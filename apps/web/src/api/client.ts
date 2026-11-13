@@ -28,6 +28,8 @@ export interface FileMeta {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly deletedAt: number | null;
+  /** When the dashboard thumbnail was last published; null until the editor makes one. */
+  readonly thumbnailAt: number | null;
 }
 export interface Member {
   readonly id: string;

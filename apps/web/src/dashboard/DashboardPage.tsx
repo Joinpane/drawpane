@@ -343,7 +343,7 @@ function FileCard({
         disabled={trash}
         aria-label={`Open ${file.name}`}
       >
-        <FileThumbnail fileId={file.id} />
+        <FileThumbnail fileId={file.id} thumbnailAt={file.thumbnailAt} />
       </button>
       <div className="dash__card-meta">
         {renaming ? (

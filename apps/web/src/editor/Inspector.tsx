@@ -17,6 +17,7 @@ import {
 } from "@drawpane/ui";
 import { useState } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { ImageChip, ImageFillEditor, PaintKindToggle } from "./ImageFill";
 
 /** The value every node shares, or null when they differ (shown as "Mixed"). */
 function common<K extends PropName>(nodes: readonly NodeRecord[], prop: K): PropValues[K] | null {
@@ -562,7 +563,7 @@ function PaintSection({
         <p className="inspector__mixed">Mixed {title.toLowerCase()}s. Add one to replace them.</p>
       ) : (
         paints.map((paint, i) => (
-          <div key={i} className="paint-row">
+          <div key={i} className={prop === "fills" ? "paint-row paint-row--fill" : "paint-row"}>
             {paint.type === "solid" ? (
               <ColorField
                 label={title}
@@ -574,10 +575,10 @@ function PaintSection({
                   )
                 }
               />
+            ) : paint.type === "image" ? (
+              <ImageChip editor={editor} paint={paint} />
             ) : (
-              <span className="inspector__mixed">
-                {paint.type === "image" ? "Image" : "Gradient"}
-              </span>
+              <span className="inspector__mixed">Gradient</span>
             )}
             <NumberField
               ariaLabel={`${title} opacity`}
@@ -608,6 +609,18 @@ function PaintSection({
                 )
               }
             />
+            {prop === "fills" ? (
+              <PaintKindToggle
+                editor={editor}
+                paint={paint}
+                onChange={(next, label) =>
+                  set(
+                    paints.map((p, j) => (j === i ? next : p)),
+                    label,
+                  )
+                }
+              />
+            ) : null}
             <IconButton
               icon="minus"
               label={`Remove ${title.toLowerCase()}`}
@@ -618,6 +631,18 @@ function PaintSection({
                 )
               }
             />
+            {paint.type === "image" ? (
+              <ImageFillEditor
+                editor={editor}
+                paint={paint}
+                onChange={(next, label) =>
+                  set(
+                    paints.map((p, j) => (j === i ? next : p)),
+                    label,
+                  )
+                }
+              />
+            ) : null}
           </div>
         ))
       )}

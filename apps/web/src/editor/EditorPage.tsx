@@ -9,11 +9,15 @@ import { ACTIONS, type ActionContext, matches } from "./actions";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
 import { connectFile } from "./connection";
+import { ExportPanel } from "./ExportSection";
 import { EditorContext, useEditor, useEditorState } from "./hooks";
+import { ImageDrop, UploadTray } from "./ImageDrop";
 import { Inspector } from "./Inspector";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
+import { filesFrom, importImageFiles, pasteFromClipboard } from "./media";
 import { Toolbar } from "./Toolbar";
+import { useThumbnailPublisher } from "./thumbnail";
 import "./editor.css";
 
 const CLIPBOARD_MIME = "application/x-drawpane+json";
@@ -50,6 +54,7 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [fatal, setFatal] = useState<string | null>(null);
 
   useEffect(() => connectFile(editor, fileId, setFatal), [editor, fileId]);
+  useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt);
 
   // The first time a page shows with content, fit it to the screen.
   useEffect(() => {
@@ -93,12 +98,12 @@ function FileEditor({ fileId }: { fileId: string }) {
         if (data) void navigator.clipboard.writeText(data);
       },
       paste: () => {
-        void navigator.clipboard.readText().then((text) => {
-          if (!editor.paste(text)) editor.notify("The clipboard doesn't hold Drawpane layers.");
+        void pasteFromClipboard(editor, fileId).then((pasted) => {
+          if (!pasted) editor.notify("The clipboard doesn't hold Drawpane layers or images.");
         });
       },
     }),
-    [editor],
+    [editor, fileId],
   );
 
   // Keyboard: shortcuts from the action registry, plus held keys (space to pan, Alt for X-ray) and arrows.
@@ -184,9 +189,19 @@ function FileEditor({ fileId }: { fileId: string }) {
     };
     const onPaste = (e: ClipboardEvent) => {
       if (isTyping(e.target) || !editor.canEdit) return;
-      const data =
-        e.clipboardData?.getData(CLIPBOARD_MIME) || e.clipboardData?.getData("text/plain") || "";
-      if (editor.paste(data)) e.preventDefault();
+      // Drawpane layers first, then image files, then layers sent as plain text.
+      const layers = e.clipboardData?.getData(CLIPBOARD_MIME) ?? "";
+      if (layers && editor.paste(layers)) {
+        e.preventDefault();
+        return;
+      }
+      const files = filesFrom(e.clipboardData);
+      if (files.length > 0) {
+        e.preventDefault();
+        void importImageFiles(editor, fileId, files);
+        return;
+      }
+      if (editor.paste(e.clipboardData?.getData("text/plain") ?? "")) e.preventDefault();
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -202,7 +217,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       document.removeEventListener("cut", onCut);
       document.removeEventListener("paste", onPaste);
     };
-  }, [editor, interaction, ctx]);
+  }, [editor, interaction, ctx, fileId]);
 
   if (meta.isError) {
     return (
@@ -240,12 +255,15 @@ function FileEditor({ fileId }: { fileId: string }) {
         {rightOpen ? (
           <aside className="pane pane--right" aria-label="Inspector">
             <Inspector />
+            <ExportPanel />
           </aside>
         ) : null}
         <Lens onOpenInspector={() => setRightOpen(true)} />
         <ZoomControls />
         <SyncStatus />
         <Notice />
+        <ImageDrop fileId={fileId} />
+        <UploadTray />
         {commandOpen ? <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} /> : null}
         {fatal ? (
           <div className="editor__fatal" role="alert">
