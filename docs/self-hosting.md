@@ -28,7 +28,7 @@ A one-command installer (`npm create drawpane`) is on the roadmap for v0.1. Unti
 
    Put the printed `database_id` into `apps/worker/wrangler.jsonc`.
 
-3. **Point it at your domain.** In `apps/worker/wrangler.jsonc`, set `routes[0].pattern` to your hostname, for example `design.example.com`. Wrangler creates the DNS record and certificate on deploy.
+3. **Choose your domain.** You pass it when you deploy (step 5), so it stays out of the repository. Wrangler creates the DNS record and certificate the first time.
 
 4. **Set the two secrets**
 
@@ -43,7 +43,7 @@ A one-command installer (`npm create drawpane`) is on the roadmap for v0.1. Unti
 
    ```sh
    pnpm --filter @drawpane/worker run db:migrate:remote
-   pnpm deploy
+   pnpm run deploy --domain design.example.com
    ```
 
 6. **Create your account.** Open your domain. A fresh instance sends you to **Set up this instance**: enter your name, email and the setup token, then create a passkey. You now own the first team and can invite everyone else from the dashboard.
