@@ -185,17 +185,14 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let lastDown = 0;
     let lastPos = { x: 0, y: 0 };
 
+    /** Last pointer on the canvas (page coordinates), resent with view changes. */
+    let cursor: { x: number; y: number } | null = null;
     const sendPresence = (e: PointerEvent | null) => {
-      const s = editor.s;
-      const rect = el.getBoundingClientRect();
-      const cursor = e
-        ? s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top })
-        : null;
-      editor.sync.setPresence({
-        cursor,
-        pageId: s.pageId,
-        selection: [...s.selection].slice(0, 500),
-      });
+      if (e) {
+        const rect = el.getBoundingClientRect();
+        cursor = editor.s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      } else cursor = null;
+      editor.sync.setPresence(editor.presence(cursor));
     };
 
     const onDown = (e: PointerEvent) => {
@@ -313,17 +310,23 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("gesturestart", onGestureStart);
     el.addEventListener("gesturechange", onGestureChange);
+    // Tell collaborators when your selection, page or view changes, even without
+    // moving the pointer: followers see what you see. (Sync throttles sending.)
+    let last = editor.s;
     const offSelection = editor.state.subscribe(() => {
-      // Tell collaborators when your selection or page changes, even without moving.
       const s = editor.s;
-      if (s.selection !== lastSelection || s.pageId !== lastPage) {
-        lastSelection = s.selection;
-        lastPage = s.pageId;
-        sendPresence(null);
-      }
+      const moved =
+        s.selection !== last.selection ||
+        s.pageId !== last.pageId ||
+        s.camera !== last.camera ||
+        s.viewport !== last.viewport ||
+        s.insets !== last.insets ||
+        s.following !== last.following ||
+        s.spotlight !== last.spotlight;
+      if (s.pageId !== last.pageId) cursor = null;
+      last = s;
+      if (moved) editor.sync.setPresence(editor.presence(cursor));
     });
-    let lastSelection = editor.s.selection;
-    let lastPage = editor.s.pageId;
     return () => {
       el.removeEventListener("pointerdown", onDown);
       el.removeEventListener("contextmenu", onContextMenu);
