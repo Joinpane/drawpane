@@ -88,10 +88,14 @@
   cursor: grab;
   touch-action: none;
 }
+/* Lifted while dragged. The lift is a scale() after the pin's translate, set
+   in CommentsLayer: the `scale` property would apply on top of the
+   transform and scale the pin's position too, throwing it off the pointer. */
 .comment-pin[data-moving] {
   z-index: 3;
+  /* Lift from the tip, so it stays on the point it will land on. */
+  transform-origin: 0 100%;
   cursor: grabbing;
-  scale: 1.08;
   box-shadow:
     inset 0 0 0 2px var(--comment-color, var(--presence-8)),
     var(--shadow-modal);
