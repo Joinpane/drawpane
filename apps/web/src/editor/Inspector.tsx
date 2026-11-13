@@ -1,5 +1,7 @@
 import type { Editor } from "@drawpane/editor";
+import { BINDING_TARGETS } from "@drawpane/editor";
 import {
+  type BindingKey,
   getProp,
   type NodeRecord,
   type Paint,
@@ -8,15 +10,22 @@ import {
 } from "@drawpane/model";
 import {
   IconButton,
+  type IconName,
   NumberField,
   PropertyRow,
   PropertySection,
   SegmentedControl,
   type SegmentedOption,
   Switch,
+  TokenChip,
 } from "@drawpane/ui";
 import { useState } from "react";
+import { ComponentSection } from "./ComponentSection";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { ImageChip, ImageFillEditor, PaintKindToggle } from "./ImageFill";
+import { Bindable } from "./tokens/Bindable";
+import { ModesSection } from "./tokens/ModesSection";
+import { CombineSection, PathSection } from "./VectorSections";
 
 /** The value every node shares, or null when they differ (shown as "Mixed"). */
 function common<K extends PropName>(nodes: readonly NodeRecord[], prop: K): PropValues[K] | null {
@@ -48,7 +57,17 @@ export function Inspector() {
 
   const types = new Set(nodes.map((n) => n.type));
   const only = types.size === 1 ? nodes[0]?.type : null;
-  const title = nodes.length === 1 ? (TYPE_LABEL[only ?? ""] ?? "Layer") : `${nodes.length} layers`;
+  const first = nodes[0];
+  const title =
+    nodes.length === 1 && first
+      ? getProp(first.props, "isComponentSet")
+        ? "Component set"
+        : getProp(first.props, "isComponent")
+          ? "Component"
+          : getProp(first.props, "instanceOf") !== null
+            ? "Instance"
+            : (TYPE_LABEL[only ?? ""] ?? "Layer")
+      : `${nodes.length} layers`;
   const geometry = nodes.filter((n) => n.type !== "group");
   const frames = nodes.filter((n) => n.type === "frame");
   const texts = nodes.filter((n) => n.type === "text");
@@ -63,6 +82,8 @@ export function Inspector() {
   return (
     <fieldset className="inspector" disabled={!canEdit} aria-label="Properties">
       <h2 className="inspector__title">{title}</h2>
+      <ComponentSection nodes={nodes} />
+      {nodes.length > 1 ? <CombineSection editor={editor} /> : null}
       {geometry.length > 0 ? <GeometrySection editor={editor} nodes={geometry} /> : null}
       {inLayout.length > 0 || layoutFrames.length > 0 ? (
         <SizingSection editor={editor} nodes={[...new Set([...inLayout, ...layoutFrames])]} />
@@ -70,6 +91,7 @@ export function Inspector() {
       {frames.length > 0 && frames.length === nodes.length ? (
         <AutoLayoutSection editor={editor} nodes={frames} />
       ) : null}
+      {only === "frame" && first ? <ModesSection node={first} /> : null}
       <AppearanceSection editor={editor} nodes={nodes} corners={corners} frames={frames} />
       {texts.length > 0 && texts.length === nodes.length ? (
         <TextSection editor={editor} nodes={texts} />
@@ -81,6 +103,7 @@ export function Inspector() {
         <PaintSection editor={editor} nodes={shapes} prop="strokes" title="Stroke" />
       ) : null}
       {shapes.length > 0 ? <EffectsSection editor={editor} nodes={shapes} /> : null}
+      <PathSection editor={editor} nodes={nodes} />
     </fieldset>
   );
 }
@@ -91,6 +114,7 @@ function Num({
   nodes,
   prop,
   label,
+  icon,
   ariaLabel,
   min,
   max,
@@ -101,6 +125,7 @@ function Num({
   nodes: readonly NodeRecord[];
   prop: PropName;
   label?: string;
+  icon?: IconName;
   ariaLabel: string;
   min?: number;
   max?: number;
@@ -109,9 +134,12 @@ function Num({
   scale?: number;
 }) {
   const value = common(nodes, prop) as number | null;
-  return (
+  const bindKey = NUMBER_BINDINGS.has(prop) ? (prop as BindingKey) : undefined;
+  const field = (token?: { name: string; open: () => void }) => (
     <NumberField
+      {...(token ? { token: token.name, onTokenClick: token.open } : {})}
       {...(label ? { label } : {})}
+      {...(icon ? { icon } : {})}
       ariaLabel={ariaLabel}
       {...(unit ? { unit } : {})}
       {...(min !== undefined ? { min } : {})}
@@ -130,7 +158,20 @@ function Num({
       onScrubEnd={() => editor.endGesture()}
     />
   );
+  if (!bindKey) return field();
+  return (
+    <Bindable nodes={nodes} bindKey={bindKey}>
+      {({ bound, open }) => field(bound ? { name: getProp(bound.props, "name"), open } : undefined)}
+    </Bindable>
+  );
 }
+
+/** Number properties a variable can drive (their binding key is the property name). */
+const NUMBER_BINDINGS: ReadonlySet<string> = new Set(
+  (Object.entries(BINDING_TARGETS) as Array<[BindingKey, { prop: string; type: string }]>)
+    .filter(([key, t]) => t.type === "number" && t.prop === key)
+    .map(([key]) => key),
+);
 
 function GeometrySection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   return (
@@ -148,7 +189,7 @@ function GeometrySection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[
           editor={editor}
           nodes={nodes}
           prop="rotation"
-          label="↻"
+          icon="rotate"
           ariaLabel="Rotation"
           unit="°"
         />
@@ -236,7 +277,13 @@ function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: NodeRecor
               value={mode ?? ""}
               onChange={(value) => editor.setProp(ids, "layoutMode", value, "Direction")}
             />
-            <Num editor={editor} nodes={nodes} prop="gap" label="↔" ariaLabel="Gap between items" />
+            <Num
+              editor={editor}
+              nodes={nodes}
+              prop="gap"
+              icon={row ? "gap-horizontal" : "gap-vertical"}
+              ariaLabel="Gap between items"
+            />
           </PropertyRow>
           <div className="inspector__layout">
             <fieldset className="inspector__align" aria-label="Alignment">
@@ -340,7 +387,7 @@ function AppearanceSection({
           editor={editor}
           nodes={nodes}
           prop="opacity"
-          label="◐"
+          icon="opacity"
           ariaLabel="Opacity"
           unit="%"
           min={0}
@@ -352,7 +399,7 @@ function AppearanceSection({
             editor={editor}
             nodes={corners}
             prop="cornerRadius"
-            label="◜"
+            icon="radius"
             ariaLabel="Corner radius"
             min={0}
           />
@@ -447,7 +494,7 @@ function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] })
       </PropertyRow>
       <PropertyRow>
         <NumberField
-          label="↕"
+          icon="line-height"
           ariaLabel="Line height"
           placeholder="Auto"
           value={lineHeight && lineHeight.unit === "px" ? lineHeight.value : null}
@@ -456,7 +503,7 @@ function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] })
           }
         />
         <NumberField
-          label="|A|"
+          icon="letter-spacing"
           ariaLabel="Letter spacing"
           placeholder="Mixed"
           value={letterSpacing && letterSpacing.unit === "px" ? letterSpacing.value : null}
@@ -547,6 +594,7 @@ function PaintSection({
   const paints = common(nodes, prop);
   const set = (next: Paint[], label: string) =>
     editor.setProp(ids, prop, next.length ? next : null, label);
+  const firstSolid = (paints ?? []).findIndex((p) => p.type === "solid");
   const add = () =>
     set(
       [...(paints ?? []), { type: "solid", color: prop === "fills" ? "#d9d9d6" : "#1c1b1a" }],
@@ -562,8 +610,32 @@ function PaintSection({
         <p className="inspector__mixed">Mixed {title.toLowerCase()}s. Add one to replace them.</p>
       ) : (
         paints.map((paint, i) => (
-          <div key={i} className="paint-row">
-            {paint.type === "solid" ? (
+          <div key={i} className={prop === "fills" ? "paint-row paint-row--fill" : "paint-row"}>
+            {paint.type === "solid" && i === firstSolid ? (
+              <Bindable nodes={nodes} bindKey={prop === "fills" ? "fill" : "stroke"}>
+                {({ bound, open }) =>
+                  bound ? (
+                    <TokenChip
+                      className="paint-token"
+                      name={getProp(bound.props, "name")}
+                      swatch={paint.color.slice(0, 7)}
+                      onClick={open}
+                    />
+                  ) : (
+                    <ColorField
+                      label={title}
+                      color={paint.color}
+                      onChange={(color) =>
+                        set(
+                          paints.map((p, j) => (j === i ? { ...paint, color } : p)),
+                          `${title} color`,
+                        )
+                      }
+                    />
+                  )
+                }
+              </Bindable>
+            ) : paint.type === "solid" ? (
               <ColorField
                 label={title}
                 color={paint.color}
@@ -574,10 +646,10 @@ function PaintSection({
                   )
                 }
               />
+            ) : paint.type === "image" ? (
+              <ImageChip editor={editor} paint={paint} />
             ) : (
-              <span className="inspector__mixed">
-                {paint.type === "image" ? "Image" : "Gradient"}
-              </span>
+              <span className="inspector__mixed">Gradient</span>
             )}
             <NumberField
               ariaLabel={`${title} opacity`}
@@ -608,6 +680,18 @@ function PaintSection({
                 )
               }
             />
+            {prop === "fills" ? (
+              <PaintKindToggle
+                editor={editor}
+                paint={paint}
+                onChange={(next, label) =>
+                  set(
+                    paints.map((p, j) => (j === i ? next : p)),
+                    label,
+                  )
+                }
+              />
+            ) : null}
             <IconButton
               icon="minus"
               label={`Remove ${title.toLowerCase()}`}
@@ -618,6 +702,18 @@ function PaintSection({
                 )
               }
             />
+            {paint.type === "image" ? (
+              <ImageFillEditor
+                editor={editor}
+                paint={paint}
+                onChange={(next, label) =>
+                  set(
+                    paints.map((p, j) => (j === i ? next : p)),
+                    label,
+                  )
+                }
+              />
+            ) : null}
           </div>
         ))
       )}
@@ -627,7 +723,7 @@ function PaintSection({
             editor={editor}
             nodes={nodes}
             prop="strokeWeight"
-            label="≡"
+            icon="stroke-weight"
             ariaLabel="Stroke weight"
             min={0}
           />
@@ -746,17 +842,44 @@ function PageInspector() {
   const pageId = useEditorState((s) => s.pageId);
   const page = pageId ? editor.doc.get(pageId) : undefined;
   if (!page) return null;
+  const background = getProp(page.props, "backgroundColor");
   return (
     <div className="inspector">
       <h2 className="inspector__title">Page</h2>
-      <PropertySection title="Background">
-        <ColorField
-          label="Background"
-          color={getProp(page.props, "backgroundColor")}
-          onChange={(color) =>
-            editor.setProp([page.id], "backgroundColor", color.slice(0, 7), "Page background")
-          }
-        />
+      <ModesSection node={page} />
+      <PropertySection
+        title="Background"
+        actions={
+          background ? (
+            <IconButton
+              icon="close"
+              label="Use the theme's canvas color"
+              onClick={() => editor.setProp([page.id], "backgroundColor", null, "Page background")}
+            />
+          ) : null
+        }
+      >
+        {background ? (
+          <ColorField
+            label="Background"
+            color={background}
+            onChange={(color) =>
+              editor.setProp([page.id], "backgroundColor", color.slice(0, 7), "Page background")
+            }
+          />
+        ) : (
+          <button
+            type="button"
+            className="inspector__default"
+            onClick={() =>
+              editor.setProp([page.id], "backgroundColor", "#ebeae6", "Page background")
+            }
+          >
+            <span className="inspector__default-swatch" aria-hidden="true" />
+            <span>Follows your theme</span>
+            <span className="inspector__default-action">Set a color</span>
+          </button>
+        )}
       </PropertySection>
       <p className="inspector__hint">
         Select a layer to edit it, or press ⌘K to search and set values by name.

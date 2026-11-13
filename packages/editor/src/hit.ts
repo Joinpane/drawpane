@@ -1,21 +1,7 @@
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { type Point, type Rect, rectContains, rectContainsPoint, rectsIntersect } from "./geometry";
+import { type Point, type Rect, rectContains, rectsIntersect } from "./geometry";
 import type { Scene } from "./scene";
-
-let hitCtx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null = null;
-function pathContext() {
-  if (!hitCtx) {
-    const canvas =
-      typeof OffscreenCanvas !== "undefined"
-        ? new OffscreenCanvas(1, 1)
-        : document.createElement("canvas");
-    hitCtx = canvas.getContext("2d") as
-      | CanvasRenderingContext2D
-      | OffscreenCanvasRenderingContext2D
-      | null;
-  }
-  return hitCtx;
-}
+import { hitPathData } from "./vector/hit";
 
 /** True when page point `p` lands on the node's own shape (not its children). */
 export function hitsNode(scene: Scene, node: NodeRecord, p: Point, tolerance: number): boolean {
@@ -38,19 +24,16 @@ export function hitsNode(scene: Scene, node: NodeRecord, p: Point, tolerance: nu
         Math.abs(local.y - h / 2) <= Math.max(tolerance, getProp(node.props, "strokeWeight") / 2)
       );
     case "path": {
-      const ctx = pathContext();
-      if (!ctx) return rectContainsPoint({ x: 0, y: 0, width: w, height: h }, local);
-      let path: Path2D;
-      try {
-        path = new Path2D(getProp(node.props, "pathData"));
-      } catch {
-        return false;
-      }
-      ctx.lineWidth = Math.max(getProp(node.props, "strokeWeight"), tolerance * 2);
-      return (
-        ctx.isPointInPath(path, local.x, local.y, getProp(node.props, "windingRule")) ||
-        ctx.isPointInStroke(path, local.x, local.y)
-      );
+      // Geometric, so it works without a canvas. Open subpaths hit on their
+      // stroke only; closed ones on their fill too when it is painted (or when
+      // nothing is, so an unstyled path stays selectable).
+      const fills = getProp(node.props, "fills").some((f) => f.visible !== false);
+      const strokes = getProp(node.props, "strokes").some((s) => s.visible !== false);
+      return hitPathData(getProp(node.props, "pathData"), local, {
+        fill: fills || !strokes,
+        fillRule: getProp(node.props, "windingRule"),
+        strokeReach: Math.max(strokes ? getProp(node.props, "strokeWeight") / 2 : 0, tolerance),
+      });
     }
     default:
       return (

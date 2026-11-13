@@ -10,8 +10,11 @@ import {
 import { getProp } from "@drawpane/model";
 import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
+import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { useEditor, useEditorState } from "./hooks";
+import { imagesFor } from "./media";
 import { TextEditor } from "./TextEditor";
+import { VectorHints } from "./VectorHints";
 
 function readTheme(): OverlayTheme {
   const css = getComputedStyle(document.documentElement);
@@ -21,6 +24,7 @@ function readTheme(): OverlayTheme {
     onSignal: v("on-signal"),
     guide: v("guide"),
     component: v("component"),
+    componentInk: v("component-ink"),
     inkMuted: v("ink-muted"),
     surfaceRaised: v("surface-raised"),
     xrayPadding: v("xray-padding"),
@@ -30,6 +34,7 @@ function readTheme(): OverlayTheme {
     agent: v("agent"),
     onAgent: v("on-agent"),
     fontUi: v("font-ui") || "sans-serif",
+    fontMono: v("font-mono") || "monospace",
   };
 }
 
@@ -40,7 +45,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const overlay = useRef<HTMLCanvasElement>(null);
   const editingText = useEditorState((s) => s.editingText);
   const measurer = editor.measurer as CanvasTextMeasurer;
-  const renderer = useMemo(() => new CanvasRenderer(editor.scene, measurer), [editor, measurer]);
+  const renderer = useMemo(
+    () => new CanvasRenderer(editor.scene, measurer, { images: imagesFor(editor) }),
+    [editor, measurer],
+  );
 
   // Render loop: repaint content when the document, page or camera changes;
   // repaint the overlay on any state change. Never more than once per frame.
@@ -53,7 +61,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const octx = overlayCanvas.getContext("2d");
     if (!cctx || !octx) return;
 
+    const canvasToken = () =>
+      getComputedStyle(document.documentElement).getPropertyValue("--canvas").trim() || "#ebeae6";
     let theme = readTheme();
+    renderer.canvasColor = canvasToken();
     let dpr = window.devicePixelRatio || 1;
     let contentDirty = true;
     let overlayDirty = true;
@@ -98,6 +109,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       contentDirty = overlayDirty = true;
       schedule();
     });
+    // An image finished decoding (or a sharper copy is ready): repaint the content.
+    const offImages = renderer.images.subscribe(() => {
+      contentDirty = true;
+      schedule();
+    });
     const offState = editor.state.subscribe(() => {
       const s = editor.s;
       if (
@@ -124,6 +140,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
 
     const themeObserver = new MutationObserver(() => {
       theme = readTheme();
+      renderer.canvasColor = canvasToken();
       contentDirty = overlayDirty = true;
       schedule();
     });
@@ -136,6 +153,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       observer.disconnect();
       themeObserver.disconnect();
       offDoc();
+      offImages();
       offState();
       document.fonts.removeEventListener("loadingdone", onFonts);
       if (frame) cancelAnimationFrame(frame);
@@ -277,12 +295,27 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       role="application"
       aria-label="Design canvas"
       aria-roledescription="canvas"
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes(COMPONENT_DRAG_MIME)) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        }
+      }}
+      onDrop={(e) => {
+        const componentId = e.dataTransfer.getData(COMPONENT_DRAG_MIME);
+        if (!componentId) return;
+        e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        const page = editor.s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+        editor.insertInstance(componentId, page);
+      }}
     >
       <canvas ref={content} className="canvas__layer" />
       <canvas ref={overlay} className="canvas__layer canvas__overlay" />
       {editingNode && getProp(editingNode.props, "visible") ? (
         <TextEditor nodeId={editingNode.id} />
       ) : null}
+      <VectorHints />
     </div>
   );
 }

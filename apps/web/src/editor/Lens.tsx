@@ -1,5 +1,6 @@
-import { getProp, type NodeRecord } from "@drawpane/model";
+import { getProp } from "@drawpane/model";
 import { type IconName, NumberField, SelectionLens } from "@drawpane/ui";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 
 const KIND: Record<string, { label: string; icon: IconName }> = {
@@ -24,9 +25,64 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const camera = useEditorState((s) => s.camera);
   const viewport = useEditorState((s) => s.viewport);
   const gesture = useEditorState((s) => s.gesture);
+  // Vector edit has its own marks on the canvas; keep the path clear.
+  const vectorEdit = useEditorState((s) => s.vectorEdit !== null);
   const editing = useEditorState((s) => s.editingText);
   const canEdit = useEditorState((s) => s.role !== "viewer");
-  if (selection.length !== 1 || gesture || editing || !canEdit) return null;
+  const tool = useEditorState((s) => s.tool);
+  const scrubbing = useRef(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const [offset, setOffset] = useState(0);
+  // Appear once the selection has settled, so a quick follow-up click (like a
+  // Shift-click on the layer just below) lands on the canvas, not the Lens.
+  const [settled, setSettled] = useState(false);
+  const [shift, setShift] = useState(false);
+  const selectionKey = selection.join(",");
+  useEffect(() => {
+    setSettled(false);
+    if (!selectionKey) return;
+    const t = setTimeout(() => setSettled(true), 350);
+    return () => clearTimeout(t);
+  }, [selectionKey]);
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => e.key === "Shift" && setShift(true);
+    const up = (e: KeyboardEvent) => e.key === "Shift" && setShift(false);
+    const blur = () => setShift(false);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+  // Keep the Lens between the side panes: shift it horizontally if it would overlap one.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const left = document.querySelector(".pane--left")?.getBoundingClientRect().right ?? 0;
+    const right =
+      document.querySelector(".pane--right")?.getBoundingClientRect().left ?? window.innerWidth;
+    const margin = 8;
+    let shiftBy = 0;
+    if (rect.left - offset < left + margin) shiftBy = left + margin - (rect.left - offset);
+    else if (rect.right - offset > right - margin) shiftBy = right - margin - (rect.right - offset);
+    if (Math.abs(shiftBy - offset) > 0.5) setOffset(shiftBy);
+  });
+  // Hide during canvas gestures, but not while scrubbing one of our own fields:
+  // unmounting mid-scrub would lose the scrub's end and leave the gesture open.
+  const hidden =
+    selection.length !== 1 ||
+    (gesture && !scrubbing.current) ||
+    (!settled && !scrubbing.current) ||
+    (shift && !scrubbing.current) ||
+    editing !== null ||
+    vectorEdit ||
+    !canEdit ||
+    tool !== "select";
+  if (hidden) return null;
   const node = editor.doc.get(selection[0] as string);
   const bounds = node ? editor.scene.bounds(node.id) : null;
   if (!node || !bounds || node.type === "group") return null;
@@ -36,7 +92,8 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   // Below the selection (clear of the size pill); flip above when it would leave the screen.
   const below = bottom.y + 40 + 44 < viewport.height;
   const y = below ? bottom.y + 36 : top.y - 52;
-  if (y < 0 || bottom.x < 0 || bottom.x > viewport.width) return null;
+  // Keep clear of the top bar (file title, tools, share) at 12–52px.
+  if (y < 64 || bottom.x < 0 || bottom.x > viewport.width) return null;
 
   const kind = KIND[node.type] ?? { label: "Layer", icon: "rectangle" as IconName };
   const label =
@@ -44,45 +101,82 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
       ? `${kind.label} · Auto layout`
       : kind.label;
 
-  const set = (prop: Parameters<typeof editor.setProp>[1], value: unknown) =>
-    editor.setProp([node.id], prop, value, "Edit in lens");
-  const num = (
-    n: NodeRecord,
-    prop: "width" | "height" | "gap" | "cornerRadius" | "fontSize" | "paddingLeft",
-    text: string,
+  const field = (
+    key: string,
+    value: number | null,
     aria: string,
+    look: { label: string } | { icon: IconName },
+    apply: (v: number) => void,
   ) => (
     <NumberField
-      key={prop}
-      label={text}
+      key={key}
+      {...look}
       ariaLabel={aria}
-      value={Math.round((getProp(n.props, prop) as number) * 100) / 100}
-      onChange={(v) => set(prop, v)}
-      onScrubStart={() => editor.beginGesture(aria)}
-      onScrubEnd={() => editor.endGesture()}
+      value={value === null ? null : Math.round(value * 100) / 100}
+      placeholder="Mixed"
+      onChange={apply}
+      onScrubStart={() => {
+        scrubbing.current = true;
+        editor.beginGesture(aria);
+      }}
+      onScrubEnd={() => {
+        scrubbing.current = false;
+        editor.endGesture();
+      }}
     />
   );
+  const prop = (
+    name: "width" | "height" | "gap" | "cornerRadius" | "fontSize",
+    aria: string,
+    look: { label: string } | { icon: IconName },
+  ) =>
+    field(name, getProp(node.props, name), aria, look, (v) =>
+      editor.setProp([node.id], name, v, aria),
+    );
+
+  const p = node.props;
+  const paddings = [
+    getProp(p, "paddingTop"),
+    getProp(p, "paddingRight"),
+    getProp(p, "paddingBottom"),
+    getProp(p, "paddingLeft"),
+  ];
+  const uniformPadding = paddings.every((v) => v === paddings[0]) ? (paddings[0] ?? 0) : null;
+  const isLayout = node.type === "frame" && getProp(p, "layoutMode") !== "none";
 
   const controls =
     node.type === "text"
-      ? [num(node, "fontSize", "Aa", "Font size"), num(node, "width", "W", "Width")]
-      : node.type === "frame" && getProp(node.props, "layoutMode") !== "none"
+      ? [prop("fontSize", "Font size", { label: "Aa" }), prop("width", "Width", { label: "W" })]
+      : isLayout
         ? [
-            num(node, "width", "W", "Width"),
-            num(node, "height", "H", "Height"),
-            num(node, "gap", "↔", "Gap"),
-            num(node, "paddingLeft", "▢", "Padding"),
+            prop("width", "Width", { label: "W" }),
+            prop("height", "Height", { label: "H" }),
+            prop("gap", "Gap", {
+              icon: getProp(p, "layoutMode") === "row" ? "gap-horizontal" : "gap-vertical",
+            }),
+            field("padding", uniformPadding, "Padding", { icon: "padding" }, (v) => {
+              editor.beginGesture("Padding");
+              for (const side of [
+                "paddingTop",
+                "paddingRight",
+                "paddingBottom",
+                "paddingLeft",
+              ] as const) {
+                editor.setProp([node.id], side, v, "Padding");
+              }
+              editor.endGesture();
+            }),
           ]
         : [
-            num(node, "width", "W", "Width"),
-            num(node, "height", "H", "Height"),
+            prop("width", "Width", { label: "W" }),
+            prop("height", "Height", { label: "H" }),
             ...(node.type === "frame" || node.type === "rect"
-              ? [num(node, "cornerRadius", "◜", "Corner radius")]
+              ? [prop("cornerRadius", "Corner radius", { icon: "radius" })]
               : []),
           ];
 
   return (
-    <div className="lens-anchor" style={{ left: bottom.x, top: y }}>
+    <div ref={ref} className="lens-anchor" style={{ left: bottom.x + offset, top: y }}>
       <SelectionLens
         kind={label}
         kindIcon={kind.icon}

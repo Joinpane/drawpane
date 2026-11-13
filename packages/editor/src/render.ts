@@ -7,12 +7,24 @@
  * the design.
  */
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
-import type { Camera } from "./camera";
+import { Camera } from "./camera";
 import type { Rect } from "./geometry";
+import { ImageCache, imagePlacement } from "./images";
 import type { Scene } from "./scene";
 import { layoutText, type TextMeasurer } from "./text";
+import { isClosedPath } from "./vector/cache";
 
-type Ctx = CanvasRenderingContext2D;
+/** On screen it's a canvas element; exports and thumbnails draw into an OffscreenCanvas. */
+type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+type ImagePaint = Extract<Paint, { type: "image" }>;
+
+export interface CanvasRendererOptions {
+  /** Shared decoded images. Pass the same cache to every renderer of one file. */
+  readonly images?: ImageCache;
+}
+
+/** Two neutral greys in device pixels, the same in both themes: an image that is still loading. */
+const PLACEHOLDER = { light: "#ececea", dark: "#dfdfdc", cell: 8 };
 
 export interface RenderStats {
   drawn: number;
@@ -53,11 +65,20 @@ export class CanvasRenderer {
   readonly #paths = new Map<string, { d: string; path: Path2D }>();
   /** Nodes not to draw (e.g. text being edited in a DOM overlay). */
   hidden = new Set<string>();
+  /** Page background when the page doesn't set one: the theme's `canvas` token. */
+  canvasColor = "#ebeae6";
   stats: RenderStats = { drawn: 0, culled: 0, ms: 0 };
+  /**
+   * Decoded images. Subscribe to repaint when one arrives:
+   * `renderer.images.subscribe(() => requestRepaint())`.
+   */
+  readonly images: ImageCache;
+  readonly #placeholders = new WeakMap<Ctx, CanvasPattern>();
 
-  constructor(scene: Scene, measurer: TextMeasurer) {
+  constructor(scene: Scene, measurer: TextMeasurer, options: CanvasRendererOptions = {}) {
     this.#scene = scene;
     this.#measurer = measurer;
+    this.images = options.images ?? new ImageCache();
   }
 
   render(
@@ -69,15 +90,48 @@ export class CanvasRenderer {
   ): void {
     const start = performance.now();
     this.stats = { drawn: 0, culled: 0, ms: 0 };
+    this.images.frame();
     const page = this.#scene.doc.get(pageId);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     if (!page) return;
-    ctx.fillStyle = getProp(page.props, "backgroundColor");
+    ctx.fillStyle = getProp(page.props, "backgroundColor") ?? this.canvasColor;
     ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     const visible = camera.visibleRect(viewport);
     for (const id of this.#scene.doc.childIds(pageId)) this.#draw(ctx, id, camera, dpr, visible);
     this.stats.ms = performance.now() - start;
+  }
+
+  /**
+   * Draws layers (with their children) into the canvas so that the page rect
+   * `rect` fills it at `scale` canvas pixels per unit. Exports and thumbnails
+   * use this, so they match the canvas exactly. The canvas should be
+   * `ceil(rect.width × scale)` by `ceil(rect.height × scale)`. Without a
+   * `background` the result is transparent.
+   */
+  renderNodes(
+    ctx: Ctx,
+    ids: readonly string[],
+    rect: Rect,
+    scale: number,
+    background: string | null = null,
+  ): void {
+    this.images.frame();
+    this.stats = { drawn: 0, culled: 0, ms: 0 };
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    if (background) {
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    }
+    const camera = new Camera(-rect.x * scale, -rect.y * scale, scale);
+    const hidden = this.hidden;
+    this.hidden = new Set();
+    try {
+      for (const id of ids) this.#draw(ctx, id, camera, 1, rect);
+    } finally {
+      this.hidden = hidden;
+    }
   }
 
   #draw(ctx: Ctx, id: string, camera: Camera, dpr: number, visible: Rect): void {
@@ -231,6 +285,10 @@ export class CanvasRenderer {
 
   #fill(ctx: Ctx, shape: Path2D, paint: Paint, w: number, h: number, node: NodeRecord): void {
     if (paint.visible === false || node.type === "line") return;
+    if (paint.type === "image") {
+      this.#imageFill(ctx, shape, paint, w, h, node);
+      return;
+    }
     const style = this.#paintStyle(ctx, paint, w, h);
     if (!style) return;
     ctx.save();
@@ -240,12 +298,83 @@ export class CanvasRenderer {
     ctx.restore();
   }
 
+  /** An image paint, placed by its scale mode and clipped to the shape. */
+  #imageFill(
+    ctx: Ctx,
+    shape: Path2D,
+    paint: ImagePaint,
+    w: number,
+    h: number,
+    node: NodeRecord,
+  ): void {
+    if (w <= 0 || h <= 0) return;
+    ctx.save();
+    if (paint.blendMode) ctx.globalCompositeOperation = BLEND[paint.blendMode] ?? "source-over";
+    ctx.globalAlpha *= paint.opacity ?? 1;
+    ctx.clip(shape, node.type === "path" ? getProp(node.props, "windingRule") : "nonzero");
+    const natural = this.images.natural(paint.ref);
+    const t = ctx.getTransform();
+    // Device pixels per layer unit, to pick a bitmap no bigger than needed.
+    const deviceScale = Math.hypot(t.a, t.b);
+    const place = natural
+      ? imagePlacement(paint.scaleMode, { width: w, height: h }, natural)
+      : null;
+    const view = place ? this.images.get(paint.ref, place.width * deviceScale) : null;
+    if (!place || !view) {
+      ctx.fillStyle = this.#placeholder(ctx);
+      ctx.fillRect(0, 0, w, h);
+    } else if (place.tile) {
+      const pattern = ctx.createPattern(view.bitmap, "repeat");
+      if (pattern) {
+        pattern.setTransform(
+          new DOMMatrix().scale(
+            view.naturalWidth / view.bitmap.width,
+            view.naturalHeight / view.bitmap.height,
+          ),
+        );
+        ctx.fillStyle = pattern;
+        ctx.fillRect(0, 0, w, h);
+      }
+    } else {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(view.bitmap, place.x, place.y, place.width, place.height);
+    }
+    ctx.restore();
+  }
+
+  /** A checkerboard fixed to device pixels, so it reads as "loading" at any zoom. */
+  #placeholder(ctx: Ctx): CanvasPattern | string {
+    let pattern = this.#placeholders.get(ctx);
+    if (!pattern && typeof OffscreenCanvas !== "undefined") {
+      const tile = new OffscreenCanvas(PLACEHOLDER.cell * 2, PLACEHOLDER.cell * 2);
+      const tctx = tile.getContext("2d");
+      if (tctx) {
+        tctx.fillStyle = PLACEHOLDER.light;
+        tctx.fillRect(0, 0, tile.width, tile.height);
+        tctx.fillStyle = PLACEHOLDER.dark;
+        tctx.fillRect(0, 0, PLACEHOLDER.cell, PLACEHOLDER.cell);
+        tctx.fillRect(PLACEHOLDER.cell, PLACEHOLDER.cell, PLACEHOLDER.cell, PLACEHOLDER.cell);
+        pattern = ctx.createPattern(tile, "repeat") ?? undefined;
+        if (pattern) this.#placeholders.set(ctx, pattern);
+      }
+    }
+    if (!pattern) return PLACEHOLDER.light;
+    pattern.setTransform(ctx.getTransform().inverse());
+    return pattern;
+  }
+
   #strokes(ctx: Ctx, node: NodeRecord, shape: Path2D, w: number, h: number): void {
     const strokes = getProp(node.props, "strokes").filter((s) => s.visible !== false);
     const weight = getProp(node.props, "strokeWeight");
     if (strokes.length === 0 || weight <= 0) return;
+    // Open paths and lines stroke along their centre; closed paths honour alignment like any shape.
     const align =
-      node.type === "line" || node.type === "path" ? "center" : getProp(node.props, "strokeAlign");
+      node.type === "line" ||
+      (node.type === "path" && !isClosedPath(getProp(node.props, "pathData")))
+        ? "center"
+        : getProp(node.props, "strokeAlign");
+    const rule = node.type === "path" ? getProp(node.props, "windingRule") : "nonzero";
     ctx.save();
     ctx.filter = "none";
     ctx.lineJoin = getProp(node.props, "strokeJoin");
@@ -257,7 +386,7 @@ export class CanvasRenderer {
     if (dashes.length > 0) ctx.setLineDash(dashes);
     // Inside and outside strokes: draw at double width and clip to one side of the edge.
     ctx.lineWidth = align === "center" ? weight : weight * 2;
-    if (align === "inside") ctx.clip(shape);
+    if (align === "inside") ctx.clip(shape, rule);
     if (align === "outside") {
       const outside = new Path2D();
       outside.rect(-weight * 4 - 1e5, -weight * 4 - 1e5, w + 2e5, h + 2e5);

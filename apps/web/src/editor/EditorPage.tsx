@@ -1,19 +1,36 @@
 import { CanvasTextMeasurer, Editor, Interaction } from "@drawpane/editor";
-import { Button, Icon, IconButton, type PresenceSlot, PresenceStack } from "@drawpane/ui";
+import {
+  Button,
+  Icon,
+  IconButton,
+  Logo,
+  type PresenceSlot,
+  PresenceStack,
+  SegmentedControl,
+} from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import { modKey } from "../app/format";
+import { isMac, modKey } from "../app/format";
+import { AssetsPanel } from "./AssetsPanel";
 import { ACTIONS, type ActionContext, matches } from "./actions";
+import { loadBooleanEngine } from "./boolean-engine";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
+import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
 import { connectFile } from "./connection";
-import { EditorContext, useEditor, useEditorState } from "./hooks";
+import { ExportPanel } from "./ExportSection";
+import { EditorContext, useEditor, useEditorState, useEditorStateOutside } from "./hooks";
+import { ImageDrop, UploadTray } from "./ImageDrop";
 import { Inspector } from "./Inspector";
+import { InspectPanel } from "./InspectPanel";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
+import { filesFrom, importImageFiles, pasteFromClipboard } from "./media";
 import { Toolbar } from "./Toolbar";
+import { useThumbnailPublisher } from "./thumbnail";
+import { TokensWorkspace } from "./tokens/TokensWorkspace";
 import "./editor.css";
 
 const CLIPBOARD_MIME = "application/x-drawpane+json";
@@ -42,14 +59,52 @@ function FileEditor({ fileId }: { fileId: string }) {
     queryFn: () => api.file(fileId),
     retry: false,
   });
-  const [editor] = useState(() => new Editor({ measurer: new CanvasTextMeasurer() }));
+  const [editor] = useState(
+    () => new Editor({ measurer: new CanvasTextMeasurer(), booleanEngine: loadBooleanEngine }),
+  );
   const interaction = useMemo(() => new Interaction(editor), [editor]);
   const [commandOpen, setCommandOpen] = useState(false);
   const [leftOpen, setLeftOpen] = useState(true);
+  const [leftTab, setLeftTab] = useState<"layers" | "assets">("layers");
+  const [view, setView] = useState<"design" | "tokens">("design");
+  const [rightTab, setRightTab] = useState<"design" | "inspect">("design");
+  // Viewers can't edit, so open them straight into Inspect (free for everyone).
+  // The role is only known once the room welcomes us ("viewer" until then).
+  const isViewer = useEditorStateOutside(editor, (s) => s.status === "live" && s.role === "viewer");
+  useEffect(() => {
+    if (isViewer) setRightTab("inspect");
+  }, [isViewer]);
   const [rightOpen, setRightOpen] = useState(true);
   const [fatal, setFatal] = useState<string | null>(null);
+  const comments = useCommentStore(editor, fileId);
+  const commentsOpen = useComments(comments.store, (s) => s.panelOpen);
+  // Room for the floating panes (12px margin + pane width), so comment popovers open over the canvas.
+  const insets = useMemo(
+    () => ({ left: leftOpen ? 276 : 0, right: commentsOpen || rightOpen ? 276 : 0 }),
+    [leftOpen, rightOpen, commentsOpen],
+  );
 
-  useEffect(() => connectFile(editor, fileId, setFatal), [editor, fileId]);
+  useEffect(
+    () => connectFile(editor, fileId, setFatal, (message) => comments.store.receive(message)),
+    [editor, fileId, comments.store],
+  );
+  useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt);
+
+  // A handle for debugging and end-to-end tests: `localStorage.setItem("drawpane:debug", "1")`.
+  useEffect(() => {
+    let debug = import.meta.env.DEV;
+    try {
+      debug ||= localStorage.getItem("drawpane:debug") === "1";
+    } catch {
+      // Storage blocked.
+    }
+    if (!debug) return;
+    const w = window as unknown as { drawpane?: Editor };
+    w.drawpane = editor;
+    return () => {
+      delete w.drawpane;
+    };
+  }, [editor]);
 
   // The first time a page shows with content, fit it to the screen.
   useEffect(() => {
@@ -81,8 +136,16 @@ function FileEditor({ fileId }: { fileId: string }) {
     () => ({
       editor,
       openCommandBar: () => setCommandOpen(true),
+      toggleTokens: () => setView((v) => (v === "tokens" ? "design" : "tokens")),
       toggleLeftPane: () => setLeftOpen((v) => !v),
-      toggleRightPane: () => setRightOpen((v) => !v),
+      // The comments panel sits where the inspector does; asking for the inspector swaps back.
+      toggleRightPane: () => {
+        if (comments.store.s.panelOpen) {
+          comments.store.setPanel(false);
+          setRightOpen(true);
+        } else setRightOpen((v) => !v);
+      },
+      toggleComments: () => comments.store.setPanel(!comments.store.s.panelOpen),
       // Menu and command-bar clipboard actions go through the async API; ⌘C/⌘X/⌘V use native events below.
       copy: () => {
         const data = editor.copy();
@@ -93,12 +156,12 @@ function FileEditor({ fileId }: { fileId: string }) {
         if (data) void navigator.clipboard.writeText(data);
       },
       paste: () => {
-        void navigator.clipboard.readText().then((text) => {
-          if (!editor.paste(text)) editor.notify("The clipboard doesn't hold Drawpane layers.");
+        void pasteFromClipboard(editor, fileId).then((pasted) => {
+          if (!pasted) editor.notify("The clipboard doesn't hold Drawpane layers or images.");
         });
       },
     }),
-    [editor],
+    [editor, fileId, comments.store],
   );
 
   // Keyboard: shortcuts from the action registry, plus held keys (space to pan, Alt for X-ray) and arrows.
@@ -112,6 +175,18 @@ function FileEditor({ fileId }: { fileId: string }) {
       }
       if (e.key === "Alt") {
         editor.state.set({ xray: true });
+        return;
+      }
+      // The pen and vector edit take their keys first (Enter, Escape, Backspace, arrows).
+      if (
+        interaction.key({
+          key: e.key,
+          shift: e.shiftKey,
+          alt: e.altKey,
+          mod: isMac() ? e.metaKey : e.ctrlKey,
+        })
+      ) {
+        e.preventDefault();
         return;
       }
       if (e.key.startsWith("Arrow") && editor.s.selection.length > 0) {
@@ -184,9 +259,19 @@ function FileEditor({ fileId }: { fileId: string }) {
     };
     const onPaste = (e: ClipboardEvent) => {
       if (isTyping(e.target) || !editor.canEdit) return;
-      const data =
-        e.clipboardData?.getData(CLIPBOARD_MIME) || e.clipboardData?.getData("text/plain") || "";
-      if (editor.paste(data)) e.preventDefault();
+      // Drawpane layers first, then image files, then layers sent as plain text.
+      const layers = e.clipboardData?.getData(CLIPBOARD_MIME) ?? "";
+      if (layers && editor.paste(layers)) {
+        e.preventDefault();
+        return;
+      }
+      const files = filesFrom(e.clipboardData);
+      if (files.length > 0) {
+        e.preventDefault();
+        void importImageFiles(editor, fileId, files);
+        return;
+      }
+      if (editor.paste(e.clipboardData?.getData("text/plain") ?? "")) e.preventDefault();
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -202,7 +287,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       document.removeEventListener("cut", onCut);
       document.removeEventListener("paste", onPaste);
     };
-  }, [editor, interaction, ctx]);
+  }, [editor, interaction, ctx, fileId]);
 
   if (meta.isError) {
     return (
@@ -220,7 +305,17 @@ function FileEditor({ fileId }: { fileId: string }) {
     <EditorContext.Provider value={editor}>
       <div className="editor">
         <Canvas interaction={interaction} />
+        {view === "design" ? (
+          <CommentsLayer
+            store={comments.store}
+            interaction={interaction}
+            people={comments.people}
+            insets={insets}
+          />
+        ) : null}
         <FileTitle
+          view={view}
+          onToggleTokens={() => setView((v) => (v === "tokens" ? "design" : "tokens"))}
           fileId={fileId}
           teamId={meta.data?.file.teamId ?? null}
           name={meta.data?.file.name ?? ""}
@@ -228,24 +323,85 @@ function FileEditor({ fileId }: { fileId: string }) {
         />
         <Toolbar onSearch={() => setCommandOpen(true)} />
         <TopRight fileId={fileId} />
-        {leftOpen ? (
-          <aside className="pane pane--left" aria-label="Pages and layers">
-            <PagesList />
-            <div className="pane__head pane__head--layers">
-              <span className="pane__label">Layers</span>
+        {view === "tokens" ? (
+          <TokensWorkspace
+            onShowLayer={(id) => {
+              setView("design");
+              const page = editor.doc.pageOf(id);
+              if (page && page.id !== editor.s.pageId) editor.setPage(page.id);
+              editor.select([id]);
+              requestAnimationFrame(() => editor.revealSelection());
+            }}
+          />
+        ) : null}
+        {leftOpen && view === "design" ? (
+          <aside className="pane pane--left" aria-label="Pages, layers and assets">
+            <div className="pane__tabs">
+              <SegmentedControl
+                label="Left pane"
+                options={[
+                  { value: "layers", label: "Layers" },
+                  { value: "assets", label: "Assets" },
+                ]}
+                value={leftTab}
+                onChange={(tab) => setLeftTab(tab as "layers" | "assets")}
+              />
             </div>
-            <LayersPanel />
+            {leftTab === "layers" ? (
+              <>
+                <PagesList />
+                <div className="pane__head pane__head--layers">
+                  <span className="pane__label">Layers</span>
+                </div>
+                <LayersPanel />
+              </>
+            ) : (
+              <AssetsPanel />
+            )}
           </aside>
         ) : null}
-        {rightOpen ? (
+        {commentsOpen && view === "design" ? (
+          <CommentsPanel
+            store={comments.store}
+            insets={insets}
+            onClose={() => comments.store.setPanel(false)}
+          />
+        ) : rightOpen && view === "design" ? (
           <aside className="pane pane--right" aria-label="Inspector">
-            <Inspector />
+            <div className="pane__tabs">
+              <SegmentedControl
+                label="Right pane"
+                options={[
+                  { value: "design", label: "Design" },
+                  { value: "inspect", label: "Inspect" },
+                ]}
+                value={rightTab}
+                onChange={(tab) => setRightTab(tab as "design" | "inspect")}
+              />
+            </div>
+            {rightTab === "design" ? (
+              <>
+                <Inspector />
+                <ExportPanel />
+              </>
+            ) : (
+              <InspectPanel />
+            )}
           </aside>
         ) : null}
-        <Lens onOpenInspector={() => setRightOpen(true)} />
-        <ZoomControls />
+        {view === "design" ? (
+          <Lens
+            onOpenInspector={() => {
+              comments.store.setPanel(false);
+              setRightOpen(true);
+            }}
+          />
+        ) : null}
+        {view === "design" ? <ZoomControls /> : null}
         <SyncStatus />
         <Notice />
+        <ImageDrop fileId={fileId} />
+        <UploadTray />
         {commandOpen ? <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} /> : null}
         {fatal ? (
           <div className="editor__fatal" role="alert">
@@ -261,11 +417,15 @@ function FileEditor({ fileId }: { fileId: string }) {
 }
 
 function FileTitle({
+  view,
+  onToggleTokens,
   fileId,
   teamId,
   name,
   project,
 }: {
+  view: "design" | "tokens";
+  onToggleTokens: () => void;
   fileId: string;
   teamId: string | null;
   name: string;
@@ -292,7 +452,7 @@ function FileTitle({
           className="file-title__home"
           aria-label="Back to files"
         >
-          <img src="/drawpane-mark.svg" alt="" width={20} height={20} />
+          <Logo size={20} label="" />
         </Link>
       ) : (
         <span className="file-title__home" />
@@ -324,6 +484,14 @@ function FileTitle({
         </button>
       )}
       {!canEdit ? <span className="file-title__badge">View only</span> : null}
+      <IconButton
+        icon="token"
+        label={view === "tokens" ? "Back to design" : "Tokens"}
+        shortcut="⌥T"
+        pressed={view === "tokens"}
+        className="file-title__tokens"
+        onClick={onToggleTokens}
+      />
     </div>
   );
 }
@@ -378,12 +546,7 @@ function ZoomControls() {
         shortcut={modKey("+")}
         onClick={() => editor.zoomBy(1.5)}
       />
-      <IconButton
-        icon="xray"
-        label="Zoom to fit"
-        shortcut="⇧1"
-        onClick={() => editor.zoomToFit()}
-      />
+      <IconButton icon="fit" label="Zoom to fit" shortcut="⇧1" onClick={() => editor.zoomToFit()} />
     </fieldset>
   );
 }

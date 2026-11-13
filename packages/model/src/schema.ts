@@ -8,9 +8,12 @@
  * properties that differ from the default.
  */
 import { z } from "zod";
+import { ID_PATTERN } from "./ids";
 
 export const NODE_TYPES = [
   "page",
+  "collection",
+  "variable",
   "frame",
   "group",
   "rect",
@@ -35,8 +38,10 @@ export type LayerType = (typeof LAYER_TYPES)[number];
 
 /** Which child types each parent type accepts. The virtual root holds pages only. */
 export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]>> = {
-  root: ["page"],
+  root: ["page", "collection"],
   page: LAYER_TYPES,
+  collection: ["variable"],
+  variable: [],
   frame: LAYER_TYPES,
   group: LAYER_TYPES,
   rect: [],
@@ -141,6 +146,41 @@ const PathData = z
   .max(2_000_000)
   .regex(/^[MmLlHhVvCcSsQqTtAaZz0-9eE.,+\-\s]*$/, "must be SVG path data");
 
+export const Mode = z.object({ id: z.string().regex(ID_PATTERN), name: z.string().min(1).max(64) });
+export type Mode = z.infer<typeof Mode>;
+/** A variable's value in one mode: a literal, or an alias to another variable (DTCG `{group.token}`). */
+export const VariableValue = z.union([
+  Color,
+  finite,
+  z.string().max(10_000),
+  z.object({ alias: z.string().regex(ID_PATTERN) }),
+]);
+export type VariableValue = z.infer<typeof VariableValue>;
+
+/**
+ * Properties a variable can drive. `fill` and `stroke` drive the colour of the
+ * first solid paint; the rest are the property of the same name.
+ */
+export const BINDING_KEYS = [
+  "fill",
+  "stroke",
+  "width",
+  "height",
+  "gap",
+  "rowGap",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "cornerRadius",
+  "strokeWeight",
+  "opacity",
+  "fontSize",
+  "fontFamily",
+  "characters",
+] as const;
+export type BindingKey = (typeof BINDING_KEYS)[number];
+
 // ---------------------------------------------------------------------------
 // Property registry
 
@@ -200,6 +240,20 @@ export const PROPS = {
     CORNERS,
   ),
 
+  // Components. A main component is a frame with `isComponent`. An instance
+  // is a frame with `instanceOf` (the main component's id); each layer inside
+  // it `mirrors` the main component's layer it copies, and lists the
+  // properties you changed in `overrides`, which syncing then leaves alone.
+  isComponent: prop(z.boolean(), false, CONTAINERS),
+  /** A frame that groups variants: main components that differ by `variantProps`. */
+  isComponentSet: prop(z.boolean(), false, CONTAINERS),
+  /** A variant's property values, e.g. { State: "Hover", Size: "Large" }. */
+  variantProps: prop(z.record(z.string().min(1).max(64), z.string().max(64)), {}, CONTAINERS),
+  componentDescription: prop(z.string().max(2000), "", CONTAINERS),
+  instanceOf: prop(z.string().regex(ID_PATTERN).nullable(), null, CONTAINERS),
+  mirrors: prop(z.string().regex(ID_PATTERN).nullable(), null, LAYERS),
+  overrides: prop(z.array(z.string().max(64)).max(64), [], LAYERS),
+
   // Frames
   clipContent: prop(z.boolean(), true, CONTAINERS),
   layoutMode: prop(z.enum(["none", "row", "column"]), "none", CONTAINERS),
@@ -246,8 +300,22 @@ export const PROPS = {
   pathData: prop(PathData, "", ["path"]),
   windingRule: prop(z.enum(["nonzero", "evenodd"]), "nonzero", ["path"]),
 
-  // Pages
-  backgroundColor: prop(Color, "#ebeae6", ["page"]),
+  // Pages. Null follows the viewer's theme (the `canvas` token).
+  backgroundColor: prop(Color.nullable(), null, ["page"]),
+
+  // Variables (design tokens). A collection holds variables and names the
+  // modes (light, dark, compact…); each variable has one value per mode.
+  modes: prop(z.array(Mode).min(1).max(16), [{ id: "m1", name: "Default" }], ["collection"]),
+  variableType: prop(z.enum(["color", "number", "string"]), "color", ["variable"]),
+  values: prop(z.record(z.string().regex(ID_PATTERN), VariableValue), {}, ["variable"]),
+  description: prop(z.string().max(2000), "", ["variable", "collection"]),
+  /** Bound properties: binding key → variable id. The bound property holds the resolved value. */
+  bindings: prop(z.partialRecord(z.enum(BINDING_KEYS), z.string().regex(ID_PATTERN)), {}, LAYERS),
+  /** Which mode of each collection applies inside this frame or page: collection id → mode id. */
+  variableModes: prop(z.record(z.string().regex(ID_PATTERN), z.string().regex(ID_PATTERN)), {}, [
+    "page",
+    "frame",
+  ]),
 } as const satisfies Record<string, PropSpec>;
 
 export type PropName = keyof typeof PROPS;

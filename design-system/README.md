@@ -120,7 +120,7 @@ AI agents are collaborators with their own visual identity, so nobody mistakes a
 
 ## Iconography
 
-- Drawpane uses its own 43-glyph set (`assets/Icons`, also `Drawpane.Icon`): a 16px grid, 1.5px stroke, round caps and joins, outline style. Only the component glyph uses a fill, for its inner diamond.
+- Drawpane uses its own 65-glyph set (`assets/Icons`, also `Drawpane.Icon`): a 16px grid, 1.5px stroke, round caps and joins, outline style. Only the component and opacity glyphs use a fill.
 - In code, icons inherit `currentColor`. The SVG files are single-ink in `#1c1b19` (Paper `ink`) for docs and slides.
 - Never mix in another icon family or use emoji as icons. New glyphs go on the same grid and are added to the set.
 

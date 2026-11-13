@@ -1,0 +1,213 @@
+/* Images: the drop zone, the upload tray, the image fill and the Export section. */
+
+.drop-zone {
+  position: absolute;
+  inset: 4px;
+  z-index: 1;
+  border: 2px solid var(--signal);
+  border-radius: var(--radius-lg);
+  pointer-events: none;
+}
+.drop-zone__tag {
+  position: fixed;
+  padding: var(--space-050) var(--space-200);
+  border-radius: var(--radius-xs);
+  background: var(--signal);
+  color: var(--on-signal);
+  font: var(--type-ui-strong);
+  white-space: nowrap;
+}
+
+.upload-tray {
+  position: absolute;
+  z-index: 9;
+  bottom: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 440px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  padding: var(--space-300);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  animation: lens-in var(--duration-popover, 160ms) ease-out;
+}
+.upload-tray--raised {
+  bottom: 108px;
+}
+.upload-tray__list {
+  display: grid;
+  gap: var(--space-200);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.upload-tray__item {
+  display: grid;
+  grid-template-columns: 12px 1fr auto 88px;
+  align-items: center;
+  gap: var(--space-200);
+  color: var(--ink);
+  font: var(--type-ui-body);
+}
+.upload-tray__item .dp-icon {
+  color: var(--icon);
+}
+.upload-tray__item--error .dp-icon {
+  color: var(--danger);
+}
+.upload-tray__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-tray__state {
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+  font-variant-numeric: tabular-nums;
+}
+.upload-tray__bar {
+  position: relative;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+.upload-tray__bar > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--signal);
+  transition: width var(--duration-toggle, 120ms) linear;
+}
+.upload-tray__item--done .upload-tray__bar > span {
+  background: var(--success);
+}
+.upload-tray__item--error .upload-tray__bar > span {
+  background: var(--danger);
+}
+.upload-tray__note {
+  margin: var(--space-200) 0 0;
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+}
+
+/* Image fill, in the Fill section. */
+.paint-row.paint-row--fill {
+  grid-template-columns: 1fr 56px auto auto auto;
+}
+.image-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  height: var(--size-control-sm);
+  padding: 0 var(--space-200) 0 var(--space-100);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font: var(--type-ui-body);
+  min-width: 0;
+}
+.image-chip__thumb {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+  background: var(--surface);
+}
+.image-chip__thumb canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.image-chip__thumb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+.image-chip__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-fill {
+  /* Spans the whole paint row it sits in. */
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--space-200);
+  padding-bottom: var(--space-200);
+}
+.image-fill__preview {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  /* A checkerboard shows through transparent pixels. */
+  background:
+    repeating-conic-gradient(var(--surface-sunken) 0 25%, var(--surface) 0 50%) 0 0 / 12px 12px;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.image-fill__preview canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.image-fill__status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+}
+.image-fill__replace {
+  position: absolute;
+  left: var(--space-200);
+  bottom: var(--space-200);
+}
+.image-fill__meta {
+  margin: 0;
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Export section. */
+.export-section__button {
+  width: 100%;
+  justify-content: center;
+}
+.export-section__preview {
+  display: grid;
+  place-items: center;
+  height: 96px;
+  border-radius: var(--radius-sm);
+  background:
+    repeating-conic-gradient(var(--surface-sunken) 0 25%, var(--surface) 0 50%) 0 0 / 12px 12px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  overflow: hidden;
+}
+.export-section__preview img {
+  max-width: calc(100% - 16px);
+  max-height: calc(100% - 16px);
+  object-fit: contain;
+}
+.export-section__hint {
+  margin: 0;
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+}
+
+/* The Export section sits just after the Inspector's fieldset (so viewers can use it). */
+.inspector:has(+ .inspector-export) {
+  padding-bottom: 0;
+}

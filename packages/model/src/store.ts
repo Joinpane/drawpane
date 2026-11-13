@@ -51,7 +51,7 @@ export class MemoryStore implements NodeStore {
   }
 
   pageIds(): readonly string[] {
-    return this.childIds(ROOT_ID);
+    return this.childIds(ROOT_ID).filter((id) => this.get(id)?.type === "page");
   }
 
   nodes(): IterableIterator<NodeRecord> {

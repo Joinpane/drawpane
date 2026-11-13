@@ -384,3 +384,30 @@
     display: none;
   }
 }
+
+/* A published thumbnail: fitted, centred and matted on the canvas ground. */
+.thumb--image {
+  display: grid;
+  place-items: center;
+  padding: var(--space-400);
+  box-sizing: border-box;
+  background: var(--canvas);
+}
+.thumb--image > .thumb {
+  position: absolute;
+  inset: 0;
+}
+.thumb__image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 1px var(--line);
+  opacity: 0;
+  transition: opacity var(--duration-toggle, 120ms) ease-out;
+}
+.thumb--ready .thumb__image {
+  opacity: 1;
+}
