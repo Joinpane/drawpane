@@ -4,6 +4,7 @@ import { fontFileKey, googleStylesheetUrl, rewriteStylesheet } from "../src/api/
 import { Browser } from "./helpers";
 
 const WOFF2 = new Uint8Array([0x77, 0x4f, 0x46, 0x32, 1, 2, 3, 4]);
+const TTF = new Uint8Array([0x00, 0x01, 0x00, 0x00, 5, 6, 7, 8]);
 const CSS = `@font-face {
   font-family: 'Fraunces';
   src: url(https://fonts.gstatic.com/s/fraunces/v38/abc_DEF-1.woff2) format('woff2');
@@ -11,20 +12,24 @@ const CSS = `@font-face {
 @import url(https://evil.example/x.css);`;
 
 /** Stands in for Google: stylesheets and font files, counting requests. */
+const agents: string[] = [];
+
 function stubGoogle() {
   const calls: string[] = [];
+  agents.length = 0;
   const real = globalThis.fetch;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
     if (url.startsWith("https://fonts.googleapis.com/")) {
       calls.push(url);
+      agents.push(new Headers(init?.headers).get("user-agent") ?? "");
       return url.includes("family=Nope")
         ? new Response("no", { status: 400 })
         : new Response(CSS, { headers: { "content-type": "text/css" } });
     }
     if (url.startsWith("https://fonts.gstatic.com/")) {
       calls.push(url);
-      return new Response(WOFF2);
+      return new Response(url.endsWith(".ttf") ? TTF : WOFF2);
     }
     return real(input, init);
   });
@@ -58,7 +63,7 @@ describe("Google Fonts URLs", () => {
       "fonts/gstatic/s/fraunces/v38/abc.woff2",
     );
     expect(fontFileKey("s/../../secret.woff2", none)).toBeNull();
-    expect(fontFileKey("s/fraunces/v38/abc.ttf", none)).toBeNull();
+    expect(fontFileKey("s/fraunces/v38/abc.otf", none)).toBeNull();
     const kit = new URLSearchParams({ kit: "Ab_c-1", skey: "2eca4ab2", v: "v38" });
     expect(fontFileKey("l/font", kit)).toBe("fonts/gstatic/l/v38/2eca4ab2/Ab_c-1.woff2");
     expect(
@@ -106,5 +111,20 @@ describe("/api/fonts", () => {
     expect(new Uint8Array(await second.arrayBuffer())).toEqual(WOFF2);
     expect(calls).toHaveLength(1);
     expect((await browser.fetch("/api/fonts/gstatic/s/x/v1/..%2Fsecret.woff2")).status).toBe(404);
+  });
+
+  it("serves TrueType for PDF export, asked for without a browser's user agent", async () => {
+    const calls = stubGoogle();
+    const browser = new Browser();
+    const res = await browser.fetch(
+      "/api/fonts/google.css?family=Inter&variants=400,700&format=ttf",
+    );
+    expect(res.status).toBe(200);
+    expect(agents.at(-1)).not.toMatch(/Chrome/);
+    const font = await browser.fetch("/api/fonts/gstatic/s/inter/v20/AbC-1.ttf");
+    expect(font.headers.get("content-type")).toBe("font/ttf");
+    expect(new Uint8Array(await font.arrayBuffer())).toEqual(TTF);
+    expect(calls.some((u) => u.endsWith(".ttf"))).toBe(true);
+    expect((await browser.fetch("/api/fonts/google.css?family=Inter&format=otf")).status).toBe(400);
   });
 });
