@@ -34,6 +34,10 @@ export interface ActionContext {
   readonly cut: () => void;
   readonly paste: () => void;
   readonly toggleComments: () => void;
+  /** Plays the prototype from the selected screen (or the page's first flow). */
+  readonly present: () => void;
+  /** Opens the right pane on Design, Prototype or Inspect. */
+  readonly showTab: (tab: "design" | "prototype" | "inspect") => void;
 }
 
 export interface Action {
@@ -389,6 +393,24 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.align("bottom"),
   },
 
+  {
+    id: "view.present",
+    label: "Play prototype",
+    group: "View",
+    icon: "play",
+    shortcut: { key: "enter", mod: true, alt: true },
+    keywords: "present prototype preview play flow",
+    run: ({ present }) => present(),
+  },
+  {
+    id: "view.prototype",
+    label: "Prototype tab",
+    group: "View",
+    icon: "flow",
+    shortcut: { key: "p", alt: true },
+    keywords: "interactions connections flows",
+    run: ({ showTab }) => showTab("prototype"),
+  },
   {
     id: "view.tokens",
     label: "Tokens and variables",
