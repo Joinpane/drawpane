@@ -96,4 +96,24 @@ export type ServerMessage =
   | { readonly t: "pong" }
   | { readonly t: "error"; readonly code: string; readonly message: string }
   /** A comment thread changed. Comments live in D1; the Worker asks the room to relay this after each write. */
-  | { readonly t: "comments"; readonly event: CommentEvent };
+  | { readonly t: "comments"; readonly event: CommentEvent }
+  /**
+   * The document changed too much at once to send as one change (restoring a
+   * large version): forget local state and say hello again with no revision.
+   * Pending edits are kept and resent.
+   */
+  | { readonly t: "resync" }
+  /** Someone restored the whole file to a saved version. Sent after the change itself. */
+  | {
+      readonly t: "restored";
+      readonly by: { readonly userId: string; readonly name: string };
+      readonly version: RestoredVersion;
+    };
+
+export interface RestoredVersion {
+  readonly id: string;
+  /** The version's name, or null for an autosave. */
+  readonly name: string | null;
+  /** When the version was saved, in epoch milliseconds. */
+  readonly at: number;
+}

@@ -1,5 +1,6 @@
 export * from "./apply";
 export * from "./comments";
+export * from "./history";
 export * from "./ids";
 export * from "./media";
 export * from "./ops";
