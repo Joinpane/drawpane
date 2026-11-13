@@ -17,8 +17,9 @@ import {
   rectContainsPoint,
   round2,
 } from "./geometry";
+import { gridSnapLines, guideAt, guideOwnerAt, placedGuides } from "./grids";
 import { hitTest, marqueeHits, selectionTarget } from "./hit";
-import { snapRect } from "./snap";
+import { type SnapLine, snapRect } from "./snap";
 import { ConnectTool } from "./tools/connect";
 import { PenTool } from "./tools/pen";
 import type { KeyInput, ToolHandler } from "./tools/types";
@@ -81,7 +82,8 @@ type Mode =
       startPage: Point;
     }
   | { kind: "rotate"; centre: Point; startAngle: number; nodes: Map<string, NodeRecord> }
-  | { kind: "draw"; type: LayerType; startPage: Point; parent: string; id: string | null };
+  | { kind: "draw"; type: LayerType; startPage: Point; parent: string; id: string | null }
+  | { kind: "guide"; axis: "x" | "y"; from: { owner: string; index: number } | null };
 
 export class Interaction {
   readonly #editor: Editor;
@@ -261,6 +263,20 @@ export class Interaction {
       return;
     }
 
+    const guide = editor.canEdit ? this.#guideUnder(page) : null;
+    if (guide) {
+      this.#mode = {
+        kind: "guide",
+        axis: guide.axis,
+        from: { owner: guide.owner, index: guide.index },
+      };
+      this.#dragGuide(guide.axis, guide.at, input.screen, {
+        owner: guide.owner,
+        index: guide.index,
+      });
+      return;
+    }
+
     const leaf = hitTest(editor.scene, pageId, page, 4 / editor.s.camera.zoom);
     let target = leaf
       ? selectionTarget(editor.scene, pageId, leaf, editor.s.selection, input.mod)
@@ -393,6 +409,9 @@ export class Interaction {
       case "draw":
         this.#draw(mode, page, input);
         return;
+      case "guide":
+        this.#dragGuide(mode.axis, mode.axis === "x" ? page.x : page.y, input.screen, mode.from);
+        return;
     }
   }
 
@@ -445,9 +464,118 @@ export class Interaction {
         editor.setTool("select");
         return;
       }
+      case "guide":
+        this.#dropGuide(mode, this.#page(input.screen));
+        return;
       case "idle":
         return;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Guides
+
+  /**
+   * Starts dragging a new guide out of a ruler: "x" from the vertical ruler
+   * (a vertical line), "y" from the horizontal one. The ruler forwards the
+   * pointer's moves and release to `move` and `up`.
+   */
+  beginGuide(axis: "x" | "y", input: PointerInput): void {
+    const editor = this.#editor;
+    if (!editor.canEdit || !editor.s.pageId) return;
+    this.#mode = { kind: "guide", axis, from: null };
+    const page = this.#page(input.screen);
+    this.#dragGuide(axis, axis === "x" ? page.x : page.y, input.screen, null);
+  }
+
+  #guideUnder(page: Point) {
+    const pageId = this.#editor.s.pageId;
+    if (!pageId) return null;
+    return guideAt(placedGuides(this.#editor.scene, pageId), page, 4 / this.#editor.s.camera.zoom);
+  }
+
+  #dragGuide(
+    axis: "x" | "y",
+    at: number,
+    screen: Point,
+    from: { owner: string; index: number } | null,
+  ): void {
+    const editor = this.#editor;
+    const { insets } = editor.s;
+    // Back over the ruler (or the pane beside it): dropping removes the guide.
+    const removing = axis === "x" ? screen.x < insets.left : screen.y < insets.top;
+    const snapped = Math.round(removing ? at : this.#snapGuide(axis, at));
+    const pointer = this.#page(screen);
+    const point = axis === "x" ? { x: snapped, y: pointer.y } : { x: pointer.x, y: snapped };
+    const pageId = editor.s.pageId as string;
+    let offset = snapped;
+    if (from && from.owner !== pageId) {
+      const local = editor.scene.toLocal(from.owner, point);
+      offset = axis === "x" ? local.x : local.y;
+    } else if (!from) offset = guideOwnerAt(editor.scene, pageId, axis, point).offset;
+    editor.state.set({
+      guideDraft: { axis, at: snapped, from, removing, offset: Math.round(offset * 100) / 100 },
+      hoverGuide: null,
+    });
+    this.cursor = removing ? "default" : axis === "x" ? "ew-resize" : "ns-resize";
+  }
+
+  /** A dragged guide snaps to the edges and centres of layers in view. */
+  #snapGuide(axis: "x" | "y", at: number): number {
+    const editor = this.#editor;
+    const pageId = editor.s.pageId;
+    if (!pageId) return at;
+    const view = editor.s.camera.visibleRect(editor.s.viewport);
+    const threshold = SNAP_PX / editor.s.camera.zoom;
+    let best = at;
+    let bestD = threshold;
+    const consider = (id: string) => {
+      const b = editor.scene.bounds(id);
+      if (!b || b.x > view.x + view.width || b.x + b.width < view.x) return;
+      if (b.y > view.y + view.height || b.y + b.height < view.y) return;
+      const stops =
+        axis === "x"
+          ? [b.x, b.x + b.width / 2, b.x + b.width]
+          : [b.y, b.y + b.height / 2, b.y + b.height];
+      for (const stop of stops) {
+        const d = Math.abs(stop - at);
+        if (d < bestD) {
+          best = stop;
+          bestD = d;
+        }
+      }
+    };
+    for (const id of editor.doc.childIds(pageId)) {
+      consider(id);
+      if (editor.doc.get(id)?.type === "frame")
+        for (const child of editor.doc.childIds(id)) consider(child);
+    }
+    return best;
+  }
+
+  #dropGuide(mode: Extract<Mode, { kind: "guide" }>, page: Point): void {
+    const editor = this.#editor;
+    const draft = editor.s.guideDraft;
+    const pageId = editor.s.pageId;
+    editor.state.set({ guideDraft: null });
+    this.cursor = "default";
+    if (!draft || !pageId) return;
+    if (draft.removing) {
+      if (mode.from) editor.setGuide(mode.from.owner, mode.from.index, null);
+      return;
+    }
+    const point = mode.axis === "x" ? { x: draft.at, y: page.y } : { x: page.x, y: draft.at };
+    if (mode.from) {
+      // A moved guide stays with its owner, in the owner's coordinates.
+      const { owner, index } = mode.from;
+      const local = owner === pageId ? point : editor.scene.toLocal(owner, point);
+      const offset = Math.round((mode.axis === "x" ? local.x : local.y) * 100) / 100;
+      editor.setGuide(owner, index, { axis: mode.axis, offset });
+      return;
+    }
+    // A new guide belongs to the frame it's dropped on, or to the page.
+    const { owner, offset } = guideOwnerAt(editor.scene, pageId, mode.axis, point);
+    editor.setGuide(owner, null, { axis: mode.axis, offset });
   }
 
   cancel(): void {
@@ -466,7 +594,7 @@ export class Interaction {
       editor.endGesture();
       editor.undo();
     }
-    editor.state.set({ marquee: null, guides: [] });
+    editor.state.set({ marquee: null, guides: [], guideDraft: null });
   }
 
   wheel(e: {
@@ -509,8 +637,15 @@ export class Interaction {
       editor.state.set({ hover: null });
       return;
     }
-    this.cursor = "default";
     const page = this.#page(input.screen);
+    const guide = editor.canEdit ? this.#guideUnder(page) : null;
+    if (guide) {
+      this.cursor = guide.axis === "x" ? "ew-resize" : "ns-resize";
+      editor.state.set({ hover: null, hoverGuide: { owner: guide.owner, index: guide.index } });
+      return;
+    }
+    if (editor.s.hoverGuide) editor.state.set({ hoverGuide: null });
+    this.cursor = "default";
     const leaf = hitTest(editor.scene, pageId, page, 4 / editor.s.camera.zoom);
     const target = leaf
       ? selectionTarget(editor.scene, pageId, leaf, editor.s.selection, input.mod)
@@ -578,7 +713,8 @@ export class Interaction {
       const parentBounds = editor.scene.bounds(first.parent);
       if (parentBounds) targets.push(parentBounds);
     }
-    const snap = snapRect(moving, targets, SNAP_PX / editor.s.camera.zoom);
+    const lines = first && !input.mod ? this.#snapLines(first.parent) : [];
+    const snap = snapRect(moving, targets, SNAP_PX / editor.s.camera.zoom, lines);
     dx += snap.dx;
     dy += snap.dy;
     editor.state.set({ guides: snap.guides });
@@ -603,6 +739,20 @@ export class Interaction {
     // Inside auto layout, dragging reorders instead of moving.
     ops.push(...this.#layoutReorder(page));
     if (ops.length > 0) editor.commit(ops, "Move");
+  }
+
+  /** Guides on the page, and the layout grid edges of the frame a layer moves inside. */
+  #snapLines(parent: string): SnapLine[] {
+    const editor = this.#editor;
+    const pageId = editor.s.pageId;
+    if (!pageId) return [];
+    const lines: SnapLine[] = placedGuides(editor.scene, pageId).map((g) => ({
+      axis: g.axis,
+      at: g.at,
+    }));
+    const owner = editor.scene.spaceOwner(parent);
+    if (owner !== pageId && editor.s.layoutGrids) lines.push(...gridSnapLines(editor.scene, owner));
+    return lines;
   }
 
   /** For a single layer in an auto-layout frame: move it to the slot under the pointer. */
