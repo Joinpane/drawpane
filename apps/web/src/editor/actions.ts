@@ -398,6 +398,62 @@ export const ACTIONS: readonly Action[] = [
   },
 
   {
+    id: "arrange.distributeHorizontal",
+    label: "Distribute horizontal spacing",
+    group: "Arrange",
+    icon: "distribute-horizontal",
+    shortcut: { key: "h", alt: true, shift: true },
+    keywords: "space evenly spread",
+    enabled: (e) => e.canEdit && e.s.selection.length > 2,
+    run: ({ editor }) => editor.distribute("horizontal"),
+  },
+  {
+    id: "arrange.distributeVertical",
+    label: "Distribute vertical spacing",
+    group: "Arrange",
+    icon: "distribute-vertical",
+    shortcut: { key: "v", alt: true, shift: true },
+    keywords: "space evenly spread",
+    enabled: (e) => e.canEdit && e.s.selection.length > 2,
+    run: ({ editor }) => editor.distribute("vertical"),
+  },
+  {
+    id: "arrange.flipHorizontal",
+    label: "Flip horizontal",
+    group: "Arrange",
+    icon: "flip-horizontal",
+    shortcut: { key: "h", shift: true },
+    keywords: "mirror",
+    enabled: canEditSelection,
+    run: ({ editor }) => editor.flip("horizontal"),
+  },
+  {
+    id: "arrange.flipVertical",
+    label: "Flip vertical",
+    group: "Arrange",
+    icon: "flip-vertical",
+    shortcut: { key: "v", shift: true },
+    keywords: "mirror",
+    enabled: canEditSelection,
+    run: ({ editor }) => editor.flip("vertical"),
+  },
+  {
+    id: "layer.fitToContent",
+    label: "Resize to fit",
+    group: "Layer",
+    icon: "fit",
+    shortcut: { key: "r", alt: true, shift: true, mod: true },
+    keywords: "frame shrink wrap content hug",
+    enabled: (e) =>
+      e.canEdit &&
+      e.s.selection.some((id) => {
+        const n = e.doc.get(id);
+        return n?.type === "frame" && e.doc.childIds(id).length > 0;
+      }),
+    run: ({ editor }) => editor.fitToContent(),
+  },
+
+  {
     id: "view.present",
     label: "Play prototype",
     group: "View",

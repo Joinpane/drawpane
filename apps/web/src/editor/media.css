@@ -95,9 +95,6 @@
 }
 
 /* Image fill, in the Fill section. */
-.paint-row.paint-row--fill {
-  grid-template-columns: 1fr 56px auto auto auto;
-}
 .image-chip {
   display: flex;
   align-items: center;
@@ -139,8 +136,6 @@
 }
 
 .image-fill {
-  /* Spans the whole paint row it sits in. */
-  grid-column: 1 / -1;
   display: grid;
   gap: var(--space-200);
   padding-bottom: var(--space-200);

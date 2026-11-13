@@ -92,11 +92,19 @@ test.describe
 
     test("switches the scale mode in the fill picker", async () => {
       const inspector = page.getByRole("group", { name: "Properties" });
-      const mode = (name: string) => inspector.getByRole("radio", { name });
+      const picker = page.getByRole("dialog", { name: "Fill paint" });
+      const mode = (name: string) => picker.getByRole("radio", { name });
+      await inspector.getByRole("button", { name: "Edit fill" }).click();
+      await expect(picker.getByRole("radio", { name: "Image" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
       await expect(mode("Fill")).toHaveAttribute("aria-checked", "true");
       await mode("Fit").click();
       await expect(mode("Fit")).toHaveAttribute("aria-checked", "true");
-      await expect(inspector.getByText(/240 × 160/)).toBeVisible();
+      await expect(picker.getByText(/240 × 160/)).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(picker).toHaveCount(0);
       // Make the layer wider than the image: Fit leaves the page background at the sides.
       await inspector.getByLabel("Width").fill("480");
       await inspector.getByLabel("Width").press("Enter");
@@ -106,7 +114,9 @@ test.describe
       await page.keyboard.press("ControlOrMeta+z");
       await page.keyboard.press("ControlOrMeta+z");
       await expect(inspector.getByLabel("Width")).toHaveValue("240");
+      await inspector.getByRole("button", { name: "Edit fill" }).click();
       await expect(mode("Fill")).toHaveAttribute("aria-checked", "true");
+      await page.keyboard.press("Escape");
     });
 
     test("refuses files that aren't images, with a notice", async () => {
