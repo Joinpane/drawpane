@@ -17,6 +17,7 @@ import {
 import type { IconName } from "@drawpane/ui";
 import { isMac } from "../app/format";
 import { copySelectionAs, exportSelection } from "./exporting";
+import { uiFor } from "./ui-state";
 
 export interface Shortcut {
   /** `KeyboardEvent.key`, lowercased. */
@@ -48,6 +49,8 @@ export interface ActionContext {
   readonly rename: () => void;
   /** Opens the keyboard shortcuts sheet. */
   readonly showShortcuts: () => void;
+  /** Opens the layers search and focuses it. */
+  readonly findLayers: () => void;
   /** Asks for image files and places them in view. */
   readonly placeImage: () => void;
 }
@@ -352,6 +355,27 @@ export const ACTIONS: readonly Action[] = [
     keywords: "css grid columns rows tracks",
     enabled: canEditSelection,
     run: ({ editor }) => editor.addGridLayout(),
+  },
+  {
+    id: "layer.find",
+    label: "Find layers",
+    group: "Layer",
+    icon: "search",
+    shortcut: { key: "f", mod: true },
+    keywords: "search filter layers panel",
+    run: ({ findLayers }) => findLayers(),
+  },
+  {
+    id: "layer.collapseAll",
+    label: "Collapse all layers",
+    group: "Layer",
+    icon: "collapse-all",
+    shortcut: { key: "l", alt: true },
+    keywords: "fold close tree",
+    run: ({ editor }) => {
+      const ui = uiFor(editor);
+      ui.set({ collapseLayers: ui.get().collapseLayers + 1 });
+    },
   },
   {
     id: "layer.rename",
