@@ -89,7 +89,10 @@ export class FileRoom extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => {
       this.#sql.exec(NODE_SCHEMA + LOG_SCHEMA);
       this.#revn = Number(this.#meta("revn") ?? 0);
-      if (this.#store.childIds(ROOT_ID).length === 0) this.#seed();
+      const hasPage = this.#store
+        .childIds(ROOT_ID)
+        .some((id) => this.#store.get(id)?.type === "page");
+      if (!hasPage) this.#seed();
     });
   }
 

@@ -129,6 +129,33 @@ test("tour", async ({ browser }) => {
   await shot(page, "12-assets");
   await page.getByRole("radio", { name: "Layers" }).click();
 
+  // Tokens: a collection with a few variables and a second mode.
+  await page.keyboard.press("Alt+t");
+  await shot(page, "13-tokens-empty");
+  await page.getByRole("button", { name: "New collection" }).first().click();
+  for (const [name, value] of [
+    ["brand/500", "#2563eb"],
+    ["surface/page", "#ffffff"],
+    ["text/strong", "#16181d"],
+  ] as const) {
+    await page.getByRole("button", { name: "Token", exact: true }).click();
+    const nameButton = page.getByRole("rowheader").last().getByRole("button");
+    await nameButton.dblclick();
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.type(name);
+    await page.keyboard.press("Enter");
+    const cell = page.getByRole("row").last().getByRole("textbox", { name: "Value" }).first();
+    await cell.fill(value);
+    await cell.press("Enter");
+  }
+  await page.getByRole("button", { name: "Add mode" }).click();
+  await page.keyboard.type("Dark");
+  await page.keyboard.press("Enter");
+  await page.getByRole("rowheader").first().click();
+  await page.waitForTimeout(300);
+  await shot(page, "14-tokens");
+  await page.keyboard.press("Alt+t");
+
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Recent files" })).toBeVisible();
   await shot(page, "08-dashboard");

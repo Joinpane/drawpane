@@ -1,5 +1,7 @@
 import type { Editor } from "@drawpane/editor";
+import { BINDING_TARGETS } from "@drawpane/editor";
 import {
+  type BindingKey,
   getProp,
   type NodeRecord,
   type Paint,
@@ -15,10 +17,13 @@ import {
   SegmentedControl,
   type SegmentedOption,
   Switch,
+  TokenChip,
 } from "@drawpane/ui";
 import { useState } from "react";
 import { ComponentSection } from "./ComponentSection";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { Bindable } from "./tokens/Bindable";
+import { ModesSection } from "./tokens/ModesSection";
 
 /** The value every node shares, or null when they differ (shown as "Mixed"). */
 function common<K extends PropName>(nodes: readonly NodeRecord[], prop: K): PropValues[K] | null {
@@ -81,6 +86,7 @@ export function Inspector() {
       {frames.length > 0 && frames.length === nodes.length ? (
         <AutoLayoutSection editor={editor} nodes={frames} />
       ) : null}
+      {only === "frame" && first ? <ModesSection node={first} /> : null}
       <AppearanceSection editor={editor} nodes={nodes} corners={corners} frames={frames} />
       {texts.length > 0 && texts.length === nodes.length ? (
         <TextSection editor={editor} nodes={texts} />
@@ -122,8 +128,10 @@ function Num({
   scale?: number;
 }) {
   const value = common(nodes, prop) as number | null;
-  return (
+  const bindKey = NUMBER_BINDINGS.has(prop) ? (prop as BindingKey) : undefined;
+  const field = (token?: { name: string; open: () => void }) => (
     <NumberField
+      {...(token ? { token: token.name, onTokenClick: token.open } : {})}
       {...(label ? { label } : {})}
       {...(icon ? { icon } : {})}
       ariaLabel={ariaLabel}
@@ -144,7 +152,20 @@ function Num({
       onScrubEnd={() => editor.endGesture()}
     />
   );
+  if (!bindKey) return field();
+  return (
+    <Bindable nodes={nodes} bindKey={bindKey}>
+      {({ bound, open }) => field(bound ? { name: getProp(bound.props, "name"), open } : undefined)}
+    </Bindable>
+  );
 }
+
+/** Number properties a variable can drive (their binding key is the property name). */
+const NUMBER_BINDINGS: ReadonlySet<string> = new Set(
+  (Object.entries(BINDING_TARGETS) as Array<[BindingKey, { prop: string; type: string }]>)
+    .filter(([key, t]) => t.type === "number" && t.prop === key)
+    .map(([key]) => key),
+);
 
 function GeometrySection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   return (
@@ -567,6 +588,7 @@ function PaintSection({
   const paints = common(nodes, prop);
   const set = (next: Paint[], label: string) =>
     editor.setProp(ids, prop, next.length ? next : null, label);
+  const firstSolid = (paints ?? []).findIndex((p) => p.type === "solid");
   const add = () =>
     set(
       [...(paints ?? []), { type: "solid", color: prop === "fills" ? "#d9d9d6" : "#1c1b1a" }],
@@ -583,7 +605,31 @@ function PaintSection({
       ) : (
         paints.map((paint, i) => (
           <div key={i} className="paint-row">
-            {paint.type === "solid" ? (
+            {paint.type === "solid" && i === firstSolid ? (
+              <Bindable nodes={nodes} bindKey={prop === "fills" ? "fill" : "stroke"}>
+                {({ bound, open }) =>
+                  bound ? (
+                    <TokenChip
+                      className="paint-token"
+                      name={getProp(bound.props, "name")}
+                      swatch={paint.color.slice(0, 7)}
+                      onClick={open}
+                    />
+                  ) : (
+                    <ColorField
+                      label={title}
+                      color={paint.color}
+                      onChange={(color) =>
+                        set(
+                          paints.map((p, j) => (j === i ? { ...paint, color } : p)),
+                          `${title} color`,
+                        )
+                      }
+                    />
+                  )
+                }
+              </Bindable>
+            ) : paint.type === "solid" ? (
               <ColorField
                 label={title}
                 color={paint.color}
@@ -770,6 +816,7 @@ function PageInspector() {
   return (
     <div className="inspector">
       <h2 className="inspector__title">Page</h2>
+      <ModesSection node={page} />
       <PropertySection
         title="Background"
         actions={

@@ -6,6 +6,7 @@
 
 import type { Peer } from "@drawpane/model";
 import {
+  type BindingKey,
   getProp,
   keyBetween,
   keysBetween,
@@ -15,7 +16,9 @@ import {
   type Op,
   type PropName,
   type Props,
+  propAllowed,
   ROOT_ID,
+  type VariableValue,
 } from "@drawpane/model";
 import { Camera } from "./camera";
 import {
@@ -31,6 +34,7 @@ import {
   wouldCycle,
 } from "./components";
 import { Doc } from "./doc";
+import { dependsOn, parseDtcg } from "./dtcg";
 import { apply, invert, multiply, type Rect, rotationOf, round2 } from "./geometry";
 import { applyBestEffort, History } from "./history";
 import { layoutOps } from "./layout";
@@ -39,6 +43,13 @@ import type { Guide } from "./snap";
 import { Store } from "./store";
 import { type ConnectionStatus, SyncEngine } from "./sync";
 import { autoSize, type TextMeasurer } from "./text";
+import {
+  BINDING_TARGETS,
+  unbindOps,
+  type VariableType,
+  variableFixupOps,
+  variablesIn,
+} from "./variables";
 
 export type ToolId = "select" | "hand" | "frame" | "rect" | "ellipse" | "line" | "text";
 
@@ -182,30 +193,39 @@ export class Editor {
 
   #commitWithFixups(ops: readonly Op[], recordOverrides = true): Op[] {
     return this.doc.batch(() => {
-      // Editing a layer inside an instance records an override first, so the
-      // sync below leaves that property alone.
-      const marks = recordOverrides ? overrideOps(this.doc, ops) : [];
-      let inverse = this.sync.commit(marks.length > 0 ? [...ops, ...marks] : ops);
+      // A person's edit inside an instance records an override, and setting a
+      // bound property by hand detaches its variable; both before the derived
+      // writes below, so those leave the edited properties alone.
+      const marks = recordOverrides
+        ? [...overrideOps(this.doc, ops), ...unbindOps(this.doc, ops)]
+        : [];
+      const first = marks.length > 0 ? [...ops, ...marks] : ops;
+      let inverse = this.sync.commit(first);
       let touched = this.#touchedBy(ops, inverse);
+      let lastOps: readonly Op[] = first;
       // Derived writes until nothing changes: instances follow their main
-      // component, text sizes to its content, auto layout places children.
-      // Each can feed the next (a synced text resizes; a resize re-lays out a
-      // hugging main component, which its instances then follow).
+      // component, bound properties follow their variables, text sizes to its
+      // content, auto layout places children. Each can feed the next.
       for (let round = 0; round < MAX_FIXUP_ROUNDS && touched.size > 0; round++) {
         const live = [...touched].filter((id) => this.doc.has(id));
-        const derived = [...propagationOps(this.doc, live), ...this.#textFixups(live)];
-        let roundInverse: Op[] = [];
-        if (derived.length > 0) roundInverse = this.sync.commit(derived);
+        const synced = propagationOps(this.doc, live);
+        let roundInverse: Op[] = synced.length > 0 ? this.sync.commit(synced) : [];
+        const resolved = variableFixupOps(this.doc, [...lastOps, ...synced]);
+        if (resolved.length > 0) roundInverse = [...this.sync.commit(resolved), ...roundInverse];
+        const derivedSoFar = [...synced, ...resolved];
+        const text = this.#textFixups([...live, ...derivedSoFar.map((o) => o.id)]);
+        if (text.length > 0) roundInverse = [...this.sync.commit(text), ...roundInverse];
+        const derived = [...derivedSoFar, ...text];
         const afterSync =
           derived.length > 0 ? this.#touchedBy(derived, roundInverse) : new Set<string>();
         const layoutTargets = [...new Set([...live, ...afterSync])].filter((id) =>
           this.doc.has(id),
         );
         const layout = layoutOps(this.doc, layoutTargets);
-        let layoutInverse: Op[] = [];
-        if (layout.length > 0) layoutInverse = this.sync.commit(layout);
+        const layoutInverse = layout.length > 0 ? this.sync.commit(layout) : [];
         inverse = [...layoutInverse, ...roundInverse, ...inverse];
         touched = new Set([...afterSync, ...this.#touchedBy(layout, layoutInverse)]);
+        lastOps = [...derived, ...layout];
       }
       return inverse;
     });
@@ -923,6 +943,237 @@ export class Editor {
         ops.push(...detachOps(this.doc, id));
     }
     if (ops.length > 0) this.commit(ops, "Detach instance");
+  }
+
+  // -------------------------------------------------------------------------
+  // Variables
+
+  /** Creates a variable collection. Returns its id. */
+  createCollection(name = "Tokens"): string | null {
+    const id = newId();
+    const last = this.doc.childIds(ROOT_ID).at(-1);
+    const ok = this.commit(
+      [
+        {
+          op: "create",
+          id,
+          type: "collection",
+          parent: ROOT_ID,
+          key: keyBetween(last ? (this.doc.get(last)?.key ?? null) : null, null),
+          props: { name, modes: [{ id: newId(8), name: "Default" }] },
+        },
+      ],
+      "New collection",
+    );
+    return ok ? id : null;
+  }
+
+  /** Adds a variable to a collection, with `value` in every mode. Returns its id. */
+  createVariable(
+    collectionId: string,
+    name: string,
+    type: VariableType,
+    value: VariableValue,
+  ): string | null {
+    const collection = this.doc.get(collectionId);
+    if (collection?.type !== "collection") return null;
+    const modes = getProp(collection.props, "modes");
+    const id = newId();
+    const ok = this.commit(
+      [
+        {
+          op: "create",
+          id,
+          type: "variable",
+          parent: collectionId,
+          key: this.topKey(collectionId),
+          props: {
+            name,
+            variableType: type,
+            values: Object.fromEntries(modes.map((m) => [m.id, value])),
+          },
+        },
+      ],
+      "New variable",
+    );
+    return ok ? id : null;
+  }
+
+  setVariableValue(variableId: string, modeId: string, value: VariableValue): void {
+    const variable = this.doc.get(variableId);
+    if (variable?.type !== "variable") return;
+    if (typeof value === "object" && dependsOn(this.doc, value.alias, variableId)) {
+      this.notify("A variable can't refer to itself, directly or through another variable.");
+      return;
+    }
+    const values = { ...getProp(variable.props, "values"), [modeId]: value };
+    this.commit([{ op: "set", id: variableId, prop: "values", value: values }], "Change variable");
+  }
+
+  addMode(collectionId: string, name: string): string | null {
+    const collection = this.doc.get(collectionId);
+    if (collection?.type !== "collection") return null;
+    const modes = getProp(collection.props, "modes");
+    if (modes.length >= 16) {
+      this.notify("A collection can have up to 16 modes.");
+      return null;
+    }
+    const mode = { id: newId(8), name };
+    const ops: Op[] = [{ op: "set", id: collectionId, prop: "modes", value: [...modes, mode] }];
+    // New modes start as a copy of the first one.
+    const first = modes[0]?.id;
+    for (const variable of variablesIn(this.doc, collectionId)) {
+      const values = getProp(variable.props, "values");
+      const seed = first ? values[first] : undefined;
+      if (seed !== undefined)
+        ops.push({
+          op: "set",
+          id: variable.id,
+          prop: "values",
+          value: { ...values, [mode.id]: seed },
+        });
+    }
+    return this.commit(ops, "Add mode") ? mode.id : null;
+  }
+
+  renameMode(collectionId: string, modeId: string, name: string): void {
+    const collection = this.doc.get(collectionId);
+    if (collection?.type !== "collection" || !name.trim()) return;
+    const modes = getProp(collection.props, "modes").map((m) =>
+      m.id === modeId ? { ...m, name: name.trim() } : m,
+    );
+    this.commit([{ op: "set", id: collectionId, prop: "modes", value: modes }], "Rename mode");
+  }
+
+  removeMode(collectionId: string, modeId: string): void {
+    const collection = this.doc.get(collectionId);
+    if (collection?.type !== "collection") return;
+    const modes = getProp(collection.props, "modes");
+    if (modes.length <= 1) {
+      this.notify("A collection needs at least one mode.");
+      return;
+    }
+    const ops: Op[] = [
+      { op: "set", id: collectionId, prop: "modes", value: modes.filter((m) => m.id !== modeId) },
+    ];
+    for (const variable of variablesIn(this.doc, collectionId)) {
+      const values = { ...getProp(variable.props, "values") };
+      if (modeId in values) {
+        delete values[modeId];
+        ops.push({ op: "set", id: variable.id, prop: "values", value: values });
+      }
+    }
+    this.commit(ops, "Remove mode");
+  }
+
+  /** Binds a property of the given layers to a variable; the value updates in the same step. */
+  bindVariable(ids: readonly string[], key: BindingKey, variableId: string): void {
+    const variable = this.doc.get(variableId);
+    if (variable?.type !== "variable") return;
+    if (getProp(variable.props, "variableType") !== BINDING_TARGETS[key].type) {
+      this.notify(
+        `That variable holds a ${getProp(variable.props, "variableType")}, not a ${BINDING_TARGETS[key].type}.`,
+      );
+      return;
+    }
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const node = this.doc.get(id);
+      if (!node || !propAllowed(node.type, BINDING_TARGETS[key].prop)) continue;
+      ops.push({
+        op: "set",
+        id,
+        prop: "bindings",
+        value: { ...getProp(node.props, "bindings"), [key]: variableId },
+      });
+    }
+    if (ops.length > 0) this.commit(ops, `Use ${getProp(variable.props, "name")}`);
+  }
+
+  /** Detaches a variable from a property, keeping its current value. */
+  unbindVariable(ids: readonly string[], key: BindingKey): void {
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const node = this.doc.get(id);
+      const bindings = node ? getProp(node.props, "bindings") : {};
+      if (!node || !bindings[key]) continue;
+      const next = { ...bindings };
+      delete next[key];
+      ops.push({
+        op: "set",
+        id,
+        prop: "bindings",
+        value: Object.keys(next).length > 0 ? next : null,
+      });
+    }
+    if (ops.length > 0) this.commit(ops, "Detach variable");
+  }
+
+  /** Sets which mode of a collection applies inside a frame or page (null inherits). */
+  setVariableMode(id: string, collectionId: string, modeId: string | null): void {
+    const node = this.doc.get(id);
+    if (!node || (node.type !== "frame" && node.type !== "page")) return;
+    const next = { ...getProp(node.props, "variableModes") };
+    if (modeId) next[collectionId] = modeId;
+    else delete next[collectionId];
+    this.commit(
+      [{ op: "set", id, prop: "variableModes", value: Object.keys(next).length > 0 ? next : null }],
+      "Change mode",
+    );
+  }
+
+  /** Imports W3C design tokens (DTCG JSON) as a new collection. Returns its id. */
+  importTokens(json: unknown, name = "Imported tokens"): string | null {
+    const parsed = parseDtcg(json);
+    if (parsed.tokens.length === 0) {
+      this.notify("That file has no design tokens Drawpane can read. It expects W3C (DTCG) JSON.");
+      return null;
+    }
+    const collectionId = newId();
+    const modeIds = new Map(parsed.modes.map((m) => [m, newId(8)]));
+    const last = this.doc.childIds(ROOT_ID).at(-1);
+    const ops: Op[] = [
+      {
+        op: "create",
+        id: collectionId,
+        type: "collection",
+        parent: ROOT_ID,
+        key: keyBetween(last ? (this.doc.get(last)?.key ?? null) : null, null),
+        props: {
+          name,
+          modes: parsed.modes.map((m) => ({ id: modeIds.get(m) as string, name: m })),
+        },
+      },
+    ];
+    const ids = new Map(parsed.tokens.map((t) => [t.name, newId()]));
+    const keys = keysBetween(null, null, parsed.tokens.length);
+    parsed.tokens.forEach((token, i) => {
+      const values: Record<string, VariableValue> = {};
+      for (const [mode, raw] of Object.entries(token.values)) {
+        const modeId = modeIds.get(mode);
+        if (!modeId) continue;
+        if (typeof raw === "object") {
+          const target = ids.get(raw.alias);
+          if (target) values[modeId] = { alias: target };
+        } else {
+          values[modeId] = raw;
+        }
+      }
+      ops.push({
+        op: "create",
+        id: ids.get(token.name) as string,
+        type: "variable",
+        parent: collectionId,
+        key: keys[i] as string,
+        props: {
+          name: token.name,
+          variableType: token.type,
+          values,
+          ...(token.description ? { description: token.description } : {}),
+        },
+      });
+    });
+    return this.commit(ops, "Import tokens") ? collectionId : null;
   }
 
   /** Selection sorted by z-order (bottom first) within the document. */
