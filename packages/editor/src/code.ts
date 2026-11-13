@@ -4,7 +4,13 @@
  * value bound to a variable is written as `var(--token)` with the resolved
  * value in a comment, so Inspect shows what ships.
  */
-import { type BindingKey, getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import {
+  type BindingKey,
+  type GridTrack,
+  getProp,
+  type NodeRecord,
+  type Paint,
+} from "@drawpane/model";
 import type { Doc } from "./doc";
 import { letterSpacingPx, lineHeightPx } from "./text";
 import { cssVariableName } from "./variables";
@@ -54,6 +60,19 @@ function paintCss(paint: Paint): string | null {
   return null; // Images need an asset URL: exported separately.
 }
 
+/** Flexbox's names for start and end. */
+const flexAlign = (a: string) => (a === "start" || a === "end" ? `flex-${a}` : a);
+
+/** A CSS track list, with `repeat()` when every track is the same. */
+function trackList(tracks: readonly GridTrack[]): string {
+  const one = (t: GridTrack) =>
+    t.unit === "auto" ? "auto" : `${Math.round(t.value * 100) / 100}${t.unit}`;
+  const all = tracks.map(one);
+  return all.length > 1 && all.every((t) => t === all[0])
+    ? `repeat(${all.length}, ${all[0]})`
+    : all.join(" ");
+}
+
 /** CSS declarations for one layer, in the order a person would write them. */
 export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
   const p = node.props;
@@ -71,6 +90,16 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
         ? { property, value: `var(${cssVariableName(token)})`, resolved: value, token }
         : { property, value },
     );
+  };
+
+  /** `gap` as one value when both directions match, else `row-gap` and `column-gap`. */
+  const gaps = (row: number, column: number, rowKey: BindingKey, columnKey: BindingKey) => {
+    if (row === column && bindings[rowKey] === bindings[columnKey]) {
+      if (row !== 0 || bindings[columnKey]) push("gap", px(column), columnKey);
+      return;
+    }
+    if (row !== 0 || bindings[rowKey]) push("row-gap", px(row), rowKey);
+    if (column !== 0 || bindings[columnKey]) push("column-gap", px(column), columnKey);
   };
 
   const parent = doc.get(node.parent);
@@ -91,31 +120,74 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
     out.push({ property: "top", value: px(getProp(p, "y")) });
   }
 
+  // Where it sits in its parent's layout.
+  if (inLayout && parentLayout === "grid") {
+    const area = getProp(p, "gridArea");
+    if (area) {
+      const line = (start: number, span: number) =>
+        span > 1 ? `${start} / span ${span}` : `${start}`;
+      out.push({ property: "grid-column", value: line(area.column, area.columnSpan) });
+      out.push({ property: "grid-row", value: line(area.row, area.rowSpan) });
+    }
+    const justifySelf = getProp(p, "justifySelf");
+    if (justifySelf !== "auto") out.push({ property: "justify-self", value: justifySelf });
+  }
+  if (inLayout) {
+    const alignSelf = getProp(p, "alignSelf");
+    if (alignSelf !== "auto")
+      out.push({
+        property: "align-self",
+        value: parentLayout === "grid" ? alignSelf : flexAlign(alignSelf),
+      });
+  }
+
   // Layout.
-  if (node.type === "frame" && getProp(p, "layoutMode") !== "none") {
+  const layoutMode = node.type === "frame" ? getProp(p, "layoutMode") : "none";
+  if (layoutMode === "grid") {
+    out.push({ property: "display", value: "grid" });
+    out.push({
+      property: "grid-template-columns",
+      value: trackList(
+        getProp(p, "gridColumns").length > 0
+          ? getProp(p, "gridColumns")
+          : [{ unit: "fr", value: 1 }],
+      ),
+    });
+    if (getProp(p, "gridRows").length > 0)
+      out.push({ property: "grid-template-rows", value: trackList(getProp(p, "gridRows")) });
+    const justifyItems = getProp(p, "justifyItems");
+    if (justifyItems !== "start") out.push({ property: "justify-items", value: justifyItems });
+    const align = getProp(p, "alignItems");
+    if (align !== "start") out.push({ property: "align-items", value: align });
+    gaps(getProp(p, "rowGap"), getProp(p, "gap"), "rowGap", "gap");
+  } else if (layoutMode !== "none") {
     out.push({ property: "display", value: "flex" });
-    if (getProp(p, "layoutMode") === "column")
-      out.push({ property: "flex-direction", value: "column" });
-    if (getProp(p, "layoutWrap")) out.push({ property: "flex-wrap", value: "wrap" });
+    if (layoutMode === "column") out.push({ property: "flex-direction", value: "column" });
+    const wraps = getProp(p, "layoutWrap");
+    if (wraps) {
+      out.push({ property: "flex-wrap", value: "wrap" });
+      // Lines pack at the start, as the editor lays them out.
+      out.push({ property: "align-content", value: "flex-start" });
+    }
     const justify = getProp(p, "justifyContent");
     if (justify !== "start")
       out.push({
         property: "justify-content",
-        value:
-          justify === "space-between"
-            ? "space-between"
-            : `flex-${justify}`.replace("flex-center", "center"),
+        value: justify === "space-between" ? "space-between" : flexAlign(justify),
       });
     const align = getProp(p, "alignItems");
     if (align !== "start")
-      out.push({
-        property: "align-items",
-        value:
-          align === "center" || align === "stretch" || align === "baseline"
-            ? align
-            : `flex-${align}`,
-      });
-    if (getProp(p, "gap") !== 0 || bindings.gap) push("gap", px(getProp(p, "gap")), "gap");
+      out.push({ property: "align-items", value: align === "baseline" ? align : flexAlign(align) });
+    if (!wraps) {
+      if (getProp(p, "gap") !== 0 || bindings.gap) push("gap", px(getProp(p, "gap")), "gap");
+    } else if (layoutMode === "row") {
+      gaps(getProp(p, "rowGap"), getProp(p, "gap"), "rowGap", "gap");
+    } else {
+      // In a wrapping column the gap between lines runs across, between columns.
+      gaps(getProp(p, "gap"), getProp(p, "rowGap"), "gap", "rowGap");
+    }
+  }
+  if (layoutMode !== "none") {
     const [t, r, b, l] = [
       getProp(p, "paddingTop"),
       getProp(p, "paddingRight"),
@@ -145,8 +217,12 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
       const sizing = getProp(p, axis === "width" ? "sizingH" : "sizingV");
       const mainAxis = inLayout && ((axis === "width" && row) || (axis === "height" && !row));
       if (sizing === "fill") {
-        if (mainAxis) out.push({ property: "flex", value: "1 1 0" });
-        else if (inLayout) out.push({ property: "align-self", value: "stretch" });
+        if (inLayout && parentLayout === "grid") {
+          const property = axis === "width" ? "justify-self" : "align-self";
+          if (!out.some((d) => d.property === property)) out.push({ property, value: "stretch" });
+        } else if (mainAxis) out.push({ property: "flex", value: "1 1 0" });
+        else if (inLayout && !out.some((d) => d.property === "align-self"))
+          out.push({ property: "align-self", value: "stretch" });
         else out.push({ property: axis, value: "100%" });
         return;
       }
@@ -365,7 +441,37 @@ export function tailwindFor(doc: Doc, node: NodeRecord): string[] {
         classes.push(tw("top", d.value, isPx ? n : undefined));
         break;
       case "display":
-        classes.push("flex");
+        classes.push(d.value);
+        break;
+      case "grid-template-columns":
+      case "grid-template-rows": {
+        const prefix = d.property === "grid-template-columns" ? "grid-cols" : "grid-rows";
+        const repeat = d.value.match(/^repeat\((\d+), 1fr\)$/);
+        classes.push(repeat ? `${prefix}-${repeat[1]}` : tw(prefix, d.value));
+        break;
+      }
+      case "grid-column":
+      case "grid-row": {
+        const prefix = d.property === "grid-column" ? "col" : "row";
+        const [start, span] = d.value.split(" / span ");
+        classes.push(`${prefix}-start-${start}`);
+        if (span) classes.push(`${prefix}-span-${span}`);
+        break;
+      }
+      case "justify-items":
+        classes.push(`justify-items-${d.value}`);
+        break;
+      case "justify-self":
+        classes.push(`justify-self-${d.value}`);
+        break;
+      case "align-content":
+        classes.push(`content-${d.value.replace("flex-", "")}`);
+        break;
+      case "row-gap":
+        classes.push(tw("gap-y", d.value, isPx ? n : undefined));
+        break;
+      case "column-gap":
+        classes.push(tw("gap-x", d.value, isPx ? n : undefined));
         break;
       case "flex-direction":
         classes.push("flex-col");
@@ -380,7 +486,7 @@ export function tailwindFor(doc: Doc, node: NodeRecord): string[] {
         classes.push(`items-${d.value.replace("flex-", "")}`);
         break;
       case "align-self":
-        classes.push("self-stretch");
+        classes.push(`self-${d.value.replace("flex-", "")}`);
         break;
       case "flex":
         classes.push("flex-1");

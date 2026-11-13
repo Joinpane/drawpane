@@ -1,4 +1,4 @@
-import { cssFor, cssRule, jsxFor, tailwindFor } from "@drawpane/editor";
+import { cssFor, cssRule, jsxFor, tailwindFor, trackLabel } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { Badge, IconButton, PropertySection, SegmentedControl } from "@drawpane/ui";
 import { useState } from "react";
@@ -115,8 +115,43 @@ function Summary({ node }: { node: NodeRecord }) {
     if (b) rows.push({ label: "Size", value: `${n(b.width)} × ${n(b.height)}` });
   }
   if (node.type === "frame" && getProp(p, "layoutMode") !== "none") {
-    rows.push({ label: "Layout", value: `Flex ${getProp(p, "layoutMode")}` });
-    rows.push({ label: "Gap", value: n(getProp(p, "gap")), token: token("gap") });
+    const mode = getProp(p, "layoutMode");
+    if (mode === "grid") {
+      const columns = getProp(p, "gridColumns");
+      const rowTracks = getProp(p, "gridRows");
+      rows.push({ label: "Layout", value: "Grid" });
+      rows.push({
+        label: "Columns",
+        value: (columns.length > 0 ? columns : [{ unit: "fr", value: 1 } as const])
+          .map(trackLabel)
+          .join(" "),
+      });
+      if (rowTracks.length > 0)
+        rows.push({ label: "Rows", value: rowTracks.map(trackLabel).join(" ") });
+      rows.push({
+        label: "Column gap",
+        value: n(getProp(p, "gap")),
+        token: token("column-gap") ?? token("gap"),
+      });
+      rows.push({
+        label: "Row gap",
+        value: n(getProp(p, "rowGap")),
+        token: token("row-gap") ?? token("gap"),
+      });
+    } else {
+      const wrap = getProp(p, "layoutWrap");
+      rows.push({ label: "Layout", value: `Flex ${mode}${wrap ? ", wrap" : ""}` });
+      // Wrapping splits `gap` into row-gap and column-gap when they differ.
+      const along = mode === "row" ? "column-gap" : "row-gap";
+      const across = mode === "row" ? "row-gap" : "column-gap";
+      rows.push({ label: "Gap", value: n(getProp(p, "gap")), token: token(along) ?? token("gap") });
+      if (wrap)
+        rows.push({
+          label: "Line gap",
+          value: n(getProp(p, "rowGap")),
+          token: token(across) ?? token("gap"),
+        });
+    }
     const pads = [
       getProp(p, "paddingTop"),
       getProp(p, "paddingRight"),
