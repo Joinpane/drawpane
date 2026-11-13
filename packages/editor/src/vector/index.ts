@@ -1,6 +1,6 @@
 export * from "./boolean";
 export * from "./bounds";
-export { isClosedPath, parsePathCached, pathBoundsCached } from "./cache";
+export { isClosedPath, parsePathCached } from "./cache";
 export * from "./edit";
 export * from "./hit";
 export * from "./node";

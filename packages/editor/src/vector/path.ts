@@ -39,10 +39,6 @@ export function parseAnchorKey(key: string): AnchorRef | null {
   return { s: Number(m[1]), i: Number(m[2]) };
 }
 
-export function anchor(x: number, y: number, inPt: Point | null = null, out: Point | null = null) {
-  return { x, y, in: inPt, out } satisfies Anchor;
-}
-
 /** The four control points of the segment that leaves anchor `a` and arrives at `b`. */
 export interface Cubic {
   readonly p0: Point;
@@ -58,10 +54,6 @@ export function segmentOf(a: Anchor, b: Anchor): Cubic {
     p2: b.in ?? { x: b.x, y: b.y },
     p3: { x: b.x, y: b.y },
   };
-}
-
-export function isLine(a: Anchor, b: Anchor): boolean {
-  return a.out === null && b.in === null;
 }
 
 /** Number of segments in a subpath: n-1 when open, n when closed. */
@@ -83,16 +75,6 @@ export function* segments(
       yield { s, i, a: sub.anchors[i] as Anchor, b: sub.anchors[(i + 1) % n] as Anchor };
     }
   }
-}
-
-export function getAnchor(path: VectorPath, ref: AnchorRef): Anchor | undefined {
-  return path[ref.s]?.anchors[ref.i];
-}
-
-export function anchorCount(path: VectorPath): number {
-  let n = 0;
-  for (const sub of path) n += sub.anchors.length;
-  return n;
 }
 
 /** Evaluates a cubic at t. */
