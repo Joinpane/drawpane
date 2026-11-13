@@ -12,6 +12,7 @@ export * from "./images";
 export * from "./interaction";
 export * from "./layout";
 export * from "./overlay";
+export * from "./prototype";
 export * from "./render";
 export * from "./scene";
 export * from "./snap";
