@@ -118,6 +118,12 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
     [
       a("layer.group"),
       a("layer.ungroup"),
+      a(
+        "layer.mask",
+        ids.every((id) => editor.doc.get(id)?.props.isMask === true)
+          ? "Remove mask"
+          : "Use as mask",
+      ),
       a("layer.frame"),
       a("layer.autoLayout"),
       a("layer.fitToContent"),

@@ -1,5 +1,6 @@
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { type Point, type Rect, rectContains, rectsIntersect } from "./geometry";
+import { hasMask, maskScopes } from "./masks";
 import type { Scene } from "./scene";
 import { flattenPath, hitPathData, hitRings } from "./vector/hit";
 import { nodePath } from "./vector/shapes";
@@ -59,8 +60,32 @@ export function hitsNode(scene: Scene, node: NodeRecord, p: Point, tolerance: nu
 }
 
 /**
+ * A parent's children topmost first, leaving out those a mask clips away at
+ * `p` (layers above a mask only show inside it).
+ */
+function reachable(scene: Scene, parentId: string, p: Point): string[] {
+  const doc = scene.doc;
+  if (!hasMask(doc, parentId)) return [...doc.childIds(parentId)].reverse();
+  const out: string[] = [];
+  const inside = new Map<string, boolean>();
+  for (const { id, mask } of maskScopes(doc, parentId).reverse()) {
+    if (mask) {
+      let hit = inside.get(mask.id);
+      if (hit === undefined) {
+        hit = hitsNode(scene, mask, p, 0);
+        inside.set(mask.id, hit);
+      }
+      if (!hit) continue;
+    }
+    out.push(id);
+  }
+  return out;
+}
+
+/**
  * The deepest visible, unlocked node under `p`, topmost first. A frame that
- * clips its content only passes hits to children inside its box.
+ * clips its content only passes hits to children inside its box, and a mask
+ * only to the layers it shows.
  */
 export function hitTest(scene: Scene, pageId: string, p: Point, tolerance: number): string | null {
   const doc = scene.doc;
@@ -69,9 +94,8 @@ export function hitTest(scene: Scene, pageId: string, p: Point, tolerance: numbe
     if (!node || node.props.visible === false || node.props.locked === true) return null;
     if (node.type === "frame" && getProp(node.props, "clipContent") && !hitsNode(scene, node, p, 0))
       return null;
-    const children = doc.childIds(id);
-    for (let i = children.length - 1; i >= 0; i--) {
-      const hit = visit(children[i] as string);
+    for (const child of reachable(scene, id, p)) {
+      const hit = visit(child);
       if (hit) return hit;
     }
     if (node.type === "frame") {
@@ -80,9 +104,8 @@ export function hitTest(scene: Scene, pageId: string, p: Point, tolerance: numbe
     }
     return hitsNode(scene, node, p, tolerance) ? id : null;
   };
-  const top = doc.childIds(pageId);
-  for (let i = top.length - 1; i >= 0; i--) {
-    const hit = visit(top[i] as string);
+  for (const id of reachable(scene, pageId, p)) {
+    const hit = visit(id);
     if (hit) return hit;
   }
   return null;
@@ -102,8 +125,7 @@ export function hitAll(scene: Scene, pageId: string, p: Point, tolerance: number
     if (node.type === "frame" && getProp(node.props, "clipContent") && !hitsNode(scene, node, p, 0))
       return false;
     let any = false;
-    const children = doc.childIds(id);
-    for (let i = children.length - 1; i >= 0; i--) if (visit(children[i] as string)) any = true;
+    for (const child of reachable(scene, id, p)) if (visit(child)) any = true;
     const self =
       node.type === "group"
         ? any
@@ -111,8 +133,7 @@ export function hitAll(scene: Scene, pageId: string, p: Point, tolerance: number
     if (self) out.push(id);
     return self;
   };
-  const top = doc.childIds(pageId);
-  for (let i = top.length - 1; i >= 0; i--) visit(top[i] as string);
+  for (const id of reachable(scene, pageId, p)) visit(id);
   return out;
 }
 

@@ -10,6 +10,7 @@ import {
   boundsOfPoints,
   boxOf,
   IDENTITY,
+  intersectRects,
   invert,
   localMatrix,
   type Matrix,
@@ -19,6 +20,7 @@ import {
   rectCorners,
   unionRects,
 } from "./geometry";
+import { maskScopes } from "./masks";
 
 export class Scene {
   readonly #doc: Doc;
@@ -91,12 +93,20 @@ export class Scene {
     const node = this.#doc.get(id);
     let result: Rect | null = null;
     if (node?.type === "group") {
-      result = unionRects(
-        this.#doc
-          .childIds(id)
-          .map((child) => this.bounds(child))
-          .filter((r): r is Rect => r !== null),
-      );
+      // Layers above a mask only show inside it: they count up to the mask's edges.
+      const rects: Rect[] = [];
+      for (const { id: child, mask } of maskScopes(this.#doc, id)) {
+        const b = this.bounds(child);
+        if (!b) continue;
+        if (!mask) {
+          rects.push(b);
+          continue;
+        }
+        const m = this.bounds(mask.id);
+        const clipped = m ? intersectRects(b, m) : b;
+        if (clipped) rects.push(clipped);
+      }
+      result = unionRects(rects);
     } else if (node && node.type !== "page") {
       const corners = this.corners(id);
       result = corners ? boundsOfPoints(corners) : null;

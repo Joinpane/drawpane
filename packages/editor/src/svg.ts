@@ -22,6 +22,7 @@
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { type Matrix, type Rect, round2 } from "./geometry";
 import { markersOf, trimmedStroke } from "./markers";
+import { hasMask, maskScopes } from "./masks";
 import type { Scene } from "./scene";
 import { layoutText, type TextMeasurer } from "./text";
 import { nodePath } from "./vector/shapes";
@@ -270,7 +271,7 @@ export function exportSvg(
     const parts: string[] = [];
 
     if (node.type === "group") {
-      for (const child of scene.doc.childIds(id)) visit(child, parts);
+      visitChildren(id, parts);
       if (parts.length > 0) into.push(`<g${name}${wrapperAttrs}>${parts.join("")}</g>`);
       return;
     }
@@ -297,7 +298,7 @@ export function exportSvg(
           }
         if (node.type === "frame") {
           const children: string[] = [];
-          for (const child of scene.doc.childIds(id)) visit(child, children);
+          visitChildren(id, children);
           if (children.length > 0) {
             if (getProp(node.props, "clipContent")) {
               const clip = out.id("clip");
@@ -316,6 +317,41 @@ export function exportSvg(
     if (parts.length === 0) return;
     if (wrapperAttrs || name) into.push(`<g${name}${wrapperAttrs}>${parts.join("")}</g>`);
     else into.push(...parts);
+  };
+
+  /** A parent's children; layers above a mask go in a group clipped to the mask's outline. */
+  const visitChildren = (parentId: string, into: string[]) => {
+    if (!hasMask(scene.doc, parentId)) {
+      for (const child of scene.doc.childIds(parentId)) visit(child, into);
+      return;
+    }
+    let clipped: string[] | null = null;
+    let clip = "";
+    const flush = () => {
+      if (clipped && clipped.length > 0)
+        into.push(`<g clip-path="url(#${clip})">${clipped.join("")}</g>`);
+      clipped = null;
+    };
+    for (const { id, isMask } of maskScopes(scene.doc, parentId)) {
+      if (!isMask) {
+        visit(id, clipped ?? into);
+        continue;
+      }
+      flush();
+      const mask = scene.doc.get(id) as NodeRecord;
+      const shape = shapeOf(mask, getProp(mask.props, "width"), getProp(mask.props, "height"));
+      if (!shape) continue;
+      clip = out.id("mask");
+      const rule =
+        mask.type === "path" && getProp(mask.props, "windingRule") === "evenodd"
+          ? ' clip-rule="evenodd"'
+          : "";
+      out.defs.push(
+        `<clipPath id="${clip}"><${shape.tag}${transformAttr(scene.worldMatrix(id))}${shape.attrs}${rule}/></clipPath>`,
+      );
+      clipped = [];
+    }
+    flush();
   };
 
   const strokes = (
