@@ -131,7 +131,6 @@ describe("media API", () => {
     expect(served.status).toBe(200);
     expect(served.headers.get("content-type")).toBe("image/png");
     expect(served.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
-    expect(served.headers.get("x-image-width")).toBe("3");
     expect(served.headers.get("x-content-type-options")).toBe("nosniff");
     expect(new Uint8Array(await served.arrayBuffer())).toEqual(PNG);
 

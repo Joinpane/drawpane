@@ -141,9 +141,6 @@ export const media = new Hono<AppContext>()
       etag,
       "content-type": row.mime,
       "content-security-policy": MEDIA_CSP,
-      // The renderer decodes straight to display size when it knows the natural size.
-      "x-image-width": String(row.width),
-      "x-image-height": String(row.height),
     });
     if (etagMatches(c.req.raw, etag)) return new Response(null, { status: 304, headers });
     const object = await c.env.FILES.get(mediaKey(row.sha));
