@@ -24,7 +24,7 @@
     }
   ],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "drawpane-files" }],
-  "vars": { "RP_NAME": "Drawpane" },
-  // The dogfooding instance. Self-hosters change this to their own domain.
-  "routes": [{ "pattern": "design.example.com", "custom_domain": true }]
+  "vars": { "RP_NAME": "Drawpane" }
+  // No route here: your domain is passed at deploy time (`--domain`, see
+  // docs/self-hosting.md), so it never has to be committed.
 }
