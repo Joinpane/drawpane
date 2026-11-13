@@ -4,6 +4,7 @@ import { CommandBar, type CommandGroup, type CommandItem, type IconName } from "
 import { useMemo, useState } from "react";
 import { ACTIONS, type ActionContext, formatShortcut } from "./actions";
 import { useEditor } from "./hooks";
+import { layerKind } from "./layer-kinds";
 import { parseBindingCommand, parsePropertyCommand } from "./property-syntax";
 
 /**
@@ -128,15 +129,7 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
         layers.push({
           id: `layer:${node.id}`,
           label: name,
-          icon: (node.type === "frame"
-            ? "board"
-            : node.type === "group"
-              ? "group"
-              : node.type === "text"
-                ? "text"
-                : node.type === "ellipse"
-                  ? "ellipse"
-                  : "rectangle") as IconName,
+          icon: layerKind(node.type).icon,
           hint: page && page.id !== pageId ? getProp(page.props, "name") : node.type,
         });
         if (layers.length >= 8) break;

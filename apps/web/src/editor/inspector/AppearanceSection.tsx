@@ -41,6 +41,9 @@ export function AppearanceSection({
 }) {
   const ids = nodes.map((n) => n.id);
   const clip = common(frames, "clipContent");
+  const rounded = nodes.filter(
+    (n) => n.type === "polygon" || n.type === "star" || n.type === "frame" || n.type === "rect",
+  );
   return (
     <PropertySection title="Appearance">
       <PropertyRow>
@@ -67,6 +70,16 @@ export function AppearanceSection({
       {corners.length === nodes.length ? (
         // A new selection starts from its own corners, not the last one's mode.
         <Corners key={corners.map((n) => n.id).join()} editor={editor} nodes={corners} />
+      ) : rounded.length === nodes.length ? (
+        // Polygons and stars round every corner alike.
+        <Num
+          editor={editor}
+          nodes={rounded}
+          prop="cornerRadius"
+          icon="radius"
+          ariaLabel="Corner radius"
+          min={0}
+        />
       ) : null}
       {frames.length === nodes.length ? (
         <PropertyRow columns="label">

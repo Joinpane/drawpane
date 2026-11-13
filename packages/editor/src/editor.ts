@@ -88,7 +88,11 @@ export type ToolId =
   | "frame"
   | "rect"
   | "ellipse"
+  | "polygon"
+  | "star"
   | "line"
+  /** Draws a line with an arrow at its end (⇧L). */
+  | "arrow"
   | "text"
   | "pen"
   /** Drops comment pins. The web app handles its clicks; the canvas interaction ignores them. */
@@ -589,6 +593,8 @@ export class Editor {
       group: "Group",
       rect: "Rectangle",
       ellipse: "Ellipse",
+      polygon: "Polygon",
+      star: "Star",
       line: "Line",
       path: "Vector",
       text: "Text",
@@ -608,7 +614,11 @@ export class Editor {
         return { fills: [{ type: "solid", color: "#ffffff" }] };
       case "rect":
       case "ellipse":
+      case "polygon":
         return { fills: [{ type: "solid", color: "#d9d9d6" }] };
+      case "star":
+        // Polygons start as triangles (the property's default); stars with five points.
+        return { fills: [{ type: "solid", color: "#d9d9d6" }], pointCount: 5 };
       case "line":
         return { strokes: [{ type: "solid", color: "#1c1b1a" }], strokeWeight: 1 };
       case "text":

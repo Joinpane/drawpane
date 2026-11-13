@@ -6,8 +6,10 @@
 import { ColorPicker, IconButton, NumberField, SegmentedControl, toHex } from "@drawpane/ui";
 import { type KeyboardEvent, type PointerEvent, useRef, useState } from "react";
 import {
+  angularHandles,
   CHECKER,
   colorAt,
+  convertPaint,
   type GradientPaint,
   gradientAngle,
   gradientCss,
@@ -77,18 +79,14 @@ export function GradientEditor({
           options={[
             { value: "linear", label: "Linear" },
             { value: "radial", label: "Radial" },
+            { value: "angular", label: "Angular" },
           ]}
           value={paint.type}
-          onChange={(type) =>
-            onChange(
-              type === "radial"
-                ? { ...paint, type, from: { x: 0.5, y: 0.5 }, to: { x: 1, y: 0.5 } }
-                : { ...paint, type, ...handlesForAngle(180) },
-              "Gradient type",
-            )
-          }
+          onChange={(type) => onChange(convertPaint(paint, type) as GradientPaint, "Gradient type")}
         />
-        {paint.type === "linear" ? (
+        {paint.type === "radial" ? (
+          <span />
+        ) : (
           <NumberField
             icon="rotate"
             ariaLabel="Gradient angle"
@@ -96,13 +94,19 @@ export function GradientEditor({
             precision={0}
             value={gradientAngle(paint)}
             onChange={(angle) =>
-              onChange({ ...paint, ...handlesForAngle(angle) }, "Gradient angle")
+              onChange(
+                {
+                  ...paint,
+                  ...(paint.type === "angular"
+                    ? angularHandles(paint.from, angle)
+                    : handlesForAngle(angle)),
+                },
+                "Gradient angle",
+              )
             }
             onScrubStart={onChangeStart}
             onScrubEnd={onChangeEnd}
           />
-        ) : (
-          <span />
         )}
         <IconButton icon="flip-horizontal" label="Reverse stops" onClick={reverse} />
       </div>

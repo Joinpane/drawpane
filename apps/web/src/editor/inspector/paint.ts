@@ -7,7 +7,8 @@ import type { Doc } from "@drawpane/editor";
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { composite, cssColor, parseHex, type Rgba, toHex } from "@drawpane/ui";
 
-export type GradientPaint = Extract<Paint, { type: "linear" | "radial" }>;
+export type GradientPaint = Extract<Paint, { type: "linear" | "radial" | "angular" }>;
+export type GradientKind = GradientPaint["type"];
 export type SolidPaint = Extract<Paint, { type: "solid" }>;
 export type PaintKind = "solid" | "gradient" | "image";
 
@@ -62,9 +63,25 @@ function stopsCss(paint: GradientPaint): string {
     .join(", ");
 }
 
+/** Handles for an angular gradient around `centre`, starting at a CSS angle (0° up, clockwise). */
+export function angularHandles(
+  centre: { x: number; y: number },
+  angle: number,
+): Pick<GradientPaint, "from" | "to"> {
+  const r = (angle * Math.PI) / 180;
+  const round = (n: number) => Math.round(n * 10000) / 10000;
+  return {
+    from: { x: round(centre.x), y: round(centre.y) },
+    to: { x: round(centre.x + Math.sin(r) / 2), y: round(centre.y - Math.cos(r) / 2) },
+  };
+}
+
 /** CSS for a gradient, as the swatch and the stop bar show it. */
 export function gradientCss(paint: GradientPaint, opaque = false): string {
   const p = opaque ? { ...paint, opacity: 1 } : paint;
+  if (paint.type === "angular") {
+    return `conic-gradient(from ${gradientAngle(paint)}deg at ${paint.from.x * 100}% ${paint.from.y * 100}%, ${stopsCss(p)})`;
+  }
   if (paint.type === "radial") {
     const r = Math.hypot(paint.to.x - paint.from.x, paint.to.y - paint.from.y) * 100;
     return `radial-gradient(circle ${Math.max(1, r)}% at ${paint.from.x * 100}% ${paint.from.y * 100}%, ${stopsCss(p)})`;
@@ -102,15 +119,20 @@ export function leadColor(paint: Paint): string {
   return [...paint.stops].sort((a, b) => a.position - b.position)[0]?.color ?? "#000000";
 }
 
+/** Where each gradient kind puts its handles when a paint becomes that kind. */
+function handlesFor(kind: GradientKind): Pick<GradientPaint, "from" | "to"> {
+  if (kind === "linear") return handlesForAngle(180);
+  if (kind === "radial") return { from: { x: 0.5, y: 0.5 }, to: { x: 1, y: 0.5 } };
+  return angularHandles({ x: 0.5, y: 0.5 }, 0);
+}
+
 /** Converts a paint to a solid or gradient, keeping its color as far as it can. */
-export function convertPaint(paint: Paint, to: "solid" | "linear" | "radial"): Paint {
+export function convertPaint(paint: Paint, to: "solid" | GradientKind): Paint {
   const base = paintBase(paint);
   if (to === "solid") return { type: "solid", color: leadColor(paint).slice(0, 7), ...base };
-  if (paint.type === "linear" || paint.type === "radial") {
+  if (paint.type !== "solid" && paint.type !== "image") {
     if (paint.type === to) return paint;
-    return to === "radial"
-      ? { ...paint, type: "radial", from: { x: 0.5, y: 0.5 }, to: { x: 1, y: 0.5 } }
-      : { ...paint, type: "linear", ...handlesForAngle(180) };
+    return { ...paint, type: to, ...handlesFor(to) };
   }
   // From a color: that color fading out, the way Figma starts a gradient.
   const c = parseHex(leadColor(paint)) ?? { r: 0, g: 0, b: 0, a: 1 };
@@ -118,9 +140,7 @@ export function convertPaint(paint: Paint, to: "solid" | "linear" | "radial"): P
     { position: 0, color: toHex({ ...c, a: 1 }) },
     { position: 1, color: toHex({ ...c, a: 0 }) },
   ];
-  return to === "radial"
-    ? { type: "radial", from: { x: 0.5, y: 0.5 }, to: { x: 1, y: 0.5 }, stops, ...base }
-    : { type: "linear", ...handlesForAngle(180), stops, ...base };
+  return { type: to, ...handlesFor(to), stops, ...base };
 }
 
 /** The color at a position along a gradient's stops (for adding a stop there). */

@@ -8,6 +8,7 @@ import { type BindingKey, getProp, type NodeRecord, type Paint } from "@drawpane
 import type { Doc } from "./doc";
 import { letterSpacingPx, lineHeightPx } from "./text";
 import { cssVariableName } from "./variables";
+import { shapeVertices } from "./vector/shapes";
 
 export interface CssDeclaration {
   readonly property: string;
@@ -32,10 +33,17 @@ function hex(color: string, opacity = 1): string {
 function paintCss(paint: Paint): string | null {
   if (paint.visible === false) return null;
   if (paint.type === "solid") return hex(paint.color, paint.opacity ?? 1);
-  if (paint.type === "linear" || paint.type === "radial") {
+  if (paint.type === "linear" || paint.type === "radial" || paint.type === "angular") {
     const stops = paint.stops
       .map((s) => `${hex(s.color, paint.opacity ?? 1)} ${Math.round(s.position * 100)}%`)
       .join(", ");
+    if (paint.type === "angular") {
+      // CSS conic angles start at 12 o'clock; ours start toward `to` from 3 o'clock.
+      const from = Math.round(
+        (Math.atan2(paint.to.y - paint.from.y, paint.to.x - paint.from.x) * 180) / Math.PI + 90,
+      );
+      return `conic-gradient(from ${((from % 360) + 360) % 360}deg at ${Math.round(paint.from.x * 100)}% ${Math.round(paint.from.y * 100)}%, ${stops})`;
+    }
     if (paint.type === "radial")
       return `radial-gradient(circle at ${Math.round(paint.from.x * 100)}% ${Math.round(paint.from.y * 100)}%, ${stops})`;
     const angle = Math.round(
@@ -176,6 +184,20 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
       push("border-radius", px(getProp(p, "cornerRadius")), "cornerRadius");
   }
   if (node.type === "ellipse") out.push({ property: "border-radius", value: "50%" });
+  if ((node.type === "polygon" || node.type === "star") && getProp(p, "cornerRadius") === 0) {
+    // Exact for sharp corners; rounded ones need the SVG.
+    const w = getProp(p, "width") || 1;
+    const h = getProp(p, "height") || 1;
+    const points = shapeVertices(
+      w,
+      h,
+      getProp(p, "pointCount"),
+      node.type === "star" ? getProp(p, "innerRadius") : null,
+    )
+      .map((v) => `${Math.round((v.x / w) * 1000) / 10}% ${Math.round((v.y / h) * 1000) / 10}%`)
+      .join(", ");
+    out.push({ property: "clip-path", value: `polygon(${points})` });
+  }
 
   const fills = getProp(p, "fills")
     .map(paintCss)
