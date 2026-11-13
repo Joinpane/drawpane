@@ -1,9 +1,10 @@
-import { getProp } from "@drawpane/model";
+import { allVariables, BINDING_TARGETS, listComponents, resolveVariable } from "@drawpane/editor";
+import { type BindingKey, getProp } from "@drawpane/model";
 import { CommandBar, type CommandGroup, type CommandItem, type IconName } from "@drawpane/ui";
 import { useMemo, useState } from "react";
 import { ACTIONS, type ActionContext, formatShortcut } from "./actions";
 import { useEditor } from "./hooks";
-import { parsePropertyCommand } from "./property-syntax";
+import { parseBindingCommand, parsePropertyCommand } from "./property-syntax";
 
 /**
  * ⌘K: one bar that runs actions, jumps to layers, and sets properties with a
@@ -42,6 +43,42 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
       });
     }
 
+    // Bind a variable by name: "fill brand/500".
+    const binding = parseBindingCommand(query);
+    if (binding && selection.length > 0 && editor.canEdit) {
+      const type = BINDING_TARGETS[binding.keys[0] as BindingKey].type;
+      const needle = binding.query.toLowerCase();
+      const matches = allVariables(editor.doc)
+        .filter(
+          (v) =>
+            getProp(v.props, "variableType") === type &&
+            getProp(v.props, "name").toLowerCase().includes(needle),
+        )
+        .sort((a, b) => {
+          // Exact and prefix matches first.
+          const an = getProp(a.props, "name").toLowerCase();
+          const bn = getProp(b.props, "name").toLowerCase();
+          const rank = (n: string) => (n === needle ? 0 : n.startsWith(needle) ? 1 : 2);
+          return rank(an) - rank(bn) || an.localeCompare(bn);
+        })
+        .slice(0, 8);
+      if (matches.length > 0) {
+        out.push({
+          id: "bind",
+          title: `Use a variable for ${binding.label.toLowerCase()}`,
+          items: matches.map((v) => {
+            const value = resolveVariable(editor.doc, v.id, selection[0]);
+            return {
+              id: `bind:${v.id}`,
+              label: getProp(v.props, "name"),
+              icon: "token",
+              hint: value === undefined ? binding.label : String(value),
+            };
+          }),
+        });
+      }
+    }
+
     const actions = ACTIONS.filter((a) => (a.enabled ? a.enabled(editor) : true)).filter(
       (a) =>
         !q ||
@@ -61,6 +98,23 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
           hint: a.group,
         })),
       });
+    }
+
+    if (q && !property && editor.canEdit) {
+      const components = listComponents(editor.doc)
+        .filter((c) => getProp(c.props, "name").toLowerCase().includes(q))
+        .slice(0, 6)
+        .map(
+          (c): CommandItem => ({
+            id: `insert:${c.id}`,
+            label: `Insert ${getProp(c.props, "name") || "component"}`,
+            icon: "component",
+            kind: "component",
+            hint: getProp(c.props, "componentDescription") || "Component",
+          }),
+        );
+      if (components.length > 0)
+        out.push({ id: "components", title: "Components", items: components });
     }
 
     if (q && !property) {
@@ -103,12 +157,25 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
       editor.endGesture();
       return;
     }
+    if (item.id?.startsWith("bind:")) {
+      const binding = parseBindingCommand(query);
+      if (!binding) return;
+      editor.beginGesture(`Use ${item.label}`);
+      for (const key of binding.keys)
+        editor.bindVariable(editor.s.selection, key, item.id.slice(5));
+      editor.endGesture();
+      return;
+    }
+    if (item.id?.startsWith("insert:")) {
+      editor.insertInstance(item.id.slice(7));
+      return;
+    }
     if (item.id?.startsWith("layer:")) {
       const id = item.id.slice(6);
       const page = editor.doc.pageOf(id);
       if (page && page.id !== editor.s.pageId) editor.setPage(page.id);
       editor.select([id]);
-      editor.zoomToSelection();
+      editor.revealSelection();
       return;
     }
     ACTIONS.find((a) => a.id === item.id)?.run(ctx);

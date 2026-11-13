@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "typecheck": "tsc -p .",
     "test": "vitest run --passWithNoTests",
-    "e2e": "playwright test"
+    "e2e": "playwright test --project=chromium",
+    "tour": "playwright test --project=tour"
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
@@ -20,6 +21,7 @@
     "@simplewebauthn/browser": "14.0.0",
     "@tanstack/react-query": "5.107.1",
     "@tanstack/react-router": "1.170.46",
+    "pathkit-wasm": "1.0.0",
     "react": "catalog:",
     "react-dom": "catalog:"
   },

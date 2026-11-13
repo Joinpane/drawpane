@@ -12,6 +12,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   applyTransaction,
   ClientMessage,
+  type CommentEvent,
   keyBetween,
   MAX_CLIENT_MESSAGE_BYTES,
   ModelError,
@@ -89,7 +90,10 @@ export class FileRoom extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => {
       this.#sql.exec(NODE_SCHEMA + LOG_SCHEMA);
       this.#revn = Number(this.#meta("revn") ?? 0);
-      if (this.#store.childIds(ROOT_ID).length === 0) this.#seed();
+      const hasPage = this.#store
+        .childIds(ROOT_ID)
+        .some((id) => this.#store.get(id)?.type === "page");
+      if (!hasPage) this.#seed();
     });
   }
 
@@ -207,6 +211,15 @@ export class FileRoom extends DurableObject<Env> {
     }
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+  }
+
+  /**
+   * Relays a comment change to everyone in the file. Comments live in D1; the
+   * Worker calls this after each successful write. Returns how many sockets
+   * it reached.
+   */
+  async broadcastComments(event: CommentEvent): Promise<number> {
+    return this.#broadcast({ t: "comments", event });
   }
 
   /** Current revision and node count, for tests and the health page. */
@@ -471,17 +484,20 @@ export class FileRoom extends DurableObject<Env> {
     }
   }
 
-  #broadcast(message: ServerMessage, except?: WebSocket): void {
+  #broadcast(message: ServerMessage, except?: WebSocket): number {
     const data = JSON.stringify(message);
+    let sent = 0;
     for (const ws of this.ctx.getWebSockets()) {
       if (ws === except) continue;
       const me = ws.deserializeAttachment() as Attachment | null;
       if (!me?.clientId) continue;
       try {
         ws.send(data);
+        sent++;
       } catch {
         // Ignore sockets that are closing.
       }
     }
+    return sent;
   }
 }

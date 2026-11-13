@@ -1,3 +1,4 @@
+import { Logo } from "@drawpane/ui";
 import type { ReactNode } from "react";
 import "./auth.css";
 
@@ -30,8 +31,7 @@ export function AuthLayout({
       <main className="auth__panel">
         <div className="auth__form">
           <div className="auth__brand">
-            <img src="/drawpane-mark.svg" alt="" width={24} height={24} />
-            <span>Drawpane</span>
+            <Logo size={24} wordmark />
           </div>
           <h1 className="auth__title">{title}</h1>
           {subtitle ? <p className="auth__subtitle">{subtitle}</p> : null}

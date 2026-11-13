@@ -3,7 +3,7 @@
  * `radius 8`, `opacity 50%`, `x 24*2`, `p 8 16`. Every number accepts math
  * (+ - * / and parentheses) and the units px, rem (16px) and %.
  */
-import type { PropName } from "@drawpane/model";
+import type { BindingKey, PropName } from "@drawpane/model";
 
 export interface PropertyCommand {
   /** What the command bar shows: "Width", "Gap"… */
@@ -224,4 +224,51 @@ export function parsePropertyCommand(text: string): PropertyCommand | null {
         sets: alias.props.map((prop) => ({ prop, value: rest })),
       };
   }
+}
+
+const BINDING_ALIASES: Record<string, { keys: BindingKey[]; label: string }> = {
+  fill: { keys: ["fill"], label: "Fill" },
+  bg: { keys: ["fill"], label: "Fill" },
+  stroke: { keys: ["stroke"], label: "Stroke" },
+  w: { keys: ["width"], label: "Width" },
+  width: { keys: ["width"], label: "Width" },
+  h: { keys: ["height"], label: "Height" },
+  height: { keys: ["height"], label: "Height" },
+  gap: { keys: ["gap"], label: "Gap" },
+  p: { keys: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"], label: "Padding" },
+  padding: {
+    keys: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
+    label: "Padding",
+  },
+  px: { keys: ["paddingLeft", "paddingRight"], label: "Horizontal padding" },
+  py: { keys: ["paddingTop", "paddingBottom"], label: "Vertical padding" },
+  radius: { keys: ["cornerRadius"], label: "Corner radius" },
+  border: { keys: ["strokeWeight"], label: "Stroke weight" },
+  opacity: { keys: ["opacity"], label: "Opacity" },
+  o: { keys: ["opacity"], label: "Opacity" },
+  size: { keys: ["fontSize"], label: "Font size" },
+  font: { keys: ["fontFamily"], label: "Font" },
+};
+
+export interface BindingCommand {
+  readonly keys: readonly BindingKey[];
+  readonly label: string;
+  /** What to search variable names for. */
+  readonly query: string;
+}
+
+/**
+ * `fill brand/500`, `gap space/200`, `radius r`: a property keyword followed
+ * by (part of) a variable name. The caller lists matching variables.
+ */
+export function parseBindingCommand(text: string): BindingCommand | null {
+  const match = /^\s*([a-z]+)\s+(\S.*?)\s*$/i.exec(text);
+  if (!match) return null;
+  const alias = BINDING_ALIASES[(match[1] as string).toLowerCase()];
+  if (!alias) return null;
+  return {
+    keys: alias.keys,
+    label: alias.label,
+    query: (match[2] as string).replace(/^\{|\}$/g, ""),
+  };
 }
