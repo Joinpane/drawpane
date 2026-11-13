@@ -10,6 +10,7 @@ import {
 import { getProp } from "@drawpane/model";
 import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
+import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { useEditor, useEditorState } from "./hooks";
 import { TextEditor } from "./TextEditor";
 
@@ -21,6 +22,7 @@ function readTheme(): OverlayTheme {
     onSignal: v("on-signal"),
     guide: v("guide"),
     component: v("component"),
+    componentInk: v("component-ink"),
     inkMuted: v("ink-muted"),
     surfaceRaised: v("surface-raised"),
     xrayPadding: v("xray-padding"),
@@ -281,6 +283,20 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       role="application"
       aria-label="Design canvas"
       aria-roledescription="canvas"
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes(COMPONENT_DRAG_MIME)) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        }
+      }}
+      onDrop={(e) => {
+        const componentId = e.dataTransfer.getData(COMPONENT_DRAG_MIME);
+        if (!componentId) return;
+        e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        const page = editor.s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+        editor.insertInstance(componentId, page);
+      }}
     >
       <canvas ref={content} className="canvas__layer" />
       <canvas ref={overlay} className="canvas__layer canvas__overlay" />

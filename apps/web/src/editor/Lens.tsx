@@ -89,7 +89,8 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   // Below the selection (clear of the size pill); flip above when it would leave the screen.
   const below = bottom.y + 40 + 44 < viewport.height;
   const y = below ? bottom.y + 36 : top.y - 52;
-  if (y < 0 || bottom.x < 0 || bottom.x > viewport.width) return null;
+  // Keep clear of the top bar (file title, tools, share) at 12–52px.
+  if (y < 64 || bottom.x < 0 || bottom.x > viewport.width) return null;
 
   const kind = KIND[node.type] ?? { label: "Layer", icon: "rectangle" as IconName };
   const label =

@@ -1,4 +1,5 @@
 export * from "./camera";
+export * from "./components";
 export * from "./doc";
 export * from "./editor";
 export * from "./geometry";

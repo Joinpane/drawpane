@@ -1,10 +1,19 @@
 import { CanvasTextMeasurer, Editor, Interaction } from "@drawpane/editor";
-import { Button, Icon, IconButton, Logo, type PresenceSlot, PresenceStack } from "@drawpane/ui";
+import {
+  Button,
+  Icon,
+  IconButton,
+  Logo,
+  type PresenceSlot,
+  PresenceStack,
+  SegmentedControl,
+} from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { modKey } from "../app/format";
+import { AssetsPanel } from "./AssetsPanel";
 import { ACTIONS, type ActionContext, matches } from "./actions";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
@@ -46,6 +55,7 @@ function FileEditor({ fileId }: { fileId: string }) {
   const interaction = useMemo(() => new Interaction(editor), [editor]);
   const [commandOpen, setCommandOpen] = useState(false);
   const [leftOpen, setLeftOpen] = useState(true);
+  const [leftTab, setLeftTab] = useState<"layers" | "assets">("layers");
   const [rightOpen, setRightOpen] = useState(true);
   const [fatal, setFatal] = useState<string | null>(null);
 
@@ -245,12 +255,29 @@ function FileEditor({ fileId }: { fileId: string }) {
         <Toolbar onSearch={() => setCommandOpen(true)} />
         <TopRight fileId={fileId} />
         {leftOpen ? (
-          <aside className="pane pane--left" aria-label="Pages and layers">
-            <PagesList />
-            <div className="pane__head pane__head--layers">
-              <span className="pane__label">Layers</span>
+          <aside className="pane pane--left" aria-label="Pages, layers and assets">
+            <div className="pane__tabs">
+              <SegmentedControl
+                label="Left pane"
+                options={[
+                  { value: "layers", label: "Layers" },
+                  { value: "assets", label: "Assets" },
+                ]}
+                value={leftTab}
+                onChange={(tab) => setLeftTab(tab as "layers" | "assets")}
+              />
             </div>
-            <LayersPanel />
+            {leftTab === "layers" ? (
+              <>
+                <PagesList />
+                <div className="pane__head pane__head--layers">
+                  <span className="pane__label">Layers</span>
+                </div>
+                <LayersPanel />
+              </>
+            ) : (
+              <AssetsPanel />
+            )}
           </aside>
         ) : null}
         {rightOpen ? (

@@ -8,6 +8,7 @@
  * properties that differ from the default.
  */
 import { z } from "zod";
+import { ID_PATTERN } from "./ids";
 
 export const NODE_TYPES = [
   "page",
@@ -199,6 +200,16 @@ export const PROPS = {
     null,
     CORNERS,
   ),
+
+  // Components. A main component is a frame with `isComponent`. An instance
+  // is a frame with `instanceOf` (the main component's id); each layer inside
+  // it `mirrors` the main component's layer it copies, and lists the
+  // properties you changed in `overrides`, which syncing then leaves alone.
+  isComponent: prop(z.boolean(), false, CONTAINERS),
+  componentDescription: prop(z.string().max(2000), "", CONTAINERS),
+  instanceOf: prop(z.string().regex(ID_PATTERN).nullable(), null, CONTAINERS),
+  mirrors: prop(z.string().regex(ID_PATTERN).nullable(), null, LAYERS),
+  overrides: prop(z.array(z.string().max(64)).max(64), [], LAYERS),
 
   // Frames
   clipContent: prop(z.boolean(), true, CONTAINERS),
