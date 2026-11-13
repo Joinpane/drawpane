@@ -1,0 +1,96 @@
+.dp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-100);
+  box-sizing: border-box;
+  height: var(--size-control-md);
+  padding: 0 var(--space-300);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font: var(--type-ui-strong);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-hover) ease-out,
+    border-color var(--duration-hover) ease-out;
+}
+.dp-btn--sm {
+  height: var(--size-control-sm);
+  padding: 0 var(--space-200);
+}
+.dp-btn--lg {
+  height: var(--size-control-lg);
+  padding: 0 var(--space-400);
+  font-size: 13px;
+}
+.dp-btn--primary {
+  background: var(--signal);
+  color: var(--on-signal);
+}
+.dp-btn--primary:hover {
+  background: var(--signal-hover);
+}
+.dp-btn--secondary {
+  background: var(--surface-sunken);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+.dp-btn--secondary:hover {
+  background: var(--surface-hover);
+}
+.dp-btn--ghost {
+  background: transparent;
+  color: var(--ink);
+}
+.dp-btn--ghost:hover {
+  background: var(--surface-hover);
+}
+.dp-btn--danger {
+  background: var(--danger-fill);
+  color: var(--on-danger);
+}
+.dp-btn:disabled {
+  background: var(--surface-sunken);
+  border-color: transparent;
+  color: var(--ink-disabled);
+  cursor: not-allowed;
+}
+.dp-btn__key {
+  font: var(--type-kbd);
+  opacity: 0.72;
+  margin-left: var(--space-100);
+}
+
+.dp-iconbtn {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--size-control-sm);
+  height: var(--size-control-sm);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--icon);
+  cursor: pointer;
+  transition: background-color var(--duration-hover) ease-out;
+}
+.dp-iconbtn--md {
+  width: var(--size-control-md);
+  height: var(--size-control-md);
+}
+.dp-iconbtn:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+.dp-iconbtn[aria-pressed="true"] {
+  background: var(--signal-soft);
+  color: var(--signal-ink);
+}
+.dp-iconbtn:disabled {
+  background: transparent;
+  color: var(--ink-disabled);
+  cursor: not-allowed;
+}

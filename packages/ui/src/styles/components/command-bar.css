@@ -1,0 +1,111 @@
+.dp-cmd {
+  width: 560px;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+}
+.dp-cmd__input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--icon);
+}
+.dp-cmd__input input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font: 400 15px / 20px var(--font-ui);
+  caret-color: var(--signal);
+}
+.dp-cmd__input input::placeholder {
+  color: var(--ink-muted);
+}
+.dp-cmd__results {
+  max-height: min(400px, 60vh);
+  padding: var(--space-100) 0 var(--space-200);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.dp-cmd__group {
+  padding: var(--space-200) 14px var(--space-100);
+  font: var(--type-ui-label);
+  color: var(--ink-muted);
+}
+.dp-cmd__option {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  margin: 0 6px;
+  padding: 0 var(--space-200);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font: 400 13px / 18px var(--font-ui);
+  cursor: default;
+}
+.dp-cmd__option.is-active {
+  background: var(--signal-soft);
+}
+.dp-cmd__icon {
+  display: inline-grid;
+  place-items: center;
+  color: var(--icon);
+}
+.dp-cmd__icon.is-component {
+  color: var(--component);
+}
+.dp-cmd__label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-200);
+  min-width: 0;
+}
+.dp-cmd__change {
+  font: var(--type-ui-body);
+  font-family: var(--font-mono);
+  color: var(--ink-muted);
+}
+.dp-cmd__change b {
+  font-weight: 500;
+  color: var(--signal-ink);
+}
+.dp-cmd__hint {
+  font-size: 12px;
+  color: var(--ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dp-cmd__key {
+  font: 400 11px / 14px var(--font-mono);
+  color: var(--ink-muted);
+}
+.dp-cmd__empty {
+  padding: var(--space-200) 14px;
+  font: 400 13px / 18px var(--font-ui);
+  color: var(--ink-muted);
+}
+.dp-cmd__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-400);
+  height: 32px;
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  font: 400 11px / 14px var(--font-ui);
+  color: var(--ink-muted);
+}
+.dp-cmd__scope {
+  margin-left: auto;
+}
