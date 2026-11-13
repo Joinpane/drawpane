@@ -190,8 +190,22 @@ export class PlayerStage {
     const start = this.#frameSize(this.#player.start);
     this.#vw = device.kind === "none" ? start.width : device.width;
     this.#vh = device.kind === "none" ? start.height : device.height;
-    const chrome = CHROME[device.kind];
     const box = this.#host.getBoundingClientRect();
+    // On a phone, the phone is the device: fill the screen, no bezel.
+    if (box.width < 520 && box.width > 0) {
+      this.#scale = box.width / this.#vw;
+      this.#vh = box.height / this.#scale;
+      this.#deviceEl.dataset.kind = "none";
+      const d = this.#deviceEl.style;
+      d.setProperty("--bezel", "0px");
+      d.setProperty("--radius", "0px");
+      d.setProperty("--inner", "0px");
+      this.#viewport.style.width = `${box.width}px`;
+      this.#viewport.style.height = `${box.height}px`;
+      this.#paintAll();
+      return;
+    }
+    const chrome = CHROME[device.kind];
     const margin = box.width < 600 ? 16 : 48;
     const availW = Math.max(100, box.width - margin * 2);
     const availH = Math.max(100, box.height - margin * 2);

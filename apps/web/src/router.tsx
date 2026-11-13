@@ -15,6 +15,7 @@ import { SetupPage } from "./auth/SetupPage";
 import { SignInPage } from "./auth/SignInPage";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import type { PresentSearch } from "./prototype/PresentPage";
+import type { SharedSearch } from "./prototype/SharedPrototypePage";
 
 // The editor is the heaviest screen; load it only when a file opens.
 const EditorPage = lazy(() =>
@@ -22,6 +23,9 @@ const EditorPage = lazy(() =>
 );
 const PresentPage = lazy(() =>
   import("./prototype/PresentPage").then((m) => ({ default: m.PresentPage })),
+);
+const SharedPrototypePage = lazy(() =>
+  import("./prototype/SharedPrototypePage").then((m) => ({ default: m.SharedPrototypePage })),
 );
 
 interface RouterContext {
@@ -133,6 +137,24 @@ const presentRoute = createRoute({
   ),
 });
 
+/** A shared prototype: public, no sign-in. */
+const sharedRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/p/$token",
+  validateSearch: (search: Record<string, unknown>): SharedSearch => {
+    const id = (v: unknown) =>
+      typeof v === "string" && /^[0-9A-Za-z_-]{1,64}$/.test(v) ? v : undefined;
+    const page = id(search.page);
+    const flow = id(search.flow);
+    return { ...(page ? { page } : {}), ...(flow ? { flow } : {}) };
+  },
+  component: () => (
+    <Suspense fallback={<div className="app-loading" aria-busy="true" />}>
+      <SharedPrototypePage />
+    </Suspense>
+  ),
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   signInRoute,
@@ -141,6 +163,7 @@ const routeTree = rootRoute.addChildren([
   teamRoute,
   fileRoute,
   presentRoute,
+  sharedRoute,
 ]);
 
 export const router = createRouter({

@@ -200,4 +200,49 @@ test.describe
       });
       await other.close();
     });
+
+    test("shares a prototype link that works signed out, until it's turned off", async ({
+      browser,
+    }) => {
+      await page.goto(page.url().replace(/\/present.*$/, ""));
+      await page.getByRole("button", { name: "Play prototype" }).click();
+      await page.getByRole("button", { name: "Share prototype" }).click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog.getByText("Turn this on to let anyone play")).toBeVisible();
+      await dialog
+        .getByRole("switch", { name: "Anyone with the link can play the prototype" })
+        .click();
+      const code = dialog.locator(".app-copy code");
+      await expect(code).toHaveText(/\/p\/[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22}\?flow=/);
+      const url = (await code.textContent()) as string;
+      await dialog.getByRole("button", { name: "Done" }).click();
+
+      // A stranger with no account.
+      const guest = await browser.newContext({ baseURL: instance.url });
+      const guestPage = await guest.newPage();
+      await guestPage.goto(url);
+      await expect(guestPage.locator(".present__count")).toHaveText("Screen 1 of 3");
+      await expect(guestPage.getByText("Back to editor")).toHaveCount(0);
+      const box = await guestPage.locator(".stage__viewport").boundingBox();
+      if (!box) throw new Error("no viewport");
+      await guestPage.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.3);
+      await expect(guestPage.locator(".present__count")).toHaveText("Screen 2 of 3");
+
+      // Turning it off shows the guest the door, live.
+      await page.getByRole("button", { name: "Share prototype" }).click();
+      await dialog
+        .getByRole("switch", { name: "Anyone with the link can play the prototype" })
+        .click();
+      await expect(dialog.locator(".app-copy")).toHaveCount(0);
+      await expect(
+        guestPage.getByRole("heading", { name: "This prototype isn't available." }),
+      ).toBeVisible({
+        timeout: 10_000,
+      });
+      await guestPage.reload();
+      await expect(
+        guestPage.getByRole("heading", { name: "This prototype isn't available." }),
+      ).toBeVisible();
+      await guest.close();
+    });
   });
