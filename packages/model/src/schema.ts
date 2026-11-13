@@ -131,6 +131,43 @@ export const Blur = z.object({
 export const Effect = z.discriminatedUnion("type", [Shadow, Blur]);
 export type Effect = z.infer<typeof Effect>;
 
+/** A ruler guide: a line across its page, or across its frame, at an offset on one axis. */
+export const RulerGuide = z.object({
+  /** "x": a vertical line at x = offset. "y": a horizontal line at y = offset. */
+  axis: z.enum(["x", "y"]),
+  /** In the owner's coordinates: page coordinates for a page, frame-local for a frame. */
+  offset: finite,
+});
+export type RulerGuide = z.infer<typeof RulerGuide>;
+
+const trackGrid = {
+  count: z
+    .number()
+    .int()
+    .refine((n) => n >= 1 && n <= 100, "must be between 1 and 100"),
+  gutter: nonNegative,
+  margin: nonNegative,
+  /** Stretch fills the frame between the margins; the others use `size` per track. */
+  alignment: z.enum(["stretch", "start", "center", "end"]),
+  /** Track width (columns) or height (rows) when not stretched. */
+  size: nonNegative,
+  color: Color,
+  visible: z.boolean().optional(),
+};
+
+/** A frame's layout grid: columns, rows, or a square grid, drawn while you design. */
+export const LayoutGrid = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("columns"), ...trackGrid }),
+  z.object({ type: z.literal("rows"), ...trackGrid }),
+  z.object({
+    type: z.literal("grid"),
+    size: finite.refine((n) => n >= 1 && n <= 10_000, "must be between 1 and 10000"),
+    color: Color,
+    visible: z.boolean().optional(),
+  }),
+]);
+export type LayoutGrid = z.infer<typeof LayoutGrid>;
+
 export const LineHeight = z.union([
   z.object({ unit: z.literal("auto") }),
   z.object({ unit: z.literal("px"), value: nonNegative }),
@@ -302,6 +339,10 @@ export const PROPS = {
   // Vectors
   pathData: prop(PathData, "", ["path"]),
   windingRule: prop(z.enum(["nonzero", "evenodd"]), "nonzero", ["path"]),
+
+  // Guides and grids: aids while designing, never drawn in exports.
+  rulerGuides: prop(z.array(RulerGuide).max(200), [], ["page", "frame"]),
+  layoutGrids: prop(z.array(LayoutGrid).max(16), [], CONTAINERS),
 
   // Pages. Null follows the viewer's theme (the `canvas` token).
   backgroundColor: prop(Color.nullable(), null, ["page"]),

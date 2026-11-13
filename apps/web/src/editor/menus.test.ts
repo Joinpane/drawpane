@@ -78,6 +78,8 @@ describe("context menus", () => {
       "Paste here",
       "Select all",
       "—",
+      "Show rulers",
+      "Show layout grids",
       "Show comments",
       "Hide other people's cursors",
       "—",
@@ -137,6 +139,26 @@ describe("context menus", () => {
     expect(l).toContain("Copy/paste as");
     for (const edit of ["Cut", "Paste here", "Delete", "Duplicate", "Group selection", "Rename"])
       expect(l).not.toContain(edit);
+  });
+
+  it("offers guide actions on a guide, and only to editors", () => {
+    const { editor, host } = setup();
+    editor.setGuide("p", null, { axis: "x", offset: 40 });
+    const request = { kind: "guide" as const, x: 0, y: 0, guide: { owner: "p", index: 0 } };
+    const items = menuFor(host, request);
+    expect(labels(items)).toEqual(["Remove guide", "Remove all guides", "—", "Show rulers"]);
+    find(items, "Remove guide")?.onSelect?.();
+    expect(editor.guideCount()).toBe(0);
+    editor.state.set({ role: "viewer" });
+    expect(menuFor(host, request)).toEqual([]);
+  });
+
+  it("checks the view toggles that are on", () => {
+    const { editor, host } = setup();
+    editor.state.set({ rulers: true, layoutGrids: false });
+    const items = menuFor(host, { kind: "canvas", x: 0, y: 0, point: { x: 900, y: 900 } });
+    expect(find(items, "Show rulers")?.checked).toBe(true);
+    expect(find(items, "Show layout grids")?.checked).toBe(false);
   });
 
   it("offers page actions, and never deleting the last page", () => {

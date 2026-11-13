@@ -3,9 +3,11 @@ import {
   type CanvasTextMeasurer,
   drawOverlay,
   fontString,
+  guideAt,
   type Interaction,
   type OverlayTheme,
   type PointerInput,
+  placedGuides,
   selectionTarget,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
@@ -276,6 +278,17 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       if (!pageId) return;
       const rect = el.getBoundingClientRect();
       const point = editor.s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      // A guide under the pointer gets its own menu.
+      const guide = guideAt(placedGuides(editor.scene, pageId), point, 4 / editor.s.camera.zoom);
+      if (guide && editor.canEdit) {
+        openMenu(editor, {
+          kind: "guide",
+          x: e.clientX,
+          y: e.clientY,
+          guide: { owner: guide.owner, index: guide.index },
+        });
+        return;
+      }
       const leaf = editor.layersAt(point)[0];
       const { selection } = editor.s;
       if (!leaf) editor.select([]);
