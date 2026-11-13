@@ -129,6 +129,14 @@ test("tour", async ({ browser }) => {
   await shot(page, "12-assets");
   await page.getByRole("radio", { name: "Layers" }).click();
 
+  // Inspect the main component, then measure to another layer with Alt.
+  await page.getByRole("radio", { name: "Inspect" }).click();
+  await page.waitForTimeout(300);
+  await shot(page, "15-inspect");
+  await page.getByRole("radio", { name: "Tailwind" }).click();
+  await shot(page, "16-inspect-tailwind");
+  await page.getByRole("radio", { name: "Design" }).first().click();
+
   // Tokens: a collection with a few variables and a second mode.
   await page.keyboard.press("Alt+t");
   await shot(page, "13-tokens-empty");
