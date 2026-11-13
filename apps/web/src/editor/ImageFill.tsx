@@ -216,3 +216,47 @@ export function ImageFillEditor({
     </div>
   );
 }
+
+/**
+ * The fill picker's Image tab: the image's own controls when the paint is
+ * one, otherwise a button that uploads an image and turns the paint into it.
+ */
+export function ImageTab({
+  editor,
+  paint,
+  onChange,
+}: {
+  editor: Editor;
+  paint: Paint;
+  onChange: (next: Paint, label: string) => void;
+}) {
+  const fileId = useFileId();
+  const [busy, setBusy] = useState(false);
+  if (paint.type === "image")
+    return <ImageFillEditor editor={editor} paint={paint} onChange={onChange} />;
+  return (
+    <div className="image-tab">
+      <p className="image-tab__hint">
+        Fill with a photo or illustration. PNG, JPEG, WebP, GIF or SVG.
+      </p>
+      <Button
+        variant="secondary"
+        disabled={busy}
+        onClick={async () => {
+          const file = await chooseImageFile();
+          if (!file) return;
+          setBusy(true);
+          try {
+            const ref = await uploadImageForFill(editor, fileId, file);
+            if (ref)
+              onChange({ type: "image", ref, scaleMode: "fill", ...base(paint) }, "Image fill");
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "Uploading…" : "Choose an image…"}
+      </Button>
+    </div>
+  );
+}
