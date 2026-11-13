@@ -18,6 +18,18 @@ import {
   ROOT_ID,
 } from "@drawpane/model";
 import { Camera } from "./camera";
+import {
+  detachOps,
+  instanceRootOf,
+  instantiateOps,
+  isInsideInstance,
+  isMainComponent,
+  overrideOps,
+  propagationOps,
+  resetOverridesOps,
+  syncInstanceOps,
+  wouldCycle,
+} from "./components";
 import { Doc } from "./doc";
 import { apply, invert, multiply, type Rect, rotationOf, round2 } from "./geometry";
 import { applyBestEffort, History } from "./history";
@@ -55,10 +67,21 @@ export interface EditorState {
   readonly notice: { readonly id: number; readonly text: string } | null;
 }
 
+export interface CommitOptions {
+  /**
+   * Record edits to layers inside instances as overrides (the default, for
+   * anything a person does). Off for writes derived from the main component.
+   */
+  readonly overrides?: boolean;
+}
+
 export interface EditorOptions {
   readonly clientId?: string;
   readonly measurer: TextMeasurer;
 }
+
+/** Bound on derived-write rounds (sync, text, layout) per commit; real files settle in two or three. */
+const MAX_FIXUP_ROUNDS = 8;
 
 const ALIGN_EDGES = ["left", "center", "right", "top", "middle", "bottom"] as const;
 export type AlignEdge = (typeof ALIGN_EDGES)[number];
@@ -141,11 +164,11 @@ export class Editor {
    * layout) in the same transaction, and records one undo step. Returns false
    * when the edit is invalid or you can only view.
    */
-  commit(ops: readonly Op[], label = "Edit"): boolean {
+  commit(ops: readonly Op[], label = "Edit", options: CommitOptions = {}): boolean {
     if (!this.canEdit || ops.length === 0) return false;
     let inverse: Op[];
     try {
-      inverse = this.#commitWithFixups(ops);
+      inverse = this.#commitWithFixups(ops, options.overrides ?? true);
     } catch (error) {
       if (error instanceof Error && error.name === "ModelError") {
         this.notify(error.message);
@@ -157,23 +180,47 @@ export class Editor {
     return true;
   }
 
-  #commitWithFixups(ops: readonly Op[]): Op[] {
+  #commitWithFixups(ops: readonly Op[], recordOverrides = true): Op[] {
     return this.doc.batch(() => {
-      let inverse = this.sync.commit(ops);
-      const touched = new Set<string>();
-      for (const op of ops) {
-        touched.add(op.id);
-        if (op.op === "move" || op.op === "create") touched.add(op.parent);
+      // Editing a layer inside an instance records an override first, so the
+      // sync below leaves that property alone.
+      const marks = recordOverrides ? overrideOps(this.doc, ops) : [];
+      let inverse = this.sync.commit(marks.length > 0 ? [...ops, ...marks] : ops);
+      let touched = this.#touchedBy(ops, inverse);
+      // Derived writes until nothing changes: instances follow their main
+      // component, text sizes to its content, auto layout places children.
+      // Each can feed the next (a synced text resizes; a resize re-lays out a
+      // hugging main component, which its instances then follow).
+      for (let round = 0; round < MAX_FIXUP_ROUNDS && touched.size > 0; round++) {
+        const live = [...touched].filter((id) => this.doc.has(id));
+        const derived = [...propagationOps(this.doc, live), ...this.#textFixups(live)];
+        let roundInverse: Op[] = [];
+        if (derived.length > 0) roundInverse = this.sync.commit(derived);
+        const afterSync =
+          derived.length > 0 ? this.#touchedBy(derived, roundInverse) : new Set<string>();
+        const layoutTargets = [...new Set([...live, ...afterSync])].filter((id) =>
+          this.doc.has(id),
+        );
+        const layout = layoutOps(this.doc, layoutTargets);
+        let layoutInverse: Op[] = [];
+        if (layout.length > 0) layoutInverse = this.sync.commit(layout);
+        inverse = [...layoutInverse, ...roundInverse, ...inverse];
+        touched = new Set([...afterSync, ...this.#touchedBy(layout, layoutInverse)]);
       }
-      // Removed nodes leave a gap in their old parent's layout.
-      for (const op of inverse) if (op.op === "create" || op.op === "move") touched.add(op.parent);
-      const textOps = this.#textFixups(touched);
-      if (textOps.length > 0) inverse = [...this.sync.commit(textOps), ...inverse];
-      const live = [...touched].filter((id) => this.doc.has(id));
-      const layout = layoutOps(this.doc, live);
-      if (layout.length > 0) inverse = [...this.sync.commit(layout), ...inverse];
       return inverse;
     });
+  }
+
+  /** Node ids an applied batch changed, plus the parents whose children changed. */
+  #touchedBy(ops: readonly Op[], inverse: readonly Op[]): Set<string> {
+    const touched = new Set<string>();
+    for (const op of ops) {
+      touched.add(op.id);
+      if (op.op === "move" || op.op === "create") touched.add(op.parent);
+    }
+    // Removed or moved nodes leave a gap in their old parent's layout.
+    for (const op of inverse) if (op.op === "create" || op.op === "move") touched.add(op.parent);
+    return touched;
   }
 
   #textFixups(ids: Iterable<string>): Op[] {
@@ -206,13 +253,19 @@ export class Editor {
 
   undo(): void {
     if (!this.canEdit) return;
-    const selection = this.history.undo((ops) => this.#commitWithFixups(ops), this.s.selection);
+    const selection = this.history.undo(
+      (ops) => this.#commitWithFixups(ops, false),
+      this.s.selection,
+    );
     if (selection) this.select(selection.filter((id) => this.doc.has(id)));
   }
 
   redo(): void {
     if (!this.canEdit) return;
-    const selection = this.history.redo((ops) => this.#commitWithFixups(ops), this.s.selection);
+    const selection = this.history.redo(
+      (ops) => this.#commitWithFixups(ops, false),
+      this.s.selection,
+    );
     if (selection) this.select(selection.filter((id) => this.doc.has(id)));
   }
 
@@ -282,6 +335,29 @@ export class Editor {
     if (bounds) this.setCamera(this.s.camera.fit(bounds, viewport, 80, 1));
   }
 
+  /**
+   * Brings the selection into view without a jarring zoom: pans when it fits
+   * at the current zoom, otherwise zooms out just enough.
+   */
+  revealSelection(): void {
+    const bounds = this.scene.unionBounds(this.s.selection);
+    if (!bounds) return;
+    const { camera, viewport } = this.s;
+    const margin = 120;
+    const fits =
+      bounds.width * camera.zoom <= viewport.width - margin * 2 &&
+      bounds.height * camera.zoom <= viewport.height - margin * 2;
+    if (fits) {
+      const centre = camera.toScreen({
+        x: bounds.x + bounds.width / 2,
+        y: bounds.y + bounds.height / 2,
+      });
+      this.setCamera(camera.pan(viewport.width / 2 - centre.x, viewport.height / 2 - centre.y));
+    } else {
+      this.setCamera(camera.fit(bounds, viewport, margin, camera.zoom));
+    }
+  }
+
   zoomToSelection(): void {
     const bounds = this.scene.unionBounds(this.s.selection);
     if (bounds) this.setCamera(this.s.camera.fit(bounds, this.s.viewport, 80, 8));
@@ -291,9 +367,12 @@ export class Editor {
   insertionParent(): string | null {
     const { selection, pageId } = this.s;
     const first = selection.length === 1 ? this.doc.get(selection[0] as string) : undefined;
-    if (first?.type === "frame") return first.id;
-    if (first) return first.parent;
-    return pageId;
+    if (!first) return pageId;
+    // An instance's structure comes from its main component: insert beside it instead.
+    const instance = instanceRootOf(this.doc, first.id);
+    if (instance) return instance.parent;
+    if (first.type === "frame") return first.id;
+    return first.parent;
   }
 
   /** The frame (or page) under a page point that would receive a new or moved layer. */
@@ -312,7 +391,7 @@ export class Editor {
           if (hit) return hit;
           continue;
         }
-        if (node.type !== "frame") continue;
+        if (node.type !== "frame" || getProp(node.props, "instanceOf") !== null) continue;
         const local = this.scene.toLocal(id, p);
         const w = getProp(node.props, "width");
         const h = getProp(node.props, "height");
@@ -417,7 +496,13 @@ export class Editor {
   }
 
   deleteSelection(): void {
-    const ids = this.#topmost(this.s.selection);
+    const all = this.#topmost(this.s.selection);
+    const ids = all.filter((id) => !isInsideInstance(this.doc, id));
+    if (ids.length < all.length) {
+      this.notify(
+        "Layers inside an instance come from its main component. Hide them instead, or detach the instance.",
+      );
+    }
     if (ids.length === 0) return;
     if (
       this.commit(
@@ -512,6 +597,19 @@ export class Editor {
       const next = siblings[siblings.indexOf(id) + 1];
       const key = keyBetween(node.key, next ? (this.doc.get(next)?.key ?? null) : null);
       const inLayout = getProp(this.doc.get(node.parent)?.props ?? {}, "layoutMode") !== "none";
+      if (isMainComponent(node)) {
+        const offset = inLayout ? 0 : getProp(node.props, "width") + 40;
+        const made = instantiateOps(this.doc, id, node.parent, key, {
+          x: round2(getProp(node.props, "x") + offset),
+          y: getProp(node.props, "y"),
+        });
+        if (made) {
+          ops.push(...made.ops);
+          created.push(made.rootId);
+        }
+        continue;
+      }
+      if (isInsideInstance(this.doc, id)) continue;
       const { ops: cloned, rootId } = this.cloneOps(
         id,
         node.parent,
@@ -563,6 +661,7 @@ export class Editor {
   }
 
   group(): void {
+    if (this.#refuseInsideInstance()) return;
     const ids = this.#ordered(this.#topmost(this.s.selection));
     const first = ids[0] && this.doc.get(ids[0]);
     if (!first) return;
@@ -588,6 +687,7 @@ export class Editor {
   }
 
   ungroup(): void {
+    if (this.#refuseInsideInstance()) return;
     const ops: Op[] = [];
     const released: string[] = [];
     for (const id of this.s.selection) {
@@ -614,6 +714,7 @@ export class Editor {
 
   /** Wraps the selection in a new frame sized to it (⌥⌘G), or with auto layout (⇧A). */
   frameSelection(autoLayout = false): void {
+    if (this.#refuseInsideInstance()) return;
     const ids = this.#ordered(this.#topmost(this.s.selection));
     const bounds = this.scene.unionBounds(ids);
     const first = ids[0] && this.doc.get(ids[0]);
@@ -693,6 +794,135 @@ export class Editor {
     });
     if (this.commit(ops, autoLayout ? "Add auto layout" : "Frame selection"))
       this.select([frameId]);
+  }
+
+  /** True (and tells the user) when the selection reaches inside an instance. */
+  #refuseInsideInstance(): boolean {
+    if (this.s.selection.some((id) => isInsideInstance(this.doc, id))) {
+      this.notify(
+        "An instance's layers follow its main component. Detach the instance to restructure it.",
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Turns the selection into a main component (⌥⌘K). A single frame or group
+   * becomes the component; anything else is wrapped in a new frame first.
+   */
+  createComponent(): void {
+    if (this.#refuseInsideInstance()) return;
+    const ids = this.#ordered(this.#topmost(this.s.selection));
+    const only = ids.length === 1 ? this.doc.get(ids[0] as string) : undefined;
+    if (only && isMainComponent(only)) {
+      this.notify("That's already a main component.");
+      return;
+    }
+    if (only?.type === "frame") {
+      const ops: Op[] = [{ op: "set", id: only.id, prop: "isComponent", value: true }];
+      if (getProp(only.props, "instanceOf")) ops.push(...detachOps(this.doc, only.id));
+      this.commit(ops, "Create component");
+      return;
+    }
+    if (ids.length === 0) return;
+    // Wrap in a frame, then mark it. One undo step for both.
+    this.beginGesture("Create component");
+    this.frameSelection(false);
+    const frame = this.s.selection[0];
+    if (frame && this.doc.get(frame)?.type === "frame") {
+      const name = only
+        ? getProp(only.props, "name")
+        : this.defaultName("frame").replace("Frame", "Component");
+      this.commit(
+        [
+          { op: "set", id: frame, prop: "isComponent", value: true },
+          { op: "set", id: frame, prop: "name", value: name || "Component" },
+          { op: "set", id: frame, prop: "fills", value: null },
+        ],
+        "Create component",
+      );
+    }
+    this.endGesture();
+  }
+
+  /**
+   * Places an instance of a main component. With a page point it lands there;
+   * otherwise in the insertion parent, centred in the viewport.
+   */
+  insertInstance(componentId: string, at?: { x: number; y: number }): string | null {
+    const main = this.doc.get(componentId);
+    if (!isMainComponent(main) || !main) return null;
+    const pageId = this.s.pageId;
+    if (!pageId) return null;
+    const { camera, viewport } = this.s;
+    const centre = at ?? camera.toPage({ x: viewport.width / 2, y: viewport.height / 2 });
+    const parent = at ? (this.dropTarget(centre) ?? pageId) : (this.insertionParent() ?? pageId);
+    if (wouldCycle(this.doc, componentId, parent)) {
+      this.notify("A component can't contain an instance of itself.");
+      return null;
+    }
+    const w = getProp(main.props, "width");
+    const h = getProp(main.props, "height");
+    const origin = this.scene.toSpace(parent, { x: centre.x - w / 2, y: centre.y - h / 2 });
+    const made = instantiateOps(this.doc, componentId, parent, this.topKey(parent), {
+      x: round2(origin.x),
+      y: round2(origin.y),
+    });
+    if (!made) return null;
+    if (!this.commit(made.ops, "Insert instance")) return null;
+    this.select([made.rootId]);
+    return made.rootId;
+  }
+
+  /** Selects an instance's main component, switching page if needed (⌥⌘G on an instance). */
+  goToMainComponent(id = this.s.selection[0]): void {
+    const root = id ? instanceRootOf(this.doc, id) : undefined;
+    const mainId = root ? getProp(root.props, "instanceOf") : null;
+    const main = mainId ? this.doc.get(mainId) : undefined;
+    if (!main) {
+      this.notify("The main component was deleted. Detach the instance to keep it as a frame.");
+      return;
+    }
+    const page = this.doc.pageOf(main.id);
+    if (page && page.id !== this.s.pageId) this.setPage(page.id);
+    this.select([main.id]);
+    this.revealSelection();
+  }
+
+  /** Clears every change made to the selected instances, so they match their main again. */
+  resetInstances(): void {
+    const ops: Op[] = [];
+    for (const id of this.s.selection) {
+      const root = instanceRootOf(this.doc, id);
+      if (root) ops.push(...resetOverridesOps(this.doc, root.id));
+    }
+    if (ops.length === 0) {
+      this.notify("These instances already match their main component.");
+      return;
+    }
+    // Clearing overrides, then syncing, as one undo step.
+    this.beginGesture("Reset instance");
+    this.commit(ops, "Reset instance");
+    const roots = new Set(
+      this.s.selection
+        .map((id) => instanceRootOf(this.doc, id)?.id)
+        .filter((id): id is string => !!id),
+    );
+    const sync = [...roots].flatMap((id) => syncInstanceOps(this.doc, id));
+    if (sync.length > 0) this.commit(sync, "Reset instance", { overrides: false });
+    this.endGesture();
+  }
+
+  /** Turns the selected instances into plain frames (⌥⌘B). */
+  detachInstances(): void {
+    const ops: Op[] = [];
+    for (const id of this.s.selection) {
+      const node = this.doc.get(id);
+      if (node && getProp(node.props, "instanceOf") !== null && node.type === "frame")
+        ops.push(...detachOps(this.doc, id));
+    }
+    if (ops.length > 0) this.commit(ops, "Detach instance");
   }
 
   /** Selection sorted by z-order (bottom first) within the document. */
@@ -918,8 +1148,35 @@ export class Editor {
     );
     const ops: Op[] = [];
     let r = 0;
+    // Pasting a main component that still exists in this file makes an instance
+    // of it (like Figma); its copied subtree is skipped.
+    const liveMains = new Set(
+      roots
+        .filter((n) => getProp(n.props, "isComponent") && isMainComponent(this.doc.get(n.id)))
+        .map((n) => n.id),
+    );
+    const underLiveMain = (n: NodeRecord): boolean => {
+      for (let parentId = n.parent; parentId !== ""; ) {
+        if (liveMains.has(parentId)) return true;
+        parentId = data.nodes?.find((m) => m.id === parentId)?.parent ?? "";
+      }
+      return false;
+    };
     for (const n of data.nodes) {
       const isRoot = n.parent === "";
+      if (!isRoot && underLiveMain(n)) continue;
+      if (isRoot && liveMains.has(n.id)) {
+        const p = apply(inv, { x: getProp(n.props, "x"), y: getProp(n.props, "y") });
+        const made = instantiateOps(this.doc, n.id, target, keys[r++] as string, {
+          x: round2(p.x),
+          y: round2(p.y),
+        });
+        if (made) {
+          ops.push(...made.ops);
+          idMap.set(n.id, made.rootId);
+        }
+        continue;
+      }
       const props: Record<string, unknown> = { ...n.props };
       if (isRoot && n.type !== "group") {
         const p = apply(inv, { x: getProp(n.props, "x"), y: getProp(n.props, "y") });
@@ -964,7 +1221,7 @@ export class Editor {
     const node = this.doc.get(id);
     // An empty text layer has nothing to show: remove it, like every design tool.
     if (node && getProp(node.props, "characters").trim() === "") {
-      applyBestEffort((ops) => this.#commitWithFixups(ops), [{ op: "delete", id }]);
+      applyBestEffort((ops) => this.#commitWithFixups(ops, false), [{ op: "delete", id }]);
       this.select([]);
     }
   }

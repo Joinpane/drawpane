@@ -11,6 +11,7 @@ import type { Interaction } from "./interaction";
 
 export interface OverlayTheme {
   signal: string;
+  componentInk: string;
   onSignal: string;
   guide: string;
   component: string;
@@ -79,8 +80,20 @@ export function drawOverlay(
     if (!corners) continue;
     const p = toScreen(corners[0] as Point);
     const selected = selection.includes(id);
-    ctx.fillStyle = selected ? theme.signal : theme.inkMuted;
-    ctx.fillText(getProp(node.props, "name") || "Frame", p.x, p.y - 4);
+    const isComponent = getProp(node.props, "isComponent");
+    const isInstance = getProp(node.props, "instanceOf") !== null;
+    let x = p.x;
+    if (isComponent || isInstance) {
+      // Components and instances wear the component colour, with a small diamond.
+      drawDiamond(ctx, x + 4, p.y - 9.5, isComponent, theme.component);
+      x += 12;
+    }
+    ctx.fillStyle = selected
+      ? theme.signal
+      : isComponent || isInstance
+        ? theme.componentInk
+        : theme.inkMuted;
+    ctx.fillText(getProp(node.props, "name") || "Frame", x, p.y - 4);
   }
 
   // Layout X-ray: padding and gaps of the selected or hovered auto-layout frame.
@@ -116,10 +129,14 @@ export function drawOverlay(
     }
   }
 
-  // Hover outline.
+  // Hover outline: components and instances in their own colour.
   if (hover && !selection.includes(hover) && !gesture) {
     const corners = scene.corners(hover);
-    if (corners) quad(corners, theme.signal, 1);
+    const hovered = doc.get(hover);
+    const isComponentish =
+      hovered?.type === "frame" &&
+      (getProp(hovered.props, "isComponent") || getProp(hovered.props, "instanceOf") !== null);
+    if (corners) quad(corners, isComponentish ? theme.component : theme.signal, 1);
   }
 
   // Selection: each layer's outline, then one set of handles.
@@ -231,6 +248,38 @@ export function drawOverlay(
       );
     }
   }
+}
+
+/** The component glyph: a diamond, solid inside for a main component. */
+function drawDiamond(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  solid: boolean,
+  color: string,
+): void {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.beginPath();
+  ctx.moveTo(0, -4.5);
+  ctx.lineTo(4.5, 0);
+  ctx.lineTo(0, 4.5);
+  ctx.lineTo(-4.5, 0);
+  ctx.closePath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.25;
+  ctx.stroke();
+  if (solid) {
+    ctx.beginPath();
+    ctx.moveTo(0, -2);
+    ctx.lineTo(2, 0);
+    ctx.lineTo(0, 2);
+    ctx.lineTo(-2, 0);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawXray(

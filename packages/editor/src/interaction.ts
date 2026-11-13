@@ -4,6 +4,7 @@
  * zooming. One gesture at a time; each gesture is one undo step.
  */
 import { getProp, keyBetween, type LayerType, type NodeRecord, type Op } from "@drawpane/model";
+import { isInsideInstance } from "./components";
 import type { Editor } from "./editor";
 import {
   apply,
@@ -553,7 +554,9 @@ export class Interaction {
       !node ||
       !parent ||
       parent.type !== "frame" ||
-      getProp(parent.props, "layoutMode") === "none"
+      getProp(parent.props, "layoutMode") === "none" ||
+      // An instance's order comes from its main component.
+      isInsideInstance(editor.doc, node.id)
     )
       return [];
     if (getProp(node.props, "positioning") === "absolute") return [];
@@ -590,7 +593,7 @@ export class Interaction {
     const ops: Op[] = [];
     for (const id of roots) {
       const node = editor.doc.get(id);
-      if (!node || node.parent === target) continue;
+      if (!node || node.parent === target || isInsideInstance(editor.doc, id)) continue;
       // Leaving an auto-layout frame only when the pointer is outside it.
       const parent = editor.doc.get(node.parent);
       if (parent?.type === "frame" && getProp(parent.props, "layoutMode") !== "none") {

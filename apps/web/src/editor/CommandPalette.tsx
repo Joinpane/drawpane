@@ -1,3 +1,4 @@
+import { listComponents } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import { CommandBar, type CommandGroup, type CommandItem, type IconName } from "@drawpane/ui";
 import { useMemo, useState } from "react";
@@ -63,6 +64,23 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
       });
     }
 
+    if (q && !property && editor.canEdit) {
+      const components = listComponents(editor.doc)
+        .filter((c) => getProp(c.props, "name").toLowerCase().includes(q))
+        .slice(0, 6)
+        .map(
+          (c): CommandItem => ({
+            id: `insert:${c.id}`,
+            label: `Insert ${getProp(c.props, "name") || "component"}`,
+            icon: "component",
+            kind: "component",
+            hint: getProp(c.props, "componentDescription") || "Component",
+          }),
+        );
+      if (components.length > 0)
+        out.push({ id: "components", title: "Components", items: components });
+    }
+
     if (q && !property) {
       const layers: CommandItem[] = [];
       const pageId = editor.s.pageId;
@@ -103,12 +121,16 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
       editor.endGesture();
       return;
     }
+    if (item.id?.startsWith("insert:")) {
+      editor.insertInstance(item.id.slice(7));
+      return;
+    }
     if (item.id?.startsWith("layer:")) {
       const id = item.id.slice(6);
       const page = editor.doc.pageOf(id);
       if (page && page.id !== editor.s.pageId) editor.setPage(page.id);
       editor.select([id]);
-      editor.zoomToSelection();
+      editor.revealSelection();
       return;
     }
     ACTIONS.find((a) => a.id === item.id)?.run(ctx);

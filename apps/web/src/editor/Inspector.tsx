@@ -17,6 +17,7 @@ import {
   Switch,
 } from "@drawpane/ui";
 import { useState } from "react";
+import { ComponentSection } from "./ComponentSection";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 
 /** The value every node shares, or null when they differ (shown as "Mixed"). */
@@ -49,7 +50,15 @@ export function Inspector() {
 
   const types = new Set(nodes.map((n) => n.type));
   const only = types.size === 1 ? nodes[0]?.type : null;
-  const title = nodes.length === 1 ? (TYPE_LABEL[only ?? ""] ?? "Layer") : `${nodes.length} layers`;
+  const first = nodes[0];
+  const title =
+    nodes.length === 1 && first
+      ? getProp(first.props, "isComponent")
+        ? "Component"
+        : getProp(first.props, "instanceOf") !== null
+          ? "Instance"
+          : (TYPE_LABEL[only ?? ""] ?? "Layer")
+      : `${nodes.length} layers`;
   const geometry = nodes.filter((n) => n.type !== "group");
   const frames = nodes.filter((n) => n.type === "frame");
   const texts = nodes.filter((n) => n.type === "text");
@@ -64,6 +73,7 @@ export function Inspector() {
   return (
     <fieldset className="inspector" disabled={!canEdit} aria-label="Properties">
       <h2 className="inspector__title">{title}</h2>
+      <ComponentSection nodes={nodes} />
       {geometry.length > 0 ? <GeometrySection editor={editor} nodes={geometry} /> : null}
       {inLayout.length > 0 || layoutFrames.length > 0 ? (
         <SizingSection editor={editor} nodes={[...new Set([...inLayout, ...layoutFrames])]} />
