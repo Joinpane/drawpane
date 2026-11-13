@@ -1,0 +1,54 @@
+/* Motion durations from the brand book: hover and press, toggles, popovers appearing. */
+:root {
+  --duration-hover: 90ms;
+  --duration-toggle: 120ms;
+  --duration-popover: 160ms;
+  --layer-popover: 1000;
+}
+
+/* Replace movement with an instant change. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-hover: 0s;
+    --duration-toggle: 0s;
+    --duration-popover: 0s;
+  }
+}
+
+/* Nothing animates while a NumberField label is being scrubbed. */
+:root.dp-scrubbing {
+  --duration-hover: 0s;
+  --duration-toggle: 0s;
+  --duration-popover: 0s;
+  cursor: ew-resize;
+  user-select: none;
+}
+
+/* Wrap an app (or a subtree) in .dp-root to get Drawpane's default text and ink. */
+.dp-root {
+  font: var(--type-ui-body);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.dp-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes dp-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
