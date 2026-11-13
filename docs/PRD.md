@@ -398,7 +398,7 @@ The biggest risk is scope: building from scratch means rebuilding editor capabil
 | Fork Penpot or build from scratch | Build from scratch in TypeScript; Penpot is a reference and an import format ([decision 0001](decisions/0001-build-from-scratch-in-typescript.md)) | No `common/`, `render-wasm/` or upstream sync; Drawpane owns its document model and renderer |
 | UI component stack | TypeScript + React for `@drawpane/ui` | The design system bundle is already React; `packages/ui` gets Storybook and is consumed from the editor |
 | Domain and npm scope | `drawpane.com` is owned; branding work waits | Nothing until launch prep |
-| Dogfooding instance | `design.dizy.cc` on the maintainer's Cloudflare account | Every merged change deploys there; the team designs Drawpane in Drawpane |
+| Dogfooding instance | A private instance on the maintainer's Cloudflare account | Every merged change deploys there; the team designs Drawpane in Drawpane |
 | Penpot plugin API | Best-effort compatibility shim | v0.3 ships plugin API v2 on typed operations under a `drawpane` global, plus a `penpot` global shim for common Penpot plugins |
 | Paid hosted tier | Not yet; revisit once the repo has momentum | Hosted service stays deferred; no feature gating anywhere |
 | Language | TypeScript everywhere; Rust/WASM only for measured hot paths | One toolchain from browser to Durable Object |

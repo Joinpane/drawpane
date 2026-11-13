@@ -2,7 +2,7 @@
 
 The open design tool you own. Drawpane is a real-time design and prototyping tool that anyone can deploy to their own Cloudflare account in minutes, and that runs for cents when idle. AI agents join a file as collaborators, working on their own branch.
 
-**Status:** pre-alpha. A live instance runs at [design.dizy.cc](https://design.dizy.cc), where the team designs Drawpane in Drawpane.
+**Status:** pre-alpha. The maintainers design Drawpane in Drawpane, on a self-hosted instance that every merged change deploys to.
 
 ## What works today
 
