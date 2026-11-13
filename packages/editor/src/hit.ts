@@ -172,6 +172,20 @@ export function selectionTarget(
 }
 
 /**
+ * Entering a container: the layer one level below `container` on the way
+ * down to `leaf` (null when the leaf isn't inside it). Double-click uses this
+ * to step into a group or nested frame, one level per double-click.
+ */
+export function childToward(scene: Scene, container: string, leaf: string): string | null {
+  for (let id = leaf; ; ) {
+    const node = scene.doc.get(id);
+    if (!node) return null;
+    if (node.parent === container) return id;
+    id = node.parent;
+  }
+}
+
+/**
  * Nodes a marquee selects: on the page, the top-level layers it touches; inside
  * an artboard (when the marquee starts within one), that frame's children.
  */

@@ -102,6 +102,11 @@ test.describe
       await page.keyboard.press("ArrowDown");
       await expect(menu(page).getByRole("menuitem").first()).toBeFocused();
       await expect(menu(page).getByRole("menuitem", { name: /^Ungroup/ })).toHaveCount(0);
+      // Every item carries an icon, so the menu scans by shape as well as by word.
+      const items = menu(page).getByRole("menuitem");
+      const count = await items.count();
+      expect(count).toBeGreaterThan(8);
+      await expect(menu(page).locator(".dp-menu__icon svg")).toHaveCount(count);
       // Escape closes it without touching the selection.
       await page.keyboard.press("Escape");
       await expect(page.getByRole("menu")).toHaveCount(0);
@@ -210,5 +215,56 @@ test.describe
       await page.keyboard.press("Escape");
       await page.keyboard.press("Escape");
       await expect(sheet).toBeHidden();
+    });
+
+    test("picks an artboard by its label and renames it there", async () => {
+      const board = await page.evaluate(() => {
+        const e = (window as unknown as { drawpane: Debug }).drawpane;
+        const p = e.s.pageId;
+        const f = e.createLayer("frame", { x: 0, y: 300, width: 300, height: 400 }, p, {
+          name: "iPhone 18 Pro",
+          fills: [{ type: "solid", color: "#ffffff" }],
+        }) as string;
+        e.createLayer("rect", { x: 40, y: 340, width: 100, height: 60 }, f, {
+          fills: [{ type: "solid", color: "#2b4fd6" }],
+        });
+        e.select([]);
+        e.zoomToFit();
+        return f;
+      });
+      const box = await page.evaluate((id) => {
+        const e = (
+          window as unknown as {
+            drawpane: Debug & {
+              s: { camera: { toScreen(p: { x: number; y: number }): { x: number; y: number } } };
+            };
+          }
+        ).drawpane;
+        const b = e.scene.bounds(id) as { x: number; y: number; width: number; height: number };
+        return {
+          tl: e.s.camera.toScreen({ x: b.x, y: b.y }),
+          br: e.s.camera.toScreen({ x: b.x + b.width, y: b.y + b.height }),
+        };
+      }, board);
+      const canvas = await page.locator(".canvas__overlay").boundingBox();
+      if (!canvas) throw new Error("no canvas");
+      const selection = () =>
+        page.evaluate(() => (window as unknown as { drawpane: Debug }).drawpane.s.selection);
+      // Its empty area picks nothing: that's where a marquee starts.
+      await page.mouse.click(canvas.x + box.br.x - 10, canvas.y + box.br.y - 10);
+      expect(await selection()).toEqual([]);
+      // Its label picks it.
+      const label = { x: canvas.x + box.tl.x + 8, y: canvas.y + box.tl.y - 9 };
+      await page.mouse.click(label.x, label.y);
+      expect(await selection()).toEqual([board]);
+      // Double-clicking the label renames it in place.
+      await page.mouse.dblclick(label.x, label.y);
+      const input = page.getByRole("textbox", { name: "Frame name" });
+      await expect(input).toBeFocused();
+      await expect(input).toHaveValue("iPhone 18 Pro");
+      await page.keyboard.type("Home screen");
+      await page.keyboard.press("Enter");
+      await expect(input).toBeHidden();
+      await expect.poll(async () => (await props(page, board)).name).toBe("Home screen");
     });
   });

@@ -3,7 +3,7 @@
 /** One shape of an icon: an SVG element name and its React attributes. */
 export type IconNode = readonly [tag: string, attributes: Readonly<Record<string, string>>];
 
-/** Drawpane's 88 icons on a 16px grid; strokes and fills inherit currentColor. */
+/** Drawpane's 104 icons on a 16px grid; strokes and fills inherit currentColor. */
 export const iconData = {
   pointer: [
     [
@@ -126,6 +126,35 @@ export const iconData = {
       },
     ],
   ],
+  ungroup: [
+    [
+      "rect",
+      {
+        x: "2.5",
+        y: "2.5",
+        width: "5",
+        height: "5",
+        rx: "1",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "8.5",
+        y: "8.5",
+        width: "5",
+        height: "5",
+        rx: "1",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M10 2.5h2a1.5 1.5 0 0 1 1.5 1.5v2M6 13.5H4A1.5 1.5 0 0 1 2.5 12v-2",
+        strokeDasharray: "1.5 2",
+      },
+    ],
+  ],
   image: [
     [
       "rect",
@@ -197,6 +226,139 @@ export const iconData = {
       "path",
       {
         d: "M5.5 7V5.5a2.5 2.5 0 0 1 5 0V7",
+      },
+    ],
+  ],
+  unlock: [
+    [
+      "rect",
+      {
+        x: "3.5",
+        y: "7",
+        width: "9",
+        height: "6.5",
+        rx: "1.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5.5 7V5.5a2.5 2.5 0 0 1 4.9-.7",
+      },
+    ],
+  ],
+  copy: [
+    [
+      "rect",
+      {
+        x: "5.5",
+        y: "5.5",
+        width: "8",
+        height: "8",
+        rx: "1.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M10.5 3.75V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.25",
+      },
+    ],
+  ],
+  cut: [
+    [
+      "circle",
+      {
+        cx: "4.5",
+        cy: "11.5",
+        r: "2",
+      },
+    ],
+    [
+      "circle",
+      {
+        cx: "11.5",
+        cy: "11.5",
+        r: "2",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5.9 10.1L12 2.5M10.1 10.1L4 2.5",
+      },
+    ],
+  ],
+  paste: [
+    [
+      "path",
+      {
+        d: "M10.5 3.25h1a1 1 0 0 1 1 1v8.25a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1V4.25a1 1 0 0 1 1-1h1",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5.75",
+        y: "2",
+        width: "4.5",
+        height: "2.5",
+        rx: "0.75",
+      },
+    ],
+  ],
+  duplicate: [
+    [
+      "rect",
+      {
+        x: "5.5",
+        y: "5.5",
+        width: "8",
+        height: "8",
+        rx: "1.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M10.5 3.75V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.25M9.5 7.75v3.5M7.75 9.5h3.5",
+      },
+    ],
+  ],
+  "select-all": [
+    [
+      "rect",
+      {
+        x: "2.5",
+        y: "2.5",
+        width: "11",
+        height: "11",
+        rx: "1.5",
+        strokeDasharray: "2 2",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5.5",
+        y: "5.5",
+        width: "5",
+        height: "5",
+        rx: "1",
+      },
+    ],
+  ],
+  rename: [
+    [
+      "path",
+      {
+        d: "M10.25 3.25l2.5 2.5L6 12.5l-3.25.75.75-3.25z",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M8.75 4.75l2.5 2.5",
       },
     ],
   ],
@@ -496,6 +658,90 @@ export const iconData = {
         width: "3.5",
         height: "3.5",
         rx: "0.75",
+      },
+    ],
+  ],
+  union: [
+    [
+      "path",
+      {
+        d: "M2.5 3.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v3h3a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-3h-3a1 1 0 0 1-1-1z",
+        fill: "currentColor",
+        fillOpacity: "0.2",
+      },
+    ],
+  ],
+  subtract: [
+    [
+      "path",
+      {
+        d: "M9.5 6.5v-3a1 1 0 0 0-1-1h-5a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h3",
+        fill: "none",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M9.5 6.5h-3v3",
+        fill: "none",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "6.5",
+        y: "6.5",
+        width: "7",
+        height: "7",
+        rx: "1",
+        strokeDasharray: "1.5 2",
+      },
+    ],
+  ],
+  intersect: [
+    [
+      "rect",
+      {
+        x: "2.5",
+        y: "2.5",
+        width: "7",
+        height: "7",
+        rx: "1",
+        strokeDasharray: "1.5 2",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "6.5",
+        y: "6.5",
+        width: "7",
+        height: "7",
+        rx: "1",
+        strokeDasharray: "1.5 2",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "6.5",
+        y: "6.5",
+        width: "3",
+        height: "3",
+        fill: "currentColor",
+        fillOpacity: "0.35",
+        strokeDasharray: "none",
+      },
+    ],
+  ],
+  exclude: [
+    [
+      "path",
+      {
+        d: "M3.5 2.5h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1zM7.5 6.5h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z",
+        fill: "currentColor",
+        fillOpacity: "0.25",
+        fillRule: "evenodd",
       },
     ],
   ],
@@ -1037,6 +1283,80 @@ export const iconData = {
         width: "12",
         height: "7",
         rx: "1.5",
+      },
+    ],
+  ],
+  "bring-front": [
+    [
+      "path",
+      {
+        d: "M6.5 9.5h-3a1 1 0 0 0-1 1",
+        strokeDasharray: "1.5 2",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.5 10.5v2a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-3",
+        strokeDasharray: "1.5 2",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "6.5",
+        y: "2.5",
+        width: "7",
+        height: "7",
+        rx: "1",
+        fill: "currentColor",
+        fillOpacity: "0.25",
+      },
+    ],
+  ],
+  "send-back": [
+    [
+      "path",
+      {
+        d: "M6.5 6.5h-3a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-3h-3z",
+        fill: "currentColor",
+        fillOpacity: "0.25",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "6.5",
+        y: "2.5",
+        width: "7",
+        height: "7",
+        rx: "1",
+      },
+    ],
+  ],
+  ruler: [
+    [
+      "rect",
+      {
+        x: "1.75",
+        y: "5",
+        width: "12.5",
+        height: "6",
+        rx: "1",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M4.75 5v2.25M7.75 5v3M10.75 5v2.25",
+      },
+    ],
+  ],
+  "actual-size": [
+    [
+      "path",
+      {
+        d: "M3.25 5.25l1.75-1.5v8.5M10.75 5.25l1.75-1.5v8.5M8 7v.01M8 10.5v.01",
       },
     ],
   ],
