@@ -55,6 +55,7 @@ function setup(role: "editor" | "viewer" = "editor") {
     saveVersion: noop,
     rename: vi.fn(),
     showShortcuts: noop,
+    findLayers: noop,
     placeImage: noop,
   } satisfies ActionContext;
   const host: MenuHost = {
