@@ -27,6 +27,7 @@ import { EffectsSection } from "./EffectsSection";
 import { FramePresets } from "./FramePresets";
 import { common, Num } from "./fields";
 import { GeometrySection } from "./GeometrySection";
+import { LayoutGridsSection } from "./LayoutGridsSection";
 import { HexField, PaintSection } from "./PaintSection";
 import { SelectionColors } from "./SelectionColors";
 import { TextSection } from "./TextSection";
@@ -99,6 +100,9 @@ export function Inspector() {
       ) : null}
       {frames.length > 0 && frames.length === nodes.length ? (
         <AutoLayoutSection editor={editor} nodes={frames} />
+      ) : null}
+      {frames.length > 0 && frames.length === nodes.length ? (
+        <LayoutGridsSection editor={editor} nodes={frames} />
       ) : null}
       {only === "frame" && first ? <ModesSection node={first} /> : null}
       <AppearanceSection editor={editor} nodes={nodes} corners={corners} frames={frames} />

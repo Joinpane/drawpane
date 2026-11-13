@@ -9,7 +9,7 @@ import { useSyncExternalStore } from "react";
 
 export interface MenuRequest {
   /** What was right-clicked: the canvas (with or without a selection), or a page in the list. */
-  readonly kind: "canvas" | "layers" | "page";
+  readonly kind: "canvas" | "layers" | "page" | "guide";
   /** Viewport coordinates of the pointer. */
   readonly x: number;
   readonly y: number;
@@ -17,6 +17,8 @@ export interface MenuRequest {
   readonly point?: { readonly x: number; readonly y: number };
   /** The page a page menu is for. */
   readonly pageId?: string;
+  /** The guide a guide menu is for. */
+  readonly guide?: { readonly owner: string; readonly index: number };
 }
 
 export interface EditorUi {

@@ -9,6 +9,7 @@ The open design tool you own. Drawpane is a real-time design and prototyping too
 - Passkey accounts, teams, invites, projects, files and trash
 - A real-time multiplayer editor: frames, rectangles, ellipses, lines, text, images and vector paths; move with smart guides, resize, rotate, group, frame, reorder; auto layout that maps 1:1 to CSS flexbox; constraints; fills, strokes, shadows and blur; pages and a layers tree
 - A full color picker (solid, gradient, image, eyedropper, contrast ratio), per-corner radius, frame presets for current phones, tablets and desktops, align, distribute, tidy up and flip
+- Rulers (`⇧R`), guides you drag out of them onto the page or a board, and layout grids (columns, rows, square) that layers snap to
 - Right-click menus on the canvas, layers and pages; copy and paste properties; a keyboard shortcuts sheet (`⌘/`)
 - The pen tool, vector editing, flatten and boolean operations
 - Components with instances and overrides, and variants with properties you can swap

@@ -498,7 +498,7 @@
 .effect__details .paint-hex {
   background: var(--surface);
 }
-.effect__details .paint-row {
+.paint-row--color {
   grid-template-columns: 24px minmax(0, 1fr) 56px;
 }
 
@@ -712,4 +712,13 @@
   color: var(--ink-muted);
   font: 400 11px / 14px var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* Layout grids reuse the effect rows; the kind shows as an icon. */
+.layout-grid__icon {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--icon);
 }

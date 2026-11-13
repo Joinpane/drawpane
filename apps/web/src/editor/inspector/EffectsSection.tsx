@@ -5,22 +5,13 @@
  */
 import type { Editor } from "@drawpane/editor";
 import type { NodeRecord, PropValues } from "@drawpane/model";
-import {
-  ColorPicker,
-  IconButton,
-  NumberField,
-  Popover,
-  PropertyRow,
-  PropertySection,
-  toHex,
-} from "@drawpane/ui";
-import { useRef, useState } from "react";
+import { IconButton, NumberField, PropertyRow, PropertySection } from "@drawpane/ui";
+import { useState } from "react";
+import { ColorRow } from "./ColorRow";
 import { common, Select } from "./fields";
-import { HexField } from "./PaintSection";
-import { rgbaOf, swatchCss } from "./paint";
+import { swatchCss } from "./paint";
 
 type Effect = PropValues["effects"][number];
-type Shadow = Extract<Effect, { type: "drop-shadow" | "inner-shadow" }>;
 
 const TYPE_OPTIONS = [
   { value: "drop-shadow", label: "Drop shadow" },
@@ -201,9 +192,10 @@ function EffectDetails({
               {...scrub("Shadow spread")}
             />
           </PropertyRow>
-          <ShadowColor
+          <ColorRow
             editor={editor}
-            shadow={effect}
+            label="Shadow"
+            color={effect.color}
             onChange={(color, label) => onChange({ ...effect, color }, label)}
           />
         </>
@@ -217,71 +209,6 @@ function EffectDetails({
           {...scrub("Blur radius")}
         />
       )}
-    </div>
-  );
-}
-
-function ShadowColor({
-  editor,
-  shadow,
-  onChange,
-}: {
-  editor: Editor;
-  shadow: Shadow;
-  onChange: (color: string, label: string) => void;
-}) {
-  const ref = useRef<HTMLButtonElement>(null);
-  const [open, setOpen] = useState(false);
-  const alpha = Math.round(rgbaOf(shadow.color).a * 100);
-  return (
-    <div className="paint-row">
-      <button
-        ref={ref}
-        type="button"
-        className="paint-swatch"
-        aria-label="Edit shadow color"
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        style={{ background: swatchCss({ type: "solid", color: shadow.color }) }}
-        onClick={() => setOpen((o) => !o)}
-      />
-      <HexField
-        label="Shadow"
-        color={shadow.color}
-        onChange={(color) => onChange(color, "Shadow color")}
-      />
-      <NumberField
-        ariaLabel="Shadow opacity"
-        unit="%"
-        min={0}
-        max={100}
-        precision={0}
-        value={alpha}
-        onChange={(v) => {
-          const next = toHex({ ...rgbaOf(shadow.color), a: Math.min(1, Math.max(0, v / 100)) });
-          if (next !== shadow.color) onChange(next, "Shadow opacity");
-        }}
-        onScrubStart={() => editor.beginGesture("Shadow opacity")}
-        onScrubEnd={() => editor.endGesture()}
-      />
-      {open && ref.current ? (
-        <Popover
-          anchor={ref.current}
-          label="Shadow color"
-          className="paint-picker dp-root"
-          onClose={() => setOpen(false)}
-        >
-          <div className="paint-picker__body">
-            <ColorPicker
-              label="Shadow"
-              value={shadow.color}
-              onChange={(color) => onChange(color, "Shadow color")}
-              onChangeStart={() => editor.beginGesture("Shadow color")}
-              onChangeEnd={() => editor.endGesture()}
-            />
-          </div>
-        </Popover>
-      ) : null}
     </div>
   );
 }
