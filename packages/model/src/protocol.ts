@@ -20,11 +20,19 @@ export const MAX_CLIENT_MESSAGE_BYTES = 4 * 1024 * 1024;
 
 const Id = z.string().regex(ID_PATTERN);
 
+const finite = z.number().refine(Number.isFinite, "must be a finite number");
+
 export const Presence = z.object({
   /** Pointer in page coordinates, or null when the pointer left the canvas. */
   cursor: z.object({ x: z.number(), y: z.number() }).nullable(),
   pageId: Id.nullable(),
   selection: z.array(Id).max(500),
+  /** The part of the page on screen, in page coordinates: what followers see. */
+  viewport: z.object({ x: finite, y: finite, width: finite, height: finite }).nullable().optional(),
+  /** The session this person is following, if any. */
+  following: z.string().min(1).max(64).nullable().optional(),
+  /** Asking everyone in the file to follow them. */
+  spotlight: z.boolean().optional(),
 });
 export type Presence = z.infer<typeof Presence>;
 
