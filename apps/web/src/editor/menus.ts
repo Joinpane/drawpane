@@ -6,8 +6,9 @@
  */
 import type { Editor } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
-import type { ContextMenuAction, ContextMenuEntry } from "@drawpane/ui";
+import type { ContextMenuAction, ContextMenuEntry, IconName } from "@drawpane/ui";
 import { ACTIONS, type Action, type ActionContext, formatShortcut } from "./actions";
+import { layerKind } from "./layer-kinds";
 import type { MenuRequest } from "./ui-state";
 
 const BY_ID: ReadonlyMap<string, Action> = new Map(ACTIONS.map((a) => [a.id, a]));
@@ -26,7 +27,7 @@ export interface MenuHost {
 type Item = ContextMenuAction | null;
 
 /** A registry action as a menu item, or null when it can't run now. */
-function action(host: MenuHost, id: string, label?: string): Item {
+function action(host: MenuHost, id: string, label?: string, icon?: IconName): Item {
   const a = BY_ID.get(id);
   if (!a) throw new Error(`No action "${id}"`);
   const editor = host.ctx.editor;
@@ -34,15 +35,23 @@ function action(host: MenuHost, id: string, label?: string): Item {
   return {
     id,
     label: label ?? a.label,
+    ...((icon ?? a.icon) ? { icon: icon ?? a.icon } : {}),
     ...(a.shortcut ? { shortcut: formatShortcut(a.shortcut) } : {}),
     onSelect: () => a.run(host.ctx),
   };
 }
 
 /** A submenu (sections split by separators), or null when none of its items can run. */
-function submenu(label: string, ...groups: ReadonlyArray<readonly Item[]>): Item {
+function submenu(label: string, icon: IconName, ...groups: ReadonlyArray<readonly Item[]>): Item {
   const items = sections(...groups);
-  return items.length > 0 ? { id: label, label, items } : null;
+  return items.length > 0 ? { id: label, label, icon, items } : null;
+}
+
+/** An on/off item: its check mark shows in the icon column, so it carries no icon. */
+function toggle(item: Item, checked: boolean): Item {
+  if (!item) return null;
+  const { icon: _icon, ...rest } = item;
+  return { ...rest, checked };
 }
 
 /** Sections joined by separators; empty sections disappear. */
@@ -64,6 +73,7 @@ function pasteHere(host: MenuHost, request: MenuRequest): Item {
   return {
     id: "edit.pasteHere",
     label: point ? "Paste here" : "Paste",
+    icon: "paste",
     ...(paste?.shortcut ? { shortcut: formatShortcut(paste.shortcut) } : {}),
     onSelect: () => (point ? host.pasteAt(point) : host.ctx.paste()),
   };
@@ -79,6 +89,7 @@ function selectLayer(editor: Editor, request: MenuRequest): Item {
   // Outermost first, like the layers panel; hits come deepest first.
   return submenu(
     "Select layer",
+    "layers",
     [...ids].reverse().map((id) => {
       const node = editor.doc.get(id);
       const name = (node && getProp(node.props, "name")) || node?.type || "Layer";
@@ -86,7 +97,8 @@ function selectLayer(editor: Editor, request: MenuRequest): Item {
         id: `select-${id}`,
         // Indent by nesting so the list reads like the layers panel.
         label: `${" ".repeat(Math.min(4, depth(id) - base))}${name}`,
-        checked: editor.s.selection.includes(id),
+        // Each layer's kind, or a check on the one that's selected now.
+        icon: editor.s.selection.includes(id) ? "check" : layerKind(node?.type ?? "").icon,
         onSelect: () => editor.select([id]),
       };
     }),
@@ -109,6 +121,7 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
       a("edit.duplicate"),
       submenu(
         "Copy/paste as",
+        "copy",
         [a("edit.copyAsPng"), a("edit.copyAsSvg"), a("edit.copyAsCss")],
         [a("edit.copyProperties"), a("edit.pasteProperties")],
       ),
@@ -132,6 +145,7 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
     [
       submenu(
         "Arrange",
+        "align-left",
         [
           a("arrange.alignLeft"),
           a("arrange.alignCenter"),
@@ -154,7 +168,7 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
       a("layer.crop"),
       a("vector.edit"),
       a("vector.flatten"),
-      submenu("Boolean", [
+      submenu("Boolean", "union", [
         a("vector.union", "Union"),
         a("vector.subtract", "Subtract"),
         a("vector.intersect", "Intersect"),
@@ -162,8 +176,8 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
       ]),
     ],
     [
-      a("layer.hide", anyVisible ? "Hide" : "Show"),
-      a("layer.lock", anyUnlocked ? "Lock" : "Unlock"),
+      action(host, "layer.hide", anyVisible ? "Hide" : "Show", anyVisible ? "eye-off" : "eye"),
+      action(host, "layer.lock", anyUnlocked ? "Lock" : "Unlock", anyUnlocked ? "lock" : "unlock"),
       a("layer.rename"),
     ],
     [a("view.zoomSelection"), a("file.export", "Export…")],
@@ -187,10 +201,10 @@ export function canvasMenu(host: MenuHost, request: MenuRequest): ContextMenuEnt
   return sections(
     [pasteHere(host, request), a("edit.selectAll")],
     [
-      rulers ? { ...rulers, checked: editor.s.rulers } : null,
-      grids ? { ...grids, checked: editor.s.layoutGrids } : null,
-      comments ? { ...comments, checked: host.commentsShown } : null,
-      focus ? { ...focus, checked: editor.s.focusMode } : null,
+      toggle(rulers, editor.s.rulers),
+      toggle(grids, editor.s.layoutGrids),
+      toggle(comments, host.commentsShown),
+      toggle(focus, editor.s.focusMode),
     ],
     [a("view.clearGuides")],
     [a("view.zoomFit"), a("view.zoom100"), a("view.zoomIn"), a("view.zoomOut")],
@@ -208,13 +222,28 @@ export function pageMenu(host: MenuHost, request: MenuRequest): ContextMenuEntry
   return sections(
     [
       editor.s.pageId !== pageId
-        ? { id: "page.open", label: "Open", onSelect: () => editor.setPage(pageId) }
+        ? {
+            id: "page.open",
+            label: "Open",
+            icon: "arrow-right",
+            onSelect: () => editor.setPage(pageId),
+          }
         : null,
       canEdit
-        ? { id: "page.rename", label: "Rename", onSelect: () => host.renamePage(pageId) }
+        ? {
+            id: "page.rename",
+            label: "Rename",
+            icon: "rename",
+            onSelect: () => host.renamePage(pageId),
+          }
         : null,
       canEdit
-        ? { id: "page.duplicate", label: "Duplicate", onSelect: () => editor.duplicatePage(pageId) }
+        ? {
+            id: "page.duplicate",
+            label: "Duplicate",
+            icon: "duplicate",
+            onSelect: () => editor.duplicatePage(pageId),
+          }
         : null,
       action(host, "file.addPage", "Add page"),
     ],
@@ -223,6 +252,7 @@ export function pageMenu(host: MenuHost, request: MenuRequest): ContextMenuEntry
         ? {
             id: "page.delete",
             label: "Delete page",
+            icon: "trash",
             danger: true,
             onSelect: () => editor.deletePage(pageId),
           }
@@ -241,14 +271,14 @@ export function guideMenu(host: MenuHost, request: MenuRequest): ContextMenuEntr
       {
         id: "guide.delete",
         label: "Remove guide",
+        icon: "trash",
         onSelect: () => editor.setGuide(guide.owner, guide.index, null),
       },
       action(host, "view.clearGuides"),
     ],
     [
       (() => {
-        const rulers = action(host, "view.rulers", "Show rulers");
-        return rulers ? { ...rulers, checked: editor.s.rulers } : null;
+        return toggle(action(host, "view.rulers", "Show rulers"), editor.s.rulers);
       })(),
     ],
   );

@@ -116,7 +116,9 @@ describe("context menus", () => {
     const layers = find(items, "Select layer")?.items ?? [];
     // Outermost first, indented by depth, like the layers panel.
     expect(labels(layers)).toEqual(["Screen", "\u2003Back", "\u2003Front"]);
-    expect((layers[2] as ContextMenuAction).checked).toBe(true);
+    // The selected layer wears a check; the rest show their kind.
+    expect((layers[2] as ContextMenuAction).icon).toBe("check");
+    expect((layers[0] as ContextMenuAction).icon).toBe("board");
     (layers[1] as ContextMenuAction).onSelect?.();
     expect(editor.s.selection).toEqual(["back"]);
   });
@@ -172,5 +174,24 @@ describe("context menus", () => {
     expect(labels(menuFor(host, { kind: "page", x: 0, y: 0, pageId: "p" }))).not.toContain(
       "Delete page",
     );
+  });
+
+  it("gives every item an icon, or a check mark for a toggle", () => {
+    const { editor, host } = setup();
+    const unmarked: string[] = [];
+    const walk = (items: readonly ContextMenuEntry[]) => {
+      for (const item of items) {
+        if (!("label" in item)) continue;
+        if (!item.icon && item.checked === undefined) unmarked.push(item.label);
+        if ("items" in item && item.items) walk(item.items);
+      }
+    };
+    walk(menuFor(host, { kind: "canvas", x: 0, y: 0, point: { x: 900, y: 900 } }));
+    walk(menuFor(host, { kind: "page", x: 0, y: 0, pageId: "p2" }));
+    for (const selection of [["front"], ["front", "back"], ["frame"]]) {
+      editor.select(selection);
+      walk(menuFor(host, { kind: "canvas", x: 0, y: 0, point: { x: 60, y: 60 } }));
+    }
+    expect(unmarked).toEqual([]);
   });
 });
