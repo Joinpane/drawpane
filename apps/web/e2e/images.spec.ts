@@ -92,9 +92,10 @@ test.describe
 
     test("switches the scale mode in the fill picker", async () => {
       const inspector = page.getByRole("group", { name: "Properties" });
-      await expect(inspector.getByText("Image · Fill")).toBeVisible();
-      await inspector.getByRole("radio", { name: "Fit" }).click();
-      await expect(inspector.getByText("Image · Fit")).toBeVisible();
+      const mode = (name: string) => inspector.getByRole("radio", { name });
+      await expect(mode("Fill")).toHaveAttribute("aria-checked", "true");
+      await mode("Fit").click();
+      await expect(mode("Fit")).toHaveAttribute("aria-checked", "true");
       await expect(inspector.getByText(/240 × 160/)).toBeVisible();
       // Make the layer wider than the image: Fit leaves the page background at the sides.
       await inspector.getByLabel("Width").fill("480");
@@ -105,7 +106,7 @@ test.describe
       await page.keyboard.press("ControlOrMeta+z");
       await page.keyboard.press("ControlOrMeta+z");
       await expect(inspector.getByLabel("Width")).toHaveValue("240");
-      await expect(inspector.getByText("Image · Fill")).toBeVisible();
+      await expect(mode("Fill")).toHaveAttribute("aria-checked", "true");
     });
 
     test("refuses files that aren't images, with a notice", async () => {

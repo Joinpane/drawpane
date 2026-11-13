@@ -1,8 +1,9 @@
 /**
  * Publishes the file's dashboard thumbnail: a picture of the first page,
  * rendered here with the canvas's renderer and uploaded once edits settle
- * (10 s after the last change), when the tab is hidden, and when you leave
- * the file. Only editors publish; nothing is sent when nothing changed.
+ * (10 s after the last change), when the tab is hidden, when you leave the
+ * file, and once 10 s after it opens (so an edit whose tab closed too soon is
+ * caught next time). Only editors publish.
  */
 import { CanvasRenderer, type Editor, renderThumbnail } from "@drawpane/editor";
 import { useQueryClient } from "@tanstack/react-query";
@@ -90,12 +91,15 @@ export function useThumbnailPublisher(
       if (change.reset) return;
       schedule();
     });
-    // Files from before thumbnails existed get one soon after they open.
+    // Once per open, refresh the thumbnail too: it catches files from before
+    // thumbnails existed, and edits whose tab closed before they were published.
+    let opened = false;
     const offState = editor.state.subscribe(() => {
-      if (hasThumbnail() !== false || dirty || editor.s.status !== "live" || !editor.canEdit)
-        return;
+      if (opened || editor.s.status !== "live" || !editor.canEdit) return;
+      opened = true;
       const pageId = editor.doc.pageIds()[0];
-      if (pageId && editor.doc.childIds(pageId).length > 0) schedule();
+      const empty = !pageId || editor.doc.childIds(pageId).length === 0;
+      if (!empty || hasThumbnail() !== false) schedule();
     });
     const onHidden = () => {
       if (document.visibilityState === "hidden") void publish();
