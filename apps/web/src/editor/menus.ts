@@ -208,6 +208,7 @@ export function canvasMenu(host: MenuHost, request: MenuRequest): ContextMenuEnt
     ],
     [a("view.clearGuides")],
     [a("view.zoomFit"), a("view.zoom100"), a("view.zoomIn"), a("view.zoomOut")],
+    [a("file.exportPagePdf")],
     [a("file.history"), a("help.shortcuts")],
   );
 }

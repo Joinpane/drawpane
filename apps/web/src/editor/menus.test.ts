@@ -90,6 +90,8 @@ describe("context menus", () => {
       "Zoom in",
       "Zoom out",
       "—",
+      "Export page as PDF",
+      "—",
       "Version history",
       "Keyboard shortcuts",
     ]);
