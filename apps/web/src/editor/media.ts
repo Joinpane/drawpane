@@ -23,6 +23,11 @@ export function imagesFor(editor: Editor): ImageCache {
   return cache;
 }
 
+/** Lets `to` draw from `from`'s image cache, so a second view of the same file loads nothing twice. */
+export function shareImages(from: Editor, to: Editor): void {
+  caches.set(to, imagesFor(from));
+}
+
 export function uploadsFor(editor: Editor): UploadQueue {
   let queue = queues.get(editor);
   if (!queue) {

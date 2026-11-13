@@ -54,7 +54,11 @@ Pull the new version, then run step 5 again. Migrations are additive and run bef
 
 ## Backups
 
-Each FileRoom writes a gzip snapshot of its file to R2 at most once an hour while it is being edited (`files/<file-id>/snapshots/`). D1 has 30-day point-in-time recovery built in (`wrangler d1 time-travel`).
+Every file keeps its own version history. While a file is being edited, its FileRoom saves a gzip snapshot to R2 (`files/<file-id>/snapshots/`) once editing pauses for 10 minutes, and at least once an hour during long sessions. It also saves one whenever someone names a version, and just before anyone restores one, so a restore can always be undone. Each snapshot has a row in D1's `versions` table that says who edited and what changed.
+
+Unnamed versions are deleted after 30 days, except the newest one. Named versions are kept until the file is deleted. People on the team can open, name and restore versions from the History tab in the editor.
+
+D1 also has 30-day point-in-time recovery built in (`wrangler d1 time-travel`).
 
 ## Accounts and security
 

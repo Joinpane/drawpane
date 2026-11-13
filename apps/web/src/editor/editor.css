@@ -535,6 +535,33 @@
   font: 500 12px / 16px var(--font-ui);
   box-shadow: var(--shadow-popover);
   animation: lens-in 160ms ease-out;
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+}
+.editor[data-history] .notice {
+  bottom: 124px;
+}
+.notice__action {
+  flex: none;
+  height: 24px;
+  margin: -4px calc(var(--space-200) * -1) -4px 0;
+  padding: 0 var(--space-200);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-inverse);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  font: 600 12px / 16px var(--font-ui);
+  cursor: pointer;
+}
+.notice__action:hover {
+  background: color-mix(in srgb, var(--ink-inverse) 14%, transparent);
+}
+.notice__action:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
 }
 
 /* Command bar overlay */
