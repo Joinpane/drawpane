@@ -2,8 +2,6 @@
  * Small caches keyed by path data, so the renderer, hit testing and the
  * overlay parse each `d` string once however often they ask.
  */
-import type { Rect } from "../geometry";
-import { pathBounds } from "./bounds";
 import type { VectorPath } from "./path";
 import { parsePath } from "./svg";
 
@@ -30,14 +28,9 @@ class Lru<V> {
 }
 
 const parsed = new Lru<VectorPath>();
-const bounds = new Lru<Rect | null>();
 
 export function parsePathCached(d: string): VectorPath {
   return parsed.get(d, () => parsePath(d));
-}
-
-export function pathBoundsCached(d: string): Rect | null {
-  return bounds.get(d, () => pathBounds(parsePathCached(d)));
 }
 
 /** True when every subpath is closed (so inside and outside strokes make sense). */

@@ -39,7 +39,7 @@ const STYLE_PROPS: readonly PropName[] = [
 ];
 
 /** Ids in document z-order, bottom first. */
-export function zOrdered(editor: Editor, ids: readonly string[]): string[] {
+function zOrdered(editor: Editor, ids: readonly string[]): string[] {
   const order = new Map<string, number>();
   let i = 0;
   const walk = (parent: string) => {
@@ -233,7 +233,10 @@ export interface BooleanPlan {
 
 /** Works out what a boolean on the current selection would combine, or null when it can't run. */
 export function planBoolean(editor: Editor, ids: readonly string[]): BooleanPlan | null {
-  const roots = zOrdered(editor, topmost(editor, ids)).filter((id) => !editor.scene.isLocked(id));
+  // Hidden and locked layers neither take part nor get replaced.
+  const roots = zOrdered(editor, topmost(editor, ids)).filter(
+    (id) => !editor.scene.isLocked(id) && editor.scene.isVisible(id),
+  );
   const leaves: NodeRecord[] = [];
   for (const id of roots) operandLeaves(editor, id, leaves);
   const top = editor.doc.get(roots.at(-1) ?? "");

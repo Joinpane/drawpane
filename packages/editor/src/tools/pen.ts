@@ -46,9 +46,10 @@ export class PenTool implements ToolHandler {
     this.#editor = editor;
     // Switching tools or pages finishes the path in progress.
     editor.state.subscribe(() => {
+      const s = editor.s;
+      if (s.tool !== "pen" && s.vectorPointer) editor.state.set({ vectorPointer: null });
       const d = this.#drawing;
       if (!d || this.#finishing) return;
-      const s = editor.s;
       if (s.tool !== "pen" || s.pageId !== d.pageId) this.finish(false);
     });
   }

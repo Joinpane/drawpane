@@ -180,7 +180,3 @@ export function nearestOnPath(path: VectorPath, p: Point): NearestPoint | null {
   }
   return best;
 }
-
-export function nearestOnCubic(c: Cubic, p: Point): { t: number; point: Point; distance: number } {
-  return refine(c, p, coarse(c, p).t);
-}
