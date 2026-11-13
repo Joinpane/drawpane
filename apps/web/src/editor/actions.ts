@@ -3,7 +3,7 @@
  * all run from here, so each action has one name, one shortcut and one
  * implementation.
  */
-import type { Editor, ToolId } from "@drawpane/editor";
+import { type Editor, instanceRootOf, isInstanceRoot, type ToolId } from "@drawpane/editor";
 import { isMac } from "../app/format";
 
 export interface Shortcut {
@@ -190,6 +190,44 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.toggleLocked(),
   },
 
+  {
+    id: "component.create",
+    label: "Create component",
+    group: "Layer",
+    icon: "component",
+    shortcut: { key: "k", mod: true, alt: true },
+    keywords: "symbol main",
+    enabled: canEditSelection,
+    run: ({ editor }) => editor.createComponent(),
+  },
+  {
+    id: "component.detach",
+    label: "Detach instance",
+    group: "Layer",
+    icon: "instance",
+    shortcut: { key: "b", mod: true, alt: true },
+    enabled: (e) => e.canEdit && e.s.selection.some((id) => isInstanceRoot(e.doc.get(id))),
+    run: ({ editor }) => editor.detachInstances(),
+  },
+  {
+    id: "component.reset",
+    label: "Reset instance",
+    group: "Layer",
+    icon: "history",
+    keywords: "revert overrides",
+    enabled: (e) =>
+      e.canEdit && e.s.selection.some((id) => instanceRootOf(e.doc, id) !== undefined),
+    run: ({ editor }) => editor.resetInstances(),
+  },
+  {
+    id: "component.main",
+    label: "Go to main component",
+    group: "Layer",
+    icon: "component",
+    enabled: (e) =>
+      e.s.selection.length === 1 && instanceRootOf(e.doc, e.s.selection[0] as string) !== undefined,
+    run: ({ editor }) => editor.goToMainComponent(),
+  },
   {
     id: "arrange.forward",
     label: "Bring forward",

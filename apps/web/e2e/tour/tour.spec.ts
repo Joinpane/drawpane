@@ -115,6 +115,20 @@ test("tour", async ({ browser }) => {
   await page.mouse.click(300, 820);
   await shot(page, "07-editor-nothing-selected");
 
+  // Components: make the auto-layout stack a component, then an instance of it.
+  await page.getByRole("treeitem", { name: /Frame 2/ }).click();
+  await page.keyboard.press("ControlOrMeta+Alt+k");
+  await page.keyboard.press("ControlOrMeta+d");
+  await page.waitForTimeout(500);
+  await shot(page, "10-instance-selected");
+  await page.getByRole("button", { name: "Go to main" }).click();
+  await page.waitForTimeout(500);
+  await shot(page, "11-main-component");
+  await page.getByRole("radio", { name: "Assets" }).click();
+  await page.waitForTimeout(300);
+  await shot(page, "12-assets");
+  await page.getByRole("radio", { name: "Layers" }).click();
+
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Recent files" })).toBeVisible();
   await shot(page, "08-dashboard");

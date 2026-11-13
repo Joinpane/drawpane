@@ -16,6 +16,14 @@ const KIND: Record<string, LayerKind> = {
   text: "text",
 };
 
+function kindOf(node: NodeRecord): LayerKind {
+  if (node.type === "frame") {
+    if (getProp(node.props, "isComponent")) return "component";
+    if (getProp(node.props, "instanceOf") !== null) return "instance";
+  }
+  return KIND[node.type] ?? "rect";
+}
+
 interface Row {
   readonly node: NodeRecord;
   readonly depth: number;
@@ -270,7 +278,7 @@ export function LayersPanel() {
                   className={dropClass}
                   style={{ position: "absolute", top: (start + i) * ROW_HEIGHT, left: 0, right: 0 }}
                   name={getProp(node.props, "name") || node.type}
-                  kind={KIND[node.type] ?? "rect"}
+                  kind={kindOf(node)}
                   depth={row.depth}
                   selected={selection.includes(node.id)}
                   hidden={!getProp(node.props, "visible")}
