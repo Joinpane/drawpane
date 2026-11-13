@@ -18,6 +18,7 @@
     "pathkit-wasm": "1.0.0"
   },
   "devDependencies": {
+    "@types/node": "26.6.6",
     "fast-check": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

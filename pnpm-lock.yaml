@@ -304,6 +304,9 @@ importers:
         specifier: 1.0.0
         version: 1.0.0
     devDependencies:
+      '@types/node':
+        specifier: 26.6.6
+        version: 26.6.6
       fast-check:
         specifier: 'catalog:'
         version: 4.10.2
