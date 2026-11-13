@@ -208,8 +208,8 @@ export function drawOverlay(
         ctx.stroke();
       }
     }
-    // Size pill under the selection.
-    const bounds = scene.unionBounds(selection);
+    // Size pill under the selection (not while prototyping: it would sit on the connections).
+    const bounds = prototyping ? null : scene.unionBounds(selection);
     if (bounds) {
       const label = `${fmt(frame.width)} × ${fmt(frame.height)}`;
       const bottom = toScreen({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height });

@@ -200,9 +200,17 @@
   height: 40px;
   display: flex;
   align-items: center;
-  gap: var(--space-300);
-  padding: 0 var(--space-200) 0 var(--space-300);
+  gap: var(--space-200);
+  padding: 0 var(--space-200);
   box-sizing: border-box;
+}
+.top-right .dp-presence {
+  margin-left: var(--space-100);
+}
+.top-right__divider {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
 }
 
 /* Pages */

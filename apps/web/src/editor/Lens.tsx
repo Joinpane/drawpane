@@ -30,6 +30,8 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const editing = useEditorState((s) => s.editingText);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const tool = useEditorState((s) => s.tool);
+  // The Prototype tab puts connection handles where the Lens would sit.
+  const prototyping = useEditorState((s) => s.prototyping);
   const scrubbing = useRef(false);
   const ref = useRef<HTMLDivElement>(null);
   const [offset, setOffset] = useState(0);
@@ -81,6 +83,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
     editing !== null ||
     vectorEdit ||
     !canEdit ||
+    prototyping ||
     tool !== "select";
   if (hidden) return null;
   const node = editor.doc.get(selection[0] as string);

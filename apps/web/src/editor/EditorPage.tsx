@@ -1,4 +1,4 @@
-import { CanvasTextMeasurer, Editor, Interaction } from "@drawpane/editor";
+import { CanvasTextMeasurer, Editor, Interaction, liveFlows, screenOf } from "@drawpane/editor";
 import {
   Button,
   Icon,
@@ -28,6 +28,7 @@ import { InspectPanel } from "./InspectPanel";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
 import { filesFrom, importImageFiles, pasteFromClipboard } from "./media";
+import { PrototypePanel } from "./prototype/PrototypePanel";
 import { Toolbar } from "./Toolbar";
 import { useThumbnailPublisher } from "./thumbnail";
 import { TokensWorkspace } from "./tokens/TokensWorkspace";
@@ -67,7 +68,7 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [leftOpen, setLeftOpen] = useState(true);
   const [leftTab, setLeftTab] = useState<"layers" | "assets">("layers");
   const [view, setView] = useState<"design" | "tokens">("design");
-  const [rightTab, setRightTab] = useState<"design" | "inspect">("design");
+  const [rightTab, setRightTab] = useState<RightTab>("design");
   // Viewers can't edit, so open them straight into Inspect (free for everyone).
   // The role is only known once the room welcomes us ("viewer" until then).
   const isViewer = useEditorStateOutside(editor, (s) => s.status === "live" && s.role === "viewer");
@@ -78,15 +79,31 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [fatal, setFatal] = useState<string | null>(null);
   const comments = useCommentStore(editor, fileId);
   const commentsOpen = useComments(comments.store, (s) => s.panelOpen);
+  // The canvas shows connections while the Prototype tab is on screen.
+  const prototyping = view === "design" && rightOpen && !commentsOpen && rightTab === "prototype";
+  useEffect(() => {
+    editor.state.set({ prototyping });
+  }, [editor, prototyping]);
   // Room for the floating panes (12px margin + pane width), so comment popovers open over the canvas.
   const insets = useMemo(
-    () => ({ left: leftOpen ? 276 : 0, right: commentsOpen || rightOpen ? 276 : 0 }),
-    [leftOpen, rightOpen, commentsOpen],
+    () => ({
+      left: leftOpen && view === "design" ? 276 : 0,
+      right: (commentsOpen || rightOpen) && view === "design" ? 276 : 0,
+    }),
+    [leftOpen, rightOpen, commentsOpen, view],
   );
+
+  // Fitting and revealing aim for the part of the canvas the panes don't cover:
+  // 12px margins, 264px panes, the top bar and the zoom controls.
+  useEffect(() => {
+    editor.state.set({
+      insets: { top: 60, bottom: 56, left: insets.left, right: insets.right },
+    });
+  }, [editor, insets]);
 
   useEffect(
     () => connectFile(editor, fileId, setFatal, (message) => comments.store.receive(message)),
-    [editor, fileId, comments.store],
+    [editor, fileId, comments.store, navigate],
   );
   useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt);
 
@@ -146,6 +163,13 @@ function FileEditor({ fileId }: { fileId: string }) {
         } else setRightOpen((v) => !v);
       },
       toggleComments: () => comments.store.setPanel(!comments.store.s.panelOpen),
+      present: () => navigate(presentTarget(editor, fileId)),
+      showTab: (tab) => {
+        setView("design");
+        comments.store.setPanel(false);
+        setRightOpen(true);
+        setRightTab(tab);
+      },
       // Menu and command-bar clipboard actions go through the async API; ⌘C/⌘X/⌘V use native events below.
       copy: () => {
         const data = editor.copy();
@@ -322,7 +346,7 @@ function FileEditor({ fileId }: { fileId: string }) {
           project={meta.data?.project?.name ?? ""}
         />
         <Toolbar onSearch={() => setCommandOpen(true)} />
-        <TopRight fileId={fileId} />
+        <TopRight fileId={fileId} onPresent={ctx.present} />
         {view === "tokens" ? (
           <TokensWorkspace
             onShowLayer={(id) => {
@@ -373,10 +397,11 @@ function FileEditor({ fileId }: { fileId: string }) {
                 label="Right pane"
                 options={[
                   { value: "design", label: "Design" },
+                  { value: "prototype", label: "Prototype" },
                   { value: "inspect", label: "Inspect" },
                 ]}
                 value={rightTab}
-                onChange={(tab) => setRightTab(tab as "design" | "inspect")}
+                onChange={(tab) => setRightTab(tab as RightTab)}
               />
             </div>
             {rightTab === "design" ? (
@@ -384,6 +409,8 @@ function FileEditor({ fileId }: { fileId: string }) {
                 <Inspector />
                 <ExportPanel />
               </>
+            ) : rightTab === "prototype" ? (
+              <PrototypePanel fileId={fileId} />
             ) : (
               <InspectPanel />
             )}
@@ -496,7 +523,24 @@ function FileTitle({
   );
 }
 
-function TopRight({ fileId }: { fileId: string }) {
+type RightTab = "design" | "prototype" | "inspect";
+
+/** Where Play goes: the selected screen's flow if it starts one, else from that screen. */
+function presentTarget(editor: Editor, fileId: string) {
+  const { pageId, selection } = editor.s;
+  const screen = selection.length === 1 ? screenOf(editor.doc, selection[0] as string) : null;
+  const flow = pageId
+    ? (liveFlows(editor.doc, pageId).find((f) => f.start === screen) ??
+      (screen ? null : liveFlows(editor.doc, pageId)[0]))
+    : null;
+  const search = {
+    ...(pageId ? { page: pageId } : {}),
+    ...(flow ? { flow: flow.id } : screen ? { screen } : {}),
+  };
+  return { to: "/f/$fileId/present" as const, params: { fileId }, search };
+}
+
+function TopRight({ fileId, onPresent }: { fileId: string; onPresent: () => void }) {
   const peers = useEditorState((s) => s.peers);
   const [copied, setCopied] = useState(false);
   const people = [...peers.values()].map((p) => ({
@@ -506,6 +550,14 @@ function TopRight({ fileId }: { fileId: string }) {
   return (
     <div className="top-right pane">
       {people.length > 0 ? <PresenceStack people={people} max={4} /> : null}
+      {people.length > 0 ? <span className="top-right__divider" aria-hidden="true" /> : null}
+      <IconButton
+        icon="play"
+        label="Play prototype"
+        shortcut={isMac() ? "⌥⌘↵" : "Ctrl+Alt+↵"}
+        size="md"
+        onClick={onPresent}
+      />
       <Button
         variant="primary"
         size="md"
