@@ -36,3 +36,8 @@ export function useDocVersion(): number {
 
 export const shallowArray = <T>(a: readonly T[], b: readonly T[]) =>
   a.length === b.length && a.every((v, i) => v === b[i]);
+
+/** Like `useEditorState`, for components that own the editor (outside its context). */
+export function useEditorStateOutside<T>(editor: Editor, select: (state: EditorState) => T): T {
+  return useSyncExternalStore(editor.state.subscribe, () => select(editor.state.get()));
+}
