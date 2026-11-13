@@ -13,6 +13,7 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { isMac, modKey } from "../app/format";
+import { ShareDialog } from "../prototype/ShareDialog";
 import { AssetsPanel } from "./AssetsPanel";
 import { ACTIONS, type ActionContext, matches } from "./actions";
 import { loadBooleanEngine } from "./boolean-engine";
@@ -346,7 +347,7 @@ function FileEditor({ fileId }: { fileId: string }) {
           project={meta.data?.project?.name ?? ""}
         />
         <Toolbar onSearch={() => setCommandOpen(true)} />
-        <TopRight fileId={fileId} onPresent={ctx.present} />
+        <TopRight fileId={fileId} fileName={meta.data?.file.name ?? ""} onPresent={ctx.present} />
         {view === "tokens" ? (
           <TokensWorkspace
             onShowLayer={(id) => {
@@ -540,9 +541,18 @@ function presentTarget(editor: Editor, fileId: string) {
   return { to: "/f/$fileId/present" as const, params: { fileId }, search };
 }
 
-function TopRight({ fileId, onPresent }: { fileId: string; onPresent: () => void }) {
+function TopRight({
+  fileId,
+  fileName,
+  onPresent,
+}: {
+  fileId: string;
+  fileName: string;
+  onPresent: () => void;
+}) {
   const peers = useEditorState((s) => s.peers);
-  const [copied, setCopied] = useState(false);
+  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const [sharing, setSharing] = useState(false);
   const people = [...peers.values()].map((p) => ({
     name: p.name,
     color: (((((p.color - 1) % 8) + 8) % 8) + 1) as PresenceSlot,
@@ -558,17 +568,16 @@ function TopRight({ fileId, onPresent }: { fileId: string; onPresent: () => void
         size="md"
         onClick={onPresent}
       />
-      <Button
-        variant="primary"
-        size="md"
-        onClick={async () => {
-          await navigator.clipboard.writeText(`${location.origin}/f/${fileId}`);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1600);
-        }}
-      >
-        {copied ? "Link copied" : "Share"}
+      <Button variant="primary" size="md" onClick={() => setSharing(true)}>
+        Share
       </Button>
+      <ShareDialog
+        fileId={fileId}
+        fileName={fileName}
+        canEdit={canEdit}
+        open={sharing}
+        onClose={() => setSharing(false)}
+      />
     </div>
   );
 }

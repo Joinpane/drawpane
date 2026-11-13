@@ -88,8 +88,10 @@ export interface ImageView {
 export type ImageStatus = "loading" | "ready" | "error";
 
 export interface ImageCacheOptions {
-  /** Fetches and decodes an image. Defaults to `/api/media/<sha>` and `createImageBitmap`. */
+  /** Fetches and decodes an image. Defaults to fetching `url(sha)` and `createImageBitmap`. */
   readonly load?: (sha: string, signal: AbortSignal) => Promise<LoadedImage>;
+  /** Where the default loader fetches an image from. Defaults to `/api/media/<sha>`. */
+  readonly url?: (sha: string) => string;
   /** Makes a smaller copy of a bitmap. Defaults to `createImageBitmap` with resize options. */
   readonly resize?: (bitmap: ImageBitmap, width: number, height: number) => Promise<ImageBitmap>;
   /** Decoded bytes to keep (4 per pixel). Default 384 MB. */
@@ -142,9 +144,13 @@ export function mediaUrl(sha: string): string {
   return `/api/media/${sha}`;
 }
 
-function defaultLoader(maxSide: number, resize: ImageCacheOptions["resize"] = defaultResize) {
+function defaultLoader(
+  maxSide: number,
+  resize: ImageCacheOptions["resize"] = defaultResize,
+  url: (sha: string) => string = mediaUrl,
+) {
   return async (sha: string, signal: AbortSignal): Promise<LoadedImage> => {
-    const response = await fetch(mediaUrl(sha), { credentials: "same-origin", signal });
+    const response = await fetch(url(sha), { credentials: "same-origin", signal });
     if (!response.ok) throw new Error(`Image ${sha} answered ${response.status}`);
     // Decoding happens off the main thread; EXIF orientation is applied, so the
     // bitmap's size is the size people see.
@@ -185,7 +191,7 @@ export class ImageCache {
 
   constructor(options: ImageCacheOptions = {}) {
     this.#resize = options.resize ?? defaultResize;
-    this.#load = options.load ?? defaultLoader(options.maxSide ?? 4096, this.#resize);
+    this.#load = options.load ?? defaultLoader(options.maxSide ?? 4096, this.#resize, options.url);
     this.#maxBytes = options.maxBytes ?? 384 * 1024 * 1024;
     this.#retryMs = options.retryMs ?? 2000;
     this.#now = options.now ?? (() => Date.now());

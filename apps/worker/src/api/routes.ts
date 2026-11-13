@@ -9,6 +9,7 @@ import { badRequest, conflict, notFound } from "../lib/http";
 import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
 import { comments } from "./comments";
 import { media, thumbnailKey } from "./media";
+import { share } from "./share";
 
 const Name = z.string().trim().min(1, "Enter a name.").max(120, "Keep names under 120 characters.");
 const RoleSchema = z.enum(["owner", "editor", "viewer"]);
@@ -327,7 +328,8 @@ export const api = new Hono<AppContext>()
   // Comments ----------------------------------------------------------------
   .route("/", comments)
   // Images and thumbnails (./media.ts) ---------------------------------------
-  .route("/", media);
+  .route("/", media)
+  .route("/", share);
 
 async function projectTeam(db: D1Database, projectId: string) {
   const row = await db

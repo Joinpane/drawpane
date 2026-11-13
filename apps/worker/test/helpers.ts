@@ -93,8 +93,13 @@ export async function signedInUser(
 }
 
 /** Opens a file socket and collects messages. */
-export async function openSocket(browser: Browser, fileId: string) {
-  const response = await browser.fetch(`/ws/files/${fileId}`, {
+export function openSocket(browser: Browser, fileId: string) {
+  return openSocketAt(browser, `/ws/files/${fileId}`);
+}
+
+/** Opens a socket at any websocket path (a file, or a shared prototype link). */
+export async function openSocketAt(browser: Browser, path: string) {
+  const response = await browser.fetch(path, {
     headers: { upgrade: "websocket" },
   });
   const ws = response.webSocket;
