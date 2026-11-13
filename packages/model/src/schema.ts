@@ -194,6 +194,39 @@ export const LayoutGrid = z.discriminatedUnion("type", [
 ]);
 export type LayoutGrid = z.infer<typeof LayoutGrid>;
 
+/**
+ * One track of a grid layout, as in CSS `grid-template-columns`: a fixed size
+ * in pixels, a share of the free space (`fr`), or `auto` (as big as its
+ * largest item).
+ */
+export const GridTrack = z.discriminatedUnion("unit", [
+  z.object({ unit: z.literal("px"), value: nonNegative }),
+  z.object({
+    unit: z.literal("fr"),
+    value: finite.refine((n) => n > 0 && n <= 1000, "must be between 0 and 1000"),
+  }),
+  z.object({ unit: z.literal("auto") }),
+]);
+export type GridTrack = z.infer<typeof GridTrack>;
+
+const gridLine = z
+  .number()
+  .int()
+  .refine((n) => n >= 1 && n <= 256, "must be between 1 and 256");
+
+/**
+ * Where a layer sits in its parent's grid, as in CSS `grid-area`: the column
+ * and row it starts at (from 1) and how many it spans. Null places it
+ * automatically, in the next free cell.
+ */
+export const GridArea = z.object({
+  column: gridLine,
+  row: gridLine,
+  columnSpan: gridLine,
+  rowSpan: gridLine,
+});
+export type GridArea = z.infer<typeof GridArea>;
+
 export const LineHeight = z.union([
   z.object({ unit: z.literal("auto") }),
   z.object({ unit: z.literal("px"), value: nonNegative }),
@@ -358,7 +391,7 @@ export const PROPS = {
 
   // Frames
   clipContent: prop(z.boolean(), true, CONTAINERS),
-  layoutMode: prop(z.enum(["none", "row", "column"]), "none", CONTAINERS),
+  layoutMode: prop(z.enum(["none", "row", "column", "grid"]), "none", CONTAINERS),
   layoutWrap: prop(z.boolean(), false, CONTAINERS),
   gap: prop(finite, 0, CONTAINERS),
   rowGap: prop(finite, 0, CONTAINERS),
@@ -368,6 +401,10 @@ export const PROPS = {
   paddingLeft: prop(nonNegative, 0, CONTAINERS),
   justifyContent: prop(z.enum(["start", "center", "end", "space-between"]), "start", CONTAINERS),
   alignItems: prop(z.enum(["start", "center", "end", "stretch", "baseline"]), "start", CONTAINERS),
+  // Grid layout: tracks, and how items sit across their cells (`alignItems` sits them down).
+  gridColumns: prop(z.array(GridTrack).max(64), [], CONTAINERS),
+  gridRows: prop(z.array(GridTrack).max(64), [], CONTAINERS),
+  justifyItems: prop(z.enum(["start", "center", "end", "stretch"]), "start", CONTAINERS),
 
   // How a layer sits in its parent's layout
   sizingH: prop(z.enum(["fixed", "hug", "fill"]), "fixed", GEOMETRY),
@@ -377,6 +414,11 @@ export const PROPS = {
   minHeight: prop(nonNegative.nullable(), null, GEOMETRY),
   maxHeight: prop(nonNegative.nullable(), null, GEOMETRY),
   positioning: prop(z.enum(["auto", "absolute"]), "auto", LAYERS),
+  /** Overrides the parent's `alignItems` for this layer (flex cross axis, or down a grid cell). */
+  alignSelf: prop(z.enum(["auto", "start", "center", "end", "stretch"]), "auto", LAYERS),
+  /** Overrides the parent grid's `justifyItems` for this layer. */
+  justifySelf: prop(z.enum(["auto", "start", "center", "end", "stretch"]), "auto", LAYERS),
+  gridArea: prop(GridArea.nullable(), null, LAYERS),
   constraintH: prop(z.enum(["start", "end", "center", "stretch", "scale"]), "start", LAYERS),
   constraintV: prop(z.enum(["start", "end", "center", "stretch", "scale"]), "start", LAYERS),
 
