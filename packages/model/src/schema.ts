@@ -259,6 +259,9 @@ const CORNERS = ["frame", "rect"] as const;
 /** Shapes with open ends: line caps and end markers apply. */
 const OPEN_ENDS = ["line", "path"] as const;
 
+/** Layers that can be a mask: anything with a filled outline. */
+const MASKABLE = ["frame", "rect", "ellipse", "polygon", "star", "path"] as const;
+
 /** What an open stroke's end looks like (Figma's arrow and marker ends). */
 export const STROKE_MARKERS = ["none", "arrow", "triangle", "circle", "diamond", "bar"] as const;
 export type StrokeMarker = (typeof STROKE_MARKERS)[number];
@@ -294,6 +297,11 @@ export const PROPS = {
   strokeJoin: prop(z.enum(["miter", "round", "bevel"]), "miter", SHAPES),
   strokeDashes: prop(z.array(nonNegative).max(16), [], SHAPES),
   effects: prop(z.array(Effect).max(32), [], LAYERS),
+  /**
+   * A mask: its outline clips the layers above it in the same parent (up to
+   * the next mask), and it isn't drawn itself, like Figma's "Use as mask".
+   */
+  isMask: prop(z.boolean(), false, MASKABLE),
 
   cornerRadius: prop(nonNegative, 0, ROUNDED),
 

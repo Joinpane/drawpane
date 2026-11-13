@@ -47,6 +47,7 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   flipX: "geometry",
   flipY: "geometry",
   lockAspect: "geometry",
+  isMask: "arranged",
   rulerGuides: "other",
   layoutGrids: "layout",
   fills: "style",
