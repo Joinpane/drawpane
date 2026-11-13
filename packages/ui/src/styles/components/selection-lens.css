@@ -1,0 +1,36 @@
+.dp-lens {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-100);
+  padding: var(--space-100);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  animation: dp-fade-in var(--duration-popover) ease-out;
+}
+.dp-lens .dp-field {
+  width: auto;
+}
+.dp-lens .dp-field__input {
+  flex: none;
+  width: 3.5em;
+}
+.dp-lens .dp-field--token {
+  width: 112px;
+}
+.dp-lens__kind {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-100);
+  padding: 0 6px 0 4px;
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+  white-space: nowrap;
+}
+.dp-lens__sep {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--line-strong);
+}

@@ -1,0 +1,5 @@
+/* Self-hosted fonts: no requests to Google Fonts. The family names are mapped to the
+   --font-ui, --font-display and --font-mono tokens in tokens.css. */
+@import "@fontsource-variable/instrument-sans";
+@import "@fontsource/instrument-serif";
+@import "@fontsource-variable/jetbrains-mono";

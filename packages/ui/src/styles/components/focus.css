@@ -1,0 +1,16 @@
+/* One focus ring everywhere: a 1px ground gap, then a 2px signal ring, on :focus-visible only. */
+.dp-btn:focus-visible,
+.dp-iconbtn:focus-visible,
+.dp-seg__option:focus-visible,
+.dp-switch:focus-visible,
+.dp-tf__input:focus-visible,
+.dp-menu__item:focus-visible,
+.dp-layer:focus-visible,
+.dp-layer__toggle:focus-visible,
+.dp-token:is(button):focus-visible,
+.dp-avatar:is(button):focus-visible,
+.dp-prompt__send:focus-visible,
+.dp-cmd__option:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
