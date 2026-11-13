@@ -9,6 +9,7 @@ const TOOLS: ReadonlyArray<{ id: ToolId; icon: IconName; label: string }> = [
   { id: "rect", icon: "rectangle", label: "Rectangle" },
   { id: "ellipse", icon: "ellipse", label: "Ellipse" },
   { id: "line", icon: "minus", label: "Line" },
+  { id: "pen", icon: "pen", label: "Pen" },
   { id: "text", icon: "text", label: "Text" },
   { id: "comment", icon: "comment", label: "Comment" },
   { id: "hand", icon: "hand", label: "Hand" },

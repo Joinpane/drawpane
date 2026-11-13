@@ -103,6 +103,24 @@ describe("Editor", () => {
     expect(props(editor, b)).toMatchObject({ x: 50, y: 50 });
   });
 
+  it("groups inside a frame without moving anything", () => {
+    const frame = editor.createLayer(
+      "frame",
+      { x: 100, y: 100, width: 200, height: 200 },
+      "p",
+    ) as string;
+    const a = editor.createLayer(
+      "rect",
+      { x: 150, y: 150, width: 10, height: 10 },
+      frame,
+    ) as string;
+    const before = editor.scene.bounds(a);
+    editor.select([a]);
+    editor.group();
+    expect(editor.doc.get(a)?.parent).toBe(editor.s.selection[0]);
+    expect(editor.scene.bounds(a)).toEqual(before);
+  });
+
   it("wraps a selection in an auto-layout frame that hugs its content", () => {
     const a = editor.createLayer("rect", { x: 100, y: 100, width: 40, height: 20 }, "p") as string;
     const b = editor.createLayer("rect", { x: 200, y: 100, width: 60, height: 20 }, "p") as string;
