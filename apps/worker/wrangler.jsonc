@@ -1,0 +1,28 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "drawpane",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/ws/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "FILE_ROOM", "class_name": "FileRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FileRoom"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "drawpane",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "drawpane-files" }],
+  "vars": { "RP_NAME": "Drawpane" }
+}

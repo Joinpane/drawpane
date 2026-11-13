@@ -1,0 +1,3 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+SESSION_SECRET=dev-only-secret-change-me-0123456789abcdef
+SETUP_TOKEN=dev-setup-token
