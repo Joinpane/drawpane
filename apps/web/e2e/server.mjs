@@ -37,6 +37,8 @@ const child = spawn(
     persist,
     "--log-level",
     "warn",
+    // A second instance (see fresh-instance.ts) needs its own inspector port.
+    ...(process.env.E2E_INSPECTOR_PORT ? ["--inspector-port", process.env.E2E_INSPECTOR_PORT] : []),
     ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`]),
   ],
   { cwd: worker, stdio: "inherit" },
