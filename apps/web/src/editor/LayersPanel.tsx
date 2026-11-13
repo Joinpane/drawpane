@@ -22,6 +22,8 @@ function kindOf(node: NodeRecord): LayerKind {
       return "component";
     if (getProp(node.props, "instanceOf") !== null) return "instance";
   }
+  // A rectangle filled with an image reads as an image layer.
+  if (node.type === "rect" && getProp(node.props, "fills").some((f) => f.type === "image")) return "image";
   return KIND[node.type] ?? "rect";
 }
 
