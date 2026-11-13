@@ -126,6 +126,7 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
       ),
       a("layer.frame"),
       a("layer.autoLayout"),
+      a("layer.gridLayout"),
       a("layer.fitToContent"),
     ],
     [
