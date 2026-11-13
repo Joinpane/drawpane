@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 492" width="760" height="492" role="img" aria-label="Each design file is one Durable Object behind a stateless Worker">
+<style>
+  svg { --edge: #8b8880; --rule: #e3e1dc; --accent: #e04f1a; --ink: #1c1b19; --quiet: #5d5a54; --tint: #f1f0ec; --bg: #fbfaf8;
+        font-family: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  @media (prefers-color-scheme: dark) {
+    svg { --edge: #77736b; --rule: #302e2b; --accent: #ff7a45; --ink: #f2f0eb; --quiet: #a9a59d; --tint: #262523; --bg: #1c1b1a; }
+  }
+  .bg { fill: var(--bg); }
+  .ink { fill: var(--ink); } .quiet { fill: var(--quiet); }
+  .edge { stroke: var(--edge); } .rule { stroke: var(--rule); }
+  .box { fill: none; stroke: var(--edge); stroke-width: 1.25; }
+  .box.main { fill: var(--accent); fill-opacity: .12; stroke: var(--accent); stroke-width: 2; }
+  .arrowhead { fill: var(--edge); }
+  .gate { fill: var(--tint); stroke: var(--edge); stroke-width: 1.25; }
+</style>
+<defs><marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrowhead"/></marker></defs>
+<rect class="bg" width="760" height="492" rx="12"/>
+<text x="24" y="32" font-size="15" class="ink" font-weight="600">Each design file is one Durable Object behind a stateless Worker</text>
+<g fill="none" class="edge" stroke-width="1.25">
+<path d="M380 160V198" marker-end="url(#arch-arrow)"/>
+<path d="M228 236H198" marker-end="url(#arch-arrow)"/>
+<path d="M532 236H562" marker-end="url(#arch-arrow)"/>
+<path d="M380 272V296"/>
+<path d="M116 296H644"/>
+<path d="M116 296V318" marker-end="url(#arch-arrow)"/>
+<path d="M292 296V318" marker-end="url(#arch-arrow)"/>
+<path d="M468 296V318" marker-end="url(#arch-arrow)"/>
+<path d="M644 296V318" marker-end="url(#arch-arrow)"/>
+<path d="M116 424V448H644V426" marker-end="url(#arch-arrow)"/>
+</g>
+<text x="392" y="184" font-size="11.5" class="quiet">HTTPS + WebSocket</text>
+<text x="380" y="468" font-size="11.5" class="quiet" text-anchor="middle">hourly snapshots and branch bases</text>
+<rect x="180" y="72" width="400" height="88" rx="8" class="box"/>
+<text x="192" y="96" font-size="13" class="ink" font-weight="600">Drawpane web app (browser)</text>
+<text x="192" y="112" font-size="11.5" class="quiet">Penpot common + WASM/WebGL renderer</text>
+<text x="192" y="128" font-size="11.5" class="quiet">@drawpane/ui shell, command bar, Selection Lens</text>
+<text x="192" y="144" font-size="11.5" class="quiet">Exports and thumbnails render here</text>
+<rect x="228" y="200" width="304" height="72" rx="8" class="box"/>
+<text x="240" y="224" font-size="13" class="ink" font-weight="600">Worker (router)</text>
+<text x="240" y="240" font-size="11.5" class="quiet">Auth, REST API, MCP, static assets</text>
+<text x="240" y="256" font-size="11.5" class="quiet">Upgrades websockets to the FileRoom</text>
+<rect x="36" y="200" width="160" height="72" rx="8" class="box"/>
+<text x="48" y="224" font-size="13" class="ink" font-weight="600">Queues + Workflows</text>
+<text x="48" y="240" font-size="11.5" class="quiet">Imports, email,</text>
+<text x="48" y="256" font-size="11.5" class="quiet">cleanup, cron jobs</text>
+<rect x="564" y="200" width="160" height="72" rx="8" class="box"/>
+<text x="576" y="224" font-size="13" class="ink" font-weight="600">Images + Email</text>
+<text x="576" y="240" font-size="11.5" class="quiet">Resize, image info</text>
+<text x="576" y="256" font-size="11.5" class="quiet">Invites, digests</text>
+<rect x="36" y="320" width="160" height="104" rx="8" class="box main"/>
+<text x="48" y="344" font-size="13" class="ink" font-weight="600">FileRoom DO</text>
+<text x="48" y="360" font-size="11.5" class="ink">One per file</text>
+<text x="48" y="376" font-size="11.5" class="ink">Orders edits by revn</text>
+<text x="48" y="392" font-size="11.5" class="ink">SQLite: pages + log</text>
+<text x="48" y="408" font-size="11.5" class="ink">Fans out to sockets</text>
+<rect x="212" y="320" width="160" height="104" rx="8" class="box"/>
+<text x="224" y="344" font-size="13" class="ink" font-weight="600">TeamHub DO</text>
+<text x="224" y="360" font-size="11.5" class="quiet">One per team</text>
+<text x="224" y="376" font-size="11.5" class="quiet">Dashboard presence</text>
+<text x="224" y="392" font-size="11.5" class="quiet">and notifications</text>
+<text x="224" y="408" font-size="11.5" class="quiet">Hibernates when idle</text>
+<rect x="388" y="320" width="160" height="104" rx="8" class="box"/>
+<text x="400" y="344" font-size="13" class="ink" font-weight="600">D1 database</text>
+<text x="400" y="360" font-size="11.5" class="quiet">Users, teams,</text>
+<text x="400" y="376" font-size="11.5" class="quiet">projects, roles,</text>
+<text x="400" y="392" font-size="11.5" class="quiet">comments, shares</text>
+<text x="400" y="408" font-size="11.5" class="quiet">No file content</text>
+<rect x="564" y="320" width="160" height="104" rx="8" class="box"/>
+<text x="576" y="344" font-size="13" class="ink" font-weight="600">R2 storage</text>
+<text x="576" y="360" font-size="11.5" class="quiet">Media and fonts</text>
+<text x="576" y="376" font-size="11.5" class="quiet">File snapshots</text>
+<text x="576" y="392" font-size="11.5" class="quiet">Import uploads</text>
+<text x="576" y="408" font-size="11.5" class="quiet">No egress fees</text>
+</svg>

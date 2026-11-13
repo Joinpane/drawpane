@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane strokes and shapes</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" tool="rectangle" file="Icon set" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas">
+      <div class="u-board" style="left: 30px; top: 40px; width: 560px; height: 600px">
+        <svg viewBox="0 0 560 600" width="560" height="600" aria-label="Shapes">
+          <polygon points="110,60 160,150 60,150" fill="#ffd8c7" stroke="#16181d" stroke-width="2"/>
+          <polygon points="290,50 305,92 350,92 314,118 327,160 290,134 253,160 266,118 230,92 275,92" fill="#2b4fd6"/>
+          <path d="M420 60 h80 a20 20 0 0 1 20 20 v40 a40 40 0 0 1 -40 40 h-60 a0 0 0 0 1 0 0 v-100 z" fill="#eef1fb" stroke="#2b4fd6" stroke-width="2"/>
+          <line x1="60" y1="260" x2="220" y2="260" stroke="#16181d" stroke-width="3" stroke-dasharray="10 6" stroke-linecap="round"/>
+          <line x1="60" y1="320" x2="220" y2="320" stroke="#16181d" stroke-width="3" marker-end="url(#arr)"/>
+          <defs><marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#16181d"/></marker></defs>
+          <circle cx="60" cy="380" r="5" fill="#16181d"/><line x1="60" y1="380" x2="220" y2="380" stroke="#16181d" stroke-width="3"/><rect x="214" y="374" width="12" height="12" fill="#16181d"/>
+          <rect x="290" y="230" width="180" height="120" rx="0" fill="none" stroke="#e04f1a" stroke-width="12"/>
+          <rect x="290" y="230" width="180" height="120" fill="none" stroke="#16181d" stroke-width="1" stroke-dasharray="3 3"/>
+          <rect x="60" y="440" width="440" height="110" rx="16" fill="#f3f4f6"/>
+          <text x="80" y="505" font-size="14" fill="#5b616e" font-family="Instrument Sans, sans-serif">Per-side strokes: bottom only</text>
+          <line x1="60" y1="550" x2="500" y2="550" stroke="#2b4fd6" stroke-width="3"/>
+        </svg>
+        <span class="u-outline" style="left: 410px; top: 50px; width: 120px; height: 120px"></span>
+        <sc-for list="{{handles}}" as="h" hint-placeholder-count="4"><span style="{{h}}"></span></sc-for>
+        <span class="u-label u-label--signal" style="left: 498px; top: 26px">R 20</span>
+        <span class="u-label u-label--signal" style="left: 498px; top: 176px">R 40</span>
+        <span class="u-label" style="left: 300px; top: 360px; background: var(--surface-inverse); color: var(--ink-inverse)">Stroke outside · 12</span>
+      </div>
+    </main>
+    <aside class="u-side" aria-label="Inspector">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="design" options="{{H.dmodes}}"></x-import></div>
+      <section class="dp-section" aria-label="Corners">
+        <div class="dp-section__head"><h3 class="dp-section__title">Corners</h3><div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="layout-grid" label="Edit each corner"></x-import></div></div>
+        <div class="dp-section__body" style="grid-template-columns: 1fr 1fr">
+          <x-import component-from-global-scope="Drawpane.NumberField" label="↖" aria-label="Top left" default-value="0"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="↗" aria-label="Top right" default-value="20"></x-import>
+          <x-import component-from-global-scope="Drawpane.NumberField" label="↙" aria-label="Bottom left" default-value="0"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="↘" aria-label="Bottom right" default-value="40"></x-import>
+          <div class="u-row u-sm" style="grid-column: 1 / -1"><span class="u-grow u-muted">Corner smoothing</span><span class="u-mono">60%</span></div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Stroke">
+        <div class="dp-section__head"><h3 class="dp-section__title">Stroke</h3><div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add stroke"></x-import></div></div>
+        <div class="dp-section__body">
+          <div class="u-row"><x-import component-from-global-scope="Drawpane.TokenChip" name="brand/500" swatch="#2b4fd6"></x-import><span class="u-spacer"></span><span class="u-sm u-mono">100%</span></div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px"><x-import component-from-global-scope="Drawpane.NumberField" label="W" aria-label="Weight" default-value="2"></x-import><span class="u-select" style="height: 24px">Inside <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+          <div class="u-row"><span class="u-xs u-muted" style="width: 52px">Sides</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Sides" value="all" options="{{sides}}"></x-import></div>
+          <div class="u-row"><span class="u-xs u-muted" style="width: 52px">Dash</span><x-import component-from-global-scope="Drawpane.NumberField" label="—" aria-label="Dash" default-value="10"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="␣" aria-label="Gap" default-value="6"></x-import></div>
+          <div class="u-row"><span class="u-xs u-muted" style="width: 52px">Caps</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Caps" value="round" options="{{caps}}"></x-import></div>
+          <div class="u-row"><span class="u-xs u-muted" style="width: 52px">Joins</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Joins" value="miter" options="{{joins}}"></x-import></div>
+          <div class="u-row"><span class="u-xs u-muted" style="width: 52px">Ends</span><span class="u-select" style="height: 24px; flex: 1">None <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span><span class="u-select" style="height: 24px; flex: 1">Triangle <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Polygon">
+        <div class="dp-section__head"><h3 class="dp-section__title">Star</h3></div>
+        <div class="dp-section__body" style="grid-template-columns: 1fr 1fr"><x-import component-from-global-scope="Drawpane.NumberField" label="#" aria-label="Points" default-value="5"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="%" aria-label="Inner radius" default-value="38"></x-import></div>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var hd = function (x, y) { return 'position: absolute; left: ' + (x - 4) + 'px; top: ' + (y - 4) + 'px; width: 8px; height: 8px; background: #ffffff; box-shadow: inset 0 0 0 1.5px var(--signal)'; };
+    var rd = function (x, y) { return 'position: absolute; left: ' + (x - 4) + 'px; top: ' + (y - 4) + 'px; width: 8px; height: 8px; border-radius: 50%; background: #ffffff; box-shadow: inset 0 0 0 1.5px var(--signal)'; };
+    return {
+      handles: [hd(410, 50), hd(530, 50), hd(410, 170), hd(530, 170), rd(506, 74), rd(496, 146)],
+      sides: H.opts(['All', 'Top', 'Bottom', 'Custom']), caps: H.opts(['None', 'Round', 'Square']), joins: H.opts(['Miter', 'Round', 'Bevel'])
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

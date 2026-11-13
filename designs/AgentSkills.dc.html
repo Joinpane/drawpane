@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane skills library and editor</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; display: flex; flex-wrap: wrap; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <nav aria-label="Skills" style="flex: 1 1 260px; max-width: 300px; box-sizing: border-box; padding: 16px 10px; background: var(--canvas); border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px">
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 0 2px 8px 10px">
+      <span style="font-size: 15px; line-height: 20px; font-weight: 600">Skills</span>
+      <x-import component-from-global-scope="Drawpane.Button" size="sm" icon="plus">New</x-import>
+    </div>
+    <div style="display: flex; align-items: center; gap: 8px; height: 32px; margin: 0 4px 8px; padding: 0 10px; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import>Search skills</div>
+    <sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+      <div style="padding: 8px 10px 4px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">{{g.title}}</div>
+      <sc-for list="{{g.items}}" as="s" hint-placeholder-count="3">
+        <a href="#" style="{{s.style}}">
+          <span style="display: inline-flex; color: var(--agent)"><x-import component-from-global-scope="Drawpane.Icon" name="book"></x-import></span>
+          <span style="flex: 1; min-width: 0; display: flex; flex-direction: column"><span style="font-size: 13px; line-height: 18px">/{{s.name}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{s.meta}}</span></span>
+        </a>
+      </sc-for>
+    </sc-for>
+  </nav>
+
+  <main aria-label="Edit skill" style="flex: 999 1 520px; min-width: 0; box-sizing: border-box; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px">
+    <header style="display: flex; align-items: center; flex-wrap: wrap; gap: 10px">
+      <h1 style="flex: 1; margin: 0; font-family: var(--font-mono); font-size: 16px; line-height: 22px; font-weight: 500">/empty-and-error-states</h1>
+      <x-import component-from-global-scope="Drawpane.Badge" tone="component" icon="component">Acme library</x-import>
+      <x-import component-from-global-scope="Drawpane.Badge">v3 · Lena</x-import>
+      <x-import component-from-global-scope="Drawpane.Button" variant="ghost" size="sm" icon="export">Export SKILL.md</x-import>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="sm">Publish v4</x-import>
+    </header>
+    <div style="flex: 1; min-height: 520px; border-radius: var(--radius-md); background: var(--surface-sunken); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; display: flex; flex-direction: column">
+      <div style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-bottom: 1px solid var(--line); font-size: 11px; line-height: 14px; color: var(--ink-muted)">SKILL.md · markdown · 41 lines <span style="flex: 1"></span> Same format as Claude Code and Figma skills</div>
+      <pre style="margin: 0; padding: 14px 16px; font-family: var(--font-mono); font-size: 12px; line-height: 19px; white-space: pre-wrap; color: var(--ink)"><span style="color: var(--ink-muted)">---</span>
+name: empty-and-error-states
+description: Add empty, loading and error states to a list or board using Acme components.
+tools: [read, apply_ops, insert_component, render_frame, request_review]
+<span style="color: var(--ink-muted)">---</span>
+
+<b style="font-weight: 600"># When to use</b>
+Any list, table or feed that can be empty, slow or fail.
+
+<b style="font-weight: 600"># Steps</b>
+1. Duplicate the board as <span style="color: var(--agent-ink)">"{name} · Empty"</span> and <span style="color: var(--agent-ink)">"{name} · Error"</span>.
+2. Empty: insert <span style="color: var(--agent-ink)">EmptyState variant=list</span>. One sentence, one action.
+3. Error: insert <span style="color: var(--agent-ink)">Banner tone=danger</span> with a Retry action.
+   Hide stale rows; never show data next to an error.
+4. Copy follows the Acme voice: no "Oops", no exclamation marks.
+5. Render both boards at 320 and 390 px and fix anything that wraps.
+
+<b style="font-weight: 600"># Never</b>
+- Add new colors or detach tokens.
+- Touch the tab bar or navigation.</pre>
+    </div>
+  </main>
+
+  <aside aria-label="Skill settings and test" style="flex: 1 1 300px; max-width: 360px; box-sizing: border-box; padding: 20px 20px 24px 0; display: grid; gap: 16px; align-content: start">
+    <section aria-labelledby="perm" style="padding: 14px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 10px">
+      <h2 id="perm" style="margin: 0; font-size: 13px; line-height: 18px; font-weight: 600">Allowed tools</h2>
+      <sc-for list="{{tools}}" as="t" hint-placeholder-count="5">
+        <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px">
+          <input type="checkbox" defaultChecked="{{t.on}}" disabled="{{t.locked}}" style="margin: 0; accent-color: var(--signal)">
+          <code style="font-family: var(--font-mono); font-size: 11.5px">{{t.name}}</code>
+          <span style="flex: 1; text-align: right; font-size: 11px; color: var(--ink-muted)">{{t.note}}</span>
+        </label>
+      </sc-for>
+    </section>
+    <section aria-labelledby="test" style="padding: 14px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 8px">
+      <div style="display: flex; align-items: center; gap: 8px">
+        <h2 id="test" style="flex: 1; margin: 0; font-size: 13px; line-height: 18px; font-weight: 600">Test run</h2>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm" icon="play">Run on Home — iOS</x-import>
+      </div>
+      <div role="list" style="display: grid; gap: 2px">
+        <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Duplicated as Empty and Error" meta="1 s"></x-import>
+        <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Inserted EmptyState" meta="3 s"></x-import>
+        <x-import component-from-global-scope="Drawpane.AgentStep" status="failed" label="Banner copy used “Oops”" detail="Rule 4 caught it; rewrote to “Couldn't load events”"></x-import>
+        <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Rendered at 320 and 390 px" meta="4 s"></x-import>
+      </div>
+      <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Dry run on a scratch branch · deleted after 24 h · $0.03</span>
+    </section>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var link = 'display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none;';
+    function s(name, meta, sel) { return { name: name, meta: meta, style: link + (sel ? ' background: var(--signal-soft);' : '') }; }
+    return {
+      theme: this.props.theme ?? 'light',
+      groups: [
+        { title: 'Acme team · 6', items: [s('empty-and-error-states', 'Used 41 times · Lena', true), s('audit-accessibility', 'Nightly · Sam'), s('localize', 'German, Japanese · Ana'), s('name-layers', 'Used 212 times')] },
+        { title: 'Mine · 2', items: [s('crit-recap', 'Summarize a thread'), s('responsive-variants', 'Draft')] },
+        { title: 'Imported · 1', items: [s('ios-hig-check', 'From a Git repo · read-only')] }
+      ],
+      tools: [
+        { name: 'read', note: 'always', on: true, locked: true },
+        { name: 'apply_ops', note: 'branch only', on: true, locked: false },
+        { name: 'insert_component', note: 'Acme only', on: true, locked: false },
+        { name: 'render_frame', note: '', on: true, locked: false },
+        { name: 'merge_branch', note: 'needs a person', on: false, locked: true }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

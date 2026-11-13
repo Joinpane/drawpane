@@ -1,0 +1,16 @@
+<!-- @dsCard group="Inputs" height=72 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>SegmentedControl — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.SegmentedControl, { label: 'Pane', value: 'design', options: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }] }),
+      h(D.SegmentedControl, { label: 'Direction', value: 'col', options: [{ value: 'row', icon: 'layout-row', title: 'Horizontal' }, { value: 'col', icon: 'layout-col', title: 'Vertical' }, { value: 'grid', icon: 'layout-grid', title: 'Grid' }] }))
+  );
+</script>
+</body>
+</html>

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane first run</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; display: grid; place-items: center; padding: 40px 16px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <div style="width: 100%; max-width: 880px; border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-modal); overflow: hidden">
+    <ol aria-label="Setup steps" style="display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 16px 24px; list-style: none; border-bottom: 1px solid var(--line)">
+      <sc-for list="{{steps}}" as="s" hint-placeholder-count="4">
+        <li style="{{s.style}}"><span style="{{s.num}}">{{s.n}}</span>{{s.name}}</li>
+      </sc-for>
+    </ol>
+
+    <div style="display: flex; flex-wrap: wrap; gap: 32px; padding: 28px 24px">
+      <div style="flex: 1 1 380px; display: grid; gap: 24px; align-content: start">
+        <div>
+          <h1 style="margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 32px; line-height: 36px">Make it yours</h1>
+          <p style="margin: 6px 0 0; font-size: 14px; line-height: 20px; color: var(--ink-muted)">You can change all of this later in Preferences.</p>
+        </div>
+
+        <fieldset style="margin: 0; padding: 0; border: 0">
+          <legend style="margin-bottom: 10px; font-size: 13px; line-height: 18px; font-weight: 600">Theme</legend>
+          <div role="radiogroup" aria-label="Theme" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px">
+            <sc-for list="{{themes}}" as="t" hint-placeholder-count="3">
+              <button type="button" role="radio" aria-checked="{{t.on}}" style="{{t.card}}">
+                <span style="{{t.preview}}"><span style="{{t.pane}}"></span><span style="{{t.accent}}"></span></span>
+                <span style="font-size: 12px; line-height: 16px; font-weight: 600">{{t.name}}</span>
+              </button>
+            </sc-for>
+          </div>
+        </fieldset>
+
+        <fieldset style="margin: 0; padding: 0; border: 0">
+          <legend style="margin-bottom: 10px; font-size: 13px; line-height: 18px; font-weight: 600">Keyboard shortcuts</legend>
+          <div role="radiogroup" aria-label="Keyboard shortcuts" style="display: grid; gap: 6px">
+            <sc-for list="{{keymaps}}" as="k" hint-placeholder-count="3">
+              <label style="{{k.row}}">
+                <input type="radio" name="keys" defaultChecked="{{k.checked}}" style="margin: 0; accent-color: var(--signal)">
+                <span style="flex: 1; display: flex; flex-direction: column">
+                  <span style="font-size: 13px; line-height: 18px; font-weight: 600">{{k.name}}</span>
+                  <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{k.desc}}</span>
+                </span>
+              </label>
+            </sc-for>
+          </div>
+        </fieldset>
+      </div>
+
+      <div style="flex: 1 1 300px; display: grid; gap: 16px; align-content: start">
+        <div style="font-size: 13px; line-height: 18px; font-weight: 600">Editing</div>
+        <div style="display: grid; gap: 12px; padding: 14px; border-radius: var(--radius-md); background: var(--surface-sunken)">
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Show the Selection Lens"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Explain layout on hover with Alt"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Reduce motion"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Hide other people's cursors"></x-import>
+        </div>
+        <div style="display: grid; place-items: center; height: 140px; border-radius: var(--radius-md); background: var(--canvas); box-shadow: inset 0 0 0 1px var(--line)">
+          <x-import component-from-global-scope="Drawpane.SelectionLens" kind="Frame" kind-icon="board">
+            <x-import component-from-global-scope="Drawpane.NumberField" label="W" default-value="320"></x-import>
+            <x-import component-from-global-scope="Drawpane.NumberField" label="H" default-value="240"></x-import>
+          </x-import>
+        </div>
+        <p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">The Lens follows your selection with the controls you use most.</p>
+      </div>
+    </div>
+
+    <footer style="display: flex; align-items: center; gap: 8px; padding: 14px 24px; border-top: 1px solid var(--line); background: var(--surface)">
+      <span style="flex: 1; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Step 2 of 4</span>
+      <x-import component-from-global-scope="Drawpane.Button" variant="ghost" size="lg">Back</x-import>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg">Continue</x-import>
+    </footer>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var step = 'display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 4px; border-radius: 999px; font-size: 12px; line-height: 16px;';
+    var num = 'display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; font-size: 11px; font-weight: 700;';
+    var steps = [['1', 'Profile', 'done'], ['2', 'Make it yours', 'now'], ['3', 'Invite your team', ''], ['4', 'First file', '']];
+    var card = 'display: grid; gap: 8px; justify-items: start; padding: 8px; border-radius: var(--radius-md); background: var(--surface-sunken); color: var(--ink); cursor: pointer; text-align: left; border: 1px solid ';
+    function preview(bg, pane, accent) {
+      return {
+        preview: 'position: relative; display: block; width: 100%; height: 72px; border-radius: var(--radius-sm); background: ' + bg + '; overflow: hidden',
+        pane: 'position: absolute; left: 8px; top: 8px; bottom: 8px; width: 34%; border-radius: 4px; background: ' + pane,
+        accent: 'position: absolute; right: 12px; top: 22px; width: 30px; height: 18px; border-radius: 4px; background: ' + accent
+      };
+    }
+    var t1 = preview('#ebeae6', '#fbfaf8', '#e04f1a');
+    var t2 = preview('#121211', '#1c1b1a', '#ff7a45');
+    var t3 = preview('linear-gradient(90deg, #ebeae6 50%, #121211 50%)', '#fbfaf8', '#ff7a45');
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true, no: false,
+      steps: steps.map(function (s) {
+        return {
+          n: s[2] === 'done' ? '✓' : s[0], name: s[1],
+          style: step + (s[2] === 'now' ? ' background: var(--signal-soft); font-weight: 600' : ' color: ' + (s[2] === 'done' ? 'var(--ink)' : 'var(--ink-muted)')),
+          num: num + (s[2] === 'now' ? ' background: var(--signal); color: var(--on-signal)' : s[2] === 'done' ? ' background: var(--surface-active); color: var(--success)' : ' box-shadow: inset 0 0 0 1px var(--line-control)')
+        };
+      }),
+      themes: [
+        Object.assign({ name: 'Paper', on: 'true', card: card + 'var(--signal); box-shadow: inset 0 0 0 1px var(--signal)' }, t1),
+        Object.assign({ name: 'Graphite', on: 'false', card: card + 'var(--line-strong)' }, t2),
+        Object.assign({ name: 'Follow system', on: 'false', card: card + 'var(--line-strong)' }, t3)
+      ],
+      keymaps: [
+        { name: 'Drawpane', desc: 'Command-first. ⌘K sets values, Alt shows X-ray.', checked: true, row: 'display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--signal-soft); cursor: pointer' },
+        { name: 'Figma-style', desc: 'Keep the shortcuts your hands already know.', checked: false, row: 'display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-sunken); cursor: pointer' },
+        { name: 'Penpot-style', desc: 'Matches Penpot 2.x defaults.', checked: false, row: 'display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-sunken); cursor: pointer' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

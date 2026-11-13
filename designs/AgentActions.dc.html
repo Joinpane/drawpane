@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane actions console</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" branch="feature/greeting" primary="Share" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <section aria-label="Actions console" class="u-side" style="width: 560px">
+      <div class="u-head"><h2 class="u-h3">Actions console</h2><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Mode" value="dry" options="{{mode}}"></x-import><x-import component-from-global-scope="Drawpane.Kbd">⌘ ⌥ J</x-import></div>
+      <p class="u-sm u-muted" style="margin: 0 14px 10px">The same typed actions agents, plugins and the command bar use. Run them by hand, see the diff first.</p>
+      <pre class="u-code" style="margin: 0 14px; font-size: 12px; line-height: 20px; min-height: 250px"><span style="color: var(--ink-muted)">// select every event row on this page that isn't linked</span>
+<span style="color: var(--agent-ink)">select</span>(<span style="color: var(--success)">"layers"</span>, {
+  page: <span style="color: var(--success)">"Mobile v2"</span>,
+  looksLike: <span style="color: var(--success)">"component:Event row"</span>,
+  linked: <span style="color: var(--signal-ink)">false</span>
+})
+.<span style="color: var(--agent-ink)">relink</span>(<span style="color: var(--success)">"component:Event row"</span>, { keepOverrides: <span style="color: var(--signal-ink)">true</span> })
+.<span style="color: var(--agent-ink)">set</span>({ gap: <span style="color: var(--success)">"space/150"</span> })</pre>
+      <div class="u-row" style="padding: 10px 14px"><span class="u-xs u-muted u-grow">Types from @drawpane/actions 2.1 · autocomplete with Tab</span><x-import component-from-global-scope="Drawpane.Button" size="sm">Save as snippet</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary" icon="play">Dry run</x-import></div>
+      <div class="u-line"></div>
+      <div class="u-head"><h2 class="u-h3">Dry run · nothing changed yet</h2><span class="u-chip u-chip--agent">7 layers · 21 changes</span></div>
+      <div class="u-col u-col--tight" style="padding: 0 10px; overflow: hidden">
+        <sc-for list="{{diff}}" as="d" hint-placeholder-count="6"><div class="u-item" style="min-height: 0; padding: 5px 6px"><x-import component-from-global-scope="Drawpane.Icon" name="{{d.i}}" size="12"></x-import><span class="u-grow u-sm u-ellip">{{d.l}}</span><span class="u-xs u-mono u-muted">{{d.c}}</span></div></sc-for>
+      </div>
+      <div class="u-row" style="margin-top: auto; padding: 12px 14px; border-top: 1px solid var(--line)"><span class="u-xs u-muted u-grow">Applies to feature/greeting · one undo step</span><x-import component-from-global-scope="Drawpane.Button" variant="primary">Apply 21 changes</x-import></div>
+    </section>
+    <main class="u-stage" aria-label="Canvas">
+      <div style="position: absolute; left: 40px; top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span class="u-outline" style="left: 32px; top: 212px; width: 276px; height: 52px; border-radius: 10px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+        <span class="u-outline" style="left: 32px; top: 272px; width: 276px; height: 52px; border-radius: 10px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+        <span class="u-outline" style="left: 32px; top: 332px; width: 276px; height: 52px; border-radius: 10px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+        <span class="u-label u-label--signal" style="left: 32px; top: 390px">3 of 7 matches on this board</span>
+      </div>
+      <section class="u-pop u-col" style="position: absolute; left: 420px; top: 60px; width: 300px; padding: 12px">
+        <strong class="u-md">Snippets</strong>
+        <sc-for list="{{snips}}" as="s" hint-placeholder-count="4"><div class="u-item" style="min-height: 0"><x-import component-from-global-scope="Drawpane.Icon" name="code" size="12"></x-import><span class="u-grow u-sm">{{s.n}}</span><span class="u-xs u-muted">{{s.w}}</span></div></sc-for>
+        <span class="u-xs u-muted">Snippets are shared with the team and can become skills or automations.</span>
+      </section>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      mode: H.opts([{ value: 'dry', label: 'Dry run' }, { value: 'live', label: 'Apply' }]),
+      diff: [{ i: 'instance', l: 'Home — iOS / Upcoming / Row 1 → Event row', c: 'relink' }, { i: 'instance', l: 'Home — iOS / Upcoming / Row 2 → Event row', c: 'relink' }, { i: 'instance', l: 'Home — iOS / Upcoming / Row 3 → Event row', c: 'relink' }, { i: 'instance', l: 'Calendar / Today / Agenda 1 → Event row', c: 'relink · 2 overrides' }, { i: 'instance', l: 'Calendar / Today / Agenda 2 → Event row', c: 'relink' }, { i: 'layout-col', l: '4 parent stacks: gap 8 → space/150', c: 'set gap' }],
+      snips: [{ n: 'Relink look-alikes', w: 'Ana' }, { n: 'Swap raw greys for tokens', w: 'Lena' }, { n: 'Rename by role', w: 'you' }, { n: 'Export all icons as SVG', w: 'Dev' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

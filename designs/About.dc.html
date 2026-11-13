@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane about this instance</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-sheet" style="display: grid; place-items: center">
+  <section class="u-modal" style="width: 760px; display: grid; grid-template-columns: 280px 1fr">
+    <div class="u-col u-col--loose" style="padding: 28px; background: var(--canvas)">
+      <span class="u-row" style="gap: 10px"><svg width="28" height="28" viewBox="0 0 32 32" role="img" aria-label="Drawpane"><rect x="3.25" y="3.25" width="18.5" height="18.5" rx="4" fill="none" stroke="var(--ink)" stroke-width="2.5"></rect><rect x="10" y="10" width="19" height="19" rx="4" fill="var(--signal)"></rect></svg><span style="font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -0.01em">Drawpane</span></span>
+      <div class="u-col u-col--tight"><span style="font-size: 28px; line-height: 34px; font-weight: 600">1.4.2</span><span class="u-sm u-muted">Released Nov 3, 2026</span></div>
+      <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Update to 1.5.0</x-import>
+      <span class="u-xs u-muted">Open source under MPL-2.0. Fork of Penpot, maintained at github.com/dizys/drawpane.</span>
+    </div>
+    <div class="u-col u-col--loose" style="padding: 28px">
+      <h2 class="u-h2">About this instance</h2>
+      <div class="u-dl" style="font-size: 13px; line-height: 20px"><dt>Instance</dt><dd>design.acme.com</dd><dt>Deployed</dt><dd>GitHub Action #318 · acme/drawpane</dd><dt>Upstream</dt><dd>Penpot 2.11 · common and render-wasm</dd><dt>Runtime</dt><dd>Cloudflare Workers · Durable Objects · D1 · R2 · Queues</dd><dt>Plugin API</dt><dd>v1 (Penpot compatible) and v2</dd><dt>MCP</dt><dd>design.acme.com/mcp · protocol 2026-06</dd><dt>File format</dt><dd>Penpot 2.11 + Drawpane extensions (branches, agents)</dd></div>
+      <span class="u-cap">Open source we use</span>
+      <div class="u-row" style="flex-wrap: wrap; gap: 4px"><sc-for list="{{oss}}" as="o" hint-placeholder-count="8"><span class="u-chip u-chip--muted">{{o}}</span></sc-for></div>
+      <div class="u-row"><x-import component-from-global-scope="Drawpane.Button" size="sm">Copy diagnostics</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm">All licenses</x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm">Changelog</x-import></div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return { oss: ['Penpot · MPL-2.0', 'React · MIT', 'Skia · BSD-3', 'Instrument Sans · OFL', 'JetBrains Mono · OFL', 'Yjs · MIT', 'Hono · MIT', 'Zod · MIT'] };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

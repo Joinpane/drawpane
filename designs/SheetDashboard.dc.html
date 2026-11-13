@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane dashboard menus, inbox, what's new and trash</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 32px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <header style="display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 24px">
+    <h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Dashboard pieces</h1>
+    <p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Team switcher, file menu, inbox, what's new and trash.</p>
+  </header>
+  <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <figure style="margin: 0; display: grid; gap: 8px; width: 260px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Team switcher</figcaption>
+      <div style="border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); padding: 6px">
+        <sc-for list="{{teams}}" as="t" hint-placeholder-count="3">
+          <div style="{{t.row}}"><span style="{{t.logo}}">{{t.mono}}</span><span style="flex: 1; display: grid"><span style="font-size: 13px; font-weight: 600">{{t.name}}</span><span style="font-size: 11px; color: var(--ink-muted)">{{t.meta}}</span></span><span style="{{t.check}}"><x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import></span></div>
+        </sc-for>
+        <div style="height: 1px; margin: 6px 4px; background: var(--line)"></div>
+        <div style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px; font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="plus"></x-import>Create a team</div>
+        <div style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px; font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="key"></x-import>Join with a code</div>
+      </div>
+      <figcaption style="margin-top: 16px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">File card menu</figcaption>
+      <x-import component-from-global-scope="Drawpane.Menu" label="File actions" items="{{fileMenu}}"></x-import>
+    </figure>
+
+    <figure style="margin: 0; display: grid; gap: 8px; width: 360px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Inbox</figcaption>
+      <section aria-label="Inbox" style="border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); overflow: hidden">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 10px 12px"><strong style="flex: 1; font-size: 14px">Inbox</strong><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Mark all read</x-import></div>
+        <div style="padding: 0 12px 8px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Inbox filter" value="all" options="{{inboxTabs}}"></x-import></div>
+        <sc-for list="{{inbox}}" as="n" hint-placeholder-count="6">
+          <div style="{{n.row}}">
+            <span style="{{n.av}}">{{n.ini}}</span>
+            <span style="flex: 1; min-width: 0; display: grid; gap: 2px"><span style="font-size: 13px; line-height: 18px">{{n.text}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{n.meta}}</span><span style="{{n.actions}}"><x-import component-from-global-scope="Drawpane.Button" size="sm">{{n.a1}}</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">{{n.a2}}</x-import></span></span>
+            <span style="{{n.dot}}"></span>
+          </div>
+        </sc-for>
+      </section>
+    </figure>
+
+    <figure style="margin: 0; display: grid; gap: 8px; width: 380px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">What's new · after an upgrade</figcaption>
+      <section role="dialog" aria-label="What's new in Drawpane 1.4" style="border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-modal); overflow: hidden">
+        <div style="position: relative; height: 150px; background: linear-gradient(135deg, var(--agent-soft), var(--signal-soft))">
+          <span style="position: absolute; left: 24px; top: 30px; width: 150px; height: 90px; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1.5px var(--agent); border: 0"></span>
+          <span style="position: absolute; left: 150px; top: 52px; padding: 1px 6px; border-radius: 4px; background: var(--agent); color: var(--on-agent); font-size: 11px; font-weight: 600">Layout agent</span>
+          <span style="position: absolute; right: 24px; top: 40px; width: 120px; height: 70px; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-pane)"></span>
+        </div>
+        <div style="padding: 16px; display: grid; gap: 10px">
+          <span style="font-size: 12px; color: var(--ink-muted)">Drawpane 1.4 · upgraded Nov 11 · synced with Penpot 2.11</span>
+          <h2 style="margin: 0; font-size: 18px; line-height: 24px; font-weight: 600">Agents can now follow your skills</h2>
+          <ul style="margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; line-height: 18px">
+            <li>Write a skill once in markdown; every agent in the team uses it.</li>
+            <li>Render checks: agents look at what they made before asking you.</li>
+            <li>Variables in prototypes, and 31 fixes from upstream Penpot.</li>
+          </ul>
+          <div style="display: flex; gap: 8px; justify-content: space-between; align-items: center"><span style="display: flex; gap: 4px"><span style="width: 16px; height: 4px; border-radius: 2px; background: var(--ink)"></span><span style="width: 6px; height: 4px; border-radius: 2px; background: var(--line-strong)"></span><span style="width: 6px; height: 4px; border-radius: 2px; background: var(--line-strong)"></span></span><span style="display: flex; gap: 8px"><x-import component-from-global-scope="Drawpane.Button">Full changelog</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Next</x-import></span></div>
+        </div>
+      </section>
+    </figure>
+
+    <section aria-label="Trash" style="flex: 1 1 100%; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); padding: 16px 20px; display: grid; gap: 10px">
+      <div style="display: flex; align-items: center; gap: 12px"><h2 style="flex: 1; margin: 0; font-size: 15px; font-weight: 600">Trash</h2><span style="font-size: 12px; color: var(--ink-muted)">Files stay for 30 days, then R2 lifecycle rules remove them</span><x-import component-from-global-scope="Drawpane.Button" size="sm">Empty trash</x-import></div>
+      <sc-for list="{{trash}}" as="t" hint-placeholder-count="3">
+        <div style="display: grid; grid-template-columns: 40px 1fr 160px 160px auto; align-items: center; gap: 12px; height: 48px; border-top: 1px solid var(--line); font-size: 13px"><span style="{{t.th}}"></span><span style="font-weight: 600">{{t.name}}</span><span style="color: var(--ink-muted)">{{t.by}}</span><span style="{{t.leftS}}">{{t.left}}</span><span style="display: flex; gap: 6px"><x-import component-from-global-scope="Drawpane.Button" size="sm">Restore</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Delete forever</x-import></span></div>
+      </sc-for>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var logo = function (c) { return 'flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: ' + c + '; color: #ffffff; font-size: 12px; font-weight: 700'; };
+    var trow = function (sel) { return 'display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 8px; border-radius: var(--radius-sm);' + (sel ? ' background: var(--surface-active)' : ''); };
+    var av = function (c, agent) { return 'flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: ' + (agent ? '8px' : '50%') + '; background: var(' + c + '); color: var(' + (agent ? '--on-agent' : '--on-presence') + '); font-size: 10px; font-weight: 700'; };
+    var N = [
+      ['AR', '--presence-1', 0, 'Ana mentioned you on Hero card', 'Mobile app · 2 min ago', 1, '', ''],
+      ['AI', '--agent', 1, 'Empty states agent needs a decision: illustrations or icons?', 'agent/empty-states · 8 min ago', 1, 'Icons', 'Illustrations'],
+      ['LP', '--presence-2', 0, 'Lena asked you to review feature/greeting', 'Mobile app · 1 h ago', 1, 'Later', 'Review'],
+      ['SO', '--presence-3', 0, 'Sam resolved your comment', 'Web dashboard · yesterday', 0, '', ''],
+      ['AI', '--agent', 1, 'Weekly lint found 12 raw colors in 3 files', 'Automation · Monday', 0, '', '']
+    ];
+    var th = function (c) { return 'width: 40px; height: 30px; border-radius: 5px; background: ' + c + '; box-shadow: inset 0 0 0 1px var(--line)'; };
+    return {
+      theme: T,
+      teams: [
+        { name: 'Acme Design', meta: '23 members · design.acme.com', mono: 'A', logo: logo('#16181d'), check: 'color: var(--signal)', row: trow(true) },
+        { name: 'Personal', meta: 'Just you · drafts', mono: 'Z', logo: logo('#6b4bd6'), check: 'display: none', row: trow(false) },
+        { name: 'Open source contributors', meta: '140 members · read-only', mono: 'O', logo: logo('#0f766e'), check: 'display: none', row: trow(false) }
+      ],
+      fileMenu: [{ label: 'Open in new tab' }, { label: 'Copy link' }, { label: 'Rename' }, { label: 'Duplicate' }, { label: 'Move to project', submenu: true }, { separator: true }, { label: 'Publish as library' }, { label: 'Download (.dpz)' }, { label: 'Pin to sidebar' }, { separator: true }, { label: 'Move to trash', danger: true }],
+      inboxTabs: [{ value: 'all', label: 'All' }, { value: 'mentions', label: 'Mentions' }, { value: 'agents', label: 'Agents' }, { value: 'reviews', label: 'Reviews' }],
+      inbox: N.map(function (n) { return { ini: n[0], av: av(n[1], n[2]), text: n[3], meta: n[4], dot: n[5] ? 'flex: none; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--signal)' : 'flex: none; width: 8px', actions: n[6] ? 'display: flex; gap: 6px; margin-top: 4px' : 'display: none', a1: n[6], a2: n[7], row: 'display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line);' + (n[5] ? '' : ' opacity: .75') }; }),
+      trash: [
+        { name: 'Old onboarding', by: 'Deleted by Dev · Nov 1', left: '19 days left', leftS: 'color: var(--ink-muted)', th: th('#eefaf8') },
+        { name: 'Pricing page draft', by: 'Deleted by Mo · Oct 20', left: '8 days left', leftS: 'color: var(--ink-muted)', th: th('#fff4ed') },
+        { name: 'Logo explorations', by: 'Deleted by you · Oct 15', left: '3 days left', leftS: 'color: var(--signal-ink); font-weight: 600', th: th('#f6f1ff') }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

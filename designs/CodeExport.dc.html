@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane export a board as code</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor" style="position: relative">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage"></main>
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+  <div class="u-dim"></div>
+  <section role="dialog" aria-label="Export as code" class="u-modal" style="position: absolute; left: 50%; top: 60px; transform: translateX(-50%); width: 1080px; height: 760px; display: grid; grid-template-columns: 260px 1fr 340px">
+    <div style="border-right: 1px solid var(--line); background: var(--surface); display: grid; align-content: start">
+      <div class="u-head" style="padding: 14px"><h2 class="u-h3">Export Home — iOS</h2></div>
+      <div class="u-col" style="padding: 0 14px">
+        <span class="u-xs u-muted">Framework</span>
+        <sc-for list="{{fw}}" as="f" hint-placeholder-count="5"><div class="u-row u-sm" style="height: 30px"><span class="u-radio {{f.on}}"></span><span class="u-grow">{{f.n}}</span></div></sc-for>
+        <span class="u-xs u-muted" style="margin-top: 8px">Options</span>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Use components from my repo"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Tokens as CSS variables"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" label="Include prototype links"></x-import>
+      </div>
+      <div class="u-xs u-muted" style="padding: 14px">Mapped via Design ↔ code sync: 6 of 7 components have a code match.</div>
+    </div>
+    <div style="display: grid; grid-template-rows: auto 1fr; min-width: 0">
+      <div class="u-row" style="padding: 10px 12px; border-bottom: 1px solid var(--line); gap: 4px">
+        <sc-for list="{{files}}" as="f" hint-placeholder-count="4"><span class="u-pill {{f.on}}" style="height: 26px; padding: 0 10px; font-family: var(--font-mono)">{{f.n}}</span></sc-for>
+        <span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.IconButton" icon="code" label="Copy file"></x-import>
+      </div>
+      <pre class="u-code" style="margin: 0; border-radius: 0; background: var(--surface); font-size: 12px; line-height: 20px"><span style="color: var(--ink-muted)">import</span> { HeroCard, EventRow, TabBar } <span style="color: var(--ink-muted)">from</span> <span style="color: var(--success)">"@acme/ui"</span>;
+<span style="color: var(--ink-muted)">import</span> styles <span style="color: var(--ink-muted)">from</span> <span style="color: var(--success)">"./Home.module.css"</span>;
+
+<span style="color: var(--ink-muted)">export function</span> <span style="color: var(--signal-ink)">Home</span>({ events }: { events: Event[] }) {
+  <span style="color: var(--ink-muted)">return</span> (
+    &lt;<span style="color: var(--signal-ink)">main</span> className={styles.screen}&gt;
+      &lt;<span style="color: var(--signal-ink)">h1</span> className={styles.greeting}&gt;Good morning, Ana&lt;/h1&gt;
+      &lt;<span style="color: var(--signal-ink)">p</span> className={styles.sub}&gt;Three things on today&lt;/p&gt;
+      &lt;<span style="color: var(--component-ink)">HeroCard</span> style=<span style="color: var(--success)">"dark"</span> title=<span style="color: var(--success)">"Design review at 2:00"</span> /&gt;
+      &lt;<span style="color: var(--signal-ink)">ul</span> className={styles.upcoming}&gt;
+        {events.slice(0, 3).map((e) =&gt; (
+          &lt;<span style="color: var(--component-ink)">EventRow</span> key={e.id} title={e.title} due={e.due} /&gt;
+        ))}
+      &lt;/ul&gt;
+      &lt;<span style="color: var(--component-ink)">TabBar</span> active=<span style="color: var(--success)">"home"</span> /&gt;
+    &lt;/main&gt;
+  );
+}</pre>
+    </div>
+    <div style="border-left: 1px solid var(--line); background: var(--canvas); display: grid; grid-template-rows: auto 1fr auto">
+      <div class="u-row" style="padding: 10px 12px"><span class="u-sm u-b u-grow">Preview of the code</span><span class="u-chip u-chip--ok">matches design · 99.2%</span></div>
+      <div style="position: relative; overflow: hidden"><div style="position: absolute; left: 50%; top: 0; width: 340px; height: 560px; margin-left: -170px; transform: scale(.85); transform-origin: top center"><dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import></div></div>
+      <div class="u-row" style="padding: 12px; border-top: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.Button" size="sm">Download zip</x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary" icon="agent">Open a pull request</x-import></div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      fw: [{ n: 'React + CSS modules', on: 'is-on' }, { n: 'React + Tailwind', on: '' }, { n: 'HTML + CSS', on: '' }, { n: 'SwiftUI', on: '' }, { n: 'Jetpack Compose', on: '' }],
+      files: [{ n: 'Home.tsx', on: 'is-on' }, { n: 'Home.module.css', on: '' }, { n: 'tokens.css', on: '' }, { n: 'README.md', on: '' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

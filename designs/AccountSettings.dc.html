@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane account settings</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-page" style="padding: 28px 32px 40px">
+  <header style="margin-bottom: 20px"><div class="u-sm u-muted">Settings / You</div><h1 class="u-h1">Account</h1></header>
+  <div style="display: grid; grid-template-columns: 200px minmax(0, 720px); gap: 32px">
+    <nav class="u-col u-col--tight" aria-label="Account sections"><sc-for list="{{nav}}" as="n" hint-placeholder-count="6"><span class="u-item {{n.sel}}">{{n.t}}</span></sc-for></nav>
+    <div class="u-col u-col--loose">
+      <section class="u-box u-pad u-col u-col--loose">
+        <h2 class="u-h3">Profile</h2>
+        <div class="u-row" style="gap: 16px"><span class="u-av" style="width: 64px; height: 64px; font-size: 22px; background: var(--presence-4)">Z</span><div class="u-col u-col--tight"><x-import component-from-global-scope="Drawpane.Button" size="sm">Upload photo</x-import><span class="u-xs u-muted">Your cursor and tag use your presence color: olive.</span></div></div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px"><x-import component-from-global-scope="Drawpane.TextField" label="Name" default-value="Ziyang"></x-import><x-import component-from-global-scope="Drawpane.TextField" label="Short name on cursors" default-value="Ziyang"></x-import></div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px"><div class="u-col u-col--tight"><span class="u-xs u-muted">Language</span><span class="u-select">English (US) <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div><div class="u-col u-col--tight"><span class="u-xs u-muted">Time zone</span><span class="u-select">Pacific · Vancouver <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div></div>
+      </section>
+      <section class="u-box u-pad u-col">
+        <h2 class="u-h3">Email and sign-in</h2>
+        <div class="u-row u-md"><span class="u-grow">ziyang@acme.com</span><span class="u-chip u-chip--ok">verified</span><x-import component-from-global-scope="Drawpane.Button" size="sm">Change</x-import></div>
+        <div class="u-row u-md"><span class="u-grow">Password · changed 4 months ago</span><x-import component-from-global-scope="Drawpane.Button" size="sm">Change</x-import></div>
+        <div class="u-row u-md"><span class="u-grow">Passkeys, two-step, sessions and tokens</span><x-import component-from-global-scope="Drawpane.Button" size="sm">Security settings</x-import></div>
+      </section>
+      <section class="u-box u-pad u-col">
+        <h2 class="u-h3">Your data</h2>
+        <div class="u-row u-md"><span class="u-grow u-col" style="gap: 0"><span>Download everything you made</span><span class="u-xs u-muted">Files (.dpz), comments, agent runs, as a zip</span></span><x-import component-from-global-scope="Drawpane.Button" size="sm">Request export</x-import></div>
+        <div class="u-row u-md" style="padding-top: 10px; border-top: 1px solid var(--line)"><span class="u-grow u-col" style="gap: 0"><span style="color: var(--danger)">Delete account</span><span class="u-xs u-muted">Your files move to the team owner. Comments stay, shown as "Former member".</span></span><x-import component-from-global-scope="Drawpane.Button" size="sm">Delete…</x-import></div>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return { nav: ['Account', 'Preferences', 'Notifications', 'Security', 'Connected apps', 'Accessibility'].map(function (t, i) { return { t: t, sel: H.sel(i === 0) }; }) };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

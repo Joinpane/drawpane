@@ -1,0 +1,22 @@
+<!-- @dsCard group="Inspector" height=344 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>PropertySection — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style="background:var(--canvas)"></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h('div', { style: { width: 264, background: 'var(--surface)', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-pane)' } },
+      h(D.PropertySection, { title: 'Frame' },
+        h('div', { className: 'dp-row' }, h(D.NumberField, { label: 'X', defaultValue: '20' }), h(D.NumberField, { label: 'Y', defaultValue: '200' })),
+        h('div', { className: 'dp-row' }, h(D.NumberField, { label: 'W', defaultValue: '300' }), h(D.NumberField, { label: 'H', defaultValue: '196', unit: 'hug' }))),
+      h(D.PropertySection, { title: 'Auto layout', actions: h(React.Fragment, null, h(D.IconButton, { icon: 'xray', label: 'Layout X-ray', pressed: true }), h(D.IconButton, { icon: 'minus', label: 'Remove auto layout' })) },
+        h(D.SegmentedControl, { label: 'Direction', value: 'col', options: [{ value: 'row', icon: 'layout-row', title: 'Horizontal' }, { value: 'col', icon: 'layout-col', title: 'Vertical' }, { value: 'grid', icon: 'layout-grid', title: 'Grid' }] }),
+        h('div', { className: 'dp-row' }, h(D.NumberField, { icon: 'layout-col', ariaLabel: 'Gap', token: 'space/200' }), h(D.NumberField, { label: '\u25a2', ariaLabel: 'Padding', defaultValue: '12' }))),
+      h(D.PropertySection, { title: 'Fill', actions: h(D.IconButton, { icon: 'plus', label: 'Add fill' }) },
+        h('div', { className: 'dp-row', style: { gridTemplateColumns: '1fr 72px' } }, h(D.NumberField, { icon: 'rectangle', ariaLabel: 'Fill', token: 'surface/raised', swatch: '#ffffff' }), h(D.NumberField, { label: '%', defaultValue: '100' }))))
+  );
+</script>
+</body>
+</html>

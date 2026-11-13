@@ -1,0 +1,16 @@
+<!-- @dsCard group="Inputs" height=132 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>TextField — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style="align-items:flex-start"></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.TextField, { label: 'File name', defaultValue: 'Checkout flow', hint: 'Shown on the dashboard and in share links.' }),
+      h(D.TextField, { label: 'Invite by email', placeholder: 'name@company.com', error: 'That address is already on this team.' }))
+  );
+</script>
+</body>
+</html>

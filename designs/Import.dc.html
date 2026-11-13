@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane import</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; display: grid; place-items: center; padding: 40px 16px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <div style="width: 100%; max-width: 960px; display: flex; flex-wrap: wrap; border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-modal); overflow: hidden">
+    <aside aria-label="Import source" style="flex: 1 1 260px; box-sizing: border-box; padding: 24px; background: var(--surface); border-right: 1px solid var(--line); display: grid; gap: 16px; align-content: start">
+      <h1 style="margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Import into Mobile</h1>
+      <div role="radiogroup" aria-label="Source" style="display: grid; gap: 6px">
+        <sc-for list="{{sources}}" as="s" hint-placeholder-count="3">
+          <button type="button" role="radio" aria-checked="{{s.on}}" style="{{s.style}}">
+            <span style="font-size: 13px; line-height: 18px; font-weight: 600">{{s.name}}</span>
+            <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{s.desc}}</span>
+          </button>
+        </sc-for>
+      </div>
+      <x-import component-from-global-scope="Drawpane.TextField" label="Figma file link" default-value="figma.com/design/Xk2…/Brand-2025"></x-import>
+      <p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Uses a read-only personal access token. Drawpane never writes to Figma.</p>
+    </aside>
+
+    <section aria-label="Import report" style="flex: 999 1 520px; box-sizing: border-box; padding: 24px; display: grid; gap: 20px; align-content: start">
+      <div style="display: flex; align-items: center; gap: 12px">
+        <span style="display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--surface-sunken); color: var(--success)"><x-import component-from-global-scope="Drawpane.Icon" name="check"></x-import></span>
+        <div style="flex: 1">
+          <h2 style="margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Brand 2025 is ready</h2>
+          <p style="margin: 2px 0 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Imported in 38 seconds · 4 pages · 1,912 layers</p>
+        </div>
+        <x-import component-from-global-scope="Drawpane.Badge" tone="success">99.4% visual match</x-import>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
+        <figure style="margin: 0">
+          <div style="position: relative; aspect-ratio: 4 / 3; border-radius: var(--radius-md); background: #fdf6e3; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden">
+            <span style="position: absolute; left: 12%; top: 18%; width: 46%; height: 18%; border-radius: 4px; background: #16181d"></span>
+            <span style="position: absolute; left: 12%; top: 44%; width: 30%; height: 8%; border-radius: 3px; background: #b7791f"></span>
+            <span style="position: absolute; left: 64%; top: 18%; width: 24%; height: 64%; border-radius: 6px; background: #ffffff"></span>
+          </div>
+          <figcaption style="margin-top: 6px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Figma render</figcaption>
+        </figure>
+        <figure style="margin: 0">
+          <div style="position: relative; aspect-ratio: 4 / 3; border-radius: var(--radius-md); background: #fdf6e3; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden">
+            <span style="position: absolute; left: 12%; top: 18%; width: 46%; height: 18%; border-radius: 4px; background: #16181d"></span>
+            <span style="position: absolute; left: 12%; top: 44%; width: 30%; height: 8%; border-radius: 3px; background: #b7791f"></span>
+            <span style="position: absolute; left: 64%; top: 18%; width: 24%; height: 64%; border-radius: 6px; background: #ffffff"></span>
+            <span style="position: absolute; left: 62%; top: 72%; width: 28%; height: 14%; border-radius: 4px; box-shadow: inset 0 0 0 2px var(--xray-gap)"></span>
+          </div>
+          <figcaption style="margin-top: 6px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Drawpane render · 1 region differs (font)</figcaption>
+        </figure>
+      </div>
+
+      <ul style="margin: 0; padding: 0; list-style: none; display: grid; gap: 4px">
+        <sc-for list="{{report}}" as="r" hint-placeholder-count="6">
+          <li style="display: grid; grid-template-columns: 20px 1fr auto; align-items: center; gap: 10px; min-height: 36px; padding: 0 10px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+            <span style="{{r.color}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{r.icon}}"></x-import></span>
+            <span style="display: flex; flex-direction: column; padding: 6px 0">
+              <span style="font-size: 13px; line-height: 18px">{{r.text}}</span>
+              <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{r.detail}}</span>
+            </span>
+            <span style="{{r.actionStyle}}">{{r.action}}</span>
+          </li>
+        </sc-for>
+      </ul>
+
+      <div style="display: flex; justify-content: flex-end; gap: 8px">
+        <x-import component-from-global-scope="Drawpane.Button" variant="ghost" size="lg">Download report</x-import>
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg">Open file</x-import>
+      </div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var src = 'display: grid; gap: 2px; justify-items: start; padding: 10px 12px; border-radius: var(--radius-sm); color: var(--ink); text-align: left; cursor: pointer; border: 1px solid ';
+    var ok = 'display: inline-flex; color: var(--success)';
+    var warn = 'display: inline-flex; color: var(--warning)';
+    var act = 'font-size: 12px; font-weight: 600; color: var(--signal-ink); white-space: nowrap';
+    return {
+      theme: this.props.theme ?? 'light',
+      sources: [
+        { name: 'Figma', desc: 'File link via the REST API, or a .fig file', on: 'true', style: src + 'var(--signal); background: var(--signal-soft)' },
+        { name: 'Penpot', desc: '.penpot export, versions 2 and 3', on: 'false', style: src + 'var(--line-strong); background: var(--surface-sunken)' },
+        { name: 'SVG or images', desc: 'Drop files onto any page', on: 'false', style: src + 'var(--line-strong); background: var(--surface-sunken)' }
+      ],
+      report: [
+        { icon: 'check', color: ok, text: '214 variables became tokens', detail: '3 collections, 2 modes kept', action: '', actionStyle: act },
+        { icon: 'check', color: ok, text: '61 components, 188 variants', detail: 'Auto layout mapped to flex; 4 grids mapped to CSS grid', action: '', actionStyle: act },
+        { icon: 'check', color: ok, text: '9 prototype flows', detail: 'Smart animate kept on 31 of 33 transitions', action: '', actionStyle: act },
+        { icon: 'warning', color: warn, text: '1 font is missing: Söhne', detail: 'Using a fallback on 212 text layers', action: 'Upload font', actionStyle: act },
+        { icon: 'warning', color: warn, text: '2 effects approximated', detail: 'Progressive blur shown as layer blur', action: 'Show layers', actionStyle: act },
+        { icon: 'warning', color: warn, text: '3 plugin data blocks skipped', detail: 'Stored on the layers, not used', action: '', actionStyle: act }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

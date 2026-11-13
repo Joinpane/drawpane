@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane selection colors and fonts</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas, two boards selected">
+      <div style="position: absolute; left: 30px; top: 60px; width: 340px; height: 560px"><dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import></div>
+      <div style="position: absolute; left: 400px; top: 60px; width: 340px; height: 560px"><dc-import name="PartBoard" variant="branch" hint-size="340px,560px"></dc-import></div>
+      <span class="u-outline" style="left: 30px; top: 60px; width: 710px; height: 560px"></span>
+      <span class="u-label u-label--signal" style="left: 330px; top: 628px">2 boards · 64 layers</span>
+    </main>
+    <aside class="u-side" aria-label="Inspector for the selection">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="design" options="{{H.dmodes}}"></x-import></div>
+      <section class="dp-section" aria-label="Selection colors">
+        <div class="dp-section__head"><h3 class="dp-section__title">Selection colors · 9</h3></div>
+        <div class="dp-section__body" style="gap: 4px">
+          <sc-for list="{{colors}}" as="c" hint-placeholder-count="9">
+            <div class="u-row" style="{{c.row}}"><span class="u-swatch" style="{{c.sw}}"></span><span class="{{c.nc}}">{{c.n}}</span><span class="u-spacer"></span><span class="u-xs u-muted">{{c.u}}</span></div>
+          </sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Selection fonts">
+        <div class="dp-section__head"><h3 class="dp-section__title">Selection fonts · 4</h3></div>
+        <div class="dp-section__body" style="gap: 4px">
+          <sc-for list="{{fonts}}" as="f" hint-placeholder-count="4"><div class="u-row" style="height: 28px"><span class="{{f.nc}}">{{f.n}}</span><span class="u-spacer"></span><span class="u-xs u-muted">{{f.u}}</span></div></sc-for>
+        </div>
+      </section>
+    </aside>
+    <div class="u-pop u-col" style="position: absolute; right: 288px; top: 210px; width: 260px; padding: 12px" role="dialog" aria-label="Replace color">
+      <strong class="u-sm">Replace #2A4ED4 in 3 layers</strong>
+      <div class="u-input" style="height: 28px"><x-import component-from-global-scope="Drawpane.Icon" name="search" size="12"></x-import>brand</div>
+      <sc-for list="{{rep}}" as="r" hint-placeholder-count="3"><div class="u-item {{r.sel}}" style="min-height: 0; padding: 5px 6px"><span class="u-swatch" style="{{r.sw}}"></span><span class="u-grow u-sm u-mono">{{r.n}}</span><span class="u-xs u-muted">{{r.d}}</span></div></sc-for>
+      <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Replace in 3 layers</x-import>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var C = [['brand/500', '#2b4fd6', '41 layers', 1, 0], ['text/strong', '#16181d', '28', 1, 0], ['text/muted', '#5b616e', '12', 1, 0], ['surface/sunken', '#f3f4f6', '8', 1, 0], ['#2A4ED4', '#2a4ed4', '3 · near brand/500', 0, 1], ['#D5D9E0', '#d5d9e0', '6', 0, 0], ['#FFD8C7', '#ffd8c7', '1', 0, 0], ['#CDEEEA', '#cdeeea', '1', 0, 0], ['#FFFFFF', '#ffffff', '22', 0, 0]];
+    return {
+      colors: C.map(function (c) { return { n: c[0], u: c[2], sw: 'background: ' + c[1], nc: c[3] ? 'u-chip u-chip--comp' : 'u-sm u-mono', row: 'height: 28px; padding: 0 6px; border-radius: var(--radius-sm);' + (c[4] ? ' background: var(--surface-active); box-shadow: inset 0 0 0 1.5px var(--signal)' : '') }; }),
+      fonts: [{ n: 'type/title-lg', u: '2', nc: 'u-chip u-chip--comp' }, { n: 'type/body', u: '14', nc: 'u-chip u-chip--comp' }, { n: 'Instrument Sans 13/16 Medium', u: '6 · no style', nc: 'u-sm' }, { n: 'SF Pro 11 · missing', u: '2', nc: 'u-sm' }],
+      rep: [{ n: 'brand/500', d: 'ΔE 0.6', sw: 'background: #2b4fd6', sel: 'is-sel' }, { n: 'brand/600', d: 'ΔE 9.1', sw: 'background: #1e3aa8', sel: '' }, { n: 'info', d: 'ΔE 4.2', sw: 'background: #2a5fe0', sel: '' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

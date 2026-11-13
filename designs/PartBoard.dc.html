@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sample design: Home, iOS</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<!-- This is the user's design on the canvas: its colors are the file's own and never follow the Drawpane UI theme. -->
+<div style="position: relative; width: 340px; height: 560px; background: #ffffff; box-shadow: 0 0 0 1px rgba(0,0,0,.06); overflow: hidden; font-family: var(--font-ui); color: #16181d">
+  <div style="height: 40px"></div>
+  <div style="margin: 8px 20px 0; font-size: 22px; line-height: 28px; font-weight: 600">{{greeting}}</div>
+  <div style="margin: 2px 20px 0; font-size: 13px; line-height: 18px; color: #5b616e">Three things on today</div>
+
+  <div style="{{heroStyle}}">
+    <div style="font-size: 14px; line-height: 18px; font-weight: 600">Design review at 2:00</div>
+    <div style="font-size: 12px; line-height: 16px; color: {{heroSub}}">Checkout flow · 4 people</div>
+  </div>
+
+  <div style="position: absolute; left: 20px; top: 200px; width: 300px; height: {{listH}}px; border-radius: 14px; background: #f3f4f6">
+    <sc-if value="{{isEmpty}}" hint-placeholder-val="{{false}}">
+      <div style="position: absolute; inset: 12px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border-radius: 10px; background: #ffffff; text-align: center; padding: 16px">
+        <span style="width: 40px; height: 40px; border-radius: 12px; background: #eef1fb"></span>
+        <span style="font-size: 14px; line-height: 18px; font-weight: 600">Nothing on today</span>
+        <span style="font-size: 12px; line-height: 16px; color: #5b616e">Enjoy the quiet, or plan something.</span>
+        <span style="margin-top: 4px; height: 32px; padding: 0 14px; border-radius: 8px; background: #2b4fd6; color: #ffffff; font-size: 13px; line-height: 32px; font-weight: 600">Add an event</span>
+      </div>
+    </sc-if>
+    <sc-for list="{{rows}}" as="r" hint-placeholder-count="3">
+      <div style="position: absolute; left: 12px; right: 12px; top: {{r.top}}px; height: 52px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-radius: 10px; background: #ffffff">
+        <span style="width: 28px; height: 28px; flex: none; border-radius: 8px; background: {{r.tint}}"></span>
+        <span style="display: flex; flex-direction: column">
+          <span style="font-size: 13px; line-height: 16px; font-weight: 500">{{r.title}}</span>
+          <span style="font-size: 11px; line-height: 14px; color: #5b616e">{{r.due}}</span>
+        </span>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="position: absolute; left: 0; right: 0; bottom: 0; height: 64px; display: flex; justify-content: space-around; align-items: center; border-top: 1px solid #e4e7ec; background: #ffffff">
+    <span style="width: 22px; height: 22px; border-radius: 6px; background: #16181d"></span>
+    <span style="width: 22px; height: 22px; border-radius: 6px; background: #d5d9e0"></span>
+    <span style="width: 22px; height: 22px; border-radius: 6px; background: #d5d9e0"></span>
+    <span style="width: 22px; height: 22px; border-radius: 6px; background: #d5d9e0"></span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"variant":{"editor":"enum","options":["default","gap16","branch","empty"],"default":"default"},"$preview":{"width":340,"height":560}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var v = this.props.variant ?? 'default';
+    var gap = v === 'gap16' ? 16 : 8;
+    var titles = ['Ship onboarding v2', 'Token audit', 'Lena: icon review'];
+    var dues = ['Due today', 'Tomorrow', 'Friday'];
+    var tints = v === 'branch' ? ['#ffd8c7', '#cdeeea', '#e4e7ec'] : ['#e4e7ec', '#e4e7ec', '#e4e7ec'];
+    var heroBg = v === 'branch' ? '#2b4fd6' : '#16181d';
+    return {
+      greeting: v === 'branch' ? 'Good afternoon, Ana' : 'Good morning, Ana',
+      heroStyle: 'position: absolute; left: 20px; top: 118px; width: 300px; height: 66px; box-sizing: border-box; padding: 14px 16px; border-radius: 14px; color: #ffffff; background: ' + heroBg,
+      heroSub: v === 'branch' ? '#d6defc' : '#b9bec8',
+      isEmpty: v === 'empty',
+      listH: 12 * 2 + 52 * 3 + gap * 2,
+      rows: v === 'empty' ? [] : titles.map(function (t, i) { return { title: t, due: dues[i], tint: tints[i], top: 12 + i * (52 + gap) }; })
+    };
+  }
+}
+</script>
+</body>
+</html>

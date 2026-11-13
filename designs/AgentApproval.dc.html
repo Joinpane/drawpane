@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane approval rules in action</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-sheet">
+  <header class="u-sheethead"><h1 class="u-h1">Approvals</h1><p class="u-lead">When an agent needs more than its rules allow, it asks a person who can say yes. Nothing waits silently.</p></header>
+  <div class="u-grid">
+    <figure class="u-fig" style="width: 360px">
+      <figcaption class="u-cap">1 · In the agent pane, the agent asks</figcaption>
+      <div class="u-pane u-col" style="padding: 14px">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Token enforcer" status="waiting" on-behalf-of="Ana"></x-import>
+        <div role="list" style="display: grid; gap: 2px">
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Found 212 raw colors across 9 files" meta="8 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="review" label="Needs approval to change 9 files" detail="Its rule allows 1 file per run"></x-import>
+        </div>
+        <div class="u-note u-note--agent"><x-import component-from-global-scope="Drawpane.Icon" name="key" size="12"></x-import><span class="u-grow">Asked Lena (design system owner). You can keep working; the agent waits on its branch.</span></div>
+      </div>
+    </figure>
+    <figure class="u-fig" style="width: 420px">
+      <figcaption class="u-cap">2 · The approver gets one clear card</figcaption>
+      <section role="alertdialog" aria-label="Approval request" class="u-modal">
+        <div class="u-row" style="padding: 14px 16px 6px"><span class="u-av u-av--agent u-av--lg"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import></span><span class="u-grow u-col u-col--tight" style="gap: 0"><strong class="u-lg">Token enforcer wants to change 9 files</strong><span class="u-sm u-muted">Started by Ana Ruiz · 2 min ago</span></span></div>
+        <div class="u-col" style="padding: 8px 16px">
+          <div class="u-dl u-well" style="padding: 10px 12px">
+            <dt>What</dt><dd>Replace 212 raw colors with tokens</dd>
+            <dt>Where</dt><dd>9 files in Mobile and Web platform</dd>
+            <dt>How</dt><dd>One branch per file; each needs its owner to merge</dd>
+            <dt>Risk</dt><dd>Low · no layout or text changes · 3 colors have no exact token</dd>
+            <dt>Cost</dt><dd>about $1.40 on the team key</dd>
+          </div>
+          <span class="u-cap">Preview · 3 of 212</span>
+          <sc-for list="{{prev}}" as="p" hint-placeholder-count="3"><div class="u-row u-sm"><span class="u-swatch" style="{{p.sw}}"></span><span class="u-mono">{{p.from}}</span><x-import component-from-global-scope="Drawpane.Icon" name="chevron-right" size="12"></x-import><x-import component-from-global-scope="Drawpane.TokenChip" name="{{p.to}}" swatch="{{p.sw2}}"></x-import><span class="u-spacer"></span><span class="u-xs u-muted">{{p.n}}</span></div></sc-for>
+        </div>
+        <div class="u-col" style="padding: 10px 16px 16px">
+          <div class="u-row"><span class="u-radio is-on"></span><span class="u-md">Approve this run</span></div>
+          <div class="u-row"><span class="u-radio"></span><span class="u-md">Always allow this for Token enforcer</span></div>
+          <div class="u-row" style="justify-content: flex-end; margin-top: 4px"><x-import component-from-global-scope="Drawpane.Button">Decline</x-import><x-import component-from-global-scope="Drawpane.Button">Only Mobile</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Approve</x-import></div>
+        </div>
+      </section>
+    </figure>
+    <div class="u-col u-col--loose" style="width: 360px">
+      <figure class="u-fig">
+        <figcaption class="u-cap">3 · Or from a push notification</figcaption>
+        <div class="u-pop u-row" style="padding: 12px 14px; border-radius: 18px"><span style="width: 32px; height: 32px; border-radius: 8px; background: #16181d; box-shadow: inset -10px -10px 0 #e04f1a"></span><span class="u-grow u-col u-col--tight" style="gap: 0"><span class="u-sm u-b">Drawpane · approval</span><span class="u-sm">Token enforcer wants to change 9 files</span></span></div>
+        <div class="u-row"><span class="u-btnlg u-grow">Decline</span><span class="u-btnlg u-btnlg--primary u-grow">Approve</span></div>
+      </figure>
+      <figure class="u-fig">
+        <figcaption class="u-cap">4 · Every request leaves a trail</figcaption>
+        <div class="u-pane u-col" style="padding: 12px 14px; gap: 10px">
+          <sc-for list="{{trail}}" as="t" hint-placeholder-count="4"><div class="u-row u-row--top u-sm"><span class="u-mono u-muted" style="width: 44px">{{t.t}}</span><span class="u-grow">{{t.e}}</span></div></sc-for>
+        </div>
+      </figure>
+      <figure class="u-fig">
+        <figcaption class="u-cap">5 · If nobody answers</figcaption>
+        <div class="u-note u-note--plain"><x-import component-from-global-scope="Drawpane.Icon" name="history" size="12"></x-import><span class="u-grow">After 24 hours the request goes to the next approver (Ana → Lena → any admin). After 3 days the run is closed and the branch kept.</span></div>
+      </figure>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var sw = function (c) { return 'background: ' + c; };
+    return {
+      prev: [{ from: '#2B4FD6', to: 'brand/500', sw: sw('#2b4fd6'), sw2: '#2b4fd6', n: '88 layers' }, { from: '#16181D', to: 'text/strong', sw: sw('#16181d'), sw2: '#16181d', n: '61 layers' }, { from: '#2A4ED4', to: 'brand/500 (close match)', sw: sw('#2a4ed4'), sw2: '#2b4fd6', n: '3 layers' }],
+      trail: [{ t: '10:12', e: 'Ana started Token enforcer on Mobile app' }, { t: '10:13', e: 'Agent asked to widen scope to 9 files' }, { t: '10:20', e: 'Lena approved this run only' }, { t: '10:31', e: '9 branches opened · 6 merged by owners' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

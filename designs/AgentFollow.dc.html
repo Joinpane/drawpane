@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane follow an agent live</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" branch="agent/empty-states" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <main class="u-stage" aria-label="Canvas, following the agent" style="border-radius: var(--radius-lg); box-shadow: inset 0 0 0 3px var(--agent)">
+      <div class="u-row" style="position: absolute; left: 50%; top: 0; transform: translateX(-50%); height: 28px; padding: 0 6px 0 10px; border-radius: 0 0 8px 8px; background: var(--agent); color: var(--on-agent); font-size: 12px; font-weight: 600; white-space: nowrap">
+        Following Empty states agent · step 4 of 6
+        <span style="padding: 0 6px; border-radius: 4px; background: rgba(255,255,255,.2); font-weight: 500">Esc to stop following</span>
+      </div>
+      <div style="position: absolute; left: 60px; top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="empty" hint-size="340px,560px"></dc-import>
+      </div>
+      <div class="u-board" style="left: 450px; top: 60px; width: 340px; height: 560px; border-radius: 0">
+        <div style="height: 40px"></div>
+        <div style="margin: 8px 20px 0; font-size: 22px; line-height: 28px; font-weight: 600">Good morning, Ana</div>
+        <div style="margin: 2px 20px 0; font-size: 13px; color: #5b616e">Three things on today</div>
+        <div style="position: absolute; left: 20px; top: 118px; width: 300px; height: 66px; box-sizing: border-box; padding: 14px 16px; border-radius: 14px; background: #16181d; color: #ffffff"><div style="font-size: 14px; line-height: 18px; font-weight: 600">Design review at 2:00</div><div style="font-size: 12px; line-height: 16px; color: #b9bec8">Checkout flow · 4 people</div></div>
+        <div style="position: absolute; left: 20px; top: 200px; width: 300px; height: 196px; border-radius: 14px; background: #f3f4f6">
+          <div style="position: absolute; inset: 12px; border-radius: 10px; background: #ffffff; display: grid; place-content: center; justify-items: center; gap: 8px; text-align: center">
+            <span style="width: 40px; height: 40px; border-radius: 12px; background: #fdecea"></span>
+            <span style="font-size: 14px; font-weight: 600">Couldn't load your day</span>
+            <span style="font-size: 12px; color: #5b616e">Check your connection and try again.</span>
+            <span style="height: 32px; padding: 0 14px; border-radius: 8px; background: #2b4fd6; color: #ffffff; font-size: 13px; line-height: 32px; font-weight: 600; opacity: .5">Retry</span>
+          </div>
+        </div>
+        <span class="u-outline u-outline--agent" style="left: 128px; top: 336px; width: 84px; height: 32px; border-radius: 8px"></span>
+      </div>
+      <div style="position: absolute; left: 600px; top: 436px">
+        <svg width="18" height="18" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 1l11 6-5 1.5L6 14z" fill="var(--agent)" stroke="#ffffff" stroke-width="1"/></svg>
+        <span class="u-label u-label--agent" style="position: static; display: inline-block; margin-left: 10px">set opacity 100% on Retry</span>
+      </div>
+      <span class="u-xs u-muted" style="position: absolute; left: 450px; top: 40px">Home — iOS · Error (new)</span>
+      <span class="u-xs u-muted" style="position: absolute; left: 60px; top: 40px">Home — iOS · Empty (new)</span>
+
+      <section aria-label="Run timeline" class="u-pop" style="position: absolute; left: 24px; right: 24px; bottom: 16px; padding: 10px 12px">
+        <div class="u-row u-sm" style="margin-bottom: 8px"><x-import component-from-global-scope="Drawpane.IconButton" icon="play" label="Replay from start"></x-import><strong>Run timeline</strong><span class="u-muted">· 31 operations · 1 min 12 s</span><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Speed" value="1" options="{{speed}}"></x-import><x-import component-from-global-scope="Drawpane.Button" size="sm">Pause agent</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Take over</x-import></div>
+        <div style="position: relative; height: 34px">
+          <div style="position: absolute; left: 0; right: 0; top: 15px; height: 4px; border-radius: 2px; background: var(--surface-sunken)"></div>
+          <div style="position: absolute; left: 0; width: 68%; top: 15px; height: 4px; border-radius: 2px; background: var(--agent)"></div>
+          <sc-for list="{{marks}}" as="m" hint-placeholder-count="6"><span style="{{m.s}}" title="{{m.t}}"></span></sc-for>
+          <span style="position: absolute; left: 68%; top: 6px; width: 3px; height: 22px; margin-left: -1px; border-radius: 2px; background: var(--ink)"></span>
+        </div>
+        <div class="u-xs u-muted" style="position: relative; height: 14px"><sc-for list="{{marks}}" as="m" hint-placeholder-count="6"><span style="{{m.l}}">{{m.t}}</span></sc-for></div>
+      </section>
+    </main>
+    <aside class="u-side" aria-label="Operations">
+      <div class="u-head"><h2 class="u-h3">Live operations</h2><span class="u-chip u-chip--agent">● live</span></div>
+      <div class="u-col u-col--tight" style="padding: 0 10px; overflow: hidden">
+        <sc-for list="{{ops}}" as="o" hint-placeholder-count="10">
+          <div class="u-item {{o.sel}}" style="min-height: 0; padding: 5px 6px"><span class="u-xs u-muted u-mono" style="width: 34px">{{o.t}}</span><code class="u-xs u-mono u-grow" style="color: var(--agent-ink); white-space: normal">{{o.op}}</code></div>
+        </sc-for>
+      </div>
+      <div class="u-xs u-muted" style="margin-top: auto; padding: 12px 14px; border-top: 1px solid var(--line)">Click an operation to see the canvas as it was then. Undo any single operation without stopping the run.</div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var M = [['Read', 2], ['Plan', 9], ['Empty', 30], ['Error', 52], ['Retry', 68], ['Check', 86]];
+    var O = [['0:58', 'duplicate board Empty as Error', 0], ['1:01', 'set text "Couldn\'t load your day"', 0], ['1:03', 'swap icon calendar → alert', 0], ['1:05', 'set fill danger/50 on art', 0], ['1:06', 'insert Button variant=primary "Retry"', 0], ['1:08', 'set opacity 100% on Retry', 1], ['next', 'render_frame Error', 0], ['next', 'check contrast Error', 0]];
+    return {
+      speed: H.opts([{ value: '1', label: '1×' }, { value: '2', label: '2×' }, { value: 'live', label: 'Live' }]),
+      marks: M.map(function (m) { return { t: m[0], s: 'position: absolute; left: ' + m[1] + '%; top: 11px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: var(--surface-raised); box-shadow: inset 0 0 0 2px ' + (m[1] < 68 ? 'var(--agent)' : 'var(--line-strong)'), l: 'position: absolute; left: ' + m[1] + '%; transform: translateX(-50%); white-space: nowrap' }; }),
+      ops: O.map(function (o) { return { t: o[0], op: o[1], sel: H.sel(o[2]) }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

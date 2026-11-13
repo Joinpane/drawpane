@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane ask about this file</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="row1" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas">
+      <div style="position: absolute; left: 60px; top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span class="u-outline u-outline--agent" style="left: 32px; top: 212px; width: 276px; height: 52px; border-radius: 10px"></span>
+        <span class="u-label u-label--agent" style="left: 316px; top: 229px">1</span>
+        <span class="u-outline u-outline--agent" style="left: 20px; top: 118px; width: 300px; height: 66px; border-radius: 14px"></span>
+        <span class="u-label u-label--agent" style="left: 328px; top: 142px">2</span>
+      </div>
+      <div class="u-board" style="left: 440px; top: 60px; width: 300px; height: 520px; opacity: .6">
+        <div style="margin: 48px 20px 0; font-size: 20px; font-weight: 600">Settings</div>
+        <div style="margin: 16px 20px; display: grid; gap: 8px"><span style="height: 44px; border-radius: 10px; background: #f3f4f6"></span><span style="height: 44px; border-radius: 10px; background: #f3f4f6"></span><span style="height: 44px; border-radius: 10px; background: #f3f4f6"></span></div>
+      </div>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Agent">
+      <div class="u-row" style="padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{H.modes}}"></x-import>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past runs"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+      <div class="u-col u-col--loose" style="flex: 1; min-height: 0; padding: 12px; overflow: hidden">
+        <div style="justify-self: end; max-width: 250px; padding: 8px 10px; border-radius: var(--radius-md) var(--radius-md) 2px var(--radius-md); background: var(--surface-sunken)" class="u-sm">Why does the Upcoming list use 8 px gaps when Settings uses 12?</div>
+        <div class="u-col" style="gap: 10px">
+          <span class="u-row u-xs u-muted"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import>Claude · read 2 boards, 3 comments, history · no changes</span>
+          <p class="u-md" style="margin: 0">Upcoming was tightened on <strong>Nov 4</strong> by Ana so three events fit above the fold on small phones <span class="u-chip u-chip--agent">1</span>. Settings still follows the default <span class="u-mono u-sm">space/150</span> (12) from the Acme list pattern <span class="u-chip u-chip--agent">2</span>.</p>
+          <p class="u-md" style="margin: 0">There's an open comment from Lena asking whether to align them <span class="u-chip u-chip--agent">3</span>.</p>
+          <div class="u-col u-col--tight">
+            <sc-for list="{{cites}}" as="c" hint-placeholder-count="3"><div class="u-item" style="box-shadow: inset 0 0 0 1px var(--line); min-height: 0"><span class="u-chip u-chip--agent">{{c.n}}</span><x-import component-from-global-scope="Drawpane.Icon" name="{{c.icon}}" size="12"></x-import><span class="u-grow u-sm u-ellip">{{c.t}}</span><span class="u-xs u-muted">{{c.m}}</span></div></sc-for>
+          </div>
+        </div>
+        <div class="u-col u-col--tight">
+          <span class="u-xs u-muted">Follow-ups</span>
+          <div class="u-row" style="flex-wrap: wrap"><sc-for list="{{fups}}" as="f" hint-placeholder-count="3"><span class="u-pill">{{f}}</span></sc-for></div>
+        </div>
+      </div>
+      <div style="padding: 10px 12px 12px; border-top: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.PromptField" model="Claude Sonnet 5.5" placeholder="Ask anything about this file" context="{{ctx}}"></x-import></div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      ctx: [{ label: 'This file', icon: 'layers' }],
+      cites: [{ n: '1', icon: 'history', t: 'Version "Tighter list" · Ana · Nov 4', m: 'History' }, { n: '2', icon: 'component', t: 'List pattern · Acme design system', m: 'Library' }, { n: '3', icon: 'comment', t: 'Lena: "Should these match?"', m: 'Comment' }],
+      fups: ['Align both to 12', 'Who else uses 8?', 'Show me the Nov 4 change']
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

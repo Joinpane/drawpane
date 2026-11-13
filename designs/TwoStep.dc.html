@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane two-step sign-in</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-sheet">
+  <header class="u-sheethead"><h1 class="u-h1">Two-step sign-in</h1><p class="u-lead">Required by Acme's policy for anyone not using SSO.</p></header>
+  <div class="u-grid">
+    <section class="u-modal u-col u-col--loose" style="width: 380px; padding: 28px; justify-items: center; text-align: center">
+      <span class="u-ico" style="width: 56px; height: 56px; border-radius: 16px"><x-import component-from-global-scope="Drawpane.Icon" name="key"></x-import></span>
+      <h2 class="u-h2">Use your passkey</h2>
+      <span class="u-md u-muted">Touch ID or your security key will ask you to confirm. Nothing to type.</span>
+      <div class="u-pop u-row" style="padding: 12px 14px; width: 100%; box-sizing: border-box; text-align: left"><span style="width: 32px; height: 32px; border-radius: 50%; background: radial-gradient(circle, #ff9b7a, #e04f1a)"></span><span class="u-grow u-col" style="gap: 0"><span class="u-sm u-b">design.acme.com</span><span class="u-xs u-muted">Sign in as ana@acme.com with Touch ID</span></span></div>
+      <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Use another way</x-import>
+    </section>
+    <section class="u-modal u-col u-col--loose" style="width: 380px; padding: 28px">
+      <h2 class="u-h2">Enter the 6-digit code</h2>
+      <span class="u-md u-muted">From your authenticator app.</span>
+      <div class="u-row" style="gap: 8px"><sc-for list="{{code}}" as="c" hint-placeholder-count="6"><span style="{{c.s}}">{{c.d}}</span></sc-for></div>
+      <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Trust this browser for 30 days"></x-import>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg">Verify</x-import>
+      <span class="u-xs u-muted">Lost your phone? Use a recovery code.</span>
+    </section>
+    <section class="u-modal u-col u-col--loose" style="width: 380px; padding: 28px">
+      <h2 class="u-h2">Set up two-step sign-in</h2>
+      <span class="u-md u-muted">Scan with an authenticator app, then enter the code it shows.</span>
+      <div style="width: 160px; height: 160px; border-radius: 8px; background-color: #ffffff; background-image: repeating-linear-gradient(0deg, #16181d 0 6px, transparent 6px 12px), repeating-linear-gradient(90deg, #16181d 0 6px, transparent 6px 14px); background-blend-mode: multiply; box-shadow: inset 0 0 0 10px #ffffff, 0 0 0 1px var(--line)"></div>
+      <span class="u-xs u-muted u-mono">Or enter: JBSW Y3DP EHPK 3PXP</span>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary">Next</x-import>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var d = ['4', '8', '1', '9', '', ''];
+    return { code: d.map(function (x, i) { return { d: x, s: 'display: grid; place-items: center; width: 44px; height: 52px; border-radius: var(--radius-md); background: var(--surface-sunken); font-size: 22px; font-weight: 600; font-family: var(--font-mono);' + (i === 4 ? ' box-shadow: inset 0 0 0 2px var(--signal)' : '') }; }) };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

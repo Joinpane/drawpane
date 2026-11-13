@@ -1,0 +1,25 @@
+<!-- @dsCard group="Actions" height=132 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Button — preview</title></head>
+<body>
+<div id="root" class="dp-stack" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h('div', { className: 'dp-stage', style: { padding: 0 } },
+        h(D.Button, { variant: 'primary', shortcut: '\u2318 \u21b5' }, 'Publish library'),
+        h(D.Button, null, 'Duplicate'),
+        h(D.Button, { variant: 'ghost', icon: 'branch' }, 'New branch'),
+        h(D.Button, { variant: 'danger' }, 'Delete file'),
+        h(D.Button, { disabled: true }, 'Merge')),
+      h('div', { className: 'dp-stage', style: { padding: 0 } },
+        h(D.Button, { variant: 'primary', size: 'lg' }, 'Create file'),
+        h(D.Button, { size: 'lg' }, 'Import .penpot'),
+        h(D.Button, { size: 'sm', icon: 'plus' }, 'Add'),
+        h(D.Button, { size: 'sm', variant: 'ghost' }, 'Detach')))
+  );
+</script>
+</body>
+</html>

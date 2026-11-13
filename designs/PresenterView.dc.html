@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane presenter view</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; display: grid; grid-template-columns: 1fr 420px; background: #121316; color: #e6e7ea; font-family: var(--font-ui); overflow: hidden">
+  <main style="position: relative; display: grid; place-items: center; border-right: 1px solid #24262b">
+    <span class="u-xs" style="position: absolute; left: 20px; top: 18px; color: #9aa0ab">Now showing · 4 of 12</span>
+    <div style="width: 820px; height: 480px; border-radius: 6px; background: #ffffff; position: relative; overflow: hidden; color: #16181d">
+      <div style="position: absolute; left: 48px; top: 48px; font-family: var(--font-display); font-size: 44px; line-height: 50px">A calmer home</div>
+      <div style="position: absolute; left: 48px; top: 120px; width: 300px; font-size: 16px; line-height: 24px; color: #5b616e">The next event first. Three upcoming items. Nothing else.</div>
+      <div style="position: absolute; right: 60px; top: 30px; width: 340px; height: 560px; transform: scale(.75); transform-origin: top right"><dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import></div>
+    </div>
+    <div class="u-row" style="position: absolute; bottom: 20px; left: 20px; right: 20px; gap: 10px">
+      <span class="u-tbtn">← Back</span><span class="u-tbtn">Next →</span><span class="u-spacer"></span><span class="u-tbtn">Laser</span><span class="u-tbtn">Black screen</span><span class="u-tbtn" style="background: #c8312b">End</span>
+    </div>
+  </main>
+  <aside style="display: grid; grid-template-rows: auto auto 1fr auto; gap: 16px; padding: 20px" aria-label="Presenter tools">
+    <div class="u-row"><span style="font-size: 36px; line-height: 40px; font-weight: 600; font-variant-numeric: tabular-nums">12:48</span><span class="u-sm u-grow" style="color: #9aa0ab">elapsed · 20 min slot</span><span class="u-tbtn">Reset</span></div>
+    <div class="u-col u-col--tight"><span class="u-xs" style="color: #9aa0ab">Next</span><div style="height: 160px; border-radius: 6px; background: #ffffff; position: relative; overflow: hidden"><div style="position: absolute; left: 18px; top: 18px; font-family: var(--font-display); font-size: 20px; color: #16181d">When there's nothing on</div><div style="position: absolute; right: 20px; top: 12px; width: 340px; height: 560px; transform: scale(.25); transform-origin: top right"><dc-import name="PartBoard" variant="empty" hint-size="340px,560px"></dc-import></div></div></div>
+    <div class="u-col" style="padding: 14px; border-radius: 10px; background: #1d1f23; align-content: start">
+      <span class="u-xs" style="color: #9aa0ab">Notes</span>
+      <span style="font-size: 17px; line-height: 26px">Start with the problem: people opened Home and saw 14 things. Ask the room how many they remember.</span>
+      <span style="font-size: 17px; line-height: 26px">Then show the hero card. Mention the 3-item cap came from interviews.</span>
+    </div>
+    <div class="u-row" style="gap: 6px"><sc-for list="{{strip}}" as="s" hint-placeholder-count="12"><span style="{{s}}"></span></sc-for></div>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return { strip: Array.from({ length: 12 }, function (_, i) { return 'flex: 1; height: 22px; border-radius: 3px; background: ' + (i === 3 ? '#ffffff' : '#2a2c31') + (i === 3 ? '; box-shadow: 0 0 0 2px #ff7a45' : ''); }) };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

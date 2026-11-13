@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane error and maintenance pages</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 32px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <header style="display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 24px">
+    <h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">When things go wrong</h1>
+    <p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Each page says what happened, whether work is safe, and the one thing to do next.</p>
+  </header>
+  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 24px">
+    <sc-for list="{{pages}}" as="p" hint-placeholder-count="6">
+      <figure style="margin: 0; display: grid; gap: 8px">
+        <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">{{p.kind}}</figcaption>
+        <div style="height: 300px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); display: grid; place-content: center; justify-items: center; gap: 12px; padding: 24px; text-align: center">
+          <span style="{{p.art}}">{{p.code}}</span>
+          <strong style="font-size: 17px; line-height: 22px">{{p.title}}</strong>
+          <span style="max-width: 320px; font-size: 13px; line-height: 19px; color: var(--ink-muted)">{{p.body}}</span>
+          <span style="display: flex; gap: 8px"><x-import component-from-global-scope="Drawpane.Button" size="sm">{{p.a1}}</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">{{p.a2}}</x-import></span>
+          <span style="font-size: 11px; color: var(--ink-muted); font-family: var(--font-mono)">{{p.ref}}</span>
+        </div>
+      </figure>
+    </sc-for>
+  </div>
+  <div style="margin-top: 24px; display: grid; gap: 12px">
+    <span style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">In-editor banners</span>
+    <div role="status" style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="warning"></x-import><span style="flex: 1"><strong>You're offline.</strong> Keep working; 38 changes are saved on this device and will sync when you reconnect.</span><span style="font-size: 12px; opacity: .8">Retrying in 8 s</span></div>
+    <div role="status" style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: var(--radius-md); background: var(--signal-soft); color: var(--signal-ink); font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="history"></x-import><span style="flex: 1"><strong>Reconnected.</strong> 2 of your offline changes touched layers Lena also edited; we kept both as a branch.</span><x-import component-from-global-scope="Drawpane.Button" size="sm">Review branch</x-import></div>
+    <div role="status" style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: var(--radius-md); background: var(--agent-soft); color: var(--agent-ink); font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import><span style="flex: 1"><strong>Agent paused.</strong> Your Anthropic key hit its rate limit. The branch is safe; the agent resumes in 40 s.</span><x-import component-from-global-scope="Drawpane.Button" size="sm">Switch model</x-import></div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var art = function (bg, c) { return 'display: grid; place-items: center; min-width: 64px; height: 64px; padding: 0 12px; box-sizing: border-box; border-radius: 16px; background: ' + bg + '; color: ' + c + '; font-family: var(--font-display); font-size: 30px; line-height: 1'; };
+    return {
+      theme: T,
+      pages: [
+        { kind: '404 · not found', code: '404', art: art('var(--surface-sunken)', 'var(--ink)'), title: 'This file isn\'t here', body: 'It may have been moved, deleted, or the link has a typo. Files in trash can be restored for 30 days.', a1: 'Check trash', a2: 'Go to files', ref: '/f/mobile-app-old' },
+        { kind: '403 · no access', code: '🔒', art: art('var(--surface-sunken)', 'var(--ink)'), title: 'You need access to Checkout flow', body: 'Signed in as ziyang@acme.com. Ana Ruiz owns this file and usually replies within an hour.', a1: 'Switch account', a2: 'Request access', ref: 'f_checkout · editor requested' },
+        { kind: '500 · something broke', code: '!', art: art('var(--signal-soft)', 'var(--signal-ink)'), title: 'Something went wrong on our side', body: 'Your work is safe: the last change was saved 4 s before this happened. Reloading usually fixes it.', a1: 'Copy error details', a2: 'Reload', ref: 'cf-ray 8e1c2a9b · 23:41:07' },
+        { kind: 'Maintenance · upgrading', code: '1.5', art: art('var(--signal-soft)', 'var(--signal-ink)'), title: 'Upgrading to Drawpane 1.5', body: 'Files are read-only for about 2 minutes while the database updates. Open files reconnect on their own.', a1: 'What\'s new', a2: 'Open read-only', ref: 'Started 23:39 by Ziyang · 62%' },
+        { kind: 'Browser not supported', code: 'GPU', art: art('var(--surface-sunken)', 'var(--ink)'), title: 'This browser can\'t run the canvas', body: 'Drawpane needs WebGL 2 and WebAssembly. Hardware acceleration seems off in this browser\'s settings.', a1: 'How to turn it on', a2: 'Open view-only', ref: 'Chrome 131 · WebGL2 unavailable' },
+        { kind: 'File too large to open here', code: '3.1 GB', art: art('var(--surface-sunken)', 'var(--ink)'), title: 'This file is very large', body: 'It has 9,400 boards and 2.8 GB of images. Opening one page at a time keeps it fast.', a1: 'Open everything', a2: 'Pick a page', ref: 'Suggestion: split into 4 files' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

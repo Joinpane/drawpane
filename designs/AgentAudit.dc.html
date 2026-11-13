@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane, file audit by an agent</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <aside aria-label="Audit categories" style="width: 248px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); padding: 12px 4px; overflow: hidden">
+      <div style="padding: 0 8px 10px; display: grid; gap: 6px">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Audit" status="idle" on-behalf-of="Acme Design"></x-import>
+        <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Ran 12 min ago · 3 pages · 1,240 layers · $0.06</span>
+      </div>
+      <sc-for list="{{cats}}" as="c" hint-placeholder-count="6">
+        <a href="#" style="{{c.style}}"><span style="flex: 1">{{c.name}}</span><span style="{{c.countStyle}}">{{c.count}}</span></a>
+      </sc-for>
+    </aside>
+
+    <main aria-label="Issues" style="flex: 999 1 560px; min-width: 0; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <header style="display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px 16px 12px; border-bottom: 1px solid var(--line)">
+        <div style="flex: 1 1 280px">
+          <h1 style="margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Detached values · 14</h1>
+          <p style="margin: 2px 0 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Raw colors and sizes that match a token. Fixing binds them; nothing moves.</p>
+        </div>
+        <x-import component-from-global-scope="Drawpane.Button" variant="ghost" size="sm">Ignore rule</x-import>
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="sm" icon="branch">Fix all 14 on a branch</x-import>
+      </header>
+      <ul style="flex: 1; min-height: 0; margin: 0; padding: 8px; list-style: none; display: grid; gap: 6px; align-content: start; overflow: hidden">
+        <sc-for list="{{issues}}" as="i" hint-placeholder-count="6">
+          <li style="display: grid; grid-template-columns: 64px 1fr auto; align-items: center; gap: 12px; padding: 8px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+            <span style="{{i.thumb}}"><span style="{{i.inner}}"></span></span>
+            <span style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
+              <span style="font-size: 12px; line-height: 16px; font-weight: 600">{{i.layer}}</span>
+              <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{i.where}}</span>
+              <code style="font-family: var(--font-mono); font-size: 11px; line-height: 14px; color: var(--agent-ink)">{{i.fix}}</code>
+            </span>
+            <x-import component-from-global-scope="Drawpane.Button" size="sm">Fix</x-import>
+          </li>
+        </sc-for>
+      </ul>
+    </main>
+
+    <aside aria-label="Audit summary" style="width: 264px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <section class="dp-section" aria-label="Health">
+        <div class="dp-section__head"><h3 class="dp-section__title">File health</h3></div>
+        <div class="dp-section__body" style="gap: 10px">
+          <sc-for list="{{scores}}" as="s" hint-placeholder-count="3">
+            <div style="display: grid; gap: 4px">
+              <div style="display: flex; justify-content: space-between; font-size: 12px; line-height: 16px"><span>{{s.name}}</span><span style="font-variant-numeric: tabular-nums; font-weight: 600">{{s.value}}</span></div>
+              <span style="height: 6px; border-radius: 3px; background: var(--surface-sunken)"><span style="{{s.bar}}"></span></span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Schedule">
+        <div class="dp-section__head"><h3 class="dp-section__title">Schedule</h3></div>
+        <div class="dp-section__body">
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Run every night at 2:00"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Open a fix branch automatically"></x-import>
+          <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Results post to #design-system in Slack.</span>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Rules">
+        <div class="dp-section__head"><h3 class="dp-section__title">Rules from skill</h3></div>
+        <p style="margin: 6px 0 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)"><b style="color: var(--ink); font-weight: 600">acme-audit.md</b> · v4 · edited by Lena. 18 rules, 3 custom.</p>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var link = 'display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;';
+    var cnt = 'font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: ';
+    var cats = [['Accessibility', '7', 'var(--danger)'], ['Detached values', '14', 'var(--warning)', true], ['Layer naming', '22', 'var(--ink-muted)'], ['Inconsistent spacing', '5', 'var(--warning)'], ['Unused components', '9', 'var(--ink-muted)'], ['Missing states', '3', 'var(--warning)']];
+    var thumb = 'display: grid; place-items: center; width: 64px; height: 44px; border-radius: var(--radius-xs); background: #ffffff; box-shadow: inset 0 0 0 1px var(--line-strong)';
+    var iss = [
+      ['Hero card · fill', 'Home — iOS · #16181e is 1 step from gray/900', 'bind fill gray/900', '#16181e'],
+      ['Event row · gap', 'Event row · 7 px between icon and text', 'bind gap space/200 (8)', '#e4e7ec'],
+      ['Tab bar · active', 'Settings — iOS · #2c50d7 is 1 step from blue/600', 'bind fill blue/600', '#2c50d7'],
+      ['Greeting · size', 'Onboarding · 21 px, nearest style heading/xl (22)', 'apply text style heading/xl', '#16181d'],
+      ['Card · radius', 'Web dashboard · 13 px, nearest radius/lg (14)', 'bind radius radius/lg', '#f3f4f6'],
+      ['Chip · fill', 'Web dashboard · #eef1fc matches blue/50', 'bind fill blue/50', '#eef1fc']
+    ];
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true, no: false,
+      cats: cats.map(function (c) { return { name: c[0], count: c[1], style: link + (c[3] ? ' background: var(--signal-soft); font-weight: 600' : ''), countStyle: cnt + c[2] }; }),
+      issues: iss.map(function (i) { return { layer: i[0], where: i[1], fix: i[2], thumb: thumb, inner: 'width: 40px; height: 16px; border-radius: 4px; background: ' + i[3] }; }),
+      scores: [
+        { name: 'Values bound to tokens', value: '92%', bar: 'display: block; height: 6px; border-radius: 3px; width: 92%; background: var(--success)' },
+        { name: 'Text contrast AA', value: '97%', bar: 'display: block; height: 6px; border-radius: 3px; width: 97%; background: var(--success)' },
+        { name: 'Layers named', value: '81%', bar: 'display: block; height: 6px; border-radius: 3px; width: 81%; background: var(--warning)' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

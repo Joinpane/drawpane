@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane when an agent run fails</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" branch="agent/settings-copy" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Failure states">
+      <div style="position: absolute; inset: 0; display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: min-content; gap: 16px; align-content: start">
+        <sc-for list="{{cases}}" as="c" hint-placeholder-count="4">
+          <section class="u-pane u-col" style="padding: 14px; gap: 10px">
+            <span class="u-cap">{{c.kind}}</span>
+            <div class="u-row u-row--top"><span class="{{c.ico}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{c.icon}}"></x-import></span><span class="u-grow u-col u-col--tight"><strong class="u-md">{{c.title}}</strong><span class="u-sm u-muted">{{c.body}}</span></span></div>
+            <div class="u-dl u-well" style="padding: 8px 10px"><dt>Branch</dt><dd>{{c.branch}}</dd><dt>Kept</dt><dd>{{c.kept}}</dd></div>
+            <div class="u-row"><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm">{{c.a1}}</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">{{c.a2}}</x-import></div>
+          </section>
+        </sc-for>
+      </div>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Agent">
+      <div class="u-row" style="padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{H.modes}}"></x-import>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past runs"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+      <div class="u-col" style="flex: 1; min-height: 0; padding: 12px; overflow: hidden">
+        <div class="u-row"><x-import component-from-global-scope="Drawpane.AgentTag" name="Copy editor" status="stopped" on-behalf-of="Mo"></x-import><span class="u-xs u-muted">stopped 10:42</span></div>
+        <div role="list" style="display: grid; gap: 2px">
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Read Settings — iOS (48 text layers)" meta="3 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Rewrote 31 labels" ops="set text × 31" meta="12 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="failed" label="Update Toggle row in the Acme library" detail="Not allowed: this agent can't edit libraries" ops="update_component Toggle row → denied"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="queued" label="Rewrite 17 labels inside Toggle row"></x-import>
+        </div>
+        <div class="u-pane" style="box-shadow: inset 0 0 0 1.5px var(--danger); background: var(--surface-raised)">
+          <div class="u-col" style="padding: 12px">
+            <strong class="u-md">The run stopped at step 3</strong>
+            <span class="u-sm u-muted">31 of 48 labels are done on the branch. The other 17 live in a library component this agent may not change.</span>
+            <div class="u-col u-col--tight">
+              <div class="u-item" style="box-shadow: inset 0 0 0 1px var(--line)"><span class="u-grow">Override the 17 labels in this file only</span><span class="u-xs u-muted">resume</span></div>
+              <div class="u-item" style="box-shadow: inset 0 0 0 1px var(--line)"><span class="u-grow">Ask Lena to allow library edits once</span><span class="u-xs u-muted">request</span></div>
+              <div class="u-item" style="box-shadow: inset 0 0 0 1px var(--line)"><span class="u-grow">Keep the 31 and stop here</span><span class="u-xs u-muted">review</span></div>
+            </div>
+          </div>
+        </div>
+        <span class="u-xs u-muted">Nothing on main changed. Spent $0.12 · full log in Agent runs.</span>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var ic = function (c) { return 'u-ico ' + c; };
+    return {
+      cases: [
+        { kind: 'Not allowed', icon: 'key', ico: ic('u-ico--signal'), title: 'Copy editor tried to edit a library', body: 'The step was blocked by the agent\'s permissions. Work up to that point is safe.', branch: 'agent/settings-copy · 31 changes', kept: 'All finished steps', a1: 'Open run', a2: 'Resume with overrides' },
+        { kind: 'Budget reached', icon: 'bolt', ico: ic('u-ico--signal'), title: 'Tidy-up hit its $1.00 limit', body: 'It renamed 340 of 512 layers before the limit. Raise the limit or finish later.', branch: 'agent/tidy-checkout · 340 changes', kept: 'Renames so far', a1: 'Review now', a2: 'Add $0.50 and resume' },
+        { kind: 'Model unavailable', icon: 'plug', ico: ic(''), title: 'Your OpenAI key returned 401', body: 'The key was revoked or expired. Other providers are set up and can take over the run.', branch: 'agent/onboarding-v3 · 6 changes', kept: 'Plan and 2 steps', a1: 'Fix key', a2: 'Continue with Claude' },
+        { kind: 'Lost track', icon: 'warning', ico: ic('u-ico--warn'), title: 'Three render checks failed in a row', body: 'The agent stopped instead of guessing. It left notes on what it tried.', branch: 'agent/grid-dashboard · 22 changes', kept: 'Notes and attempts', a1: 'Discard branch', a2: 'Take over by hand' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

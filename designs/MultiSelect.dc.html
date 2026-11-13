@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane multi-selection and smart spacing</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" file="Web dashboard" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <aside aria-label="Layers" style="width: 248px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); padding: 8px 4px">
+      <div style="padding: 0 8px 8px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Left pane" value="layers" options="{{tabs}}"></x-import></div>
+      <div role="tree" aria-label="Layers">
+        <x-import component-from-global-scope="Drawpane.LayerRow" name="Overview" kind="board" has-children="{{yes}}" expanded="{{yes}}"></x-import>
+        <x-import component-from-global-scope="Drawpane.LayerRow" name="Header" kind="instance" depth="1"></x-import>
+        <x-import component-from-global-scope="Drawpane.LayerRow" name="Revenue" kind="instance" depth="1" selected="{{yes}}"></x-import>
+        <x-import component-from-global-scope="Drawpane.LayerRow" name="Active users" kind="instance" depth="1" selected="{{yes}}"></x-import>
+        <x-import component-from-global-scope="Drawpane.LayerRow" name="Churn" kind="instance" depth="1" selected="{{yes}}"></x-import>
+        <x-import component-from-global-scope="Drawpane.LayerRow" name="Chart" kind="frame" depth="1" has-children="{{yes}}"></x-import>
+      </div>
+      <div style="margin: 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 11px; line-height: 14px; color: var(--ink-muted)">3 selected · ⌘ click to add · ⇧ click for a range</div>
+    </aside>
+
+    <main aria-label="Canvas with three cards selected" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: 50%; top: 60px; width: 720px; height: 460px; margin-left: -360px; background: #ffffff; box-shadow: 0 0 0 1px rgba(0,0,0,.06); font-family: var(--font-ui); color: #16181d">
+        <span style="position: absolute; left: 0; top: -20px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Overview</span>
+        <div style="position: absolute; left: 32px; top: 28px; font-size: 20px; line-height: 26px; font-weight: 600">Overview</div>
+        <div style="position: absolute; left: 32px; top: 84px; width: 200px; height: 112px; border-radius: 12px; background: #f3f4f6; padding: 16px; box-sizing: border-box"><div style="font-size: 12px; color: #5b616e">Revenue</div><div style="margin-top: 6px; font-size: 24px; font-weight: 600">$48.2k</div></div>
+        <div style="position: absolute; left: 256px; top: 84px; width: 200px; height: 112px; border-radius: 12px; background: #f3f4f6; padding: 16px; box-sizing: border-box"><div style="font-size: 12px; color: #5b616e">Active users</div><div style="margin-top: 6px; font-size: 24px; font-weight: 600">3,912</div></div>
+        <div style="position: absolute; left: 480px; top: 84px; width: 208px; height: 112px; border-radius: 12px; background: #f3f4f6; padding: 16px; box-sizing: border-box"><div style="font-size: 12px; color: #5b616e">Churn</div><div style="margin-top: 6px; font-size: 24px; font-weight: 600">2.1%</div></div>
+        <div style="position: absolute; left: 32px; top: 220px; width: 656px; height: 208px; border-radius: 12px; background: #f8f9fb"></div>
+
+        <span aria-hidden="true" style="position: absolute; left: 32px; top: 84px; width: 200px; height: 112px; box-shadow: inset 0 0 0 1px var(--signal); border-radius: 12px"></span>
+        <span aria-hidden="true" style="position: absolute; left: 256px; top: 84px; width: 200px; height: 112px; box-shadow: inset 0 0 0 1px var(--signal); border-radius: 12px"></span>
+        <span aria-hidden="true" style="position: absolute; left: 480px; top: 84px; width: 208px; height: 112px; box-shadow: inset 0 0 0 1px var(--signal); border-radius: 12px"></span>
+        <span aria-hidden="true" style="position: absolute; left: 32px; top: 84px; width: 656px; height: 112px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+
+        <span aria-hidden="true" style="position: absolute; left: 232px; top: 139px; width: 24px; height: 1px; background: var(--guide)"></span>
+        <span style="position: absolute; left: 233px; top: 122px; padding: 0 3px; border-radius: 2px; background: var(--guide); color: #ffffff; font-family: var(--font-mono); font-size: 10.5px; line-height: 13px">24</span>
+        <span aria-hidden="true" style="position: absolute; left: 456px; top: 139px; width: 24px; height: 1px; background: var(--guide)"></span>
+        <span style="position: absolute; left: 457px; top: 122px; padding: 0 3px; border-radius: 2px; background: var(--guide); color: #ffffff; font-family: var(--font-mono); font-size: 10.5px; line-height: 13px">24</span>
+        <span style="position: absolute; left: 600px; top: 200px; padding: 1px 6px; border-radius: var(--radius-xs); background: var(--warning); color: #ffffff; font-size: 11px; line-height: 14px; font-weight: 600; white-space: nowrap">Widths differ: 200, 200, 208</span>
+        <span style="position: absolute; left: 360px; top: 204px; transform: translateX(-50%); padding: 1px 6px; border-radius: var(--radius-xs); background: var(--signal); color: var(--on-signal); font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 500">656 × 112 · 3 layers</span>
+      </div>
+
+      <div style="position: absolute; left: 50%; top: 556px; transform: translateX(-50%); white-space: nowrap">
+        <x-import component-from-global-scope="Drawpane.SelectionLens" kind="3 instances" kind-icon="instance">
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Align" value="top" options="{{align}}"></x-import>
+          <x-import component-from-global-scope="Drawpane.NumberField" label="↔" aria-label="Spacing" default-value="24"></x-import>
+          <x-import component-from-global-scope="Drawpane.NumberField" label="W" default-value="Mixed"></x-import>
+          <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost" icon="layout-row">Add auto layout</x-import>
+        </x-import>
+      </div>
+      <div style="position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); font-size: 11px; line-height: 14px; color: var(--ink-muted); white-space: nowrap">
+        <span>Equal spacing found · drag a pink gap to change all</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px"><x-import component-from-global-scope="Drawpane.Kbd">⌥ ⌘ T</x-import> tidy up</span>
+      </div>
+    </main>
+
+    <aside aria-label="Inspector, three layers" style="width: 264px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="design" options="{{modes}}"></x-import></div>
+      <section class="dp-section" aria-label="Align and distribute">
+        <div class="dp-section__head"><h3 class="dp-section__title">Align and distribute</h3></div>
+        <div class="dp-section__body">
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Horizontal align" value="none" options="{{halign}}"></x-import>
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Vertical align" value="top" options="{{valign}}"></x-import>
+          <div class="dp-row"><x-import component-from-global-scope="Drawpane.Button" size="sm">Distribute ↔</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm">Match widths</x-import></div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Frame">
+        <div class="dp-section__head"><h3 class="dp-section__title">Frame · 3 layers</h3></div>
+        <div class="dp-section__body">
+          <div class="dp-row"><x-import component-from-global-scope="Drawpane.NumberField" label="X" default-value="Mixed"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="Y" default-value="84"></x-import></div>
+          <div class="dp-row"><x-import component-from-global-scope="Drawpane.NumberField" label="W" default-value="Mixed"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="H" default-value="112"></x-import></div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Selection colors">
+        <div class="dp-section__head"><h3 class="dp-section__title">Selection colors</h3></div>
+        <div class="dp-section__body" style="gap: 6px">
+          <x-import component-from-global-scope="Drawpane.TokenChip" name="gray/100" swatch="#f3f4f6"></x-import>
+          <x-import component-from-global-scope="Drawpane.TokenChip" name="text/strong" swatch="#16181d"></x-import>
+          <x-import component-from-global-scope="Drawpane.TokenChip" name="text/muted" swatch="#5b616e"></x-import>
+          <span class="dp-caption">Change one to recolor all three cards.</span>
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      tabs: [{ value: 'layers', label: 'Layers' }, { value: 'assets', label: 'Assets' }, { value: 'history', label: 'History' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }],
+      align: [{ value: 'left', label: 'L' }, { value: 'top', label: 'T' }, { value: 'center', label: 'C' }],
+      halign: [{ value: 'left', label: 'Left' }, { value: 'center', label: 'Center' }, { value: 'right', label: 'Right' }],
+      valign: [{ value: 'top', label: 'Top' }, { value: 'middle', label: 'Middle' }, { value: 'bottom', label: 'Bottom' }]
+    };
+  }
+}
+</script>
+</body>
+</html>

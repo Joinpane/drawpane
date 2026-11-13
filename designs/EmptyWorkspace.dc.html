@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane a brand new workspace</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-shell">
+  <nav aria-label="Workspace" style="width: 260px; flex: none; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; padding: 12px 10px; background: var(--canvas); border-right: 1px solid var(--line)">
+    <div class="u-row" style="height: 40px; padding: 0 8px"><span style="display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--radius-sm); background: var(--surface-inverse); color: var(--ink-inverse); font-size: 11px; font-weight: 700">N</span><span class="u-col" style="gap: 0"><span class="u-md u-b">Northwind</span><span class="u-xs u-muted">1 member · just created</span></span></div>
+    <sc-for list="{{nav}}" as="n" hint-placeholder-count="4"><span class="u-item {{n.sel}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{n.i}}"></x-import>{{n.t}}</span></sc-for>
+    <div class="u-xs u-muted" style="padding: 16px 10px 0">Projects</div>
+    <span class="u-item u-muted">No projects yet</span>
+  </nav>
+  <main class="u-main" style="display: grid; place-items: center">
+    <div class="u-col u-col--loose" style="width: 720px">
+      <h1 class="u-display" style="font-size: 44px; line-height: 50px">Welcome to Northwind</h1>
+      <p class="u-md u-muted" style="margin: 0">Your instance is ready on northwind.design. Here are good first steps; do them in any order.</p>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px">
+        <sc-for list="{{steps}}" as="s" hint-placeholder-count="4">
+          <div class="u-box u-col" style="padding: 16px; border-radius: var(--radius-md)">
+            <div class="u-row"><span class="u-ico {{s.ic}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{s.i}}"></x-import></span><strong class="u-md u-grow">{{s.t}}</strong><span class="{{s.cc}}">{{s.c}}</span></div>
+            <span class="u-sm u-muted">{{s.d}}</span>
+            <div><x-import component-from-global-scope="Drawpane.Button" size="sm">{{s.a}}</x-import></div>
+          </div>
+        </sc-for>
+      </div>
+      <div class="u-row u-sm u-muted"><div class="u-bar" style="width: 160px; height: 4px"><span style="width: 25%"></span></div>1 of 4 done · you can hide this anytime</div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      nav: [{ i: 'history', t: 'Recent', sel: 'is-sel' }, { i: 'pen', t: 'Drafts', sel: '' }, { i: 'component', t: 'Libraries', sel: '' }, { i: 'agent', t: 'Agents', sel: '' }],
+      steps: [
+        { i: 'board', ic: '', t: 'Start a file', d: 'Blank, from a template, or from a prompt.', a: 'New file', c: '', cc: 'display: none' },
+        { i: 'export', ic: '', t: 'Bring your work', d: 'Import .fig, .penpot or .dpz files. Comments and history come too.', a: 'Import', c: '', cc: 'display: none' },
+        { i: 'layers', ic: '', t: 'Invite your team', d: 'By email, by domain, or with SSO.', a: 'Invite', c: '', cc: 'display: none' },
+        { i: 'agent', ic: 'u-ico--agent', t: 'Set up agents', d: 'Workers AI is on. Add a Claude or OpenAI key anytime.', a: 'Change', c: 'done', cc: 'u-chip u-chip--ok' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

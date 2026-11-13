@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane phone, sign in</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-phone">
+  <div class="u-col u-col--loose" style="flex: 1; padding: 96px 24px 32px">
+    <span class="u-row" style="gap: 10px"><svg width="28" height="28" viewBox="0 0 32 32" role="img" aria-label="Drawpane"><rect x="3.25" y="3.25" width="18.5" height="18.5" rx="4" fill="none" stroke="var(--ink)" stroke-width="2.5"></rect><rect x="10" y="10" width="19" height="19" rx="4" fill="var(--signal)"></rect></svg><span style="font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -0.01em">Drawpane</span></span>
+    <div class="u-col u-col--tight"><h1 class="u-display" style="font-size: 34px; line-height: 40px">Sign in to Acme Design</h1><span class="u-sm u-muted u-mono">design.acme.com</span></div>
+    <span class="u-btnlg u-btnlg--primary">Continue with a passkey</span>
+    <span class="u-btnlg">Continue with Acme SSO</span>
+    <div class="u-row u-xs u-muted"><span class="u-grow u-line"></span>or<span class="u-grow u-line"></span></div>
+    <x-import component-from-global-scope="Drawpane.TextField" label="Work email" placeholder="name@acme.com"></x-import>
+    <span class="u-btnlg" style="background: transparent; box-shadow: inset 0 0 0 1px var(--line)">Email me a link</span>
+    <span class="u-spacer"></span>
+    <div class="u-note u-note--plain"><x-import component-from-global-scope="Drawpane.Icon" name="eye" size="12"></x-import><span class="u-grow">On the phone you can view, comment, inspect and answer agents. Editing works best on a tablet or computer.</span></div>
+    <span class="u-xs u-muted" style="text-align: center">Different instance? <strong>Change server</strong></span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 390, "height": 844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {};
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

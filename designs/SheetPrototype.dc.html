@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane overlays, interactive components and variables</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 32px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <header style="display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 24px">
+    <h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Prototype details</h1>
+    <p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Interactions read as sentences, so a prototype can be reviewed like copy.</p>
+  </header>
+  <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+
+    <figure style="margin: 0; display: grid; gap: 8px; width: 300px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Interaction · open overlay</figcaption>
+      <div role="dialog" aria-label="Interaction" style="border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); padding: 12px; display: grid; gap: 10px">
+        <p style="margin: 0; font-size: 13px; line-height: 20px"><strong>On tap</strong> → <strong>open overlay</strong> <span style="padding: 1px 6px; border-radius: 4px; background: var(--surface-sunken); font-family: var(--font-mono); font-size: 12px">Event sheet</span></p>
+        <div style="display: grid; grid-template-columns: 80px 1fr; gap: 8px; align-items: center; font-size: 12px">
+          <span style="color: var(--ink-muted)">Position</span>
+          <div aria-label="Overlay position" style="display: grid; grid-template-columns: repeat(3, 20px); gap: 3px">
+            <sc-for list="{{pos}}" as="p" hint-placeholder-count="9"><span style="{{p}}"></span></sc-for>
+          </div>
+          <span style="color: var(--ink-muted)">Background</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span style="width: 16px; height: 16px; border-radius: 4px; background: rgba(22,24,29,.4)"></span>Dim 40%</span>
+          <span style="color: var(--ink-muted)">Animation</span>
+          <span style="display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken)">Move in · bottom <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+        </div>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Close when tapping outside"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" label="Keep scroll position"></x-import>
+      </div>
+    </figure>
+
+    <figure style="margin: 0; display: grid; gap: 8px; width: 300px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Easing and spring</figcaption>
+      <div style="border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); padding: 12px; display: grid; gap: 10px">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Curve type" value="spring" options="{{curves}}"></x-import>
+        <svg viewBox="0 0 276 140" width="276" height="140" role="img" aria-label="Spring curve overshooting then settling" style="border-radius: 6px; background: var(--surface-sunken)">
+          <line x1="12" y1="40" x2="264" y2="40" stroke="var(--line-strong)" stroke-dasharray="3 3"/>
+          <path d="M12 128 C 50 128, 60 20, 96 28 S 140 48, 160 38 S 200 40, 264 40" fill="none" stroke="var(--signal)" stroke-width="2"/>
+          <circle cx="96" cy="28" r="3" fill="var(--signal)"/>
+        </svg>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px">
+          <x-import component-from-global-scope="Drawpane.NumberField" label="M" aria-label="Mass" default-value="1"></x-import>
+          <x-import component-from-global-scope="Drawpane.NumberField" label="S" aria-label="Stiffness" default-value="320"></x-import>
+          <x-import component-from-global-scope="Drawpane.NumberField" label="D" aria-label="Damping" default-value="24"></x-import>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px"><span style="flex: 1; color: var(--ink-muted)">Settles in about 420 ms</span><x-import component-from-global-scope="Drawpane.Button" size="sm" icon="play">Preview</x-import></div>
+        <x-import component-from-global-scope="Drawpane.TokenChip" name="motion/spring-snappy" swatch="#e04f1a"></x-import>
+      </div>
+    </figure>
+
+    <figure style="margin: 0; display: grid; gap: 8px; width: 340px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Interactive component · Button</figcaption>
+      <div style="border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); padding: 16px; display: grid; gap: 14px">
+        <div style="position: relative; display: flex; align-items: center; justify-content: space-between">
+          <sc-for list="{{states}}" as="s" hint-placeholder-count="3">
+            <span style="display: grid; gap: 6px; justify-items: center"><span style="{{s.btn}}">Save</span><span style="font-size: 11px; color: var(--ink-muted)">{{s.name}}</span></span>
+          </sc-for>
+          <span aria-hidden="true" style="position: absolute; left: 76px; right: 76px; top: 16px; height: 1px; background: var(--component)"></span>
+        </div>
+        <ul style="margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 12px; line-height: 16px">
+          <li style="padding: 6px 8px; border-radius: var(--radius-sm); background: var(--surface-sunken)"><strong>While hovering</strong> → change to Hover · 120 ms ease-out</li>
+          <li style="padding: 6px 8px; border-radius: var(--radius-sm); background: var(--surface-sunken)"><strong>While pressing</strong> → change to Pressed · instant</li>
+          <li style="padding: 6px 8px; border-radius: var(--radius-sm); background: var(--surface-sunken)"><strong>On tap</strong> → set <code style="font-family: var(--font-mono)">saved</code> to true</li>
+        </ul>
+        <span class="dp-caption">Every instance of Button gets these for free. 214 instances across 9 files.</span>
+      </div>
+    </figure>
+
+    <figure style="margin: 0; display: grid; gap: 8px; width: 360px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Variables and conditions</figcaption>
+      <div style="border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+        <div style="display: flex; align-items: center; padding: 10px 12px 6px"><strong style="flex: 1; font-size: 13px">Prototype variables</strong><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add variable"></x-import></div>
+        <div style="display: grid; grid-template-columns: 1fr 70px 80px; gap: 0 8px; padding: 0 12px; font-size: 12px; line-height: 28px">
+          <span style="color: var(--ink-muted); font-size: 11px">Name</span><span style="color: var(--ink-muted); font-size: 11px">Type</span><span style="color: var(--ink-muted); font-size: 11px">Starts as</span>
+          <sc-for list="{{vars}}" as="v" hint-placeholder-count="4"><span style="font-family: var(--font-mono)">{{v.n}}</span><span style="color: var(--ink-muted)">{{v.t}}</span><span style="font-family: var(--font-mono)">{{v.v}}</span></sc-for>
+        </div>
+        <div style="margin: 10px 12px 12px; padding: 10px; border-radius: var(--radius-sm); background: var(--surface-sunken); display: grid; gap: 6px; font-size: 12px; line-height: 18px; font-family: var(--font-mono)">
+          <span><span style="color: var(--signal-ink)">on tap</span> Add to cart</span>
+          <span style="padding-left: 12px">set cartCount = cartCount + 1</span>
+          <span style="padding-left: 12px"><span style="color: var(--signal-ink)">if</span> signedIn</span>
+          <span style="padding-left: 24px">navigate to Checkout · smart animate</span>
+          <span style="padding-left: 12px"><span style="color: var(--signal-ink)">else</span></span>
+          <span style="padding-left: 24px">open overlay Sign in sheet</span>
+        </div>
+        <div style="padding: 0 12px 12px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Variables can be bound to text, visibility and variant properties. Agents read the same names when they build flows.</div>
+      </div>
+    </figure>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var cell = function (on) { return 'width: 20px; height: 14px; border-radius: 3px; background: ' + (on ? 'var(--signal)' : 'var(--surface-sunken)') + '; box-shadow: inset 0 0 0 1px var(--line)'; };
+    var btn = function (bg, fg, sh) { return 'display: inline-block; padding: 7px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; background: ' + bg + '; color: ' + fg + '; box-shadow: 0 0 0 1.5px var(--component)' + (sh ? ', ' + sh : ''); };
+    return {
+      theme: T, yes: true,
+      pos: [0, 0, 0, 0, 0, 0, 0, 1, 0].map(function (v) { return cell(v); }),
+      curves: [{ value: 'ease', label: 'Ease' }, { value: 'spring', label: 'Spring' }, { value: 'custom', label: 'Bezier' }],
+      states: [{ name: 'Default', btn: btn('#2b4fd6', '#ffffff') }, { name: 'Hover', btn: btn('#1e3aa8', '#ffffff') }, { name: 'Pressed', btn: btn('#172d82', '#ffffff', 'inset 0 2px 0 rgba(0,0,0,.25)') }],
+      vars: [{ n: 'cartCount', t: 'Number', v: '0' }, { n: 'signedIn', t: 'Boolean', v: 'false' }, { n: 'userName', t: 'Text', v: '"Ziyang"' }, { n: 'theme', t: 'Mode', v: 'light' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

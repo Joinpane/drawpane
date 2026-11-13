@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane drafts, shared and starred</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-shell">
+  <nav aria-label="Workspace" style="flex: 1 1 240px; max-width: 260px; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; padding: 12px 10px; background: var(--canvas); border-right: 1px solid var(--line)">
+    <button type="button" style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); cursor: pointer; text-align: left"><span style="display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--radius-sm); background: var(--surface-inverse); color: var(--ink-inverse); font-size: 11px; font-weight: 700">A</span><span style="flex: 1; display: flex; flex-direction: column"><span style="font-size: 13px; line-height: 18px; font-weight: 600">Acme Design</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">23 members</span></span><x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></button>
+    <div style="height: 8px"></div>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="history"></x-import><span style="flex: 1">Recent</span><span style="font-size: 11px; color: var(--ink-muted)"></span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px; background: var(--surface-active); font-weight: 600"><x-import component-from-global-scope="Drawpane.Icon" name="pen"></x-import><span style="flex: 1">Drafts</span><span style="font-size: 11px; color: var(--ink-muted)">6</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="layers"></x-import><span style="flex: 1">Shared with me</span><span style="font-size: 11px; color: var(--ink-muted)">14</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="component"></x-import><span style="flex: 1">Libraries</span><span style="font-size: 11px; color: var(--ink-muted)">3</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import><span style="flex: 1">Agents</span><span style="font-size: 11px; color: var(--ink-muted)">2</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="close"></x-import><span style="flex: 1">Trash</span><span style="font-size: 11px; color: var(--ink-muted)"></span></a>
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 0 2px 0 10px"><span style="font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Projects</span><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="New project"></x-import></div>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #2b4fd6"></span><span style="flex: 1">Mobile</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #0f766e"></span><span style="flex: 1">Web platform</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #e04f1a"></span><span style="flex: 1">Brand</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #6b4bd6"></span><span style="flex: 1">Experiments</span></a>
+  </nav>
+  <main class="u-main u-col u-col--loose">
+    <header class="u-row"><h1 class="u-h1 u-grow">Drafts</h1><div class="u-input" style="width: 260px"><x-import component-from-global-scope="Drawpane.Icon" name="search" size="12"></x-import>Search drafts</div><x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg" icon="plus">New draft</x-import></header>
+    <p class="u-md u-muted" style="margin: -6px 0 0">Only you can see drafts until you move or share them. Agents can work in drafts without approvals.</p>
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 18px">
+      <sc-for list="{{drafts}}" as="d" hint-placeholder-count="6"><div class="u-col u-col--tight"><span style="{{d.th}}"><span style="{{d.a}}"></span><span style="{{d.b}}"></span></span><span class="u-md u-b">{{d.n}}</span><span class="u-xs u-muted">{{d.m}}</span></div></sc-for>
+    </div>
+    <div class="u-row" style="margin-top: 8px"><h2 class="u-h2 u-grow">Shared with me · 14</h2><x-import component-from-global-scope="Drawpane.SegmentedControl" label="From" value="all" options="{{from}}"></x-import></div>
+    <div role="table" aria-label="Shared with me">
+      <sc-for list="{{shared}}" as="s" hint-placeholder-count="5"><div class="u-trow" style="grid-template-columns: 40px minmax(200px, 1.5fr) 1fr 1fr 120px 32px"><span style="{{s.th}}"></span><span class="u-b">{{s.n}}</span><span class="u-row u-muted"><span class="u-av u-av--sm" style="{{s.avs}}">{{s.ini}}</span>{{s.by}}</span><span class="u-muted">{{s.when}}</span><span class="u-chip u-chip--muted" style="justify-self: start">{{s.role}}</span><span style="{{s.star}}">★</span></div></sc-for>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var th = function (bg) { return 'position: relative; display: block; aspect-ratio: 4 / 3; border-radius: var(--radius-md); background: ' + bg + '; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden'; };
+    var D = [['Logo explorations', 'Edited 1 h ago', '#f6f1ff', '#6b4bd6'], ['Agent: 3 directions for Home', 'Made by Claude · yesterday', '#efe9fd', '#6d3fd6'], ['Sketchpad', 'Edited Nov 9', '#fdf6e3', '#b7791f'], ['Pricing page ideas', 'Edited Nov 2', '#fff4ed', '#e04f1a']];
+    var S = [['Checkout flow', 'Ana Ruiz', 'AR', '2 h ago', 'Can edit', '#fff4ed', 1], ['Q4 brand refresh', 'Mo Haddad', 'MH', 'Yesterday', 'Can comment', '#f6f1ff', 0], ['Watch app', 'Lena Park', 'LP', 'Nov 8', 'Can view', '#f8f9fb', 1], ['Research synthesis', 'Kai Tanaka', 'KT', 'Nov 3', 'Can edit', '#eefaf8', 0], ['Agency handoff · North Studio', 'Rae Brooks (guest)', 'JN', 'Oct 30', 'Can view', '#f3f4f6', 0]];
+    return {
+      drafts: D.map(function (d) { return { n: d[0], m: d[1], th: th(d[2]), a: 'position: absolute; left: 14%; top: 18%; width: 34%; height: 64%; border-radius: 6px; background: #ffffff', b: 'position: absolute; left: 54%; top: 18%; width: 32%; height: 22%; border-radius: 6px; background: ' + d[3] }; }),
+      from: H.opts([{ value: 'all', label: 'Everyone' }, 'People', 'Guests']),
+      shared: S.map(function (s) { return { n: s[0], by: s[1], ini: s[2], avs: H.p(s[2]).st, when: s[3], role: s[4], th: 'width: 40px; height: 30px; border-radius: 5px; background: ' + s[5] + '; box-shadow: inset 0 0 0 1px var(--line)', star: 'color: ' + (s[6] ? 'var(--warning)' : 'var(--line-strong)') }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

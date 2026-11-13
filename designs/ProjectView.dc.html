@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane project page, list view</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; display: flex; flex-wrap: wrap; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <nav aria-label="Workspace" style="flex: 1 1 240px; max-width: 260px; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; padding: 12px 10px; background: var(--canvas); border-right: 1px solid var(--line)">
+    <button type="button" style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); cursor: pointer; text-align: left"><span style="display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--radius-sm); background: var(--surface-inverse); color: var(--ink-inverse); font-size: 11px; font-weight: 700">A</span><span style="flex: 1; display: flex; flex-direction: column"><span style="font-size: 13px; line-height: 18px; font-weight: 600">Acme Design</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">23 members</span></span><x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></button>
+    <div style="height: 8px"></div>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="history"></x-import><span style="flex: 1">Recent</span><span style="font-size: 11px; color: var(--ink-muted)"></span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="pen"></x-import><span style="flex: 1">Drafts</span><span style="font-size: 11px; color: var(--ink-muted)">6</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="layers"></x-import><span style="flex: 1">Shared with me</span><span style="font-size: 11px; color: var(--ink-muted)">14</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="component"></x-import><span style="flex: 1">Libraries</span><span style="font-size: 11px; color: var(--ink-muted)">3</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import><span style="flex: 1">Agents</span><span style="font-size: 11px; color: var(--ink-muted)">2</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="close"></x-import><span style="flex: 1">Trash</span><span style="font-size: 11px; color: var(--ink-muted)"></span></a>
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 0 2px 0 10px"><span style="font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Projects</span><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="New project"></x-import></div>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px; background: var(--surface-active); font-weight: 600"><span style="width: 8px; height: 8px; border-radius: 2px; background: #2b4fd6"></span><span style="flex: 1">Mobile</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #0f766e"></span><span style="flex: 1">Web platform</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #e04f1a"></span><span style="flex: 1">Brand</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #6b4bd6"></span><span style="flex: 1">Experiments</span></a>
+  </nav>
+  <main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 24px 32px 40px; position: relative">
+    <header style="display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px">
+      <div style="flex: 1; display: grid; gap: 4px">
+        <span style="font-size: 12px; color: var(--ink-muted)">Acme Design / Projects</span>
+        <h1 style="margin: 0; display: flex; align-items: center; gap: 10px; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em"><span style="width: 12px; height: 12px; border-radius: 3px; background: #2b4fd6"></span>Mobile</h1>
+        <p style="margin: 0; max-width: 560px; font-size: 13px; line-height: 18px; color: var(--ink-muted)">iOS and Android app. Uses Acme design system 2.4. Agents may open branches here; merges need Lena or Ana.</p>
+      </div>
+      <x-import component-from-global-scope="Drawpane.PresenceStack" people="{{people}}"></x-import>
+      <x-import component-from-global-scope="Drawpane.Button" size="lg">Project settings</x-import>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg" icon="plus">New file</x-import>
+    </header>
+
+    <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 20px 0 12px">
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Filter" value="all" options="{{filters}}"></x-import>
+      <span style="flex: 1"></span>
+      <span style="font-size: 12px; color: var(--ink-muted)">Sort: last edited</span>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="View" value="list" options="{{views}}"></x-import>
+    </div>
+
+    <div role="table" aria-label="Files in Mobile" style="display: grid; font-size: 13px">
+      <div role="row" style="display: grid; grid-template-columns: 28px minmax(220px, 2fr) 1fr 1fr 120px 100px 32px; align-items: center; gap: 12px; height: 32px; padding: 0 8px; border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 500; color: var(--ink-muted)">
+        <span></span><span role="columnheader">Name</span><span role="columnheader">Branches</span><span role="columnheader">Last edited</span><span role="columnheader">People</span><span role="columnheader">Status</span><span></span>
+      </div>
+      <sc-for list="{{files}}" as="f" hint-placeholder-count="9">
+        <div role="row" style="{{f.row}}">
+          <span style="{{f.check}}"><x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import></span>
+          <span style="display: flex; align-items: center; gap: 10px; min-width: 0"><span style="{{f.thumb}}"></span><span style="display: grid; min-width: 0"><span style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{f.name}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{f.pages}}</span></span></span>
+          <span style="display: flex; align-items: center; gap: 6px; color: var(--ink-muted)"><x-import component-from-global-scope="Drawpane.Icon" name="branch" size="12"></x-import>{{f.branches}}</span>
+          <span style="color: var(--ink-muted)">{{f.edited}}</span>
+          <span style="display: flex">
+            <sc-for list="{{f.avs}}" as="a" hint-placeholder-count="2"><span style="{{a.s}}">{{a.t}}</span></sc-for>
+          </span>
+          <span style="{{f.status}}">{{f.statusText}}</span>
+          <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="File actions"></x-import>
+        </div>
+      </sc-for>
+    </div>
+
+    <div role="toolbar" aria-label="2 files selected" style="position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 4px 4px 4px 14px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); box-shadow: var(--shadow-popover); font-size: 13px">
+      <span style="margin-right: 8px; font-weight: 600">2 selected</span>
+      <span class="u-tbtn">Move to…</span>
+      <span class="u-tbtn">Duplicate</span>
+      <span class="u-tbtn">Export</span>
+      <span class="u-tbtn">Delete</span>
+      <span class="u-tbtn">Clear</span>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var av = function (t, c) { return { t: t, s: 'display: grid; place-items: center; width: 22px; height: 22px; margin-right: -4px; border-radius: ' + (t === 'AI' ? '6px' : '50%') + '; background: var(' + c + '); color: var(' + (t === 'AI' ? '--on-agent' : '--on-presence') + '); font-size: 9px; font-weight: 700; box-shadow: 0 0 0 2px var(--surface)' }; };
+    var st = function (k) {
+      var m = { live: ['● 2 editing', 'color: var(--success)'], review: ['In review', 'background: var(--signal-soft); color: var(--signal-ink)'], agent: ['Agent working', 'background: var(--agent-soft); color: var(--agent-ink)'], ready: ['Ready for dev', 'background: var(--surface-active); color: var(--ink)'], '': ['', ''] }[k];
+      return [m[0], m[0] ? 'justify-self: start; height: 20px; padding: 0 6px; border-radius: var(--radius-xs); font-size: 11px; line-height: 20px; font-weight: 600; ' + m[1] : 'display: none'];
+    };
+    var F = [
+      ['Mobile app', '12 pages · 84 boards', '3 open', '2 min ago · Ana', [av('AR', '--presence-1'), av('LP', '--presence-2')], 'live', '#eef1fb', 1],
+      ['Empty states', '1 page · 6 boards', '1 open', '8 min ago · agent', [av('AI', '--agent'), av('SO', '--presence-3')], 'agent', '#efe9fd', 0],
+      ['Checkout flow', '4 pages · 22 boards', '2 open', 'Nov 9 · Ana', [av('AR', '--presence-1')], 'review', '#fff4ed', 1],
+      ['Onboarding v2', '3 pages · 18 boards', 'main', 'Nov 8 · Dev', [av('DP', '--presence-6')], 'ready', '#eefaf8', 0],
+      ['Widgets', '2 pages · 9 boards', 'main', 'Nov 6 · Sam', [av('SO', '--presence-3')], '', '#f3f4f6', 0],
+      ['App Store screenshots', '1 page · 10 boards', 'main', 'Nov 2 · Mo', [av('MH', '--presence-5')], '', '#fdf6e3', 0],
+      ['Watch app', '2 pages · 7 boards', '1 open', 'Oct 28 · Lena', [av('LP', '--presence-2')], '', '#f8f9fb', 0],
+      ['Archive 2025', '9 pages · 140 boards', 'main', 'Aug 14 · Ana', [av('AR', '--presence-1')], '', '#f3f4f6', 0]
+    ];
+    return {
+      theme: T,
+      people: [{ name: 'Ana Ruiz', color: 1 }, { name: 'Lena Park', color: 2 }, { name: 'Sam Okafor', color: 3 }, { name: 'Dev Patel', color: 6 }],
+      filters: [{ value: 'all', label: 'All · 8' }, { value: 'branches', label: 'Open branches' }, { value: 'ready', label: 'Ready for dev' }, { value: 'archived', label: 'Archived' }],
+      views: [{ value: 'grid', icon: 'layout-grid', title: 'Grid' }, { value: 'list', icon: 'layers', title: 'List' }],
+      files: F.map(function (f) {
+        var s = st(f[5]);
+        return { name: f[0], pages: f[1], branches: f[2], edited: f[3], avs: f[4], statusText: s[0], status: s[1],
+          thumb: 'flex: none; width: 40px; height: 30px; border-radius: 5px; background: ' + f[6] + '; box-shadow: inset 0 0 0 1px var(--line)',
+          check: 'display: grid; place-items: center; width: 16px; height: 16px; box-sizing: border-box; border-radius: 4px; color: var(--on-signal); ' + (f[7] ? 'background: var(--signal)' : 'border: 1.5px solid var(--line-control); color: transparent'),
+          row: 'display: grid; grid-template-columns: 28px minmax(220px, 2fr) 1fr 1fr 120px 100px 32px; align-items: center; gap: 12px; height: 52px; padding: 0 8px; border-bottom: 1px solid var(--line);' + (f[7] ? ' background: var(--surface-active)' : '') };
+      })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

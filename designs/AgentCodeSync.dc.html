@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane design and code in sync</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" branch="main" primary="Share" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <section aria-label="Frame" style="width: 380px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+      <div style="font-size: 12px; line-height: 16px; font-weight: 600">Home — iOS · Empty</div>
+      <div style="flex: 1; min-height: 0; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--canvas)">
+        <div style="width: 340px; height: 560px; transform: scale(.82)"><dc-import name="PartBoard" variant="empty" hint-size="340px,560px"></dc-import></div>
+      </div>
+      <div style="font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Mapped to code</div>
+      <sc-for list="{{maps}}" as="m" hint-placeholder-count="4">
+        <div style="display: grid; grid-template-columns: 1fr 14px 1fr; align-items: center; gap: 6px; font-size: 12px; line-height: 16px">
+          <span style="display: flex; align-items: center; gap: 6px; color: var(--component-ink)"><x-import component-from-global-scope="Drawpane.Icon" name="component" size="12"></x-import>{{m.d}}</span>
+          <span style="color: var(--ink-muted)">→</span>
+          <code style="font-family: var(--font-mono); font-size: 11px; color: var(--ink)">{{m.c}}</code>
+        </div>
+      </sc-for>
+    </section>
+
+    <main aria-label="Generated code" style="flex: 999 1 420px; min-width: 0; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <header style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Claude" status="waiting" on-behalf-of="Dev" hide-status="{{yes}}"></x-import>
+        <span style="flex: 1; font-family: var(--font-mono); font-size: 12px">app/(tabs)/home/EmptyToday.tsx</span>
+        <x-import component-from-global-scope="Drawpane.Badge" tone="success">+38 −0</x-import>
+      </header>
+      <pre style="flex: 1; min-height: 0; margin: 0; padding: 14px 16px; overflow: hidden; font-family: var(--font-mono); font-size: 12px; line-height: 20px; white-space: pre; color: var(--ink)"><span style="color: var(--ink-muted)">import</span> { EmptyState, Button } <span style="color: var(--ink-muted)">from</span> <span style="color: var(--agent-ink)">"@acme/ui"</span>;
+<span style="color: var(--ink-muted)">import</span> { useEvents } <span style="color: var(--ink-muted)">from</span> <span style="color: var(--agent-ink)">"@/data/events"</span>;
+
+<span style="color: var(--ink-muted)">export function</span> EmptyToday() {
+  <span style="color: var(--ink-muted)">const</span> { createEvent } = useEvents();
+  <span style="color: var(--ink-muted)">return</span> (
+    &lt;EmptyState
+      variant=<span style="color: var(--agent-ink)">"list"</span>
+      title=<span style="color: var(--agent-ink)">"Nothing on today"</span>
+      description=<span style="color: var(--agent-ink)">"Enjoy the quiet, or plan something."</span>
+      action={
+        &lt;Button variant=<span style="color: var(--agent-ink)">"primary"</span> onPress={createEvent}&gt;
+          Add an event
+        &lt;/Button&gt;
+      }
+    /&gt;
+  );
+}</pre>
+      <footer style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--surface-sunken); font-size: 11px; line-height: 14px; color: var(--ink-muted)">
+        <span style="color: var(--success)">● only @acme/ui components</span><span style="color: var(--success)">● no inline styles</span><span>Types checked against acme/web main</span>
+      </footer>
+    </main>
+
+    <aside aria-label="Pull request and sync" style="width: 300px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <section class="dp-section" aria-label="Pull request">
+        <div class="dp-section__head"><h3 class="dp-section__title">Pull request</h3><x-import component-from-global-scope="Drawpane.Badge" tone="info">Draft</x-import></div>
+        <div class="dp-section__body" style="gap: 8px">
+          <div style="font-size: 13px; line-height: 18px; font-weight: 600">Add empty state to Today</div>
+          <div style="font-family: var(--font-mono); font-size: 11px; line-height: 14px; color: var(--ink-muted)">acme/web#418 · drawpane/empty-today</div>
+          <sc-for list="{{checks}}" as="k" hint-placeholder-count="3">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px"><span style="{{k.color}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{k.icon}}" size="12"></x-import></span><span style="flex: 1">{{k.text}}</span></div>
+          </sc-for>
+          <div style="display: flex; gap: 8px"><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Mark ready</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Open in GitHub</x-import></div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Code to design">
+        <div class="dp-section__head"><h3 class="dp-section__title">Code to design</h3></div>
+        <div class="dp-section__body" style="gap: 8px">
+          <p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Bring a running page or a Storybook story back as editable layers built from your library.</p>
+          <x-import component-from-global-scope="Drawpane.TextField" label="URL or story" default-value="storybook.acme.dev/?path=/story/today--busy"></x-import>
+          <x-import component-from-global-scope="Drawpane.Button" size="sm" icon="code">Import as layers</x-import>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Drift">
+        <div class="dp-section__head"><h3 class="dp-section__title">Drift</h3><x-import component-from-global-scope="Drawpane.Badge" tone="warning">2</x-import></div>
+        <p style="margin: 6px 0 0; font-size: 12px; line-height: 16px">Code's <code style="font-family: var(--font-mono)">Button</code> has a <code style="font-family: var(--font-mono)">loading</code> prop the design lacks, and Tab bar uses 3 px in code vs 2 px here.</p>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      maps: [{ d: 'EmptyState', c: '<EmptyState>' }, { d: 'Button', c: '<Button>' }, { d: 'Tab bar', c: '<TabBar>' }, { d: 'Status bar', c: 'native' }],
+      checks: [
+        { icon: 'check', text: 'Typecheck and lint pass', color: 'display: inline-flex; color: var(--success)' },
+        { icon: 'check', text: 'Visual test matches the frame (0.4% diff)', color: 'display: inline-flex; color: var(--success)' },
+        { icon: 'warning', text: 'Needs a reviewer from Mobile', color: 'display: inline-flex; color: var(--warning)' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

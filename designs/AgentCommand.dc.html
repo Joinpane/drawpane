@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane, natural language in the command bar</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="upcoming" hint-size="248px,824px"></dc-import>
+
+    <main aria-label="Canvas with an agent preview" style="flex: 999 1 560px; min-width: 0; position: relative; height: 824px">
+      <div style="position: absolute; left: calc(50% - 170px); top: 250px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 200px; width: 300px; height: 196px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+        <div aria-hidden="true" style="position: absolute; left: 32px; top: 212px; width: 276px; height: 52px; border-radius: 10px; overflow: hidden; outline: 1.5px dashed var(--agent)">
+          <div style="position: absolute; right: 0; top: 0; bottom: 0; display: flex">
+            <span style="display: grid; place-items: center; width: 64px; background: #5b616e; color: #ffffff; font: 600 12px/1 var(--font-ui)">Archive</span>
+            <span style="display: grid; place-items: center; width: 64px; background: #c8312b; color: #ffffff; font: 600 12px/1 var(--font-ui)">Delete</span>
+          </div>
+          <div style="position: absolute; left: -128px; top: 0; width: 276px; height: 52px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #ffffff; font-family: var(--font-ui); color: #16181d">
+            <span style="width: 28px; height: 28px; border-radius: 8px; background: #e4e7ec"></span>
+            <span style="font-size: 13px; font-weight: 500">Ship onboarding v2</span>
+          </div>
+        </div>
+        <span style="position: absolute; left: 32px; top: 268px; padding: 1px 6px; border-radius: var(--radius-xs); background: var(--agent-soft); color: var(--agent-ink); font-size: 11px; line-height: 14px; font-weight: 600; white-space: nowrap">Preview · not applied</span>
+      </div>
+
+      <div role="dialog" aria-label="Command bar" style="position: absolute; left: 50%; top: 8px; transform: translateX(-50%); width: min(600px, 100%); border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-popover); overflow: hidden">
+        <div style="display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 8px 14px; border-bottom: 1px solid var(--line)">
+          <span style="display: inline-flex; color: var(--agent)"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import></span>
+          <span style="flex: 1; font-size: 15px; line-height: 20px">make these rows swipeable with archive and delete, iOS style<span style="display: inline-block; width: 1.5px; height: 17px; margin-left: 1px; vertical-align: -3px; background: var(--signal)"></span></span>
+          <x-import component-from-global-scope="Drawpane.Kbd">esc</x-import>
+        </div>
+        <div style="padding: 10px 14px; display: grid; gap: 8px">
+          <div style="display: flex; align-items: center; gap: 8px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Agent plan for Upcoming · 3 Event row instances · 12 operations</div>
+          <ol style="margin: 0; padding: 10px 12px; list-style: none; display: grid; gap: 4px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-family: var(--font-mono); font-size: 11.5px; line-height: 17px; color: var(--agent-ink)">
+            <li>add variant swiped to Event row</li>
+            <li>insert Button variant=destructive label="Delete" in Event row/swiped</li>
+            <li>insert Button variant=neutral label="Archive" in Event row/swiped</li>
+            <li>link Event row drag-left → swiped, smart animate 220ms ease/out</li>
+            <li style="color: var(--ink-muted)">… 8 more, all inside the Event row component</li>
+          </ol>
+          <div style="display: flex; align-items: center; gap: 12px; font-size: 12px; line-height: 16px; color: var(--ink-muted)">
+            <span style="color: var(--success)">● uses Acme Button, no new colors</span>
+            <span>~20 s · about $0.01</span>
+          </div>
+        </div>
+        <div style="padding: 2px 6px 6px">
+          <div role="option" aria-selected="true" style="display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 10px; min-height: 36px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--signal-soft); font-size: 13px">
+            <span style="display: inline-flex; color: var(--icon)"><x-import component-from-global-scope="Drawpane.Icon" name="branch"></x-import></span>
+            <span><b style="font-weight: 600">Run on a branch</b> <span style="color: var(--ink-muted)">· review before it reaches main</span></span>
+            <x-import component-from-global-scope="Drawpane.Kbd">↵</x-import>
+          </div>
+          <div role="option" aria-selected="false" style="display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 10px; min-height: 36px; padding: 0 8px; border-radius: var(--radius-sm); font-size: 13px">
+            <span style="display: inline-flex; color: var(--icon)"><x-import component-from-global-scope="Drawpane.Icon" name="check"></x-import></span>
+            <span>Apply here <span style="color: var(--ink-muted)">· one undo step</span></span>
+            <x-import component-from-global-scope="Drawpane.Kbd">⌘ ↵</x-import>
+          </div>
+          <div role="option" aria-selected="false" style="display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 10px; min-height: 36px; padding: 0 8px; border-radius: var(--radius-sm); font-size: 13px">
+            <span style="display: inline-flex; color: var(--icon)"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import></span>
+            <span>Open in agent pane to refine</span>
+            <x-import component-from-global-scope="Drawpane.Kbd">tab</x-import>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 16px; height: 32px; padding: 0 14px; border-top: 1px solid var(--line); background: var(--surface); font-size: 11px; line-height: 14px; color: var(--ink-muted)">
+          <span>Plain words go to the agent; syntax like <code style="font-family: var(--font-mono); color: var(--ink)">gap 16</code> runs instantly</span>
+          <span style="margin-left: auto">Claude Opus 5.5 · your key</span>
+        </div>
+      </div>
+    </main>
+
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.theme ?? 'light' };
+  }
+}
+</script>
+</body>
+</html>

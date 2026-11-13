@@ -1,0 +1,24 @@
+<!-- @dsCard group="Layers" height=344 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>LayerRow — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style="background:var(--canvas)"></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h('div', { role: 'tree', 'aria-label': 'Layers', style: { width: 248, padding: 4, background: 'var(--surface)', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-pane)' } },
+      h(D.LayerRow, { name: 'Home — iOS', kind: 'board', hasChildren: true, expanded: true }),
+      h(D.LayerRow, { name: 'Status bar', kind: 'instance', depth: 1 }),
+      h(D.LayerRow, { name: 'Greeting', kind: 'text', depth: 1 }),
+      h(D.LayerRow, { name: 'Hero card', kind: 'instance', depth: 1, presence: 2 }),
+      h(D.LayerRow, { name: 'Upcoming', kind: 'frame', depth: 1, hasChildren: true, expanded: true, selected: true }),
+      h(D.LayerRow, { name: 'Event row', kind: 'instance', depth: 2 }),
+      h(D.LayerRow, { name: 'Event row', kind: 'instance', depth: 2 }),
+      h(D.LayerRow, { name: 'Tab bar', kind: 'instance', depth: 1, locked: true }),
+      h(D.LayerRow, { name: 'Onboarding', kind: 'board', hasChildren: true, hidden: true }),
+      h(D.LayerRow, { name: 'Event row', kind: 'component', hasChildren: true }))
+  );
+</script>
+</body>
+</html>

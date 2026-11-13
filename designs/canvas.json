@@ -1,0 +1,2131 @@
+{
+ "v": 3,
+ "createdOnFiles": {
+  "v": 1,
+  "at": "2026-11-12T22:05:00Z"
+ },
+ "title": "Drawpane \u2014 Product Design",
+ "launch": {
+  "view": "canvas",
+  "page": "index"
+ },
+ "pages": [
+  {
+   "id": "index",
+   "name": "Coverage index"
+  },
+  {
+   "id": "ai",
+   "name": "AI agents"
+  },
+  {
+   "id": "editor",
+   "name": "Editor"
+  },
+  {
+   "id": "collab",
+   "name": "Collaboration"
+  },
+  {
+   "id": "proto",
+   "name": "Prototype & handoff"
+  },
+  {
+   "id": "home",
+   "name": "Dashboard & onboarding"
+  },
+  {
+   "id": "admin",
+   "name": "Self-hosting & admin"
+  },
+  {
+   "id": "states",
+   "name": "States & devices"
+  },
+  {
+   "id": "parts",
+   "name": "Building blocks"
+  }
+ ],
+ "boards": {
+  "Coverage.dc.html": {
+   "x": 0,
+   "y": 300,
+   "w": 1440,
+   "h": 3720,
+   "title": "Coverage index",
+   "page": "index",
+   "expand": "fill"
+  },
+  "AgentPane.dc.html": {
+   "x": 0,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Agent pane \u00b7 working on a branch",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentStart.dc.html": {
+   "x": 1520,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Start an agent",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentQuestion.dc.html": {
+   "x": 3040,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Agent asks a question mid-run",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentFollow.dc.html": {
+   "x": 0,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Follow an agent live",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentRenderCheck.dc.html": {
+   "x": 1520,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Agent checks its own render",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentFailure.dc.html": {
+   "x": 3040,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "When an agent run fails",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentReview.dc.html": {
+   "x": 0,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Reviewing an agent's proposal",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentLintGate.dc.html": {
+   "x": 1520,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Design-system gate on merge",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentApproval.dc.html": {
+   "x": 3040,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Approval rules in action",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentCommand.dc.html": {
+   "x": 0,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Natural language in the command bar",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentAsk.dc.html": {
+   "x": 1520,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Ask about this file",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentComments.dc.html": {
+   "x": 3040,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "@drawpane in comments",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentGenerate.dc.html": {
+   "x": 0,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Generate screens from a prompt",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentFromScreenshot.dc.html": {
+   "x": 1520,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Screenshot or URL to editable design",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentExplore.dc.html": {
+   "x": 3040,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Explore directions in parallel",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentAudit.dc.html": {
+   "x": 0,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "File audit with one-click fixes",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentTidy.dc.html": {
+   "x": 1520,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "Tidy a file",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentExtractDS.dc.html": {
+   "x": 3040,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "Build a design system from a file",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentContent.dc.html": {
+   "x": 0,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "Realistic content and translation",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentA11y.dc.html": {
+   "x": 1520,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "Accessibility review",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentPrototype.dc.html": {
+   "x": 3040,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "Wire a prototype",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentConnections.dc.html": {
+   "x": 0,
+   "y": 9540,
+   "w": 1440,
+   "h": 900,
+   "title": "MCP connections and sessions",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentExternal.dc.html": {
+   "x": 1520,
+   "y": 9540,
+   "w": 1440,
+   "h": 900,
+   "title": "Claude Code working in your file",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentConsent.dc.html": {
+   "x": 3040,
+   "y": 9540,
+   "w": 1440,
+   "h": 900,
+   "title": "Authorize an MCP client",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentDirectory.dc.html": {
+   "x": 0,
+   "y": 10860,
+   "w": 1440,
+   "h": 900,
+   "title": "Team agents",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentEditor.dc.html": {
+   "x": 1520,
+   "y": 10860,
+   "w": 1440,
+   "h": 900,
+   "title": "Define a custom agent",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentSkills.dc.html": {
+   "x": 3040,
+   "y": 10860,
+   "w": 1440,
+   "h": 900,
+   "title": "Skills library and editor",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentRuns.dc.html": {
+   "x": 0,
+   "y": 12180,
+   "w": 1440,
+   "h": 900,
+   "title": "Agent runs",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentRunDetail.dc.html": {
+   "x": 1520,
+   "y": 12180,
+   "w": 1440,
+   "h": 900,
+   "title": "One run, start to finish",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentModels.dc.html": {
+   "x": 3040,
+   "y": 12180,
+   "w": 1440,
+   "h": 900,
+   "title": "Models, budgets and approval rules",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentCodeSync.dc.html": {
+   "x": 0,
+   "y": 13500,
+   "w": 1440,
+   "h": 900,
+   "title": "Design and code in sync",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentAutomations.dc.html": {
+   "x": 1520,
+   "y": 13500,
+   "w": 1440,
+   "h": 900,
+   "title": "Scheduled automations",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentActions.dc.html": {
+   "x": 3040,
+   "y": 13500,
+   "w": 1440,
+   "h": 900,
+   "title": "Actions console",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentSetup.dc.html": {
+   "x": 0,
+   "y": 14820,
+   "w": 1440,
+   "h": 900,
+   "title": "Set up agents",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentUsage.dc.html": {
+   "x": 1520,
+   "y": 14820,
+   "w": 1440,
+   "h": 900,
+   "title": "Agent usage and cost",
+   "page": "ai",
+   "expand": "fill"
+  },
+  "AgentMobile.dc.html": {
+   "x": 3040,
+   "y": 14820,
+   "w": 390,
+   "h": 844,
+   "title": "Phone \u00b7 agent run",
+   "page": "ai"
+  },
+  "Main.dc.html": {
+   "x": 0,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Design mode",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "EditorText.dc.html": {
+   "x": 1520,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Text in Graphite",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "EditorCommand.dc.html": {
+   "x": 3040,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Command bar sets a value",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "EditorXray.dc.html": {
+   "x": 0,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Layout X-ray and Explain",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "EditorFocus.dc.html": {
+   "x": 1520,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Focus mode",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "Navigation.dc.html": {
+   "x": 3040,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Zoom and navigation",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "PagesPanel.dc.html": {
+   "x": 0,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Pages and sections",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "LayersAdvanced.dc.html": {
+   "x": 1520,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Layers in depth",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "DropPaste.dc.html": {
+   "x": 3040,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Drop and paste",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "VectorEdit.dc.html": {
+   "x": 0,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Vector editing",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "StrokesShapes.dc.html": {
+   "x": 1520,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Strokes and shapes",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "MasksCrop.dc.html": {
+   "x": 3040,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Masks and image crop",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "MultiSelect.dc.html": {
+   "x": 0,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Multi-selection and spacing",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "BulkEdit.dc.html": {
+   "x": 1520,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Selection colors and fonts",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "SheetPickers.dc.html": {
+   "x": 3040,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Sheet \u00b7 Color, gradient, image and effects",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "TypeDetails.dc.html": {
+   "x": 0,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Type in depth",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "FontPicker.dc.html": {
+   "x": 1520,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Font picker",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "AutoLayoutAdvanced.dc.html": {
+   "x": 0,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Auto layout in depth",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "GridLayout.dc.html": {
+   "x": 1520,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Grid layout",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "SheetGuides.dc.html": {
+   "x": 3040,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "Sheet \u00b7 Rulers, guides, grids, constraints",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "Components.dc.html": {
+   "x": 0,
+   "y": 9540,
+   "w": 1440,
+   "h": 900,
+   "title": "Component playground",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "Variants.dc.html": {
+   "x": 1520,
+   "y": 9540,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Variants and properties",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "InstanceProps.dc.html": {
+   "x": 3040,
+   "y": 9540,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Instance properties and swap",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "Tokens.dc.html": {
+   "x": 0,
+   "y": 10860,
+   "w": 1440,
+   "h": 900,
+   "title": "Tokens",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "TokenModes.dc.html": {
+   "x": 1520,
+   "y": 10860,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Token modes and themes",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "LibraryPublish.dc.html": {
+   "x": 3040,
+   "y": 10860,
+   "w": 1440,
+   "h": 900,
+   "title": "Publish library",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "Assets.dc.html": {
+   "x": 0,
+   "y": 12180,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Assets and library updates",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "Plugins.dc.html": {
+   "x": 1520,
+   "y": 12180,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Plugins",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "PluginDev.dc.html": {
+   "x": 3040,
+   "y": 12180,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Plugin development",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "FileSettings.dc.html": {
+   "x": 4560,
+   "y": 12180,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 File menu and settings",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "SheetMenus.dc.html": {
+   "x": 0,
+   "y": 13500,
+   "w": 1440,
+   "h": 900,
+   "title": "Sheet \u00b7 Menus and shortcuts",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "SheetDialogs.dc.html": {
+   "x": 1520,
+   "y": 13500,
+   "w": 1440,
+   "h": 900,
+   "title": "Sheet \u00b7 Export, fonts, find and replace",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "KeyboardA11y.dc.html": {
+   "x": 3040,
+   "y": 13500,
+   "w": 1440,
+   "h": 900,
+   "title": "Editor \u00b7 Keyboard and screen reader",
+   "page": "editor",
+   "expand": "fill"
+  },
+  "BranchReview.dc.html": {
+   "x": 0,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Branch review",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "Branches.dc.html": {
+   "x": 1520,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Branches and merge conflicts",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "History.dc.html": {
+   "x": 3040,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "History scrubber",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "CompareVersions.dc.html": {
+   "x": 0,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Compare two versions",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "ReviewRequests.dc.html": {
+   "x": 1520,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Review requests and protected main",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "OfflineSync.dc.html": {
+   "x": 3040,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "After working offline",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "FollowMode.dc.html": {
+   "x": 0,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Follow mode and spotlight",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "CursorChat.dc.html": {
+   "x": 1520,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Cursor chat and reactions",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "FileActivity.dc.html": {
+   "x": 3040,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "File activity",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "Comments.dc.html": {
+   "x": 0,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Comments",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "CommentsPanel.dc.html": {
+   "x": 1520,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "All comments",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "ViewOnly.dc.html": {
+   "x": 3040,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Viewing a file you cannot edit",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "Share.dc.html": {
+   "x": 0,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Share",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "AccessRequests.dc.html": {
+   "x": 1520,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Access requests and guests",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "Emails.dc.html": {
+   "x": 3040,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Notification emails",
+   "page": "collab",
+   "expand": "fill"
+  },
+  "Prototype.dc.html": {
+   "x": 0,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Prototype mode",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "SheetPrototype.dc.html": {
+   "x": 1520,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Sheet \u00b7 Overlays, interactive components, variables",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "PrototypePlayer.dc.html": {
+   "x": 3040,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Prototype player",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "Inspect.dc.html": {
+   "x": 0,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Inspect mode",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "DevHandoff.dc.html": {
+   "x": 1520,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Ready for dev and changes since handoff",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "Annotations.dc.html": {
+   "x": 3040,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Annotations",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "CodeExport.dc.html": {
+   "x": 0,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Export a board as code",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "TokenExport.dc.html": {
+   "x": 1520,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Token export and sync",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "SpecPage.dc.html": {
+   "x": 3040,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Spec page",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "Present.dc.html": {
+   "x": 0,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Present",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "PresenterView.dc.html": {
+   "x": 1520,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Presenter view",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "PublishWeb.dc.html": {
+   "x": 3040,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Publish to web and embed",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "Breakpoints.dc.html": {
+   "x": 0,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Breakpoint strip",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "ProtoAnalytics.dc.html": {
+   "x": 1520,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Prototype views and drop-off",
+   "page": "proto",
+   "expand": "fill"
+  },
+  "SignIn.dc.html": {
+   "x": 0,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Sign in",
+   "page": "home",
+   "expand": "fill"
+  },
+  "SignUp.dc.html": {
+   "x": 1520,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Create an account",
+   "page": "home",
+   "expand": "fill"
+  },
+  "RecoverAccount.dc.html": {
+   "x": 3040,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Recover an account",
+   "page": "home",
+   "expand": "fill"
+  },
+  "TwoStep.dc.html": {
+   "x": 0,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Two-step sign-in",
+   "page": "home",
+   "expand": "fill"
+  },
+  "Onboarding.dc.html": {
+   "x": 1520,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "First run",
+   "page": "home",
+   "expand": "fill"
+  },
+  "CreateTeam.dc.html": {
+   "x": 3040,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Create a team",
+   "page": "home",
+   "expand": "fill"
+  },
+  "Dashboard.dc.html": {
+   "x": 0,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Dashboard",
+   "page": "home",
+   "expand": "fill"
+  },
+  "ProjectView.dc.html": {
+   "x": 1520,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Project page \u00b7 list view",
+   "page": "home",
+   "expand": "fill"
+  },
+  "DraftsShared.dc.html": {
+   "x": 3040,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Drafts, shared and starred",
+   "page": "home",
+   "expand": "fill"
+  },
+  "SearchResults.dc.html": {
+   "x": 0,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Search everything",
+   "page": "home",
+   "expand": "fill"
+  },
+  "NewFile.dc.html": {
+   "x": 1520,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "New file and templates",
+   "page": "home",
+   "expand": "fill"
+  },
+  "CommunityGallery.dc.html": {
+   "x": 3040,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Community gallery",
+   "page": "home",
+   "expand": "fill"
+  },
+  "Import.dc.html": {
+   "x": 0,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Import from Figma or Penpot",
+   "page": "home",
+   "expand": "fill"
+  },
+  "ImportReport.dc.html": {
+   "x": 1520,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Import report",
+   "page": "home",
+   "expand": "fill"
+  },
+  "InviteAccept.dc.html": {
+   "x": 3040,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Accept an invite",
+   "page": "home",
+   "expand": "fill"
+  },
+  "Libraries.dc.html": {
+   "x": 0,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "Team libraries",
+   "page": "home",
+   "expand": "fill"
+  },
+  "TeamFonts.dc.html": {
+   "x": 1520,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "Team fonts",
+   "page": "home",
+   "expand": "fill"
+  },
+  "ProjectSettings.dc.html": {
+   "x": 3040,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "Project settings",
+   "page": "home",
+   "expand": "fill"
+  },
+  "SheetDashboard.dc.html": {
+   "x": 0,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "Sheet \u00b7 Menus, inbox, what's new, trash",
+   "page": "home",
+   "expand": "fill"
+  },
+  "AccountSettings.dc.html": {
+   "x": 1520,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "Account settings",
+   "page": "home",
+   "expand": "fill"
+  },
+  "HelpFeedback.dc.html": {
+   "x": 3040,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "Help and feedback",
+   "page": "home",
+   "expand": "fill"
+  },
+  "EmptyWorkspace.dc.html": {
+   "x": 4560,
+   "y": 8220,
+   "w": 1440,
+   "h": 900,
+   "title": "A brand new workspace",
+   "page": "home",
+   "expand": "fill"
+  },
+  "Deploy.dc.html": {
+   "x": 0,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Self-host setup",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "InstanceSettings.dc.html": {
+   "x": 1520,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Instance settings",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "Health.dc.html": {
+   "x": 3040,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Instance health and cost",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "LiveRooms.dc.html": {
+   "x": 0,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Live rooms and logs",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "Backups.dc.html": {
+   "x": 1520,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "Backups, restore and upgrades",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "About.dc.html": {
+   "x": 3040,
+   "y": 1620,
+   "w": 1440,
+   "h": 900,
+   "title": "About this instance",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "TeamSettings.dc.html": {
+   "x": 0,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Team settings",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "Roles.dc.html": {
+   "x": 1520,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Roles and permissions",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "Preferences.dc.html": {
+   "x": 3040,
+   "y": 2940,
+   "w": 1440,
+   "h": 900,
+   "title": "Preferences",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "AuthSecurity.dc.html": {
+   "x": 0,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Authentication and account security",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "AuditLog.dc.html": {
+   "x": 1520,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Audit log",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "DataRetention.dc.html": {
+   "x": 3040,
+   "y": 4260,
+   "w": 1440,
+   "h": 900,
+   "title": "Data, retention and export",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "Integrations.dc.html": {
+   "x": 0,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Integrations",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "ApiWebhooks.dc.html": {
+   "x": 1520,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "API and webhooks",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "InstanceAdmin.dc.html": {
+   "x": 3040,
+   "y": 5580,
+   "w": 1440,
+   "h": 900,
+   "title": "Instance admin: teams and people",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "SheetErrors.dc.html": {
+   "x": 0,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "Sheet \u00b7 Error and maintenance pages",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "Labs.dc.html": {
+   "x": 1520,
+   "y": 6900,
+   "w": 1440,
+   "h": 900,
+   "title": "Labs",
+   "page": "admin",
+   "expand": "fill"
+  },
+  "States.dc.html": {
+   "x": 0,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "System states",
+   "page": "states",
+   "expand": "fill"
+  },
+  "Localization.dc.html": {
+   "x": 1520,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "Long strings and right-to-left",
+   "page": "states",
+   "expand": "fill"
+  },
+  "HighContrast.dc.html": {
+   "x": 3040,
+   "y": 300,
+   "w": 1440,
+   "h": 900,
+   "title": "High contrast and large text",
+   "page": "states",
+   "expand": "fill"
+  },
+  "DesktopApp.dc.html": {
+   "x": 0,
+   "y": 1620,
+   "w": 1440,
+   "h": 940,
+   "title": "Desktop app window",
+   "page": "states"
+  },
+  "Tablet.dc.html": {
+   "x": 1520,
+   "y": 1620,
+   "w": 1180,
+   "h": 820,
+   "title": "Tablet \u00b7 Editing with a pencil",
+   "page": "states"
+  },
+  "TabletReview.dc.html": {
+   "x": 2780,
+   "y": 1620,
+   "w": 1180,
+   "h": 820,
+   "title": "Tablet \u00b7 Reviewing with comments",
+   "page": "states"
+  },
+  "MobileSignIn.dc.html": {
+   "x": 0,
+   "y": 2980,
+   "w": 390,
+   "h": 844,
+   "title": "Phone \u00b7 Sign in",
+   "page": "states"
+  },
+  "MobileDashboard.dc.html": {
+   "x": 470,
+   "y": 2980,
+   "w": 390,
+   "h": 844,
+   "title": "Phone \u00b7 Files",
+   "page": "states"
+  },
+  "MobileFile.dc.html": {
+   "x": 940,
+   "y": 2980,
+   "w": 390,
+   "h": 844,
+   "title": "Phone \u00b7 Inside a file",
+   "page": "states"
+  },
+  "MobileViewer.dc.html": {
+   "x": 1410,
+   "y": 2980,
+   "w": 390,
+   "h": 844,
+   "title": "Phone \u00b7 Prototype viewer",
+   "page": "states"
+  },
+  "MobileComments.dc.html": {
+   "x": 1880,
+   "y": 2980,
+   "w": 390,
+   "h": 844,
+   "title": "Phone \u00b7 Comments",
+   "page": "states"
+  },
+  "MobileNotifications.dc.html": {
+   "x": 2350,
+   "y": 2980,
+   "w": 390,
+   "h": 844,
+   "title": "Phone \u00b7 Inbox",
+   "page": "states"
+  },
+  "MobileInspect.dc.html": {
+   "x": 2820,
+   "y": 2980,
+   "w": 390,
+   "h": 844,
+   "title": "Phone \u00b7 Inspect",
+   "page": "states"
+  },
+  "MobileShare.dc.html": {
+   "x": 3290,
+   "y": 2980,
+   "w": 390,
+   "h": 844,
+   "title": "Phone \u00b7 Share",
+   "page": "states"
+  },
+  "PartTopBar.dc.html": {
+   "x": 0,
+   "y": 300,
+   "w": 1416,
+   "h": 40,
+   "title": "Part \u00b7 Top bar",
+   "page": "parts"
+  },
+  "PartLayers.dc.html": {
+   "x": 1496,
+   "y": 300,
+   "w": 248,
+   "h": 824,
+   "title": "Part \u00b7 Layers pane",
+   "page": "parts"
+  },
+  "PartInspector.dc.html": {
+   "x": 1824,
+   "y": 300,
+   "w": 264,
+   "h": 824,
+   "title": "Part \u00b7 Design inspector",
+   "page": "parts"
+  },
+  "PartBoard.dc.html": {
+   "x": 2168,
+   "y": 300,
+   "w": 340,
+   "h": 560,
+   "title": "Part \u00b7 Sample design (Home, iOS)",
+   "page": "parts"
+  }
+ },
+ "order": [
+  "Coverage.dc.html",
+  "AgentPane.dc.html",
+  "AgentStart.dc.html",
+  "AgentQuestion.dc.html",
+  "AgentFollow.dc.html",
+  "AgentRenderCheck.dc.html",
+  "AgentFailure.dc.html",
+  "AgentReview.dc.html",
+  "AgentLintGate.dc.html",
+  "AgentApproval.dc.html",
+  "AgentCommand.dc.html",
+  "AgentAsk.dc.html",
+  "AgentComments.dc.html",
+  "AgentGenerate.dc.html",
+  "AgentFromScreenshot.dc.html",
+  "AgentExplore.dc.html",
+  "AgentAudit.dc.html",
+  "AgentTidy.dc.html",
+  "AgentExtractDS.dc.html",
+  "AgentContent.dc.html",
+  "AgentA11y.dc.html",
+  "AgentPrototype.dc.html",
+  "AgentConnections.dc.html",
+  "AgentExternal.dc.html",
+  "AgentConsent.dc.html",
+  "AgentDirectory.dc.html",
+  "AgentEditor.dc.html",
+  "AgentSkills.dc.html",
+  "AgentRuns.dc.html",
+  "AgentRunDetail.dc.html",
+  "AgentModels.dc.html",
+  "AgentCodeSync.dc.html",
+  "AgentAutomations.dc.html",
+  "AgentActions.dc.html",
+  "AgentSetup.dc.html",
+  "AgentUsage.dc.html",
+  "AgentMobile.dc.html",
+  "Main.dc.html",
+  "EditorText.dc.html",
+  "EditorCommand.dc.html",
+  "EditorXray.dc.html",
+  "EditorFocus.dc.html",
+  "Navigation.dc.html",
+  "PagesPanel.dc.html",
+  "LayersAdvanced.dc.html",
+  "DropPaste.dc.html",
+  "VectorEdit.dc.html",
+  "StrokesShapes.dc.html",
+  "MasksCrop.dc.html",
+  "MultiSelect.dc.html",
+  "BulkEdit.dc.html",
+  "SheetPickers.dc.html",
+  "TypeDetails.dc.html",
+  "FontPicker.dc.html",
+  "AutoLayoutAdvanced.dc.html",
+  "GridLayout.dc.html",
+  "SheetGuides.dc.html",
+  "Components.dc.html",
+  "Variants.dc.html",
+  "InstanceProps.dc.html",
+  "Tokens.dc.html",
+  "TokenModes.dc.html",
+  "LibraryPublish.dc.html",
+  "Assets.dc.html",
+  "Plugins.dc.html",
+  "PluginDev.dc.html",
+  "FileSettings.dc.html",
+  "SheetMenus.dc.html",
+  "SheetDialogs.dc.html",
+  "KeyboardA11y.dc.html",
+  "BranchReview.dc.html",
+  "Branches.dc.html",
+  "History.dc.html",
+  "CompareVersions.dc.html",
+  "ReviewRequests.dc.html",
+  "OfflineSync.dc.html",
+  "FollowMode.dc.html",
+  "CursorChat.dc.html",
+  "FileActivity.dc.html",
+  "Comments.dc.html",
+  "CommentsPanel.dc.html",
+  "ViewOnly.dc.html",
+  "Share.dc.html",
+  "AccessRequests.dc.html",
+  "Emails.dc.html",
+  "Prototype.dc.html",
+  "SheetPrototype.dc.html",
+  "PrototypePlayer.dc.html",
+  "Inspect.dc.html",
+  "DevHandoff.dc.html",
+  "Annotations.dc.html",
+  "CodeExport.dc.html",
+  "TokenExport.dc.html",
+  "SpecPage.dc.html",
+  "Present.dc.html",
+  "PresenterView.dc.html",
+  "PublishWeb.dc.html",
+  "Breakpoints.dc.html",
+  "ProtoAnalytics.dc.html",
+  "SignIn.dc.html",
+  "SignUp.dc.html",
+  "RecoverAccount.dc.html",
+  "TwoStep.dc.html",
+  "Onboarding.dc.html",
+  "CreateTeam.dc.html",
+  "Dashboard.dc.html",
+  "ProjectView.dc.html",
+  "DraftsShared.dc.html",
+  "SearchResults.dc.html",
+  "NewFile.dc.html",
+  "CommunityGallery.dc.html",
+  "Import.dc.html",
+  "ImportReport.dc.html",
+  "InviteAccept.dc.html",
+  "Libraries.dc.html",
+  "TeamFonts.dc.html",
+  "ProjectSettings.dc.html",
+  "SheetDashboard.dc.html",
+  "AccountSettings.dc.html",
+  "HelpFeedback.dc.html",
+  "EmptyWorkspace.dc.html",
+  "Deploy.dc.html",
+  "InstanceSettings.dc.html",
+  "Health.dc.html",
+  "LiveRooms.dc.html",
+  "Backups.dc.html",
+  "About.dc.html",
+  "TeamSettings.dc.html",
+  "Roles.dc.html",
+  "Preferences.dc.html",
+  "AuthSecurity.dc.html",
+  "AuditLog.dc.html",
+  "DataRetention.dc.html",
+  "Integrations.dc.html",
+  "ApiWebhooks.dc.html",
+  "InstanceAdmin.dc.html",
+  "SheetErrors.dc.html",
+  "Labs.dc.html",
+  "States.dc.html",
+  "Localization.dc.html",
+  "HighContrast.dc.html",
+  "DesktopApp.dc.html",
+  "Tablet.dc.html",
+  "TabletReview.dc.html",
+  "MobileSignIn.dc.html",
+  "MobileDashboard.dc.html",
+  "MobileFile.dc.html",
+  "MobileViewer.dc.html",
+  "MobileComments.dc.html",
+  "MobileNotifications.dc.html",
+  "MobileInspect.dc.html",
+  "MobileShare.dc.html",
+  "PartTopBar.dc.html",
+  "PartLayers.dc.html",
+  "PartInspector.dc.html",
+  "PartBoard.dc.html"
+ ],
+ "notes": {
+  "r-index-0": {
+   "x": 0,
+   "y": 20,
+   "text": "Every artboard in Drawpane, by area",
+   "kind": "title1",
+   "maxW": 1440,
+   "page": "index",
+   "w": 240
+  },
+  "r-ai-0": {
+   "x": 0,
+   "y": 20,
+   "text": "Agents work beside you, on their own branch",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-1": {
+   "x": 0,
+   "y": 1340,
+   "text": "Watching and steering a run",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-2": {
+   "x": 0,
+   "y": 2660,
+   "text": "Reviewing and merging agent work",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-3": {
+   "x": 0,
+   "y": 3980,
+   "text": "Asking in plain words",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-4": {
+   "x": 0,
+   "y": 5300,
+   "text": "Generating new work",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-5": {
+   "x": 0,
+   "y": 6620,
+   "text": "Cleaning up and systematizing",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-6": {
+   "x": 0,
+   "y": 7940,
+   "text": "Content, accessibility and flows",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-7": {
+   "x": 0,
+   "y": 9260,
+   "text": "Agents from outside, over MCP",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-8": {
+   "x": 0,
+   "y": 10580,
+   "text": "Your team's agents and skills",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-9": {
+   "x": 0,
+   "y": 11900,
+   "text": "Runs, cost and governance",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-10": {
+   "x": 0,
+   "y": 13220,
+   "text": "Design, code and automation",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "ai",
+   "w": 240
+  },
+  "r-ai-11": {
+   "x": 0,
+   "y": 14540,
+   "text": "Setting up and keeping an eye on it",
+   "kind": "title1",
+   "maxW": 3430,
+   "page": "ai",
+   "w": 240
+  },
+  "r-editor-0": {
+   "x": 0,
+   "y": 20,
+   "text": "The editor: canvas first, chrome last",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-1": {
+   "x": 0,
+   "y": 1340,
+   "text": "Precision tools",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-2": {
+   "x": 0,
+   "y": 2660,
+   "text": "Pages and layers",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-3": {
+   "x": 0,
+   "y": 3980,
+   "text": "Drawing and shapes",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-4": {
+   "x": 0,
+   "y": 5300,
+   "text": "Selecting and editing many things",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-5": {
+   "x": 0,
+   "y": 6620,
+   "text": "Type",
+   "kind": "title1",
+   "maxW": 2960,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-6": {
+   "x": 0,
+   "y": 7940,
+   "text": "Measuring and constraining",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-7": {
+   "x": 0,
+   "y": 9260,
+   "text": "Design systems: components and variants",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-8": {
+   "x": 0,
+   "y": 10580,
+   "text": "Tokens and libraries",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-9": {
+   "x": 0,
+   "y": 11900,
+   "text": "Assets, plugins and file",
+   "kind": "title1",
+   "maxW": 6000,
+   "page": "editor",
+   "w": 240
+  },
+  "r-editor-10": {
+   "x": 0,
+   "y": 13220,
+   "text": "Every popover, menu and dialog",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "editor",
+   "w": 240
+  },
+  "r-collab-0": {
+   "x": 0,
+   "y": 20,
+   "text": "Branches and history",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "collab",
+   "w": 240
+  },
+  "r-collab-1": {
+   "x": 0,
+   "y": 1340,
+   "text": "Versions and reviews",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "collab",
+   "w": 240
+  },
+  "r-collab-2": {
+   "x": 0,
+   "y": 2660,
+   "text": "Being in a file together",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "collab",
+   "w": 240
+  },
+  "r-collab-3": {
+   "x": 0,
+   "y": 3980,
+   "text": "Conversations",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "collab",
+   "w": 240
+  },
+  "r-collab-4": {
+   "x": 0,
+   "y": 5300,
+   "text": "Access and notifications",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "collab",
+   "w": 240
+  },
+  "r-proto-0": {
+   "x": 0,
+   "y": 20,
+   "text": "From design to working product",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "proto",
+   "w": 240
+  },
+  "r-proto-1": {
+   "x": 0,
+   "y": 1340,
+   "text": "Handoff",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "proto",
+   "w": 240
+  },
+  "r-proto-2": {
+   "x": 0,
+   "y": 2660,
+   "text": "Code and tokens out",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "proto",
+   "w": 240
+  },
+  "r-proto-3": {
+   "x": 0,
+   "y": 3980,
+   "text": "Presenting",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "proto",
+   "w": 240
+  },
+  "r-proto-4": {
+   "x": 0,
+   "y": 5300,
+   "text": "Responsive and insight",
+   "kind": "title1",
+   "maxW": 2960,
+   "page": "proto",
+   "w": 240
+  },
+  "r-home-0": {
+   "x": 0,
+   "y": 20,
+   "text": "Getting in",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "home",
+   "w": 240
+  },
+  "r-home-1": {
+   "x": 0,
+   "y": 1340,
+   "text": "Getting set up",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "home",
+   "w": 240
+  },
+  "r-home-2": {
+   "x": 0,
+   "y": 2660,
+   "text": "Finding your files",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "home",
+   "w": 240
+  },
+  "r-home-3": {
+   "x": 0,
+   "y": 3980,
+   "text": "Searching and starting",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "home",
+   "w": 240
+  },
+  "r-home-4": {
+   "x": 0,
+   "y": 5300,
+   "text": "Migrating and joining",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "home",
+   "w": 240
+  },
+  "r-home-5": {
+   "x": 0,
+   "y": 6620,
+   "text": "Team resources",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "home",
+   "w": 240
+  },
+  "r-home-6": {
+   "x": 0,
+   "y": 7940,
+   "text": "Around the dashboard",
+   "kind": "title1",
+   "maxW": 6000,
+   "page": "home",
+   "w": 240
+  },
+  "r-admin-0": {
+   "x": 0,
+   "y": 20,
+   "text": "Your instance, your Cloudflare account",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "admin",
+   "w": 240
+  },
+  "r-admin-1": {
+   "x": 0,
+   "y": 1340,
+   "text": "Running it",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "admin",
+   "w": 240
+  },
+  "r-admin-2": {
+   "x": 0,
+   "y": 2660,
+   "text": "Team and personal settings",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "admin",
+   "w": 240
+  },
+  "r-admin-3": {
+   "x": 0,
+   "y": 3980,
+   "text": "Security and data",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "admin",
+   "w": 240
+  },
+  "r-admin-4": {
+   "x": 0,
+   "y": 5300,
+   "text": "Connecting other tools",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "admin",
+   "w": 240
+  },
+  "r-admin-5": {
+   "x": 0,
+   "y": 6620,
+   "text": "Edges",
+   "kind": "title1",
+   "maxW": 2960,
+   "page": "admin",
+   "w": 240
+  },
+  "r-states-0": {
+   "x": 0,
+   "y": 20,
+   "text": "Every state",
+   "kind": "title1",
+   "maxW": 4480,
+   "page": "states",
+   "w": 240
+  },
+  "r-states-1": {
+   "x": 0,
+   "y": 1340,
+   "text": "Desktop and tablet",
+   "kind": "title1",
+   "maxW": 3960,
+   "page": "states",
+   "w": 240
+  },
+  "r-states-2": {
+   "x": 0,
+   "y": 2700,
+   "text": "Phone",
+   "kind": "title1",
+   "maxW": 3680,
+   "page": "states",
+   "w": 240
+  },
+  "r-parts-0": {
+   "x": 0,
+   "y": 20,
+   "text": "Shared parts imported by the editor screens",
+   "kind": "title1",
+   "maxW": 2508,
+   "page": "parts",
+   "w": 240
+  },
+  "s-theme": {
+   "x": 4560,
+   "y": 300,
+   "w": 420,
+   "text": "Every screen has a Theme tweak (Paper or Graphite). Open an artboard's Tweaks to flip it.",
+   "fill": "orange",
+   "page": "editor"
+  }
+ },
+ "designSystems": [
+  {
+   "title": "Drawpane Design System",
+   "namespace": "drawpane",
+   "artifact": "https://claude.ai/artifact/JDA7uexnrSaFBSbhSxrg1E",
+   "version": "1794525397-1cba",
+   "copiedAt": "2026-11-12T23:20:00Z"
+  }
+ ],
+ "attachments": {},
+ "noteOrder": [
+  "r-index-0",
+  "r-ai-0",
+  "r-ai-1",
+  "r-ai-2",
+  "r-ai-3",
+  "r-ai-4",
+  "r-ai-5",
+  "r-ai-6",
+  "r-ai-7",
+  "r-ai-8",
+  "r-ai-9",
+  "r-ai-10",
+  "r-ai-11",
+  "r-editor-0",
+  "r-editor-1",
+  "r-editor-2",
+  "r-editor-3",
+  "r-editor-4",
+  "r-editor-5",
+  "r-editor-6",
+  "r-editor-7",
+  "r-editor-8",
+  "r-editor-9",
+  "r-editor-10",
+  "r-collab-0",
+  "r-collab-1",
+  "r-collab-2",
+  "r-collab-3",
+  "r-collab-4",
+  "r-proto-0",
+  "r-proto-1",
+  "r-proto-2",
+  "r-proto-3",
+  "r-proto-4",
+  "r-home-0",
+  "r-home-1",
+  "r-home-2",
+  "r-home-3",
+  "r-home-4",
+  "r-home-5",
+  "r-home-6",
+  "r-admin-0",
+  "r-admin-1",
+  "r-admin-2",
+  "r-admin-3",
+  "r-admin-4",
+  "r-admin-5",
+  "r-states-0",
+  "r-states-1",
+  "r-states-2",
+  "r-parts-0",
+  "s-theme"
+ ]
+}

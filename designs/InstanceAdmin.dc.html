@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane instance admin, teams and people</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-page" style="padding: 28px 32px 40px">
+  <header class="u-row" style="margin-bottom: 16px"><div class="u-grow u-col u-col--tight"><span class="u-sm u-muted">Instance admin · design.acme.com</span><h1 class="u-h1">Teams and people</h1></div><x-import component-from-global-scope="Drawpane.SegmentedControl" label="View" value="people" options="{{v}}"></x-import></header>
+  <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 16px">
+    <sc-for list="{{teams}}" as="t" hint-placeholder-count="3"><div class="u-box u-pad u-row"><span style="{{t.l}}">{{t.m}}</span><span class="u-grow u-col" style="gap: 0"><strong class="u-md">{{t.n}}</strong><span class="u-xs u-muted">{{t.d}}</span></span><span class="u-mono u-sm">{{t.s}}</span></div></sc-for>
+  </div>
+  <div class="u-row" style="margin-bottom: 8px"><div class="u-input" style="width: 280px"><x-import component-from-global-scope="Drawpane.Icon" name="search" size="12"></x-import>Search 41 people</div><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Filter" value="all" options="{{f}}"></x-import></div>
+  <div class="u-trow u-thead" style="{{cols}}"><span>Person</span><span>Teams</span><span>Sign-in</span><span>Last active</span><span>Status</span><span></span></div>
+  <sc-for list="{{people}}" as="p" hint-placeholder-count="8"><div class="u-trow" style="{{p.st}}"><span class="u-row"><span class="u-av u-av--sm" style="{{p.avs}}">{{p.i}}</span><span class="u-col" style="gap: 0"><span class="u-b">{{p.n}}</span><span class="u-xs u-muted">{{p.e}}</span></span></span><span class="u-sm u-muted">{{p.t}}</span><span class="u-sm">{{p.si}}</span><span class="u-sm u-muted">{{p.la}}</span><span><span class="{{p.c}}">{{p.s}}</span></span><x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Person actions"></x-import></div></sc-for>
+  <div style="position: absolute; right: 50px; top: 418px; width: 220px"><x-import component-from-global-scope="Drawpane.Menu" label="Person actions" items="{{menu}}"></x-import></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var cols = 'grid-template-columns: minmax(220px, 1.4fr) 1fr 120px 120px 110px 32px';
+    var logo = function (c) { return 'display: grid; place-items: center; width: 36px; height: 36px; border-radius: 9px; background: ' + c + '; color: #ffffff; font-weight: 700'; };
+    var P = [['LP', 'Lena Park', 'lena@acme.com', 'Acme Design (admin)', 'SSO', 'now', 'Active', 'ok'], ['AR', 'Ana Ruiz', 'ana@acme.com', 'Acme Design', 'SSO', '5 min ago', 'Active', 'ok'], ['Z', 'Ziyang', 'ziyang@acme.com', 'Acme Design, Personal', 'Passkey', 'now', 'Owner', 'muted'], ['TS', 'Tom S.', 'tom@freelance.dev', 'Acme Design (guest)', 'Email', '94 days ago', 'Inactive', 'muted', 1], ['KT', 'Kai Tanaka', 'kai@acme.com', 'Acme Design', 'SSO', 'Yesterday', 'Active', 'ok'], ['PL', 'Priya L.', 'priya@client.com', 'Acme Design (guest)', 'Email', 'Nov 2', 'Expires today', 'signal'], ['JN', 'Jo Nguyen', 'jo@acme.com', 'Open source contributors', 'GitHub', 'Oct 28', 'Suspended', 'signal']];
+    return {
+      v: H.opts(['Teams', 'People']), f: H.opts(['All', 'Admins', 'Guests', 'Inactive']), cols: cols,
+      teams: [{ n: 'Acme Design', d: '23 members · 4 projects', s: '2.0 GB', l: logo('#16181d'), m: 'A' }, { n: 'Personal spaces', d: '17 people', s: '0.1 GB', l: logo('#6b4bd6'), m: 'P' }, { n: 'Open source contributors', d: '140 members · read-only', s: '0.04 GB', l: logo('#0f766e'), m: 'O' }],
+      people: P.map(function (p) { return { i: p[0], n: p[1], e: p[2], t: p[3], si: p[4], la: p[5], s: p[6], c: 'u-chip u-chip--' + p[7], avs: 'background: var(--presence-' + (H.slot[p[0]] || 7) + ')', st: cols + (p[8] ? '; background: var(--surface-active)' : '') }; }),
+      menu: [{ label: 'View activity' }, { label: 'Reset two-step sign-in' }, { label: 'Sign out everywhere' }, { label: 'Transfer files…' }, { separator: true }, { label: 'Suspend', danger: true }, { label: 'Remove and keep files…', danger: true }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

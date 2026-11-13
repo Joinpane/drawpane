@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Editor top bar</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<header style="height: 40px; display: flex; align-items: center; justify-content: space-between; gap: 12px; font-family: var(--font-ui); color: var(--ink)">
+  <div style="width: 248px; height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 12px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+    <svg width="20" height="20" viewBox="0 0 32 32" role="img" aria-label="Drawpane"><rect x="3.25" y="3.25" width="18.5" height="18.5" rx="4" fill="none" stroke="var(--ink)" stroke-width="2.5"></rect><rect x="10" y="10" width="19" height="19" rx="4" fill="var(--signal)"></rect></svg>
+    <button type="button" style="flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 0; border: 0; background: transparent; color: var(--ink); font: 600 13px/18px var(--font-ui); cursor: pointer; text-align: left">
+      <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{file}}</span>
+      <span style="display: inline-flex; color: var(--ink-muted)"><x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+    </button>
+    <x-import component-from-global-scope="Drawpane.Badge" tone="info">{{branch}}</x-import>
+  </div>
+
+  <nav aria-label="Tools" style="display: flex; align-items: center; gap: 4px; padding: 4px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+    <sc-for list="{{tools}}" as="t" hint-placeholder-count="8">
+      <x-import component-from-global-scope="Drawpane.IconButton" icon="{{t.icon}}" label="{{t.label}}" shortcut="{{t.key}}" pressed="{{t.pressed}}" size="md"></x-import>
+    </sc-for>
+    <span style="width: 1px; height: 16px; margin: 0 4px; background: var(--line-strong)"></span>
+    <button type="button" aria-label="Open command bar" style="display: inline-flex; align-items: center; gap: 8px; width: 232px; height: 28px; padding: 0 4px 0 8px; box-sizing: border-box; border: 0; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font: 400 12px/16px var(--font-ui); cursor: text">
+      <x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import>
+      <span style="flex: 1; text-align: left; white-space: nowrap">Search or set…</span>
+      <x-import component-from-global-scope="Drawpane.Kbd">⌘ K</x-import>
+    </button>
+  </nav>
+
+  <div style="height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 4px; padding: 0 6px 0 8px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+    <x-import component-from-global-scope="Drawpane.PresenceStack" people="{{people}}"></x-import>
+    <span style="width: 1px; height: 16px; margin: 0 4px; background: var(--line-strong)"></span>
+    <x-import component-from-global-scope="Drawpane.IconButton" icon="play" label="Present" shortcut="⌘ ↵"></x-import>
+    <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="sm">{{primary}}</x-import>
+  </div>
+</header>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"tool":{"editor":"enum","options":["pointer","board","rectangle","ellipse","pen","text","comment","hand"],"default":"pointer"},"file":{"editor":"text","default":"Mobile app"},"branch":{"editor":"text","default":"main"},"primary":{"editor":"text","default":"Share"},"$preview":{"width":1416,"height":40}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var tool = this.props.tool ?? 'pointer';
+    var list = [['pointer','Move','V'],['board','Board','B'],['rectangle','Rectangle','R'],['ellipse','Ellipse','O'],['pen','Pen','P'],['text','Text','T'],['comment','Comment','C'],['hand','Hand','H']];
+    return {
+      file: this.props.file ?? 'Mobile app',
+      branch: this.props.branch ?? 'main',
+      primary: this.props.primary ?? 'Share',
+      tools: list.map(function (t) { return { icon: t[0], label: t[1], key: t[2], pressed: t[0] === tool }; }),
+      people: [{ name: 'Ana Ruiz', color: 1, where: 'Home — iOS' }, { name: 'Lena Park', color: 2, where: 'Hero card' }, { name: 'Sam Okafor', color: 3, where: 'Settings — iOS' }]
+    };
+  }
+}
+</script>
+</body>
+</html>

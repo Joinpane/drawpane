@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane agent pane, agent working on a branch</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" branch="agent/empty-states" primary="Review" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="upcoming" hint-size="248px,824px"></dc-import>
+
+    <main aria-label="Canvas on the agent's branch" style="flex: 999 1 560px; min-width: 0; position: relative; height: 824px">
+      <div style="position: absolute; left: 50%; top: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 10px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); font-size: 12px; line-height: 16px; white-space: nowrap">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Claude" status="working" on-behalf-of="Ana"></x-import>
+        <span style="color: var(--ink-muted)">on <b style="color: var(--ink); font-weight: 600">agent/empty-states</b> · main is untouched</span>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">View main</x-import>
+      </div>
+
+      <div style="position: absolute; left: 50%; top: 72px; width: 340px; height: 560px; margin-left: -170px">
+        <span style="position: absolute; left: 0; top: -20px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Home — iOS · Empty</span>
+        <dc-import name="PartBoard" variant="empty" hint-size="340px,560px"></dc-import>
+        <span aria-hidden="true" style="position: absolute; left: 32px; top: 212px; width: 276px; height: 172px; border-radius: 10px; outline: 1.5px dashed var(--agent); outline-offset: 0"></span>
+        <div aria-hidden="true" style="position: absolute; left: 238px; top: 352px">
+          <svg width="16" height="18" viewBox="0 0 16 18"><path d="M1 1l13 6.5-5.6 1.6L6.2 15z" fill="var(--agent)" stroke="var(--surface-raised)" stroke-width="1"></path></svg>
+          <span style="position: absolute; left: 14px; top: 16px; display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px 2px 4px; border-radius: var(--radius-xs); background: var(--agent); color: var(--on-agent); font-size: 11px; line-height: 14px; font-weight: 600; white-space: nowrap"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import>Claude</span>
+        </div>
+        <span style="position: absolute; left: 30px; top: 394px; padding: 1px 6px; border-radius: var(--radius-xs); background: var(--agent-soft); color: var(--agent-ink); font-family: var(--font-mono); font-size: 11px; line-height: 14px; white-space: nowrap">insert EmptyState variant=list</span>
+      </div>
+
+      <div style="position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 6px 12px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); font-size: 11px; line-height: 14px; color: var(--ink-muted); white-space: nowrap">
+        <span>6 operations</span><span style="color: var(--success)">● 100% tokens</span><span style="color: var(--success)">● contrast AA</span><span>You can keep editing; the agent works around you</span>
+      </div>
+    </main>
+
+    <aside aria-label="Agent" style="width: 300px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="display: flex; align-items: center; gap: 8px; padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{modes}}"></x-import>
+        <span style="flex: 1"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past sessions"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+
+      <div style="flex: 1; min-height: 0; overflow: hidden; padding: 12px; display: grid; gap: 12px; align-content: start">
+        <div style="justify-self: end; max-width: 240px; padding: 8px 10px; border-radius: var(--radius-md) var(--radius-md) 2px var(--radius-md); background: var(--surface-sunken); font-size: 12px; line-height: 17px">Add empty and error states for Upcoming, using our components. Keep the tab bar as is.</div>
+        <div style="display: grid; gap: 4px">
+          <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">
+            <span style="display: inline-flex; color: var(--agent)"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import></span>
+            Plan · 5 steps · reading 1 board, Acme design system 2.4.0
+          </div>
+          <div role="list" style="display: grid; gap: 2px">
+            <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Read Home — iOS and the Acme library" meta="2 s"></x-import>
+            <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Duplicated Home — iOS as Empty and Error" ops="duplicate board Home — iOS as Empty, Error" meta="1 s"></x-import>
+            <x-import component-from-global-scope="Drawpane.AgentStep" status="running" label="Adding empty state to Upcoming" detail="EmptyState from Acme, list variant" ops="insert EmptyState variant=list in Upcoming"></x-import>
+            <x-import component-from-global-scope="Drawpane.AgentStep" status="queued" label="Adding error state with retry"></x-import>
+            <x-import component-from-global-scope="Drawpane.AgentStep" status="queued" label="Render both boards and check contrast"></x-import>
+          </div>
+        </div>
+        <div style="display: grid; gap: 6px; padding: 10px; border-radius: var(--radius-md); background: var(--surface-sunken); font-size: 12px; line-height: 16px">
+          <div style="display: flex; justify-content: space-between"><span style="color: var(--ink-muted)">Model</span><span>Claude Opus 5.5 · your key</span></div>
+          <div style="display: flex; justify-content: space-between"><span style="color: var(--ink-muted)">Spent</span><span style="font-variant-numeric: tabular-nums">$0.04 of $2.00 session limit</span></div>
+          <div style="display: flex; justify-content: space-between"><span style="color: var(--ink-muted)">Can change</span><span>agent/empty-states only</span></div>
+        </div>
+      </div>
+
+      <div style="padding: 10px 12px 12px; border-top: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.PromptField" running="{{yes}}" model="Claude Opus 5.5" placeholder="Steer the agent while it works" context="{{ctx}}"></x-import>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      ctx: [{ label: 'Upcoming', icon: 'board' }, { label: 'Acme design system', icon: 'component' }]
+    };
+  }
+}
+</script>
+</body>
+</html>

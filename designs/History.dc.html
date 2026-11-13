@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane history scrubber</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" tool="pointer" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+
+    <aside aria-label="History" style="width: 248px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 8px 12px">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Left pane" value="history" options="{{tabs}}"></x-import>
+      </div>
+      <div style="display: flex; gap: 6px; padding: 0 12px 8px">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Show" value="named" options="{{filters}}"></x-import>
+      </div>
+      <div style="flex: 1; min-height: 0; overflow: hidden; padding: 0 4px">
+        <sc-for list="{{days}}" as="d" hint-placeholder-count="3">
+          <div style="padding: 8px 8px 4px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">{{d.day}}</div>
+          <sc-for list="{{d.items}}" as="v" hint-placeholder-count="3">
+            <div style="{{v.row}}">
+              <span style="{{v.dot}}"></span>
+              <span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+                <span style="{{v.titleStyle}}">{{v.title}}</span>
+                <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{v.meta}}</span>
+              </span>
+            </div>
+          </sc-for>
+        </sc-for>
+      </div>
+      <div style="padding: 10px 12px; border-top: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.Button" size="sm" icon="plus">Name this version</x-import>
+      </div>
+    </aside>
+
+    <main aria-label="Canvas at a past revision" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: 50%; top: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); font-size: 12px; line-height: 16px; white-space: nowrap">
+        <x-import component-from-global-scope="Drawpane.Icon" name="history"></x-import>
+        <span>Viewing <b style="font-weight: 600">Nov 10, 4:12 pm</b> · read-only</span>
+        <button type="button" style="height: 24px; padding: 0 10px; border: 0; border-radius: var(--radius-sm); background: transparent; box-shadow: inset 0 0 0 1px currentColor; color: inherit; font: 600 12px/16px var(--font-ui); cursor: pointer">Back to now</button>
+      </div>
+
+      <div style="position: absolute; left: 50%; top: 64px; width: 340px; height: 560px; margin-left: -170px">
+        <span style="position: absolute; left: 0; top: -20px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Home — iOS · revision 1,180</span>
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 118px; width: 300px; height: 66px; border-radius: 14px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+        <div role="menu" aria-label="Hero card" style="position: absolute; left: 236px; top: 150px; width: 252px">
+          <x-import component-from-global-scope="Drawpane.Menu" label="Hero card" items="{{menu}}"></x-import>
+        </div>
+      </div>
+
+      <div aria-label="Timeline" style="position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px 12px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px">
+          <x-import component-from-global-scope="Drawpane.IconButton" icon="play" label="Replay changes" shortcut="space"></x-import>
+          <span style="font-size: 12px; line-height: 16px; font-weight: 600">Revision 1,180</span>
+          <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">of 1,204 · Lena Park recolored Hero card</span>
+          <span style="flex: 1"></span>
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Zoom" value="week" options="{{zoom}}"></x-import>
+        </div>
+        <div style="position: relative; height: 44px">
+          <div style="position: absolute; left: 0; right: 0; top: 20px; height: 2px; border-radius: 1px; background: var(--line-strong)"></div>
+          <sc-for list="{{ticks}}" as="t" hint-placeholder-count="20">
+            <span style="{{t.style}}"></span>
+          </sc-for>
+          <span style="position: absolute; left: 61%; top: 2px; width: 2px; height: 38px; border-radius: 1px; background: var(--signal)"></span>
+          <span style="position: absolute; left: calc(61% - 6px); top: 0; width: 14px; height: 10px; border-radius: 3px; background: var(--signal)"></span>
+          <span style="position: absolute; left: 0; top: 30px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Nov 6</span>
+          <span style="position: absolute; left: 50%; top: 30px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Nov 9</span>
+          <span style="position: absolute; right: 0; top: 30px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Now</span>
+        </div>
+      </div>
+    </main>
+
+    <aside aria-label="Version details" style="width: 264px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 14px 12px 10px; border-bottom: 1px solid var(--line)">
+        <div style="font-size: 13px; line-height: 18px; font-weight: 600">Before color pass</div>
+        <div style="margin-top: 2px; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Named by Lena Park · Nov 10, 4:12 pm</div>
+      </div>
+      <section class="dp-section" aria-label="In this session">
+        <div class="dp-section__head"><h3 class="dp-section__title">In this session</h3><span class="dp-caption">38 edits</span></div>
+        <div class="dp-section__body" style="gap: 6px">
+          <sc-for list="{{edits}}" as="e" hint-placeholder-count="4">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px">
+              <span style="display: inline-flex; color: var(--icon)"><x-import component-from-global-scope="Drawpane.Icon" name="{{e.icon}}" size="12"></x-import></span>
+              <span style="flex: 1">{{e.text}}</span>
+              <span style="color: var(--ink-muted); font-variant-numeric: tabular-nums">{{e.n}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      <div style="margin-top: auto; padding: 12px; border-top: 1px solid var(--line); display: grid; gap: 8px">
+        <x-import component-from-global-scope="Drawpane.Button" icon="branch">Branch from this version</x-import>
+        <x-import component-from-global-scope="Drawpane.Button" variant="ghost" icon="history">Restore whole file</x-import>
+        <p style="margin: 0; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Restoring adds a new revision. Nothing after it is lost.</p>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var row = 'display: flex; align-items: flex-start; gap: 10px; padding: 6px 8px; border-radius: var(--radius-sm);';
+    var dot = 'width: 8px; height: 8px; margin-top: 4px; flex: none; border-radius: 50%; background: ';
+    function v(title, meta, color, opts) {
+      opts = opts || {};
+      return { title: title, meta: meta, row: row + (opts.sel ? ' background: var(--signal-soft);' : ''), dot: dot + color + (opts.named ? '; box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px ' + color : ''), titleStyle: 'font-size: 12px; line-height: 16px; ' + (opts.named ? 'font-weight: 600' : 'color: var(--ink)') };
+    }
+    var ticks = [];
+    var spots = [2, 4, 5, 9, 13, 14, 15, 22, 27, 31, 33, 41, 44, 47, 52, 58, 61, 66, 72, 79, 83, 88, 91, 95, 98];
+    var named = { 14: 1, 41: 1, 61: 1, 88: 1 };
+    spots.forEach(function (s) {
+      ticks.push({ style: 'position: absolute; top: ' + (named[s] ? 13 : 16) + 'px; left: ' + s + '%; width: ' + (named[s] ? 8 : 4) + 'px; height: ' + (named[s] ? 16 : 10) + 'px; border-radius: 2px; background: ' + (named[s] ? 'var(--ink)' : 'var(--icon)') + '; opacity: ' + (named[s] ? 1 : 0.55) });
+    });
+    return {
+      theme: this.props.theme ?? 'light',
+      tabs: [{ value: 'layers', label: 'Layers' }, { value: 'assets', label: 'Assets' }, { value: 'history', label: 'History' }],
+      filters: [{ value: 'named', label: 'Named' }, { value: 'all', label: 'All edits' }],
+      days: [
+        { day: 'Today', items: [v('Merged feature/greeting', 'Lena Park · 11:40 am', 'var(--presence-2)', { named: true }), v('12 edits', 'Ana Ruiz · 9:05 am', 'var(--presence-1)')] },
+        { day: 'Nov 10', items: [v('Before color pass', 'Lena Park · 4:12 pm', 'var(--presence-2)', { named: true, sel: true }), v('38 edits', 'Lena Park · 2:30 pm', 'var(--presence-2)'), v('Tokens synced from GitHub', 'acme/web · 10:02 am', 'var(--icon)')] },
+        { day: 'Nov 7', items: [v('Design review v1', 'Ana Ruiz · 5:48 pm', 'var(--presence-1)', { named: true }), v('64 edits', 'Ana, Sam · 1:15 pm', 'var(--presence-3)')] }
+      ],
+      menu: [
+        { heading: 'Hero card at revision 1,180' },
+        { label: 'Restore this layer', icon: 'history', active: true },
+        { label: 'Copy this layer to now', shortcut: '⌘ C' },
+        { label: 'Compare with now', icon: 'branch' },
+        { separator: true },
+        { label: 'Show who changed it', icon: 'search' }
+      ],
+      zoom: [{ value: 'day', label: 'Day' }, { value: 'week', label: 'Week' }, { value: 'all', label: 'All' }],
+      ticks: ticks,
+      edits: [
+        { icon: 'rectangle', text: 'Fill changes', n: '14' },
+        { icon: 'text', text: 'Text edits', n: '11' },
+        { icon: 'layout-col', text: 'Layout changes', n: '9' },
+        { icon: 'instance', text: 'Instance swaps', n: '4' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

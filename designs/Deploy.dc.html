@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane self-host setup</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 40px 32px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <div style="max-width: 1200px; margin: 0 auto; display: grid; gap: 24px">
+    <header style="display: flex; align-items: flex-end; flex-wrap: wrap; gap: 16px">
+      <div style="flex: 1 1 480px">
+        <h1 style="margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 40px; line-height: 44px">Your instance is live</h1>
+        <p style="margin: 8px 0 0; font-size: 14px; line-height: 20px; color: var(--ink-muted)">One command created everything in Acme's Cloudflare account. Finish setup here; it takes about two minutes.</p>
+      </div>
+      <x-import component-from-global-scope="Drawpane.Badge" tone="success">All checks passing</x-import>
+    </header>
+
+    <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+      <section aria-label="Terminal output" style="flex: 1 1 480px; min-width: 0; border-radius: var(--radius-lg); background: #121211; box-shadow: var(--shadow-pane); overflow: hidden">
+        <div style="display: flex; align-items: center; gap: 6px; padding: 10px 14px; border-bottom: 1px solid #2a2927">
+          <span style="width: 10px; height: 10px; border-radius: 50%; background: #3d3b37"></span><span style="width: 10px; height: 10px; border-radius: 50%; background: #3d3b37"></span><span style="width: 10px; height: 10px; border-radius: 50%; background: #3d3b37"></span>
+          <span style="flex: 1; text-align: center; font-family: var(--font-mono); font-size: 11px; color: #a9a59d">~/acme · zsh</span>
+        </div>
+        <pre style="margin: 0; padding: 16px 18px 20px; font-family: var(--font-mono); font-size: 12px; line-height: 20px; color: #f2f0eb; white-space: pre-wrap"><span style="color: #ff7a45">$</span> npm create drawpane@latest
+
+<span style="color: #a9a59d">◆</span> Cloudflare account   <span style="color: #f2f0eb">Acme Inc (logged in with wrangler)</span>
+<span style="color: #a9a59d">◆</span> Instance name        <span style="color: #f2f0eb">acme-design</span>
+<span style="color: #a9a59d">◆</span> Custom domain        <span style="color: #f2f0eb">design.acme.com</span>
+<span style="color: #a9a59d">◆</span> Data location        <span style="color: #f2f0eb">EU jurisdiction</span>
+
+<span style="color: #4cc38a">✓</span> Worker               drawpane-acme-design
+<span style="color: #4cc38a">✓</span> Durable Objects      FileRoom, TeamHub
+<span style="color: #4cc38a">✓</span> D1 database          drawpane-acme  <span style="color: #a9a59d">(12 migrations)</span>
+<span style="color: #4cc38a">✓</span> R2 bucket            drawpane-acme-files <span style="color: #a9a59d">(EU)</span>
+<span style="color: #4cc38a">✓</span> Queue + cron         jobs, nightly snapshots
+<span style="color: #4cc38a">✓</span> Deployed in 41 s
+
+<span style="color: #ff7a45">→</span> Open https://design.acme.com/setup
+<span style="color: #a9a59d">  Upgrade later with: npx drawpane upgrade</span></pre>
+      </section>
+
+      <section aria-label="Finish setup" style="flex: 1 1 420px; border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-pane); overflow: hidden">
+        <div style="padding: 20px 20px 12px">
+          <h2 style="margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Finish setup</h2>
+          <p style="margin: 4px 0 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">design.acme.com · Drawpane 1.4.2 · synced to Penpot 2.11 common</p>
+        </div>
+        <ul style="margin: 0; padding: 0 20px; list-style: none; display: grid; gap: 4px">
+          <sc-for list="{{checks}}" as="c" hint-placeholder-count="6">
+            <li style="display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap: 10px; height: 36px; padding: 0 10px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 13px">
+              <span style="display: inline-flex; color: var(--success)"><x-import component-from-global-scope="Drawpane.Icon" name="check"></x-import></span>
+              <span>{{c.name}}</span>
+              <span style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted)">{{c.value}}</span>
+            </li>
+          </sc-for>
+        </ul>
+        <form style="display: grid; gap: 14px; padding: 20px">
+          <div style="font-size: 13px; line-height: 18px; font-weight: 600">Create the first admin</div>
+          <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
+            <x-import component-from-global-scope="Drawpane.TextField" label="Your name" default-value="Ziyang"></x-import>
+            <x-import component-from-global-scope="Drawpane.TextField" label="Email" default-value="ziyang@acme.com"></x-import>
+          </div>
+          <x-import component-from-global-scope="Drawpane.TextField" label="Team name" default-value="Acme Design" hint="You can add more teams later."></x-import>
+          <div style="display: grid; gap: 10px; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+            <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Allow sign-in with GitHub"></x-import>
+            <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Send anonymous usage counts to the Drawpane project"></x-import>
+          </div>
+          <div style="display: flex; justify-content: flex-end; gap: 8px">
+            <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg">Create admin and open Drawpane</x-import>
+          </div>
+        </form>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true, no: false,
+      checks: [
+        { name: 'Worker responds', value: '38 ms' },
+        { name: 'Durable Objects reachable', value: 'FileRoom ok' },
+        { name: 'D1 migrations applied', value: '12 / 12' },
+        { name: 'R2 read and write', value: 'EU' },
+        { name: 'Queue consumer running', value: 'jobs' },
+        { name: 'Email delivery', value: 'Email Service' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

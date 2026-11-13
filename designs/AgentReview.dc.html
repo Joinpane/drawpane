@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane, reviewing an agent's proposal</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" branch="agent/empty-states" primary="Merge" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+
+    <aside aria-label="Proposed changes" style="width: 260px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 12px 12px 10px; border-bottom: 1px solid var(--line); display: grid; gap: 6px">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Claude" status="waiting" on-behalf-of="Ana"></x-import>
+        <div style="font-size: 13px; line-height: 18px; font-weight: 600">Empty and error states for Upcoming</div>
+        <div style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">2 new boards · 6 changes · 3 min · $0.09</div>
+      </div>
+      <div style="flex: 1; min-height: 0; padding: 6px 4px">
+        <sc-for list="{{changes}}" as="c" hint-placeholder-count="6">
+          <label style="{{c.row}}">
+            <input type="checkbox" defaultChecked="{{c.on}}" style="margin: 2px 0 0; accent-color: var(--signal)">
+            <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+              <span style="font-size: 12px; line-height: 16px; font-weight: 600">{{c.title}}</span>
+              <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{c.why}}</span>
+              <code style="font-family: var(--font-mono); font-size: 10.5px; line-height: 14px; color: var(--agent-ink)">{{c.ops}}</code>
+            </span>
+          </label>
+        </sc-for>
+      </div>
+    </aside>
+
+    <main aria-label="Before and after" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: 50%; top: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 4px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); white-space: nowrap">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Compare" value="side" options="{{modes}}"></x-import>
+      </div>
+      <div style="position: absolute; left: 50%; top: 92px; transform: translateX(-50%); display: flex; gap: 40px">
+        <div style="position: relative; width: 340px; height: 560px">
+          <span style="position: absolute; left: 0; top: -22px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">main · Home — iOS</span>
+          <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        </div>
+        <div style="position: relative; width: 340px; height: 560px">
+          <span style="position: absolute; left: 0; top: -22px; font-size: 11px; line-height: 14px; font-weight: 600">New · Home — iOS · Empty</span>
+          <dc-import name="PartBoard" variant="empty" hint-size="340px,560px"></dc-import>
+          <span aria-hidden="true" style="position: absolute; left: 32px; top: 212px; width: 276px; height: 172px; border-radius: 10px; outline: 1.5px dashed var(--agent)"></span>
+          <span style="position: absolute; left: 316px; top: 214px; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--success); color: var(--surface-raised); font-size: 10.5px; font-weight: 700">2</span>
+        </div>
+      </div>
+    </main>
+
+    <aside aria-label="Agent summary" style="width: 300px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <section class="dp-section" aria-label="Summary">
+        <div class="dp-section__head"><h3 class="dp-section__title">What Claude did</h3></div>
+        <p style="margin: 6px 0 0; font-size: 12px; line-height: 17px">Duplicated Home as Empty and Error boards. Used Acme's EmptyState and Banner components, so both follow your tokens. Left the tab bar untouched as you asked.</p>
+      </section>
+      <section class="dp-section" aria-label="Checks">
+        <div class="dp-section__head"><h3 class="dp-section__title">Checks</h3><x-import component-from-global-scope="Drawpane.Badge" tone="success">All passed</x-import></div>
+        <div class="dp-section__body" style="gap: 6px">
+          <sc-for list="{{checks}}" as="k" hint-placeholder-count="4">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px">
+              <span style="display: inline-flex; color: var(--success)"><x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import></span>
+              <span style="flex: 1">{{k.text}}</span><span style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted)">{{k.v}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Ask for changes" style="flex: 1; min-height: 0">
+        <div class="dp-section__head"><h3 class="dp-section__title">Ask for changes</h3></div>
+        <div style="margin-top: 6px"><x-import component-from-global-scope="Drawpane.PromptField" rows="2" placeholder="e.g. use a warmer illustration slot and shorter copy" model="Claude Opus 5.5"></x-import></div>
+      </section>
+      <div style="padding: 12px; border-top: 1px solid var(--line); display: grid; gap: 8px">
+        <div style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Merging adds one revision, attributed to Claude for Ana. Undo restores main as it is now.</div>
+        <div style="display: flex; gap: 8px">
+          <x-import component-from-global-scope="Drawpane.Button" variant="ghost">Discard</x-import>
+          <x-import component-from-global-scope="Drawpane.Button" variant="primary" icon="branch" shortcut="⌘ ↵">Merge 5 of 6</x-import>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var row = 'display: flex; align-items: flex-start; gap: 8px; padding: 8px; border-radius: var(--radius-sm); cursor: pointer;';
+    var list = [
+      ['Empty board created', 'You asked for empty and error states', 'duplicate board Home — iOS as Empty', true],
+      ['EmptyState in Upcoming', 'List variant fits the card height', 'insert EmptyState variant=list', true, true],
+      ['Error board created', 'Same layout, keeps context', 'duplicate board Home — iOS as Error', true],
+      ['Banner with Retry', 'Acme Banner, danger tone', 'insert Banner tone=danger action=Retry', true],
+      ['Upcoming hides rows on error', 'Avoids stale data next to an error', 'set Upcoming/rows visible=false', true],
+      ['Greeting shortened', 'Fits one line at 320 px', 'set Greeting text="Morning, Ana"', false]
+    ];
+    return {
+      theme: this.props.theme ?? 'light',
+      modes: [{ value: 'side', label: 'Side by side' }, { value: 'overlay', label: 'Overlay' }, { value: 'swipe', label: 'Swipe' }],
+      changes: list.map(function (c) { return { title: c[0], why: c[1], ops: c[2], on: c[3], row: row + (c[4] ? ' background: var(--signal-soft);' : '') }; }),
+      checks: [
+        { text: 'Values bound to tokens', v: '41 / 41' },
+        { text: 'Components from Acme', v: '4 used' },
+        { text: 'Text contrast AA', v: '12 / 12' },
+        { text: 'Rendered and compared', v: '2 boards' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

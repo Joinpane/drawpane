@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sign in to Drawpane</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; display: flex; flex-wrap: wrap; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <section aria-label="About Drawpane" style="flex: 1 1 520px; min-height: 360px; position: relative; overflow: hidden; background: var(--canvas); display: flex; flex-direction: column; justify-content: flex-end; padding: 48px; box-sizing: border-box">
+    <div aria-hidden="true" style="position: absolute; right: 48px; top: 48px; width: 360px; height: 360px">
+      <span style="position: absolute; left: 0; top: 0; width: 220px; height: 220px; border-radius: var(--radius-lg); background: var(--surface-inverse)"></span>
+      <span style="position: absolute; left: 96px; top: 96px; width: 240px; height: 220px; border-radius: var(--radius-lg); background: var(--signal)"></span>
+      <span style="position: absolute; left: 260px; top: 24px; width: 72px; height: 48px; border-radius: var(--radius-md); background: var(--component)"></span>
+    </div>
+    <h1 style="position: relative; margin: 0; max-width: 520px; font-family: var(--font-display); font-weight: 400; font-size: 64px; line-height: 60px; letter-spacing: -0.01em">Design you own.</h1>
+    <p style="position: relative; margin: 16px 0 0; max-width: 440px; font-size: 15px; line-height: 22px; color: var(--ink-muted)">Open source, real-time and fast. This instance runs on Acme's own Cloudflare account, so your files never leave it.</p>
+  </section>
+
+  <section aria-label="Sign in" style="flex: 1 1 440px; display: grid; place-items: center; padding: 48px 24px; box-sizing: border-box">
+    <div style="width: 100%; max-width: 360px; display: grid; gap: 20px">
+      <div style="display: flex; align-items: center; gap: 10px">
+        <svg width="28" height="28" viewBox="0 0 32 32" role="img" aria-label="Drawpane"><rect x="3.25" y="3.25" width="18.5" height="18.5" rx="4" fill="none" stroke="var(--ink)" stroke-width="2.5"></rect><rect x="10" y="10" width="19" height="19" rx="4" fill="var(--signal)"></rect></svg>
+        <span style="font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -0.01em">Drawpane</span>
+      </div>
+      <div>
+        <h2 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Sign in to Acme Design</h2>
+        <p style="margin: 4px 0 0; font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--ink-muted)">design.acme.com</p>
+      </div>
+      <div style="display: grid; gap: 8px">
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg" icon="lock">Continue with a passkey</x-import>
+        <x-import component-from-global-scope="Drawpane.Button" size="lg">Continue with GitHub</x-import>
+        <x-import component-from-global-scope="Drawpane.Button" size="lg">Continue with Google</x-import>
+      </div>
+      <div style="display: flex; align-items: center; gap: 12px; font-size: 12px; line-height: 16px; color: var(--ink-muted)">
+        <span style="flex: 1; height: 1px; background: var(--line)"></span>or<span style="flex: 1; height: 1px; background: var(--line)"></span>
+      </div>
+      <form style="display: grid; gap: 10px">
+        <x-import component-from-global-scope="Drawpane.TextField" label="Work email" type="email" placeholder="name@acme.com"></x-import>
+        <x-import component-from-global-scope="Drawpane.Button" size="lg" variant="ghost">Email me a sign-in link</x-import>
+      </form>
+      <p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Your company uses SSO? <a href="#" style="color: var(--signal-ink); font-weight: 600; text-decoration: none">Sign in with SSO</a></p>
+      <p style="margin: 12px 0 0; padding-top: 16px; border-top: 1px solid var(--line); font-size: 11px; line-height: 14px; color: var(--ink-muted)">Self-hosted by Acme · Drawpane 1.4.2 · <a href="#" style="color: var(--ink-muted)">Open source under MPL-2.0</a></p>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.theme ?? 'light' };
+  }
+}
+</script>
+</body>
+</html>

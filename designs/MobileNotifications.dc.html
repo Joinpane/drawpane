@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane phone, inbox</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="position: relative; width: 390px; height: 844px; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <header style="padding: 52px 16px 8px; display: grid; gap: 12px">
+    <div style="display: flex; align-items: center"><h1 style="flex: 1; margin: 0; font-size: 26px; line-height: 32px; font-weight: 600; letter-spacing: -0.01em">Inbox</h1><span style="font-size: 15px; color: var(--ink-muted)">Mark all read</span></div>
+    <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Inbox filter" value="all" options="{{tabs}}"></x-import>
+  </header>
+  <div style="flex: 1; min-height: 0; overflow: hidden; display: grid; align-content: start">
+    <sc-for list="{{items}}" as="n" hint-placeholder-count="6">
+      <div style="{{n.row}}">
+        <span style="{{n.av}}">{{n.ini}}</span>
+        <span style="flex: 1; min-width: 0; display: grid; gap: 4px">
+          <span style="font-size: 15px; line-height: 21px">{{n.text}}</span>
+          <span style="font-size: 13px; line-height: 17px; color: var(--ink-muted)">{{n.meta}}</span>
+          <span style="{{n.quick}}">
+            <span style="{{n.b1}}">{{n.a1}}</span><span style="{{n.b2}}">{{n.a2}}</span>
+          </span>
+        </span>
+        <span style="{{n.dot}}"></span>
+      </div>
+    </sc-for>
+  </div>
+  <div style="position: absolute; left: 12px; right: 12px; top: 8px; padding: 12px 14px; border-radius: 18px; background: color-mix(in srgb, var(--surface-raised) 92%, transparent); box-shadow: var(--shadow-popover); display: flex; gap: 10px; align-items: center">
+    <span style="width: 32px; height: 32px; border-radius: 8px; background: #16181d; box-shadow: inset -10px -10px 0 #e04f1a"></span>
+    <span style="flex: 1; display: grid"><span style="font-size: 13px; line-height: 17px; font-weight: 600">Drawpane · now</span><span style="font-size: 13px; line-height: 17px">Lena approved feature/greeting. Merge it?</span></span>
+  </div>
+  <nav aria-label="App" style="display: grid; grid-template-columns: repeat(4, 1fr); height: 64px; padding-bottom: 18px; border-top: 1px solid var(--line); background: var(--surface)">
+    <a href="#" style="position: relative; display: grid; justify-items: center; align-content: center; gap: 2px; color: var(--ink-muted); text-decoration: none; font-size: 11px; font-weight: 400"><x-import component-from-global-scope="Drawpane.Icon" name="layers"></x-import>Files</a>
+    <a href="#" style="position: relative; display: grid; justify-items: center; align-content: center; gap: 2px; color: var(--ink); text-decoration: none; font-size: 11px; font-weight: 600"><span style="position: absolute; top: 8px; margin-left: 14px; width: 8px; height: 8px; border-radius: 50%; background: var(--signal)"></span><x-import component-from-global-scope="Drawpane.Icon" name="comment"></x-import>Inbox</a>
+    <a href="#" style="position: relative; display: grid; justify-items: center; align-content: center; gap: 2px; color: var(--ink-muted); text-decoration: none; font-size: 11px; font-weight: 400"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import>Agents</a>
+    <a href="#" style="position: relative; display: grid; justify-items: center; align-content: center; gap: 2px; color: var(--ink-muted); text-decoration: none; font-size: 11px; font-weight: 400"><x-import component-from-global-scope="Drawpane.Icon" name="eye"></x-import>Viewer</a>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 390, "height": 844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var av = function (c, agent) { return 'flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: ' + (agent ? '10px' : '50%') + '; background: var(' + c + '); color: var(' + (agent ? '--on-agent' : '--on-presence') + '); font-size: 12px; font-weight: 700'; };
+    var btn = function (primary) { return 'height: 34px; padding: 0 14px; border-radius: var(--radius-md); font-size: 14px; line-height: 34px; font-weight: 600; ' + (primary ? 'background: var(--surface-inverse); color: var(--ink-inverse)' : 'background: var(--surface-sunken)'); };
+    var N = [
+      ['AI', '--agent', 1, 'Empty states agent asks: illustrations or icons for empty lists?', 'agent/empty-states · 8 min', 1, 'Icons', 'Illustrations'],
+      ['AR', '--presence-1', 0, 'Ana mentioned you: "can we use the larger title here?"', 'Mobile app · Home · 12 min', 1, 'Reply', 'Open'],
+      ['LP', '--presence-2', 0, 'Lena asked you to review feature/greeting', 'Mobile app · 1 h', 1, 'Later', 'Review'],
+      ['SO', '--presence-3', 0, 'Sam resolved your comment on Calendar', 'Web dashboard · yesterday', 0, '', ''],
+      ['AI', '--agent', 1, 'Weekly lint: 12 raw colors in 3 files', 'Automation · Monday', 0, '', ''],
+      ['MH', '--presence-5', 0, 'Mo shared Checkout v3 with you', 'Nov 9', 0, '', '']
+    ];
+    return {
+      theme: T,
+      tabs: [{ value: 'all', label: 'All' }, { value: 'mentions', label: 'Mentions' }, { value: 'agents', label: 'Agents' }, { value: 'reviews', label: 'Reviews' }],
+      items: N.map(function (n) { return { ini: n[0], av: av(n[1], n[2]), text: n[3], meta: n[4], a1: n[6], a2: n[7], b1: btn(false), b2: btn(true),
+        quick: n[6] ? 'display: flex; gap: 8px; margin-top: 4px' : 'display: none',
+        dot: n[5] ? 'flex: none; width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; background: var(--signal)' : 'flex: none; width: 10px',
+        row: 'display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line)' + (n[5] ? '' : '; opacity: .7') }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

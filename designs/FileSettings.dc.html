@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane file menu and settings</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor" style="position: relative">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas"><div style="position: absolute; left: 380px; top: 60px; width: 340px; height: 560px"><dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import></div></main>
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+  <div style="position: absolute; left: 12px; top: 58px; width: 250px"><x-import component-from-global-scope="Drawpane.Menu" label="File" items="{{menu}}"></x-import></div>
+  <section role="dialog" aria-label="File settings" class="u-modal" style="position: absolute; left: 500px; top: 110px; width: 520px">
+    <div class="u-head" style="padding: 14px 16px 8px"><h2 class="u-h2">File settings · Mobile app</h2><x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import></div>
+    <div class="u-tabs" style="padding: 0 16px"><sc-for list="{{tabs}}" as="t" hint-placeholder-count="4"><span class="u-tab {{t.on}}">{{t.n}}</span></sc-for></div>
+    <div class="u-col u-col--loose" style="padding: 16px">
+      <div style="display: grid; grid-template-columns: 1fr 160px; gap: 16px">
+        <div class="u-col"><x-import component-from-global-scope="Drawpane.TextField" label="Name" default-value="Mobile app"></x-import><div class="u-col u-col--tight"><span class="u-xs u-muted">Project</span><span class="u-select">Mobile <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div><x-import component-from-global-scope="Drawpane.TextField" label="Description" default-value="iOS and Android app · source of truth for v3"></x-import></div>
+        <div class="u-col u-col--tight"><span class="u-xs u-muted">Thumbnail</span><div style="height: 120px; border-radius: var(--radius-md); background: #eef1fb; box-shadow: inset 0 0 0 1px var(--line); position: relative"><span style="position: absolute; left: 20%; top: 14%; width: 30%; height: 72%; border-radius: 6px; background: #ffffff"></span><span style="position: absolute; left: 56%; top: 14%; width: 30%; height: 26%; border-radius: 6px; background: #2b4fd6"></span></div><x-import component-from-global-scope="Drawpane.Button" size="sm">Use selected board</x-import></div>
+      </div>
+      <div class="u-col"><span class="u-cap">Libraries used</span>
+        <sc-for list="{{libs}}" as="l" hint-placeholder-count="3"><div class="u-row u-sm"><x-import component-from-global-scope="Drawpane.Icon" name="component" size="12"></x-import><span class="u-grow">{{l.n}}</span><span class="{{l.c}}">{{l.s}}</span><x-import component-from-global-scope="Drawpane.Switch" checked="{{l.on}}" aria-label="{{l.n}}"></x-import></div></sc-for>
+      </div>
+      <div class="u-col"><span class="u-cap">Defaults for new boards</span><div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px"><span class="u-select">iPhone 16 · 393 × 852 <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span><span class="u-select">Color mode: Light <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div></div>
+    </div>
+    <div class="u-foot"><x-import component-from-global-scope="Drawpane.Button" variant="ghost">Move to trash</x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button">Cancel</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Save</x-import></div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      menu: [{ heading: 'Mobile app' }, { label: 'Rename', shortcut: '⌘ ⇧ R' }, { label: 'Move to project…' }, { label: 'Duplicate' }, { label: 'Save version…', shortcut: '⌥ ⌘ S' }, { label: 'Show version history' }, { separator: true }, { label: 'Download .dpz' }, { label: 'Export to Penpot (.penpot)' }, { label: 'Make a copy as a template' }, { separator: true }, { label: 'File settings…', active: true }, { label: 'Pin to sidebar', checked: true }, { label: 'Move to trash', danger: true }],
+      tabs: [{ n: 'General', on: 'is-on' }, { n: 'Libraries', on: '' }, { n: 'Access', on: '' }, { n: 'Agents', on: '' }],
+      libs: [{ n: 'Acme design system', s: '2.4.1 · up to date', c: 'u-chip u-chip--ok', on: true }, { n: 'Icon set', s: 'update 3.2', c: 'u-chip u-chip--signal', on: true }, { n: 'Marketing brand', s: 'not used', c: 'u-chip u-chip--muted', on: false }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>
