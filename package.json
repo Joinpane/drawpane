@@ -1,0 +1,25 @@
+{
+  "name": "drawpane",
+  "private": true,
+  "license": "MPL-2.0",
+  "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=26.13.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "deploy": "turbo run build --filter=@drawpane/worker... && pnpm --filter @drawpane/worker run deploy"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.7",
+    "turbo": "2.11.11",
+    "typescript": "7.0.2"
+  }
+}

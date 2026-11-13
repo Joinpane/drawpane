@@ -1,14 +1,14 @@
 # Drawpane — Product Requirements Document
 
-Nov 12, 2026 · Owner: Ziyang · Status: Draft v0.1
+Nov 12, 2026 · Owner: Ziyang · Status: Draft v0.2 (see [decision 0001](decisions/0001-build-from-scratch-in-typescript.md))
 
 ## TL;DR
 
-Drawpane is an open-source design and prototyping tool that anyone can deploy to their own Cloudflare account in minutes, and that runs for cents when idle. It starts as a hard fork of Penpot (`github.com/Joinpane/drawpane`). It keeps Penpot's open file model, its shared `common` logic and its WASM renderer, and replaces everything else: the JVM backend becomes Workers + Durable Objects, and the interface becomes a new design system built for speed and focus.
+Drawpane is an open-source design and prototyping tool that anyone can deploy to their own Cloudflare account in minutes, and that runs for cents when idle. It is built from scratch in TypeScript (`github.com/Joinpane/drawpane`), using Penpot as a reference rather than a dependency. It has its own document model designed for Durable Objects, a WebGL canvas, and a new design system built for speed and focus. It imports `.penpot` files, so Penpot users can bring their work.
 
 We are making four bets:
 
-1. **Serverless-native beats self-hosted.** A Penpot install is an always-on JVM, Postgres, Redis and nginx. A Drawpane install is one `wrangler deploy`. Idle teams cost only their storage, and busy teams scale with no capacity planning.
+1. **Serverless-native beats self-hosted.** A Penpot install is an always-on JVM, Postgres, Redis and nginx. A Drawpane install is one command that runs `wrangler deploy`. Idle teams cost only their storage, and busy teams scale with no capacity planning.
 2. **A genuinely better editor.** We don't aim for parity with a new coat of paint. Drawpane ships interaction ideas neither Figma nor Penpot has: a command-first canvas, in-context properties, live branching, and a single model for tokens, variables and code.
 3. **Open by default.** The license is MPL-2.0 and the file format is documented. Designs are SVG, CSS and JSON underneath, so nobody's work is ever locked in, including ours.
 4. **Agents as collaborators.** AI agents, built in or connected over MCP, join the file like a person: with a cursor, on their own branch, using the same typed operations as the command bar. People review and merge their work. See "AI agents, natively" below.
@@ -33,7 +33,7 @@ Teams that want an open design tool today must choose between Figma's price and 
 - Performance is the most common complaint, and the new WebGL renderer was still an opt-in beta in mid-2026 ([Penpot community](https://community.penpot.app/t/not-a-roadmap-but-whats-coming-in-penpot-june-2026/10628)).
 - The UI is functional but dense, and it borrows many of Figma's patterns without improving on them.
 
-**The opening.** Cloudflare's Workers, Durable Objects, D1 and R2 can now run a real-time multiplayer editor with no servers. Penpot's MPL-2.0 frontend and shared logic give us a two-year head start on the editor itself. A tool that is open like Penpot, at least as polished as Figma, and deploys in one command onto infrastructure that costs cents at rest doesn't exist yet.
+**The opening.** Cloudflare's Workers, Durable Objects, D1 and R2 can now run a real-time multiplayer editor with no servers. Penpot's open source code and file format show how the hard parts (layout, components, path editing) can work, so we start from proven designs rather than a blank page. A tool that is open like Penpot, at least as polished as Figma, and deploys in one command onto infrastructure that costs cents at rest doesn't exist yet.
 
 ## Vision and product principles
 
@@ -74,14 +74,14 @@ Success at 12 months means 1,000 self-hosted deployments and designers who choos
 2. Run fully on Workers, Durable Objects, D1, R2 and Queues, with no containers or VMs in production.
 3. Deliver a visibly better editing experience than both Figma and Penpot on speed, focus and layout.
 4. Make migration painless: import `.penpot` files and Figma files (via `.fig` parsing or the REST API), and export SVG, PNG, PDF and CSS.
-5. Keep the fork economical: track Penpot's `common` and renderer, and contribute fixes upstream where they apply.
+5. Keep the stack lean: one language (TypeScript) from browser to Durable Object, and a document model whose memory use grows with the size of an edit, not the size of the file.
 
 **Non-goals for v1**
 
 - Whiteboarding (FigJam-style), slides or sites. Revisit after v1.
 - A native desktop app. A PWA with offline support is enough.
 - Bundling a hosted AI model. AI comes through MCP and bring-your-own keys.
-- Drop-in API compatibility with Penpot's backend or plugin API. We keep file compatibility, not wire compatibility.
+- Drop-in API compatibility with Penpot's backend. We import Penpot files; we don't speak its wire protocol.
 - Running on non-Cloudflare platforms. Portability is welcome later through a storage adapter, but it won't shape v1.
 
 **Success metrics**
@@ -145,7 +145,7 @@ Both route agents through a scripting path built for plugins. Agents edit the li
 
 |  | Figma | Penpot | Drawpane |
 | --- | --- | --- | --- |
-| How agents edit | JavaScript through the Plugin API | Plugin API, through an MCP plugin open in Penpot | Typed operations sent to the file's Durable Object and validated by `common` before they apply |
+| How agents edit | JavaScript through the Plugin API | Plugin API, through an MCP plugin open in Penpot | Typed operations sent to the file's Durable Object and validated by `@drawpane/model` before they apply |
 | Where changes land | In the file | In the file | On the agent's own branch, merged after review |
 | Which models | Figma's agent, or any MCP client | Any MCP client and model | Any MCP client and model, plus a built-in agent that uses your own key or Workers AI |
 | Cost to the team | AI credits; write-to-canvas planned usage-based | Free | Free; model usage is billed by your provider |
@@ -214,39 +214,39 @@ The built-in agent and outside MCP clients reach the same tools. Neither can cha
 
 ## Functional requirements
 
-Most editor capability comes from Penpot's frontend and `common`, behind a new interface. Everything server-side is new. Phases: **v0.1** alpha (April 2027), **v0.2** beta (July 2027), **v0.3** (September 2027), **v1.0** (November 2027).
+Everything is built new in TypeScript. Where Penpot already has a capability, we study its behavior and tests before building ours. Phases: **v0.1** alpha (April 2027), **v0.2** beta (July 2027), **v0.3** (September 2027), **v1.0** (November 2027).
 
-Origin key: **Inherit** means Penpot code reused behind new UI. **Rebuild** means the same capability with a new implementation. **New** means it doesn't exist in Penpot.
+Reference key: **Penpot** means Penpot has this capability and its behavior is our baseline to match or beat. **New** means Penpot doesn't have it.
 
-| Area | Requirement | Phase | Origin |
+| Area | Requirement | Phase | Reference |
 | --- | --- | --- | --- |
-| Canvas | Boards, shapes, pen and path editing, booleans, masks, images, groups | v0.1 | Inherit |
-| Canvas | WASM/WebGL renderer as the only renderer; 10k-layer files pan at 60 fps | v0.1 | Inherit + tune |
-| Canvas | Fills, strokes, gradients, shadows, layer and background blur | v0.1 | Inherit |
-| Text | Rich text, OpenType features, Google Fonts and uploaded fonts | v0.1 | Inherit; font conversion rebuilt in WASM |
+| Canvas | Boards, shapes, pen and path editing, booleans, masks, images, groups | v0.1 | Penpot |
+| Canvas | WebGL renderer; 10k-layer files pan at 60 fps | v0.1 | Penpot |
+| Canvas | Fills, strokes, gradients, shadows, layer and background blur | v0.1 | Penpot |
+| Text | Rich text, OpenType features, Google Fonts and uploaded fonts | v0.1 | Penpot |
 | Text | Variable fonts, text on path | v1.0 | New |
-| Layout | Flex and grid layout, constraints, min/max sizing | v0.1 | Inherit |
+| Layout | Flex and grid layout, constraints, min/max sizing | v0.1 | Penpot |
 | Layout | Layout X-ray and Explain | v0.1 | New |
 | Layout | Breakpoint strip, exportable media and container queries | v0.3 | New |
-| Components | Main components, instances, overrides, variants | v0.1 | Inherit |
+| Components | Main components, instances, overrides, variants | v0.1 | Penpot |
 | Components | Slots, component playground with auto-generated state matrix | v0.3 | New |
-| Libraries | Shared team libraries with versioned publish and update review | v0.2 | Rebuild |
-| Tokens | One model for tokens, variables, modes and styles; DTCG import and export | v0.1 | Inherit + rebuild UI |
+| Libraries | Shared team libraries with versioned publish and update review | v0.2 | Penpot |
+| Tokens | One model for tokens, variables, modes and styles; DTCG import and export | v0.1 | Penpot |
 | Tokens | Two-way GitHub sync of tokens | v0.3 | New |
-| Prototyping | Interactions, flows, overlays, present mode, shareable prototype links | v0.1 | Inherit |
+| Prototyping | Interactions, flows, overlays, present mode, shareable prototype links | v0.1 | Penpot |
 | Prototyping | Smart animate, scrollable boards, device preview over QR | v0.3 | New |
-| Collaboration | Real-time multiplayer editing, presence, follow mode | v0.1 | Rebuild on Durable Objects |
-| Collaboration | Comments, mentions, resolve; email digests | v0.1 | Rebuild |
+| Collaboration | Real-time multiplayer editing, presence, follow mode | v0.1 | Penpot |
+| Collaboration | Comments, mentions, resolve; email digests | v0.1 | Penpot |
 | Collaboration | Live branches, visual diff, review and merge | v0.2 | New |
 | Collaboration | History scrubber, named versions, layer-level restore | v0.2 | New |
-| Handoff | Inspect with CSS, SVG and token names, free for viewers; asset export (PNG, JPG, WebP, SVG, PDF) | v0.1 | Inherit; export runs client-side |
-| Import | `.penpot` v3 import and export | v0.1 | Inherit |
+| Handoff | Inspect with CSS, SVG and token names, free for viewers; asset export (PNG, JPG, WebP, SVG, PDF) | v0.1 | Penpot |
+| Import | `.penpot` v3 import (converted to the Drawpane model) | v0.1 | Penpot |
 | Import | Figma import via `.fig` file and REST API | v0.2 | New |
-| Workspace | Dashboard with teams, projects, files, search, trash, templates | v0.1 | Rebuild UI |
+| Workspace | Dashboard with teams, projects, files, search, trash, templates | v0.1 | Penpot |
 | Workspace | Command bar, Selection Lens, focus mode, customizable shortcuts | v0.1 | New |
-| Accounts | Email with passkeys, GitHub and Google login, invites, roles (owner, editor, viewer) | v0.1 | Rebuild |
+| Accounts | Email with passkeys, GitHub and Google login, invites, roles (owner, editor, viewer) | v0.1 | Penpot |
 | Accounts | OIDC and SAML SSO, SCIM, audit log | v1.0 | New |
-| Extensibility | Full Penpot plugin API compatibility; Drawpane extensions under a separate namespace | v0.3 | Inherit + adapt |
+| Extensibility | Plugin API v2 (typed operations); a best-effort `penpot` compatibility shim for existing Penpot plugins | v0.3 | Penpot |
 | Extensibility | Public REST API, webhooks, MCP server for AI clients | v0.2 | New |
 | Offline | Installable PWA; edits queue offline and merge on reconnect | v1.0 | New |
 | Self-host | `npm create drawpane` installer, one-command upgrade, R2 backups, health page | v0.1 | New |
@@ -273,48 +273,46 @@ Performance and data safety are release blockers. Every target below has an auto
 
 ## Architecture on Cloudflare
 
-Drawpane runs entirely on Cloudflare: one Worker, two Durable Object classes, D1, R2 and Queues, with no containers. The file's Durable Object replaces Penpot's Postgres advisory lock, its Redis message bus and its websocket server.
+Drawpane runs entirely on Cloudflare: one Worker, two Durable Object classes, D1, R2 and Queues, with no containers. Each file's Durable Object (the FileRoom) orders edits, stores them and sends them to everyone in the file. It replaces the database lock, message bus and websocket server a traditional backend needs.
 
 ![Drawpane on Cloudflare · 1 Worker, 2 Durable Object classes, D1, R2](diagrams/architecture.svg)
 
 Only the FileRoom holds a file's live state. Everything else is stateless or managed storage, so it scales to zero.
 
+**The document model** (`@drawpane/model`, shared by the browser, the FileRoom, the MCP server and agents)
+
+- A file is a flat map of nodes keyed by id. Every node has a type, a parent, an order key among its siblings (a fractional index string), and typed properties.
+- An edit is a transaction of typed operations: create a node, delete a node, set a property, or move a node to a new parent and order key. Transactions carry the client's id and sequence number.
+- The FileRoom is the only authority on order. It gives each accepted transaction the next revision number (`revn`). Concurrent edits resolve per property: the later revision wins. A move that would create a cycle is rejected.
+- Clients apply their own edits at once and keep them pending until the FileRoom acknowledges them. An incoming edit to a property that has a pending local edit waits, so the interface never flickers back.
+
 **How an edit flows**
 
-1. The client applies a change locally and sends the batch with its base revision (`revn`) over the file's websocket.
-2. The FileRoom applies it with upstream's `app.common.files.changes`, validates it, appends it to the change log in SQLite and bumps `revn`. Requests run one at a time, so no lock is needed.
-3. The FileRoom broadcasts the change to every connected socket. A client that fell behind receives the changes it missed.
-4. An alarm writes an R2 snapshot every hour and trims the log behind it.
+1. The client applies a transaction locally and sends it with its base `revn` over the file's websocket.
+2. The FileRoom validates it (schema, parent exists, allowed nesting, no cycles). In one SQLite transaction, it writes the node rows it touches and appends the transaction to the log, then bumps `revn`. Requests run one at a time, so no lock is needed.
+3. The FileRoom acknowledges the sender and broadcasts to every other socket. A client that reconnects receives the transactions it missed, or a fresh snapshot if it fell too far behind.
+4. An alarm writes an R2 snapshot every hour and moves older log segments to R2, so history stays available without growing the Durable Object.
 
 **Key design decisions**
 
-- **Plain data on disk.** We never enable Penpot's `fdata/pointer-map` or `fdata/objects-map` backend features, so file data stays in transit format and no JVM-only codecs are needed.
-- **Page-level rows.** Each page is its own SQLite row, and a save loads only the pages it touches. This keeps the FileRoom under its memory budget.
-- **Branches are new FileRooms** seeded from an R2 snapshot at the base revision. Merging replays one branch's change log onto the other, with conflicts surfaced per layer.
+- **One row per node.** A save writes only the rows it touches, and opening a file streams rows from SQLite. The FileRoom never holds a decoded copy of the whole file, so its memory stays flat as files grow. (The M0 spike measured 75 MB of fixed overhead for Penpot's `common` in a Durable Object; see [decision 0001](decisions/0001-build-from-scratch-in-typescript.md).)
+- **Branches are new FileRooms** seeded from a snapshot at the base revision. Merging replays one branch's operations onto the other, with conflicts shown per property.
 - **Auth at the edge.** The Worker validates the session and passes a signed, short-lived claim (user, file, role) to the Durable Object, which checks it on every connection.
-- **Websocket URL includes the file id** (`/ws/files/:id`), so sockets route straight to the right FileRoom. This is a deliberate break from Penpot's single `/ws/notifications` endpoint.
+- **Websocket URL includes the file id** (`/ws/files/:id`), so sockets route straight to the right FileRoom.
+- **Rendering runs in the browser** on WebGL behind a renderer interface, so the engine can change without touching the editor. Exports and thumbnails render client-side too.
 
-## Upstream strategy, licensing and brand
+## Relationship to Penpot, licensing and brand
 
-We fork the whole repository with history, then track Penpot at three depths. Shared logic is merged on every release, editor internals are cherry-picked, and the UI, backend and branding are ours alone.
+Drawpane doesn't fork Penpot. It learns from it, and it welcomes Penpot users.
 
-| Upstream path | How we track it | Why |
-| --- | --- | --- |
-| `common/` (file model, changes, validation, migrations) | Merge on every Penpot release (six-week cadence), via an automated PR | This is the file format. Drifting from it breaks `.penpot` compatibility |
-| `render-wasm/` (Rust/WASM renderer) | Merge on every release | Upstream is investing heavily here; it's our performance foundation |
-| `frontend/` data layer (tools, layout, workspace state) | Cherry-pick selected commits | Valuable fixes land here, but it's coupled to Penpot's UI |
-| `frontend/` UI components and styles | Replace; don't track | The new design system lives in `ui/` |
-| `backend/`, `exporter/`, `docker/` | Delete; use as a CI test oracle only | Replaced by Workers and Durable Objects |
+- **Behavior baseline.** Where Penpot already has a capability (marked "Penpot" in the requirements table), we study its behavior and tests first, and aim to match or beat it.
+- **File import.** A `.penpot` v3 converter turns Penpot files into the Drawpane model. A corpus of real files and a visual-diff suite guard its fidelity.
+- **Reading code.** We read Penpot's layout, geometry and path code for reference. If we ever port a file, it keeps MPL-2.0 and Penpot's copyright header, and the `NOTICE` file credits Kaleidos.
+- **Giving back.** Bugs we find in Penpot's format or algorithms go upstream as issues or pull requests.
 
-**How to keep merges cheap**
+**Licensing (MPL-2.0).** All Drawpane code is MPL-2.0, so the project has a single license. We use DCO sign-off, not a CLA. This is not legal advice; have a lawyer review before the first public release.
 
-- Never edit files in `common/` or `render-wasm/` in place. Extend through new namespaces, and send real fixes upstream as pull requests.
-- Put a thin adapter (`frontend/src/drawpane/api`) between Penpot's data layer and our backend, so RPC changes upstream touch one file.
-- A sync bot opens a PR on each upstream tag and runs the 500-file import corpus, the visual-diff suite and the websocket conformance test. A red build blocks the merge.
-
-**Licensing (MPL-2.0).** MPL is file-level copyleft. Every Penpot file we modify stays MPL-2.0, keeps its original copyright header, and must have its source published. We'll license all new code MPL-2.0 as well, so the project has a single license. The repo gets a `NOTICE` file crediting Penpot and Kaleidos. We use DCO sign-off, not a CLA. This is not legal advice; have a lawyer review before the first public release.
-
-**Brand separation.** Penpot is Kaleidos's trademark, so Drawpane ships with none of Penpot's name, logo, illustrations, colors or marketing copy. A factual credit ("Drawpane started as a fork of Penpot") in the README and About screen is fine. A web search found no design product named Drawpane, only a `DrawPane` class in the SmartGWT library. A formal USPTO and EUIPO search is still needed before launch.
+**Brand separation.** Penpot is Kaleidos's trademark, so Drawpane ships with none of Penpot's name, logo, illustrations, colors or marketing copy. A factual credit ("Drawpane was inspired by Penpot") in the README and About screen is fine. A web search found no design product named Drawpane, only a `DrawPane` class in the SmartGWT library. A formal USPTO and EUIPO search is still needed before launch.
 
 ## Cost targets and hosting model
 
@@ -348,16 +346,17 @@ Drawpane launches as `github.com/Joinpane/drawpane` under MPL-2.0. It moves to a
 
 ```
 drawpane/
-  common/        Penpot shared file model (tracked, never edited in place)
-  render-wasm/   Penpot WASM/WebGL renderer (tracked)
-  frontend/      Penpot editor data layer (forked) + drawpane/api adapter
-  ui/            @drawpane/ui — design system: tokens, components, icons, Storybook
-  app/           New shell: dashboard, workspace chrome, command bar, Lens
-  worker/        Workers router: auth, REST API, static assets, websocket upgrade (TypeScript)
-  durable/       FileRoom DO and TeamHub DO in TypeScript, calling compiled common/
-  cli/           create-drawpane installer and upgrade tool
-  oracle/        CI-only: upstream Penpot backend in a container for contract tests
-  docs/          User guide, self-hosting guide, file-format spec, RFCs
+  apps/
+    web/          Browser app: dashboard, editor shell, command bar, Selection Lens (React + Vite)
+    worker/       Cloudflare Worker: routing, auth, REST API, MCP, static assets, FileRoom and TeamHub DOs
+  packages/
+    model/        @drawpane/model: document model, typed operations, validation and apply (runs everywhere)
+    editor/       @drawpane/editor: canvas engine, renderer, tools, local store and sync client
+    ui/           @drawpane/ui: the design system in React: tokens, components, icons
+    cli/          create-drawpane installer and upgrade tool
+  design-system/  Design system spec: brand book, tokens.json (the source for every token), reference components
+  designs/        Product design artboards: the visual and behavioral spec
+  docs/           PRD, decisions, user guide, self-hosting guide, file-format spec, RFCs
 ```
 
 **Governance**
@@ -366,26 +365,26 @@ drawpane/
 - **RFCs:** changes to the file format, the public API or the design system need a short RFC in `docs/rfcs/` with a 7-day comment window.
 - **Design review:** any pull request that changes UI must include a before/after recording and pass a design-system lint (tokens only, no raw hex values, no off-scale spacing).
 - **Contributions:** DCO sign-off, Contributor Covenant code of conduct, and "good first issue" labels from day one.
-- **Releases:** semantic versioning, with a minor release every 4 weeks and patch releases as needed. Each release notes which Penpot tag it is synced to.
+- **Releases:** semantic versioning, with a minor release every 4 weeks and patch releases as needed.
 - **Community:** GitHub Discussions for questions and ideas, and a public roadmap on GitHub Projects.
 
 ## Roadmap and milestones
 
-A usable alpha lands in April 2027 and v1.0 in November 2027, provided the six-week M0 spike proves Penpot's `common` runs inside a Durable Object.
+A usable alpha lands in April 2027 and v1.0 in November 2027. M0 settled the architecture: the spike showed Penpot's `common` runs in a Durable Object but costs too much memory there, so Drawpane builds its own model ([decision 0001](decisions/0001-build-from-scratch-in-typescript.md)).
 
 ![Drawpane roadmap · 5 phases, 4 gates, Dec 2026 to Nov 2027](diagrams/roadmap.svg)
 
-Each diamond is a gate that must pass before the next phase starts. If the M0 gate fails, we fall back to validating changes on the client, which adds about four weeks. These dates assume one full-time maintainer plus part-time contributors from v0.2, and they are rough estimates.
+Each diamond is a gate that must pass before the next phase starts. The M0 gate is now: the model and sync engine meet the save-latency, collaboration-latency and memory budgets in a deployed instance. These dates assume one full-time maintainer plus part-time contributors from v0.2, and they are rough estimates.
 
 ## Risks and open questions
 
-The biggest risk is technical and comes first: Penpot's `common` code might not run inside workerd. The M0 spike exists to answer that within six weeks.
+The biggest risk is scope: building from scratch means rebuilding editor capability Penpot already has. The plan answers it with a tight v0.1, Penpot's behavior as a reference, and property-based tests for the model.
 
 | Risk | Likelihood | Impact | Mitigation |
 | --- | --- | --- | --- |
-| `common` touches browser-only globals and won't run in workerd | Medium | High | M0 spike: load a real file, apply changes, validate and migrate inside a Durable Object. Fallback: validate on the client, and have the DO only order and persist changes |
-| Large files exceed the 128 MB Durable Object memory limit | Medium | High | Store each page as a row and load only touched pages; split very large files across several DOs |
-| Upstream refactors make merges expensive | Medium | Medium | Track only `common` and `render-wasm` closely; adapter layer; automated sync PRs with corpus tests |
+| Rebuilding Penpot-level editing (paths, booleans, text, flex and grid layout, components) takes longer than planned | High | High | Tight v0.1 scope; study Penpot's behavior and tests first; property-based tests for the model; ship the signature UX early to earn feedback |
+| Large files exceed the 128 MB Durable Object memory limit | Low | High | One SQLite row per node; the FileRoom never holds a whole file in memory; snapshot streaming for file open |
+| `.penpot` import drifts as Penpot's format evolves | Medium | Medium | Converter pinned to Penpot's file version; corpus and visual-diff tests; follow Penpot's release notes |
 | Figma's `.fig` format changes or import raises legal questions | Medium | Medium | Use the official REST API as the supported path, with `.fig` parsing best-effort; get legal review |
 | A solo maintainer can't sustain the scope | High | High | Hard scope cuts for v0.1; recruit 2 co-maintainers before v0.2; use the hosted demo to build community |
 | "Cloudflare-only" puts off some self-hosters | Medium | Low | Document why; keep storage behind interfaces so a workerd + SQLite + S3 target is possible later |
@@ -396,11 +395,13 @@ The biggest risk is technical and comes first: Penpot's `common` code might not 
 
 | Question | Decision | What it changes |
 | --- | --- | --- |
-| UI component stack | TypeScript + React for `@drawpane/ui` | The design system bundle is already React; `ui/` gets Storybook and is consumed from the editor |
+| Fork Penpot or build from scratch | Build from scratch in TypeScript; Penpot is a reference and an import format ([decision 0001](decisions/0001-build-from-scratch-in-typescript.md)) | No `common/`, `render-wasm/` or upstream sync; Drawpane owns its document model and renderer |
+| UI component stack | TypeScript + React for `@drawpane/ui` | The design system bundle is already React; `packages/ui` gets Storybook and is consumed from the editor |
 | Domain and npm scope | `drawpane.com` is owned; branding work waits | Nothing until launch prep |
-| Penpot plugin API | Full compatibility as the starting point | v0.3 runs Penpot plugins unmodified through a `penpot` global; Drawpane-only APIs live under a separate `drawpane` global |
+| Dogfooding instance | `design.example.com` on the maintainer's Cloudflare account | Every merged change deploys there; the team designs Drawpane in Drawpane |
+| Penpot plugin API | Best-effort compatibility shim | v0.3 ships plugin API v2 on typed operations under a `drawpane` global, plus a `penpot` global shim for common Penpot plugins |
 | Paid hosted tier | Not yet; revisit once the repo has momentum | Hosted service stays deferred; no feature gating anywhere |
-| Language for the FileRoom and new code | TypeScript for all new code | `durable/` is TypeScript calling compiled `common`; porting `common` itself is a later, separate decision |
+| Language | TypeScript everywhere; Rust/WASM only for measured hot paths | One toolchain from browser to Durable Object |
 
 ## Sources
 
