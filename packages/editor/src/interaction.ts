@@ -3,7 +3,14 @@
  * guides, resizing, rotating, marquee, drawing new layers, panning and
  * zooming. One gesture at a time; each gesture is one undo step.
  */
-import { getProp, keyBetween, type LayerType, type NodeRecord, type Op } from "@drawpane/model";
+import {
+  getProp,
+  keyBetween,
+  type LayerType,
+  type NodeRecord,
+  type Op,
+  type Props,
+} from "@drawpane/model";
 import { isInsideInstance } from "./components";
 import type { Editor } from "./editor";
 import {
@@ -82,7 +89,15 @@ type Mode =
       startPage: Point;
     }
   | { kind: "rotate"; centre: Point; startAngle: number; nodes: Map<string, NodeRecord> }
-  | { kind: "draw"; type: LayerType; startPage: Point; parent: string; id: string | null }
+  | {
+      kind: "draw";
+      type: LayerType;
+      /** Properties the tool adds (the arrow tool's end marker). */
+      extra: Props;
+      startPage: Point;
+      parent: string;
+      id: string | null;
+    }
   | { kind: "guide"; axis: "x" | "y"; from: { owner: string; index: number } | null };
 
 export class Interaction {
@@ -234,7 +249,10 @@ export class Interaction {
         return;
       }
       editor.beginGesture(`Draw ${tool}`);
-      this.#mode = { kind: "draw", type: tool, startPage: page, parent, id: null };
+      // The arrow tool draws a line that ends in an arrow.
+      const type: LayerType = tool === "arrow" ? "line" : tool;
+      const extra: Props = tool === "arrow" ? { markerEnd: "arrow" } : {};
+      this.#mode = { kind: "draw", type, extra, startPage: page, parent, id: null };
       return;
     }
 
@@ -457,6 +475,7 @@ export class Interaction {
               height: size.h,
             },
             mode.parent,
+            mode.extra,
           );
           if (id) editor.select([id]);
         }
@@ -1036,12 +1055,10 @@ export class Interaction {
       rect = normalizeRect({ x: x0, y: y0 }, { x: x1, y: y1 });
     }
     if (!mode.id) {
-      const id = editor.createLayer(
-        mode.type,
-        rect,
-        mode.parent,
-        rotation ? { rotation: round2(rotation) } : {},
-      );
+      const id = editor.createLayer(mode.type, rect, mode.parent, {
+        ...mode.extra,
+        ...(rotation ? { rotation: round2(rotation) } : {}),
+      });
       if (!id) return;
       mode.id = id;
       editor.select([id]);

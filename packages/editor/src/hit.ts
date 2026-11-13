@@ -1,7 +1,8 @@
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { type Point, type Rect, rectContains, rectsIntersect } from "./geometry";
 import type { Scene } from "./scene";
-import { hitPathData } from "./vector/hit";
+import { flattenPath, hitPathData, hitRings } from "./vector/hit";
+import { nodePath } from "./vector/shapes";
 
 /** True when page point `p` lands on the node's own shape (not its children). */
 export function hitsNode(scene: Scene, node: NodeRecord, p: Point, tolerance: number): boolean {
@@ -16,6 +17,18 @@ export function hitsNode(scene: Scene, node: NodeRecord, p: Point, tolerance: nu
       const dx = local.x - w / 2;
       const dy = local.y - h / 2;
       return (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1;
+    }
+    case "polygon":
+    case "star": {
+      // Hit inside the outline (not its bounding box: a star's notches miss).
+      const outline = nodePath(node);
+      if (!outline) return false;
+      const strokes = getProp(node.props, "strokes").some((s) => s.visible !== false);
+      return hitRings(flattenPath(outline), local, {
+        fill: true,
+        fillRule: "nonzero",
+        strokeReach: Math.max(strokes ? getProp(node.props, "strokeWeight") / 2 : 0, tolerance),
+      });
     }
     case "line":
       return (
