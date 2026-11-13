@@ -14,7 +14,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@drawpane/model": "workspace:*"
+    "@drawpane/model": "workspace:*",
+    "pathkit-wasm": "1.0.0"
   },
   "devDependencies": {
     "fast-check": "catalog:",
