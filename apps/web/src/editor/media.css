@@ -164,10 +164,16 @@
   color: var(--ink-muted);
   font: var(--type-ui-label);
 }
-.image-fill__replace {
+.image-fill__replace,
+.image-fill__crop {
   position: absolute;
-  left: var(--space-200);
   bottom: var(--space-200);
+}
+.image-fill__replace {
+  left: var(--space-200);
+}
+.image-fill__crop {
+  left: calc(var(--space-200) + 76px);
 }
 .image-fill__meta {
   margin: 0;

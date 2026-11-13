@@ -65,6 +65,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const octx = overlayCanvas.getContext("2d");
     if (!cctx || !octx) return;
 
+    // Cropping starts from what a fill shows, which needs each image's own size.
+    editor.imageSize = (ref) => imagesFor(editor).natural(ref);
     const canvasToken = () =>
       getComputedStyle(document.documentElement).getPropertyValue("--canvas").trim() || "#ebeae6";
     let theme = readTheme();
@@ -84,7 +86,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         contentDirty = false;
       }
       if (overlayDirty) {
-        drawOverlay(octx, editor, interaction, theme, dpr);
+        drawOverlay(octx, editor, interaction, theme, dpr, imagesFor(editor));
         overlayDirty = false;
       }
     };
