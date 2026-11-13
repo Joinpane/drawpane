@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "typecheck": "tsc -p .",
     "test": "vitest run --passWithNoTests",
-    "e2e": "playwright test"
+    "e2e": "playwright test --project=chromium",
+    "tour": "playwright test --project=tour"
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
