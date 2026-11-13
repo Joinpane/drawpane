@@ -17,6 +17,7 @@ import { AssetsPanel } from "./AssetsPanel";
 import { ACTIONS, type ActionContext, matches } from "./actions";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
+import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
 import { connectFile } from "./connection";
 import { EditorContext, useEditor, useEditorState, useEditorStateOutside } from "./hooks";
 import { Inspector } from "./Inspector";
@@ -68,8 +69,18 @@ function FileEditor({ fileId }: { fileId: string }) {
   }, [isViewer]);
   const [rightOpen, setRightOpen] = useState(true);
   const [fatal, setFatal] = useState<string | null>(null);
+  const comments = useCommentStore(editor, fileId);
+  const commentsOpen = useComments(comments.store, (s) => s.panelOpen);
+  // Room for the floating panes (12px margin + pane width), so comment popovers open over the canvas.
+  const insets = useMemo(
+    () => ({ left: leftOpen ? 276 : 0, right: commentsOpen || rightOpen ? 276 : 0 }),
+    [leftOpen, rightOpen, commentsOpen],
+  );
 
-  useEffect(() => connectFile(editor, fileId, setFatal), [editor, fileId]);
+  useEffect(
+    () => connectFile(editor, fileId, setFatal, (message) => comments.store.receive(message)),
+    [editor, fileId, comments.store],
+  );
 
   // A handle for debugging and end-to-end tests: `localStorage.setItem("drawpane:debug", "1")`.
   useEffect(() => {
@@ -119,7 +130,14 @@ function FileEditor({ fileId }: { fileId: string }) {
       openCommandBar: () => setCommandOpen(true),
       toggleTokens: () => setView((v) => (v === "tokens" ? "design" : "tokens")),
       toggleLeftPane: () => setLeftOpen((v) => !v),
-      toggleRightPane: () => setRightOpen((v) => !v),
+      // The comments panel sits where the inspector does; asking for the inspector swaps back.
+      toggleRightPane: () => {
+        if (comments.store.s.panelOpen) {
+          comments.store.setPanel(false);
+          setRightOpen(true);
+        } else setRightOpen((v) => !v);
+      },
+      toggleComments: () => comments.store.setPanel(!comments.store.s.panelOpen),
       // Menu and command-bar clipboard actions go through the async API; ⌘C/⌘X/⌘V use native events below.
       copy: () => {
         const data = editor.copy();
@@ -135,7 +153,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         });
       },
     }),
-    [editor],
+    [editor, comments.store],
   );
 
   // Keyboard: shortcuts from the action registry, plus held keys (space to pan, Alt for X-ray) and arrows.
@@ -257,6 +275,14 @@ function FileEditor({ fileId }: { fileId: string }) {
     <EditorContext.Provider value={editor}>
       <div className="editor">
         <Canvas interaction={interaction} />
+        {view === "design" ? (
+          <CommentsLayer
+            store={comments.store}
+            interaction={interaction}
+            people={comments.people}
+            insets={insets}
+          />
+        ) : null}
         <FileTitle
           view={view}
           onToggleTokens={() => setView((v) => (v === "tokens" ? "design" : "tokens"))}
@@ -304,7 +330,13 @@ function FileEditor({ fileId }: { fileId: string }) {
             )}
           </aside>
         ) : null}
-        {rightOpen && view === "design" ? (
+        {commentsOpen && view === "design" ? (
+          <CommentsPanel
+            store={comments.store}
+            insets={insets}
+            onClose={() => comments.store.setPanel(false)}
+          />
+        ) : rightOpen && view === "design" ? (
           <aside className="pane pane--right" aria-label="Inspector">
             <div className="pane__tabs">
               <SegmentedControl
@@ -320,7 +352,14 @@ function FileEditor({ fileId }: { fileId: string }) {
             {rightTab === "design" ? <Inspector /> : <InspectPanel />}
           </aside>
         ) : null}
-        {view === "design" ? <Lens onOpenInspector={() => setRightOpen(true)} /> : null}
+        {view === "design" ? (
+          <Lens
+            onOpenInspector={() => {
+              comments.store.setPanel(false);
+              setRightOpen(true);
+            }}
+          />
+        ) : null}
         {view === "design" ? <ZoomControls /> : null}
         <SyncStatus />
         <Notice />

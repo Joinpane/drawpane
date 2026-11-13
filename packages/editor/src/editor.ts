@@ -56,7 +56,16 @@ import {
   variablesIn,
 } from "./variables";
 
-export type ToolId = "select" | "hand" | "frame" | "rect" | "ellipse" | "line" | "text";
+export type ToolId =
+  | "select"
+  | "hand"
+  | "frame"
+  | "rect"
+  | "ellipse"
+  | "line"
+  | "text"
+  /** Drops comment pins. The web app handles its clicks; the canvas interaction ignores them. */
+  | "comment";
 
 export interface EditorState {
   readonly pageId: string | null;

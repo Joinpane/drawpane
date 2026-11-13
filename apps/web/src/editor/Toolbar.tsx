@@ -10,8 +10,12 @@ const TOOLS: ReadonlyArray<{ id: ToolId; icon: IconName; label: string }> = [
   { id: "ellipse", icon: "ellipse", label: "Ellipse" },
   { id: "line", icon: "minus", label: "Line" },
   { id: "text", icon: "text", label: "Text" },
+  { id: "comment", icon: "comment", label: "Comment" },
   { id: "hand", icon: "hand", label: "Hand" },
 ];
+
+/** Tools that don't change the file, so viewers get them too. */
+const VIEWER_TOOLS: ReadonlySet<ToolId> = new Set(["select", "comment", "hand"]);
 
 /** The floating command strip: tools, then the search-or-set field that opens the command bar. */
 export function Toolbar({ onSearch }: { onSearch: () => void }) {
@@ -24,7 +28,7 @@ export function Toolbar({ onSearch }: { onSearch: () => void }) {
   };
   return (
     <div className="toolbar pane" role="toolbar" aria-label="Tools">
-      {TOOLS.filter((t) => canEdit || t.id === "select" || t.id === "hand").map((t) => {
+      {TOOLS.filter((t) => canEdit || VIEWER_TOOLS.has(t.id)).map((t) => {
         const shortcut = shortcutOf(`tool.${t.id}`);
         return (
           <IconButton

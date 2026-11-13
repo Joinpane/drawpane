@@ -7,6 +7,7 @@ import type { AppContext, Role } from "../env";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { badRequest, conflict, notFound } from "../lib/http";
 import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
+import { comments } from "./comments";
 
 const Name = z.string().trim().min(1, "Enter a name.").max(120, "Keep names under 120 characters.");
 const RoleSchema = z.enum(["owner", "editor", "viewer"]);
@@ -319,7 +320,10 @@ export const api = new Hono<AppContext>()
       .bind(Date.now(), file.id)
       .run();
     return c.json({ ok: true });
-  });
+  })
+
+  // Comments ----------------------------------------------------------------
+  .route("/", comments);
 
 async function projectTeam(db: D1Database, projectId: string) {
   const row = await db
