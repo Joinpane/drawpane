@@ -2,6 +2,7 @@ export * from "./components/AgentStep";
 export * from "./components/AgentTag";
 export * from "./components/Badge";
 export * from "./components/Button";
+export * from "./components/ColorPicker";
 export * from "./components/CommandBar";
 export * from "./components/Icon";
 export * from "./components/IconButton";
@@ -10,6 +11,7 @@ export * from "./components/LayerRow";
 export * from "./components/Logo";
 export * from "./components/Menu";
 export * from "./components/NumberField";
+export * from "./components/Popover";
 export * from "./components/PresenceStack";
 export * from "./components/PromptField";
 export * from "./components/PropertySection";
@@ -20,6 +22,25 @@ export * from "./components/TextField";
 export * from "./components/TokenChip";
 export * from "./components/Tooltip";
 export * from "./icons";
+export {
+  type ContrastLevel,
+  composite,
+  contrastLevel,
+  contrastRatio,
+  cssColor,
+  type Hsl,
+  type Hsva,
+  hexDigits,
+  hslToRgb,
+  hsvToRgb,
+  luminance,
+  parseColor,
+  parseHex,
+  type Rgba,
+  rgbToHsl,
+  rgbToHsv,
+  toHex,
+} from "./lib/color";
 export { type ClassValue, cx } from "./lib/cx";
 export {
   evaluateNumericInput,

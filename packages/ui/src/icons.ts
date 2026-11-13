@@ -3,7 +3,7 @@
 /** One shape of an icon: an SVG element name and its React attributes. */
 export type IconNode = readonly [tag: string, attributes: Readonly<Record<string, string>>];
 
-/** Drawpane's 72 icons on a 16px grid; strokes and fills inherit currentColor. */
+/** Drawpane's 83 icons on a 16px grid; strokes and fills inherit currentColor. */
 export const iconData = {
   pointer: [
     [
@@ -780,6 +780,240 @@ export const iconData = {
       "path",
       {
         d: "M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3",
+      },
+    ],
+  ],
+  eyedropper: [
+    [
+      "path",
+      {
+        d: "M10.2 2.8a1.9 1.9 0 0 1 2.7 2.7l-1.4 1.4.7.7-1.1 1.1-3.6-3.6 1.1-1.1.7.7z",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7.7 6.4 3 11.1V13h1.9l4.7-4.7",
+      },
+    ],
+  ],
+  corners: [
+    [
+      "path",
+      {
+        d: "M2.5 6V4.5a2 2 0 0 1 2-2H6",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M10 2.5h1.5a2 2 0 0 1 2 2V6",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M13.5 10v1.5a2 2 0 0 1-2 2H10",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M6 13.5H4.5a2 2 0 0 1-2-2V10",
+      },
+    ],
+  ],
+  "flip-horizontal": [
+    [
+      "path",
+      {
+        d: "M8 2v12",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5.5 4.5 2 11.5h3.5z",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M10.5 4.5l3.5 7h-3.5z",
+      },
+    ],
+  ],
+  "flip-vertical": [
+    [
+      "path",
+      {
+        d: "M2 8h12",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M4.5 5.5 11.5 2v3.5z",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M4.5 10.5l7 3.5v-3.5z",
+      },
+    ],
+  ],
+  "distribute-horizontal": [
+    [
+      "path",
+      {
+        d: "M2 2.5v11",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M14 2.5v11",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5.5",
+        y: "5",
+        width: "5",
+        height: "6",
+        rx: "0.75",
+      },
+    ],
+  ],
+  "distribute-vertical": [
+    [
+      "path",
+      {
+        d: "M2.5 2h11",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.5 14h11",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5",
+        y: "5.5",
+        width: "6",
+        height: "5",
+        rx: "0.75",
+      },
+    ],
+  ],
+  tidy: [
+    [
+      "rect",
+      {
+        x: "2.5",
+        y: "2.5",
+        width: "4",
+        height: "4",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "9.5",
+        y: "2.5",
+        width: "4",
+        height: "4",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "2.5",
+        y: "9.5",
+        width: "4",
+        height: "4",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "9.5",
+        y: "9.5",
+        width: "4",
+        height: "4",
+        rx: "0.75",
+      },
+    ],
+  ],
+  dash: [
+    [
+      "path",
+      {
+        d: "M2 8h2.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M6.75 8h2.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M11.5 8H14",
+      },
+    ],
+  ],
+  portrait: [
+    [
+      "rect",
+      {
+        x: "4.5",
+        y: "2",
+        width: "7",
+        height: "12",
+        rx: "1.5",
+      },
+    ],
+  ],
+  landscape: [
+    [
+      "rect",
+      {
+        x: "2",
+        y: "4.5",
+        width: "12",
+        height: "7",
+        rx: "1.5",
+      },
+    ],
+  ],
+  italic: [
+    [
+      "path",
+      {
+        d: "M7 3h5.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M3.5 13H9",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M9.75 3 6.25 13",
       },
     ],
   ],
