@@ -19,6 +19,7 @@ import {
   type Peer,
   PROTOCOL_VERSION,
   type Presence,
+  type RestoredVersion,
   type ServerMessage,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
@@ -41,6 +42,8 @@ export interface SyncEvents {
   /** The document could not follow the room; it is reloading a fresh snapshot. */
   desync(reason: string): void;
   role(role: "owner" | "editor" | "viewer"): void;
+  /** Someone restored the whole file to a saved version; the document already shows it. */
+  restored(by: { readonly userId: string; readonly name: string }, version: RestoredVersion): void;
 }
 
 export interface SyncOptions {
@@ -239,6 +242,12 @@ export class SyncEngine {
         }
         return;
       }
+      case "resync":
+        this.#resync(null);
+        return;
+      case "restored":
+        this.#emit("restored", message.by, message.version);
+        return;
       case "pong":
         return;
       case "error":
@@ -363,8 +372,9 @@ export class SyncEngine {
     }
   }
 
-  #resync(reason: string): void {
-    this.#emit("desync", reason);
+  /** Loads the room's state afresh. `reason` is set when we fell out of step (not when the room asked). */
+  #resync(reason: string | null): void {
+    if (reason !== null) this.#emit("desync", reason);
     this.#revn = null;
     if (this.#send) {
       this.#setStatus("syncing");
