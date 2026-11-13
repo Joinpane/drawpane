@@ -39,7 +39,7 @@ import { InspectPanel } from "./InspectPanel";
 import { Inspector } from "./inspector/Inspector";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
-import { filesFrom, importImageFiles, pasteFromClipboard } from "./media";
+import { chooseImageFiles, filesFrom, importImageFiles, pasteFromClipboard } from "./media";
 import { PrototypePanel } from "./prototype/PrototypePanel";
 import { RULER, RULER_GAP, Rulers } from "./Rulers";
 import { ShortcutsDialog } from "./ShortcutsDialog";
@@ -239,6 +239,18 @@ function FileEditor({ fileId }: { fileId: string }) {
         uiFor(editor).set({ renaming: id });
       },
       showShortcuts: () => setShortcutsOpen(true),
+      placeImage: () => {
+        void chooseImageFiles().then((files) => {
+          if (files.length === 0) return;
+          const { camera, viewport, insets } = editor.s;
+          // Into the middle of the part of the canvas the panes don't cover.
+          const centre = camera.toPage({
+            x: insets.left + (viewport.width - insets.left - insets.right) / 2,
+            y: insets.top + (viewport.height - insets.top - insets.bottom) / 2,
+          });
+          void importImageFiles(editor, fileId, files, centre);
+        });
+      },
       showTab: (tab) => {
         setView("design");
         comments.store.setPanel(false);
@@ -462,7 +474,7 @@ function FileEditor({ fileId }: { fileId: string }) {
           project={meta.data?.project?.name ?? ""}
         />
         <EditorContext.Provider value={active}>
-          <Toolbar onSearch={() => setCommandOpen(true)} />
+          <Toolbar onSearch={() => setCommandOpen(true)} ctx={ctx} />
         </EditorContext.Provider>
         <TopRight fileId={fileId} fileName={fileName} onPresent={ctx.present} />
         {view === "tokens" ? (

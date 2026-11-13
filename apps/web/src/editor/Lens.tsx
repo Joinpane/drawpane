@@ -2,16 +2,9 @@ import { getProp } from "@drawpane/model";
 import { type IconName, NumberField, SelectionLens } from "@drawpane/ui";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { LAYER_KINDS } from "./layer-kinds";
 
-const KIND: Record<string, { label: string; icon: IconName }> = {
-  frame: { label: "Frame", icon: "board" },
-  group: { label: "Group", icon: "group" },
-  rect: { label: "Rectangle", icon: "rectangle" },
-  ellipse: { label: "Ellipse", icon: "ellipse" },
-  line: { label: "Line", icon: "minus" },
-  path: { label: "Vector", icon: "pen" },
-  text: { label: "Text", icon: "text" },
-};
+const KIND = LAYER_KINDS as Readonly<Record<string, { label: string; icon: IconName }>>;
 
 /**
  * The Selection Lens: a compact strip anchored under the selection with the

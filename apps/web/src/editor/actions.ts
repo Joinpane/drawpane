@@ -46,6 +46,8 @@ export interface ActionContext {
   readonly rename: () => void;
   /** Opens the keyboard shortcuts sheet. */
   readonly showShortcuts: () => void;
+  /** Asks for image files and places them in view. */
+  readonly placeImage: () => void;
 }
 
 export interface Action {
@@ -89,6 +91,44 @@ export const ACTIONS: readonly Action[] = [
   tool("rect", "Rectangle", "r", "rectangle"),
   tool("ellipse", "Ellipse", "o", "ellipse"),
   tool("line", "Line", "l", "minus"),
+  {
+    id: "tool.arrow",
+    label: "Arrow",
+    group: "Tools",
+    icon: "arrow",
+    shortcut: { key: "l", shift: true },
+    keywords: "line arrowhead connector",
+    enabled: canEdit,
+    run: ({ editor }) => editor.setTool("arrow"),
+  },
+  {
+    id: "tool.polygon",
+    label: "Polygon",
+    group: "Tools",
+    icon: "polygon",
+    keywords: "triangle hexagon shape sides",
+    enabled: canEdit,
+    run: ({ editor }) => editor.setTool("polygon"),
+  },
+  {
+    id: "tool.star",
+    label: "Star",
+    group: "Tools",
+    icon: "star",
+    keywords: "shape points rating",
+    enabled: canEdit,
+    run: ({ editor }) => editor.setTool("star"),
+  },
+  {
+    id: "tool.image",
+    label: "Place image…",
+    group: "Tools",
+    icon: "image",
+    shortcut: { key: "k", mod: true, shift: true },
+    keywords: "photo picture upload insert",
+    enabled: canEdit,
+    run: ({ placeImage }) => placeImage(),
+  },
   tool("pen", "Pen", "p", "pen"),
   tool("text", "Text", "t", "text"),
   tool("hand", "Hand", "h", "hand"),
