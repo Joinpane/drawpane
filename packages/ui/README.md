@@ -1,6 +1,6 @@
 # @drawpane/ui
 
-The Drawpane design system in React 19 and TypeScript: tokens, self-hosted fonts, 83 icons, the logo and 23 components. It is a production port of [`design-system/`](../../design-system/README.md), which stays the spec and the single source for tokens and icons.
+The Drawpane design system in React 19 and TypeScript: tokens, self-hosted fonts, 86 icons, the logo and 23 components. It is a production port of [`design-system/`](../../design-system/README.md), which stays the spec and the single source for tokens and icons.
 
 ## Use it
 
@@ -31,7 +31,7 @@ The package ships as TypeScript source (`exports` points at `src/`), so the app'
 | Export | What |
 | --- | --- |
 | Components | `Icon`, `Button`, `IconButton`, `Kbd`, `Tooltip`, `Badge`, `TextField`, `NumberField`, `TokenChip`, `SegmentedControl`, `Switch`, `PropertySection` (+ `PropertyRow`), `LayerRow`, `Menu`, `ContextMenu` (+ `placeMenu`), `Popover` (+ `placePopover`), `ColorPicker`, `CommandBar`, `SelectionLens`, `PresenceStack`, `AgentTag`, `AgentStep` (+ `AgentPlan`), `PromptField`, `Logo` |
-| Icons | `iconData`, `iconNames`, `type IconName` (all 83 glyphs, in the design system's order) |
+| Icons | `iconData`, `iconNames`, `type IconName` (all 86 glyphs, in the design system's order) |
 | Tokens | `colors`, `shadows`, `space`, `radii`, `sizes`, `fontFamilies`, `typeStyles`, their name types (`ColorToken`, `SpaceToken`, …), `cssVar(token)`, `presenceSlot(n)`, `presenceColor(n)` |
 | Helpers | `cx(...classes)`, `evaluateNumericInput(text, options)` (the math and units parser NumberField uses, for the command bar too), `formatNumber`, `roundTo`, color math for pickers (`parseColor`, `parseHex`, `toHex`, `rgbToHsv`, `hsvToRgb`, `rgbToHsl`, `hslToRgb`, `contrastRatio`, `contrastLevel`) |
 
