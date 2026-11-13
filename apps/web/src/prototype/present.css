@@ -1,0 +1,400 @@
+/* Present mode: the prototype player inside the app */
+
+.present {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  background: var(--canvas);
+  color: var(--ink);
+}
+.present__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-300);
+  height: 52px;
+  padding: 0 var(--space-300) 0 var(--space-200);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.present__left,
+.present__right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  min-width: 0;
+}
+.present__back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-200);
+  height: var(--size-control-md);
+  padding: 0 var(--space-300) 0 var(--space-200);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font: var(--type-ui-strong);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.present__back:hover {
+  background: var(--surface-hover);
+}
+.present__back:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.present__back-link {
+  color: var(--signal-ink);
+  font: var(--type-ui-strong);
+}
+.present__divider {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+}
+.present__file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--type-ui-strong);
+}
+
+/* A native select dressed as a quiet button, with icons either side. */
+.present__flow {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: var(--size-control-md);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--ink-muted);
+}
+.present__flow:hover {
+  background: var(--surface-hover);
+}
+.present__flow > .dp-icon {
+  position: absolute;
+  pointer-events: none;
+}
+.present__flow > .dp-icon:first-child {
+  left: var(--space-200);
+}
+.present__flow > .dp-icon:last-child {
+  right: var(--space-200);
+}
+.present__flow select {
+  height: 100%;
+  max-width: 220px;
+  padding: 0 28px 0 28px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: var(--ink);
+  font: var(--type-ui-strong);
+  appearance: none;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+.present__flow select:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.present__device select {
+  font: var(--type-ui-body);
+}
+.present__count {
+  color: var(--ink-muted);
+  font: var(--type-ui-body);
+  white-space: nowrap;
+}
+
+.present__body {
+  display: flex;
+  min-height: 0;
+}
+.present__stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.present__hint {
+  position: absolute;
+  bottom: var(--space-400);
+  left: 50%;
+  z-index: 3;
+  margin: 0;
+  padding: 6px var(--space-300);
+  border-radius: var(--radius-full);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink-muted);
+  font: var(--type-ui-body);
+  white-space: nowrap;
+  transform: translateX(-50%);
+  animation: present-hint 220ms ease-out both;
+  pointer-events: none;
+}
+@keyframes present-hint {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+}
+
+/* Screens */
+.present__panel {
+  flex: none;
+  width: 232px;
+  margin: var(--space-300) var(--space-300) var(--space-300) 0;
+  overflow: auto;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-pane);
+}
+.present__panel-title {
+  margin: 0;
+  padding: var(--space-300) var(--space-300) var(--space-200);
+  font: var(--type-ui-strong);
+}
+.present__screens {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0 var(--space-200) var(--space-300);
+  list-style: none;
+}
+.present__screen {
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  width: 100%;
+  padding: var(--space-200);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.present__screen:hover {
+  background: var(--surface-hover);
+}
+.present__screen:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.present__thumb {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 80px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.present__thumb canvas {
+  display: block;
+  border-radius: 2px;
+}
+.present__screen[aria-current] .present__thumb {
+  box-shadow: 0 0 0 2px var(--signal);
+}
+.present__screen-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.present__screen-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--type-ui-strong);
+}
+.present__screen[aria-current] .present__screen-name {
+  color: var(--signal-ink);
+}
+.present__screen-meta {
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+}
+
+/* The stage: device, viewport, screens and overlays */
+.stage__device {
+  position: relative;
+  padding: var(--bezel, 0);
+  border-radius: var(--radius, 0);
+  background: #0c0c0d;
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.08),
+    0 24px 64px -16px rgb(0 0 0 / 0.35),
+    0 8px 20px -8px rgb(0 0 0 / 0.2);
+}
+.stage__device[data-kind="phone"] {
+  box-shadow:
+    inset 0 0 0 1.5px rgb(255 255 255 / 0.12),
+    0 0 0 1px rgb(0 0 0 / 0.25),
+    0 32px 80px -20px rgb(0 0 0 / 0.45),
+    0 10px 24px -10px rgb(0 0 0 / 0.3);
+}
+.stage__device[data-kind="none"],
+.stage__device[data-kind="desktop"] {
+  background: transparent;
+}
+.stage__viewport {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--inner, 0);
+  background: #ffffff;
+  isolation: isolate;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+.stage__screen {
+  position: absolute;
+  inset: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  background: #ffffff;
+}
+.stage__screen::-webkit-scrollbar {
+  display: none;
+}
+/* Dims and overlays share a level, so each later pair stacks on the one before. */
+.stage__overlay {
+  position: absolute;
+  z-index: 3;
+}
+.stage__dim {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+.stage__canvas {
+  display: block;
+}
+.stage__hotspot {
+  position: absolute;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--info) 22%, transparent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--info) 75%, transparent);
+  pointer-events: none;
+}
+
+@media (max-width: 720px) {
+  .present__count,
+  .present__device,
+  .present__divider {
+    display: none;
+  }
+  .present__panel {
+    display: none;
+  }
+}
+
+/* Share dialog */
+.share__section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-300);
+}
+.share__section--file {
+  padding-top: var(--space-400);
+  border-top: 1px solid var(--line);
+}
+.share__head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: var(--space-300);
+  align-items: start;
+}
+.share__head > .dp-switch,
+.share__head > .dp-btn {
+  margin-top: 2px;
+}
+.share__badge {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  color: var(--ink-muted);
+}
+.share__badge[data-on] {
+  background: var(--signal-soft);
+  color: var(--signal-ink);
+}
+.share__text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.share__title {
+  margin: 0;
+  font: var(--type-ui-strong);
+}
+.share__note {
+  margin: 0;
+  color: var(--ink-muted);
+  font: var(--type-ui-body);
+}
+.share__reset {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-muted);
+  font: var(--type-ui-body);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.share__reset:hover {
+  color: var(--ink);
+}
+.share__reset:focus-visible {
+  outline: none;
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-focus);
+}
+.share__confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  padding: var(--space-200) var(--space-200) var(--space-200) var(--space-300);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--ink);
+  font: var(--type-ui-body);
+}
+.share__confirm > span {
+  flex: 1;
+}
+.share__error {
+  margin: 0;
+  color: var(--danger);
+  font: var(--type-ui-body);
+}
+
+.present__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-200);
+  min-width: 0;
+  padding-left: var(--space-200);
+}
+.present__brand .present__file {
+  max-width: 240px;
+}
+.present__brand .present__divider {
+  margin-left: var(--space-100);
+}

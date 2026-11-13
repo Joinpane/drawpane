@@ -3,7 +3,7 @@
 /** One shape of an icon: an SVG element name and its React attributes. */
 export type IconNode = readonly [tag: string, attributes: Readonly<Record<string, string>>];
 
-/** Drawpane's 65 icons on a 16px grid; strokes and fills inherit currentColor. */
+/** Drawpane's 72 icons on a 16px grid; strokes and fills inherit currentColor. */
 export const iconData = {
   pointer: [
     [
@@ -245,6 +245,128 @@ export const iconData = {
       "path",
       {
         d: "M6.25 4.5L9.75 8l-3.5 3.5",
+      },
+    ],
+  ],
+  "arrow-left": [
+    [
+      "path",
+      {
+        d: "M13 8H3",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7 4L3 8l4 4",
+      },
+    ],
+  ],
+  "arrow-right": [
+    [
+      "path",
+      {
+        d: "M3 8h10",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M9 4l4 4-4 4",
+      },
+    ],
+  ],
+  "arrow-up": [
+    [
+      "path",
+      {
+        d: "M8 13V3",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M4 7l4-4 4 4",
+      },
+    ],
+  ],
+  "arrow-down": [
+    [
+      "path",
+      {
+        d: "M8 3v10",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M4 9l4 4 4-4",
+      },
+    ],
+  ],
+  restart: [
+    [
+      "path",
+      {
+        d: "M2.75 8A5.25 5.25 0 1 0 4.3 4.3",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M3.5 1.75v3h3",
+      },
+    ],
+  ],
+  device: [
+    [
+      "rect",
+      {
+        x: "4.25",
+        y: "1.75",
+        width: "7.5",
+        height: "12.5",
+        rx: "1.75",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7.25 12h1.5",
+      },
+    ],
+  ],
+  flow: [
+    [
+      "rect",
+      {
+        x: "1.75",
+        y: "1.75",
+        width: "6",
+        height: "4.5",
+        rx: "1.25",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "8.25",
+        y: "9.75",
+        width: "6",
+        height: "4.5",
+        rx: "1.25",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7.75 4h1.75a2.25 2.25 0 0 1 2.25 2.25v1.75",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M10.25 6.75l1.5 1.5 1.5-1.5",
       },
     ],
   ],
