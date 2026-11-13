@@ -40,6 +40,7 @@ const ROOT_LOCAL_PROPS: ReadonlySet<string> = new Set([
   "rotation",
   "flipX",
   "flipY",
+  "lockAspect",
   "positioning",
   "constraintH",
   "constraintV",

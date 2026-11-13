@@ -223,6 +223,8 @@ export const PROPS = {
   rotation: prop(finite, 0, GEOMETRY),
   flipX: prop(z.boolean(), false, GEOMETRY),
   flipY: prop(z.boolean(), false, GEOMETRY),
+  /** Keep width and height in proportion when either changes (the inspector's lock, handles). */
+  lockAspect: prop(z.boolean(), false, GEOMETRY),
 
   fills: prop(z.array(Paint).max(32), [], SHAPES),
   strokes: prop(z.array(Paint).max(32), [], SHAPES),
