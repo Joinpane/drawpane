@@ -94,7 +94,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const kind = KIND[node.type] ?? { label: "Layer", icon: "rectangle" as IconName };
   const label =
     node.type === "frame" && getProp(node.props, "layoutMode") !== "none"
-      ? `${kind.label} · Auto layout`
+      ? `${kind.label} · ${getProp(node.props, "layoutMode") === "grid" ? "Grid" : "Auto layout"}`
       : kind.label;
 
   const field = (
@@ -148,7 +148,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
             prop("width", "Width", { label: "W" }),
             prop("height", "Height", { label: "H" }),
             prop("gap", "Gap", {
-              icon: getProp(p, "layoutMode") === "row" ? "gap-horizontal" : "gap-vertical",
+              icon: getProp(p, "layoutMode") === "column" ? "gap-vertical" : "gap-horizontal",
             }),
             field("padding", uniformPadding, "Padding", { icon: "padding" }, (v) => {
               editor.beginGesture("Padding");

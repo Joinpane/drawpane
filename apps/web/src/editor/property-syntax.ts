@@ -60,7 +60,7 @@ const ALIASES: Record<
     props: ["layoutMode"],
     label: "Auto layout",
     kind: "enum",
-    values: ["none", "row", "column"],
+    values: ["none", "row", "column", "grid"],
   },
   align: {
     props: ["alignItems"],
