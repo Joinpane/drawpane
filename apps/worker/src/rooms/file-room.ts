@@ -36,10 +36,15 @@ export interface RoomClaim {
   readonly fid: string;
   readonly role: Role;
   readonly kind: "person" | "agent";
+  /** Someone playing a shared prototype: they see the document, never who's in it. */
+  readonly guest?: boolean;
   readonly exp: number;
 }
 
 export const CLAIM_HEADER = "x-drawpane-claim";
+
+/** The author guests see on every change: nobody in particular. */
+const ANONYMOUS = { userId: "", sessionId: "" } as const;
 
 /** Per-socket state that survives hibernation. */
 interface Attachment {
@@ -49,6 +54,8 @@ interface Attachment {
   readonly role: Role;
   readonly kind: "person" | "agent";
   readonly color: number;
+  /** A shared-prototype guest (see RoomClaim). Missing on sockets from before guests existed. */
+  readonly guest?: boolean;
   clientId: string | null;
 }
 
@@ -117,7 +124,8 @@ export class FileRoom extends DurableObject<Env> {
       name: claim.name,
       role: claim.role,
       kind: claim.kind,
-      color: this.#nextColor(),
+      color: claim.guest ? 0 : this.#nextColor(),
+      ...(claim.guest ? { guest: true } : {}),
       clientId: null,
     };
     this.ctx.acceptWebSocket(server, [claim.uid]);
@@ -154,6 +162,8 @@ export class FileRoom extends DurableObject<Env> {
       case "txn":
         return this.#transaction(ws, me, message.seq, message.ops as Op[]);
       case "presence":
+        // Guests are invisible: they have no cursor or selection to show.
+        if (me.guest) return;
         this.#presence.set(me.sessionId, message.presence);
         this.#broadcast({ t: "presence", sessionId: me.sessionId, presence: message.presence }, ws);
         return;
@@ -222,6 +232,22 @@ export class FileRoom extends DurableObject<Env> {
     return this.#broadcast({ t: "comments", event });
   }
 
+  /** Disconnects everyone playing a shared prototype (the link was turned off). Returns how many. */
+  async closeGuests(): Promise<number> {
+    let closed = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      const me = ws.deserializeAttachment() as Attachment | null;
+      if (!me?.guest) continue;
+      try {
+        ws.close(4403, "Link turned off");
+        closed++;
+      } catch {
+        // Already closing.
+      }
+    }
+    return closed;
+  }
+
   /** Current revision and node count, for tests and the health page. */
   async stats(): Promise<{ revn: number; nodes: number; sockets: number }> {
     return {
@@ -249,7 +275,7 @@ export class FileRoom extends DurableObject<Env> {
       revn <= this.#revn &&
       (revn === this.#revn || (oldest !== null && oldest <= revn + 1));
 
-    const peers = this.#peers().filter((p) => p.sessionId !== me.sessionId);
+    const peers = me.guest ? [] : this.#peers().filter((p) => p.sessionId !== me.sessionId);
     this.#send(ws, {
       t: "welcome",
       sessionId: me.sessionId,
@@ -271,7 +297,7 @@ export class FileRoom extends DurableObject<Env> {
           t: "txn",
           revn: row.revn,
           ops: JSON.parse(row.ops) as Op[],
-          author: { userId: row.user_id, sessionId: row.session_id },
+          author: me.guest ? ANONYMOUS : { userId: row.user_id, sessionId: row.session_id },
         });
       }
     } else {
@@ -280,7 +306,7 @@ export class FileRoom extends DurableObject<Env> {
       }
       this.#send(ws, { t: "snapshot", nodes: [], done: true });
     }
-    this.#broadcast({ t: "peer", peer: this.#peer(me) }, ws);
+    if (!me.guest) this.#broadcast({ t: "peer", peer: this.#peer(me) }, ws);
   }
 
   #transaction(ws: WebSocket, me: Attachment, seq: number, ops: Op[]): void {
@@ -465,13 +491,13 @@ export class FileRoom extends DurableObject<Env> {
 
   #peers(): Peer[] {
     return this.#attachments()
-      .filter(({ me }) => me.clientId !== null)
+      .filter(({ me }) => me.clientId !== null && !me.guest)
       .map(({ me }) => this.#peer(me));
   }
 
   #left(ws: WebSocket): void {
     const me = ws.deserializeAttachment() as Attachment | null;
-    if (!me) return;
+    if (!me || me.guest) return;
     this.#presence.delete(me.sessionId);
     this.#broadcast({ t: "peer-left", sessionId: me.sessionId }, ws);
   }
@@ -486,13 +512,17 @@ export class FileRoom extends DurableObject<Env> {
 
   #broadcast(message: ServerMessage, except?: WebSocket): number {
     const data = JSON.stringify(message);
+    // Guests get document changes only, without who made them.
+    const guestData =
+      message.t === "txn" ? JSON.stringify({ ...message, author: ANONYMOUS }) : null;
     let sent = 0;
     for (const ws of this.ctx.getWebSockets()) {
       if (ws === except) continue;
       const me = ws.deserializeAttachment() as Attachment | null;
       if (!me?.clientId) continue;
+      if (me.guest && guestData === null) continue;
       try {
-        ws.send(data);
+        ws.send(me.guest ? (guestData as string) : data);
         sent++;
       } catch {
         // Ignore sockets that are closing.

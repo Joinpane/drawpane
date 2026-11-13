@@ -8,6 +8,7 @@ import { getProp } from "@drawpane/model";
 import type { Editor } from "./editor";
 import { apply, type Point, type Rect } from "./geometry";
 import type { Interaction } from "./interaction";
+import { drawPrototypeOverlay, flowStartScreens } from "./prototype/overlay";
 import { drawVectorOverlay } from "./tools/overlay";
 
 export interface OverlayTheme {
@@ -17,6 +18,10 @@ export interface OverlayTheme {
   guide: string;
   component: string;
   inkMuted: string;
+  /** Text on raised surfaces (connection labels); defaults to inkMuted. */
+  ink?: string;
+  /** Hairlines on raised surfaces; none when omitted. */
+  border?: string;
   surfaceRaised: string;
   xrayPadding: string;
   xrayGap: string;
@@ -51,6 +56,7 @@ export function drawOverlay(
     peers,
     gesture,
     vectorEdit,
+    prototyping,
   } = editor.s;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -92,9 +98,10 @@ export function drawOverlay(
   // Artboard labels: names above top-level frames.
   ctx.font = `500 11px ${theme.fontUi}`;
   ctx.textBaseline = "bottom";
+  const flowStarts = flowStartScreens(editor);
   for (const id of doc.childIds(pageId)) {
     const node = doc.get(id);
-    if (node?.type !== "frame" || node.props.visible === false) continue;
+    if (node?.type !== "frame" || node.props.visible === false || flowStarts.has(id)) continue;
     const corners = scene.corners(id);
     if (!corners) continue;
     const p = toScreen(corners[0] as Point);
@@ -174,7 +181,7 @@ export function drawOverlay(
       { x: 0, y: frame.height },
     ].map((p) => apply(frame.matrix, p));
     if (selection.length > 1) quad(corners, theme.signal, 1);
-    if (editor.canEdit && !editingText) {
+    if (editor.canEdit && !editingText && !prototyping) {
       const screenW = frame.width * camera.zoom;
       const screenH = frame.height * camera.zoom;
       const small = screenW < 24 || screenH < 24;
@@ -201,8 +208,8 @@ export function drawOverlay(
         ctx.stroke();
       }
     }
-    // Size pill under the selection.
-    const bounds = scene.unionBounds(selection);
+    // Size pill under the selection (not while prototyping: it would sit on the connections).
+    const bounds = prototyping ? null : scene.unionBounds(selection);
     if (bounds) {
       const label = `${fmt(frame.width)} × ${fmt(frame.height)}`;
       const bottom = toScreen({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height });
@@ -226,6 +233,7 @@ export function drawOverlay(
     const b = scene.bounds(hover);
     if (a && b) drawMeasurements(ctx, a, b, (p) => toScreen(p), theme);
   }
+  if (prototyping) drawPrototypeOverlay(ctx, editor, theme);
   // Pen and vector edit: anchors, handles and the pen's rubber band.
   drawVectorOverlay(ctx, editor, interaction, theme);
 

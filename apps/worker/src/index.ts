@@ -3,6 +3,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { ZodError } from "zod";
 import { requireFileRole } from "./api/access";
 import { api } from "./api/routes";
+import { resolveShareToken } from "./api/share";
 import { passkeys, publicOrigins } from "./auth/passkeys";
 import { requireUser, session } from "./auth/session";
 import type { AppContext } from "./env";
@@ -50,6 +51,35 @@ app.get("/ws/files/:fileId", async (c) => {
   const headers = new Headers(c.req.raw.headers);
   headers.set(CLAIM_HEADER, await signPayload(c.env.SESSION_SECRET, claim));
   const room = c.env.FILE_ROOM.get(c.env.FILE_ROOM.idFromName(file.id));
+  return room.fetch(new Request(c.req.raw.url, { headers }));
+});
+
+/**
+ * A guest playing a shared prototype: read-only, anonymous, and the room
+ * tells them nothing about the people in the file.
+ */
+app.get("/ws/share/:token", async (c) => {
+  if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
+    throw new HttpError(426, "bad_request", "Expected a websocket upgrade.");
+  }
+  const origin = c.req.header("origin");
+  if (origin && !publicOrigins(c).includes(origin)) {
+    throw new HttpError(403, "forbidden", "Cross-origin websockets aren't allowed.");
+  }
+  const shared = await resolveShareToken(c.env, c.req.param("token"));
+  if (!shared) throw new HttpError(404, "not_found", "This prototype link was turned off.");
+  const claim: RoomClaim = {
+    uid: `guest:${shared.linkId}`,
+    name: "Guest",
+    fid: shared.file.id,
+    role: "viewer",
+    kind: "person",
+    guest: true,
+    exp: Date.now() + CLAIM_TTL_MS,
+  };
+  const headers = new Headers(c.req.raw.headers);
+  headers.set(CLAIM_HEADER, await signPayload(c.env.SESSION_SECRET, claim));
+  const room = c.env.FILE_ROOM.get(c.env.FILE_ROOM.idFromName(shared.file.id));
   return room.fetch(new Request(c.req.raw.url, { headers }));
 });
 

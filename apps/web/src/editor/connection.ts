@@ -16,6 +16,8 @@ export function connectFile(
   onFatal: (message: string) => void,
   /** Sees every server message after the editor does (comments listen here). */
   onMessage?: (message: ServerMessage) => void,
+  /** Where to connect instead of the file's own room, e.g. a shared prototype link. */
+  path = `/ws/files/${encodeURIComponent(fileId)}`,
 ): () => void {
   let ws: WebSocket | null = null;
   let disposed = false;
@@ -23,7 +25,7 @@ export function connectFile(
   let retry: ReturnType<typeof setTimeout> | null = null;
   let ping: ReturnType<typeof setInterval> | null = null;
 
-  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/files/${encodeURIComponent(fileId)}`;
+  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
 
   function open() {
     if (disposed) return;
@@ -61,6 +63,10 @@ export function connectFile(
       editor.sync.disconnected();
       if (event.code === 4404) {
         onFatal("This file was deleted.");
+        return;
+      }
+      if (event.code === 4403) {
+        onFatal("This prototype link was turned off.");
         return;
       }
       schedule();
