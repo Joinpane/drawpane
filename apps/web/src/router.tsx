@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
 import { api } from "./api/client";
+import { ErrorPage } from "./app/ErrorPage";
 import { NotFound } from "./app/NotFound";
 import { InvitePage } from "./auth/InvitePage";
 import { SetupPage } from "./auth/SetupPage";
@@ -15,7 +16,9 @@ import { SignInPage } from "./auth/SignInPage";
 import { DashboardPage } from "./dashboard/DashboardPage";
 
 // The editor is the heaviest screen; load it only when a file opens.
-const EditorPage = lazy(() => import("./editor/EditorPage").then((m) => ({ default: m.EditorPage })));
+const EditorPage = lazy(() =>
+  import("./editor/EditorPage").then((m) => ({ default: m.EditorPage })),
+);
 
 interface RouterContext {
   queryClient: QueryClient;
@@ -29,10 +32,19 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
 });
 
 /** Sends signed-out visitors to sign-in (or setup on a fresh install). */
-async function requireUser({ context, location }: { context: RouterContext; location: { href: string } }) {
+async function requireUser({
+  context,
+  location,
+}: {
+  context: RouterContext;
+  location: { href: string };
+}) {
   const session = await context.queryClient.ensureQueryData(sessionQuery);
   if (!session.user) {
-    throw redirect({ to: session.needsSetup ? "/setup" : "/signin", search: { next: location.href } });
+    throw redirect({
+      to: session.needsSetup ? "/setup" : "/signin",
+      search: { next: location.href },
+    });
   }
   return session.user;
 }
@@ -42,7 +54,10 @@ const indexRoute = createRoute({
   path: "/",
   beforeLoad: async ({ context, location }) => {
     await requireUser({ context, location });
-    const { teams } = await context.queryClient.ensureQueryData({ queryKey: ["teams"], queryFn: api.teams });
+    const { teams } = await context.queryClient.ensureQueryData({
+      queryKey: ["teams"],
+      queryFn: api.teams,
+    });
     const first = teams[0];
     if (first) throw redirect({ to: "/t/$teamId", params: { teamId: first.id } });
   },
@@ -91,12 +106,20 @@ const fileRoute = createRoute({
   ),
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, signInRoute, setupRoute, inviteRoute, teamRoute, fileRoute]);
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  signInRoute,
+  setupRoute,
+  inviteRoute,
+  teamRoute,
+  fileRoute,
+]);
 
 export const router = createRouter({
   routeTree,
   context: { queryClient: undefined as unknown as QueryClient },
   defaultPreload: "intent",
+  defaultErrorComponent: ErrorPage,
   scrollRestoration: true,
 });
 

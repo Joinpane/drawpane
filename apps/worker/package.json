@@ -6,7 +6,7 @@
   "description": "The Drawpane Cloudflare Worker: routing, auth, REST API, static assets and the FileRoom Durable Object.",
   "type": "module",
   "scripts": {
-    "dev": "node -e \"require('fs').mkdirSync('../web/dist',{recursive:true})\" && wrangler dev",
+    "dev": "node -e \"require('fs').mkdirSync('../web/dist',{recursive:true})\" && wrangler dev --local-upstream localhost:8787",
     "types": "wrangler types --include-runtime=false src/worker-configuration.d.ts",
     "typecheck": "tsc -p .",
     "test": "vitest run",

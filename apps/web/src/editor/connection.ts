@@ -10,7 +10,11 @@ const PING_MS = 25_000;
  * backoff, reconnects at once when the tab comes back online or visible, and
  * gives up only when the room says the file is gone or access was revoked.
  */
-export function connectFile(editor: Editor, fileId: string, onFatal: (message: string) => void): () => void {
+export function connectFile(
+  editor: Editor,
+  fileId: string,
+  onFatal: (message: string) => void,
+): () => void {
   let ws: WebSocket | null = null;
   let disposed = false;
   let attempt = 0;

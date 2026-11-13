@@ -14,7 +14,9 @@ export const sameOrigin = createMiddleware<AppContext>(async (c, next) => {
   if (!SAFE.has(c.req.method)) {
     const origin = c.req.header("origin");
     const site = c.req.header("sec-fetch-site");
-    const host = new URL(c.req.url).host;
+    const hosts = c.env.PUBLIC_ORIGIN
+      ? c.env.PUBLIC_ORIGIN.split(",").map((o) => new URL(o.trim()).host)
+      : [new URL(c.req.url).host];
     let originHost: string | null = null;
     try {
       originHost = origin ? new URL(origin).host : null;
@@ -22,7 +24,7 @@ export const sameOrigin = createMiddleware<AppContext>(async (c, next) => {
       throw forbidden("Cross-site requests aren't allowed.");
     }
     if (
-      (originHost !== null && originHost !== host) ||
+      (originHost !== null && !hosts.includes(originHost)) ||
       (site !== undefined && site !== "same-origin" && site !== "none")
     ) {
       throw forbidden("Cross-site requests aren't allowed.");

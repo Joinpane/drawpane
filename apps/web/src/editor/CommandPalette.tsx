@@ -1,7 +1,7 @@
 import { getProp } from "@drawpane/model";
-import { type CommandGroup, CommandBar, type CommandItem, type IconName } from "@drawpane/ui";
+import { CommandBar, type CommandGroup, type CommandItem, type IconName } from "@drawpane/ui";
 import { useMemo, useState } from "react";
-import { type ActionContext, ACTIONS, formatShortcut } from "./actions";
+import { ACTIONS, type ActionContext, formatShortcut } from "./actions";
 import { useEditor } from "./hooks";
 import { parsePropertyCommand } from "./property-syntax";
 
@@ -30,12 +30,24 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
       out.push({
         id: "set",
         title: `Set on ${selection.length === 1 ? "selection" : `${selection.length} layers`}`,
-        items: [{ id: "set", label: property.label, from: prettify(from), to: property.display, icon: "bolt" }],
+        items: [
+          {
+            id: "set",
+            label: property.label,
+            from: prettify(from),
+            to: property.display,
+            icon: "bolt",
+          },
+        ],
       });
     }
 
     const actions = ACTIONS.filter((a) => (a.enabled ? a.enabled(editor) : true)).filter(
-      (a) => !q || a.label.toLowerCase().includes(q) || a.keywords?.includes(q) || a.group.toLowerCase().startsWith(q),
+      (a) =>
+        !q ||
+        a.label.toLowerCase().includes(q) ||
+        a.keywords?.includes(q) ||
+        a.group.toLowerCase().startsWith(q),
     );
     if (actions.length > 0) {
       out.push({
@@ -62,7 +74,15 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
         layers.push({
           id: `layer:${node.id}`,
           label: name,
-          icon: (node.type === "frame" ? "board" : node.type === "group" ? "group" : node.type === "text" ? "text" : node.type === "ellipse" ? "ellipse" : "rectangle") as IconName,
+          icon: (node.type === "frame"
+            ? "board"
+            : node.type === "group"
+              ? "group"
+              : node.type === "text"
+                ? "text"
+                : node.type === "ellipse"
+                  ? "ellipse"
+                  : "rectangle") as IconName,
           hint: page && page.id !== pageId ? getProp(page.props, "name") : node.type,
         });
         if (layers.length >= 8) break;
@@ -78,7 +98,8 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
       const property = parsePropertyCommand(query);
       if (!property) return;
       editor.beginGesture(property.label);
-      for (const { prop, value } of property.sets) editor.setProp(editor.s.selection, prop, value, property.label);
+      for (const { prop, value } of property.sets)
+        editor.setProp(editor.s.selection, prop, value, property.label);
       editor.endGesture();
       return;
     }
@@ -94,19 +115,36 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
   };
 
   return (
-    <div className="command-overlay" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    // biome-ignore lint/a11y/noStaticElementInteractions: clicking outside closes the bar; keyboard users press Escape inside it
+    <div
+      className="command-overlay"
+      role="presentation"
+      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+    >
       <CommandBar
         className="command-overlay__bar"
         groups={groups}
         query={query}
         onQueryChange={setQuery}
-        placeholder={selection.length > 0 ? "Search, or set a value: w 320, gap 16, fill #ff5a1f" : "Search actions and layers"}
+        placeholder={
+          selection.length > 0
+            ? "Search, or set a value: w 320, gap 16, fill #ff5a1f"
+            : "Search actions and layers"
+        }
         onRun={run}
         onClose={onClose}
         autoFocus
         label="Command bar"
         emptyLabel="No matching actions. Try a property like w 320."
-        {...(selection.length > 0 ? { scope: selection.length === 1 ? (getProp(editor.doc.get(selection[0] as string)?.props ?? {}, "name") || "Selection") : `${selection.length} layers` } : {})}
+        {...(selection.length > 0
+          ? {
+              scope:
+                selection.length === 1
+                  ? getProp(editor.doc.get(selection[0] as string)?.props ?? {}, "name") ||
+                    "Selection"
+                  : `${selection.length} layers`,
+            }
+          : {})}
       />
     </div>
   );

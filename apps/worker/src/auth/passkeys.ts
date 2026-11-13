@@ -39,17 +39,25 @@ type Challenge =
     }
   | { purpose: "login"; challenge: string; exp: number };
 
-function relyingParty(c: Context<AppContext>) {
-  const url = new URL(c.req.url);
-  const origin = c.req.header("origin") ?? url.origin;
-  let originHost: string;
-  try {
-    originHost = new URL(origin).hostname;
-  } catch {
-    throw badRequest("Missing or invalid Origin header.");
-  }
-  if (originHost !== url.hostname) throw forbidden("Cross-origin sign-in isn't allowed.");
-  return { rpID: url.hostname, origin, rpName: c.env.RP_NAME ?? "Drawpane" };
+/**
+ * The relying party for this request: the site the passkey belongs to and the
+ * origin the browser must report. Derived from the request, or from
+ * `PUBLIC_ORIGIN` in local development.
+ */
+export function relyingParty(c: Context<AppContext>) {
+  const origin = c.req.header("origin");
+  const allowed = publicOrigins(c);
+  if (!origin || !allowed.includes(origin)) throw forbidden("Cross-origin sign-in isn't allowed.");
+  // Behind a dev proxy the browser's origin can differ from the Origin header
+  // the Worker sees, so accept any configured origin on the same site.
+  return { rpID: new URL(origin).hostname, origin: allowed, rpName: c.env.RP_NAME ?? "Drawpane" };
+}
+
+/** Origins this instance answers to. */
+export function publicOrigins(c: Context<AppContext>): string[] {
+  if (c.env.PUBLIC_ORIGIN)
+    return c.env.PUBLIC_ORIGIN.split(",").map((o) => o.trim().replace(/\/$/, ""));
+  return [new URL(c.req.url).origin];
 }
 
 async function issueChallenge(c: Context<AppContext>, challenge: Challenge): Promise<void> {

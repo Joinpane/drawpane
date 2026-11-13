@@ -1,5 +1,5 @@
-import { IconButton, LayerRow, type LayerKind, type PresenceSlot } from "@drawpane/ui";
 import { getProp, keyBetween, type NodeRecord } from "@drawpane/model";
+import { IconButton, type LayerKind, LayerRow, type PresenceSlot } from "@drawpane/ui";
 import { type KeyboardEvent, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 
@@ -31,7 +31,11 @@ export function LayersPanel() {
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [focusId, setFocusId] = useState<string | null>(null);
-  const [drag, setDrag] = useState<{ id: string; over: string | null; where: "before" | "after" | "inside" } | null>(null);
+  const [drag, setDrag] = useState<{
+    id: string;
+    over: string | null;
+    where: "before" | "after" | "inside";
+  } | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const [scroll, setScroll] = useState({ top: 0, height: 400 });
 
@@ -74,7 +78,8 @@ export function LayersPanel() {
     const map = new Map<string, { slot: PresenceSlot; name: string }>();
     for (const peer of peers.values()) {
       if (peer.presence?.pageId !== pageId) continue;
-      for (const id of peer.presence.selection) map.set(id, { slot: (((peer.color - 1) % 8) + 1) as PresenceSlot, name: peer.name });
+      for (const id of peer.presence.selection)
+        map.set(id, { slot: (((peer.color - 1) % 8) + 1) as PresenceSlot, name: peer.name });
     }
     return map;
   }, [peers, pageId]);
@@ -88,7 +93,8 @@ export function LayersPanel() {
     if (index === -1) return;
     const top = index * ROW_HEIGHT;
     if (top < el.scrollTop) el.scrollTop = top;
-    else if (top + ROW_HEIGHT > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW_HEIGHT - el.clientHeight;
+    else if (top + ROW_HEIGHT > el.scrollTop + el.clientHeight)
+      el.scrollTop = top + ROW_HEIGHT - el.clientHeight;
   }, [selection, rows]);
 
   useLayoutEffect(() => {
@@ -116,7 +122,9 @@ export function LayersPanel() {
   const select = (id: string, e: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }) => {
     setFocusId(id);
     if (e.metaKey || e.ctrlKey) {
-      editor.select(selection.includes(id) ? selection.filter((s) => s !== id) : [...selection, id]);
+      editor.select(
+        selection.includes(id) ? selection.filter((s) => s !== id) : [...selection, id],
+      );
     } else if (e.shiftKey && selection.length > 0) {
       const anchor = rows.findIndex((r) => r.node.id === selection[0]);
       const target = rows.findIndex((r) => r.node.id === id);
@@ -173,7 +181,8 @@ export function LayersPanel() {
     const y = (e.clientY - rect.top) / rect.height;
     const container = row.node.type === "frame" || row.node.type === "group";
     const where = container && y > 0.3 && y < 0.7 ? "inside" : y < 0.5 ? "before" : "after";
-    if (drag.over !== row.node.id || drag.where !== where) setDrag({ ...drag, over: row.node.id, where });
+    if (drag.over !== row.node.id || drag.where !== where)
+      setDrag({ ...drag, over: row.node.id, where });
   };
 
   const onDrop = () => {
@@ -183,7 +192,12 @@ export function LayersPanel() {
     setDrag(null);
     if (!target) return;
     // Refuse to drop a layer into itself.
-    if (moving.some((id) => id === target.id || editor.doc.ancestors(target.id).some((a) => a.id === id))) return;
+    if (
+      moving.some(
+        (id) => id === target.id || editor.doc.ancestors(target.id).some((a) => a.id === id),
+      )
+    )
+      return;
     let parent: string;
     let below: string | null;
     let above: string | null;
@@ -225,7 +239,10 @@ export function LayersPanel() {
   };
 
   const start = Math.max(0, Math.floor(scroll.top / ROW_HEIGHT) - OVERSCAN);
-  const end = Math.min(rows.length, Math.ceil((scroll.top + scroll.height) / ROW_HEIGHT) + OVERSCAN);
+  const end = Math.min(
+    rows.length,
+    Math.ceil((scroll.top + scroll.height) / ROW_HEIGHT) + OVERSCAN,
+  );
   const tabStop = focusId ?? selection[0] ?? rows[0]?.node.id;
 
   return (
@@ -261,12 +278,26 @@ export function LayersPanel() {
                   hasChildren={row.hasChildren}
                   expanded={!collapsed.has(node.id)}
                   tabIndex={node.id === tabStop ? 0 : -1}
-                  {...(presence ? { presence: presence.slot, presenceLabel: `Selected by ${presence.name}` } : {})}
+                  {...(presence
+                    ? { presence: presence.slot, presenceLabel: `Selected by ${presence.name}` }
+                    : {})}
                   onToggleExpanded={() => toggle(node.id)}
                   {...(canEdit
                     ? {
-                        onToggleHidden: () => editor.setProp([node.id], "visible", getProp(node.props, "visible") ? false : null, "Hide"),
-                        onToggleLocked: () => editor.setProp([node.id], "locked", getProp(node.props, "locked") ? null : true, "Lock"),
+                        onToggleHidden: () =>
+                          editor.setProp(
+                            [node.id],
+                            "visible",
+                            getProp(node.props, "visible") ? false : null,
+                            "Hide",
+                          ),
+                        onToggleLocked: () =>
+                          editor.setProp(
+                            [node.id],
+                            "locked",
+                            getProp(node.props, "locked") ? null : true,
+                            "Lock",
+                          ),
                         onRename: (name: string) => editor.rename(node.id, name),
                         draggable: true,
                         onDragStart: (e: React.DragEvent) => {
@@ -297,13 +328,18 @@ export function PagesList() {
   const pageId = useEditorState((s) => s.pageId);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const [renaming, setRenaming] = useState<string | null>(null);
-  const pages = editor.doc.pageIds().map((id) => editor.doc.get(id)).filter((p): p is NodeRecord => !!p);
+  const pages = editor.doc
+    .pageIds()
+    .map((id) => editor.doc.get(id))
+    .filter((p): p is NodeRecord => !!p);
 
   return (
     <div className="pages">
       <div className="pane__head">
         <span className="pane__label">Pages</span>
-        {canEdit ? <IconButton icon="plus" label="Add page" onClick={() => editor.addPage()} /> : null}
+        {canEdit ? (
+          <IconButton icon="plus" label="Add page" onClick={() => editor.addPage()} />
+        ) : null}
       </div>
       <ul className="pages__list" aria-label="Pages">
         {pages.map((page) => (

@@ -14,7 +14,15 @@ export interface PropertyCommand {
   readonly display: string;
 }
 
-const ALIASES: Record<string, { props: PropName[]; label: string; kind: "number" | "percent" | "color" | "text" | "enum"; values?: readonly string[] }> = {
+const ALIASES: Record<
+  string,
+  {
+    props: PropName[];
+    label: string;
+    kind: "number" | "percent" | "color" | "text" | "enum";
+    values?: readonly string[];
+  }
+> = {
   x: { props: ["x"], label: "X", kind: "number" },
   y: { props: ["y"], label: "Y", kind: "number" },
   w: { props: ["width"], label: "Width", kind: "number" },
@@ -26,8 +34,16 @@ const ALIASES: Record<string, { props: PropName[]; label: string; kind: "number"
   rotation: { props: ["rotation"], label: "Rotation", kind: "number" },
   radius: { props: ["cornerRadius"], label: "Corner radius", kind: "number" },
   gap: { props: ["gap"], label: "Gap", kind: "number" },
-  p: { props: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"], label: "Padding", kind: "number" },
-  padding: { props: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"], label: "Padding", kind: "number" },
+  p: {
+    props: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
+    label: "Padding",
+    kind: "number",
+  },
+  padding: {
+    props: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
+    label: "Padding",
+    kind: "number",
+  },
   px: { props: ["paddingLeft", "paddingRight"], label: "Horizontal padding", kind: "number" },
   py: { props: ["paddingTop", "paddingBottom"], label: "Vertical padding", kind: "number" },
   opacity: { props: ["opacity"], label: "Opacity", kind: "percent" },
@@ -40,9 +56,24 @@ const ALIASES: Record<string, { props: PropName[]; label: string; kind: "number"
   font: { props: ["fontFamily"], label: "Font", kind: "text" },
   weight: { props: ["fontWeight"], label: "Font weight", kind: "number" },
   name: { props: ["name"], label: "Name", kind: "text" },
-  layout: { props: ["layoutMode"], label: "Auto layout", kind: "enum", values: ["none", "row", "column"] },
-  align: { props: ["alignItems"], label: "Align items", kind: "enum", values: ["start", "center", "end", "stretch", "baseline"] },
-  justify: { props: ["justifyContent"], label: "Justify content", kind: "enum", values: ["start", "center", "end", "space-between"] },
+  layout: {
+    props: ["layoutMode"],
+    label: "Auto layout",
+    kind: "enum",
+    values: ["none", "row", "column"],
+  },
+  align: {
+    props: ["alignItems"],
+    label: "Align items",
+    kind: "enum",
+    values: ["start", "center", "end", "stretch", "baseline"],
+  },
+  justify: {
+    props: ["justifyContent"],
+    label: "Justify content",
+    kind: "enum",
+    values: ["start", "center", "end", "space-between"],
+  },
 };
 
 /** All keywords the syntax understands, for completion hints. */
@@ -102,7 +133,9 @@ export function evaluate(input: string, percentOf = 100): number | null {
   }
   if (src === "") return null;
   const value = expr();
-  return value !== null && i === src.length && Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
+  return value !== null && i === src.length && Number.isFinite(value)
+    ? Math.round(value * 100) / 100
+    : null;
 }
 
 function normalizeColor(input: string): string | null {
@@ -130,7 +163,13 @@ export function parsePropertyCommand(text: string): PropertyCommand | null {
         if (parts.some((p) => p === null || p < 0)) return null;
         const v = parts as number[];
         const [t, r, b, l] =
-          v.length === 1 ? [v[0], v[0], v[0], v[0]] : v.length === 2 ? [v[0], v[1], v[0], v[1]] : v.length === 4 ? v : [];
+          v.length === 1
+            ? [v[0], v[0], v[0], v[0]]
+            : v.length === 2
+              ? [v[0], v[1], v[0], v[1]]
+              : v.length === 4
+                ? v
+                : [];
         if (t === undefined || r === undefined || b === undefined || l === undefined) return null;
         return {
           label: alias.label,
@@ -145,24 +184,44 @@ export function parsePropertyCommand(text: string): PropertyCommand | null {
       }
       const value = evaluate(rest);
       if (value === null) return null;
-      return { label: alias.label, display: String(value), sets: alias.props.map((prop) => ({ prop, value })) };
+      return {
+        label: alias.label,
+        display: String(value),
+        sets: alias.props.map((prop) => ({ prop, value })),
+      };
     }
     case "percent": {
       const value = evaluate(rest.endsWith("%") ? rest : `${rest}%`, 1);
       if (value === null || value < 0 || value > 1) return null;
-      return { label: alias.label, display: `${Math.round(value * 100)}%`, sets: alias.props.map((prop) => ({ prop, value })) };
+      return {
+        label: alias.label,
+        display: `${Math.round(value * 100)}%`,
+        sets: alias.props.map((prop) => ({ prop, value })),
+      };
     }
     case "color": {
       const color = normalizeColor(rest);
       if (!color) return null;
-      return { label: alias.label, display: color, sets: alias.props.map((prop) => ({ prop, value: [{ type: "solid", color }] })) };
+      return {
+        label: alias.label,
+        display: color,
+        sets: alias.props.map((prop) => ({ prop, value: [{ type: "solid", color }] })),
+      };
     }
     case "enum": {
       const value = rest.toLowerCase();
       if (!alias.values?.includes(value)) return null;
-      return { label: alias.label, display: value, sets: alias.props.map((prop) => ({ prop, value })) };
+      return {
+        label: alias.label,
+        display: value,
+        sets: alias.props.map((prop) => ({ prop, value })),
+      };
     }
     case "text":
-      return { label: alias.label, display: rest, sets: alias.props.map((prop) => ({ prop, value: rest })) };
+      return {
+        label: alias.label,
+        display: rest,
+        sets: alias.props.map((prop) => ({ prop, value: rest })),
+      };
   }
 }

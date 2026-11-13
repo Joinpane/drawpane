@@ -58,7 +58,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch {
-    throw new ApiError(0, "network", "Couldn't reach Drawpane. Check your connection and try again.");
+    throw new ApiError(
+      0,
+      "network",
+      "Couldn't reach Drawpane. Check your connection and try again.",
+    );
   }
   const data = (await response.json().catch(() => null)) as
     | (T & { error?: undefined })
@@ -66,7 +70,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     | null;
   if (!response.ok) {
     const error = data && "error" in data && data.error ? data.error : null;
-    throw new ApiError(response.status, error?.code ?? "internal", error?.message ?? "Something went wrong. Try again.");
+    throw new ApiError(
+      response.status,
+      error?.code ?? "internal",
+      error?.message ?? "Something went wrong. Try again.",
+    );
   }
   return data as T;
 }
@@ -79,11 +87,19 @@ export const api = {
 
   session: () => request<{ user: User | null; needsSetup: boolean }>("GET", "/session"),
   teams: () => request<{ teams: Team[] }>("GET", "/teams"),
-  projects: (teamId: string) => request<{ projects: Project[] }>("GET", `/teams/${teamId}/projects`),
+  projects: (teamId: string) =>
+    request<{ projects: Project[] }>("GET", `/teams/${teamId}/projects`),
   teamFiles: (teamId: string, view: "recent" | "trash" = "recent") =>
-    request<{ files: FileMeta[] }>("GET", `/teams/${teamId}/files${view === "trash" ? "?view=trash" : ""}`),
-  projectFiles: (projectId: string) => request<{ files: FileMeta[] }>("GET", `/projects/${projectId}/files`),
+    request<{ files: FileMeta[] }>(
+      "GET",
+      `/teams/${teamId}/files${view === "trash" ? "?view=trash" : ""}`,
+    ),
+  projectFiles: (projectId: string) =>
+    request<{ files: FileMeta[] }>("GET", `/projects/${projectId}/files`),
   file: (fileId: string) =>
-    request<{ file: FileMeta; role: Role; project: { id: string; name: string } | null }>("GET", `/files/${fileId}`),
+    request<{ file: FileMeta; role: Role; project: { id: string; name: string } | null }>(
+      "GET",
+      `/files/${fileId}`,
+    ),
   members: (teamId: string) => request<{ members: Member[] }>("GET", `/teams/${teamId}/members`),
 };

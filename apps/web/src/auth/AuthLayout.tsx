@@ -2,7 +2,15 @@ import type { ReactNode } from "react";
 import "./auth.css";
 
 /** The split sign-in layout: the brand on the left, one focused form on the right. */
-export function AuthLayout({ title, subtitle, children }: { title: string; subtitle?: ReactNode; children: ReactNode }) {
+export function AuthLayout({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <div className="auth">
       <aside className="auth__art" aria-hidden="true">
@@ -14,7 +22,8 @@ export function AuthLayout({ title, subtitle, children }: { title: string; subti
         <div className="auth__tagline">
           <p className="auth__display">Design you own.</p>
           <p className="auth__lede">
-            Open source, real-time and fast. This instance runs on its owner's Cloudflare account, so your files never leave it.
+            Open source, real-time and fast. This instance runs on its owner's Cloudflare account,
+            so your files never leave it.
           </p>
         </div>
       </aside>

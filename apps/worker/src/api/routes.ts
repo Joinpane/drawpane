@@ -1,6 +1,7 @@
 import { newId } from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
+import { publicOrigins } from "../auth/passkeys";
 import { requireUser } from "../auth/session";
 import type { AppContext, Role } from "../env";
 import { randomToken, sha256Hex } from "../lib/crypto";
@@ -117,7 +118,7 @@ export const api = new Hono<AppContext>()
     )
       .bind(await sha256Hex(token), teamId, role, user.id, Date.now(), expiresAt)
       .run();
-    const url = new URL(`/invite/${token}`, c.req.url).toString();
+    const url = new URL(`/invite/${token}`, publicOrigins(c)[0]).toString();
     return c.json({ token, url, role, expiresAt }, 201);
   })
 

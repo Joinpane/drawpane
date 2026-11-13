@@ -41,7 +41,13 @@ export function Toolbar({ onSearch }: { onSearch: () => void }) {
       <span className="toolbar__sep" aria-hidden="true" />
       <button type="button" className="toolbar__search" onClick={onSearch}>
         <span>Search or set…</span>
-        <Kbd keys={formatShortcut({ key: "k", mod: true }).match(/Ctrl|⌘|K|\+/g)?.filter((k) => k !== "+") ?? ["⌘", "K"]} />
+        <Kbd
+          keys={
+            formatShortcut({ key: "k", mod: true })
+              .match(/Ctrl|⌘|K|\+/g)
+              ?.filter((k) => k !== "+") ?? ["⌘", "K"]
+          }
+        />
       </button>
     </div>
   );
