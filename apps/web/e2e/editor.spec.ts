@@ -108,6 +108,40 @@ test.describe
       await page.getByRole("radio", { name: "Layers" }).click();
     });
 
+    test("creates tokens and binds one with the command bar", async () => {
+      await page.keyboard.press("Alt+t");
+      await expect(page.getByText("Tokens start here.")).toBeVisible();
+      await page.getByRole("button", { name: "New collection" }).first().click();
+      await page.getByRole("button", { name: "Token", exact: true }).click();
+      const value = page.getByRole("textbox", { name: "Value" }).first();
+      await value.fill("#16a34a");
+      await value.press("Enter");
+      await expect(page.getByRole("rowheader", { name: /color\/new/ })).toBeVisible();
+
+      // Back in design, bind the main component's fill to it by name.
+      await page.keyboard.press("Alt+t");
+      await page
+        .getByRole("treeitem", { name: /Rectangle 1/ })
+        .first()
+        .click();
+      await page.keyboard.press("ControlOrMeta+k");
+      await page.getByRole("combobox").fill("fill color/new");
+      await page.getByRole("option", { name: /color\/new/ }).click();
+      const props = page.getByRole("group", { name: "Properties" });
+      await expect(props.getByText("color/new")).toBeVisible();
+
+      // Changing the token changes the layer.
+      await page.keyboard.press("Alt+t");
+      await value.fill("#dc2626");
+      await value.press("Enter");
+      await page.keyboard.press("Alt+t");
+      await page
+        .getByRole("treeitem", { name: /Rectangle 1/ })
+        .first()
+        .click();
+      await expect(props.getByRole("button", { name: /color\/new/ })).toBeVisible();
+    });
+
     test("shows edits live in a second tab and survives a reload", async () => {
       const url = page.url();
       const second = await context.newPage();

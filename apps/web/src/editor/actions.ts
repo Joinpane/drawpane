@@ -17,6 +17,7 @@ export interface Shortcut {
 export interface ActionContext {
   readonly editor: Editor;
   readonly openCommandBar: () => void;
+  readonly toggleTokens: () => void;
   readonly toggleLeftPane: () => void;
   readonly toggleRightPane: () => void;
   readonly copy: () => void;
@@ -309,6 +310,15 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.align("bottom"),
   },
 
+  {
+    id: "view.tokens",
+    label: "Tokens and variables",
+    group: "View",
+    icon: "token",
+    shortcut: { key: "t", alt: true },
+    keywords: "variables design tokens modes",
+    run: ({ toggleTokens }) => toggleTokens(),
+  },
   {
     id: "view.command",
     label: "Search or set a value",

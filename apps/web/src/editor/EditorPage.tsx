@@ -23,6 +23,7 @@ import { Inspector } from "./Inspector";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
 import { Toolbar } from "./Toolbar";
+import { TokensWorkspace } from "./tokens/TokensWorkspace";
 import "./editor.css";
 
 const CLIPBOARD_MIME = "application/x-drawpane+json";
@@ -56,6 +57,7 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [commandOpen, setCommandOpen] = useState(false);
   const [leftOpen, setLeftOpen] = useState(true);
   const [leftTab, setLeftTab] = useState<"layers" | "assets">("layers");
+  const [view, setView] = useState<"design" | "tokens">("design");
   const [rightOpen, setRightOpen] = useState(true);
   const [fatal, setFatal] = useState<string | null>(null);
 
@@ -107,6 +109,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     () => ({
       editor,
       openCommandBar: () => setCommandOpen(true),
+      toggleTokens: () => setView((v) => (v === "tokens" ? "design" : "tokens")),
       toggleLeftPane: () => setLeftOpen((v) => !v),
       toggleRightPane: () => setRightOpen((v) => !v),
       // Menu and command-bar clipboard actions go through the async API; ⌘C/⌘X/⌘V use native events below.
@@ -247,6 +250,8 @@ function FileEditor({ fileId }: { fileId: string }) {
       <div className="editor">
         <Canvas interaction={interaction} />
         <FileTitle
+          view={view}
+          onToggleTokens={() => setView((v) => (v === "tokens" ? "design" : "tokens"))}
           fileId={fileId}
           teamId={meta.data?.file.teamId ?? null}
           name={meta.data?.file.name ?? ""}
@@ -254,7 +259,18 @@ function FileEditor({ fileId }: { fileId: string }) {
         />
         <Toolbar onSearch={() => setCommandOpen(true)} />
         <TopRight fileId={fileId} />
-        {leftOpen ? (
+        {view === "tokens" ? (
+          <TokensWorkspace
+            onShowLayer={(id) => {
+              setView("design");
+              const page = editor.doc.pageOf(id);
+              if (page && page.id !== editor.s.pageId) editor.setPage(page.id);
+              editor.select([id]);
+              requestAnimationFrame(() => editor.revealSelection());
+            }}
+          />
+        ) : null}
+        {leftOpen && view === "design" ? (
           <aside className="pane pane--left" aria-label="Pages, layers and assets">
             <div className="pane__tabs">
               <SegmentedControl
@@ -280,13 +296,13 @@ function FileEditor({ fileId }: { fileId: string }) {
             )}
           </aside>
         ) : null}
-        {rightOpen ? (
+        {rightOpen && view === "design" ? (
           <aside className="pane pane--right" aria-label="Inspector">
             <Inspector />
           </aside>
         ) : null}
-        <Lens onOpenInspector={() => setRightOpen(true)} />
-        <ZoomControls />
+        {view === "design" ? <Lens onOpenInspector={() => setRightOpen(true)} /> : null}
+        {view === "design" ? <ZoomControls /> : null}
         <SyncStatus />
         <Notice />
         {commandOpen ? <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} /> : null}
@@ -304,11 +320,15 @@ function FileEditor({ fileId }: { fileId: string }) {
 }
 
 function FileTitle({
+  view,
+  onToggleTokens,
   fileId,
   teamId,
   name,
   project,
 }: {
+  view: "design" | "tokens";
+  onToggleTokens: () => void;
   fileId: string;
   teamId: string | null;
   name: string;
@@ -367,6 +387,14 @@ function FileTitle({
         </button>
       )}
       {!canEdit ? <span className="file-title__badge">View only</span> : null}
+      <IconButton
+        icon="token"
+        label={view === "tokens" ? "Back to design" : "Tokens"}
+        shortcut="⌥T"
+        pressed={view === "tokens"}
+        className="file-title__tokens"
+        onClick={onToggleTokens}
+      />
     </div>
   );
 }

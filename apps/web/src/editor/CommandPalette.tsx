@@ -1,10 +1,10 @@
-import { listComponents } from "@drawpane/editor";
-import { getProp } from "@drawpane/model";
+import { allVariables, BINDING_TARGETS, listComponents, resolveVariable } from "@drawpane/editor";
+import { type BindingKey, getProp } from "@drawpane/model";
 import { CommandBar, type CommandGroup, type CommandItem, type IconName } from "@drawpane/ui";
 import { useMemo, useState } from "react";
 import { ACTIONS, type ActionContext, formatShortcut } from "./actions";
 import { useEditor } from "./hooks";
-import { parsePropertyCommand } from "./property-syntax";
+import { parseBindingCommand, parsePropertyCommand } from "./property-syntax";
 
 /**
  * ⌘K: one bar that runs actions, jumps to layers, and sets properties with a
@@ -41,6 +41,42 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
           },
         ],
       });
+    }
+
+    // Bind a variable by name: "fill brand/500".
+    const binding = parseBindingCommand(query);
+    if (binding && selection.length > 0 && editor.canEdit) {
+      const type = BINDING_TARGETS[binding.keys[0] as BindingKey].type;
+      const needle = binding.query.toLowerCase();
+      const matches = allVariables(editor.doc)
+        .filter(
+          (v) =>
+            getProp(v.props, "variableType") === type &&
+            getProp(v.props, "name").toLowerCase().includes(needle),
+        )
+        .sort((a, b) => {
+          // Exact and prefix matches first.
+          const an = getProp(a.props, "name").toLowerCase();
+          const bn = getProp(b.props, "name").toLowerCase();
+          const rank = (n: string) => (n === needle ? 0 : n.startsWith(needle) ? 1 : 2);
+          return rank(an) - rank(bn) || an.localeCompare(bn);
+        })
+        .slice(0, 8);
+      if (matches.length > 0) {
+        out.push({
+          id: "bind",
+          title: `Use a variable for ${binding.label.toLowerCase()}`,
+          items: matches.map((v) => {
+            const value = resolveVariable(editor.doc, v.id, selection[0]);
+            return {
+              id: `bind:${v.id}`,
+              label: getProp(v.props, "name"),
+              icon: "token",
+              hint: value === undefined ? binding.label : String(value),
+            };
+          }),
+        });
+      }
     }
 
     const actions = ACTIONS.filter((a) => (a.enabled ? a.enabled(editor) : true)).filter(
@@ -118,6 +154,15 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
       editor.beginGesture(property.label);
       for (const { prop, value } of property.sets)
         editor.setProp(editor.s.selection, prop, value, property.label);
+      editor.endGesture();
+      return;
+    }
+    if (item.id?.startsWith("bind:")) {
+      const binding = parseBindingCommand(query);
+      if (!binding) return;
+      editor.beginGesture(`Use ${item.label}`);
+      for (const key of binding.keys)
+        editor.bindVariable(editor.s.selection, key, item.id.slice(5));
       editor.endGesture();
       return;
     }
