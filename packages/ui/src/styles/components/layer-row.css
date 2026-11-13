@@ -6,6 +6,8 @@
   box-sizing: border-box;
   height: var(--size-control-md);
   padding-right: 6px;
+  /* 4px, plus 12px per nesting level (LayerRow sets --dp-depth). */
+  padding-left: calc(var(--space-100) + var(--dp-depth, 0) * var(--space-300));
   border-radius: var(--radius-sm);
   color: var(--ink);
   font: var(--type-ui-body);
@@ -32,17 +34,17 @@
   color: var(--icon);
 }
 .dp-layer__name {
-  color: var(--component-ink);
-}
-.dp-layer.is-component .dp-layer__icon {
-  color: var(--component);
-}
-.dp-layer.is-component .dp-layer__name {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.dp-layer.is-component .dp-layer__icon {
+  color: var(--component);
+}
+.dp-layer.is-component .dp-layer__name {
+  color: var(--component-ink);
 }
 .dp-layer.is-hidden .dp-layer__name,
 .dp-layer.is-hidden .dp-layer__icon {

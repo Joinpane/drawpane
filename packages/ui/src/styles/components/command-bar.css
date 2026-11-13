@@ -30,6 +30,7 @@
   color: var(--ink-muted);
 }
 .dp-cmd__results {
+  position: relative;
   max-height: min(400px, 60vh);
   padding: var(--space-100) 0 var(--space-200);
   overflow-y: auto;
