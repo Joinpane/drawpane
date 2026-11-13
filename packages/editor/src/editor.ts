@@ -19,7 +19,7 @@ import {
 } from "@drawpane/model";
 import { Camera } from "./camera";
 import { Doc } from "./doc";
-import { apply, invert, multiply, type Rect, rotationOf, round2 } from "./geometry";
+import { apply, invert, multiply, type Point, type Rect, rotationOf, round2 } from "./geometry";
 import { applyBestEffort, History } from "./history";
 import { layoutOps } from "./layout";
 import { Scene } from "./scene";
@@ -27,8 +27,19 @@ import type { Guide } from "./snap";
 import { Store } from "./store";
 import { type ConnectionStatus, SyncEngine } from "./sync";
 import { autoSize, type TextMeasurer } from "./text";
+import type { BooleanEngine, BooleanEngineLoader, BooleanOp } from "./vector/boolean";
+import * as vector from "./vector/commands";
+import { pathResizeOps } from "./vector/node";
+import type { VectorPath } from "./vector/path";
+import { loadPathKitEngine } from "./vector/pathkit";
 
-export type ToolId = "select" | "hand" | "frame" | "rect" | "ellipse" | "line" | "text";
+export type ToolId = "select" | "hand" | "frame" | "rect" | "ellipse" | "line" | "text" | "pen";
+
+/** Editing a path's anchors: which path, and which anchors ("subpath:index") are selected. */
+export interface VectorEditState {
+  readonly id: string;
+  readonly anchors: readonly string[];
+}
 
 export interface EditorState {
   readonly pageId: string | null;
@@ -53,11 +64,17 @@ export interface EditorState {
   readonly canRedo: boolean;
   /** Last message worth telling the user (a rejected edit, a desync). */
   readonly notice: { readonly id: number; readonly text: string } | null;
+  /** Vector edit mode on a path, or null. */
+  readonly vectorEdit: VectorEditState | null;
+  /** The pointer in page coordinates while the pen or vector edit draws live feedback. */
+  readonly vectorPointer: Point | null;
 }
 
 export interface EditorOptions {
   readonly clientId?: string;
   readonly measurer: TextMeasurer;
+  /** Loads the boolean geometry engine on first use (defaults to PathKit). */
+  readonly booleanEngine?: BooleanEngineLoader;
 }
 
 const ALIGN_EDGES = ["left", "center", "right", "top", "middle", "bottom"] as const;
@@ -88,12 +105,17 @@ export class Editor {
     canUndo: false,
     canRedo: false,
     notice: null,
+    vectorEdit: null,
+    vectorPointer: null,
   });
   #noticeId = 0;
   readonly #cameras = new Map<string, Camera>();
+  #booleanLoader: BooleanEngineLoader;
+  #booleanEngine: Promise<BooleanEngine> | null = null;
 
   constructor(options: EditorOptions) {
     this.measurer = options.measurer;
+    this.#booleanLoader = options.booleanEngine ?? (() => loadPathKitEngine());
     this.sync = new SyncEngine(this.doc, { clientId: options.clientId ?? newId() });
     this.sync.on("status", (status) => this.state.set({ status }));
     this.sync.on("role", (role) => this.state.set({ role }));
@@ -106,6 +128,9 @@ export class Editor {
       this.state.set({ canUndo: this.history.canUndo, canRedo: this.history.canRedo }),
     );
     this.doc.subscribe(() => this.#reconcile());
+    // Leave vector edit when its path goes away or the selection or tool moves on.
+    this.state.subscribe(() => vector.reconcileVectorEdit(this));
+    this.doc.subscribe(() => vector.reconcileVectorEdit(this));
   }
 
   get s(): EditorState {
@@ -159,7 +184,9 @@ export class Editor {
 
   #commitWithFixups(ops: readonly Op[]): Op[] {
     return this.doc.batch(() => {
-      let inverse = this.sync.commit(ops);
+      // Resizing a path (handles, inspector) scales its path data with its box.
+      const pathOps = pathResizeOps(this.doc, ops);
+      let inverse = this.sync.commit(pathOps.length > 0 ? [...ops, ...pathOps] : ops);
       const touched = new Set<string>();
       for (const op of ops) {
         touched.add(op.id);
@@ -171,6 +198,7 @@ export class Editor {
       if (textOps.length > 0) inverse = [...this.sync.commit(textOps), ...inverse];
       const live = [...touched].filter((id) => this.doc.has(id));
       const layout = layoutOps(this.doc, live);
+      layout.push(...pathResizeOps(this.doc, layout));
       if (layout.length > 0) inverse = [...this.sync.commit(layout), ...inverse];
       return inverse;
     });
@@ -938,6 +966,75 @@ export class Editor {
     const created = roots.map((n) => idMap.get(n.id) as string);
     if (this.commit(ops, "Paste")) this.select(created);
     return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Vectors: path editing, flatten, booleans (implemented in ./vector)
+
+  /** A path node's geometry in its local box, or null for other nodes. */
+  pathOf(id: string): VectorPath | null {
+    return vector.pathOf(this, id);
+  }
+
+  /** Replaces a path's geometry (given in its current local box) and re-fits its box. */
+  setPath(id: string, path: VectorPath, label = "Edit path"): boolean {
+    return vector.setPath(this, id, path, label);
+  }
+
+  enterVectorEdit(id: string): boolean {
+    return vector.enterVectorEdit(this, id);
+  }
+
+  exitVectorEdit(): void {
+    if (this.s.vectorEdit) this.state.set({ vectorEdit: null });
+  }
+
+  selectAnchors(keys: readonly string[]): void {
+    vector.setAnchorSelection(this, keys);
+  }
+
+  deleteSelectedAnchors(): boolean {
+    return vector.deleteSelectedAnchors(this);
+  }
+
+  /** Moves the selected anchors by a page-space delta. */
+  nudgeAnchors(dx: number, dy: number): boolean {
+    return vector.nudgeAnchors(this, dx, dy);
+  }
+
+  toggleAnchorSmooth(key: string): boolean {
+    return vector.toggleAnchorSmooth(this, key);
+  }
+
+  /** Converts rectangles, ellipses, lines and empty frames into equivalent paths (⌘E). */
+  flatten(ids?: readonly string[]): boolean {
+    return vector.flatten(this, ids);
+  }
+
+  /** True when the selection holds two or more shapes a boolean can combine. */
+  canBoolean(): boolean {
+    return vector.canBoolean(this);
+  }
+
+  /** Combines the selected shapes into one path. Loads the geometry engine on first use. */
+  booleanOp(op: BooleanOp): Promise<boolean> {
+    return vector.booleanSelection(this, op);
+  }
+
+  /** The boolean engine, loaded once. A failed load is retried next time. */
+  booleanEngine(): Promise<BooleanEngine> {
+    if (!this.#booleanEngine) {
+      this.#booleanEngine = this.#booleanLoader().catch((error: unknown) => {
+        this.#booleanEngine = null;
+        throw error;
+      });
+    }
+    return this.#booleanEngine;
+  }
+
+  setBooleanEngine(loader: BooleanEngineLoader): void {
+    this.#booleanLoader = loader;
+    this.#booleanEngine = null;
   }
 
   // -------------------------------------------------------------------------

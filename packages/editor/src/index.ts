@@ -13,3 +13,7 @@ export * from "./snap";
 export * from "./store";
 export * from "./sync";
 export * from "./text";
+export * from "./tools/pen";
+export type { KeyInput, ToolHandler } from "./tools/types";
+export * from "./tools/vector-edit";
+export * from "./vector";
