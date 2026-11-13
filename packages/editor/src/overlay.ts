@@ -24,8 +24,6 @@ export interface OverlayTheme {
   agent: string;
   onAgent: string;
   fontUi: string;
-  /** Bézier handle stems and knobs in vector edit (defaults to inkMuted). */
-  icon?: string;
   /** Coordinate tags in vector edit (defaults to fontUi). */
   fontMono?: string;
 }

@@ -17,6 +17,7 @@ import {
 } from "@drawpane/ui";
 import { useState } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { CombineSection, PathSection } from "./VectorSections";
 
 /** The value every node shares, or null when they differ (shown as "Mixed"). */
 function common<K extends PropName>(nodes: readonly NodeRecord[], prop: K): PropValues[K] | null {
@@ -63,6 +64,7 @@ export function Inspector() {
   return (
     <fieldset className="inspector" disabled={!canEdit} aria-label="Properties">
       <h2 className="inspector__title">{title}</h2>
+      {nodes.length > 1 ? <CombineSection editor={editor} /> : null}
       {geometry.length > 0 ? <GeometrySection editor={editor} nodes={geometry} /> : null}
       {inLayout.length > 0 || layoutFrames.length > 0 ? (
         <SizingSection editor={editor} nodes={[...new Set([...inLayout, ...layoutFrames])]} />
@@ -81,6 +83,7 @@ export function Inspector() {
         <PaintSection editor={editor} nodes={shapes} prop="strokes" title="Stroke" />
       ) : null}
       {shapes.length > 0 ? <EffectsSection editor={editor} nodes={shapes} /> : null}
+      <PathSection editor={editor} nodes={nodes} />
     </fieldset>
   );
 }

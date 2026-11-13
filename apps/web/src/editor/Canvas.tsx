@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
 import { useEditor, useEditorState } from "./hooks";
 import { TextEditor } from "./TextEditor";
+import { VectorHints } from "./VectorHints";
 
 function readTheme(): OverlayTheme {
   const css = getComputedStyle(document.documentElement);
@@ -30,6 +31,7 @@ function readTheme(): OverlayTheme {
     agent: v("agent"),
     onAgent: v("on-agent"),
     fontUi: v("font-ui") || "sans-serif",
+    fontMono: v("font-mono") || "monospace",
   };
 }
 
@@ -283,6 +285,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       {editingNode && getProp(editingNode.props, "visible") ? (
         <TextEditor nodeId={editingNode.id} />
       ) : null}
+      <VectorHints />
     </div>
   );
 }

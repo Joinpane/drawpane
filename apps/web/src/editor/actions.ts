@@ -3,7 +3,13 @@
  * all run from here, so each action has one name, one shortcut and one
  * implementation.
  */
-import type { Editor, ToolId } from "@drawpane/editor";
+import {
+  BOOLEAN_LABELS,
+  BOOLEAN_OPS,
+  type BooleanOp,
+  type Editor,
+  type ToolId,
+} from "@drawpane/editor";
 import { isMac } from "../app/format";
 
 export interface Shortcut {
@@ -37,6 +43,13 @@ export interface Action {
 }
 
 const hasSelection = (e: Editor) => e.s.selection.length > 0;
+/** Boolean shortcuts: ⌥⇧ plus the operation's initial (X for exclude), like Figma. */
+const BOOLEAN_KEYS: Record<BooleanOp, string> = {
+  union: "u",
+  subtract: "s",
+  intersect: "i",
+  exclude: "x",
+};
 const canEditSelection = (e: Editor) => e.canEdit && e.s.selection.length > 0;
 const canEdit = (e: Editor) => e.canEdit;
 
@@ -58,6 +71,7 @@ export const ACTIONS: readonly Action[] = [
   tool("rect", "Rectangle", "r", "rectangle"),
   tool("ellipse", "Ellipse", "o", "ellipse"),
   tool("line", "Line", "l", "minus"),
+  tool("pen", "Pen", "p", "pen"),
   tool("text", "Text", "t", "text"),
   tool("hand", "Hand", "h", "hand"),
 
@@ -189,6 +203,44 @@ export const ACTIONS: readonly Action[] = [
     enabled: canEditSelection,
     run: ({ editor }) => editor.toggleLocked(),
   },
+
+  {
+    id: "vector.edit",
+    label: "Edit path",
+    group: "Layer",
+    icon: "pen",
+    shortcut: { key: "enter" },
+    keywords: "vector points anchors",
+    enabled: (e) =>
+      e.canEdit &&
+      e.s.selection.length === 1 &&
+      e.doc.get(e.s.selection[0] as string)?.type === "path",
+    run: ({ editor }) => {
+      const id = editor.s.selection[0];
+      if (id) editor.enterVectorEdit(id);
+    },
+  },
+  {
+    id: "vector.flatten",
+    label: "Flatten",
+    group: "Layer",
+    icon: "pen",
+    shortcut: { key: "e", mod: true },
+    keywords: "outline convert vector path",
+    enabled: canEditSelection,
+    run: ({ editor }) => editor.flatten(),
+  },
+  ...BOOLEAN_OPS.map(
+    (op): Action => ({
+      id: `vector.${op}`,
+      label: `${BOOLEAN_LABELS[op]} selection`,
+      group: "Layer",
+      shortcut: { key: BOOLEAN_KEYS[op], alt: true, shift: true },
+      keywords: "boolean combine shapes",
+      enabled: (e) => e.canBoolean(),
+      run: ({ editor }) => void editor.booleanOp(op),
+    }),
+  ),
 
   {
     id: "arrange.forward",
@@ -358,6 +410,8 @@ export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
   if (key === "+") key = "=";
   // Shift changes some keys (Shift+1 is "!"): fall back to the physical digit.
   if (shortcut.shift && /^digit\d$/i.test(e.code)) key = e.code.slice(5);
+  // Option changes letters on macOS (⌥⇧U is "¨"): fall back to the physical key.
+  if (shortcut.alt && /^Key[A-Z]$/.test(e.code)) key = e.code.slice(3).toLowerCase();
   return (
     key === shortcut.key &&
     mod === !!shortcut.mod &&
@@ -368,7 +422,13 @@ export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
 
 export function formatShortcut(s: Shortcut): string {
   const mac = isMac();
-  const keyLabel: Record<string, string> = { backspace: "⌫", escape: "Esc", "=": "+", "\\": "\\" };
+  const keyLabel: Record<string, string> = {
+    backspace: "⌫",
+    escape: "Esc",
+    enter: "↵",
+    "=": "+",
+    "\\": "\\",
+  };
   const key = keyLabel[s.key] ?? s.key.toUpperCase();
   if (mac) return `${s.alt ? "⌥" : ""}${s.shift ? "⇧" : ""}${s.mod ? "⌘" : ""}${key}`;
   return [s.mod ? "Ctrl" : "", s.alt ? "Alt" : "", s.shift ? "Shift" : "", key]
