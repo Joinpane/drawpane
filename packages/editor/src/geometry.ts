@@ -171,6 +171,11 @@ export function normalizeRect(a: Point, b: Point): Rect {
 }
 
 /** Rounds to 2 decimals, which is as precise as the inspector shows and avoids float noise in files. */
+/** An angle in degrees, in the range [-180, 180). */
+export function normalizeDegrees(degrees: number): number {
+  return round2(((((degrees + 180) % 360) + 360) % 360) - 180);
+}
+
 export function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
