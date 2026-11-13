@@ -71,18 +71,53 @@ export function snapRect(
   const guides: Guide[] = [];
   for (const axis of ["x", "y"] as const) {
     if ((axis === "x" ? dx : dy) === 0 && Math.abs(best[axis].d) > threshold) continue;
-    const at = best[axis].at;
-    const mine = stops(snapped, axis);
-    if (!mine.some((m) => Math.abs(m - at) < 0.01)) continue;
-    // The guide spans every rect that shares this line, plus the moving one.
-    let from = axis === "x" ? snapped.y : snapped.x;
-    let to = axis === "x" ? snapped.y + snapped.height : snapped.x + snapped.width;
-    for (const t of targets) {
-      if (!stops(t, axis).some((s) => Math.abs(s - at) < 0.01)) continue;
-      from = Math.min(from, axis === "x" ? t.y : t.x);
-      to = Math.max(to, axis === "x" ? t.y + t.height : t.x + t.width);
-    }
-    guides.push({ axis, at, from, to });
+    const guide = snapGuide(snapped, targets, axis, best[axis].at);
+    if (guide) guides.push(guide);
   }
   return { dx, dy, guides };
+}
+
+/**
+ * The guide to draw where `rect` meets the line `at` on `axis`, spanning every
+ * target that shares the line. Null when the rect doesn't touch it.
+ */
+export function snapGuide(
+  rect: Rect,
+  targets: readonly Rect[],
+  axis: "x" | "y",
+  at: number,
+): Guide | null {
+  if (!stops(rect, axis).some((m) => Math.abs(m - at) < 0.01)) return null;
+  let from = axis === "x" ? rect.y : rect.x;
+  let to = axis === "x" ? rect.y + rect.height : rect.x + rect.width;
+  for (const t of targets) {
+    if (!stops(t, axis).some((s) => Math.abs(s - at) < 0.01)) continue;
+    from = Math.min(from, axis === "x" ? t.y : t.x);
+    to = Math.max(to, axis === "x" ? t.y + t.height : t.x + t.width);
+  }
+  return { axis, at, from, to };
+}
+
+/**
+ * Snaps edges being dragged (a resize handle's edges, on one axis) to the
+ * edges and centres of `targets` and to `lines`. Returns the correction to
+ * add and the line it snapped to, or null when nothing is within `threshold`.
+ */
+export function snapEdges(
+  edges: readonly number[],
+  axis: "x" | "y",
+  targets: readonly Rect[],
+  threshold: number,
+  lines: readonly SnapLine[] = [],
+): { d: number; at: number } | null {
+  let best: { d: number; at: number } | null = null;
+  const consider = (at: number) => {
+    for (const edge of edges) {
+      const d = at - edge;
+      if (Math.abs(d) <= threshold && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, at };
+    }
+  };
+  for (const t of targets) for (const at of stops(t, axis)) consider(at);
+  for (const line of lines) if (line.axis === axis) consider(line.at);
+  return best;
 }

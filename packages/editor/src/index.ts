@@ -14,6 +14,7 @@ export * from "./history";
 export * from "./hit";
 export * from "./images";
 export * from "./interaction";
+export * from "./labels";
 export * from "./layout";
 export * from "./masks";
 export * from "./overlay";

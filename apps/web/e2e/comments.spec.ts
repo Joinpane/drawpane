@@ -137,6 +137,10 @@ test("comments: pin, reply with a mention, live updates, resolve, find again", a
   await ana.mouse.move(start.x + 12, start.y + 12);
   await ana.mouse.down();
   await ana.mouse.move(start.x + 42, start.y + 52, { steps: 8 });
+  // Mid-drag, the pin's tip stays under the pointer (lifted, not thrown aside).
+  const lifted = await box(anaPin);
+  expect(Math.abs(lifted.x - (start.x + 30))).toBeLessThanOrEqual(1);
+  expect(Math.abs(lifted.y + lifted.height - (start.y + start.height + 40))).toBeLessThanOrEqual(1);
   await ana.mouse.up();
   await expect
     .poll(async () => {

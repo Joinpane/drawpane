@@ -3,8 +3,10 @@ import {
   type CanvasTextMeasurer,
   drawOverlay,
   fontString,
+  frameLabelAt,
   guideAt,
   type Interaction,
+  isArtboard,
   type OverlayTheme,
   type PointerInput,
   placedGuides,
@@ -15,6 +17,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
 import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
+import { FrameNameEditor } from "./FrameNameEditor";
 import { useEditor, useEditorState } from "./hooks";
 import { imagesFor } from "./media";
 import { TextEditor } from "./TextEditor";
@@ -284,7 +287,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       const pageId = editor.s.pageId;
       if (!pageId) return;
       const rect = el.getBoundingClientRect();
-      const point = editor.s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      const screen = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const point = editor.s.camera.toPage(screen);
       // A guide under the pointer gets its own menu.
       const guide = guideAt(placedGuides(editor.scene, pageId), point, 4 / editor.s.camera.zoom);
       if (guide && editor.canEdit) {
@@ -296,10 +300,15 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         });
         return;
       }
-      const leaf = editor.layersAt(point)[0];
+      // Like a click: a frame's label picks the frame; an artboard's empty area picks nothing.
+      const label = frameLabelAt(editor, screen);
+      const hit = label?.id ?? editor.layersAt(point)[0];
+      const leaf = hit && !label && isArtboard(editor, hit) ? undefined : hit;
       const { selection } = editor.s;
       if (!leaf) editor.select([]);
-      else {
+      else if (label) {
+        if (!selection.includes(label.id)) editor.select([label.id]);
+      } else {
         const hitSelected = editor.layersAt(point).some((id) => selection.includes(id));
         if (!hitSelected) {
           const deep = isMac() ? e.metaKey : e.ctrlKey;
@@ -379,6 +388,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         <TextEditor nodeId={editingNode.id} />
       ) : null}
       <VectorHints />
+      <FrameNameEditor />
     </div>
   );
 }

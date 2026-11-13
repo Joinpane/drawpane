@@ -21,6 +21,7 @@ const REACT_ATTRIBUTE: Record<string, string> = {
   "stroke-linecap": "strokeLinecap",
   "stroke-linejoin": "strokeLinejoin",
   "fill-rule": "fillRule",
+  "fill-opacity": "fillOpacity",
   "clip-rule": "clipRule",
 };
 
