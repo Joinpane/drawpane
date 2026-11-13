@@ -225,6 +225,49 @@ describe("comments API", () => {
     expect((await editor.browser.fetch(threadUrl, { method: "DELETE" })).status).toBe(200);
   });
 
+  it("moves pins: authors their own, editors anyone's, without reordering the list", async () => {
+    const { browser: owner, fileId, teamId } = await newFile();
+    const viewer = await signedInUser("Vera", "viewer", teamId);
+    const editor = await signedInUser("Ed", "editor", teamId);
+    const mine = await startThread(viewer.browser, fileId, { body: "Mine." });
+    const theirs = await startThread(owner, fileId, { body: "The owner's." });
+    const url = (id: string) => `/api/files/${fileId}/comments/${id}`;
+
+    // The author moves their own pin onto a layer.
+    const moved = await viewer.browser.json<{ thread: CommentThread }>(url(mine.thread.id), {
+      method: "PATCH",
+      json: { anchor: { x: 300, y: 40, nodeId: "card", offset: { x: 8, y: 6 } } },
+    });
+    expect(moved.thread.anchor).toEqual({ x: 300, y: 40, nodeId: "card", offset: { x: 8, y: 6 } });
+    // Moving isn't activity: the thread keeps its place in the list.
+    expect(moved.thread.updatedAt).toBe(mine.thread.updatedAt);
+    expect(moved.thread.resolvedAt).toBeNull();
+
+    // A viewer can't move someone else's pin; an editor can, and unpin it.
+    const refused = await viewer.browser.fetch(url(theirs.thread.id), {
+      method: "PATCH",
+      json: { anchor: { x: 1, y: 1 } },
+    });
+    expect(refused.status).toBe(403);
+    const byEditor = await editor.browser.json<{ thread: CommentThread }>(url(mine.thread.id), {
+      method: "PATCH",
+      json: { anchor: { x: 10, y: 20, nodeId: null, offset: null } },
+    });
+    expect(byEditor.thread.anchor).toEqual({ x: 10, y: 20, nodeId: null, offset: null });
+
+    // A half-pinned anchor, or a patch that changes nothing, is refused clearly.
+    const half = await owner.fetch(url(mine.thread.id), {
+      method: "PATCH",
+      json: { anchor: { x: 1, y: 1, nodeId: "card" } },
+    });
+    expect(half.status).toBe(400);
+    const empty = await owner.fetch(url(mine.thread.id), { method: "PATCH", json: {} });
+    expect(empty.status).toBe(400);
+    expect(((await empty.json()) as { error: { message: string } }).error.message).toBe(
+      "Say what to change: resolved, or where the comment goes.",
+    );
+  });
+
   it("refuses new comments on a file in the trash", async () => {
     const { browser, fileId } = await newFile();
     await browser.json(`/api/files/${fileId}`, { method: "DELETE" });

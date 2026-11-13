@@ -83,6 +83,19 @@
 .comment-pin--draft {
   cursor: default;
 }
+/* Pins you can move: grab to drag, or focus and use the arrow keys. */
+.comment-pin[data-movable] {
+  cursor: grab;
+  touch-action: none;
+}
+.comment-pin[data-moving] {
+  z-index: 3;
+  cursor: grabbing;
+  scale: 1.08;
+  box-shadow:
+    inset 0 0 0 2px var(--comment-color, var(--presence-8)),
+    var(--shadow-modal);
+}
 
 /* Avatars in threads and the panel. */
 .comment-avatar {

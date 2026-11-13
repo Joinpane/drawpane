@@ -131,6 +131,28 @@ test("comments: pin, reply with a mention, live updates, resolve, find again", a
     .poll(async () => Math.round((await box(anaPin)).x - before.x), { timeout: 5_000 })
     .toBe(50);
 
+  // Ana drags her pin to another spot on the layer: it re-pins there, and the
+  // drag doesn't open the thread.
+  const start = await box(anaPin);
+  await ana.mouse.move(start.x + 12, start.y + 12);
+  await ana.mouse.down();
+  await ana.mouse.move(start.x + 42, start.y + 52, { steps: 8 });
+  await ana.mouse.up();
+  await expect
+    .poll(async () => {
+      const b = await box(anaPin);
+      return [Math.round(b.x - start.x), Math.round(b.y - start.y)];
+    })
+    .toEqual([30, 40]);
+  await expect(anaThread).toBeHidden();
+  const saved = await ana.evaluate(async (path) => {
+    const fileId = path.split("/").at(-1);
+    const res = await fetch(`/api/files/${fileId}/comments`);
+    type Anchor = { nodeId: string | null; offset: { x: number; y: number } | null };
+    return ((await res.json()) as { threads: { anchor: Anchor }[] }).threads[0]?.anchor;
+  }, new URL(fileUrl).pathname);
+  expect(saved?.nodeId).not.toBeNull();
+
   // Ana invites Bo as a viewer. Viewers can comment.
   const invite = await ana.evaluate(async () => {
     const { teams } = (await (await fetch("/api/teams")).json()) as { teams: { id: string }[] };
@@ -153,8 +175,10 @@ test("comments: pin, reply with a mention, live updates, resolve, find again", a
   await expect(bo.getByRole("status")).toContainText("Saved", { timeout: 15_000 });
   await expect(bo.getByRole("button", { name: "Comment", exact: true })).toBeVisible();
 
-  // Bo opens Ana's pin and replies, mentioning her from the @ list.
+  // Bo opens Ana's pin and replies, mentioning her from the @ list. As a
+  // viewer he can't move her pin.
   const boPin = bo.getByRole("button", { name: /^Comment by Ana Lima/ });
+  await expect(boPin).not.toHaveAttribute("data-movable");
   await boPin.click();
   const boThread = bo.getByRole("dialog", { name: "Thread on Rectangle 1 · Page 1" });
   const boReply = boThread.getByRole("combobox", { name: "Reply" });
