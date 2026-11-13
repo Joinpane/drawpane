@@ -87,7 +87,7 @@ export function InspectPanel() {
           value={format}
           onChange={(v) => setFormat(v as typeof format)}
         />
-        <pre className="inspect__code" aria-label={`${format} code`}>
+        <pre className="inspect__code">
           <code>{code}</code>
         </pre>
       </PropertySection>

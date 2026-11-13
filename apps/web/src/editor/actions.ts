@@ -3,7 +3,13 @@
  * all run from here, so each action has one name, one shortcut and one
  * implementation.
  */
-import { type Editor, instanceRootOf, isInstanceRoot, type ToolId } from "@drawpane/editor";
+import {
+  type Editor,
+  instanceRootOf,
+  isInstanceRoot,
+  isMainComponent,
+  type ToolId,
+} from "@drawpane/editor";
 import { isMac } from "../app/format";
 
 export interface Shortcut {
@@ -200,6 +206,18 @@ export const ACTIONS: readonly Action[] = [
     keywords: "symbol main",
     enabled: canEditSelection,
     run: ({ editor }) => editor.createComponent(),
+  },
+  {
+    id: "component.combine",
+    label: "Combine as variants",
+    group: "Layer",
+    icon: "component",
+    keywords: "component set states",
+    enabled: (e) =>
+      e.canEdit &&
+      e.s.selection.length > 0 &&
+      e.s.selection.every((id) => isMainComponent(e.doc.get(id))),
+    run: ({ editor }) => editor.combineAsVariants(),
   },
   {
     id: "component.detach",

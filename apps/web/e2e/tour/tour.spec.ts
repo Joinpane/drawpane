@@ -129,6 +129,29 @@ test("tour", async ({ browser }) => {
   await shot(page, "12-assets");
   await page.getByRole("radio", { name: "Layers" }).click();
 
+  // Variants: combine the main into a set, add a variant, then switch the instance to it.
+  await page.keyboard.press("ControlOrMeta+k");
+  await page.getByRole("combobox").fill("combine as variants");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  await shot(page, "17-component-set");
+  await page.getByRole("treeitem", { name: /Property 1=Default/ }).click();
+  await page.getByRole("button", { name: "Add variant" }).click();
+  await page.waitForTimeout(300);
+  await page.getByRole("textbox", { name: "Property 1" }).fill("Pressed");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  await shot(page, "18-variant");
+  await page
+    .getByRole("treeitem", { name: /Frame 2/ })
+    .first()
+    .click();
+  await page.waitForTimeout(400);
+  await shot(page, "19-instance-variants");
+  await page.getByRole("radio", { name: "Pressed" }).click();
+  await page.waitForTimeout(300);
+  await page.getByRole("treeitem", { name: /Property 1=Default/ }).click();
+
   // Inspect the main component, then measure to another layer with Alt.
   await page.getByRole("radio", { name: "Inspect" }).click();
   await page.waitForTimeout(300);
