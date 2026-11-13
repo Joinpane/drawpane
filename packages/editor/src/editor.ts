@@ -19,8 +19,9 @@ import {
 } from "@drawpane/model";
 import { Camera } from "./camera";
 import { Doc } from "./doc";
-import { apply, invert, multiply, type Rect, rotationOf, round2 } from "./geometry";
+import { apply, invert, multiply, type Point, type Rect, rotationOf, round2 } from "./geometry";
 import { applyBestEffort, History } from "./history";
+import { layoutImageRow } from "./images";
 import { layoutOps } from "./layout";
 import { Scene } from "./scene";
 import type { Guide } from "./snap";
@@ -397,6 +398,54 @@ export class Editor {
       `Create ${type}`,
     );
     return ok ? id : null;
+  }
+
+  /**
+   * Places images as rectangles with an image fill: each at its natural size,
+   * scaled down to fit the viewport, side by side and centred on `at` (page
+   * coordinates; the viewport centre by default), inside the frame under that
+   * point. Selects the new layers and returns their ids, in order.
+   */
+  insertImages(
+    images: readonly { ref: string; width: number; height: number; name: string }[],
+    at?: Point,
+  ): string[] {
+    const { camera, viewport, pageId } = this.s;
+    if (images.length === 0 || !pageId) return [];
+    const center = at ?? camera.toPage({ x: viewport.width / 2, y: viewport.height / 2 });
+    const fit = (px: number) => (px > 0 ? (px * 0.8) / camera.zoom : Number.POSITIVE_INFINITY);
+    const rects = layoutImageRow(images, center, {
+      width: fit(viewport.width),
+      height: fit(viewport.height),
+    });
+    const parent = this.dropTarget(center) ?? pageId;
+    const last = this.doc.childIds(parent).at(-1);
+    const keys = keysBetween(last ? (this.doc.get(last)?.key ?? null) : null, null, images.length);
+    const ids: string[] = [];
+    const ops: Op[] = images.map((image, i) => {
+      const id = newId();
+      ids.push(id);
+      const rect = rects[i] as Rect;
+      const origin = this.scene.toSpace(parent, { x: rect.x, y: rect.y });
+      return {
+        op: "create",
+        id,
+        type: "rect",
+        parent,
+        key: keys[i] as string,
+        props: {
+          name: image.name.trim().slice(0, 256) || "Image",
+          x: round2(origin.x),
+          y: round2(origin.y),
+          width: rect.width,
+          height: rect.height,
+          fills: [{ type: "image", ref: image.ref, scaleMode: "fill" }],
+        },
+      };
+    });
+    if (!this.commit(ops, images.length === 1 ? "Place image" : "Place images")) return [];
+    this.select(ids);
+    return ids;
   }
 
   /** Sets one property on several layers, skipping layers the property doesn't apply to. */
