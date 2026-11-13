@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane zoom and navigation</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas zoomed out to 25%">
+      <sc-for list="{{boards}}" as="b" hint-placeholder-count="12">
+        <div style="{{b.pos}}"><span class="u-xs u-muted" style="display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{b.n}}</span><span style="{{b.box}}"><span style="{{b.a}}"></span><span style="{{b.c}}"></span></span></div>
+      </sc-for>
+      <section role="dialog" aria-label="Go to board" class="u-modal" style="position: absolute; left: 50%; top: 40px; transform: translateX(-50%); width: 460px">
+        <div class="u-row" style="padding: 10px 12px; border-bottom: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import><span class="u-md u-grow">sett</span><x-import component-from-global-scope="Drawpane.Kbd">⌘ P</x-import></div>
+        <div class="u-list" style="padding: 6px">
+          <sc-for list="{{jump}}" as="j" hint-placeholder-count="5"><div class="u-item {{j.sel}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{j.i}}" size="12"></x-import><span class="u-grow">{{j.n}}</span><span class="u-xs u-muted">{{j.p}}</span></div></sc-for>
+        </div>
+        <div class="u-row u-xs u-muted" style="padding: 8px 12px; border-top: 1px solid var(--line)">↵ zoom to board · ⇧↵ select it · searches boards, pages, layers and comments</div>
+      </section>
+      <div class="u-pop" style="position: absolute; right: 12px; bottom: 56px; width: 220px; height: 150px" aria-label="Minimap">
+        <div style="position: absolute; inset: 10px; display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; align-content: start">
+          <sc-for list="{{mini}}" as="m" hint-placeholder-count="18"><span style="{{m}}"></span></sc-for>
+        </div>
+        <span style="position: absolute; left: 30px; top: 18px; width: 100px; height: 66px; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--signal); background: color-mix(in srgb, var(--signal) 8%, transparent)"></span>
+      </div>
+      <div class="u-row" style="position: absolute; right: 12px; bottom: 12px">
+        <div class="u-pop u-row" style="padding: 4px; gap: 2px"><x-import component-from-global-scope="Drawpane.IconButton" icon="minus" label="Zoom out"></x-import><span class="u-sm u-mono" style="width: 44px; text-align: center">25%</span><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Zoom in"></x-import></div>
+      </div>
+      <div style="position: absolute; right: 12px; bottom: 216px; width: 220px"><x-import component-from-global-scope="Drawpane.Menu" label="Zoom" items="{{zoom}}"></x-import></div>
+    </main>
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var C = ['#eef1fb', '#ffffff', '#f3f4f6', '#fff4ed', '#eefaf8', '#16181d'];
+    var N = ['Home — iOS', 'Empty', 'Error', 'Calendar', 'Event detail', 'Settings — iOS', 'Account', 'Notifications', 'Onboarding 1', 'Onboarding 2', 'Onboarding 3', 'Widgets'];
+    var boards = N.map(function (n, i) { var col = i % 6, row = Math.floor(i / 6); return { n: n, pos: 'position: absolute; left: ' + (24 + col * 92) + 'px; top: ' + (300 + row * 190) + 'px; width: 80px', box: 'position: relative; display: block; width: 80px; height: 140px; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,.12)', a: 'position: absolute; left: 6px; right: 6px; top: 18px; height: 22px; border-radius: 4px; background: ' + C[i % 6], c: 'position: absolute; left: 6px; right: 6px; top: 46px; height: 50px; border-radius: 4px; background: #f3f4f6' }; });
+    return {
+      boards: boards,
+      jump: [{ i: 'board', n: 'Settings — iOS', p: 'Mobile v2', sel: 'is-sel' }, { i: 'board', n: 'Settings — Android', p: 'Mobile v2', sel: '' }, { i: 'board', n: 'Settings / Account', p: 'Web dashboard', sel: '' }, { i: 'layers', n: 'Settings button', p: 'layer in Home — iOS', sel: '' }, { i: 'comment', n: '"Settings icon feels heavy"', p: 'comment · Lena', sel: '' }],
+      mini: Array.from({ length: 18 }, function (_, i) { return 'height: 28px; border-radius: 2px; background: ' + (i < 12 ? 'var(--line-strong)' : 'var(--line)'); }),
+      zoom: [{ label: 'Zoom in', shortcut: '⌘ +' }, { label: 'Zoom out', shortcut: '⌘ −' }, { label: 'Zoom to fit', shortcut: '⇧ 1' }, { label: 'Zoom to selection', shortcut: '⇧ 2' }, { label: 'Zoom to 100%', shortcut: '⌘ 0' }, { separator: true }, { label: 'Minimap', checked: true, shortcut: '⌥ M' }, { label: 'Pixel preview' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane share dialog</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="position: relative; height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <div style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: 50%; top: 40px; margin-left: -170px"><dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import></div>
+    </div>
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+  <div aria-hidden="true" style="position: absolute; inset: 0; background: rgba(12,11,10,.38)"></div>
+
+  <div role="dialog" aria-modal="true" aria-labelledby="share-title" style="position: absolute; right: 12px; top: 60px; width: min(480px, calc(100% - 24px)); border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-modal); overflow: hidden">
+    <header style="display: flex; align-items: center; gap: 12px; padding: 16px 16px 10px 20px">
+      <h2 id="share-title" style="flex: 1; margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Share “Mobile app”</h2>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Share by" value="people" options="{{tabs}}"></x-import>
+      <x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close" shortcut="esc"></x-import>
+    </header>
+
+    <div style="display: flex; gap: 8px; padding: 0 20px 14px">
+      <div style="flex: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-height: 36px; padding: 4px 8px; box-sizing: border-box; border: 1px solid var(--signal); border-radius: var(--radius-sm); background: var(--surface-raised)">
+        <span style="display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 4px 0 8px; border-radius: var(--radius-xs); background: var(--surface-active); font-size: 12px">mo@acme.com <x-import component-from-global-scope="Drawpane.Icon" name="close" size="12"></x-import></span>
+        <label for="invite" style="position: absolute; left: -9999px">Invite by email</label>
+        <input id="invite" placeholder="Add people or groups" style="flex: 1; min-width: 120px; border: 0; outline: none; background: transparent; color: var(--ink); font: 400 13px/18px var(--font-ui); caret-color: var(--signal)">
+        <span style="display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-muted)">Can edit <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+      </div>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg">Invite</x-import>
+    </div>
+
+    <div style="padding: 0 12px 6px; border-top: 1px solid var(--line)">
+      <div style="padding: 10px 8px 4px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">People with access · 5</div>
+      <sc-for list="{{people}}" as="p" hint-placeholder-count="5">
+        <div style="display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 8px; border-radius: var(--radius-sm)">
+          <span style="{{p.avatar}}">{{p.initials}}</span>
+          <span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+            <span style="font-size: 13px; line-height: 18px">{{p.name}}</span>
+            <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{p.detail}}</span>
+          </span>
+          <button type="button" style="display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); font: 400 12px/16px var(--font-ui); cursor: pointer">{{p.role}} <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></button>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="padding: 12px 20px; border-top: 1px solid var(--line); display: grid; gap: 10px">
+      <div style="font-size: 12px; line-height: 16px; font-weight: 600">General access</div>
+      <div style="display: flex; align-items: center; gap: 10px">
+        <span style="display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--icon)"><x-import component-from-global-scope="Drawpane.Icon" name="lock"></x-import></span>
+        <span style="flex: 1; display: flex; flex-direction: column">
+          <span style="font-size: 13px; line-height: 18px">Anyone at acme.com with the link</span>
+          <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Viewers get Inspect and export for free</span>
+        </span>
+        <span style="display: inline-flex; align-items: center; gap: 4px; font-size: 12px">Can view <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+      </div>
+      <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Branches inherit these permissions"></x-import>
+    </div>
+
+    <footer style="display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--surface)">
+      <span style="flex: 1; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap">design.acme.com/f/mobile-app</span>
+      <x-import component-from-global-scope="Drawpane.Button" icon="export">Copy link</x-import>
+      <x-import component-from-global-scope="Drawpane.Button" variant="ghost">Done</x-import>
+    </footer>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var av = function (slot) { return 'display: grid; place-items: center; width: 28px; height: 28px; flex: none; border-radius: 50%; background: var(--surface-raised); font-size: 10.5px; font-weight: 700; color: var(--ink); box-shadow: inset 0 0 0 2px var(--presence-' + slot + ')'; };
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      tabs: [{ value: 'people', label: 'People' }, { value: 'publish', label: 'Publish' }, { value: 'embed', label: 'Embed' }],
+      people: [
+        { name: 'Ana Ruiz (you)', detail: 'ana@acme.com · in the file now', role: 'Owner', initials: 'AR', avatar: av(1) },
+        { name: 'Lena Park', detail: 'lena@acme.com · in the file now', role: 'Can edit', initials: 'LP', avatar: av(2) },
+        { name: 'Sam Okafor', detail: 'sam@acme.com', role: 'Can edit', initials: 'SO', avatar: av(3) },
+        { name: 'Engineering', detail: 'Group · 14 people', role: 'Can view', initials: 'EN', avatar: av(8) },
+        { name: 'Dev Patel', detail: 'dev@acme.com · Engineering', role: 'Can comment', initials: 'DP', avatar: av(4) }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

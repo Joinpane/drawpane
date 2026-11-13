@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane component playground</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" file="Acme design system" branch="main" primary="Publish" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+
+    <aside aria-label="Components" style="width: 248px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 8px 12px">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Left pane" value="assets" options="{{tabs}}"></x-import>
+      </div>
+      <div style="margin: 0 8px 8px; display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font-size: 12px">
+        <x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import><span>Search 48 components</span>
+      </div>
+      <sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+        <div style="padding: 4px 4px 8px">
+          <div style="padding: 6px 8px 4px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">{{g.title}}</div>
+          <sc-for list="{{g.items}}" as="c" hint-placeholder-count="3">
+            <x-import component-from-global-scope="Drawpane.LayerRow" name="{{c.name}}" kind="component" selected="{{c.sel}}"></x-import>
+          </sc-for>
+        </div>
+      </sc-for>
+    </aside>
+
+    <main aria-label="Variant matrix for Button" style="flex: 999 1 560px; min-width: 0; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="display: flex; align-items: center; gap: 12px; padding: 14px 16px 12px; border-bottom: 1px solid var(--line)">
+        <span style="display: inline-flex; color: var(--component)"><x-import component-from-global-scope="Drawpane.Icon" name="component"></x-import></span>
+        <div style="flex: 1; min-width: 0">
+          <div style="font-size: 15px; line-height: 20px; font-weight: 600">Button</div>
+          <div style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">3 variants × 5 states · 15 of 15 combinations designed · used 412 times in 9 files</div>
+        </div>
+        <x-import component-from-global-scope="Drawpane.Badge" tone="component" icon="component">Main</x-import>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm" icon="plus">Add property</x-import>
+      </div>
+
+      <div style="display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line)">
+        <sc-for list="{{props}}" as="p" hint-placeholder-count="5">
+          <span style="display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px; line-height: 16px">
+            <b style="font-weight: 600">{{p.name}}</b><span style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted)">{{p.values}}</span>
+          </span>
+        </sc-for>
+      </div>
+
+      <div style="flex: 1; min-height: 0; padding: 20px 24px; background: var(--canvas); overflow: auto">
+        <div style="display: grid; grid-template-columns: 96px repeat(3, minmax(0, 1fr)); gap: 0; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); overflow: hidden">
+          <span style="padding: 10px 12px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted); border-bottom: 1px solid var(--line)">State ╲ variant</span>
+          <span style="padding: 10px 12px; font-size: 12px; line-height: 14px; font-weight: 600; border-bottom: 1px solid var(--line)">Primary</span>
+          <span style="padding: 10px 12px; font-size: 12px; line-height: 14px; font-weight: 600; border-bottom: 1px solid var(--line)">Secondary</span>
+          <span style="padding: 10px 12px; font-size: 12px; line-height: 14px; font-weight: 600; border-bottom: 1px solid var(--line)">Ghost</span>
+          <sc-for list="{{cells}}" as="c" hint-placeholder-count="20">
+            <div style="{{c.wrap}}">
+              <sc-if value="{{c.isLabel}}" hint-placeholder-val="{{false}}">
+                <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{c.text}}</span>
+              </sc-if>
+              <sc-if value="{{c.isCell}}" hint-placeholder-val="{{true}}">
+                <span style="{{c.btn}}">Continue</span>
+                <span style="{{c.check}}">{{c.ratio}}</span>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+        <p style="margin: 14px 0 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">The matrix is generated from the properties above. Drag a cell out to make a one-off instance; double-click to edit that combination.</p>
+      </div>
+    </main>
+
+    <aside aria-label="Playground" style="width: 264px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 12px 12px 0; font-size: 12px; line-height: 16px; font-weight: 600">Playground</div>
+      <div style="margin: 10px 12px; height: 112px; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--canvas)">
+        <span style="display: inline-flex; align-items: center; height: 44px; padding: 0 20px; border-radius: 10px; background: #2b4fd6; color: #ffffff; font: 600 15px/20px var(--font-ui)">Book a demo</span>
+      </div>
+      <section class="dp-section" aria-label="Properties">
+        <div class="dp-section__head"><h3 class="dp-section__title">Properties</h3></div>
+        <div class="dp-section__body">
+          <div class="dp-row--label dp-row"><span class="dp-caption">Variant</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Variant" value="primary" options="{{variants}}"></x-import></div>
+          <div class="dp-row--label dp-row"><span class="dp-caption">Size</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Size" value="lg" options="{{sizes}}"></x-import></div>
+          <div class="dp-row--label dp-row"><span class="dp-caption">Icon</span><x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Leading icon"></x-import></div>
+          <div class="dp-row--label dp-row"><span class="dp-caption">Label</span><x-import component-from-global-scope="Drawpane.NumberField" label="T" aria-label="Label text" default-value="Book a demo"></x-import></div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Checks">
+        <div class="dp-section__head"><h3 class="dp-section__title">Checks</h3><x-import component-from-global-scope="Drawpane.Badge" tone="warning">1 issue</x-import></div>
+        <div class="dp-section__body" style="gap: 6px">
+          <sc-for list="{{checks}}" as="k" hint-placeholder-count="4">
+            <div style="display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 16px">
+              <span style="{{k.color}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{k.icon}}" size="12"></x-import></span>
+              <span style="flex: 1">{{k.text}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Code">
+        <div class="dp-section__head"><h3 class="dp-section__title">Code</h3><x-import component-from-global-scope="Drawpane.IconButton" icon="export" label="Copy snippet"></x-import></div>
+        <pre style="margin: 6px 0 0; padding: 10px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-family: var(--font-mono); font-size: 11.5px; line-height: 17px; color: var(--ink); white-space: pre-wrap">&lt;Button variant="primary" size="lg"&gt;
+  Book a demo
+&lt;/Button&gt;</pre>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var states = ['Default', 'Hover', 'Pressed', 'Focus', 'Disabled'];
+    var looks = {
+      Primary: [['#2b4fd6', '#ffffff', ''], ['#2443b8', '#ffffff', ''], ['#1d379a', '#ffffff', ''], ['#2b4fd6', '#ffffff', 'box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #2b4fd6;'], ['#e4e7ec', '#8a909c', '']],
+      Secondary: [['#eef1fb', '#2b4fd6', ''], ['#e1e6f8', '#2443b8', ''], ['#d3daf4', '#1d379a', ''], ['#eef1fb', '#2b4fd6', 'box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #2b4fd6;'], ['#f3f4f6', '#8a909c', '']],
+      Ghost: [['transparent', '#2b4fd6', ''], ['#f3f4f6', '#2443b8', ''], ['#e4e7ec', '#1d379a', ''], ['transparent', '#2b4fd6', 'box-shadow: 0 0 0 2px #2b4fd6;'], ['transparent', '#8a909c', '']]
+    };
+    var ratios = { Primary: ['6.6:1', '8.2:1', '10.2:1', '6.6:1', 'n/a'], Secondary: ['5.8:1', '6.6:1', '7.3:1', '5.8:1', 'n/a'], Ghost: ['6.6:1', '7.4:1', '8.2:1', '6.6:1', 'n/a'] };
+    var cells = [];
+    var border = 'border-bottom: 1px solid var(--line);';
+    states.forEach(function (s, si) {
+      cells.push({ isLabel: true, isCell: false, text: s, wrap: 'display: flex; align-items: center; padding: 0 12px; height: 76px;' + (si < 4 ? border : '') });
+      ['Primary', 'Secondary', 'Ghost'].forEach(function (v) {
+        var l = looks[v][si];
+        var disabled = si === 4;
+        cells.push({
+          isLabel: false, isCell: true,
+          wrap: 'display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 6px; padding: 0 12px; height: 76px; border-left: 1px dashed var(--line);' + (si < 4 ? border : ''),
+          btn: 'display: inline-flex; align-items: center; height: 36px; padding: 0 16px; border-radius: 8px; font: 600 13px/18px var(--font-ui); background: ' + l[0] + '; color: ' + l[1] + ';' + l[2],
+          ratio: disabled ? 'exempt' : ratios[v][si] + ' AA',
+          check: 'font-family: var(--font-mono); font-size: 10.5px; line-height: 12px; color: ' + (disabled ? 'var(--ink-muted)' : 'var(--success)')
+        });
+      });
+    });
+    return {
+      theme: this.props.theme ?? 'light',
+      no: false,
+      tabs: [{ value: 'layers', label: 'Layers' }, { value: 'assets', label: 'Assets' }, { value: 'history', label: 'History' }],
+      groups: [
+        { title: 'Actions · 4', items: [{ name: 'Button', sel: true }, { name: 'Icon button', sel: false }, { name: 'Link', sel: false }] },
+        { title: 'Inputs · 9', items: [{ name: 'Text field', sel: false }, { name: 'Select', sel: false }, { name: 'Checkbox', sel: false }, { name: 'Radio group', sel: false }] },
+        { title: 'Navigation · 6', items: [{ name: 'Tab bar', sel: false }, { name: 'Top app bar', sel: false }, { name: 'Breadcrumbs', sel: false }] }
+      ],
+      props: [
+        { name: 'variant', values: 'primary | secondary | ghost' },
+        { name: 'state', values: 'default | hover | pressed | focus | disabled' },
+        { name: 'size', values: 'md | lg' },
+        { name: 'icon', values: 'boolean' },
+        { name: 'label', values: 'text' }
+      ],
+      cells: cells,
+      variants: [{ value: 'primary', label: 'Pri' }, { value: 'secondary', label: 'Sec' }, { value: 'ghost', label: 'Ghost' }],
+      sizes: [{ value: 'md', label: 'md' }, { value: 'lg', label: 'lg' }],
+      checks: [
+        { icon: 'check', text: 'Text contrast passes AA in all 12 enabled states', color: 'display: inline-flex; margin-top: 2px; color: var(--success)' },
+        { icon: 'check', text: 'Focus state is distinct from hover', color: 'display: inline-flex; margin-top: 2px; color: var(--success)' },
+        { icon: 'warning', text: 'Size md is 36 px tall; touch targets need 44 px on mobile', color: 'display: inline-flex; margin-top: 2px; color: var(--warning)' },
+        { icon: 'check', text: 'All colors bound to tokens', color: 'display: inline-flex; margin-top: 2px; color: var(--success)' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

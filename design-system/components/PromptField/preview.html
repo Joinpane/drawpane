@@ -1,0 +1,15 @@
+<!-- @dsCard group="Agents" height=168 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>PromptField — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h('div', { style: { width: 380 } },
+      h(D.PromptField, { model: 'Claude Opus 5.5 · your key', context: [{ label: 'Upcoming', icon: 'board' }, { label: 'Acme design system', icon: 'component' }], value: 'Add empty and error states for this list, using our components' }))
+  );
+</script>
+</body>
+</html>

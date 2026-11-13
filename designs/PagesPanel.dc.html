@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane pages and sections</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <aside class="u-side u-side--left" aria-label="Pages">
+      <div class="u-row" style="padding: 8px 8px 4px 12px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Left pane" value="layers" options="{{tabs}}"></x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.IconButton" icon="search" label="Search"></x-import></div>
+      <div class="u-row" style="padding: 6px 8px 2px 12px"><span class="u-xs u-muted u-grow">Pages · 9</span><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add page"></x-import></div>
+      <div class="u-list">
+        <sc-for list="{{pages}}" as="p" hint-placeholder-count="10">
+          <div class="u-item {{p.sel}}" style="{{p.st}}"><span style="{{p.ic}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{p.icon}}" size="12"></x-import></span><span class="u-grow u-ellip">{{p.n}}</span><span class="u-xs u-muted">{{p.c}}</span></div>
+        </sc-for>
+      </div>
+      <div style="margin: 8px; padding: 0" aria-label="Page menu"><x-import component-from-global-scope="Drawpane.Menu" label="Page" items="{{menu}}"></x-import></div>
+    </aside>
+    <main class="u-stage" aria-label="Section view">
+      <div class="u-row" style="position: absolute; left: 0; top: 0; right: 0; height: 36px"><span class="u-md u-b">Mobile v2</span><span class="u-sm u-muted">· 3 sections · 84 boards</span></div>
+      <sc-for list="{{sections}}" as="s" hint-placeholder-count="3">
+        <section style="{{s.pos}}">
+          <div class="u-row" style="height: 28px"><span class="u-chip" style="{{s.chip}}">{{s.n}}</span><span class="u-xs u-muted">{{s.c}}</span></div>
+          <div style="display: flex; gap: 10px; flex-wrap: wrap">
+            <sc-for list="{{s.boards}}" as="b" hint-placeholder-count="5"><span style="{{b}}"></span></sc-for>
+          </div>
+        </section>
+      </sc-for>
+      <div class="u-toast" style="position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%)"><x-import component-from-global-scope="Drawpane.Icon" name="check"></x-import>Moved "Archive 2025" to its own file · links still work<span class="u-tbtn">Undo</span></div>
+    </main>
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var it = function (lvl) { return 'padding-left: ' + (8 + lvl * 16) + 'px'; };
+    var P = [['Cover', 'image', '1', 0, 0], ['Mobile v2', 'layers', '84', 0, 1], ['Onboarding', 'board', '12', 1, 0], ['Home and calendar', 'board', '40', 1, 0], ['Settings', 'board', '32', 1, 0], ['Web dashboard', 'layers', '41', 0, 0], ['Components (local)', 'component', '18', 0, 0], ['Explorations', 'pen', '63', 0, 0], ['— Archive —', 'minus', '', 0, 0], ['Archive 2025', 'eye-off', '140', 0, 0]];
+    var bx = function (c) { return 'width: 56px; height: 100px; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,.12); border-top: 14px solid ' + c; };
+    var sec = function (x, y, w, n, c, color, k) { return { n: n, c: c, chip: 'background: ' + color + '; color: #16181d', pos: 'position: absolute; left: ' + x + 'px; top: ' + y + 'px; width: ' + w + 'px; padding: 12px; border-radius: 12px; background: color-mix(in srgb, ' + color + ' 45%, transparent)', boards: Array.from({ length: k }, function (_, i) { return bx(['#2b4fd6', '#16181d', '#e04f1a', '#0f766e'][i % 4]); }) }; };
+    return {
+      tabs: H.opts(['Layers', 'Assets', 'History']),
+      pages: P.map(function (p) { return { n: p[0], icon: p[1], c: p[2], sel: H.sel(p[4]), st: it(p[3]), ic: 'display: inline-flex; color: var(--icon)' }; }),
+      menu: [{ label: 'Rename', shortcut: '↵' }, { label: 'Duplicate page' }, { label: 'Add section' }, { label: 'Move to new file…' }, { label: 'Copy link to page' }, { separator: true }, { label: 'Delete page', danger: true }],
+      sections: [sec(0, 50, 420, 'Onboarding', '12 boards', '#eef1fb', 6), sec(440, 50, 330, 'Home and calendar', '40 boards · showing 10', '#eefaf8', 10), sec(0, 340, 420, 'Settings', '32 boards', '#fff4ed', 6)]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

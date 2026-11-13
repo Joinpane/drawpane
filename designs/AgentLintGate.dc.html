@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane design-system gate on merge</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor" style="position: relative">
+  <dc-import name="PartTopBar" branch="agent/promo-banner" primary="Merge" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="hero" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas">
+      <div style="position: absolute; left: 40px; top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="branch" hint-size="340px,560px"></dc-import>
+        <sc-for list="{{marks}}" as="m" hint-placeholder-count="4"><span style="{{m.box}}"></span><span style="{{m.pin}}">{{m.n}}</span></sc-for>
+      </div>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Merge checks">
+      <div class="u-head"><h2 class="u-h3">Merge agent/promo-banner</h2><span class="u-chip u-chip--signal">Blocked</span></div>
+      <div class="u-col" style="padding: 0 14px 12px">
+        <span class="u-sm u-muted">Promo agent for Mo · 9 changes · ready 4 min ago</span>
+        <div class="u-row u-sm"><span class="u-ico u-ico--sm u-ico--ok"><x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import></span><span class="u-grow">Render checks</span><span class="u-muted">passed</span></div>
+        <div class="u-row u-sm"><span class="u-ico u-ico--sm u-ico--ok"><x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import></span><span class="u-grow">Contrast</span><span class="u-muted">all AA</span></div>
+        <div class="u-row u-sm"><span class="u-ico u-ico--sm" style="color: var(--danger)"><x-import component-from-global-scope="Drawpane.Icon" name="warning" size="12"></x-import></span><span class="u-grow">Design-system lint</span><span style="color: var(--danger)">4 violations</span></div>
+      </div>
+      <div class="u-line"></div>
+      <div class="u-col u-col--tight" style="padding: 10px 8px; flex: 1; min-height: 0">
+        <sc-for list="{{issues}}" as="i" hint-placeholder-count="4">
+          <div class="u-item {{i.sel}}" style="align-items: flex-start">
+            <span class="u-chip u-chip--signal">{{i.n}}</span>
+            <span class="u-grow u-col u-col--tight" style="gap: 2px"><span class="u-b">{{i.rule}}</span><span class="u-xs u-muted">{{i.where}}</span><span class="u-xs u-mono">{{i.fix}}</span></span>
+          </div>
+        </sc-for>
+      </div>
+      <div class="u-col" style="padding: 12px 14px; border-top: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary" icon="agent">Ask the agent to fix all 4</x-import>
+        <div class="u-row"><x-import component-from-global-scope="Drawpane.Button" size="sm">Fix by hand</x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Override…</x-import></div>
+        <span class="u-xs u-muted">Rules come from the Acme library's lint settings. Overrides need a reason and are written to the audit log.</span>
+      </div>
+    </aside>
+  </div>
+  <div role="dialog" aria-label="Override lint" class="u-modal u-col" style="position: absolute; left: 330px; bottom: 40px; width: 380px; padding: 16px">
+    <strong class="u-lg">Keep violation 1 as an exception?</strong>
+    <span class="u-sm u-muted">The agent fixed 2, 3 and 4. The promo blue is a one-off for the holiday campaign and will show as an exception in the library report.</span>
+    <x-import component-from-global-scope="Drawpane.TextField" label="Reason (required)" default-value="Holiday campaign, ends Jan 2 — approved by brand"></x-import>
+    <div class="u-row"><x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Remind me to remove it on Jan 2"></x-import></div>
+    <div class="u-row" style="justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button">Cancel</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Merge with exception</x-import></div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var mk = function (n, x, y, w, h, r) { return { n: n, box: 'position: absolute; left: ' + x + 'px; top: ' + y + 'px; width: ' + w + 'px; height: ' + h + 'px; border-radius: ' + r + 'px; box-shadow: inset 0 0 0 2px var(--danger)', pin: 'position: absolute; left: ' + (x + w - 10) + 'px; top: ' + (y - 10) + 'px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--danger); color: #ffffff; font-size: 11px; font-weight: 700' }; };
+    return {
+      marks: [mk(1, 20, 118, 300, 66, 14), mk(2, 18, 46, 222, 32, 4), mk(3, 44, 224, 28, 28, 8), mk(4, 32, 272, 276, 52, 10)],
+      issues: [
+        { n: '1', rule: 'Raw color instead of a token', where: 'Hero card · fill #2B4FD6', fix: '→ brand/500', sel: 'is-sel' },
+        { n: '2', rule: 'Detached text style', where: 'Greeting · 22/28 Instrument Sans', fix: '→ type/title-lg', sel: '' },
+        { n: '3', rule: 'Off-scale radius', where: 'Event row / icon · 7 px', fix: '→ radius/sm (8)', sel: '' },
+        { n: '4', rule: 'Detached instance', where: 'Event row · Token audit', fix: '→ relink to Event row', sel: '' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

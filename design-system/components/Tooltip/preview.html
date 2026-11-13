@@ -1,0 +1,17 @@
+<!-- @dsCard group="Actions" height=72 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Tooltip — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.Tooltip, { label: 'Rectangle', shortcut: 'R' }),
+      h(D.Tooltip, { label: 'Layout X-ray', shortcut: 'Hold Alt' }),
+      h(D.Tooltip, { label: 'Lena is editing this board' }))
+  );
+</script>
+</body>
+</html>

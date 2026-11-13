@@ -1,0 +1,17 @@
+<!-- @dsCard group="Agents" height=88 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>AgentTag — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.AgentTag, { name: 'Claude', status: 'working', onBehalfOf: 'Ana' }),
+      h(D.AgentTag, { name: 'Audit bot', status: 'waiting' }),
+      h(D.AgentTag, { name: 'Cursor', status: 'idle' }))
+  );
+</script>
+</body>
+</html>

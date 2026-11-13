@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane variants and properties</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" file="Acme design system" branch="main" primary="Publish" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Variant grid for Button">
+      <div class="u-row" style="position: absolute; left: 0; top: 0; height: 32px"><x-import component-from-global-scope="Drawpane.Icon" name="component"></x-import><span class="u-md u-b" style="color: var(--component-ink)">Button</span><span class="u-sm u-muted">· 3 properties · 18 variants · 214 instances</span></div>
+      <div style="position: absolute; left: 0; top: 44px; padding: 20px; border-radius: 12px; border: 1.5px dashed var(--component); display: grid; grid-template-columns: 90px repeat(3, 150px); gap: 14px 18px; align-items: center">
+        <span></span><sc-for list="{{states}}" as="s" hint-placeholder-count="3"><span class="u-xs u-muted u-mono">State = {{s}}</span></sc-for>
+        <sc-for list="{{grid}}" as="g" hint-placeholder-count="12"><span style="{{g.s}}">{{g.t}}</span></sc-for>
+      </div>
+      <div class="u-note u-note--signal" style="position: absolute; left: 0; top: 410px; width: 640px"><x-import component-from-global-scope="Drawpane.Icon" name="warning" size="12"></x-import><span class="u-grow"><strong>Danger · Large · Disabled</strong> is missing. 2 instances set to it fall back to Danger · Large · Default.</span><x-import component-from-global-scope="Drawpane.Button" size="sm">Create it</x-import></div>
+    </main>
+    <aside class="u-side" aria-label="Component properties">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="design" options="{{H.dmodes}}"></x-import></div>
+      <section class="dp-section" aria-label="Properties">
+        <div class="dp-section__head"><h3 class="dp-section__title">Properties</h3><div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add property"></x-import></div></div>
+        <div class="dp-section__body" style="gap: 6px">
+          <sc-for list="{{props}}" as="p" hint-placeholder-count="5">
+            <div class="u-box" style="padding: 8px 10px; display: grid; gap: 4px; border-radius: var(--radius-sm)">
+              <div class="u-row"><span class="u-chip u-chip--muted">{{p.k}}</span><strong class="u-sm u-grow">{{p.n}}</strong><x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Property options"></x-import></div>
+              <span class="u-xs u-muted">{{p.v}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Description">
+        <div class="dp-section__head"><h3 class="dp-section__title">Description and docs</h3></div>
+        <div class="dp-section__body"><span class="u-sm">Use Primary once per screen. Label says what happens: "Save changes", not "OK".</span><span class="u-xs u-muted">Shown to designers, devs and agents</span></div>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var states = ['Default', 'Hover', 'Disabled'];
+    var bg = { Primary: ['#2b4fd6', '#1e3aa8', '#c9d3f5'], Secondary: ['#ffffff', '#f3f4f6', '#ffffff'], Danger: ['#c8312b', '#a3241f', '#f0c4c2'] };
+    var grid = [];
+    ['Primary', 'Secondary', 'Danger'].forEach(function (k) {
+      [['Medium', 32], ['Large', 40]].forEach(function (sz) {
+        grid.push({ t: k + ' · ' + sz[0][0], s: 'font-size: 11px; color: var(--ink-muted); font-family: var(--font-mono)' });
+        states.forEach(function (st, i) {
+          var miss = sz[0] === 'Large' && st === 'Disabled' && k === 'Danger';
+          grid.push({ t: miss ? 'missing' : 'Save changes', s: miss ? 'height: ' + sz[1] + 'px; border-radius: 8px; border: 1.5px dashed var(--signal); color: var(--signal-ink); font-size: 12px; line-height: ' + (sz[1] - 3) + 'px; text-align: center; font-weight: 600' : 'height: ' + sz[1] + 'px; border-radius: 8px; background: ' + bg[k][i] + '; color: ' + (k === 'Secondary' ? (i === 2 ? '#aab0bb' : '#16181d') : '#ffffff') + '; font-size: ' + (sz[0] === 'Large' ? 14 : 13) + 'px; line-height: ' + sz[1] + 'px; text-align: center; font-weight: 600; font-family: var(--font-ui); box-shadow: ' + (k === 'Secondary' ? 'inset 0 0 0 1px #e4e7ec' : 'none') });
+        });
+      });
+    });
+    return {
+      states: states, grid: grid.slice(0, 24),
+      props: [{ k: 'Variant', n: 'Kind', v: 'Primary · Secondary · Danger' }, { k: 'Variant', n: 'Size', v: 'Medium · Large' }, { k: 'Variant', n: 'State', v: 'Default · Hover · Disabled' }, { k: 'Text', n: 'Label', v: 'Default "Save changes"' }, { k: 'Instance', n: 'Icon', v: 'Swap from Icon set · optional' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

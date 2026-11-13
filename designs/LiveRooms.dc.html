@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane live rooms and logs</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-page" style="padding: 28px 32px 40px">
+  <header class="u-row" style="margin-bottom: 18px"><div class="u-grow u-col u-col--tight"><span class="u-sm u-muted">Instance / Health</span><h1 class="u-h1">Live rooms and logs</h1></div><span class="u-chip u-chip--ok">● all systems normal</span></header>
+  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px">
+    <sc-for list="{{kpi}}" as="k" hint-placeholder-count="4"><div class="u-box u-pad u-col u-col--tight"><span class="u-sm u-muted">{{k.l}}</span><span style="font-size: 26px; line-height: 32px; font-weight: 600">{{k.v}}</span><span class="u-xs u-muted">{{k.d}}</span></div></sc-for>
+  </div>
+  <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px">
+    <section class="u-box">
+      <div class="u-head"><h2 class="u-h3">Open file rooms · 9</h2><span class="u-xs u-muted">one Durable Object per open file</span></div>
+      <div class="u-trow u-thead" style="grid-template-columns: minmax(0, 1fr) 60px 70px 80px; padding: 0 14px"><span>File</span><span>People</span><span>Agents</span><span>Ops/min</span></div>
+      <sc-for list="{{rooms}}" as="r" hint-placeholder-count="7"><div class="u-trow" style="grid-template-columns: minmax(0, 1fr) 60px 70px 80px; padding: 0 14px"><span class="u-b u-ellip">{{r.f}}</span><span class="u-mono u-sm">{{r.p}}</span><span class="u-mono u-sm" style="color: var(--agent-ink)">{{r.a}}</span><span class="u-mono u-sm">{{r.o}}</span></div></sc-for>
+    </section>
+    <section class="u-box" style="display: flex; flex-direction: column">
+      <div class="u-head"><h2 class="u-h3">Worker logs</h2><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Level" value="all" options="{{lv}}"></x-import></div>
+      <div style="font-family: var(--font-mono); font-size: 11px; line-height: 19px; padding: 0 14px 14px">
+        <sc-for list="{{logs}}" as="l" hint-placeholder-count="12"><div style="{{l.s}}"><span style="color: var(--ink-muted); width: 60px; flex: none">{{l.t}}</span><span style="width: 44px; flex: none">{{l.lv}}</span><span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{l.m}}</span></div></sc-for>
+      </div>
+      <div class="u-xs u-muted" style="margin-top: auto; padding: 10px 14px; border-top: 1px solid var(--line)">Streaming from Workers Logs · open in the Cloudflare dashboard for 7 days of history</div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var lg = function (t, lv, m) { var c = lv === 'WARN' ? 'color: var(--signal-ink)' : lv === 'ERR' ? 'color: var(--danger)' : ''; return { t: t, lv: lv, m: m, s: 'display: flex; gap: 8px; border-bottom: 1px solid var(--line);' + c }; };
+    return {
+      kpi: [{ l: 'People online', v: '14', d: 'in 9 files' }, { l: 'Agents running', v: '3', d: '2 inside, 1 over MCP' }, { l: 'p95 op latency', v: '38 ms', d: 'edit to everyone\'s screen' }, { l: 'Errors, last hour', v: '2', d: 'both plugin permission denials' }],
+      rooms: [{ f: 'Mobile app', p: '4', a: '1', o: '212' }, { f: 'Web dashboard', p: '3', a: '1 (MCP)', o: '96' }, { f: 'Checkout flow', p: '2', a: '0', o: '41' }, { f: 'Acme design system', p: '1', a: '0', o: '12' }, { f: 'Marketing site', p: '2', a: '0', o: '30' }, { f: 'Onboarding v2', p: '1', a: '1', o: '58' }, { f: 'Watch app', p: '1', a: '0', o: '4' }],
+      lv: H.opts(['All', 'Warn', 'Error']),
+      logs: [lg('11:42:07', 'INFO', 'room f_mobile_app · 4 peers · snapshot 1.2 MB'), lg('11:42:05', 'INFO', 'agent ag_empty_states apply_actions 6 ops 41ms'), lg('11:42:01', 'WARN', 'plugin token-sync denied action publish_library'), lg('11:41:58', 'INFO', 'render_frame f_mobile_app/Error 2x 390ms'), lg('11:41:51', 'INFO', 'mcp session claude-code-laptop get_board'), lg('11:41:40', 'ERR', 'email webhook 429 from provider · retry in 30s'), lg('11:41:31', 'INFO', 'queue thumbnails 3 jobs done'), lg('11:41:22', 'INFO', 'room f_checkout · peer joined Ana'), lg('11:41:10', 'INFO', 'd1 query p95 4ms'), lg('11:40:59', 'INFO', 'cron backup-verify ok')]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

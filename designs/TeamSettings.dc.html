@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane team settings</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <header style="padding: 28px 32px 0; border-bottom: 1px solid var(--line)">
+    <div style="display: flex; align-items: center; gap: 12px">
+      <span style="display: grid; place-items: center; width: 36px; height: 36px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); font-weight: 700">A</span>
+      <div style="flex: 1">
+        <h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Acme Design</h1>
+        <p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Team settings · 23 members · no seat limits</p>
+      </div>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg" icon="plus">Invite people</x-import>
+    </div>
+    <nav aria-label="Team settings" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 20px">
+      <sc-for list="{{tabs}}" as="t" hint-placeholder-count="6">
+        <a href="#" style="{{t.style}}">{{t.label}}</a>
+      </sc-for>
+    </nav>
+  </header>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 24px; padding: 24px 32px 40px">
+    <section aria-label="Members" style="flex: 999 1 600px; min-width: 0">
+      <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px">
+        <div style="display: flex; align-items: center; gap: 8px; width: 260px; height: 32px; padding: 0 10px; box-sizing: border-box; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import>Search members</div>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Filter" value="all" options="{{filters}}"></x-import>
+      </div>
+      <div style="overflow-x: auto; border-radius: var(--radius-md); box-shadow: inset 0 0 0 1px var(--line)">
+        <div role="table" style="display: table; width: 100%; min-width: 640px; border-collapse: collapse; font-size: 13px; line-height: 18px">
+          <div role="rowgroup" style="display: table-header-group; ">
+            <div role="row" style="display: table-row; text-align: left; color: var(--ink-muted)">
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 10px 14px; font-size: 11px; font-weight: 500; border-bottom: 1px solid var(--line)">Member</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 10px 8px; font-size: 11px; font-weight: 500; border-bottom: 1px solid var(--line)">Role</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 10px 8px; font-size: 11px; font-weight: 500; border-bottom: 1px solid var(--line)">Sign-in</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 10px 14px 10px 8px; font-size: 11px; font-weight: 500; border-bottom: 1px solid var(--line)">Last active</div>
+            </div>
+          </div>
+          <div role="rowgroup" style="display: table-row-group; ">
+            <sc-for list="{{members}}" as="m" hint-placeholder-count="7">
+              <div role="row" style="display: table-row; ">
+                <div role="cell" style="display: table-cell; padding: 8px 14px; border-bottom: 1px solid var(--line)">
+                  <span style="display: flex; align-items: center; gap: 10px">
+                    <span style="{{m.avatar}}">{{m.initials}}</span>
+                    <span style="display: flex; flex-direction: column"><span style="font-weight: 600">{{m.name}}</span><span style="font-size: 12px; color: var(--ink-muted)">{{m.email}}</span></span>
+                  </span>
+                </div>
+                <div role="cell" style="display: table-cell; padding: 8px; border-bottom: 1px solid var(--line)"><button type="button" style="display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink); font: 400 12px/16px var(--font-ui); cursor: pointer">{{m.role}} <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></button></div>
+                <div role="cell" style="display: table-cell; padding: 8px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--ink-muted)">{{m.auth}}</div>
+                <div role="cell" style="display: table-cell; padding: 8px 14px 8px 8px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--ink-muted)">{{m.last}}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside style="flex: 1 1 300px; display: grid; gap: 16px; align-content: start">
+      <section aria-labelledby="sso" style="padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 10px">
+        <div style="display: flex; align-items: center; gap: 8px">
+          <h2 id="sso" style="flex: 1; margin: 0; font-size: 13px; line-height: 18px; font-weight: 600">Single sign-on</h2>
+          <x-import component-from-global-scope="Drawpane.Badge" tone="success">Active</x-import>
+        </div>
+        <p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">OIDC with Okta · acme.okta.com. New people from acme.com join this team as Viewers.</p>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Require SSO for acme.com"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Provision with SCIM"></x-import>
+      </section>
+      <section aria-labelledby="roles" style="padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane)">
+        <h2 id="roles" style="margin: 0 0 10px; font-size: 13px; line-height: 18px; font-weight: 600">What roles can do</h2>
+        <dl style="margin: 0; display: grid; grid-template-columns: 72px 1fr; row-gap: 8px; column-gap: 10px; font-size: 12px; line-height: 16px">
+          <dt style="font-weight: 600">Admin</dt><dd style="margin: 0; color: var(--ink-muted)">Members, SSO, libraries, deletion</dd>
+          <dt style="font-weight: 600">Editor</dt><dd style="margin: 0; color: var(--ink-muted)">Create and edit files, branch, merge</dd>
+          <dt style="font-weight: 600">Viewer</dt><dd style="margin: 0; color: var(--ink-muted)">View, comment, Inspect and export</dd>
+        </dl>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var tab = 'display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;';
+    var av = function (slot) { return 'display: grid; place-items: center; width: 28px; height: 28px; flex: none; border-radius: 50%; background: var(--surface-raised); font-size: 10.5px; font-weight: 700; color: var(--ink); box-shadow: inset 0 0 0 2px var(--presence-' + slot + ')'; };
+    var m = [
+      ['Ana Ruiz', 'ana@acme.com', 'Admin', 'SSO · passkey', 'Now', 1],
+      ['Lena Park', 'lena@acme.com', 'Editor', 'SSO · passkey', 'Now', 2],
+      ['Sam Okafor', 'sam@acme.com', 'Editor', 'SSO', '12 min ago', 3],
+      ['Dev Patel', 'dev@acme.com', 'Editor', 'SSO', 'Yesterday', 4],
+      ['Mo Haddad', 'mo@acme.com', 'Viewer', 'SSO', 'Nov 9', 5],
+      ['Ida Berg', 'ida@acme.com', 'Editor', 'SSO · passkey', 'Nov 8', 6],
+      ['Pending: lee@acme.com', 'Invited by Ana · expires in 6 days', 'Editor', 'Invite sent', '—', 8]
+    ];
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      tabs: ['Members', 'Roles', 'Libraries', 'Authentication', 'Integrations', 'Audit log'].map(function (t, i) {
+        return { label: t, style: tab + (i === 0 ? ' color: var(--ink); font-weight: 600; border-bottom-color: var(--signal)' : '') };
+      }),
+      filters: [{ value: 'all', label: 'All 23' }, { value: 'admins', label: 'Admins' }, { value: 'guests', label: 'Guests' }, { value: 'pending', label: 'Pending' }],
+      members: m.map(function (r) {
+        return { name: r[0], email: r[1], role: r[2], auth: r[3], last: r[4], initials: r[0].replace('Pending: ', '').slice(0, 2).toUpperCase(), avatar: av(r[5]) };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>

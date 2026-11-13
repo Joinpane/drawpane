@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane assets and library updates</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <aside aria-label="Assets" style="width: 280px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 8px 12px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Left pane" value="assets" options="{{tabs}}"></x-import></div>
+      <div style="display: flex; align-items: center; gap: 8px; height: 28px; margin: 0 8px 8px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font-size: 12px"><x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import>Search components, icons, tokens</div>
+      <div role="status" style="display: flex; align-items: center; gap: 8px; margin: 0 8px 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--signal-soft); font-size: 12px; line-height: 16px">
+        <span style="flex: 1"><b style="font-weight: 600">Acme 2.4.0</b> is out · 4 changes</span>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Review</x-import>
+      </div>
+      <div style="flex: 1; min-height: 0; overflow: hidden; padding: 0 8px">
+        <sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 4px 6px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)"><span>{{g.title}}</span><span>{{g.count}}</span></div>
+          <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px">
+            <sc-for list="{{g.items}}" as="i" hint-placeholder-count="6">
+              <button type="button" title="{{i.name}}" style="display: grid; gap: 4px; justify-items: center; padding: 6px 4px; border: 0; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink); cursor: grab">
+                <span style="display: grid; place-items: center; width: 100%; height: 44px; border-radius: 4px; background: #ffffff"><span style="{{i.shape}}"></span></span>
+                <span style="font-size: 10.5px; line-height: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%">{{i.name}}</span>
+              </button>
+            </sc-for>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); font-size: 11px; line-height: 14px; color: var(--ink-muted)">
+        <span style="flex: 1">Libraries: Acme, Icons, Illustrations</span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add library"></x-import>
+      </div>
+    </aside>
+
+    <main aria-label="Canvas, dropping a component" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: 50%; top: 40px; width: 340px; height: 560px; margin-left: -170px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <div aria-hidden="true" style="position: absolute; left: 20px; top: 412px; width: 300px; height: 52px; border-radius: 12px; background: #2b4fd6; opacity: .85; display: grid; place-items: center; color: #ffffff; font: 600 14px/1 var(--font-ui); box-shadow: 0 8px 24px rgba(0,0,0,.18)">Add an event</div>
+        <span aria-hidden="true" style="position: absolute; left: 0; top: 404px; width: 340px; height: 1px; background: var(--guide)"></span>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 380px; width: 1px; height: 100px; background: var(--guide)"></span>
+        <span style="position: absolute; left: 150px; top: 396px; padding: 0 3px; border-radius: 2px; background: var(--guide); color: #ffffff; font-family: var(--font-mono); font-size: 10.5px; line-height: 13px">16</span>
+        <span style="position: absolute; left: 24px; top: 470px; padding: 2px 6px; border-radius: var(--radius-xs); background: var(--surface-raised); box-shadow: var(--shadow-popover); font-size: 11px; line-height: 14px; white-space: nowrap">Button · Primary · lg · from Acme</span>
+      </div>
+    </main>
+
+    <aside aria-label="Library update review" style="width: 300px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 14px 12px 10px; border-bottom: 1px solid var(--line)">
+        <div style="font-size: 13px; line-height: 18px; font-weight: 600">Update Acme to 2.4.0</div>
+        <div style="margin-top: 2px; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Affects 37 layers in this file. Your overrides are kept.</div>
+      </div>
+      <div style="flex: 1; min-height: 0; padding: 8px; display: grid; gap: 6px; align-content: start">
+        <sc-for list="{{updates}}" as="u" hint-placeholder-count="4">
+          <label style="display: grid; grid-template-columns: 18px 1fr; gap: 8px; padding: 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); cursor: pointer">
+            <input type="checkbox" defaultChecked="{{u.on}}" style="margin: 2px 0 0; accent-color: var(--signal)">
+            <span style="display: flex; flex-direction: column; gap: 2px">
+              <span style="font-size: 12px; line-height: 16px; font-weight: 600">{{u.name}}</span>
+              <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{u.detail}}</span>
+              <span style="{{u.tagStyle}}">{{u.tag}}</span>
+            </span>
+          </label>
+        </sc-for>
+      </div>
+      <div style="padding: 12px; border-top: 1px solid var(--line); display: flex; gap: 8px">
+        <x-import component-from-global-scope="Drawpane.Button" variant="ghost" icon="branch">On a branch</x-import>
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary">Update 4 of 4</x-import>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    function it(name, w, h, c, r) { return { name: name, shape: 'width: ' + w + 'px; height: ' + h + 'px; border-radius: ' + (r || 4) + 'px; background: ' + c }; }
+    var tag = 'font-size: 11px; line-height: 14px; font-weight: 600; color: ';
+    return {
+      theme: this.props.theme ?? 'light',
+      tabs: [{ value: 'layers', label: 'Layers' }, { value: 'assets', label: 'Assets' }, { value: 'history', label: 'History' }],
+      groups: [
+        { title: 'Acme · Actions', count: '4', items: [it('Button', 40, 14, '#2b4fd6'), it('Icon button', 18, 18, '#2b4fd6', 6), it('Link', 30, 4, '#2b4fd6', 2)] },
+        { title: 'Acme · Feedback', count: '6', items: [it('Toast', 44, 14, '#16181d'), it('Banner', 48, 12, '#ffd8c7'), it('EmptyState', 28, 28, '#eef1fb', 8), it('Badge', 22, 10, '#cdeee8'), it('Spinner', 16, 16, '#2b4fd6', 8), it('Progress', 44, 4, '#2b4fd6', 2)] },
+        { title: 'Acme · Navigation', count: '6', items: [it('Tab bar', 48, 10, '#16181d', 2), it('Top app bar', 48, 12, '#f3f4f6', 2), it('Breadcrumbs', 40, 4, '#5b616e', 2)] }
+      ],
+      updates: [
+        { name: 'Toast', detail: 'New component', tag: 'Added', tagStyle: tag + 'var(--success)', on: true },
+        { name: 'Button', detail: 'Primary hover darker for contrast · 21 layers', tag: 'Changed', tagStyle: tag + 'var(--info)', on: true },
+        { name: 'Tab bar', detail: 'Active indicator 2 → 3 px · 3 layers', tag: 'Changed', tagStyle: tag + 'var(--info)', on: true },
+        { name: 'text/subtle → text/muted', detail: 'Renamed token · 13 layers rebound', tag: 'Renamed', tagStyle: tag + 'var(--warning)', on: true }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

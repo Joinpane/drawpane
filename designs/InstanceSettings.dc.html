@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane instance settings</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-page">
+  <header style="padding: 28px 32px 0; border-bottom: 1px solid var(--line)">
+    <div style="display: flex; align-items: center; gap: 12px">
+      <span style="display: grid; place-items: center; width: 36px; height: 36px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); font-weight: 700">A</span>
+      <div style="flex: 1"><h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Acme Design</h1><p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Instance and team settings · design.acme.com · Drawpane 1.4.2</p></div>
+    </div>
+    <nav aria-label="Settings" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 20px">
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Members</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Roles</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Libraries</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Authentication</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Agents</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Integrations</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Audit log</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Backups and upgrades</a>
+    </nav>
+  </header>
+  <div style="padding: 20px 32px 40px; display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 28px">
+    <nav class="u-col u-col--tight" aria-label="Instance sections"><span class="u-cap" style="padding: 0 8px 6px">Instance</span><sc-for list="{{nav}}" as="n" hint-placeholder-count="6"><span class="u-item {{n.sel}}">{{n.t}}</span></sc-for></nav>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-content: start">
+      <section class="u-box u-pad u-col">
+        <div class="u-row"><h2 class="u-h3 u-grow">Domain</h2><span class="u-chip u-chip--ok">TLS active</span></div>
+        <x-import component-from-global-scope="Drawpane.TextField" label="Address" default-value="design.acme.com"></x-import>
+        <div class="u-dl"><dt>DNS</dt><dd>CNAME → drawpane-acme.workers.dev · proxied</dd><dt>Prototypes</dt><dd>*.design.acme.com</dd><dt>Access</dt><dd>Cloudflare Access in front · SSO</dd></div>
+      </section>
+      <section class="u-box u-pad u-col">
+        <div class="u-row"><h2 class="u-h3 u-grow">Email</h2><span class="u-chip u-chip--ok">last sent 4 min ago</span></div>
+        <div class="u-col u-col--tight"><span class="u-xs u-muted">Provider</span><span class="u-select">Resend <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+        <x-import component-from-global-scope="Drawpane.TextField" label="From address" default-value="notify@design.acme.com"></x-import>
+        <div class="u-row"><x-import component-from-global-scope="Drawpane.Button" size="sm">Send test email</x-import><span class="u-xs u-muted">SPF and DKIM verified</span></div>
+      </section>
+      <section class="u-box u-pad u-col">
+        <h2 class="u-h3">Storage</h2>
+        <div class="u-dl"><dt>Files and images</dt><dd>R2 · drawpane-acme · 2.1 GB</dd><dt>Database</dt><dd>D1 · drawpane-acme · 412 MB</dd><dt>Backups</dt><dd>R2 · drawpane-acme-backups (separate bucket)</dd><dt>Region hint</dt><dd>Western North America</dd></div>
+        <div class="u-bar"><span style="width: 21%"></span></div>
+        <span class="u-xs u-muted">2.1 of 10 GB free tier · then $0.015 per GB-month</span>
+      </section>
+      <section class="u-box u-pad u-col">
+        <h2 class="u-h3">Limits</h2>
+        <sc-for list="{{lim}}" as="l" hint-placeholder-count="5"><div class="u-row u-sm" style="height: 30px; border-bottom: 1px solid var(--line)"><span class="u-grow">{{l.k}}</span><span class="u-select" style="height: 24px">{{l.v}}</span></div></sc-for>
+      </section>
+      <section class="u-box u-pad u-col" style="grid-column: 1 / -1">
+        <h2 class="u-h3">Branding</h2>
+        <div class="u-row" style="gap: 16px"><span style="display: grid; place-items: center; width: 48px; height: 48px; border-radius: 12px; background: var(--surface-inverse); color: var(--ink-inverse); font-weight: 700; font-size: 20px">A</span><x-import component-from-global-scope="Drawpane.TextField" label="Instance name" default-value="Acme Design"></x-import><x-import component-from-global-scope="Drawpane.TextField" label="Sign-in page message" default-value="Use your Acme Okta account."></x-import><span class="u-xs u-muted" style="width: 240px">Drawpane's own brand stays in the app; your name and logo appear on sign-in, emails and published prototypes.</span></div>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      nav: ['General', 'Domain and email', 'Storage', 'Limits', 'Branding', 'Labs'].map(function (t, i) { return { t: t, sel: H.sel(i === 0) }; }),
+      lim: [{ k: 'Max file size', v: '500 MB' }, { k: 'Max image upload', v: '50 MB' }, { k: 'People per file at once', v: '100' }, { k: 'Version history kept', v: '1 year' }, { k: 'Teams anyone can create', v: 'Admins only' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

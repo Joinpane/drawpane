@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane generate screens from a prompt</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" file="Mobile app" branch="agent/onboarding-v3" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <main class="u-stage" aria-label="Canvas">
+      <section class="u-pop u-col" style="position: absolute; left: 0; top: 0; width: 520px; padding: 12px 14px">
+        <div class="u-row u-xs u-muted"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import>Prompt · Ziyang · 10:02</div>
+        <p class="u-md" style="margin: 0">Design a 3-step onboarding for the calendar app: welcome, calendar permission, notification choice. Follow the PRD. Match the screenshot's tone, not its colors.</p>
+        <div class="u-row" style="flex-wrap: wrap">
+          <span class="u-chip"><x-import component-from-global-scope="Drawpane.Icon" name="book" size="12"></x-import>PRD · Onboarding v3.md</span>
+          <span class="u-chip"><x-import component-from-global-scope="Drawpane.Icon" name="image" size="12"></x-import>reference.png</span>
+          <span class="u-chip"><x-import component-from-global-scope="Drawpane.Icon" name="plug" size="12"></x-import>linear.app/acme/ONB-212</span>
+          <span class="u-chip u-chip--comp"><x-import component-from-global-scope="Drawpane.Icon" name="component" size="12"></x-import>Acme design system</span>
+        </div>
+      </section>
+      <div style="position: absolute; left: 0; top: 150px; display: flex; gap: 28px">
+        <sc-for list="{{screens}}" as="s" hint-placeholder-count="3">
+          <div class="u-col u-col--tight" style="justify-items: start">
+            <span class="u-xs u-muted">{{s.name}}</span>
+            <div style="{{s.frame}}">
+              <div style="{{s.art}}"></div>
+              <div style="{{s.h}}">{{s.title}}</div>
+              <div style="{{s.p}}">{{s.body}}</div>
+              <div style="{{s.alt}}">{{s.alt2}}</div>
+              <div style="{{s.btn}}">{{s.cta}}</div>
+              <div style="{{s.dots}}"><span style="{{s.d1}}"></span><span style="{{s.d2}}"></span><span style="{{s.d3}}"></span></div>
+            </div>
+            <span class="{{s.tagc}}">{{s.tag}}</span>
+          </div>
+        </sc-for>
+      </div>
+      <section class="u-pop u-row" style="position: absolute; left: 0; bottom: 8px; padding: 8px 10px; gap: 10px">
+        <span class="u-sm u-b">Variations of Welcome</span>
+        <sc-for list="{{vars}}" as="v" hint-placeholder-count="4"><span style="{{v}}"></span></sc-for>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm">More like the second</x-import>
+      </section>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Agent">
+      <div class="u-row" style="padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{H.modes}}"></x-import>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past runs"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+      <div class="u-col" style="flex: 1; min-height: 0; padding: 12px; overflow: hidden">
+        <div class="u-row u-xs u-muted"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import>Plan · 6 steps · read PRD (4 pages), 1 image, 1 ticket</div>
+        <div role="list" style="display: grid; gap: 2px">
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Pulled requirements from the PRD" detail="3 steps · skip allowed · permission copy approved by legal" meta="4 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Picked components from Acme" detail="Illustration, Button, Page dots, Toggle row" meta="2 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Built Welcome and Permission" ops="create board × 2 · insert × 18" meta="21 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="running" label="Building Notifications" detail="Toggle rows for 3 reminder types"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="queued" label="Render and check all three"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="queued" label="Link them as a prototype flow"></x-import>
+        </div>
+        <div class="u-dl" style="padding: 10px; border-radius: var(--radius-md); background: var(--surface-sunken)"><dt>Uses</dt><dd>14 components, 22 tokens, 0 raw values</dd><dt>Copy</dt><dd>From the PRD, not invented</dd><dt>Spent</dt><dd>$0.31 of $3.00</dd></div>
+      </div>
+      <div style="padding: 10px 12px 12px; border-top: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.PromptField" running="{{H.yes}}" model="Claude Opus 5.5" placeholder="Steer: e.g. make the art smaller"></x-import></div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var frame = function (busy) { return 'position: relative; width: 240px; height: 480px; border-radius: 0; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12)' + (busy ? ', 0 0 0 0 transparent; outline: 1.5px dashed var(--agent); outline-offset: 3px' : ''); };
+    var dot = function (on) { return 'width: ' + (on ? 16 : 6) + 'px; height: 6px; border-radius: 3px; background: ' + (on ? '#16181d' : '#d5d9e0'); };
+    var mk = function (name, title, body, cta, alt, art, step, busy) {
+      return { name: name, title: title, body: body, cta: cta, alt2: alt, frame: frame(busy),
+        art: 'position: absolute; left: 20px; right: 20px; top: 52px; height: 170px; border-radius: 16px; ' + art,
+        h: 'position: absolute; left: 20px; right: 20px; top: 244px; font-size: 20px; line-height: 26px; font-weight: 600; color: #16181d' + (busy ? '; background: #eceef1; color: transparent; border-radius: 6px' : ''),
+        p: 'position: absolute; left: 20px; right: 20px; top: 304px; font-size: 12px; line-height: 17px; color: #5b616e' + (busy ? '; background: #f3f4f6; color: transparent; border-radius: 6px' : ''),
+        alt: 'position: absolute; left: 20px; right: 20px; bottom: 84px; text-align: center; font-size: 12px; color: #5b616e',
+        btn: 'position: absolute; left: 20px; right: 20px; bottom: 36px; height: 40px; border-radius: 10px; background: ' + (busy ? '#d6defc' : '#2b4fd6') + '; color: #ffffff; font-size: 14px; line-height: 40px; font-weight: 600; text-align: center',
+        dots: 'position: absolute; left: 0; right: 0; top: 24px; display: flex; gap: 4px; justify-content: center', d1: dot(step === 1), d2: dot(step === 2), d3: dot(step === 3),
+        tag: busy ? 'Building…' : 'Done · checked', tagc: busy ? 'u-chip u-chip--agent' : 'u-chip u-chip--ok' };
+    };
+    var v = function (bg, sel) { return 'width: 44px; height: 66px; border-radius: 6px; background: ' + bg + '; box-shadow: 0 0 0 ' + (sel ? '2px var(--agent)' : '1px var(--line)'); };
+    return {
+      screens: [
+        mk('Onboarding / Welcome', 'Your week, calmer', 'See everything due today in one glance. It takes a minute to set up.', 'Get started', 'I already have an account', 'background: linear-gradient(160deg, #eef1fb, #ffd8c7)', 1, false),
+        mk('Onboarding / Calendar', 'Bring your calendars', 'We only read event times and titles. You can change this later in Settings.', 'Allow calendar access', 'Not now', 'background: #eef1fb; box-shadow: inset 0 0 0 54px #eef1fb, inset 0 0 0 85px #2b4fd6', 2, false),
+        mk('Onboarding / Reminders', 'Pick your reminders', 'Choose when we nudge you.', 'Finish', 'Skip', 'background: #f3f4f6', 3, true)
+      ],
+      vars: [v('linear-gradient(160deg,#eef1fb,#ffd8c7)', 0), v('linear-gradient(160deg,#16181d,#2b4fd6)', 1), v('#fff4ed', 0), v('#eefaf8', 0)]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

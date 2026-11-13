@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane MCP connections and agent sessions</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; background: var(--surface); color: var(--ink); font-family: var(--font-ui); padding: 28px 32px 40px">
+  <div style="max-width: 1240px; margin: 0 auto; display: grid; gap: 20px">
+    <header style="display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px">
+      <div style="flex: 1 1 420px">
+        <div style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">Settings / Agents</div>
+        <h1 style="margin: 2px 0 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Connections</h1>
+      </div>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Section" value="connections" options="{{tabs}}"></x-import>
+    </header>
+
+    <div style="display: flex; flex-wrap: wrap; gap: 16px">
+      <section aria-labelledby="endpoint" style="flex: 1 1 520px; padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 12px">
+        <div style="display: flex; align-items: center; gap: 10px">
+          <span style="display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-sm); background: var(--agent-soft); color: var(--agent-ink)"><x-import component-from-global-scope="Drawpane.Icon" name="plug"></x-import></span>
+          <div style="flex: 1">
+            <h2 id="endpoint" style="margin: 0; font-size: 14px; line-height: 20px; font-weight: 600">MCP server</h2>
+            <p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Any MCP client can read files and work on branches, with your permissions.</p>
+          </div>
+          <x-import component-from-global-scope="Drawpane.Badge" tone="success">Online</x-import>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 6px 0 12px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-family: var(--font-mono); font-size: 12px">
+          <span style="flex: 1">https://design.acme.com/mcp</span>
+          <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost" icon="export">Copy</x-import>
+        </div>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Client" value="claude" options="{{clients}}"></x-import>
+        <pre style="margin: 0; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-family: var(--font-mono); font-size: 11.5px; line-height: 18px; white-space: pre-wrap">claude mcp add --transport http drawpane https://design.acme.com/mcp
+<span style="color: var(--ink-muted)"># Opens a browser to approve. Grants Ana's access, branches only.</span></pre>
+      </section>
+
+      <section aria-labelledby="connectors" style="flex: 1 1 360px; padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 10px; align-content: start">
+        <h2 id="connectors" style="margin: 0; font-size: 14px; line-height: 20px; font-weight: 600">Context agents can read</h2>
+        <sc-for list="{{connectors}}" as="c" hint-placeholder-count="4">
+          <div style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 10px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+            <span style="width: 20px; height: 20px; border-radius: 5px; background: var(--surface-active)"></span>
+            <span style="flex: 1; display: flex; flex-direction: column"><span style="font-size: 13px; line-height: 18px; font-weight: 600">{{c.name}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{c.scope}}</span></span>
+            <x-import component-from-global-scope="Drawpane.Switch" checked="{{c.on}}" label="Allow"></x-import>
+          </div>
+        </sc-for>
+      </section>
+    </div>
+
+    <section aria-labelledby="sessions" style="padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane)">
+      <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px">
+        <h2 id="sessions" style="flex: 1; margin: 0; font-size: 14px; line-height: 20px; font-weight: 600">Agent sessions</h2>
+        <span style="font-size: 12px; color: var(--ink-muted)">2 live · 14 today</span>
+      </div>
+      <div style="overflow-x: auto">
+        <div role="table" style="display: table; width: 100%; min-width: 760px; border-collapse: collapse; font-size: 12px; line-height: 16px">
+          <div role="rowgroup" style="display: table-header-group; ">
+            <div role="row" style="display: table-row; text-align: left; color: var(--ink-muted)">
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px 10px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line)">Agent</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line)">Working in</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line)">Scopes</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line)">Last action</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px 10px 8px 8px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line); text-align: right">Actions</div>
+            </div>
+          </div>
+          <div role="rowgroup" style="display: table-row-group; ">
+            <sc-for list="{{sessions}}" as="s" hint-placeholder-count="4">
+              <div role="row" style="display: table-row; ">
+                <div role="cell" style="display: table-cell; padding: 10px; border-bottom: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.AgentTag" name="{{s.agent}}" status="{{s.status}}" on-behalf-of="{{s.who}}"></x-import></div>
+                <div role="cell" style="display: table-cell; padding: 10px 8px; border-bottom: 1px solid var(--line)">{{s.where}}</div>
+                <div role="cell" style="display: table-cell; padding: 10px 8px; border-bottom: 1px solid var(--line); font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted)">{{s.scopes}}</div>
+                <div role="cell" style="display: table-cell; padding: 10px 8px; border-bottom: 1px solid var(--line); font-family: var(--font-mono); font-size: 11px; color: var(--agent-ink)">{{s.last}}</div>
+                <div role="cell" style="display: table-cell; padding: 10px 10px 10px 8px; border-bottom: 1px solid var(--line); text-align: right"><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">{{s.action}}</x-import></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      theme: this.props.theme ?? 'light',
+      tabs: [{ value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      clients: [{ value: 'claude', label: 'Claude Code' }, { value: 'cursor', label: 'Cursor' }, { value: 'codex', label: 'Codex' }, { value: 'vscode', label: 'VS Code' }, { value: 'other', label: 'Other' }],
+      connectors: [
+        { name: 'GitHub', scope: 'acme/web · read code, open pull requests', on: true },
+        { name: 'Linear', scope: 'Mobile team · read issues', on: true },
+        { name: 'Notion', scope: 'Product specs · read pages', on: false },
+        { name: 'Slack', scope: '#design-system · post results', on: true }
+      ],
+      sessions: [
+        { agent: 'Claude Code', status: 'working', who: 'Dev', where: 'Web dashboard · agent/table-density', scopes: 'read, branch', last: 'apply_ops 3 ops · 20 s ago', action: 'Stop' },
+        { agent: 'Claude', status: 'waiting', who: 'Ana', where: 'Mobile app · agent/empty-states', scopes: 'read, branch', last: 'request_review · 2 min ago', action: 'Open review' },
+        { agent: 'Cursor', status: 'idle', who: 'Sam', where: 'Acme design system', scopes: 'read', last: 'list_tokens · 1 h ago', action: 'Revoke' },
+        { agent: 'Audit', status: 'idle', who: 'Acme Design', where: '3 files · nightly', scopes: 'read, branch', last: 'get_outline · 2:00 am', action: 'Edit' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

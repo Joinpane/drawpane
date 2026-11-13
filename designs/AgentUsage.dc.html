@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane agent usage and cost</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-page" style="padding: 28px 32px 40px">
+  <header style="display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 20px">
+      <div style="flex: 1 1 360px"><div class="u-sm u-muted">Settings / Agents</div><h1 class="u-h1" style="margin-top: 2px">Usage</h1></div>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Section" value="usage" options="{{H.agentTabs}}"></x-import>
+    </header>
+  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px">
+    <sc-for list="{{kpis}}" as="k" hint-placeholder-count="4"><div class="u-box u-pad u-col u-col--tight"><span class="u-sm u-muted">{{k.l}}</span><span style="font-size: 26px; line-height: 32px; font-weight: 600; letter-spacing: -0.01em">{{k.v}}</span><span class="u-xs u-muted">{{k.d}}</span></div></sc-for>
+  </div>
+  <div style="display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px">
+    <section class="u-box u-pad u-col">
+      <div class="u-row"><h2 class="u-h3 u-grow">Spend per day · November</h2><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Group" value="model" options="{{grp}}"></x-import></div>
+      <div role="img" aria-label="Daily spend, stacked by model, rising toward mid month" style="position: relative; height: 220px; display: flex; align-items: flex-end; gap: 6px; padding-top: 10px; border-bottom: 1px solid var(--line)">
+        <span style="position: absolute; left: 0; right: 0; bottom: 136px; border-top: 1px dashed var(--signal)"></span>
+        <span class="u-xs" style="position: absolute; right: 0; bottom: 140px; color: var(--signal-ink)">daily cap $4</span>
+        <sc-for list="{{bars}}" as="b" hint-placeholder-count="12"><span style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 1px"><span style="{{b.a}}"></span><span style="{{b.b}}"></span><span style="{{b.c}}"></span></span></sc-for>
+      </div>
+      <div class="u-row u-xs u-muted"><span class="u-swatch" style="background: var(--agent)"></span>Claude Opus<span class="u-swatch" style="background: color-mix(in srgb, var(--agent) 50%, transparent)"></span>Claude Sonnet<span class="u-swatch" style="background: var(--line-strong)"></span>Workers AI<span class="u-spacer"></span>Nov 1 – 12</div>
+    </section>
+    <section class="u-box u-pad u-col">
+      <h2 class="u-h3">By agent</h2>
+      <sc-for list="{{byAgent}}" as="a" hint-placeholder-count="6"><div class="u-col u-col--tight"><div class="u-row u-sm"><span class="u-grow">{{a.n}}</span><span class="u-mono">{{a.v}}</span></div><div class="u-bar" style="height: 4px"><span style="{{a.w}}"></span></div></div></sc-for>
+    </section>
+    <section class="u-box u-pad u-col">
+      <h2 class="u-h3">By person</h2>
+      <sc-for list="{{byPerson}}" as="p" hint-placeholder-count="5"><div class="u-row u-sm"><span class="u-av u-av--sm" style="{{p.st}}">{{p.i}}</span><span class="u-grow">{{p.n}}</span><span class="u-muted">{{p.r}}</span><span class="u-mono" style="width: 60px; text-align: right">{{p.v}}</span></div></sc-for>
+    </section>
+    <section class="u-box u-pad u-col">
+      <h2 class="u-h3">Alerts</h2>
+      <div class="u-note u-note--signal"><x-import component-from-global-scope="Drawpane.Icon" name="warning" size="12"></x-import><span class="u-grow">Team budget is 79% used with 18 days left. At this pace it runs out on Nov 22.</span></div>
+      <div class="u-row u-sm"><x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Email admins at 80% and 100%"></x-import></div>
+      <div class="u-row u-sm"><x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="At 100%: switch to Workers AI instead of stopping"></x-import></div>
+      <x-import component-from-global-scope="Drawpane.Button" size="sm">Change budgets</x-import>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var D = [[1.2, .6, .2], [1.6, .8, .3], [.8, .4, .2], [2.1, .9, .3], [2.4, 1.1, .2], [1.0, .5, .4], [.4, .2, .3], [2.8, 1.2, .3], [3.1, 1.0, .2], [2.2, .8, .4], [2.6, .9, .3], [1.9, .7, .2]];
+    var px = 34;
+    return {
+      kpis: [{ l: 'Spent this month', v: '$47.40', d: 'of $60 team budget' }, { l: 'Runs', v: '612', d: '94% finished · 4% failed' }, { l: 'Merged agent changes', v: '388', d: '71% of runs end in a merge' }, { l: 'Avg cost per merged change', v: '$0.12', d: 'down from $0.19 in October' }],
+      grp: H.opts(['Model', 'Agent', 'Person']),
+      bars: D.map(function (d) { return { a: 'height: ' + d[0] * px + 'px; border-radius: 3px 3px 0 0; background: var(--agent)', b: 'height: ' + d[1] * px + 'px; background: color-mix(in srgb, var(--agent) 50%, transparent)', c: 'height: ' + d[2] * px + 'px; background: var(--line-strong)' }; }),
+      byAgent: [['Claude', '$18.20', 38], ['Token enforcer', '$9.80', 21], ['Accessibility reviewer', '$7.90', 17], ['Empty states agent', '$6.20', 13], ['Copy editor', '$4.40', 9], ['Weekly lint (Workers AI)', '$0.90', 2]].map(function (a) { return { n: a[0], v: a[1], w: 'width: ' + a[2] * 2.4 + '%; background: var(--agent)' }; }),
+      byPerson: [['AR', 'Ana Ruiz', '142 runs', '$12.10'], ['Z', 'Ziyang', '98 runs', '$11.40'], ['SO', 'Sam Okafor', '120 runs', '$8.30'], ['LP', 'Lena Park', '61 runs', '$9.20'], ['DP', 'Dev Patel', '74 runs', '$6.40']].map(function (p) { return { i: p[0], n: p[1], r: p[2], v: p[3], st: H.p(p[0]).st }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

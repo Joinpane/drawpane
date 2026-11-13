@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane compare two versions</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <main class="u-stage" aria-label="Compare">
+      <div class="u-pop u-row" style="position: absolute; left: 0; right: 0; top: 0; padding: 8px 10px; flex-wrap: nowrap">
+        <span class="u-select" style="width: 230px">v212 · "Before type scale" · Nov 3 <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+        <x-import component-from-global-scope="Drawpane.Icon" name="chevron-right" size="12"></x-import>
+        <span class="u-select" style="width: 230px">Now · main <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Compare as" value="side" options="{{view}}"></x-import>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm">Restore v212</x-import>
+      </div>
+      <div style="position: absolute; left: 0; right: 0; top: 64px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; justify-items: center">
+        <sc-for list="{{sides}}" as="s" hint-placeholder-count="2">
+          <div class="u-col u-col--tight" style="justify-items: center">
+            <span class="u-xs u-muted">{{s.label}}</span>
+            <div style="position: relative; width: 340px; height: 560px">
+              <dc-import name="PartBoard" variant="{{s.v}}" hint-size="340px,560px"></dc-import>
+              <sc-for list="{{s.marks}}" as="m" hint-placeholder-count="3"><span style="{{m.s}}"></span><span style="{{m.p}}">{{m.n}}</span></sc-for>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </main>
+    <aside class="u-side" aria-label="Changes between versions">
+      <div class="u-head"><h2 class="u-h3">12 changes</h2><span class="u-xs u-muted">by 3 people, 1 agent</span></div>
+      <div class="u-list" style="padding: 0 6px">
+        <sc-for list="{{changes}}" as="c" hint-placeholder-count="8"><div class="u-item {{c.sel}}" style="align-items: flex-start"><span class="{{c.k}}">{{c.n}}</span><span class="u-grow u-col" style="gap: 0"><span class="u-sm u-b">{{c.l}}</span><span class="u-xs u-muted">{{c.d}}</span></span><span class="u-av u-av--sm" style="{{c.ast}}">{{c.a}}</span></div></sc-for>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var mk = function (n, x, y, w, h, r, c) { return { n: n, s: 'position: absolute; left: ' + x + 'px; top: ' + y + 'px; width: ' + w + 'px; height: ' + h + 'px; border-radius: ' + r + 'px; box-shadow: inset 0 0 0 2px ' + c, p: 'position: absolute; left: ' + (x + w - 10) + 'px; top: ' + (y - 10) + 'px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: ' + c + '; color: #ffffff; font-size: 11px; font-weight: 700' }; };
+    var ch = function (n, l, d, a, kind, sel) { var p = H.p(a); return { n: n, l: l, d: d, a: a, ast: p.st || 'background: var(--agent); color: var(--on-agent)', k: 'u-chip ' + (kind === 'add' ? 'u-chip--ok' : kind === 'del' ? 'u-chip--signal' : 'u-chip--muted'), sel: H.sel(sel) }; };
+    return {
+      view: H.opts([{ value: 'side', label: 'Side by side' }, 'Overlay', 'Swipe']),
+      sides: [
+        { label: 'v212 · Nov 3', v: 'default', marks: [] },
+        { label: 'Now', v: 'branch', marks: [mk(1, 18, 46, 222, 32, 4, 'var(--info)'), mk(2, 20, 118, 300, 66, 14, 'var(--info)'), mk(3, 44, 224, 28, 28, 8, 'var(--success)')] }
+      ],
+      changes: [ch('1', 'Greeting', 'Text: "Good morning" → "Good afternoon"', 'AR', 'mod', 1), ch('2', 'Hero card', 'Fill text/strong → brand/500', 'LP', 'mod'), ch('3', 'Event row icons', 'Tints added × 2', 'AI', 'add'), ch('4', 'Upcoming', 'Gap 8 → 8 (token bound)', 'LP', 'mod'), ch('5', 'Settings — iOS', '2 rows added', 'SO', 'add'), ch('6', 'Onboarding 0', 'Board removed', 'AR', 'del'), ch('7', 'Tab bar', 'Icons swapped to v3', 'LP', 'mod'), ch('8', 'Empty, Error', 'Boards added', 'AI', 'add')]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

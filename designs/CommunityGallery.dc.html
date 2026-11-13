@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane community gallery</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-shell">
+  <nav aria-label="Workspace" style="flex: 1 1 240px; max-width: 260px; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; padding: 12px 10px; background: var(--canvas); border-right: 1px solid var(--line)">
+    <button type="button" style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); cursor: pointer; text-align: left"><span style="display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--radius-sm); background: var(--surface-inverse); color: var(--ink-inverse); font-size: 11px; font-weight: 700">A</span><span style="flex: 1; display: flex; flex-direction: column"><span style="font-size: 13px; line-height: 18px; font-weight: 600">Acme Design</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">23 members</span></span><x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></button>
+    <div style="height: 8px"></div>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="history"></x-import><span style="flex: 1">Recent</span><span style="font-size: 11px; color: var(--ink-muted)"></span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="pen"></x-import><span style="flex: 1">Drafts</span><span style="font-size: 11px; color: var(--ink-muted)">6</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="layers"></x-import><span style="flex: 1">Shared with me</span><span style="font-size: 11px; color: var(--ink-muted)">14</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="component"></x-import><span style="flex: 1">Libraries</span><span style="font-size: 11px; color: var(--ink-muted)">3</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import><span style="flex: 1">Agents</span><span style="font-size: 11px; color: var(--ink-muted)">2</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><x-import component-from-global-scope="Drawpane.Icon" name="close"></x-import><span style="flex: 1">Trash</span><span style="font-size: 11px; color: var(--ink-muted)"></span></a>
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 0 2px 0 10px"><span style="font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Projects</span><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="New project"></x-import></div>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #2b4fd6"></span><span style="flex: 1">Mobile</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #0f766e"></span><span style="flex: 1">Web platform</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #e04f1a"></span><span style="flex: 1">Brand</span></a>
+    <a href="#" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #6b4bd6"></span><span style="flex: 1">Experiments</span></a>
+  </nav>
+  <main class="u-main u-col u-col--loose">
+    <header class="u-row"><div class="u-grow u-col u-col--tight"><h1 class="u-h1">Community</h1><span class="u-sm u-muted">Open files from the Drawpane and Penpot communities. Duplicating copies them into your instance; nothing calls home.</span></div><div class="u-input" style="width: 280px"><x-import component-from-global-scope="Drawpane.Icon" name="search" size="12"></x-import>Search UI kits, icons, templates</div></header>
+    <div class="u-row" style="gap: 6px; flex-wrap: wrap"><sc-for list="{{cats}}" as="c" hint-placeholder-count="7"><span class="u-pill {{c.on}}">{{c.t}}</span></sc-for></div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px">
+      <sc-for list="{{items}}" as="i" hint-placeholder-count="8">
+        <div class="u-col u-col--tight">
+          <span style="{{i.th}}"><span style="{{i.a}}"></span><span style="{{i.b}}"></span><span style="{{i.c}}"></span></span>
+          <div class="u-row"><span class="u-md u-b u-grow u-ellip">{{i.n}}</span><span class="u-chip u-chip--muted">{{i.lic}}</span></div>
+          <span class="u-xs u-muted">{{i.m}}</span>
+        </div>
+      </sc-for>
+    </div>
+  </main>
+  <aside class="u-pane u-col" style="position: absolute; right: 24px; top: 120px; width: 320px; padding: 16px; display: none"></aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var I = [['Material 3 kit', 'Penpot community · 310 components', 'Apache-2.0', '#f6f1ff', '#6b4bd6'], ['Wireframe kit', 'Drawpane · 120 components', 'CC0', '#f3f4f6', '#16181d'], ['Iconoir', '1,500 icons', 'MIT', '#ffffff', '#16181d'], ['Dashboard template', 'Charts, tables, filters', 'CC-BY', '#eefaf8', '#0f766e'], ['iOS 26 frames', 'Device frames and status bars', 'CC-BY', '#eef1fb', '#2b4fd6'], ['Agent skills pack', '12 skills for audits and states', 'MIT', '#efe9fd', '#6d3fd6'], ['Pitch deck', 'Slides with variables', 'CC0', '#fff4ed', '#e04f1a'], ['Accessibility annotations', 'Notes kit for handoff', 'CC-BY', '#fdf6e3', '#b7791f']];
+    return {
+      cats: [{ t: 'All', on: 'is-on' }, { t: 'UI kits', on: '' }, { t: 'Icons', on: '' }, { t: 'Templates', on: '' }, { t: 'Wireframes', on: '' }, { t: 'Agent skills', on: '' }, { t: 'Plugins', on: '' }],
+      items: I.map(function (i) { return { n: i[0], m: i[1], lic: i[2], th: 'position: relative; display: block; aspect-ratio: 16 / 10; border-radius: var(--radius-md); background: ' + i[3] + '; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden', a: 'position: absolute; left: 10%; top: 16%; width: 38%; height: 30%; border-radius: 8px; background: ' + i[4], b: 'position: absolute; left: 10%; top: 54%; width: 60%; height: 10%; border-radius: 4px; background: ' + i[4] + '; opacity: .3', c: 'position: absolute; left: 56%; top: 16%; width: 30%; height: 30%; border-radius: 8px; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,.08)' }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

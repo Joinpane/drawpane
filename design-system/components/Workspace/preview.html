@@ -1,0 +1,158 @@
+<!-- @dsCard group="Pages" height=680 width=1200 page subtitle="The editor, composed from the system" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Workspace — preview</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  .ws { position: relative; width: 1200px; height: 680px; overflow: hidden; background: var(--canvas); }
+  .pane { position: absolute; background: var(--surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-pane); }
+  .strip { display: flex; align-items: center; gap: var(--space-100); padding: var(--space-100); }
+  .sep { width: 1px; height: 16px; margin: 0 var(--space-100); background: var(--line-strong); }
+  .file { left: 12px; top: 12px; width: 248px; height: 40px; box-sizing: border-box; padding: 0 var(--space-200) 0 var(--space-300); display: flex; align-items: center; gap: var(--space-200); }
+  .file b { font: 600 13px/18px var(--font-ui); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mark .back { fill: none; stroke: var(--ink); stroke-width: 2.5; }
+  .mark .front { fill: var(--signal); }
+  .tools { left: 50%; top: 12px; transform: translateX(-50%); }
+  .search { display: inline-flex; align-items: center; gap: var(--space-200); height: 28px; width: 220px; padding: 0 var(--space-100) 0 var(--space-200); box-sizing: border-box; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font: 400 12px/16px var(--font-ui); }
+  .search span { flex: 1; white-space: nowrap; }
+  .share { right: 12px; top: 12px; height: 40px; box-sizing: border-box; padding: 0 var(--space-100) 0 var(--space-200); }
+  .layers { left: 12px; top: 64px; width: 248px; bottom: 12px; padding: var(--space-200) var(--space-100); box-sizing: border-box; }
+  .layers .head { display: flex; align-items: center; justify-content: space-between; padding: 0 var(--space-100) var(--space-200) var(--space-200); }
+  .page { display: flex; align-items: center; gap: var(--space-100); height: 28px; padding: 0 var(--space-200); margin-bottom: var(--space-100); border-radius: var(--radius-sm); font: 600 12px/16px var(--font-ui); color: var(--ink); }
+  .page .dp-icon { color: var(--ink-muted); }
+  .caption { padding: var(--space-200) var(--space-200) var(--space-100); font: 500 11px/14px var(--font-ui); color: var(--ink-muted); }
+  .inspector { right: 12px; top: 64px; width: 264px; bottom: 12px; overflow: hidden; }
+  .inspector .tabs { padding: var(--space-200) var(--space-300) var(--space-100); }
+  .zoom { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; align-items: center; gap: var(--space-100); padding: var(--space-100); background: var(--surface); border-radius: var(--radius-md); box-shadow: var(--shadow-pane); font: 500 11px/14px var(--font-ui); color: var(--ink-muted); }
+  .zoom span { padding: 0 var(--space-100); font-variant-numeric: tabular-nums; }
+  /* The design on the canvas is the user's content, so its colors are fixed and do not follow the UI theme. */
+  .board-label { position: absolute; left: 430px; top: 70px; font: 500 11px/14px var(--font-ui); color: var(--ink-muted); }
+  .board { position: absolute; left: 430px; top: 88px; width: 340px; height: 560px; background: #ffffff; box-shadow: 0 0 0 1px rgba(0,0,0,.06); overflow: hidden; font-family: var(--font-ui); }
+  .d-status { height: 40px; }
+  .d-hi { margin: 8px 20px 0; font: 600 22px/28px var(--font-ui); color: #16181d; }
+  .d-sub { margin: 2px 20px 0; font: 400 13px/18px var(--font-ui); color: #5b616e; }
+  .d-hero { position: absolute; left: 20px; top: 118px; width: 300px; height: 66px; border-radius: 14px; background: #16181d; color: #ffffff; padding: 14px 16px; box-sizing: border-box; font: 600 14px/18px var(--font-ui); }
+  .d-hero small { display: block; font: 400 12px/16px var(--font-ui); color: #b9bec8; }
+  .d-list { position: absolute; left: 20px; top: 200px; width: 300px; height: 196px; background: #f3f4f6; border-radius: 14px; }
+  .d-row { position: absolute; left: 12px; right: 12px; height: 52px; background: #ffffff; border-radius: 10px; display: flex; align-items: center; gap: 10px; padding: 0 12px; box-sizing: border-box; font: 500 13px/16px var(--font-ui); color: #16181d; }
+  .d-row i { width: 28px; height: 28px; border-radius: 8px; background: #e4e7ec; flex: none; }
+  .d-row small { display: block; font: 400 11px/14px var(--font-ui); color: #5b616e; }
+  .d-tab { position: absolute; left: 0; right: 0; bottom: 0; height: 64px; border-top: 1px solid #e4e7ec; background: #ffffff; }
+  /* Canvas overlays: X-ray, selection, collaborator */
+  .xp { position: absolute; background: var(--xray-padding); opacity: .35; }
+  .xg { position: absolute; background: var(--xray-gap); opacity: .35; }
+  .sel { position: absolute; left: 450px; top: 288px; width: 300px; height: 196px; box-shadow: inset 0 0 0 1.5px var(--signal); }
+  .handle { position: absolute; width: 7px; height: 7px; background: #ffffff; box-shadow: inset 0 0 0 1.5px var(--signal); }
+  .size { position: absolute; left: 600px; top: 492px; transform: translateX(-50%); padding: 1px 6px; border-radius: var(--radius-xs); background: var(--signal); color: var(--on-signal); font: 500 11px/14px var(--font-mono); }
+  .lens { position: absolute; left: 600px; top: 520px; transform: translateX(-50%); }
+  .peer { position: absolute; left: 450px; top: 206px; width: 300px; height: 66px; border-radius: 14px; box-shadow: inset 0 0 0 1px var(--presence-2); }
+  .cursor { position: absolute; left: 700px; top: 238px; }
+  .cursor svg path { fill: var(--presence-2); stroke: var(--surface-raised); stroke-width: 1; }
+  .tag { position: absolute; left: 14px; top: 16px; padding: 2px 6px; border-radius: var(--radius-xs); background: var(--presence-2); color: var(--on-presence); font: 600 11px/14px var(--font-ui); white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+  var D = window.Drawpane, h = React.createElement, F = React.Fragment;
+  var tools = [['pointer','Move','V',true],['board','Board','B'],['rectangle','Rectangle','R'],['ellipse','Ellipse','O'],['pen','Pen','P'],['text','Text','T'],['comment','Comment','C'],['hand','Hand','H']];
+  var dirs = [{ value: 'row', icon: 'layout-row', title: 'Horizontal' }, { value: 'col', icon: 'layout-col', title: 'Vertical' }, { value: 'grid', icon: 'layout-grid', title: 'Grid' }];
+  function box(cls, l, t, w, hh) { return h('div', { className: cls, style: { left: l, top: t, width: w, height: hh } }); }
+  var L = 450, T = 288; // the selected frame on the canvas
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h('div', { className: 'ws' },
+      // the design
+      h('div', { className: 'board-label' }, 'Home — iOS'),
+      h('div', { className: 'board' },
+        h('div', { className: 'd-status' }),
+        h('div', { className: 'd-hi' }, 'Good morning, Ana'),
+        h('div', { className: 'd-sub' }, 'Three things on today'),
+        h('div', { className: 'd-hero' }, 'Design review at 2:00', h('small', null, 'Checkout flow · 4 people')),
+        h('div', { className: 'd-list' },
+          [12, 72, 132].map(function (y, i) {
+            return h('div', { key: i, className: 'd-row', style: { top: y } }, h('i'),
+              h('div', null, ['Ship onboarding v2', 'Token audit', 'Lena: icon review'][i], h('small', null, ['Due today', 'Tomorrow', 'Friday'][i])));
+          })),
+        h('div', { className: 'd-tab' })),
+      // Layout X-ray over the selected frame: padding 12, gap 8
+      box('xp', L, T, 300, 12), box('xp', L, T + 184, 300, 12), box('xp', L, T + 12, 12, 172), box('xp', L + 288, T + 12, 12, 172),
+      box('xg', L + 12, T + 64, 276, 8), box('xg', L + 12, T + 124, 276, 8),
+      // collaborator
+      h('div', { className: 'peer' }),
+      h('div', { className: 'cursor' },
+        h('svg', { width: 16, height: 18, viewBox: '0 0 16 18' }, h('path', { d: 'M1 1l13 6.5-5.6 1.6L6.2 15z' })),
+        h('span', { className: 'tag' }, 'Lena')),
+      // selection
+      h('div', { className: 'sel' }),
+      [[L, T], [L + 300, T], [L, T + 196], [L + 300, T + 196]].map(function (p, i) { return h('div', { key: i, className: 'handle', style: { left: p[0] - 3.5, top: p[1] - 3.5 } }); }),
+      h('div', { className: 'size' }, '300 × 196'),
+      h('div', { className: 'lens' },
+        h(D.SelectionLens, { kind: 'Frame · Auto layout', kindIcon: 'board' },
+          h(D.NumberField, { label: 'W', defaultValue: '300' }),
+          h(D.NumberField, { label: 'H', defaultValue: '196', unit: 'hug' }),
+          h(D.NumberField, { icon: 'layout-col', ariaLabel: 'Gap', token: 'space/200' }),
+          h(D.NumberField, { label: '▢', ariaLabel: 'Padding', defaultValue: '12' }))),
+      // file pane
+      h('div', { className: 'pane file' },
+        h('svg', { className: 'mark', width: 20, height: 20, viewBox: '0 0 32 32', 'aria-label': 'Drawpane' },
+          h('rect', { className: 'back', x: 3.25, y: 3.25, width: 18.5, height: 18.5, rx: 4 }),
+          h('rect', { className: 'front', x: 10, y: 10, width: 19, height: 19, rx: 4 })),
+        h('b', null, 'Mobile app'),
+        h(D.Badge, { tone: 'info' }, 'main')),
+      // command strip
+      h('div', { className: 'pane strip tools' },
+        tools.map(function (t) { return h(D.IconButton, { key: t[0], icon: t[0], label: t[1], shortcut: t[2], pressed: !!t[3], size: 'md' }); }),
+        h('span', { className: 'sep' }),
+        h('span', { className: 'search' }, h(D.Icon, { name: 'search' }), h('span', null, 'Search or set\u2026'), h(D.Kbd, { keys: ['⌘', 'K'] }))),
+      // share strip
+      h('div', { className: 'pane strip share' },
+        h(D.PresenceStack, { people: [{ name: 'Ana Ruiz', color: 1 }, { name: 'Lena Park', color: 2 }, { name: 'Sam Okafor', color: 3 }] }),
+        h('span', { className: 'sep' }),
+        h(D.IconButton, { icon: 'play', label: 'Present', shortcut: '⌘ ↵' }),
+        h(D.Button, { variant: 'primary', size: 'sm' }, 'Share')),
+      // layers
+      h('div', { className: 'pane layers' },
+        h('div', { className: 'head' },
+          h(D.SegmentedControl, { label: 'Left pane', value: 'layers', options: [{ value: 'layers', label: 'Layers' }, { value: 'assets', label: 'Assets' }, { value: 'history', label: 'History' }] }),
+          h(D.IconButton, { icon: 'search', label: 'Find layer' })),
+        h('div', { className: 'page' }, h(D.Icon, { name: 'chevron-down', size: 12 }), 'Mobile v2'),
+        h('div', { role: 'tree', 'aria-label': 'Layers' },
+          h(D.LayerRow, { name: 'Home — iOS', kind: 'board', hasChildren: true, expanded: true }),
+          h(D.LayerRow, { name: 'Status bar', kind: 'instance', depth: 1 }),
+          h(D.LayerRow, { name: 'Greeting', kind: 'text', depth: 1 }),
+          h(D.LayerRow, { name: 'Hero card', kind: 'instance', depth: 1, presence: 2 }),
+          h(D.LayerRow, { name: 'Upcoming', kind: 'frame', depth: 1, hasChildren: true, expanded: true, selected: true }),
+          h(D.LayerRow, { name: 'Event row', kind: 'instance', depth: 2 }),
+          h(D.LayerRow, { name: 'Event row', kind: 'instance', depth: 2 }),
+          h(D.LayerRow, { name: 'Event row', kind: 'instance', depth: 2 }),
+          h(D.LayerRow, { name: 'Tab bar', kind: 'instance', depth: 1, locked: true }),
+          h(D.LayerRow, { name: 'Settings — iOS', kind: 'board', hasChildren: true }),
+          h(D.LayerRow, { name: 'Onboarding', kind: 'board', hasChildren: true, hidden: true })),
+        h('div', { className: 'caption' }, 'Components'),
+        h(D.LayerRow, { name: 'Event row', kind: 'component', hasChildren: true })),
+      // inspector
+      h('div', { className: 'pane inspector' },
+        h('div', { className: 'tabs' }, h(D.SegmentedControl, { label: 'Right pane', value: 'design', options: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }] })),
+        h(D.PropertySection, { title: 'Frame' },
+          h('div', { className: 'dp-row' }, h(D.NumberField, { label: 'X', defaultValue: '20' }), h(D.NumberField, { label: 'Y', defaultValue: '200' })),
+          h('div', { className: 'dp-row' }, h(D.NumberField, { label: 'W', defaultValue: '300' }), h(D.NumberField, { label: 'H', defaultValue: '196', unit: 'hug' })),
+          h(D.Switch, { checked: true, label: 'Clip content' })),
+        h(D.PropertySection, { title: 'Auto layout', actions: h(F, null, h(D.IconButton, { icon: 'xray', label: 'Layout X-ray', shortcut: 'Alt', pressed: true }), h(D.IconButton, { icon: 'minus', label: 'Remove auto layout' })) },
+          h(D.SegmentedControl, { label: 'Direction', value: 'col', options: dirs }),
+          h('div', { className: 'dp-row' }, h(D.NumberField, { icon: 'layout-col', ariaLabel: 'Gap', token: 'space/200' }), h(D.NumberField, { label: '▢', ariaLabel: 'Padding', defaultValue: '12' }))),
+        h(D.PropertySection, { title: 'Fill', actions: h(D.IconButton, { icon: 'plus', label: 'Add fill' }) },
+          h('div', { className: 'dp-row', style: { gridTemplateColumns: '1fr 72px' } }, h(D.NumberField, { icon: 'rectangle', ariaLabel: 'Fill', token: 'gray/100', swatch: '#f3f4f6' }), h(D.NumberField, { label: '%', defaultValue: '100' }))),
+        h(D.PropertySection, { title: 'Corner radius' },
+          h('div', { className: 'dp-row' }, h(D.NumberField, { label: '◜', ariaLabel: 'Radius', token: 'radius/lg' }), h('span'))),
+        h(D.PropertySection, { title: 'Stroke', actions: h(D.IconButton, { icon: 'plus', label: 'Add stroke' }) }),
+        h(D.PropertySection, { title: 'Effects', actions: h(D.IconButton, { icon: 'plus', label: 'Add effect' }) }),
+        h(D.PropertySection, { title: 'Export', actions: h(D.IconButton, { icon: 'plus', label: 'Add export' }) })),
+      // zoom
+      h('div', { className: 'zoom' }, h(D.IconButton, { icon: 'minus', label: 'Zoom out' }), h('span', null, '100%'), h(D.IconButton, { icon: 'plus', label: 'Zoom in' }))
+    )
+  );
+</script>
+</body>
+</html>

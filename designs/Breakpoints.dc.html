@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane breakpoint strip</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" file="Web dashboard" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <nav aria-label="Collapsed layers pane" style="width: 40px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 0; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+      <x-import component-from-global-scope="Drawpane.IconButton" icon="layers" label="Layers" pressed="{{no}}"></x-import>
+      <x-import component-from-global-scope="Drawpane.IconButton" icon="component" label="Assets"></x-import>
+      <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="History"></x-import>
+    </nav>
+
+    <main aria-label="Breakpoint strip for Dashboard" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane)">
+        <span style="font-size: 12px; line-height: 16px; font-weight: 600">Dashboard</span>
+        <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">One frame, three live widths. Edit any of them; overrides apply from that width up.</span>
+        <span style="flex: 1"></span>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Scale" value="40" options="{{scales}}"></x-import>
+      </div>
+
+      <div aria-label="Width ruler" style="position: relative; height: 40px; margin: 16px 0 8px">
+        <div style="position: absolute; left: 0; right: 0; top: 18px; height: 2px; background: var(--line-strong)"></div>
+        <sc-for list="{{marks}}" as="m" hint-placeholder-count="3">
+          <div style="{{m.pos}}">
+            <span style="display: block; width: 2px; height: 14px; margin: 0 auto; background: var(--signal)"></span>
+            <span style="display: block; margin-top: 4px; padding: 0 6px; border-radius: var(--radius-xs); background: var(--signal); color: var(--on-signal); font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 500; white-space: nowrap; cursor: ew-resize">{{m.label}}</span>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="display: flex; align-items: flex-start; gap: 16px; margin-top: 16px">
+        <figure style="margin: 0">
+          <figcaption style="margin-bottom: 6px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Phone · 375</figcaption>
+          <div style="width: 150px; height: 420px; box-sizing: border-box; padding: 8px; background: #ffffff; box-shadow: 0 0 0 1px rgba(0,0,0,.08); display: flex; flex-direction: column; gap: 6px">
+            <div style="height: 14px; border-radius: 3px; background: #16181d"></div>
+            <div style="height: 40px; border-radius: 4px; background: #eef1fb"></div>
+            <div style="height: 40px; border-radius: 4px; background: #f3f4f6"></div>
+            <div style="height: 40px; border-radius: 4px; background: #f3f4f6"></div>
+            <div style="height: 40px; border-radius: 4px; background: #f3f4f6"></div>
+            <div style="height: 80px; border-radius: 4px; background: #f3f4f6"></div>
+          </div>
+        </figure>
+        <figure style="margin: 0">
+          <figcaption style="margin-bottom: 6px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Tablet · 768</figcaption>
+          <div style="width: 307px; height: 420px; box-sizing: border-box; padding: 10px; background: #ffffff; box-shadow: 0 0 0 1px rgba(0,0,0,.08); display: flex; flex-direction: column; gap: 8px">
+            <div style="height: 16px; border-radius: 3px; background: #16181d"></div>
+            <div style="height: 54px; border-radius: 4px; background: #eef1fb"></div>
+            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+              <div style="height: 64px; border-radius: 4px; background: #f3f4f6"></div>
+              <div style="height: 64px; border-radius: 4px; background: #f3f4f6"></div>
+              <div style="height: 64px; border-radius: 4px; background: #f3f4f6"></div>
+              <div style="height: 64px; border-radius: 4px; background: #f3f4f6"></div>
+            </div>
+            <div style="height: 110px; border-radius: 4px; background: #f3f4f6"></div>
+          </div>
+        </figure>
+        <figure style="margin: 0; position: relative">
+          <figcaption style="margin-bottom: 6px; font-size: 11px; line-height: 14px; font-weight: 600; color: var(--ink)">Desktop · 1280 · editing</figcaption>
+          <div style="width: 512px; height: 420px; box-sizing: border-box; padding: 12px; background: #ffffff; box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 0 0 3px var(--signal); display: grid; grid-template-columns: 96px 1fr; gap: 12px">
+            <div style="border-radius: 4px; background: #16181d"></div>
+            <div style="display: flex; flex-direction: column; gap: 10px">
+              <div style="height: 60px; border-radius: 4px; background: #eef1fb"></div>
+              <div style="position: relative; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px">
+                <div style="height: 72px; border-radius: 4px; background: #f3f4f6"></div>
+                <div style="height: 72px; border-radius: 4px; background: #f3f4f6"></div>
+                <div style="height: 72px; border-radius: 4px; background: #f3f4f6"></div>
+                <span aria-hidden="true" style="position: absolute; inset: -3px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+              </div>
+              <div style="height: 150px; border-radius: 4px; background: #f3f4f6"></div>
+            </div>
+          </div>
+        </figure>
+      </div>
+    </main>
+
+    <aside aria-label="Breakpoints" style="width: 264px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="design" options="{{modes}}"></x-import></div>
+      <section class="dp-section" aria-label="Breakpoints">
+        <div class="dp-section__head"><h3 class="dp-section__title">Breakpoints</h3><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add breakpoint"></x-import></div>
+        <div class="dp-section__body" style="gap: 4px">
+          <sc-for list="{{bps}}" as="b" hint-placeholder-count="3">
+            <div style="{{b.row}}"><span style="flex: 1">{{b.name}}</span><span style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted)">{{b.w}}</span></div>
+          </sc-for>
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Export as" value="container" options="{{exports}}"></x-import>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Overrides at desktop">
+        <div class="dp-section__head"><h3 class="dp-section__title">Overrides at 1280+</h3><x-import component-from-global-scope="Drawpane.Badge" tone="signal">3</x-import></div>
+        <div class="dp-section__body" style="gap: 6px">
+          <sc-for list="{{overrides}}" as="o" hint-placeholder-count="3">
+            <div style="display: grid; grid-template-columns: 1fr auto; gap: 8px; font-size: 12px; line-height: 16px">
+              <span>{{o.what}}</span><span style="font-family: var(--font-mono); font-size: 11px; color: var(--signal-ink)">{{o.val}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Grid">
+        <div class="dp-section__head"><h3 class="dp-section__title">Cards grid</h3></div>
+        <div class="dp-section__body">
+          <div class="dp-row">
+            <x-import component-from-global-scope="Drawpane.NumberField" label="Col" aria-label="Columns" default-value="3"></x-import>
+            <x-import component-from-global-scope="Drawpane.NumberField" icon="layout-row" aria-label="Gap" token="space/400"></x-import>
+          </div>
+          <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Inherited: 1 column on phone, 2 from 768.</span>
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var row = 'display: flex; align-items: center; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); font-size: 12px;';
+    return {
+      theme: this.props.theme ?? 'light',
+      no: false,
+      scales: [{ value: '25', label: '25%' }, { value: '40', label: '40%' }, { value: 'fit', label: 'Fit' }],
+      marks: [
+        { label: '375', pos: 'position: absolute; left: 6%; top: 11px; transform: translateX(-50%); text-align: center' },
+        { label: 'md 768', pos: 'position: absolute; left: 30%; top: 11px; transform: translateX(-50%); text-align: center' },
+        { label: 'lg 1280', pos: 'position: absolute; left: 66%; top: 11px; transform: translateX(-50%); text-align: center' }
+      ],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }],
+      bps: [
+        { name: 'Base (phone)', w: '0+', row: row },
+        { name: 'md', w: '768+', row: row },
+        { name: 'lg', w: '1280+', row: row + ' background: var(--signal-soft); font-weight: 600' }
+      ],
+      exports: [{ value: 'container', label: 'Container' }, { value: 'media', label: 'Media' }],
+      overrides: [
+        { what: 'Cards grid · columns', val: '2 → 3' },
+        { what: 'Sidebar · visible', val: 'off → on' },
+        { what: 'Hero · height', val: '54 → 60' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane agent checks its own render</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" branch="agent/empty-states" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <main class="u-stage" aria-label="Render check">
+      <div class="u-row" style="position: absolute; left: 0; right: 0; top: 0; height: 40px; padding: 0 4px">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Empty states agent" status="working" on-behalf-of="Sam"></x-import>
+        <span class="u-md"><strong>Render check</strong> · Home — iOS · Error · pass 2 of 2</span>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Show" value="side" options="{{views}}"></x-import>
+      </div>
+      <div style="position: absolute; left: 0; right: 0; top: 52px; bottom: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px">
+        <sc-for list="{{cols}}" as="c" hint-placeholder-count="3">
+          <section class="u-pane u-col" style="padding: 14px; align-content: start; gap: 12px">
+            <div class="u-row"><span class="{{c.chipc}}">{{c.chip}}</span><strong class="u-md">{{c.title}}</strong></div>
+            <div style="position: relative; height: 420px; border-radius: var(--radius-md); background: var(--canvas); overflow: hidden">
+              <div style="position: absolute; left: 50%; top: 14px; width: 340px; height: 560px; margin-left: -170px; transform: scale(.72); transform-origin: top center">
+                <div class="u-board" style="position: absolute; inset: 0">
+                  <div style="height: 40px"></div>
+                  <div style="margin: 8px 20px 0; font-size: 22px; line-height: 28px; font-weight: 600">Good morning, Ana</div>
+                  <div style="position: absolute; left: 20px; top: 118px; width: 300px; height: 66px; border-radius: 14px; background: #16181d"></div>
+                  <div style="position: absolute; left: 20px; top: 200px; width: 300px; height: 220px; border-radius: 14px; background: #f3f4f6">
+                    <div style="position: absolute; inset: 12px; border-radius: 10px; background: #ffffff; display: grid; place-content: center; justify-items: center; gap: 8px; text-align: center; padding: 0 16px">
+                      <span style="{{c.art}}"></span>
+                      <span style="{{c.titleS}}">Couldn't load your day</span>
+                      <span style="font-size: 12px; color: #5b616e">Check your connection and try again.</span>
+                      <span style="{{c.btn}}">Retry</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <sc-for list="{{c.pins}}" as="p" hint-placeholder-count="3"><span style="{{p.s}}">{{p.n}}</span></sc-for>
+            </div>
+            <ul style="margin: 0; padding: 0; list-style: none; display: grid; gap: 6px">
+              <sc-for list="{{c.notes}}" as="n" hint-placeholder-count="3"><li class="u-row u-row--top u-sm"><span class="{{n.c}}">{{n.k}}</span><span class="u-grow">{{n.t}}</span></li></sc-for>
+            </ul>
+          </section>
+        </sc-for>
+      </div>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Agent">
+      <div class="u-row" style="padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{H.modes}}"></x-import>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past runs"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+      <div class="u-col" style="flex: 1; min-height: 0; padding: 12px; overflow: hidden">
+        <div role="list" style="display: grid; gap: 2px">
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Built Error state" meta="14 ops"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="render_frame Error" ops="render_frame board=Error scale=2" meta="0.4 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="failed" label="Found 3 problems in the render" detail="Contrast, clipping, wrapping"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Fixed all 3" ops="set fill brand/600 · set width fill · set text-style title-sm" meta="6 ops"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="running" label="Rendering again to confirm"></x-import>
+        </div>
+        <div class="u-note u-note--agent"><x-import component-from-global-scope="Drawpane.Icon" name="eye" size="12"></x-import><span class="u-grow">Agents look at the pixels, not just the layer tree. Each render costs about 900 tokens; this run has done 2.</span></div>
+        <div class="u-dl" style="padding: 10px; border-radius: var(--radius-md); background: var(--surface-sunken)"><dt>Checks</dt><dd>contrast, clipping, overlap, text wrap, tokens</dd><dt>Max retries</dt><dd>2, then ask Sam</dd><dt>Spent</dt><dd>$0.21 of $2.00</dd></div>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var pin = function (n, x, y, c) { return { n: n, s: 'position: absolute; left: ' + x + 'px; top: ' + y + 'px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; font-size: 11px; font-weight: 700; background: ' + c + '; color: #ffffff; box-shadow: 0 0 0 2px #ffffff' }; };
+    var nt = function (k, t, c) { return { k: k, t: t, c: 'u-chip ' + c }; };
+    var art = 'width: 40px; height: 40px; border-radius: 12px; background: #fdecea';
+    return {
+      views: H.opts([{ value: 'side', label: 'Side by side' }, 'Overlay', 'Diff']),
+      cols: [
+        { chip: 'Intent', chipc: 'u-chip', title: 'What the skill asked for', art: art, titleS: 'font-size: 14px; font-weight: 600', btn: 'height: 32px; padding: 0 14px; border-radius: 8px; background: #2b4fd6; color: #ffffff; font-size: 13px; line-height: 32px; font-weight: 600', pins: [], notes: [nt('1', 'Primary button, AA contrast', 'u-chip--muted'), nt('2', 'Art fits the card at 320 wide', 'u-chip--muted'), nt('3', 'Title on one line', 'u-chip--muted')] },
+        { chip: 'Pass 1', chipc: 'u-chip u-chip--signal', title: 'What actually rendered', art: 'width: 300px; height: 40px; border-radius: 12px; background: #fdecea', titleS: 'font-size: 18px; font-weight: 600; width: 150px', btn: 'height: 32px; padding: 0 14px; border-radius: 8px; background: #8fa3ec; color: #ffffff; font-size: 13px; line-height: 32px; font-weight: 600', pins: [pin(1, 168, 262, 'var(--danger)'), pin(2, 46, 182, 'var(--danger)'), pin(3, 210, 214, 'var(--danger)')], notes: [nt('1', 'Retry text is 2.4:1 on light blue', 'u-chip--signal'), nt('2', 'Art stretched past the card edge', 'u-chip--signal'), nt('3', 'Title wraps to two lines', 'u-chip--signal')] },
+        { chip: 'Pass 2', chipc: 'u-chip u-chip--ok', title: 'After the fixes', art: art, titleS: 'font-size: 14px; font-weight: 600', btn: 'height: 32px; padding: 0 14px; border-radius: 8px; background: #1e3aa8; color: #ffffff; font-size: 13px; line-height: 32px; font-weight: 600', pins: [], notes: [nt('✓', 'Retry 8.9:1', 'u-chip--ok'), nt('✓', 'Art 40 × 40, inside the card', 'u-chip--ok'), nt('✓', 'Title fits on one line', 'u-chip--ok')] }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

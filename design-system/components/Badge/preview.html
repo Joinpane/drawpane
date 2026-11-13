@@ -1,0 +1,17 @@
+<!-- @dsCard group="Status" height=72 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Badge — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.Badge, null, 'Draft'), h(D.Badge, { tone: 'signal' }, '3 changes'), h(D.Badge, { tone: 'component', icon: 'component' }, 'Main'),
+      h(D.Badge, { tone: 'info' }, 'feature/onboarding'), h(D.Badge, { tone: 'success' }, 'Merged'),
+      h(D.Badge, { tone: 'warning' }, 'Missing font'), h(D.Badge, { tone: 'danger' }, 'Conflict'))
+  );
+</script>
+</body>
+</html>

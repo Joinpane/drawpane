@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane editor, editing text</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" tool="text" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="greeting" hint-size="248px,824px"></dc-import>
+
+    <main aria-label="Canvas" style="flex: 999 1 560px; min-width: 0; position: relative; height: 824px">
+      <div style="position: absolute; left: 50%; top: 40px; width: 340px; height: 560px; margin-left: -170px">
+        <span style="position: absolute; left: 0; top: -20px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Home — iOS</span>
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+
+        <div aria-hidden="true" style="position: absolute; left: 18px; top: 46px; width: 204px; height: 32px; box-shadow: inset 0 0 0 1.5px var(--signal)"></div>
+        <span aria-hidden="true" style="position: absolute; left: 154px; top: 50px; width: 64px; height: 24px; background: var(--signal); opacity: .22"></span>
+        <span aria-hidden="true" style="position: absolute; left: 217px; top: 50px; width: 1.5px; height: 24px; background: var(--signal)"></span>
+        <span style="position: absolute; left: 18px; top: 86px; padding: 1px 6px; border-radius: var(--radius-xs); background: var(--signal); color: var(--on-signal); font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 500; white-space: nowrap">Hug × 28 · editing</span>
+
+        <div style="position: absolute; left: 18px; top: -64px; white-space: nowrap">
+          <x-import component-from-global-scope="Drawpane.SelectionLens" kind="Text" kind-icon="text">
+            <x-import component-from-global-scope="Drawpane.NumberField" icon="token" aria-label="Text style" token="heading/xl"></x-import>
+            <x-import component-from-global-scope="Drawpane.NumberField" label="Aa" aria-label="Font size" default-value="22"></x-import>
+            <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Weight" value="600" options="{{weights}}"></x-import>
+            <x-import component-from-global-scope="Drawpane.NumberField" icon="rectangle" aria-label="Fill" token="ink/strong" swatch="#16181d"></x-import>
+          </x-import>
+        </div>
+      </div>
+
+      <div role="dialog" aria-label="Text styles" style="position: absolute; left: calc(50% - 110px); top: 152px; width: 280px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); overflow: hidden">
+        <div style="display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 10px; border-bottom: 1px solid var(--line); color: var(--icon)">
+          <x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import>
+          <input aria-label="Search text styles" placeholder="Search styles" value="head" style="flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: var(--ink); font: 400 13px/18px var(--font-ui); caret-color: var(--signal)">
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Library" value="local" options="{{libs}}"></x-import>
+        </div>
+        <div style="padding: 4px">
+          <div style="padding: 6px 8px 2px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Mobile app · 4 matches</div>
+          <sc-for list="{{styles}}" as="s" hint-placeholder-count="4">
+            <div role="option" aria-selected="{{s.sel}}" style="{{s.row}}">
+              <span style="{{s.sample}}">Ag</span>
+              <span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+                <span style="font-family: var(--font-mono); font-size: 11px; line-height: 14px; color: var(--ink)">{{s.name}}</span>
+                <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{s.spec}}</span>
+              </span>
+              <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted); font-variant-numeric: tabular-nums">{{s.uses}}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--surface)">
+          <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Styles are tokens: edit once, update everywhere</span>
+          <x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="New text style"></x-import>
+        </div>
+      </div>
+
+      <div style="position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); font-size: 11px; line-height: 14px; color: var(--ink-muted)">
+        <span style="display: inline-flex; align-items: center; gap: 6px"><x-import component-from-global-scope="Drawpane.Kbd">⌘ B</x-import> bold</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px"><x-import component-from-global-scope="Drawpane.Kbd">⌥ ⌘ T</x-import> text styles</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px"><x-import component-from-global-scope="Drawpane.Kbd">esc</x-import> done</span>
+      </div>
+    </main>
+
+    <aside aria-label="Inspector" style="width: 264px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="design" options="{{modes}}"></x-import></div>
+      <section class="dp-section" aria-label="Typography">
+        <div class="dp-section__head">
+          <h3 class="dp-section__title">Typography</h3>
+          <div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Type settings"></x-import></div>
+        </div>
+        <div class="dp-section__body">
+          <x-import component-from-global-scope="Drawpane.NumberField" icon="token" aria-label="Text style" token="heading/xl"></x-import>
+          <div style="display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px">
+            <span>Instrument Sans</span>
+            <span style="display: inline-flex; color: var(--ink-muted)"><x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+          </div>
+          <div class="dp-row">
+            <x-import component-from-global-scope="Drawpane.NumberField" label="Aa" aria-label="Size" default-value="22"></x-import>
+            <x-import component-from-global-scope="Drawpane.NumberField" label="B" aria-label="Weight" default-value="600"></x-import>
+          </div>
+          <div class="dp-row">
+            <x-import component-from-global-scope="Drawpane.NumberField" label="↕" aria-label="Line height" default-value="28"></x-import>
+            <x-import component-from-global-scope="Drawpane.NumberField" label="↔" aria-label="Letter spacing" default-value="-0.2" unit="%"></x-import>
+          </div>
+          <div class="dp-row">
+            <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Align" value="left" options="{{aligns}}"></x-import>
+            <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Resizing" value="hug" options="{{resizing}}"></x-import>
+          </div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="OpenType">
+        <div class="dp-section__head"><h3 class="dp-section__title">OpenType</h3></div>
+        <div class="dp-section__body">
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Tabular figures"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Contextual alternates"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Slashed zero"></x-import>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Fill">
+        <div class="dp-section__head">
+          <h3 class="dp-section__title">Fill</h3>
+          <div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add fill"></x-import></div>
+        </div>
+        <div class="dp-section__body">
+          <div class="dp-row" style="grid-template-columns: 1fr 72px">
+            <x-import component-from-global-scope="Drawpane.NumberField" icon="rectangle" aria-label="Fill" token="ink/strong" swatch="#16181d"></x-import>
+            <x-import component-from-global-scope="Drawpane.NumberField" label="%" default-value="100"></x-import>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; line-height: 14px; color: var(--success)">
+            <x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import>
+            <span>17.8:1 on #ffffff · AAA</span>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"dark"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var row = 'display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 8px; border-radius: var(--radius-sm);';
+    var styles = [
+      { name: 'heading/xl', spec: '22 / 28 · Semibold', uses: '14', size: 22, w: 600, sel: true },
+      { name: 'heading/lg', spec: '18 / 24 · Semibold', uses: '31', size: 18, w: 600 },
+      { name: 'heading/md', spec: '15 / 20 · Semibold', uses: '48', size: 15, w: 600 },
+      { name: 'heading/eyebrow', spec: '11 / 14 · Medium · caps', uses: '9', size: 11, w: 500 }
+    ];
+    return {
+      theme: this.props.theme ?? 'dark',
+      yes: true, no: false,
+      weights: [{ value: '400', label: 'Reg' }, { value: '500', label: 'Med' }, { value: '600', label: 'Semi' }],
+      libs: [{ value: 'local', label: 'File' }, { value: 'team', label: 'Team' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }],
+      aligns: [{ value: 'left', label: 'L' }, { value: 'center', label: 'C' }, { value: 'right', label: 'R' }],
+      resizing: [{ value: 'hug', label: 'Hug' }, { value: 'fixed', label: 'Fixed' }],
+      styles: styles.map(function (s) {
+        return {
+          name: s.name, spec: s.spec, uses: s.uses + ' uses', sel: String(!!s.sel),
+          row: row + (s.sel ? ' background: var(--signal-soft);' : ''),
+          sample: 'width: 32px; text-align: center; color: var(--ink); font-size: ' + Math.min(s.size, 20) + 'px; font-weight: ' + s.w + '; line-height: 1'
+        };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>

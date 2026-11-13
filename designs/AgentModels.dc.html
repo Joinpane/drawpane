@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane models, budgets and approval rules</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; background: var(--surface); color: var(--ink); font-family: var(--font-ui); padding: 28px 32px 40px">
+  <div style="max-width: 1240px; margin: 0 auto; display: grid; gap: 20px">
+    <header style="display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px">
+      <div style="flex: 1 1 420px">
+        <div style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">Settings / Agents</div>
+        <h1 style="margin: 2px 0 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Models and limits</h1>
+      </div>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Section" value="models" options="{{tabs}}"></x-import>
+    </header>
+
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px">
+      <section aria-labelledby="providers" style="padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 10px; align-content: start">
+        <div style="display: flex; align-items: center"><h2 id="providers" style="flex: 1; margin: 0; font-size: 14px; line-height: 20px; font-weight: 600">Model providers</h2><x-import component-from-global-scope="Drawpane.Button" size="sm" icon="plus">Add</x-import></div>
+        <p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Calls go from this instance to your provider through AI Gateway. Drawpane adds no markup and sells no credits.</p>
+        <sc-for list="{{providers}}" as="p" hint-placeholder-count="4">
+          <div style="display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+            <span style="font-size: 13px; line-height: 18px; font-weight: 600">{{p.name}}</span>
+            <x-import component-from-global-scope="Drawpane.Badge" tone="{{p.tone}}">{{p.status}}</x-import>
+            <span style="font-family: var(--font-mono); font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{p.detail}}</span>
+            <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted); text-align: right">{{p.use}}</span>
+          </div>
+        </sc-for>
+      </section>
+
+      <section aria-labelledby="budget" style="padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 12px; align-content: start">
+        <h2 id="budget" style="margin: 0; font-size: 14px; line-height: 20px; font-weight: 600">Budgets</h2>
+        <div style="display: grid; gap: 6px">
+          <div style="display: flex; justify-content: space-between; font-size: 12px; line-height: 16px"><span>Team, November</span><span style="font-variant-numeric: tabular-nums"><b style="font-weight: 600">$18.40</b> of $60.00</span></div>
+          <span style="height: 8px; border-radius: 4px; background: var(--surface-sunken)"><span style="display: block; width: 31%; height: 8px; border-radius: 4px; background: var(--agent)"></span></span>
+        </div>
+        <div aria-label="Daily agent spend, last 14 days" style="display: flex; align-items: flex-end; gap: 4px; height: 64px; padding-top: 4px">
+          <sc-for list="{{days}}" as="d" hint-placeholder-count="14">
+            <span style="{{d}}"></span>
+          </sc-for>
+        </div>
+        <div class="dp-row">
+          <x-import component-from-global-scope="Drawpane.NumberField" label="$" aria-label="Per session limit" default-value="2.00" unit="session"></x-import>
+          <x-import component-from-global-scope="Drawpane.NumberField" label="$" aria-label="Per person daily limit" default-value="5.00" unit="day"></x-import>
+        </div>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Pause agents and notify admins at 90%"></x-import>
+      </section>
+
+      <section aria-labelledby="rules" style="padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 10px; align-content: start">
+        <h2 id="rules" style="margin: 0; font-size: 14px; line-height: 20px; font-weight: 600">Approval rules</h2>
+        <sc-for list="{{rules}}" as="r" hint-placeholder-count="5">
+          <div style="display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; min-height: 36px; border-bottom: 1px solid var(--line); font-size: 12px; line-height: 16px">
+            <span>{{r.what}}</span>
+            <span style="display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-weight: 600">{{r.who}} <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+          </div>
+        </sc-for>
+      </section>
+
+      <section aria-labelledby="data" style="padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 10px; align-content: start">
+        <h2 id="data" style="margin: 0; font-size: 14px; line-height: 20px; font-weight: 600">What agents may send to a model</h2>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Layer structure and text of the files in scope"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Rendered images of frames they change"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Comments and their authors' names"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Block files tagged Confidential"></x-import>
+        <p style="margin: 0; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Prompts and responses are logged in your AI Gateway for 30 days. Nothing is sent to the Drawpane project.</p>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var vals = [0.8, 1.2, 0.4, 0, 0, 1.9, 2.4, 1.1, 1.6, 0.9, 0, 0.2, 2.8, 1.4];
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true, no: false,
+      tabs: [{ value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      providers: [
+        { name: 'Anthropic', status: 'Default', tone: 'signal', detail: 'claude-opus-5-5 · key ••••7Q2a', use: '$14.20 this month' },
+        { name: 'OpenAI', status: 'Connected', tone: 'success', detail: 'team key ••••m9Lt', use: '$3.10 this month' },
+        { name: 'Workers AI', status: 'Connected', tone: 'success', detail: 'runs in this Cloudflare account', use: '$1.10 this month' },
+        { name: 'Local endpoint', status: 'Off', tone: 'neutral', detail: 'OpenAI-compatible URL, e.g. a GPU box', use: 'Not used' }
+      ],
+      days: vals.map(function (v) { return 'flex: 1; min-height: 2px; height: ' + Math.max(v / 2.8 * 56, 2) + 'px; border-radius: 2px 2px 0 0; background: ' + (v === 0 ? 'var(--line-strong)' : 'var(--agent)'); }),
+      rules: [
+        { what: 'Merge an agent branch into main', who: 'A person' },
+        { what: 'Rename layers or rebind tokens with the same value', who: 'Automatic' },
+        { what: 'Publish a library version', who: 'An admin' },
+        { what: 'Post to Slack or open a GitHub pull request', who: 'A person' },
+        { what: 'Delete boards or pages', who: 'Never' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

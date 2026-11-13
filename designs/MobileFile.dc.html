@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane phone, inside a file</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-phone" style="background: var(--canvas)">
+  <header class="u-row" style="height: 56px; margin-top: 44px; padding: 0 8px; background: var(--surface); border-bottom: 1px solid var(--line)">
+    <span style="display: grid; place-items: center; width: 44px; height: 44px; color: var(--icon); transform: rotate(90deg)"><x-import component-from-global-scope="Drawpane.Icon" name="chevron-down"></x-import></span>
+    <span class="u-grow u-col" style="gap: 0"><span class="u-lg u-b">Mobile app</span><span class="u-xs u-muted">Mobile v2 · main · 4 here now</span></span>
+    <span style="display: grid; place-items: center; width: 44px; height: 44px; color: var(--icon)"><x-import component-from-global-scope="Drawpane.Icon" name="more"></x-import></span>
+  </header>
+  <div class="u-row" style="padding: 10px 12px; gap: 6px; overflow: hidden; background: var(--surface)"><sc-for list="{{pages}}" as="p" hint-placeholder-count="4"><span class="u-pill {{p.on}}" style="flex: none">{{p.t}}</span></sc-for></div>
+  <div style="flex: 1; position: relative; overflow: hidden">
+    <div style="position: absolute; left: 16px; top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; width: 358px">
+      <sc-for list="{{boards}}" as="b" hint-placeholder-count="6"><div class="u-col u-col--tight"><span style="{{b.th}}"><span style="{{b.a}}"></span><span style="{{b.c}}"></span></span><span class="u-sm u-b u-ellip">{{b.n}}</span><span class="u-xs u-muted">{{b.m}}</span></div></sc-for>
+    </div>
+    <div class="u-pop u-row" style="position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 12px; border-radius: 999px; white-space: nowrap"><span class="u-sm">Pinch a board to open it · double tap to fit</span></div>
+  </div>
+  <nav aria-label="App" style="display: grid; grid-template-columns: repeat(4, 1fr); height: 64px; padding-bottom: 18px; border-top: 1px solid var(--line); background: var(--surface)">
+    <a href="#" style="position: relative; display: grid; justify-items: center; align-content: center; gap: 2px; color: var(--ink); text-decoration: none; font-size: 11px; font-weight: 600"><x-import component-from-global-scope="Drawpane.Icon" name="layers"></x-import>Files</a>
+    <a href="#" style="position: relative; display: grid; justify-items: center; align-content: center; gap: 2px; color: var(--ink-muted); text-decoration: none; font-size: 11px; font-weight: 400"><span style="position: absolute; top: 8px; margin-left: 14px; width: 8px; height: 8px; border-radius: 50%; background: var(--signal)"></span><x-import component-from-global-scope="Drawpane.Icon" name="comment"></x-import>Inbox</a>
+    <a href="#" style="position: relative; display: grid; justify-items: center; align-content: center; gap: 2px; color: var(--ink-muted); text-decoration: none; font-size: 11px; font-weight: 400"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import>Agents</a>
+    <a href="#" style="position: relative; display: grid; justify-items: center; align-content: center; gap: 2px; color: var(--ink-muted); text-decoration: none; font-size: 11px; font-weight: 400"><x-import component-from-global-scope="Drawpane.Icon" name="eye"></x-import>Viewer</a>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 390, "height": 844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var C = ['#eef1fb', '#ffffff', '#fdecea', '#f3f4f6', '#fff4ed', '#eefaf8'];
+    var N = [['Home — iOS', '2 comments'], ['Empty', 'agent · new'], ['Error', 'agent · new'], ['Calendar', 'Sam editing'], ['Event detail', ''], ['Settings — iOS', 'ready for dev']];
+    return {
+      pages: [{ t: 'Mobile v2', on: 'is-on' }, { t: 'Web dashboard', on: '' }, { t: 'Components', on: '' }, { t: 'Archive', on: '' }],
+      boards: N.map(function (n, i) { return { n: n[0], m: n[1] || '—', th: 'position: relative; display: block; height: 260px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12)' + (i === 1 || i === 2 ? '; outline: 1.5px dashed var(--agent); outline-offset: 2px' : ''), a: 'position: absolute; left: 10px; right: 10px; top: 34px; height: 36px; border-radius: 8px; background: ' + (i === 0 ? '#16181d' : C[i]), c: 'position: absolute; left: 10px; right: 10px; top: 80px; height: 100px; border-radius: 8px; background: #f3f4f6' }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

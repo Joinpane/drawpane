@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane type in depth</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" tool="text" file="Marketing site" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="greeting" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas">
+      <div class="u-board" style="left: 30px; top: 40px; width: 560px; height: 620px; padding: 40px; box-sizing: border-box">
+        <div style="font-size: 40px; line-height: 44px; font-weight: 600; letter-spacing: -0.02em">Plan your week<br>in <span style="font-family: var(--font-display); font-style: italic; font-weight: 400; color: #e04f1a">one glance</span></div>
+        <p style="margin: 16px 0 0; font-size: 16px; line-height: 26px; color: #5b616e; font-variant-numeric: tabular-nums">Join 12,400 teams. Meetings at 9:30, 10:15 and 14:00 line up because numbers use <span style="background: color-mix(in srgb, var(--signal) 22%, transparent)">tabular figures</span>. Read the <a href="#" style="color: #2b4fd6">pricing guide</a>.</p>
+        <ul style="margin: 64px 0 0; padding-left: 22px; font-size: 16px; line-height: 26px">
+          <li>Every calendar in one view</li><li>Reminders you can actually ignore</li><li style="list-style: none; margin-left: -22px"><span style="display: inline-block; width: 22px">3.</span>Works offline</li>
+        </ul>
+        <span class="u-outline" style="left: 36px; top: 132px; width: 488px; height: 82px"></span>
+        <span style="position: absolute; left: 395px; top: 168px; width: 1.5px; height: 22px; background: var(--signal)"></span>
+        <div class="u-pop u-row" style="position: absolute; left: 36px; top: 222px; padding: 4px; gap: 2px; white-space: nowrap">
+          <span class="u-tbtn" style="background: var(--surface-active); color: var(--ink)">B</span><span class="u-tbtn" style="background: none; color: var(--ink); font-style: italic">I</span><span class="u-tbtn" style="background: none; color: var(--ink); text-decoration: underline">U</span><span class="u-tbtn" style="background: none; color: var(--ink)">Link</span><span class="u-tbtn" style="background: none; color: var(--ink)">• List</span><span class="u-tbtn" style="background: none; color: var(--ink)">1. List</span><x-import component-from-global-scope="Drawpane.TokenChip" name="type/body-lg" swatch="#5b616e"></x-import>
+        </div>
+      </div>
+    </main>
+    <aside class="u-side" aria-label="Text inspector">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="design" options="{{H.dmodes}}"></x-import></div>
+      <section class="dp-section" aria-label="Text style">
+        <div class="dp-section__head"><h3 class="dp-section__title">Text</h3><div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="token" label="Text styles"></x-import></div></div>
+        <div class="dp-section__body">
+          <div class="u-row"><x-import component-from-global-scope="Drawpane.TokenChip" name="type/body-lg" swatch="#5b616e"></x-import><span class="u-xs u-muted">mixed: 2 overrides</span></div>
+          <span class="u-select">Instrument Sans <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px"><span class="u-select">Regular <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span><x-import component-from-global-scope="Drawpane.NumberField" label="Aa" aria-label="Size" default-value="16"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="↕" aria-label="Line height" default-value="26"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="↔" aria-label="Letter spacing" default-value="0"></x-import></div>
+          <div class="u-row"><span class="u-xs u-muted" style="width: 44px">Align</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Align" value="left" options="{{align}}"></x-import></div>
+          <div class="u-row"><span class="u-xs u-muted" style="width: 44px">Resize</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Resize" value="auto" options="{{resize}}"></x-import></div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="OpenType">
+        <div class="dp-section__head"><h3 class="dp-section__title">OpenType features</h3></div>
+        <div class="dp-section__body" style="gap: 6px">
+          <sc-for list="{{ot}}" as="o" hint-placeholder-count="5"><div class="u-row u-sm"><span class="u-grow">{{o.n}}</span><span class="u-mono u-xs u-muted">{{o.t}}</span><x-import component-from-global-scope="Drawpane.Switch" checked="{{o.on}}" aria-label="{{o.n}}"></x-import></div></sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Paragraph">
+        <div class="dp-section__head"><h3 class="dp-section__title">Paragraph and lists</h3></div>
+        <div class="dp-section__body" style="grid-template-columns: 1fr 1fr">
+          <x-import component-from-global-scope="Drawpane.NumberField" label="¶" aria-label="Paragraph spacing" default-value="12"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="⇥" aria-label="List indent" default-value="22"></x-import>
+          <span class="u-select">Truncate: off <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span><span class="u-select">Case: as typed <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      align: H.opts(['Left', 'Center', 'Right']), resize: H.opts([{ value: 'auto', label: 'Width' }, { value: 'h', label: 'Height' }, 'Fixed']),
+      ot: [{ n: 'Tabular figures', t: 'tnum', on: true }, { n: 'Slashed zero', t: 'zero', on: false }, { n: 'Contextual alternates', t: 'calt', on: true }, { n: 'Stylistic set 1 · single-story a', t: 'ss01', on: false }, { n: 'Case-sensitive forms', t: 'case', on: false }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane auto layout in depth</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" file="Web dashboard" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Auto layout examples">
+      <figure class="u-fig" style="position: absolute; left: 20px; top: 16px; width: 380px">
+        <figcaption class="u-cap">Wrap · tags flow onto new lines</figcaption>
+        <div class="u-board" style="position: relative; padding: 14px; display: flex; flex-wrap: wrap; gap: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.12), 0 0 0 1.5px var(--signal)">
+          <sc-for list="{{tags}}" as="t" hint-placeholder-count="9"><span style="height: 28px; padding: 0 12px; border-radius: 14px; background: #eef1fb; color: #1e3aa8; font-size: 12px; line-height: 28px; font-weight: 600">{{t}}</span></sc-for>
+          <span style="position: absolute; left: 14px; right: 14px; top: 42px; height: 8px; background: var(--xray-gap); opacity: .35"></span>
+        </div>
+      </figure>
+      <figure class="u-fig" style="position: absolute; left: 20px; top: 200px; width: 380px">
+        <figcaption class="u-cap">Absolute position inside auto layout · badge ignores the flow</figcaption>
+        <div class="u-board" style="position: relative; padding: 14px; display: grid; gap: 10px">
+          <div style="position: relative; height: 64px; border-radius: 10px; background: #f3f4f6; display: flex; align-items: center; gap: 10px; padding: 0 12px"><span style="width: 36px; height: 36px; border-radius: 50%; background: #d5d9e0"></span><span style="font-size: 13px; font-weight: 600">Inbox</span>
+            <span style="position: absolute; right: -6px; top: -6px; min-width: 20px; height: 20px; border-radius: 10px; background: #c8312b; color: #ffffff; font-size: 11px; line-height: 20px; text-align: center; font-weight: 700; box-shadow: 0 0 0 1.5px var(--signal)">3</span></div>
+          <div style="height: 64px; border-radius: 10px; background: #f3f4f6"></div>
+          <span class="u-label u-label--signal" style="right: 0; bottom: -26px">Badge · absolute · top right −6</span>
+        </div>
+      </figure>
+      <figure class="u-fig" style="position: absolute; left: 420px; top: 16px; width: 340px">
+        <figcaption class="u-cap">Min and max · fill, but never past 480 or below 240</figcaption>
+        <div style="position: relative; height: 210px; border-radius: var(--radius-md); background: var(--canvas)">
+          <div style="position: absolute; left: 0; right: 0; top: 30px; height: 120px; display: flex; gap: 10px; padding: 10px; box-sizing: border-box; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12)">
+            <span style="flex: 1; min-width: 0; border-radius: 8px; background: #eef1fb; box-shadow: 0 0 0 1.5px var(--signal)"></span><span style="width: 90px; border-radius: 8px; background: #f3f4f6"></span>
+          </div>
+          <span style="position: absolute; left: 10px; top: 160px; width: 210px; height: 1px; background: var(--guide)"></span>
+          <span class="u-label u-label--guide" style="left: 70px; top: 166px">218 · min 240 ⚠</span>
+          <span class="u-label u-label--signal" style="left: 10px; top: 6px">Content · fill · min 240 · max 480</span>
+        </div>
+      </figure>
+      <section class="u-pop u-col" style="position: absolute; left: 420px; top: 250px; width: 340px; padding: 12px">
+        <strong class="u-md">Resizing, explained on the layer</strong>
+        <sc-for list="{{sizing}}" as="z" hint-placeholder-count="3"><div class="u-row u-row--top u-sm"><span class="u-chip u-chip--muted" style="width: 46px; justify-content: center">{{z.k}}</span><span class="u-grow">{{z.d}}</span></div></sc-for>
+      </section>
+    </main>
+    <aside class="u-side" aria-label="Auto layout inspector">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="design" options="{{H.dmodes}}"></x-import></div>
+      <section class="dp-section" aria-label="Auto layout">
+        <div class="dp-section__head"><h3 class="dp-section__title">Auto layout</h3><div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="xray" label="Layout X-ray"></x-import></div></div>
+        <div class="dp-section__body">
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Direction" value="wrap" options="{{dir}}"></x-import>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px"><x-import component-from-global-scope="Drawpane.NumberField" label="↔" aria-label="Gap" default-value="8"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="↕" aria-label="Row gap" default-value="8"></x-import></div>
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px"><x-import component-from-global-scope="Drawpane.NumberField" label="T" default-value="14"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="R" default-value="14"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="B" default-value="14"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="L" default-value="14"></x-import></div>
+          <div class="u-row u-sm"><span class="u-grow u-muted">Align content</span><span class="u-select" style="height: 24px">Start <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+          <x-import component-from-global-scope="Drawpane.Switch" label="Strokes take up space"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" label="Last item on top"></x-import>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Resizing">
+        <div class="dp-section__head"><h3 class="dp-section__title">Resizing · Content</h3></div>
+        <div class="dp-section__body">
+          <div class="u-row"><span class="u-xs u-muted" style="width: 20px">W</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Width" value="fill" options="{{wsize}}"></x-import></div>
+          <div class="u-row"><span class="u-xs u-muted" style="width: 20px">H</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Height" value="hug" options="{{wsize}}"></x-import></div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px"><x-import component-from-global-scope="Drawpane.NumberField" label="min" default-value="240"></x-import><x-import component-from-global-scope="Drawpane.NumberField" label="max" default-value="480"></x-import></div>
+          <x-import component-from-global-scope="Drawpane.Switch" label="Absolute position"></x-import>
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      tags: ['Design', 'Research', 'Engineering', 'Marketing', 'Ops', 'Brand', 'Mobile', 'Web platform', 'Data'],
+      sizing: [{ k: 'Hug', d: 'As big as its content' }, { k: 'Fill', d: 'Takes the space left in its parent, within min and max' }, { k: 'Fixed', d: 'Exact size, content may clip' }],
+      dir: H.opts([{ value: 'row', label: 'Row' }, { value: 'col', label: 'Column' }, 'Wrap', 'Grid']),
+      wsize: H.opts(['Hug', 'Fill', 'Fixed'])
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

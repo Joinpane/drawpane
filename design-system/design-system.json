@@ -1,0 +1,383 @@
+{
+ "v": 3,
+ "layout": "files",
+ "createdOnFiles": {
+  "at": "2026-11-12T21:42:32Z",
+  "v": 1
+ },
+ "title": "Drawpane Design System",
+ "namespace": "Drawpane",
+ "libraries": [
+  {
+   "name": "react",
+   "version": "18"
+  },
+  {
+   "name": "react-dom",
+   "version": "18"
+  }
+ ],
+ "sections": {},
+ "groups": [
+  "Logos",
+  "Icons"
+ ],
+ "assetGroups": {
+  "Logos": {
+   "name": "Logos",
+   "tile": "l",
+   "order": [
+    "drawpane-mark.svg",
+    "drawpane-mark-graphite.svg",
+    "drawpane-mark-mono.svg",
+    "drawpane-app-icon.svg"
+   ],
+   "files": {
+    "drawpane-mark.svg": {
+     "name": "drawpane-mark.svg",
+     "blob": "fe5096c24705cfbcb5554e5ed383640e",
+     "size": 274,
+     "type": "image/svg+xml"
+    },
+    "drawpane-mark-graphite.svg": {
+     "name": "drawpane-mark-graphite.svg",
+     "blob": "de3fb284e6d713df844fc5c5df52d207",
+     "size": 274,
+     "type": "image/svg+xml"
+    },
+    "drawpane-mark-mono.svg": {
+     "name": "drawpane-mark-mono.svg",
+     "blob": "b3d76d7953587354d9b6bbbab8d32bbc",
+     "size": 274,
+     "type": "image/svg+xml"
+    },
+    "drawpane-app-icon.svg": {
+     "name": "drawpane-app-icon.svg",
+     "blob": "151680199ac15eec41cc5fc24d142410",
+     "size": 329,
+     "type": "image/svg+xml"
+    }
+   }
+  },
+  "Icons": {
+   "name": "Icons",
+   "tile": "xs",
+   "order": [
+    "pointer.svg",
+    "hand.svg",
+    "board.svg",
+    "rectangle.svg",
+    "ellipse.svg",
+    "pen.svg",
+    "text.svg",
+    "comment.svg",
+    "component.svg",
+    "instance.svg",
+    "group.svg",
+    "image.svg",
+    "eye.svg",
+    "eye-off.svg",
+    "lock.svg",
+    "plus.svg",
+    "minus.svg",
+    "search.svg",
+    "chevron-down.svg",
+    "chevron-right.svg",
+    "layout-row.svg",
+    "layout-col.svg",
+    "layout-grid.svg",
+    "branch.svg",
+    "history.svg",
+    "token.svg",
+    "xray.svg",
+    "play.svg",
+    "export.svg",
+    "more.svg",
+    "check.svg",
+    "close.svg",
+    "inspector.svg",
+    "layers.svg",
+    "warning.svg",
+    "agent.svg",
+    "stop.svg",
+    "send.svg",
+    "code.svg",
+    "key.svg",
+    "bolt.svg",
+    "book.svg",
+    "plug.svg"
+   ],
+   "files": {
+    "pointer.svg": {
+     "name": "pointer.svg",
+     "blob": "c4d9342e1f3561a07d7f4be1013361f7",
+     "size": 235,
+     "type": "image/svg+xml"
+    },
+    "hand.svg": {
+     "name": "hand.svg",
+     "blob": "9af7a5cf88380661f49a4942fdee30f3",
+     "size": 352,
+     "type": "image/svg+xml"
+    },
+    "board.svg": {
+     "name": "board.svg",
+     "blob": "91ddccf04e7a087b794902ec6ec69482",
+     "size": 240,
+     "type": "image/svg+xml"
+    },
+    "rectangle.svg": {
+     "name": "rectangle.svg",
+     "blob": "75bc068ba5fbb8c587e2051a72812a98",
+     "size": 241,
+     "type": "image/svg+xml"
+    },
+    "ellipse.svg": {
+     "name": "ellipse.svg",
+     "blob": "13925d483c26e6e6b6aac5f2d4a40245",
+     "size": 224,
+     "type": "image/svg+xml"
+    },
+    "pen.svg": {
+     "name": "pen.svg",
+     "blob": "7e7dbe52388558eebf6e209ab618ab69",
+     "size": 296,
+     "type": "image/svg+xml"
+    },
+    "text.svg": {
+     "name": "text.svg",
+     "blob": "f7bf8d01b8116b8f0ec5ff39722d9787",
+     "size": 232,
+     "type": "image/svg+xml"
+    },
+    "comment.svg": {
+     "name": "comment.svg",
+     "blob": "c2fecfdbf3713c110ae3fe7094ea6218",
+     "size": 283,
+     "type": "image/svg+xml"
+    },
+    "component.svg": {
+     "name": "component.svg",
+     "blob": "fc73dd979742d339b94a456e16cce0b5",
+     "size": 304,
+     "type": "image/svg+xml"
+    },
+    "instance.svg": {
+     "name": "instance.svg",
+     "blob": "d29a762ab8a9612ff0aaa1e243126a11",
+     "size": 230,
+     "type": "image/svg+xml"
+    },
+    "group.svg": {
+     "name": "group.svg",
+     "blob": "e2184cb58910786acbaa15a73d6da8de",
+     "size": 274,
+     "type": "image/svg+xml"
+    },
+    "image.svg": {
+     "name": "image.svg",
+     "blob": "0732b5bd389b090670b9a2ece46dca5d",
+     "size": 340,
+     "type": "image/svg+xml"
+    },
+    "eye.svg": {
+     "name": "eye.svg",
+     "blob": "f0a929185bacd9fa11837f14e922ff9e",
+     "size": 299,
+     "type": "image/svg+xml"
+    },
+    "eye-off.svg": {
+     "name": "eye-off.svg",
+     "blob": "0dd8a08e0c941f63fce0f4ac1c1c904c",
+     "size": 372,
+     "type": "image/svg+xml"
+    },
+    "lock.svg": {
+     "name": "lock.svg",
+     "blob": "7a0a9f7898efc7f1ce559774c66a91f2",
+     "size": 291,
+     "type": "image/svg+xml"
+    },
+    "plus.svg": {
+     "name": "plus.svg",
+     "blob": "c1e56927322444c0990d5d41be6023dd",
+     "size": 216,
+     "type": "image/svg+xml"
+    },
+    "minus.svg": {
+     "name": "minus.svg",
+     "blob": "7e763f88d945fb852ff3f846f51c3bbf",
+     "size": 209,
+     "type": "image/svg+xml"
+    },
+    "search.svg": {
+     "name": "search.svg",
+     "blob": "2fe2c56faf3bed4e1ee78c1bca711fc6",
+     "size": 260,
+     "type": "image/svg+xml"
+    },
+    "chevron-down.svg": {
+     "name": "chevron-down.svg",
+     "blob": "7437a479fbf5f612c1b13c64b925f551",
+     "size": 226,
+     "type": "image/svg+xml"
+    },
+    "chevron-right.svg": {
+     "name": "chevron-right.svg",
+     "blob": "c7440a3be421e747a2b6f2d8462f37a8",
+     "size": 227,
+     "type": "image/svg+xml"
+    },
+    "layout-row.svg": {
+     "name": "layout-row.svg",
+     "blob": "ffb46efa47dbbac468db9feffab73748",
+     "size": 296,
+     "type": "image/svg+xml"
+    },
+    "layout-col.svg": {
+     "name": "layout-col.svg",
+     "blob": "da7595fa70a0151ebaa79e3fa87f4aca",
+     "size": 296,
+     "type": "image/svg+xml"
+    },
+    "layout-grid.svg": {
+     "name": "layout-grid.svg",
+     "blob": "26c60c63e1c332ae18c4518c7abeda1a",
+     "size": 420,
+     "type": "image/svg+xml"
+    },
+    "branch.svg": {
+     "name": "branch.svg",
+     "blob": "8f6bebcd145e0c3f4519c6c73728567c",
+     "size": 364,
+     "type": "image/svg+xml"
+    },
+    "history.svg": {
+     "name": "history.svg",
+     "blob": "e987a39af44a939b74f4d153c8ff9a26",
+     "size": 300,
+     "type": "image/svg+xml"
+    },
+    "token.svg": {
+     "name": "token.svg",
+     "blob": "15f5da42cd0a77e34c714d27409caac9",
+     "size": 277,
+     "type": "image/svg+xml"
+    },
+    "xray.svg": {
+     "name": "xray.svg",
+     "blob": "4f0694b7e906372fc92e4056a746ec67",
+     "size": 343,
+     "type": "image/svg+xml"
+    },
+    "play.svg": {
+     "name": "play.svg",
+     "blob": "4988deb2b89b82bc338fd1f4587e6f2b",
+     "size": 220,
+     "type": "image/svg+xml"
+    },
+    "export.svg": {
+     "name": "export.svg",
+     "blob": "c068da499d16f39f11f07e9388d9a553",
+     "size": 279,
+     "type": "image/svg+xml"
+    },
+    "more.svg": {
+     "name": "more.svg",
+     "blob": "876065e36e96c397a50b7924b6364bc6",
+     "size": 393,
+     "type": "image/svg+xml"
+    },
+    "check.svg": {
+     "name": "check.svg",
+     "blob": "7595dafcc6009047205f71cea295db4d",
+     "size": 221,
+     "type": "image/svg+xml"
+    },
+    "close.svg": {
+     "name": "close.svg",
+     "blob": "a1e1821a1460184d15be7a24bcd6322c",
+     "size": 220,
+     "type": "image/svg+xml"
+    },
+    "inspector.svg": {
+     "name": "inspector.svg",
+     "blob": "a860509505d5e080884c5dbbba08dc19",
+     "size": 292,
+     "type": "image/svg+xml"
+    },
+    "layers.svg": {
+     "name": "layers.svg",
+     "blob": "8689d075acd568298be10f5860d6c822",
+     "size": 305,
+     "type": "image/svg+xml"
+    },
+    "warning.svg": {
+     "name": "warning.svg",
+     "blob": "92474fbc475743c66965e9288ef0d205",
+     "size": 315,
+     "type": "image/svg+xml"
+    },
+    "agent.svg": {
+     "name": "agent.svg",
+     "blob": "f3ee043a1fcf595c5399942ce87cc777",
+     "size": 417,
+     "type": "image/svg+xml"
+    },
+    "stop.svg": {
+     "name": "stop.svg",
+     "blob": "7280042fedeeaba9f98339bad6058447",
+     "size": 268,
+     "type": "image/svg+xml"
+    },
+    "send.svg": {
+     "name": "send.svg",
+     "blob": "49713d9ba1fa38f7d2fe79344652632f",
+     "size": 237,
+     "type": "image/svg+xml"
+    },
+    "code.svg": {
+     "name": "code.svg",
+     "blob": "882fa47e592b179185f422a103ee0391",
+     "size": 245,
+     "type": "image/svg+xml"
+    },
+    "key.svg": {
+     "name": "key.svg",
+     "blob": "d295de238d7c089b7e86b43da6406197",
+     "size": 296,
+     "type": "image/svg+xml"
+    },
+    "bolt.svg": {
+     "name": "bolt.svg",
+     "blob": "1d6687ab3706a88193e64ba10d5c05eb",
+     "size": 237,
+     "type": "image/svg+xml"
+    },
+    "book.svg": {
+     "name": "book.svg",
+     "blob": "f6d75144a66246e9a76d6679e7a99f24",
+     "size": 323,
+     "type": "image/svg+xml"
+    },
+    "plug.svg": {
+     "name": "plug.svg",
+     "blob": "9516352d09522beb5da69aa28c2b353c",
+     "size": 253,
+     "type": "image/svg+xml"
+    }
+   }
+  }
+ },
+ "blobs": {},
+ "docs": {
+  "readme": "project/README.md",
+  "sections": []
+ },
+ "lastChange": {
+  "by": "Claude",
+  "at": "2026-11-12T23:30:00Z",
+  "via": "Claude",
+  "note": "Agents: agent tokens, AgentTag, AgentStep, PromptField, 8 icons; presence-4 moved off violet"
+ }
+}

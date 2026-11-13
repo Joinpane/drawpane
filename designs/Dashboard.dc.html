@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane dashboard</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; display: flex; flex-wrap: wrap; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <nav aria-label="Workspace" style="flex: 1 1 240px; max-width: 280px; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; padding: 12px 10px; background: var(--canvas); border-right: 1px solid var(--line)">
+    <button type="button" style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); cursor: pointer; text-align: left">
+      <span style="display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--radius-sm); background: var(--surface-inverse); color: var(--ink-inverse); font-size: 11px; font-weight: 700">A</span>
+      <span style="flex: 1; display: flex; flex-direction: column"><span style="font-size: 13px; line-height: 18px; font-weight: 600">Acme Design</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">23 members</span></span>
+      <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import>
+    </button>
+    <div style="height: 8px"></div>
+    <sc-for list="{{nav}}" as="n" hint-placeholder-count="5">
+      <a href="#" style="{{n.style}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{n.icon}}"></x-import><span style="flex: 1">{{n.label}}</span><span style="font-size: 11px; color: var(--ink-muted)">{{n.count}}</span></a>
+    </sc-for>
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 0 2px 0 10px">
+      <span style="font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Projects</span>
+      <x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="New project"></x-import>
+    </div>
+    <sc-for list="{{projects}}" as="p" hint-placeholder-count="4">
+      <a href="#" style="display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px"><span style="{{p.dot}}"></span><span style="flex: 1">{{p.name}}</span></a>
+    </sc-for>
+    <div style="margin-top: auto; padding: 12px 10px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); display: grid; gap: 6px">
+      <div style="display: flex; justify-content: space-between; font-size: 12px; line-height: 16px"><span style="font-weight: 600">This instance</span><span style="color: var(--success)">Healthy</span></div>
+      <div style="height: 4px; border-radius: 2px; background: var(--surface-sunken)"><div style="width: 21%; height: 4px; border-radius: 2px; background: var(--signal)"></div></div>
+      <div style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">2.1 GB stored · about $5.40 this month</div>
+    </div>
+  </nav>
+
+  <main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 24px 32px 40px">
+    <header style="display: flex; align-items: center; flex-wrap: wrap; gap: 12px">
+      <h1 style="flex: 1; margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Recent files</h1>
+      <div style="display: flex; align-items: center; gap: 8px; width: 280px; height: 36px; padding: 0 8px 0 12px; box-sizing: border-box; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font-size: 13px">
+        <x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import><span style="flex: 1">Search files, layers, people</span><x-import component-from-global-scope="Drawpane.Kbd">⌘ K</x-import>
+      </div>
+      <x-import component-from-global-scope="Drawpane.PresenceStack" people="{{online}}"></x-import>
+      <x-import component-from-global-scope="Drawpane.Button" size="lg">Import</x-import>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg" icon="plus">New file</x-import>
+    </header>
+
+    <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 20px 0 16px">
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Filter" value="all" options="{{filters}}"></x-import>
+      <span style="flex: 1"></span>
+      <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">Sorted by last edited</span>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="View" value="grid" options="{{views}}"></x-import>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 20px">
+      <sc-for list="{{files}}" as="f" hint-placeholder-count="8">
+        <a href="Main.dc.html" style="display: grid; gap: 10px; color: var(--ink); text-decoration: none">
+          <span style="{{f.thumb}}">
+            <span style="{{f.a}}"></span><span style="{{f.b}}"></span><span style="{{f.c}}"></span>
+            <span style="{{f.live}}">{{f.liveText}}</span>
+          </span>
+          <span style="display: flex; align-items: flex-start; gap: 8px">
+            <span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+              <span style="font-size: 13px; line-height: 18px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{f.name}}</span>
+              <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{f.meta}}</span>
+            </span>
+            <span style="{{f.badge}}">{{f.badgeText}}</span>
+          </span>
+        </a>
+      </sc-for>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var link = 'display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px;';
+    var dot = function (c) { return 'width: 8px; height: 8px; border-radius: 2px; background: ' + c; };
+    var data = [
+      ['Mobile app', 'Edited 2 minutes ago · Ana', 'Live', '#eef1fb', '#2b4fd6', '#16181d', true, '2 branches'],
+      ['Acme design system', 'Edited 1 hour ago · Lena', '', '#f8f9fb', '#0f766e', '#2b4fd6', false, 'Library'],
+      ['Web dashboard', 'Edited yesterday · Sam', 'Live', '#f3f4f6', '#16181d', '#94acf8', true, ''],
+      ['Checkout flow', 'Edited Nov 9 · Ana', '', '#fff4ed', '#c8312b', '#16181d', false, 'In review'],
+      ['Onboarding v2', 'Edited Nov 8 · Dev', '', '#eefaf8', '#0f766e', '#a7f3e5', false, ''],
+      ['Marketing site', 'Edited Nov 6 · Mo', '', '#f6f1ff', '#6b4bd6', '#16181d', false, ''],
+      ['Icon set', 'Edited Nov 2 · Lena', '', '#f8f9fb', '#16181d', '#5b616e', false, 'Library'],
+      ['Imported from Figma: Brand 2025', 'Imported Oct 30 · Ana', '', '#fdf6e3', '#b7791f', '#16181d', false, 'Imported']
+    ];
+    var badgeBase = 'flex: none; height: 18px; padding: 0 6px; border-radius: var(--radius-xs); font-size: 11px; line-height: 18px; font-weight: 600; ';
+    return {
+      theme: this.props.theme ?? 'light',
+      nav: [
+        { icon: 'history', label: 'Recent', count: '', style: link + ' background: var(--surface-active); font-weight: 600' },
+        { icon: 'pen', label: 'Drafts', count: '6', style: link },
+        { icon: 'layers', label: 'Shared with me', count: '14', style: link },
+        { icon: 'component', label: 'Libraries', count: '3', style: link },
+        { icon: 'close', label: 'Trash', count: '', style: link }
+      ],
+      projects: [
+        { name: 'Mobile', dot: dot('#2b4fd6') }, { name: 'Web platform', dot: dot('#0f766e') }, { name: 'Brand', dot: dot('#e04f1a') }, { name: 'Experiments', dot: dot('#6b4bd6') }
+      ],
+      online: [{ name: 'Lena Park', color: 2, where: 'Mobile app' }, { name: 'Sam Okafor', color: 3, where: 'Web dashboard' }],
+      filters: [{ value: 'all', label: 'All' }, { value: 'mine', label: 'Mine' }, { value: 'branches', label: 'Open branches' }, { value: 'libraries', label: 'Libraries' }],
+      views: [{ value: 'grid', icon: 'layout-grid', title: 'Grid' }, { value: 'list', icon: 'layers', title: 'List' }],
+      files: data.map(function (d) {
+        return {
+          name: d[0], meta: d[1],
+          thumb: 'position: relative; display: block; aspect-ratio: 4 / 3; border-radius: var(--radius-md); background: ' + d[3] + '; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden',
+          a: 'position: absolute; left: 14%; top: 16%; width: 30%; height: 68%; border-radius: 6px; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,.08)',
+          b: 'position: absolute; left: 50%; top: 16%; width: 36%; height: 22%; border-radius: 6px; background: ' + d[4],
+          c: 'position: absolute; left: 50%; top: 44%; width: 26%; height: 10%; border-radius: 3px; background: ' + d[5] + '; opacity: .8',
+          live: d[6] ? 'position: absolute; left: 8px; bottom: 8px; display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--surface-raised); box-shadow: 0 0 0 1px var(--line-strong); font-size: 11px; line-height: 18px; font-weight: 600; color: var(--success)' : 'display: none',
+          liveText: d[6] ? '● 2 editing' : '',
+          badge: d[7] ? badgeBase + (d[7] === 'Library' ? 'background: var(--component-soft); color: var(--component-ink)' : d[7] === 'In review' ? 'background: var(--signal-soft); color: var(--signal-ink)' : 'background: var(--surface-active); color: var(--ink)') : 'display: none',
+          badgeText: d[7]
+        };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>

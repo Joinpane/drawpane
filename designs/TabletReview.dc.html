@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane tablet, reviewing with comments</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="position: relative; width: 1180px; height: 820px; overflow: hidden; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <header class="u-pop u-row" style="position: absolute; left: 16px; right: 16px; top: 28px; height: 48px; padding: 0 8px; border-radius: var(--radius-lg)">
+    <span style="display: grid; place-items: center; width: 44px; height: 44px; color: var(--icon)"><x-import component-from-global-scope="Drawpane.Icon" name="chevron-right"></x-import></span>
+    <span class="u-grow u-col" style="gap: 0"><span class="u-lg u-b">Checkout flow</span><span class="u-xs u-muted">Review mode · feature/checkout-v3</span></span>
+    <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Mode" value="review" options="{{modes}}"></x-import>
+    <span style="height: 36px; padding: 0 14px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); font-size: 14px; line-height: 36px; font-weight: 600">Approve</span>
+  </header>
+  <div style="position: absolute; left: 60px; top: 110px; display: flex; gap: 40px">
+    <div style="position: relative; width: 340px; height: 560px"><dc-import name="PartBoard" variant="branch" hint-size="340px,560px"></dc-import>
+      <svg width="340" height="560" style="position: absolute; left: 0; top: 0" aria-label="Ink marks"><path d="M14 112 C 60 100, 280 98, 328 116 C 340 150, 330 190, 300 194 C 200 200, 60 198, 16 190 C 6 160, 8 130, 14 112" fill="none" stroke="#e04f1a" stroke-width="3" stroke-linecap="round"/><path d="M300 60 l 30 -24 m -10 0 l 10 0 l 0 10" fill="none" stroke="#e04f1a" stroke-width="3" stroke-linecap="round"/></svg>
+      <span style="position: absolute; left: 240px; top: 14px; padding: 2px 8px; border-radius: 6px; background: #e04f1a; color: #ffffff; font-size: 12px; font-weight: 600; transform: rotate(-4deg)">too loud?</span>
+    </div>
+    <div style="position: relative; width: 340px; height: 560px"><dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import><span style="position: absolute; left: 290px; top: 230px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 14px 14px 14px 2px; background: var(--presence-3); color: var(--on-presence); font-size: 11px; font-weight: 700">2</span></div>
+  </div>
+  <aside class="u-pop u-col" style="position: absolute; right: 16px; top: 92px; bottom: 16px; width: 300px; padding: 14px; border-radius: var(--radius-lg)" aria-label="Review">
+    <strong class="u-lg">Review · 3 notes</strong>
+    <sc-for list="{{notes}}" as="n" hint-placeholder-count="3"><div class="u-box u-col" style="padding: 10px 12px; border-radius: var(--radius-md); gap: 4px"><div class="u-row u-sm"><span class="u-av u-av--sm" style="{{n.st}}">{{n.i}}</span><strong class="u-grow">{{n.who}}</strong><span class="u-xs u-muted">{{n.k}}</span></div><span class="u-sm">{{n.t}}</span></div></sc-for>
+    <div style="margin-top: auto" class="u-col"><span class="u-xs u-muted">Draw with the pencil to leave ink notes; they're saved as a comment with a drawing, not in the design.</span><div class="u-row"><span class="u-btnlg u-grow">Request changes</span><span class="u-btnlg u-btnlg--primary u-grow">Approve</span></div></div>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1180, "height": 820}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      modes: H.opts([{ value: 'view', label: 'View' }, { value: 'review', label: 'Review' }, { value: 'edit', label: 'Edit' }]),
+      notes: [{ i: 'Z', who: 'You · ink', k: 'just now', t: 'Hero card: the blue feels loud next to the tab bar.', st: 'background: var(--presence-4)' }, { i: 'SO', who: 'Sam', k: '10 min', t: 'Third row should say "Lena · icon review"', st: 'background: var(--presence-3)' }, { i: 'AI', who: 'Accessibility reviewer', k: 'agent', t: 'All text passes AA on both boards.', st: 'background: var(--agent); color: var(--on-agent); border-radius: 6px' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

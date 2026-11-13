@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane notification emails</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 32px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <header style="display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 24px">
+    <h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Notification emails</h1>
+    <p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Sent by a Queue consumer through your own provider. Every email says why it came and has a one-click way to stop it.</p>
+  </header>
+  <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <sc-for list="{{mails}}" as="m" hint-placeholder-count="4">
+      <figure style="margin: 0; display: grid; gap: 8px; width: 316px">
+        <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">{{m.kind}}</figcaption>
+        <div style="border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+          <div style="padding: 10px 14px; border-bottom: 1px solid var(--line); display: grid; gap: 2px; font-size: 12px; line-height: 16px">
+            <span><strong>Drawpane</strong> <span style="color: var(--ink-muted)">&lt;notify@design.acme.com&gt;</span></span>
+            <span style="font-weight: 600">{{m.subject}}</span>
+          </div>
+          <article style="padding: 20px; background: #ffffff; color: #16181d; display: grid; gap: 14px; font-size: 14px; line-height: 21px">
+            <span style="display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13px"><span style="width: 16px; height: 16px; border-radius: 4px; background: #16181d; box-shadow: inset -5px -5px 0 #e04f1a"></span>Drawpane</span>
+            <p style="margin: 0">{{m.lead}}</p>
+            <div style="{{m.card}}">
+              <span style="{{m.thumb}}"></span>
+              <span style="font-size: 13px; line-height: 19px">{{m.quote}}</span>
+              <span style="font-size: 12px; line-height: 16px; color: #5b616e">{{m.where}}</span>
+            </div>
+            <a href="#" style="justify-self: start; display: inline-block; padding: 9px 14px; border-radius: 8px; background: #16181d; color: #ffffff; text-decoration: none; font-size: 13px; font-weight: 600">{{m.cta}}</a>
+            <p style="margin: 0; padding-top: 12px; border-top: 1px solid #e4e7ec; font-size: 11px; line-height: 16px; color: #5b616e">{{m.why}} <a href="#" style="color: #5b616e">Unsubscribe from these</a> · <a href="#" style="color: #5b616e">All email settings</a></p>
+          </article>
+        </div>
+      </figure>
+    </sc-for>
+
+    <section aria-label="Email settings" style="width: 316px; padding: 16px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); display: grid; gap: 12px">
+      <h2 style="margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Email me about</h2>
+      <sc-for list="{{prefs}}" as="p" hint-placeholder-count="6">
+        <div style="display: flex; align-items: center; gap: 8px"><span style="flex: 1; display: grid"><span style="font-size: 13px; line-height: 18px">{{p.label}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{p.detail}}</span></span><x-import component-from-global-scope="Drawpane.Switch" checked="{{p.on}}" aria-label="{{p.label}}"></x-import></div>
+      </sc-for>
+      <div style="display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; font-size: 13px"><span>Bundle the rest into</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Digest" value="daily" options="{{digest}}"></x-import></div>
+      <span class="dp-caption">Quiet hours follow your time zone (Pacific). Mentions still arrive in the in-app inbox.</span>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var card = 'display: grid; gap: 8px; padding: 12px; border-radius: 10px; background: #f8f9fb; box-shadow: inset 0 0 0 1px #e4e7ec';
+    var th = function (bg) { return 'display: block; height: 96px; border-radius: 6px; background: ' + bg; };
+    return {
+      theme: T,
+      mails: [
+        { kind: 'Mention', subject: 'Ana mentioned you in Mobile app', lead: 'Ana Ruiz mentioned you on Home · Hero card.', quote: '“@Ziyang can we use the larger title here? It reads better at arm\'s length.”', where: 'Mobile app · Home · 2 replies', cta: 'Reply in Drawpane', why: 'You got this because you were mentioned.', card: card, thumb: th('linear-gradient(135deg,#eef1fb,#ffffff); box-shadow: inset 0 0 0 1px #e4e7ec') },
+        { kind: 'Agent finished', subject: 'Empty states agent: 6 boards ready for review', lead: 'The agent you started at 10:12 finished on branch agent/empty-states. Nothing has changed on main.', quote: '6 boards added · 0 lint issues · 1 question for you about the illustration style.', where: 'Used 41k tokens on your Anthropic key · about $0.38', cta: 'Review the branch', why: 'You got this because you started this agent.', card: card, thumb: th('repeating-linear-gradient(135deg,#efe9fd 0 10px,#f8f9fb 10px 20px)') },
+        { kind: 'Invite', subject: 'Lena invited you to Acme Design', lead: 'Lena Park invited you to edit in the Acme Design team on design.acme.com.', quote: '23 members · 4 projects · Acme design system library', where: 'Invite expires November 19', cta: 'Accept invite', why: 'You got this because Lena entered your address.', card: card, thumb: th('linear-gradient(135deg,#fff4ed,#ffffff)') },
+        { kind: 'Daily digest', subject: '12 updates in 3 files', lead: 'Here is what happened yesterday in files you follow.', quote: 'Checkout flow: 2 branches merged · Mobile app: 5 comments, 1 resolved · Acme design system: version 2.4.0 published', where: '3 files · 4 people · 1 agent', cta: 'Open inbox', why: 'Your digest is set to daily at 8:00.', card: card, thumb: 'display: none' }
+      ],
+      prefs: [
+        { label: 'Mentions and replies', detail: 'Right away', on: true }, { label: 'Agents I started', detail: 'When they finish or need you', on: true }, { label: 'Review requests', detail: 'Branches waiting on me', on: true },
+        { label: 'Library updates', detail: 'New versions of libraries I use', on: false }, { label: 'Comments on my files', detail: 'Included in digest', on: false }, { label: 'Security alerts', detail: 'Always on', on: true }
+      ],
+      digest: [{ value: 'off', label: 'Off' }, { value: 'daily', label: 'Daily' }, { value: 'weekly', label: 'Weekly' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

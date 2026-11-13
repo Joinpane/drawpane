@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane export, fonts, find and replace</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 32px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <header style="display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 24px">
+    <h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Dialogs</h1>
+    <p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Dialogs never block the canvas for long jobs: exports and font installs move to a toast and keep going.</p>
+  </header>
+  <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+
+    <section role="dialog" aria-label="Export" style="width: 440px; border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-modal); overflow: hidden">
+      <div style="display: flex; align-items: center; padding: 14px 14px 10px"><h2 style="flex: 1; margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Export 3 layers</h2><x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import></div>
+      <div style="display: flex; gap: 8px; padding: 0 14px 12px">
+        <sc-for list="{{thumbs}}" as="t" hint-placeholder-count="3">
+          <span style="flex: 1; display: grid; gap: 4px"><span style="{{t.box}}"><span style="{{t.inner}}"></span></span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{t.name}}</span></span>
+        </sc-for>
+      </div>
+      <div style="padding: 0 14px; display: grid; gap: 6px">
+        <div style="display: grid; grid-template-columns: 72px 1fr 90px 28px; gap: 6px; font-size: 11px; color: var(--ink-muted)"><span>Scale</span><span>Suffix</span><span>Format</span><span></span></div>
+        <sc-for list="{{rows}}" as="r" hint-placeholder-count="3">
+          <div style="display: grid; grid-template-columns: 72px 1fr 90px 28px; gap: 6px; align-items: center">
+            <x-import component-from-global-scope="Drawpane.NumberField" label="×" aria-label="Scale" default-value="{{r.scale}}"></x-import>
+            <x-import component-from-global-scope="Drawpane.TextField" aria-label="Suffix" default-value="{{r.suffix}}"></x-import>
+            <span style="display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px">{{r.fmt}}<x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+            <x-import component-from-global-scope="Drawpane.IconButton" icon="minus" label="Remove"></x-import>
+          </div>
+        </sc-for>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost" icon="plus">Add format</x-import>
+      </div>
+      <div style="display: grid; gap: 8px; margin: 10px 14px 0; padding: 10px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Include background"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" label="Outline text in SVG"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Name files by layer path"></x-import>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 14px"><span style="flex: 1; font-size: 12px; color: var(--ink-muted)">9 files · about 1.8 MB · zipped</span><x-import component-from-global-scope="Drawpane.Button">Copy link</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Export</x-import></div>
+    </section>
+
+    <div style="display: grid; gap: 24px; width: 380px">
+      <section role="dialog" aria-label="Missing fonts" style="border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-modal); overflow: hidden">
+        <div style="display: flex; gap: 10px; padding: 14px 14px 6px"><span style="color: var(--warning)"><x-import component-from-global-scope="Drawpane.Icon" name="warning"></x-import></span><div style="flex: 1; display: grid; gap: 2px"><h2 style="margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">2 fonts aren't available</h2><span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">Text using them shows a fallback until you fix this. Nothing is changed until you choose.</span></div></div>
+        <div style="padding: 6px 14px; display: grid; gap: 6px">
+          <sc-for list="{{fonts}}" as="f" hint-placeholder-count="2">
+            <div style="display: grid; grid-template-columns: 1fr 16px 1fr; align-items: center; gap: 8px; font-size: 12px">
+              <span style="display: grid"><span style="font-weight: 600">{{f.name}}</span><span style="color: var(--ink-muted); font-size: 11px">{{f.uses}}</span></span>
+              <x-import component-from-global-scope="Drawpane.Icon" name="chevron-right" size="12"></x-import>
+              <span style="display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken)">{{f.to}}<x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="display: flex; gap: 8px; padding: 12px 14px 14px; justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button">Upload font files</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Replace 2 fonts</x-import></div>
+      </section>
+
+      <div role="status" style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); box-shadow: var(--shadow-popover); font-size: 13px">
+        <span style="width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.3); border-top-color: currentColor; box-sizing: border-box"></span>
+        <span style="flex: 1">Exporting 9 files… 6 of 9</span><span class="u-tbtn">Cancel</span>
+      </div>
+      <div role="status" style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); box-shadow: var(--shadow-popover); font-size: 13px">
+        <x-import component-from-global-scope="Drawpane.Icon" name="check"></x-import><span style="flex: 1">Exported mobile-app.zip</span><span class="u-tbtn">Show</span>
+      </div>
+    </div>
+
+    <section aria-label="Find and replace" style="width: 340px; border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-popover); overflow: hidden">
+      <div style="display: flex; align-items: center; gap: 6px; padding: 10px 10px 6px"><h2 style="flex: 1; margin: 0; font-size: 13px; line-height: 18px; font-weight: 600">Find and replace</h2><x-import component-from-global-scope="Drawpane.Kbd">⌘ F</x-import><x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import></div>
+      <div style="padding: 0 10px; display: grid; gap: 6px">
+        <x-import component-from-global-scope="Drawpane.TextField" label="Find" default-value="Sign in"></x-import>
+        <x-import component-from-global-scope="Drawpane.TextField" label="Replace with" default-value="Log in"></x-import>
+        <div style="display: flex; gap: 6px; flex-wrap: wrap"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Search in" value="text" options="{{scopes}}"></x-import><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Match" value="case" options="{{match}}"></x-import></div>
+      </div>
+      <div style="padding: 8px 10px 4px; font-size: 11px; color: var(--ink-muted)">7 matches on 4 boards · 2 inside instances</div>
+      <div style="display: grid; padding: 0 4px">
+        <sc-for list="{{matches}}" as="m" hint-placeholder-count="5">
+          <div style="{{m.row}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{m.icon}}" size="12"></x-import><span style="flex: 1; min-width: 0; display: grid"><span style="font-size: 12px; line-height: 16px">{{m.before}}<mark style="background: var(--signal-soft); color: var(--signal-ink); border-radius: 2px">Sign in</mark>{{m.after}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{m.path}}</span></span></div>
+        </sc-for>
+      </div>
+      <div style="display: flex; gap: 6px; padding: 10px; justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button" size="sm">Replace</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Replace all 5</x-import></div>
+      <div style="padding: 0 10px 10px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Text inside instances is replaced as overrides; main components are skipped.</div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var thumb = function (n, bg, c) { return { name: n, box: 'display: grid; place-items: center; height: 80px; border-radius: var(--radius-sm); background: repeating-conic-gradient(#eceef1 0 25%, #f8f9fb 0 50%) 0 0 / 12px 12px', inner: 'width: 60%; height: 60%; border-radius: 6px; background: ' + bg + '; box-shadow: inset 0 0 0 1px ' + c }; };
+    var mrow = function (sel) { return 'display: flex; align-items: flex-start; gap: 8px; padding: 6px; border-radius: var(--radius-sm); color: var(--icon);' + (sel ? ' background: var(--surface-active)' : ''); };
+    return {
+      theme: T, yes: true,
+      thumbs: [thumb('Hero card', '#2b4fd6', 'transparent'), thumb('Event row', '#ffffff', '#e4e7ec'), thumb('App icon', '#e04f1a', 'transparent')],
+      rows: [{ scale: '1', suffix: '', fmt: 'PNG' }, { scale: '2', suffix: '@2x', fmt: 'PNG' }, { scale: '1', suffix: '', fmt: 'SVG' }],
+      fonts: [{ name: 'Circular Std', uses: '41 layers · 3 styles', to: 'Instrument Sans' }, { name: 'SF Pro Rounded', uses: '6 layers', to: 'Keep missing' }],
+      scopes: [{ value: 'text', label: 'Text' }, { value: 'names', label: 'Layer names' }],
+      match: [{ value: 'case', label: 'Aa' }, { value: 'word', label: 'Word' }, { value: 'regex', label: '.*' }],
+      matches: [
+        { icon: 'text', before: '', after: '', path: 'Sign in / Button / Label', row: mrow(true) },
+        { icon: 'text', before: 'Already have an account? ', after: '', path: 'Sign up / Footer', row: mrow(false) },
+        { icon: 'instance', before: '', after: ' with Google', path: 'Sign in / SSO button · override', row: mrow(false) },
+        { icon: 'instance', before: '', after: ' with GitHub', path: 'Sign in / SSO button · override', row: mrow(false) },
+        { icon: 'component', before: '', after: '', path: 'Button (main) · skipped', row: mrow(false) + ' opacity: .6' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

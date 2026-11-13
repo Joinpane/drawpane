@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane follow mode and spotlight</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="hero" hint-size="248px,824px"></dc-import>
+    <main aria-label="Canvas, following Lena Park" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative; border-radius: var(--radius-lg); box-shadow: inset 0 0 0 3px var(--presence-2)">
+      <div role="status" style="position: absolute; left: 50%; top: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 6px 0 10px; border-radius: 0 0 8px 8px; background: var(--presence-2); color: var(--on-presence); font-size: 12px; font-weight: 600">
+        <span style="display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: rgba(255,255,255,.25); font-size: 10px">LP</span>
+        Following Lena Park · Spotlight on 6 people
+        <span style="padding: 0 6px; border-radius: 4px; background: rgba(255,255,255,.2); font-weight: 500">Esc to stop</span>
+      </div>
+      <div style="position: absolute; left: 60px; top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span aria-hidden="true" style="position: absolute; left: 32px; top: 212px; width: 276px; height: 52px; border-radius: 10px; box-shadow: 0 0 0 1.5px var(--presence-2)"></span>
+      </div>
+      <div aria-label="Lena's cursor" style="position: absolute; left: 330px; top: 300px; display: grid; gap: 2px; justify-items: start">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 1l11 6-5 1.5L6 14z" fill="var(--presence-2)" stroke="#ffffff" stroke-width="1"/></svg>
+        <span style="margin-left: 10px; padding: 1px 6px; border-radius: 4px; background: var(--presence-2); color: var(--on-presence); font-size: 11px; line-height: 16px; font-weight: 600">Lena · "this row needs more air"</span>
+      </div>
+      <div style="position: absolute; left: 440px; top: 70px; width: 300px; height: 470px; border-radius: 12px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12); opacity: .55"></div>
+
+      <div role="dialog" aria-label="People in this file" style="position: absolute; right: 16px; top: 44px; width: 300px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); overflow: hidden">
+        <div style="display: flex; align-items: center; padding: 10px 12px 6px"><strong style="flex: 1; font-size: 13px">In this file · 7</strong><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Spotlight me</x-import></div>
+        <sc-for list="{{people}}" as="p" hint-placeholder-count="6">
+          <div style="display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 12px">
+            <span style="{{p.av}}">{{p.ini}}</span>
+            <span style="flex: 1; min-width: 0; display: grid"><span style="font-size: 13px; line-height: 18px; font-weight: 600">{{p.name}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{p.where}}</span></span>
+            <span style="{{p.tag}}">{{p.state}}</span>
+          </div>
+        </sc-for>
+        <div style="padding: 8px 12px; border-top: 1px solid var(--line); font-size: 11px; line-height: 14px; color: var(--ink-muted)">Click a face to follow. Agents can be followed too: you watch each step as it happens.</div>
+      </div>
+
+      <div style="position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; border-radius: 999px; background: var(--surface-inverse); color: var(--ink-inverse); box-shadow: var(--shadow-popover); font-size: 12px">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--danger)"></span>
+        Huddle · 4 on audio · 12:08
+        <span class="u-tbtn">Mute</span>
+        <span class="u-tbtn">Leave</span>
+      </div>
+    </main>
+    <aside aria-label="Spotlight request" style="width: 264px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px">
+      <div role="alertdialog" aria-label="Spotlight invitation" style="padding: 14px; border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-popover); display: grid; gap: 10px">
+        <div style="display: flex; gap: 10px; align-items: center"><span style="display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--presence-3); color: var(--on-presence); font-size: 12px; font-weight: 700">SO</span><div style="display: grid"><strong style="font-size: 13px">Sam wants to spotlight</strong><span style="font-size: 12px; color: var(--ink-muted)">Your view will follow Sam</span></div></div>
+        <div style="display: flex; gap: 8px"><x-import component-from-global-scope="Drawpane.Button" size="sm">Not now</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Follow Sam</x-import></div>
+      </div>
+      <div style="padding: 14px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); display: grid; gap: 10px; font-size: 12px; line-height: 16px">
+        <strong style="font-size: 13px">Follow behaviour</strong>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Stop following when I edit"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Match their zoom"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" label="Follow across pages"></x-import>
+        <span style="color: var(--ink-muted)">Presence goes through the file's Durable Object, so a 40-person review costs the same as two.</span>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var av = function (c, agent) { return 'flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: ' + (agent ? '8px' : '50%') + '; background: var(' + c + '); color: var(' + (agent ? '--on-agent' : '--on-presence') + '); font-size: 11px; font-weight: 700'; };
+    var tag = function (on) { return on ? 'height: 18px; padding: 0 6px; border-radius: var(--radius-xs); background: var(--signal-soft); color: var(--signal-ink); font-size: 11px; line-height: 18px; font-weight: 600' : 'font-size: 11px; color: var(--ink-muted)'; };
+    var P = [['Lena Park', 'LP', '--presence-2', 'Home · presenting', 'Following', 1, 0], ['Sam Okafor', 'SO', '--presence-3', 'Home · Upcoming', 'Follow', 0, 0], ['Ana Ruiz', 'AR', '--presence-1', 'Checkout · idle 4 min', 'Follow', 0, 0], ['Mo Haddad', 'MH', '--presence-5', 'Viewing only', 'Follow', 0, 0], ['Empty states agent', 'AI', '--agent', 'Branch agent/empty-states · step 4 of 6', 'Follow', 0, 1], ['Dev Patel', 'DP', '--presence-6', 'Inspect mode', 'Follow', 0, 0]];
+    return {
+      theme: T, yes: true,
+      people: P.map(function (p) { return { name: p[0], ini: p[1], av: av(p[2], p[6]), where: p[3], state: p[4], tag: tag(p[5]) }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

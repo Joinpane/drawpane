@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane prototype mode</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" tool="pointer" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="row1" hint-size="248px,824px"></dc-import>
+
+    <main aria-label="Canvas with prototype connections" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: calc(50% - 390px); top: 60px; width: 780px; height: 560px">
+        <div style="position: absolute; left: 0; top: 0; width: 340px; height: 560px">
+          <span style="position: absolute; left: 0; top: -22px; display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px 2px 6px; border-radius: var(--radius-xs); background: var(--signal); color: var(--on-signal); font-size: 11px; line-height: 14px; font-weight: 600"><x-import component-from-global-scope="Drawpane.Icon" name="play" size="12"></x-import>Flow 1 · Home — iOS</span>
+          <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+          <span aria-hidden="true" style="position: absolute; left: 32px; top: 212px; width: 276px; height: 52px; border-radius: 10px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+          <span aria-hidden="true" style="position: absolute; left: 6px; top: 500px; width: 328px; height: 56px; border-radius: 10px; box-shadow: inset 0 0 0 1px var(--ink-muted)"></span>
+        </div>
+
+        <div style="position: absolute; left: 440px; top: 0; width: 340px; height: 560px; background: #ffffff; box-shadow: 0 0 0 1px rgba(0,0,0,.06); font-family: var(--font-ui); color: #16181d; overflow: hidden">
+          <span style="position: absolute; left: 0; top: -22px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Event detail</span>
+          <div style="height: 40px"></div>
+          <div style="margin: 4px 16px 0; display: flex; align-items: center; gap: 6px; font-size: 13px; color: #2b4fd6; font-weight: 600">‹ Today</div>
+          <div style="margin: 18px 20px 0; width: 44px; height: 44px; border-radius: 12px; background: #e4e7ec"></div>
+          <div style="margin: 14px 20px 0; font-size: 22px; line-height: 28px; font-weight: 600">Ship onboarding v2</div>
+          <div style="margin: 4px 20px 0; font-size: 13px; line-height: 18px; color: #5b616e">Due today · Mobile squad</div>
+          <div style="margin: 20px 20px 0; height: 1px; background: #e4e7ec"></div>
+          <div style="margin: 16px 20px 0; display: grid; gap: 10px">
+            <div style="height: 12px; width: 92%; border-radius: 4px; background: #eef0f3"></div>
+            <div style="height: 12px; width: 78%; border-radius: 4px; background: #eef0f3"></div>
+            <div style="height: 12px; width: 84%; border-radius: 4px; background: #eef0f3"></div>
+          </div>
+          <div style="position: absolute; left: 20px; right: 20px; bottom: 28px; height: 48px; border-radius: 12px; background: #2b4fd6; color: #ffffff; display: grid; place-items: center; font-size: 15px; font-weight: 600">Mark done</div>
+        </div>
+
+        <svg aria-hidden="true" width="780" height="560" viewBox="0 0 780 560" style="position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none">
+          <path d="M308 238 C 380 238, 372 40, 432 40" fill="none" stroke="var(--signal)" stroke-width="2"></path>
+          <path d="M426 34 L436 40 L426 46 z" fill="var(--signal)"></path>
+          <circle cx="308" cy="238" r="4" fill="var(--surface-raised)" stroke="var(--signal)" stroke-width="2"></circle>
+          <path d="M308 528 C 392 528, 404 300, 440 300" fill="none" stroke="var(--ink-muted)" stroke-width="1.25" stroke-dasharray="4 3"></path>
+          <circle cx="308" cy="528" r="3.5" fill="var(--surface-raised)" stroke="var(--ink-muted)" stroke-width="1.25"></circle>
+        </svg>
+        <span style="position: absolute; left: 352px; top: 128px; padding: 2px 6px; border-radius: var(--radius-xs); background: var(--surface-raised); box-shadow: var(--shadow-popover); font-size: 11px; line-height: 14px; white-space: nowrap">Tap → Smart animate</span>
+      </div>
+    </main>
+
+    <aside aria-label="Prototype inspector" style="width: 264px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="prototype" options="{{modes}}"></x-import></div>
+      <section class="dp-section" aria-label="Interaction">
+        <div class="dp-section__head">
+          <h3 class="dp-section__title">Interaction</h3>
+          <div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add interaction"></x-import></div>
+        </div>
+        <div class="dp-section__body">
+          <div class="dp-row dp-row--label"><span class="dp-caption">Trigger</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Trigger" value="tap" options="{{triggers}}"></x-import></div>
+          <div class="dp-row dp-row--label"><span class="dp-caption">Action</span><span style="display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px">Navigate to <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+          <div class="dp-row dp-row--label"><span class="dp-caption">Destination</span><span style="display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px"><x-import component-from-global-scope="Drawpane.Icon" name="board" size="12"></x-import>Event detail</span></div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Animation">
+        <div class="dp-section__head"><h3 class="dp-section__title">Animation</h3><x-import component-from-global-scope="Drawpane.IconButton" icon="play" label="Preview animation"></x-import></div>
+        <div class="dp-section__body">
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Type" value="smart" options="{{anims}}"></x-import>
+          <div aria-label="Easing curve: ease out, cubic-bezier 0.2, 0.8, 0.2, 1" style="position: relative; height: 120px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+            <svg width="100%" height="120" viewBox="0 0 240 120" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M16 104 L224 16" stroke="var(--line-strong)" stroke-width="1" stroke-dasharray="3 3" fill="none"></path>
+              <path d="M16 104 L57.6 33.6" stroke="var(--icon)" stroke-width="1" fill="none"></path>
+              <path d="M182.4 16 L224 16" stroke="var(--icon)" stroke-width="1" fill="none"></path>
+              <path d="M16 104 C 57.6 33.6, 182.4 16, 224 16" stroke="var(--signal)" stroke-width="2" fill="none"></path>
+              <circle cx="57.6" cy="33.6" r="4" fill="var(--surface-raised)" stroke="var(--signal)" stroke-width="1.5"></circle>
+              <circle cx="182.4" cy="16" r="4" fill="var(--surface-raised)" stroke="var(--signal)" stroke-width="1.5"></circle>
+            </svg>
+          </div>
+          <div class="dp-row">
+            <x-import component-from-global-scope="Drawpane.NumberField" icon="token" aria-label="Easing" token="ease/out"></x-import>
+            <x-import component-from-global-scope="Drawpane.NumberField" label="ms" aria-label="Duration" default-value="280"></x-import>
+          </div>
+          <span style="font-family: var(--font-mono); font-size: 11px; line-height: 14px; color: var(--ink-muted)">cubic-bezier(0.2, 0.8, 0.2, 1)</span>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Flows">
+        <div class="dp-section__head"><h3 class="dp-section__title">Flows</h3><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add flow"></x-import></div>
+        <div class="dp-section__body" style="gap: 2px">
+          <sc-for list="{{flows}}" as="f" hint-placeholder-count="2">
+            <div style="{{f.row}}"><x-import component-from-global-scope="Drawpane.Icon" name="play" size="12"></x-import><span style="flex: 1">{{f.name}}</span><span style="color: var(--ink-muted)">{{f.n}}</span></div>
+          </sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Device">
+        <div class="dp-section__head"><h3 class="dp-section__title">Device</h3></div>
+        <div class="dp-section__body"><span style="display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px">Phone · 390 × 844 <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var row = 'display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); font-size: 12px;';
+    return {
+      theme: this.props.theme ?? 'light',
+      modes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }],
+      triggers: [{ value: 'tap', label: 'Tap' }, { value: 'hover', label: 'Hover' }, { value: 'drag', label: 'Drag' }, { value: 'key', label: 'Key' }],
+      anims: [{ value: 'instant', label: 'Instant' }, { value: 'dissolve', label: 'Dissolve' }, { value: 'push', label: 'Push' }, { value: 'smart', label: 'Smart' }],
+      flows: [
+        { name: 'Flow 1 · Today', n: '6 screens', row: row + ' background: var(--signal-soft); color: var(--signal-ink); font-weight: 600' },
+        { name: 'Onboarding', n: '4 screens', row: row }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

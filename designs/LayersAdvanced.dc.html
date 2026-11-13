@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane layers in depth</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <aside class="u-side" aria-label="Layers" style="width: 300px">
+      <div class="u-row" style="padding: 8px 8px 4px 12px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Left pane" value="layers" options="{{tabs}}"></x-import></div>
+      <div style="padding: 6px 10px"><div class="u-input u-input--focus"><x-import component-from-global-scope="Drawpane.Icon" name="search" size="12"></x-import><span class="u-grow">row</span><span class="u-xs u-muted">9 found</span></div></div>
+      <div class="u-row" style="padding: 0 10px 6px; gap: 4px; flex-wrap: wrap"><sc-for list="{{filters}}" as="f" hint-placeholder-count="5"><span class="u-pill {{f.on}}" style="height: 24px; padding: 0 9px">{{f.t}}</span></sc-for></div>
+      <div class="u-list" style="padding: 0 6px">
+        <sc-for list="{{layers}}" as="l" hint-placeholder-count="14">
+          <div class="u-item {{l.sel}}" style="{{l.st}}">
+            <span style="{{l.ic}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{l.icon}}" size="12"></x-import></span>
+            <span class="u-grow u-ellip" style="{{l.ns}}">{{l.n}}</span>
+            <span style="{{l.flag}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{l.f}}" size="12"></x-import></span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="position: relative; margin: 0 6px; height: 2px; background: var(--signal); border-radius: 1px"><span style="position: absolute; left: 40px; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--signal)"></span></div>
+      <div class="u-pop u-row" style="margin: 4px 30px; padding: 4px 8px; width: max-content; opacity: .92"><x-import component-from-global-scope="Drawpane.Icon" name="instance" size="12"></x-import><span class="u-sm">Event row · moving to the end of Settings — iOS</span></div>
+    </aside>
+    <main class="u-stage" aria-label="Canvas">
+      <div style="position: absolute; left: 60px; top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span class="u-outline" style="left: 32px; top: 272px; width: 276px; height: 52px; border-radius: 10px"></span>
+      </div>
+      <section class="u-pop u-col" style="position: absolute; left: 440px; top: 60px; width: 300px; padding: 12px">
+        <strong class="u-md">Layer states, at a glance</strong>
+        <sc-for list="{{legend}}" as="g" hint-placeholder-count="7"><div class="u-row u-sm"><span style="{{g.ic}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{g.i}}" size="12"></x-import></span><span class="u-grow" style="{{g.ns}}">{{g.n}}</span><span class="u-xs u-muted">{{g.d}}</span></div></sc-for>
+        <div class="u-line"></div>
+        <span class="u-xs u-muted">Double-click to rename · ⌘ click to multi-select · drag with ⌥ to duplicate · ← → collapse and expand · ⌘ ⇧ L lock · ⌘ ⇧ H hide</span>
+      </section>
+    </main>
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var ic = function (t) { return 'display: inline-flex; color: ' + (t === 'c' ? 'var(--component-ink)' : t === 'm' ? 'var(--ink-muted)' : 'var(--icon)'); };
+    var L = [[0, 'Home — iOS', 'board', '', '', 0, ''], [1, 'Upcoming', 'layout-col', '', '', 0, ''], [2, 'Event row', 'instance', 'c', '', 0, ''], [2, 'Event row', 'instance', 'c', '', 1, 'edit'], [2, 'Event row', 'instance', 'c', '', 0, ''], [1, 'Hero card', 'instance', 'c', '', 0, ''], [1, 'Card mask', 'ellipse', '', 'mask', 0, ''], [2, 'Photo', 'image', '', '', 0, ''], [1, 'Tab bar', 'instance', 'c', 'lock', 0, ''], [1, 'Old header', 'eye-off', 'm', 'eye-off', 0, ''], [0, 'Settings — iOS', 'board', '', '', 0, ''], [1, 'Toggle row', 'instance', 'c', '', 0, ''], [1, 'Row 2', 'group', '', '', 0, ''], [1, 'Row 3 (rename me)', 'group', '', '', 0, '']];
+    return {
+      tabs: H.opts(['Layers', 'Assets', 'History']),
+      filters: [{ t: 'All', on: '' }, { t: 'Text', on: '' }, { t: 'Components', on: 'is-on' }, { t: 'Hidden', on: '' }, { t: 'Changed by agent', on: '' }],
+      layers: L.map(function (l) { return { n: l[6] === 'edit' ? 'Event row' : l[1], icon: l[2], ic: ic(l[3]), ns: (l[3] === 'c' ? 'color: var(--component-ink);' : l[3] === 'm' ? 'color: var(--ink-muted);' : '') + (l[6] === 'edit' ? ' box-shadow: inset 0 0 0 1.5px var(--signal); border-radius: 3px; padding: 0 4px; background: var(--surface)' : ''), f: l[4] || 'eye', flag: l[4] ? 'display: inline-flex; color: var(--ink-muted)' : 'display: none', sel: H.sel(l[5] || l[6] === 'edit'), st: 'padding-left: ' + (8 + l[0] * 16) + 'px; min-height: 28px; padding-top: 4px; padding-bottom: 4px' }; }),
+      legend: [{ i: 'instance', n: 'Instance', d: 'teal name', ic: ic('c'), ns: 'color: var(--component-ink)' }, { i: 'component', n: 'Main component', d: 'teal, filled icon', ic: ic('c'), ns: 'color: var(--component-ink)' }, { i: 'layout-col', n: 'Auto layout', d: 'stack icon', ic: ic(''), ns: '' }, { i: 'ellipse', n: 'Mask', d: 'clips the layers under it', ic: ic(''), ns: '' }, { i: 'lock', n: 'Locked', d: "can't select on canvas", ic: ic('m'), ns: '' }, { i: 'eye-off', n: 'Hidden', d: 'dimmed', ic: ic('m'), ns: 'color: var(--ink-muted)' }, { i: 'agent', n: 'Changed by an agent', d: 'violet dot, on branches', ic: 'display: inline-flex; color: var(--agent)', ns: '' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

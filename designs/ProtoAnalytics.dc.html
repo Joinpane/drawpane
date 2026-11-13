@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane prototype views and drop-off</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-page" style="padding: 28px 32px 40px">
+  <header style="display: flex; align-items: flex-end; gap: 12px; margin-bottom: 20px"><div style="flex: 1"><div class="u-sm u-muted">Mobile app · Published prototype</div><h1 class="u-h1">Onboarding v3 · last 14 days</h1></div><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Range" value="14" options="{{range}}"></x-import></header>
+  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px">
+    <sc-for list="{{kpi}}" as="k" hint-placeholder-count="4"><div class="u-box u-pad u-col u-col--tight"><span class="u-sm u-muted">{{k.l}}</span><span style="font-size: 26px; line-height: 32px; font-weight: 600">{{k.v}}</span><span class="u-xs u-muted">{{k.d}}</span></div></sc-for>
+  </div>
+  <div style="display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 14px">
+    <section class="u-box u-pad u-col">
+      <h2 class="u-h3">Flow drop-off</h2>
+      <div class="u-row" style="align-items: flex-end; gap: 14px; height: 240px">
+        <sc-for list="{{funnel}}" as="f" hint-placeholder-count="4"><div class="u-col u-col--tight" style="flex: 1; justify-items: center; align-self: flex-end"><span class="u-sm u-b">{{f.p}}</span><span style="{{f.bar}}"></span><span class="u-xs u-muted">{{f.n}}</span></div></sc-for>
+      </div>
+      <div class="u-note u-note--signal"><x-import component-from-global-scope="Drawpane.Icon" name="warning" size="12"></x-import><span class="u-grow">38% leave at Calendar. Most tap "Not now", which isn't wired yet in this prototype.</span></div>
+    </section>
+    <section class="u-box u-pad u-col">
+      <h2 class="u-h3">Where people tap · Calendar</h2>
+      <div style="position: relative; height: 330px; border-radius: var(--radius-md); background: var(--canvas); overflow: hidden">
+        <div style="position: absolute; left: 50%; top: 10px; width: 240px; height: 480px; margin-left: -120px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12)">
+          <div style="margin: 52px 20px 0; height: 160px; border-radius: 16px; background: #eef1fb"></div>
+          <div style="margin: 18px 20px 0; font-size: 18px; font-weight: 600; color: #16181d">Bring your calendars</div>
+          <div style="position: absolute; left: 20px; right: 20px; top: 250px; height: 36px; border-radius: 10px; background: #2b4fd6; color: #ffffff; font-size: 13px; line-height: 36px; text-align: center; font-weight: 600">Allow calendar access</div>
+          <div style="position: absolute; left: 0; right: 0; top: 296px; text-align: center; font-size: 12px; color: #5b616e">Not now</div>
+          <sc-for list="{{heat}}" as="h" hint-placeholder-count="4"><span style="{{h}}"></span></sc-for>
+        </div>
+      </div>
+      <span class="u-xs u-muted">No cookies. Counts come from the Worker serving the prototype.</span>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var F = [['Welcome', 1240, 100], ['Calendar', 1180, 95], ['Reminders', 732, 59], ['Home', 690, 56]];
+    var blob = function (x, y, r, a) { return 'position: absolute; left: ' + (x - r) + 'px; top: ' + (y - r) + 'px; width: ' + (2 * r) + 'px; height: ' + (2 * r) + 'px; border-radius: 50%; background: radial-gradient(circle, rgba(224,79,26,' + a + '), rgba(224,79,26,0) 70%)'; };
+    return {
+      range: H.opts([{ value: '7', label: '7 days' }, { value: '14', label: '14 days' }, { value: '30', label: '30 days' }]),
+      kpi: [{ l: 'Views', v: '1,240', d: 'from 3 links' }, { l: 'Finished the flow', v: '56%', d: 'to Home' }, { l: 'Median time', v: '48 s', d: 'Welcome to Home' }, { l: 'Comments left', v: '17', d: 'by 9 viewers' }],
+      funnel: F.map(function (f) { return { n: f[0], p: f[2] + '%', bar: 'width: 100%; height: ' + (f[2] * 1.8) + 'px; border-radius: 6px 6px 0 0; background: ' + (f[0] === 'Calendar' ? 'var(--signal)' : 'color-mix(in srgb, var(--signal) 40%, transparent)') }; }),
+      heat: [blob(120, 303, 34, .6), blob(120, 268, 30, .35), blob(150, 140, 18, .15)]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<!-- @dsCard group="Actions" height=72 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Kbd — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.Kbd, { keys: ['\u2318', 'K'] }), h(D.Kbd, { keys: ['\u21e7', 'A'] }), h(D.Kbd, { keys: ['Alt'] }),
+      h(D.Kbd, { keys: ['\u2318', '.'] }), h(D.Kbd, { keys: ['tab'] }))
+  );
+</script>
+</body>
+</html>

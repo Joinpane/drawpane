@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane editor, Layout X-ray and Explain</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" tool="pointer" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="upcoming" hint-size="248px,824px"></dc-import>
+
+    <main aria-label="Canvas" style="flex: 999 1 560px; min-width: 0; position: relative; height: 824px">
+      <div style="position: absolute; left: calc(50% - 250px); top: 40px; width: 340px; height: 560px">
+        <span style="position: absolute; left: 0; top: -20px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Home — iOS</span>
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 200px; width: 300px; height: 12px; background: var(--xray-padding); opacity: .35"></span>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 384px; width: 300px; height: 12px; background: var(--xray-padding); opacity: .35"></span>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 212px; width: 12px; height: 172px; background: var(--xray-padding); opacity: .35"></span>
+        <span aria-hidden="true" style="position: absolute; left: 308px; top: 212px; width: 12px; height: 172px; background: var(--xray-padding); opacity: .35"></span>
+        <span aria-hidden="true" style="position: absolute; left: 32px; top: 264px; width: 276px; height: 8px; background: var(--xray-gap); opacity: .35"></span>
+        <span aria-hidden="true" style="position: absolute; left: 32px; top: 324px; width: 276px; height: 8px; background: var(--xray-gap); opacity: .35"></span>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 200px; width: 300px; height: 196px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+
+        <span style="position: absolute; left: 160px; top: 200px; font-family: var(--font-mono); font-size: 10.5px; line-height: 12px; color: #6b4e00">12</span>
+        <span style="position: absolute; left: 22px; top: 292px; font-family: var(--font-mono); font-size: 10.5px; line-height: 12px; color: #6b4e00">12</span>
+        <span style="position: absolute; left: 150px; top: 262px; padding: 0 4px; border-radius: 999px; background: #ffffff; box-shadow: 0 0 0 1px var(--xray-gap); font-family: var(--font-mono); font-size: 10.5px; line-height: 12px; color: #8a1f50; cursor: ns-resize">gap 8 ⇕</span>
+        <span style="position: absolute; left: 150px; top: 322px; padding: 0 4px; border-radius: 999px; background: #ffffff; box-shadow: 0 0 0 1px var(--xray-gap); font-family: var(--font-mono); font-size: 10.5px; line-height: 12px; color: #8a1f50; cursor: ns-resize">gap 8 ⇕</span>
+
+        <span style="position: absolute; left: 330px; top: 200px; width: 8px; height: 196px; border-top: 1px solid var(--guide); border-bottom: 1px solid var(--guide); box-sizing: border-box"></span>
+        <span style="position: absolute; left: 333.5px; top: 200px; width: 1px; height: 196px; background: var(--guide)"></span>
+        <span style="position: absolute; left: 344px; top: 289px; padding: 1px 6px; border-radius: var(--radius-xs); background: var(--signal); color: var(--on-signal); font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 500; white-space: nowrap; box-shadow: 0 0 0 3px var(--signal-soft)">196 · hug</span>
+      </div>
+
+      <div role="dialog" aria-label="Explain height" style="position: absolute; left: calc(50% + 130px); top: 200px; width: 300px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); overflow: hidden">
+        <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 12px 12px 8px">
+          <div>
+            <div style="font-size: 13px; line-height: 18px; font-weight: 600">Why is Upcoming 196 px tall?</div>
+            <div style="margin-top: 2px; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Height hugs its children in a vertical stack.</div>
+          </div>
+          <x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close explanation" shortcut="esc"></x-import>
+        </div>
+        <ol aria-label="How the height is calculated" style="margin: 0; padding: 0 12px; list-style: none; display: grid; gap: 2px">
+          <sc-for list="{{terms}}" as="t" hint-placeholder-count="4">
+            <li style="display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; min-height: 28px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px; line-height: 16px">
+              <span style="display: flex; align-items: center; gap: 6px; min-width: 0"><span style="{{t.dot}}"></span><span>{{t.label}}</span></span>
+              <span style="font-family: var(--font-mono); font-size: 11px; color: var(--ink); font-variant-numeric: tabular-nums">{{t.value}}</span>
+            </li>
+          </sc-for>
+        </ol>
+        <div style="display: flex; justify-content: space-between; margin: 6px 12px 0; padding: 8px; border-top: 1px solid var(--line); font-family: var(--font-mono); font-size: 12px; line-height: 16px">
+          <span style="color: var(--ink-muted)">12 + 3 × 52 + 2 × 8 + 12</span>
+          <b style="font-weight: 500; color: var(--signal-ink)">= 196</b>
+        </div>
+        <div style="padding: 8px 12px; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Width is Fill: Home — iOS is 340, minus 20 left and 20 right margins.</div>
+        <div style="display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); background: var(--surface)">
+          <x-import component-from-global-scope="Drawpane.Button" size="sm">Set fixed height</x-import>
+          <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost" icon="instance">Select Event row</x-import>
+        </div>
+      </div>
+
+      <div style="position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; padding: 6px 12px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); font-size: 11px; line-height: 14px; color: var(--ink-muted); white-space: nowrap">
+        <span style="display: inline-flex; align-items: center; gap: 6px"><span style="width: 10px; height: 10px; border-radius: 2px; background: var(--xray-padding)"></span>Padding</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px"><span style="width: 10px; height: 10px; border-radius: 2px; background: var(--xray-gap)"></span>Gap · drag to change</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px"><x-import component-from-global-scope="Drawpane.Kbd">Alt</x-import> held for X-ray</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px"><x-import component-from-global-scope="Drawpane.Kbd">⌥ E</x-import> explain</span>
+      </div>
+    </main>
+
+    <dc-import name="PartInspector" xray="{{yes}}" hint-size="264px,824px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var sw = 'width: 8px; height: 8px; border-radius: 2px; flex: none; background: ';
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      terms: [
+        { label: 'Padding top and bottom', value: '12 + 12', dot: sw + 'var(--xray-padding)' },
+        { label: '3 × Event row · fixed 52', value: '156', dot: sw + 'var(--component)' },
+        { label: '2 gaps · space/200', value: '16', dot: sw + 'var(--xray-gap)' },
+        { label: 'Hidden children', value: '0', dot: sw + 'var(--line-strong)' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

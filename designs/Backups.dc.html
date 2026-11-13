@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane backups, restore and upgrades</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <header style="padding: 28px 32px 0; border-bottom: 1px solid var(--line)">
+    <div style="display: flex; align-items: center; gap: 12px">
+      <span style="display: grid; place-items: center; width: 36px; height: 36px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); font-weight: 700">A</span>
+      <div style="flex: 1"><h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Acme Design</h1><p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Instance and team settings · design.acme.com · Drawpane 1.4.2</p></div>
+    </div>
+    <nav aria-label="Settings" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 20px">
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Members</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Roles</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Libraries</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Authentication</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Agents</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Integrations</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Audit log</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent; color: var(--ink); font-weight: 600; border-bottom-color: var(--signal)">Backups and upgrades</a>
+    </nav>
+  </header>
+  <div style="padding: 24px 32px 40px; display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <div style="flex: 1 1 560px; display: grid; gap: 20px">
+      <section aria-label="Upgrade available" style="border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden">
+        <div style="display: flex; align-items: flex-start; gap: 12px; padding: 16px; background: var(--signal-soft)">
+          <span style="color: var(--signal-ink)"><x-import component-from-global-scope="Drawpane.Icon" name="bolt"></x-import></span>
+          <div style="flex: 1; display: grid; gap: 4px"><strong style="font-size: 15px">Drawpane 1.5.0 is available</strong><span style="font-size: 13px; line-height: 18px">Includes Penpot 2.12 core (merged upstream Nov 10), agent skills v2 and 46 fixes. You're on 1.4.2.</span></div>
+          <x-import component-from-global-scope="Drawpane.Button">Changelog</x-import>
+        </div>
+        <div style="padding: 14px 16px; display: grid; gap: 10px">
+          <span class="dp-caption">Pre-flight checks</span>
+          <sc-for list="{{checks}}" as="c" hint-placeholder-count="5">
+            <div style="display: flex; align-items: center; gap: 10px; font-size: 13px"><span style="{{c.ic}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{c.icon}}" size="12"></x-import></span><span style="flex: 1">{{c.label}}</span><span style="font-size: 12px; color: var(--ink-muted)">{{c.meta}}</span></div>
+          </sc-for>
+          <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px"><span style="flex: 1; font-size: 12px; color: var(--ink-muted)">Runs your GitHub Action: wrangler deploy, then D1 migrations behind a gradual rollout (10% → 100%).</span><x-import component-from-global-scope="Drawpane.Button">Schedule for tonight</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Upgrade now</x-import></div>
+        </div>
+      </section>
+
+      <section aria-label="Backups" style="border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line)"><div style="flex: 1; display: grid"><h2 style="margin: 0; font-size: 15px; font-weight: 600">Backups</h2><span style="font-size: 12px; color: var(--ink-muted)">Nightly snapshots to a separate R2 bucket · D1 point-in-time recovery for 30 days</span></div><x-import component-from-global-scope="Drawpane.Button" size="sm">Back up now</x-import></div>
+        <sc-for list="{{backups}}" as="b" hint-placeholder-count="5">
+          <div style="display: grid; grid-template-columns: 1fr 120px 120px auto; align-items: center; gap: 12px; height: 48px; padding: 0 16px; border-bottom: 1px solid var(--line); font-size: 13px"><span style="display: grid"><span style="font-weight: 600">{{b.when}}</span><span style="font-size: 11px; color: var(--ink-muted)">{{b.kind}}</span></span><span style="color: var(--ink-muted)">{{b.size}}</span><span style="{{b.ss}}">{{b.state}}</span><span style="display: flex; gap: 6px"><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Download</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm">Restore…</x-import></span></div>
+        </sc-for>
+      </section>
+    </div>
+
+    <div style="flex: 1 1 360px; max-width: 420px; display: grid; gap: 20px">
+      <section role="dialog" aria-label="Restore" style="border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-modal); padding: 18px; display: grid; gap: 12px">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600">Restore from Nov 11, 02:00</h2>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Restore scope" value="file" options="{{scope}}"></x-import>
+        <x-import component-from-global-scope="Drawpane.TextField" label="File" default-value="Checkout flow"></x-import>
+        <div style="display: grid; gap: 8px; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 13px">
+          <span role="radio" aria-checked="true" style="display: flex; gap: 8px; align-items: flex-start"><span style="flex: none; width: 14px; height: 14px; margin-top: 2px; box-sizing: border-box; border-radius: 50%; border: 4px solid var(--signal); background: var(--surface)"></span><span style="display: grid"><strong>Restore as a copy</strong><span style="font-size: 12px; color: var(--ink-muted)">"Checkout flow (Nov 11)" next to the original</span></span></span>
+          <span role="radio" aria-checked="false" style="display: flex; gap: 8px; align-items: flex-start"><span style="flex: none; width: 14px; height: 14px; margin-top: 2px; box-sizing: border-box; border-radius: 50%; border: 1.5px solid var(--line-control)"></span><span style="display: grid"><strong>Replace the current file</strong><span style="font-size: 12px; color: var(--ink-muted)">Today's work is kept as a named version first</span></span></span>
+        </div>
+        <div style="display: flex; gap: 8px; justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button">Cancel</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Restore copy</x-import></div>
+      </section>
+      <section aria-label="Version" style="border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); padding: 16px; display: grid; gap: 8px; font-size: 13px">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600">This instance</h2>
+        <dl style="margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 16px"><dt style="color: var(--ink-muted)">Version</dt><dd style="margin: 0">1.4.2 · Penpot core 2.11</dd><dt style="color: var(--ink-muted)">Deployed</dt><dd style="margin: 0">Nov 3 by GitHub Action #318</dd><dt style="color: var(--ink-muted)">Previous</dt><dd style="margin: 0">1.4.1 · <a href="#" style="color: var(--ink)">roll back</a></dd><dt style="color: var(--ink-muted)">Repo</dt><dd style="margin: 0; font-family: var(--font-mono); font-size: 12px">acme/drawpane (fork of dizys/drawpane)</dd></dl>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var ic = function (c) { return 'flex: none; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--surface-sunken); color: ' + c; };
+    var st = function (ok) { return 'font-size: 12px; font-weight: 600; color: ' + (ok ? 'var(--success)' : 'var(--ink-muted)'); };
+    return {
+      theme: T,
+      checks: [
+        { icon: 'check', label: '3 D1 migrations, all additive', meta: 'about 4 s', ic: ic('var(--success)') },
+        { icon: 'check', label: 'File format 2.12 reads every file here', meta: 'tested on a copy of 412 files', ic: ic('var(--success)') },
+        { icon: 'check', label: 'Plugins compatible', meta: '7 of 7', ic: ic('var(--success)') },
+        { icon: 'warning', label: 'Your fork changes durable/room.ts', meta: '1 merge conflict to fix in GitHub', ic: ic('var(--warning)') },
+        { icon: 'check', label: 'Fresh backup taken', meta: '2 min ago', ic: ic('var(--success)') }
+      ],
+      backups: [
+        { when: 'Today, 02:00', kind: 'Nightly · R2 + D1 export', size: '2.1 GB', state: 'Verified', ss: st(1) },
+        { when: 'Nov 11, 02:00', kind: 'Nightly', size: '2.1 GB', state: 'Verified', ss: st(1) },
+        { when: 'Nov 10, 16:20', kind: 'Before upgrade check', size: '2.0 GB', state: 'Verified', ss: st(1) },
+        { when: 'Nov 10, 02:00', kind: 'Nightly', size: '2.0 GB', state: 'Verified', ss: st(1) },
+        { when: 'Nov 3, 09:12', kind: 'Before upgrade to 1.4.2', size: '1.9 GB', state: 'Kept 90 days', ss: st(0) }
+      ],
+      scope: [{ value: 'file', label: 'One file' }, { value: 'project', label: 'Project' }, { value: 'all', label: 'Everything' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

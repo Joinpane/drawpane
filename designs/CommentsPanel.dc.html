@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane all comments</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" tool="comment" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <aside class="u-side" aria-label="All comments" style="width: 340px">
+      <div class="u-head"><h2 class="u-h3">Comments · 23</h2><x-import component-from-global-scope="Drawpane.IconButton" icon="search" label="Search comments"></x-import></div>
+      <div class="u-row" style="padding: 0 12px 8px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Show" value="open" options="{{show}}"></x-import><span class="u-spacer"></span><span class="u-select" style="height: 24px">This page <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+      <div style="overflow: hidden">
+        <sc-for list="{{threads}}" as="t" hint-placeholder-count="6">
+          <div class="u-col u-col--tight" style="{{t.st}}">
+            <div class="u-row"><span class="u-av u-av--sm" style="{{t.avs}}">{{t.ini}}</span><span class="u-sm u-b u-grow">{{t.who}}</span><span class="u-xs u-muted">{{t.when}}</span><span style="{{t.dot}}"></span></div>
+            <span class="u-sm" style="padding-left: 28px">{{t.text}}</span>
+            <span class="u-xs u-muted" style="padding-left: 28px">{{t.meta}}</span>
+          </div>
+        </sc-for>
+      </div>
+    </aside>
+    <main class="u-stage" aria-label="Canvas">
+      <div style="position: absolute; left: 40px; top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <sc-for list="{{pins}}" as="p" hint-placeholder-count="3"><span style="{{p.s}}">{{p.n}}</span></sc-for>
+      </div>
+      <section class="u-pop u-col" style="position: absolute; left: 400px; top: 160px; width: 340px; padding: 12px" aria-label="Thread">
+        <div class="u-row"><span class="u-av u-av--sm" style="background: var(--presence-1)">AR</span><span class="u-sm u-b u-grow">Ana Ruiz</span><x-import component-from-global-scope="Drawpane.IconButton" icon="check" label="Resolve"></x-import></div>
+        <span class="u-sm">Can we use the larger title here? It reads better at arm's length.</span>
+        <div class="u-row" style="gap: 6px"><span style="width: 90px; height: 60px; border-radius: 6px; background: linear-gradient(135deg,#eef1fb,#ffd8c7)"></span><span class="u-xs u-muted">screenshot.png · 120 KB</span></div>
+        <div class="u-row"><span class="u-av u-av--sm" style="background: var(--presence-2)">LP</span><span class="u-sm"><strong>Lena</strong> +1, title-lg</span></div>
+        <div class="u-box" style="padding: 8px 10px; border-radius: var(--radius-sm); display: grid; gap: 6px">
+          <span class="u-sm">@Sam let's try it on the <span class="u-chip u-chip--muted">#Hero card</span></span>
+          <div class="u-row"><x-import component-from-global-scope="Drawpane.IconButton" icon="image" label="Attach"></x-import><x-import component-from-global-scope="Drawpane.IconButton" icon="agent" label="Ask an agent"></x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Reply</x-import></div>
+        </div>
+        <div style="margin-top: -4px"><x-import component-from-global-scope="Drawpane.Menu" label="Mention" items="{{mention}}"></x-import></div>
+      </section>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var T4 = [['AR', 'Ana Ruiz', '10:05', 'Can we use the larger title here?', 'Home — iOS · Greeting · 2 replies', 1, 1], ['SO', 'Sam Okafor', 'Yesterday', 'Swap these hand-made rows for the component', 'Web dashboard · Calendar · agent replied', 1, 0], ['LP', 'Lena Park', 'Nov 10', 'Settings icon feels heavy next to the others', 'Home — iOS · Tab bar', 0, 0], ['DP', 'Dev Patel', 'Nov 9', 'Is this 44 tall? Hard to tap.', 'Home — iOS · Tab bar · 1 reply', 0, 0], ['MH', 'Mo Haddad', 'Nov 8', 'Copy for the empty state?', 'Home — iOS · Empty', 0, 0], ['AR', 'Ana Ruiz', 'Nov 3', 'Resolved: spacing matches Settings now', 'resolved by Lena', 0, 0]];
+    var pin = function (n, x, y, slot) { return { n: n, s: 'position: absolute; left: ' + x + 'px; top: ' + y + 'px; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 13px 13px 13px 2px; background: var(--presence-' + slot + '); color: var(--on-presence); font-size: 11px; font-weight: 700; box-shadow: 0 2px 6px rgba(0,0,0,.2)' }; };
+    return {
+      show: H.opts(['Open', 'Mine', 'Resolved']),
+      threads: T4.map(function (t) { return { ini: t[0], avs: 'background: var(--presence-' + H.slot[t[0]] + ')', who: t[1], when: t[2], text: t[3], meta: t[4], dot: t[5] ? 'width: 8px; height: 8px; border-radius: 50%; background: var(--signal)' : 'width: 8px', st: 'padding: 10px 14px; border-top: 1px solid var(--line);' + (t[6] ? ' background: var(--surface-active)' : '') + (t[3].indexOf('Resolved') === 0 ? ' opacity: .6' : '') }; }),
+      pins: [pin('1', 230, 34, 1), pin('2', 300, 500, 2), pin('3', 70, 512, 6)],
+      mention: [{ heading: 'People' }, { label: 'Sam Okafor', active: true }, { label: 'Sara Kim' }, { heading: 'Agents' }, { icon: 'agent', label: 'Claude' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

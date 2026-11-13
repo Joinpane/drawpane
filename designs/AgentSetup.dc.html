@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane set up agents</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-sheet">
+  <header class="u-sheethead"><h1 class="u-h1">Setting up agents</h1><p class="u-lead">Agents need a model. Bring your own key, use Workers AI on your Cloudflare account, or point at a local model.</p></header>
+  <div class="u-grid">
+    <section class="u-modal u-col u-col--loose" style="width: 520px; padding: 22px">
+      <div class="u-row"><span class="u-chip">Step 1 of 2</span><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import></div>
+      <h2 class="u-display" style="font-size: 28px; line-height: 34px">Choose where agents think</h2>
+      <sc-for list="{{prov}}" as="p" hint-placeholder-count="4">
+        <div class="u-row" style="{{p.st}}"><span class="u-radio {{p.on}}"></span><span class="u-grow u-col" style="gap: 0"><strong class="u-md">{{p.n}}</strong><span class="u-xs u-muted">{{p.d}}</span></span><span class="{{p.cc}}">{{p.c}}</span></div>
+      </sc-for>
+      <x-import component-from-global-scope="Drawpane.TextField" label="Anthropic API key" default-value="sk-ant-••••••••••••7Q2a" hint="Stored encrypted in your Worker's secrets. Never sent to Drawpane."></x-import>
+      <div class="u-row"><span class="u-row u-sm" style="color: var(--success)"><x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import>Key works · Claude Opus 5.5 and Sonnet 5.5 available</span><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" variant="primary">Next: limits</x-import></div>
+    </section>
+    <div class="u-col u-col--loose" style="width: 380px">
+      <figure class="u-fig">
+        <figcaption class="u-cap">No model yet · agent pane empty state</figcaption>
+        <div class="u-pane u-col" style="padding: 24px; justify-items: center; text-align: center">
+          <span class="u-av u-av--agent u-av--lg"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import></span>
+          <strong class="u-lg">Agents aren't set up yet</strong>
+          <span class="u-sm u-muted">An admin connects a model once for the whole team. You can still use the command bar and plugins.</span>
+          <x-import component-from-global-scope="Drawpane.Button" variant="primary">Ask Ziyang to set up</x-import>
+        </div>
+      </figure>
+      <figure class="u-fig">
+        <figcaption class="u-cap">Turned off by an admin</figcaption>
+        <div class="u-pane u-col" style="padding: 18px">
+          <div class="u-row u-row--top"><span class="u-ico u-ico--signal"><x-import component-from-global-scope="Drawpane.Icon" name="key"></x-import></span><span class="u-grow u-col u-col--tight"><strong class="u-md">Agents are off for the Brand project</strong><span class="u-sm u-muted">Lena turned them off on Nov 3: "Client NDA — no files leave the instance." Workers AI on your account is still allowed.</span></span></div>
+        </div>
+      </figure>
+    </div>
+    <figure class="u-fig" style="width: 360px">
+      <figcaption class="u-cap">Step 2 · limits, with sensible defaults</figcaption>
+      <div class="u-modal u-col" style="padding: 18px">
+        <sc-for list="{{lim}}" as="l" hint-placeholder-count="5"><div class="u-row u-sm" style="height: 32px; border-bottom: 1px solid var(--line)"><span class="u-grow">{{l.k}}</span><span class="u-select" style="height: 24px">{{l.v}}</span></div></sc-for>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Agents work on branches only"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Allow outside agents over MCP"></x-import>
+        <div class="u-row" style="justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button">Back</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Turn on agents</x-import></div>
+      </div>
+    </figure>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var st = function (on) { return 'padding: 10px 12px; border-radius: var(--radius-md); box-shadow: inset 0 0 0 ' + (on ? '2px var(--signal)' : '1px var(--line)'); };
+    var P = [['Anthropic', 'Claude models with your API key', 'Recommended', 'u-chip u-chip--signal', 1], ['OpenAI', 'GPT models with your API key', '', '', 0], ['Workers AI', 'Open models on your Cloudflare account · no key', 'Cheapest', 'u-chip u-chip--muted', 0], ['Local endpoint', 'Any OpenAI-compatible URL, e.g. on your network', '', '', 0]];
+    return {
+      prov: P.map(function (p) { return { n: p[0], d: p[1], c: p[2], cc: p[2] ? p[3] : 'display: none', on: H.on(p[4]), st: st(p[4]) }; }),
+      lim: [{ k: 'Team budget per month', v: '$60' }, { k: 'Per run', v: '$2' }, { k: 'Per person per day', v: '$5' }, { k: 'Who can start agents', v: 'Editors' }, { k: 'Merging agent work', v: 'Editors' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

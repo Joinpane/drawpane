@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane authentication and account security</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <header style="padding: 28px 32px 0; border-bottom: 1px solid var(--line)">
+    <div style="display: flex; align-items: center; gap: 12px">
+      <span style="display: grid; place-items: center; width: 36px; height: 36px; border-radius: var(--radius-md); background: var(--surface-inverse); color: var(--ink-inverse); font-weight: 700">A</span>
+      <div style="flex: 1"><h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Acme Design</h1><p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Instance and team settings · design.acme.com · Drawpane 1.4.2</p></div>
+    </div>
+    <nav aria-label="Settings" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 20px">
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Members</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Roles</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Libraries</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent; color: var(--ink); font-weight: 600; border-bottom-color: var(--signal)">Authentication</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Agents</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Integrations</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Audit log</a>
+      <a href="#" style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; color: var(--ink-muted); text-decoration: none; font-size: 13px; border-bottom: 2px solid transparent;">Backups and upgrades</a>
+    </nav>
+  </header>
+  <div style="padding: 24px 32px 40px; display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <div style="flex: 1 1 560px; display: grid; gap: 20px">
+      <section aria-label="Sign-in methods" style="border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden">
+        <div style="padding: 14px 16px; border-bottom: 1px solid var(--line)"><h2 style="margin: 0; font-size: 15px; font-weight: 600">Sign-in methods</h2><span style="font-size: 12px; color: var(--ink-muted)">Handled by the auth Worker. Sessions live in D1, tokens are signed with your own key.</span></div>
+        <sc-for list="{{methods}}" as="m" hint-placeholder-count="5">
+          <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line)">
+            <span style="{{m.logo}}">{{m.mono}}</span>
+            <span style="flex: 1; display: grid"><span style="font-size: 13px; font-weight: 600">{{m.name}}</span><span style="font-size: 12px; color: var(--ink-muted)">{{m.detail}}</span></span>
+            <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Configure</x-import>
+            <x-import component-from-global-scope="Drawpane.Switch" checked="{{m.on}}" aria-label="{{m.name}}"></x-import>
+          </div>
+        </sc-for>
+      </section>
+      <section aria-label="SAML configuration" style="border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); padding: 16px; display: grid; gap: 12px">
+        <div style="display: flex; align-items: center; gap: 8px"><h2 style="flex: 1; margin: 0; font-size: 15px; font-weight: 600">Okta SAML</h2><x-import component-from-global-scope="Drawpane.Badge" tone="success">Verified Nov 2</x-import></div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px">
+          <x-import component-from-global-scope="Drawpane.TextField" label="Single sign-on URL" default-value="https://acme.okta.com/app/drawpane/sso/saml"></x-import>
+          <x-import component-from-global-scope="Drawpane.TextField" label="Entity ID" default-value="https://design.acme.com/saml"></x-import>
+          <x-import component-from-global-scope="Drawpane.TextField" label="Allowed domains" default-value="acme.com, acme.io"></x-import>
+          <x-import component-from-global-scope="Drawpane.TextField" label="Default role for new people" default-value="Viewer"></x-import>
+        </div>
+        <div style="display: grid; gap: 8px"><x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Create accounts on first sign-in (just-in-time)"></x-import><x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Sync groups to teams with SCIM"></x-import><x-import component-from-global-scope="Drawpane.Switch" label="Require SSO for everyone except 2 break-glass admins"></x-import></div>
+      </section>
+    </div>
+
+    <div style="flex: 1 1 360px; max-width: 440px; display: grid; gap: 20px">
+      <section aria-label="Policies" style="border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); padding: 16px; display: grid; gap: 12px">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600">Policies</h2>
+        <sc-for list="{{policies}}" as="p" hint-placeholder-count="5">
+          <div style="display: flex; align-items: center; gap: 8px"><span style="flex: 1; display: grid"><span style="font-size: 13px">{{p.label}}</span><span style="font-size: 11px; color: var(--ink-muted)">{{p.detail}}</span></span><span style="{{p.vs}}">{{p.value}}</span></div>
+        </sc-for>
+      </section>
+      <section aria-label="Your security" style="border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); padding: 16px; display: grid; gap: 12px">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600">Your account</h2>
+        <div style="display: flex; align-items: center; gap: 10px; font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="key"></x-import><span style="flex: 1">Passkey on MacBook Pro · added Oct 2</span><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Remove</x-import></div>
+        <div style="display: flex; align-items: center; gap: 10px; font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="key"></x-import><span style="flex: 1">Authenticator app · backup codes 8 of 10 left</span><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Manage</x-import></div>
+        <span class="dp-caption" style="margin-top: 4px">Active sessions</span>
+        <sc-for list="{{sessions}}" as="s" hint-placeholder-count="3">
+          <div style="display: flex; align-items: center; gap: 10px; font-size: 13px"><span style="flex: 1; display: grid"><span>{{s.dev}}</span><span style="font-size: 11px; color: var(--ink-muted)">{{s.meta}}</span></span><span style="{{s.ss}}">{{s.state}}</span></div>
+        </sc-for>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm">Sign out of other sessions</x-import>
+        <span class="dp-caption" style="margin-top: 4px">Personal access tokens</span>
+        <div style="display: flex; align-items: center; gap: 10px; font-size: 13px"><span style="flex: 1; display: grid"><span style="font-family: var(--font-mono)">claude-code-laptop</span><span style="font-size: 11px; color: var(--ink-muted)">MCP · read, write to branches · expires Feb 1 · used 3 min ago</span></span><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Revoke</x-import></div>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var logo = function (c) { return 'flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: ' + c + '; color: #ffffff; font-size: 12px; font-weight: 700'; };
+    var val = 'height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px; line-height: 24px';
+    return {
+      theme: T, yes: true,
+      methods: [
+        { name: 'SAML single sign-on', detail: 'Okta · 21 of 23 people sign in this way', mono: 'S', logo: logo('#16181d'), on: true },
+        { name: 'Email and password', detail: 'Passwords hashed with Argon2id in the Worker', mono: '@', logo: logo('#5b616e'), on: true },
+        { name: 'Passkeys', detail: 'WebAuthn · offered after first sign-in', mono: 'P', logo: logo('#0f766e'), on: true },
+        { name: 'Google', detail: 'Only @acme.com accounts', mono: 'G', logo: logo('#2b4fd6'), on: true },
+        { name: 'GitHub', detail: 'Off · used by open source contributors team only', mono: 'GH', logo: logo('#16181d'), on: false }
+      ],
+      policies: [
+        { label: 'Two-step verification', detail: 'For people not using SSO', value: 'Required', vs: val },
+        { label: 'Session length', detail: 'Re-auth after', value: '14 days', vs: val },
+        { label: 'Idle timeout', detail: 'Sign out after inactivity', value: '12 hours', vs: val },
+        { label: 'Public share links', detail: 'Anyone with the link', value: 'Admins only', vs: val },
+        { label: 'Agent tokens', detail: 'Longest lifetime allowed', value: '90 days', vs: val }
+      ],
+      sessions: [
+        { dev: 'Chrome on macOS', meta: 'San Francisco · this session', state: 'Current', ss: 'font-size: 12px; color: var(--success); font-weight: 600' },
+        { dev: 'Drawpane for iPad', meta: 'San Francisco · 2 h ago', state: 'Sign out', ss: 'font-size: 12px; color: var(--ink-muted)' },
+        { dev: 'Safari on iPhone', meta: 'Oakland · yesterday', state: 'Sign out', ss: 'font-size: 12px; color: var(--ink-muted)' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

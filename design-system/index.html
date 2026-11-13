@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drawpane design system</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="components/bundle.css">
+<style>
+  body { margin: 0; background: var(--canvas); color: var(--ink); font: 400 13px/18px var(--font-ui); }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 8px; }
+  header h1 { margin: 0; flex: 1; font: 400 40px/44px var(--font-display); letter-spacing: -.01em; }
+  header p { flex-basis: 100%; margin: 0; color: var(--ink-muted); }
+  header a { color: var(--signal-ink); }
+  button { height: 28px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink); font: 600 12px/26px var(--font-ui); cursor: pointer; }
+  button:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
+  h2 { margin: 32px 0 12px; font-size: 15px; line-height: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 560px), 1fr)); gap: 16px; }
+  .card { min-width: 0; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden; }
+  .card.wide { grid-column: 1 / -1; }
+  .card iframe { display: block; width: 100%; border: 0; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .card .meta { padding: 10px 14px 14px; }
+  .card h3 { margin: 0 0 4px; font-size: 13px; line-height: 18px; }
+  .card .readme { margin: 0; color: var(--ink-muted); font-size: 12px; line-height: 17px; white-space: pre-wrap; }
+  .icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+  .icons figure, .logos figure { margin: 0; padding: 12px 6px 8px; display: grid; justify-items: center; gap: 6px; border-radius: var(--radius-md); background: var(--surface-raised); }
+  .icons figcaption, .logos figcaption { font: 400 11px/14px var(--font-mono); color: var(--ink-muted); text-align: center; overflow-wrap: anywhere; }
+  .logos { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .logos img { width: 64px; height: 64px; }
+  /* The SVG files are single-ink Paper ink (#1c1b19), so they always sit on a Paper ground. */
+  .icons figure, .swatch { background: #fbfaf8; }
+  .icons figcaption, .swatch figcaption { color: #5d5a54; }
+  .swatch.dark figcaption { color: #a9a59d; }
+  .swatch.dark { background: #1c1b1a; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Drawpane design system</h1>
+    <button id="theme" type="button" aria-pressed="false">Graphite theme</button>
+    <p>Live previews of every component card, rendered from <code>components/bundle.js</code>. The brand book is <a href="README.md">README.md</a>; tokens are in <a href="tokens.json">tokens.json</a>. Serve the repo over HTTP to view this page (<code>python3 -m http.server</code>).</p>
+  </header>
+  <div id="groups"></div>
+  <h2>Logos</h2>
+  <div class="logos" id="logos"></div>
+  <h2>Icons</h2>
+  <div class="icons" id="icons"></div>
+</div>
+<script>
+(function () {
+  var COMPONENTS = ['Cover', 'Workspace', 'Icon', 'Button', 'IconButton', 'Kbd', 'Badge', 'TextField', 'NumberField', 'TokenChip',
+    'SegmentedControl', 'Switch', 'PropertySection', 'LayerRow', 'Menu', 'CommandBar', 'SelectionLens', 'Tooltip', 'PresenceStack',
+    'AgentTag', 'AgentStep', 'PromptField'];
+  var REACT = 'https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js';
+  var REACT_DOM = 'https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js';
+  var base = new URL('.', location.href).href;
+  var theme = 'light', frames = [];
+
+  // Each preview.html is a fragment written for a host that preloads tokens, fonts, styles, React and
+  // the bundle. Recreate that host inside an iframe.
+  function host(html) {
+    var pre = '<base href="' + base + 'components/x/">' +
+      '<link rel="stylesheet" href="' + base + 'tokens.css">' +
+      '<link rel="stylesheet" href="' + base + 'components/bundle.css">' +
+      '<script src="' + REACT + '"><\/script><script src="' + REACT_DOM + '"><\/script>' +
+      '<script src="' + base + 'components/bundle.js"><\/script>';
+    html = html.replace(/^<!--[^]*?-->\s*/, '');
+    return html.replace(/<head>/i, '<head>' + pre).replace(/<html/i, '<html data-theme="' + theme + '"');
+  }
+
+  function card(name, html, readme) {
+    var meta = (html.match(/^<!--\s*@dsCard([^]*?)-->/) || [, ''])[1];
+    var group = (meta.match(/group="([^"]*)"/) || [, name === 'Cover' ? 'Overview' : 'Other'])[1];
+    var height = +(meta.match(/height=(\d+)/) || [, 240])[1];
+    var el = document.createElement('section');
+    el.className = 'card' + (/\bpage\b|width=/.test(meta) || name === 'Cover' ? ' wide' : '');
+    var f = document.createElement('iframe');
+    f.title = name + ' preview';
+    f.style.height = height + 'px';
+    f.loading = 'lazy';
+    f.dataset.html = html;
+    f.srcdoc = host(html);
+    frames.push(f);
+    el.appendChild(f);
+    if (name !== 'Cover') {
+      var m = document.createElement('div'); m.className = 'meta';
+      var h = document.createElement('h3'); h.textContent = name; m.appendChild(h);
+      var p = document.createElement('p'); p.className = 'readme'; p.textContent = (readme || '').replace(/^#.*\n+/, '').trim(); m.appendChild(p);
+      el.appendChild(m);
+    }
+    return { group: group, el: el };
+  }
+
+  Promise.all(COMPONENTS.map(function (n) {
+    return Promise.all([
+      fetch('components/' + n + '/preview.html').then(function (r) { return r.text(); }),
+      fetch('components/' + n + '/README.md').then(function (r) { return r.ok ? r.text() : ''; })
+    ]).then(function (x) { return card(n, x[0], x[1]); });
+  })).then(function (cards) {
+    var groups = {}, order = [];
+    cards.forEach(function (c) { if (!groups[c.group]) { groups[c.group] = []; order.push(c.group); } groups[c.group].push(c.el); });
+    var root = document.getElementById('groups');
+    order.forEach(function (g) {
+      var h = document.createElement('h2'); h.textContent = g; root.appendChild(h);
+      var grid = document.createElement('div'); grid.className = 'grid';
+      groups[g].forEach(function (el) { grid.appendChild(el); });
+      root.appendChild(grid);
+    });
+  });
+
+  fetch('design-system.json').then(function (r) { return r.json(); }).then(function (ds) {
+    [['Logos', 'logos'], ['Icons', 'icons']].forEach(function (pair) {
+      var g = ds.assetGroups[pair[0]], box = document.getElementById(pair[1]);
+      (g.order && g.order.length ? g.order : Object.keys(g.files)).forEach(function (k) {
+        var f = g.files[k];
+        var fig = document.createElement('figure');
+        if (/graphite|app-icon/.test(f.name)) fig.className = 'swatch dark'; else if (pair[0] === 'Logos') fig.className = 'swatch';
+        var img = document.createElement('img'); img.src = 'assets/' + pair[0] + '/' + f.name; img.alt = '';
+        var cap = document.createElement('figcaption'); cap.textContent = f.name;
+        fig.appendChild(img); fig.appendChild(cap); box.appendChild(fig);
+      });
+    });
+  });
+
+  document.getElementById('theme').addEventListener('click', function () {
+    theme = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', theme);
+    this.setAttribute('aria-pressed', String(theme === 'dark'));
+    frames.forEach(function (f) { f.srcdoc = host(f.dataset.html); });
+  });
+})();
+</script>
+</body>
+</html>

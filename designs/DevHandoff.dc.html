@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane ready for dev and changes since handoff</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" file="Mobile app" primary="Share" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <aside aria-label="Ready for dev" style="width: 260px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden; display: flex; flex-direction: column">
+      <div style="padding: 12px 12px 8px; display: grid; gap: 8px"><h2 style="margin: 0; font-size: 13px; font-weight: 600">Ready for dev · 6</h2><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Filter" value="all" options="{{filters}}"></x-import></div>
+      <div style="display: grid; gap: 2px; padding: 0 6px">
+        <sc-for list="{{boards}}" as="b" hint-placeholder-count="6">
+          <div style="{{b.row}}"><span style="{{b.thumb}}"></span><span style="flex: 1; min-width: 0; display: grid"><span style="font-size: 13px; line-height: 18px; font-weight: 600">{{b.name}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{b.meta}}</span></span><span style="{{b.badge}}">{{b.badgeText}}</span></div>
+        </sc-for>
+      </div>
+      <div style="margin: auto 8px 8px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-sunken); font-size: 12px; line-height: 16px; display: grid; gap: 4px"><strong>Linked to GitHub</strong><span style="color: var(--ink-muted)">dizys/acme-mobile · 4 boards have open pull requests</span></div>
+    </aside>
+
+    <main aria-label="Board with annotations" style="flex: 999 1 520px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: 50%; top: 24px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 12px; border-radius: 999px; background: var(--surface-raised); box-shadow: var(--shadow-popover); font-size: 12px; white-space: nowrap">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--success)"></span><strong>Home</strong> marked ready by Ana · Nov 10
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Compare" value="changes" options="{{cmp}}"></x-import>
+      </div>
+      <div style="position: absolute; left: calc(50% - 170px); top: 90px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 118px; width: 300px; height: 66px; border-radius: 14px; box-shadow: 0 0 0 2px var(--warning)"></span>
+        <span style="position: absolute; left: 326px; top: 128px; padding: 2px 6px; border-radius: 4px; background: var(--warning); color: #1c1b19; font-size: 11px; line-height: 14px; font-weight: 600; white-space: nowrap">Changed · padding</span>
+        <span aria-hidden="true" style="position: absolute; left: 32px; top: 332px; width: 276px; height: 52px; border-radius: 10px; box-shadow: 0 0 0 2px var(--success)"></span>
+        <span style="position: absolute; left: 326px; top: 349px; padding: 2px 6px; border-radius: 4px; background: var(--success); color: #ffffff; font-size: 11px; line-height: 14px; font-weight: 600; white-space: nowrap">New · Event row</span>
+      </div>
+      <div style="position: absolute; left: calc(50% - 340px); top: 300px; width: 150px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--surface-raised); box-shadow: var(--shadow-popover); font-size: 12px; line-height: 16px">
+        <strong style="display: block; margin-bottom: 2px">Note from Ana</strong>Card scrolls under the header; keep 12 px gap.
+      </div>
+    </main>
+
+    <aside aria-label="Changes since handoff" style="width: 340px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden; display: flex; flex-direction: column">
+      <div style="padding: 12px 14px 8px"><h2 style="margin: 0; font-size: 13px; font-weight: 600">Changed since Nov 10 handoff</h2><span style="font-size: 12px; color: var(--ink-muted)">4 property changes · 1 new layer · by Lena</span></div>
+      <div style="display: grid; gap: 2px; padding: 0 8px">
+        <sc-for list="{{diffs}}" as="d" hint-placeholder-count="5">
+          <div style="display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 6px; border-radius: var(--radius-sm); font-size: 12px; line-height: 16px">
+            <span style="font-weight: 600">{{d.layer}}</span><span style="color: var(--ink-muted)">{{d.prop}}</span>
+            <span style="grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; font-family: var(--font-mono); font-size: 11px"><del style="color: var(--danger)">{{d.from}}</del><x-import component-from-global-scope="Drawpane.Icon" name="chevron-right" size="12"></x-import><ins style="text-decoration: none; color: var(--success)">{{d.to}}</ins></span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin: 8px 14px 0; display: flex; align-items: center; gap: 8px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Code" value="react" options="{{langs}}"></x-import><span style="flex: 1"></span><x-import component-from-global-scope="Drawpane.IconButton" icon="code" label="Copy code"></x-import></div>
+      <pre style="margin: 8px 14px; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-family: var(--font-mono); font-size: 11px; line-height: 17px; overflow: hidden; white-space: pre-wrap"><span style="color: var(--ink-muted)">// Hero card · uses your components</span>
+&lt;<span style="color: var(--signal-ink)">HeroCard</span>
+  style=<span style="color: var(--success)">"dark"</span>
+  title=<span style="color: var(--success)">"Design review at 2:00"</span>
+  icon={&lt;<span style="color: var(--signal-ink)">Calendar</span> /&gt;}
+  <ins style="text-decoration: none; background: color-mix(in srgb, var(--success) 14%, transparent)">padding=<span style="color: var(--success)">"space/250"</span></ins>
+/&gt;</pre>
+      <div style="margin-top: auto; padding: 12px 14px; border-top: 1px solid var(--line); display: grid; gap: 8px">
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary">Mark changes as seen</x-import>
+        <x-import component-from-global-scope="Drawpane.Button" icon="agent">Ask agent to open a PR</x-import>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var row = function (sel) { return 'display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-radius: var(--radius-sm);' + (sel ? ' background: var(--surface-active)' : ''); };
+    var th = function (c) { return 'flex: none; width: 28px; height: 40px; border-radius: 4px; background: ' + c + '; box-shadow: inset 0 0 0 1px var(--line)'; };
+    var bb = function (t) { return 'height: 18px; padding: 0 6px; border-radius: var(--radius-xs); font-size: 11px; line-height: 18px; font-weight: 600; ' + t; };
+    var B = [['Home', 'Ana · Nov 10 · PR #212', '#eef1fb', 'Changed', 'background: var(--signal-soft); color: var(--signal-ink)', 1], ['Event detail', 'Ana · Nov 10 · PR #214', '#ffffff', '', '', 0], ['Calendar month', 'Sam · Nov 8', '#f3f4f6', '', '', 0], ['Settings', 'Mo · Nov 7 · shipped', '#f8f9fb', 'Done', 'background: var(--surface-active); color: var(--success)', 0], ['Empty states', 'Agent · Nov 12 · awaiting review', '#efe9fd', 'Branch', 'background: var(--agent-soft); color: var(--agent-ink)', 0], ['Sign in', 'Dev · Nov 3 · shipped', '#fff4ed', 'Done', 'background: var(--surface-active); color: var(--success)', 0]];
+    return {
+      theme: T,
+      filters: [{ value: 'all', label: 'All' }, { value: 'changed', label: 'Changed · 1' }, { value: 'mine', label: 'Mine' }],
+      cmp: [{ value: 'now', label: 'Now' }, { value: 'changes', label: 'Changes' }, { value: 'handoff', label: 'At handoff' }],
+      langs: [{ value: 'react', label: 'React' }, { value: 'css', label: 'CSS' }, { value: 'swift', label: 'SwiftUI' }, { value: 'compose', label: 'Compose' }],
+      boards: B.map(function (b) { return { name: b[0], meta: b[1], thumb: th(b[2]), badgeText: b[3], badge: b[3] ? bb(b[4]) : 'display: none', row: row(b[5]) }; }),
+      diffs: [
+        { layer: 'Hero card', prop: 'Padding', from: 'space/200 · 16', to: 'space/250 · 20' },
+        { layer: 'Hero card / Title', prop: 'Text style', from: 'type/title', to: 'type/title-lg' },
+        { layer: 'Greeting', prop: 'Fill', from: 'gray/700', to: 'text/muted' },
+        { layer: 'Upcoming', prop: 'Gap', from: '8', to: 'space/150 · 12' },
+        { layer: 'Event row', prop: 'Added', from: '—', to: 'instance of Event row' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane, asking the agent in a comment</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" tool="comment" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+
+    <main aria-label="Canvas" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: calc(50% - 280px); top: 40px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="gap16" hint-size="340px,560px"></dc-import>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 200px; width: 300px; height: 212px; border-radius: 14px; outline: 1.5px dashed var(--agent)"></span>
+        <button type="button" aria-label="Thread by Lena with an agent reply" style="position: absolute; left: 6px; top: 292px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 14px 14px 14px 2px; background: var(--signal); color: var(--on-signal); font: 700 10px/1 var(--font-ui); box-shadow: 0 0 0 3px var(--signal-soft); cursor: pointer">LP</button>
+      </div>
+
+      <div role="dialog" aria-label="Thread on Upcoming" style="position: absolute; left: calc(50% + 80px); top: 40px; width: 340px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); overflow: hidden">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 10px 8px 8px 12px; border-bottom: 1px solid var(--line)">
+          <span style="flex: 1; font-size: 12px; line-height: 16px; font-weight: 600">Upcoming · Home — iOS</span>
+          <x-import component-from-global-scope="Drawpane.IconButton" icon="check" label="Resolve thread"></x-import>
+        </div>
+        <div style="display: grid; gap: 14px; padding: 12px">
+          <div style="display: grid; grid-template-columns: 24px 1fr; gap: 8px">
+            <span style="display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--surface-raised); font-size: 9.5px; font-weight: 700; box-shadow: inset 0 0 0 2px var(--presence-2)">LP</span>
+            <div style="display: grid; gap: 2px; font-size: 12px; line-height: 17px">
+              <span><b style="font-weight: 600">Lena Park</b> <span style="color: var(--ink-muted)">· 6 min</span></span>
+              <span>Rows feel tight on small phones. <b style="color: var(--agent-ink); font-weight: 600">@drawpane</b> try gap 16 and check a 320 px width.</span>
+            </div>
+          </div>
+          <div style="display: grid; grid-template-columns: 24px 1fr; gap: 8px">
+            <span style="display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: var(--agent); color: var(--on-agent)"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import></span>
+            <div style="display: grid; gap: 8px">
+              <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px"><b style="font-weight: 600">Claude</b><span style="color: var(--ink-muted)">for Lena · 4 min</span></div>
+              <div style="font-size: 12px; line-height: 17px">Done on <b style="font-weight: 600">agent/upcoming-gap-16</b>. Gap is now space/400. At 320 px the titles still fit on one line, and each row stays 52 px tall.</div>
+              <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+                <figure style="margin: 0"><div style="height: 72px; border-radius: var(--radius-sm); background: #f3f4f6; display: grid; gap: 4px; align-content: center; padding: 0 10px"><span style="height: 16px; border-radius: 4px; background: #ffffff"></span><span style="height: 16px; border-radius: 4px; background: #ffffff"></span><span style="height: 16px; border-radius: 4px; background: #ffffff"></span></div><figcaption style="margin-top: 4px; font-size: 11px; color: var(--ink-muted)">Before · gap 8</figcaption></figure>
+                <figure style="margin: 0"><div style="height: 72px; border-radius: var(--radius-sm); background: #f3f4f6; display: grid; gap: 8px; align-content: center; padding: 0 10px; outline: 1.5px dashed var(--agent)"><span style="height: 14px; border-radius: 4px; background: #ffffff"></span><span style="height: 14px; border-radius: 4px; background: #ffffff"></span><span style="height: 14px; border-radius: 4px; background: #ffffff"></span></div><figcaption style="margin-top: 4px; font-size: 11px; color: var(--ink-muted)">After · gap 16</figcaption></figure>
+              </div>
+              <div style="display: flex; gap: 12px; font-size: 11px; line-height: 14px; color: var(--success)"><span>● 3 changes</span><span>● tokens only</span><span>● 320 px checked</span></div>
+              <div style="display: flex; gap: 8px">
+                <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary" icon="branch">Merge</x-import>
+                <x-import component-from-global-scope="Drawpane.Button" size="sm">Review</x-import>
+                <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Undo</x-import>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="padding: 0 12px 12px">
+          <x-import component-from-global-scope="Drawpane.PromptField" rows="1" placeholder="Reply, or @drawpane to ask for more"></x-import>
+        </div>
+      </div>
+    </main>
+
+    <aside aria-label="All comments" style="width: 264px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 10px 12px 8px; border-bottom: 1px solid var(--line); display: grid; gap: 8px">
+        <span style="font-size: 12px; line-height: 16px; font-weight: 600">Comments</span>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Filter" value="open" options="{{filters}}"></x-import>
+      </div>
+      <div style="padding: 4px">
+        <sc-for list="{{list}}" as="c" hint-placeholder-count="3">
+          <article style="{{c.row}}">
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px"><b style="font-weight: 600">{{c.name}}</b><span style="color: var(--ink-muted)">· {{c.when}}</span></div>
+            <p style="margin: 4px 0 0; font-size: 12px; line-height: 17px">{{c.text}}</p>
+            <span style="{{c.tagStyle}}">{{c.tag}}</span>
+          </article>
+        </sc-for>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var row = 'padding: 10px 8px; border-bottom: 1px solid var(--line); border-radius: var(--radius-sm);';
+    var tag = 'display: inline-block; margin-top: 4px; font-size: 11px; line-height: 14px; font-weight: 600; color: ';
+    return {
+      theme: this.props.theme ?? 'light',
+      filters: [{ value: 'open', label: 'Open 3' }, { value: 'agent', label: 'Agent 1' }, { value: 'resolved', label: 'Resolved' }],
+      list: [
+        { name: 'Lena Park', when: '6m', text: 'Rows feel tight on small phones. @drawpane try gap 16…', tag: 'Claude proposed a change', tagStyle: tag + 'var(--agent-ink)', row: row + ' background: var(--signal-soft);' },
+        { name: 'Ana Ruiz', when: '2h', text: 'Should the hero follow the brand blue?', tag: '3 replies', tagStyle: tag + 'var(--ink-muted)', row: row },
+        { name: 'Dev Patel', when: '1d', text: 'Is the tab bar locked on purpose?', tag: 'New', tagStyle: tag + 'var(--signal-ink)', row: row }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

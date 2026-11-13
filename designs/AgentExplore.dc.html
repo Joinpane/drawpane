@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane, explore directions with parallel agents</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+
+  <section aria-label="Explore directions" style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 16px 20px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+    <header style="display: flex; align-items: flex-start; flex-wrap: wrap; gap: 16px">
+      <div style="flex: 1 1 420px">
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)"><x-import component-from-global-scope="Drawpane.Icon" name="branch" size="12"></x-import>Explore · 3 agents · started from Home — iOS at revision 1,204</div>
+        <h1 style="margin: 4px 0 0; font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -0.01em">“Make the home screen feel calmer and more personal”</h1>
+      </div>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Agents" value="models" options="{{modes}}"></x-import>
+      <x-import component-from-global-scope="Drawpane.Button" variant="ghost" icon="plus">Another direction</x-import>
+    </header>
+
+    <div style="flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px">
+      <sc-for list="{{dirs}}" as="d" hint-placeholder-count="3">
+        <article style="{{d.card}}">
+          <div style="display: flex; align-items: center; gap: 8px">
+            <span style="font-size: 13px; line-height: 18px; font-weight: 600; flex: 1">{{d.name}}</span>
+            <x-import component-from-global-scope="Drawpane.AgentTag" name="{{d.agent}}" status="{{d.status}}" hide-status="{{yes}}"></x-import>
+          </div>
+          <div style="position: relative; height: 380px; border-radius: var(--radius-md); background: var(--canvas); overflow: hidden; display: grid; place-items: center">
+            <div style="width: 340px; height: 560px; transform: scale(.62); transform-origin: center">
+              <dc-import name="PartBoard" variant="{{d.variant}}" hint-size="340px,560px"></dc-import>
+            </div>
+            <sc-if value="{{d.running}}" hint-placeholder-val="{{false}}">
+              <span style="position: absolute; left: 10px; bottom: 10px; display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; background: var(--surface-raised); box-shadow: var(--shadow-popover); font-size: 11px; line-height: 14px; color: var(--agent-ink); font-weight: 600">Step 4 of 6 · rendering</span>
+            </sc-if>
+          </div>
+          <p style="margin: 0; font-size: 12px; line-height: 17px; color: var(--ink)">{{d.summary}}</p>
+          <div style="display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">
+            <span>{{d.model}}</span><span style="font-variant-numeric: tabular-nums">{{d.cost}}</span><span style="color: var(--success)">{{d.checks}}</span>
+          </div>
+          <div style="display: flex; gap: 8px; margin-top: auto">
+            <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="{{d.primary}}">Pick this</x-import>
+            <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Take parts</x-import>
+            <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Refine</x-import>
+          </div>
+        </article>
+      </sc-for>
+    </div>
+
+    <footer style="display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; line-height: 16px; color: var(--ink-muted)">
+      <span>Each direction is its own branch. Picking one opens review; the others stay for 30 days.</span>
+      <span style="flex: 1"></span>
+      <span style="font-variant-numeric: tabular-nums">Total so far $0.31 of $5.00 team daily limit</span>
+    </footer>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var card = 'display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: var(--radius-md); background: var(--surface-raised); min-height: 0;';
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      modes: [{ value: 'same', label: 'Same model' }, { value: 'models', label: 'Compare models' }],
+      dirs: [
+        { name: 'A · Quiet', agent: 'Claude', status: 'waiting', variant: 'default', running: false, model: 'Claude Opus 5.5', cost: '2 min · $0.12', checks: '● all checks pass', primary: 'secondary', summary: 'Keeps the layout, softens the hero and uses one accent. Smallest change.', card: card + ' box-shadow: inset 0 0 0 1px var(--line-strong);' },
+        { name: 'B · Brand blue', agent: 'GPT', status: 'waiting', variant: 'branch', running: false, model: 'GPT · team key', cost: '3 min · $0.14', checks: '● all checks pass', primary: 'primary', summary: 'Blue hero, afternoon greeting and category tints. Most personal; adds 3 token uses.', card: card + ' box-shadow: inset 0 0 0 1.5px var(--signal);' },
+        { name: 'C · Roomier list', agent: 'Workers AI', status: 'working', variant: 'gap16', running: true, model: 'Llama on Workers AI', cost: '1 min · $0.05', checks: '● checking', primary: 'secondary', summary: 'More space between events, larger touch targets. Still working on the hero.', card: card + ' box-shadow: inset 0 0 0 1px var(--line-strong);' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

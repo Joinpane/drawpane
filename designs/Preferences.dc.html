@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane preferences</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; display: flex; flex-wrap: wrap; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <nav aria-label="Preferences" style="flex: 1 1 220px; max-width: 260px; box-sizing: border-box; padding: 16px 10px; background: var(--canvas); border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px">
+    <div style="padding: 4px 10px 12px; font-size: 13px; line-height: 18px; font-weight: 600">Preferences</div>
+    <sc-for list="{{nav}}" as="n" hint-placeholder-count="8">
+      <a href="#" style="{{n.style}}">{{n.label}}</a>
+    </sc-for>
+  </nav>
+
+  <main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 28px 32px 40px; display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <section aria-labelledby="keys" style="flex: 999 1 520px; min-width: 0">
+      <h1 id="keys" style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Keyboard shortcuts</h1>
+      <p style="margin: 4px 0 16px; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Every command in the command bar can have a shortcut. Changes sync to your account on every instance.</p>
+      <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Preset" value="drawpane" options="{{presets}}"></x-import>
+        <div style="display: flex; align-items: center; gap: 8px; flex: 1 1 200px; height: 32px; padding: 0 10px; box-sizing: border-box; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font-size: 13px"><x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import>Search 214 commands</div>
+      </div>
+      <sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+        <div style="margin-top: 16px">
+          <div style="padding: 0 0 6px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">{{g.title}}</div>
+          <div style="border-radius: var(--radius-md); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden">
+            <sc-for list="{{g.rows}}" as="r" hint-placeholder-count="4">
+              <div style="{{r.row}}">
+                <span style="flex: 1; font-size: 13px; line-height: 18px">{{r.cmd}}</span>
+                <sc-if value="{{r.editing}}" hint-placeholder-val="{{false}}">
+                  <span style="display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px; border-radius: var(--radius-sm); box-shadow: inset 0 0 0 1.5px var(--signal); background: var(--surface-raised); font-size: 12px; color: var(--ink-muted)">Press keys… <x-import component-from-global-scope="Drawpane.Kbd">⌥ X</x-import></span>
+                </sc-if>
+                <sc-if value="{{r.notEditing}}" hint-placeholder-val="{{true}}">
+                  <x-import component-from-global-scope="Drawpane.Kbd">{{r.keys}}</x-import>
+                </sc-if>
+              </div>
+              <sc-if value="{{r.editing}}" hint-placeholder-val="{{false}}">
+                <div style="display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: var(--surface-sunken); font-size: 12px; line-height: 16px; color: var(--warning)">
+                  <x-import component-from-global-scope="Drawpane.Icon" name="warning" size="12"></x-import>
+                  <span style="flex: 1">⌥ X is used by “Export selection”. Replace it?</span>
+                  <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Cancel</x-import>
+                  <x-import component-from-global-scope="Drawpane.Button" size="sm">Replace</x-import>
+                </div>
+              </sc-if>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+    </section>
+
+    <aside style="flex: 1 1 280px; display: grid; gap: 16px">
+      <section aria-labelledby="appearance" style="padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 12px">
+        <h2 id="appearance" style="margin: 0; font-size: 13px; line-height: 18px; font-weight: 600">Appearance</h2>
+        <div class="dp-row dp-row--label"><span class="dp-caption">Theme</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Theme" value="system" options="{{themes}}"></x-import></div>
+        <div class="dp-row dp-row--label"><span class="dp-caption">Density</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Density" value="compact" options="{{density}}"></x-import></div>
+        <div class="dp-row dp-row--label"><span class="dp-caption">UI text</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="UI text size" value="12" options="{{sizes}}"></x-import></div>
+      </section>
+      <section aria-labelledby="a11y" style="padding: 16px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane); display: grid; gap: 10px">
+        <h2 id="a11y" style="margin: 0; font-size: 13px; line-height: 18px; font-weight: 600">Accessibility</h2>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Reduce motion"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Show focus ring on click too"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Name tags on all cursors"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Announce collaborators' edits to screen readers"></x-import>
+      </section>
+    </aside>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var link = 'display: block; padding: 7px 10px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 13px; line-height: 18px;';
+    var labels = ['Account', 'Appearance', 'Editing', 'Keyboard shortcuts', 'Notifications', 'Accessibility', 'Plugins', 'Access tokens'];
+    var row = 'display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 0 14px; border-bottom: 1px solid var(--line);';
+    function r(cmd, keys, editing) { return { cmd: cmd, keys: keys, editing: !!editing, notEditing: !editing, row: row + (editing ? ' background: var(--signal-soft);' : '') }; }
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true, no: false,
+      nav: labels.map(function (l) { return { label: l, style: link + (l === 'Keyboard shortcuts' ? ' background: var(--surface-active); font-weight: 600' : '') }; }),
+      presets: [{ value: 'drawpane', label: 'Drawpane' }, { value: 'figma', label: 'Figma-style' }, { value: 'penpot', label: 'Penpot-style' }],
+      groups: [
+        { title: 'Command bar and view', rows: [r('Open command bar', '⌘ K'), r('Focus mode (hide panes)', '\\'), r('Toggle Inspector', '⌘ .')] },
+        { title: 'Layout', rows: [r('Add auto layout', '⇧ A'), r('Explain this layout', '⌥ X', true), r('Toggle Layout X-ray', 'Alt')] },
+        { title: 'Collaboration', rows: [r('New branch from selection', '⌥ ⌘ B'), r('Show history', '⌥ ⌘ H'), r('Follow next person', '⌥ F')] }
+      ],
+      themes: [{ value: 'light', label: 'Paper' }, { value: 'dark', label: 'Graphite' }, { value: 'system', label: 'System' }],
+      density: [{ value: 'compact', label: 'Compact' }, { value: 'comfortable', label: 'Comfortable' }],
+      sizes: [{ value: '12', label: '12' }, { value: '13', label: '13' }, { value: '14', label: '14' }]
+    };
+  }
+}
+</script>
+</body>
+</html>

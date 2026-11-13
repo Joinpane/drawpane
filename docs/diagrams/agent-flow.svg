@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 316" width="760" height="316" role="img" aria-label="Every agent change lands on a branch and reaches main only through review">
+<style>
+  svg { --edge: #8b8880; --rule: #e3e1dc; --accent: #e04f1a; --ink: #1c1b19; --quiet: #5d5a54; --tint: #f1f0ec; --bg: #fbfaf8;
+        font-family: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  @media (prefers-color-scheme: dark) {
+    svg { --edge: #77736b; --rule: #302e2b; --accent: #ff7a45; --ink: #f2f0eb; --quiet: #a9a59d; --tint: #262523; --bg: #1c1b1a; }
+  }
+  .bg { fill: var(--bg); }
+  .ink { fill: var(--ink); } .quiet { fill: var(--quiet); }
+  .edge { stroke: var(--edge); } .rule { stroke: var(--rule); }
+  .box { fill: none; stroke: var(--edge); stroke-width: 1.25; }
+  .box.main { fill: var(--accent); fill-opacity: .12; stroke: var(--accent); stroke-width: 2; }
+  .arrowhead { fill: var(--edge); }
+  .gate { fill: var(--tint); stroke: var(--edge); stroke-width: 1.25; }
+</style>
+<defs><marker id="ag-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrowhead"/></marker></defs>
+<rect class="bg" width="760" height="316" rx="12"/>
+<text x="24" y="32" font-size="15" class="ink" font-weight="600">Every agent change lands on a branch and reaches main only through review</text>
+<g fill="none" class="edge" stroke-width="1.25">
+<path d="M216 92H236V112H254" marker-end="url(#ag-arrow)"/>
+<path d="M216 164H236V144H254" marker-end="url(#ag-arrow)"/>
+<path d="M428 128H466" marker-end="url(#ag-arrow)"/>
+<path d="M602 172V218" marker-end="url(#ag-arrow)"/>
+<path d="M468 256H430" marker-end="url(#ag-arrow)"/>
+</g>
+<text x="449" y="246" font-size="11.5" class="quiet" text-anchor="middle">merge</text>
+<text x="447" y="118" font-size="11.5" class="quiet" text-anchor="middle">ops</text>
+<rect x="24" y="64" width="192" height="56" rx="8" class="box"/>
+<text x="36" y="88" font-size="13" class="ink" font-weight="600">Built-in agent</text>
+<text x="36" y="104" font-size="11.5" class="quiet">your key or Workers AI</text>
+<rect x="24" y="136" width="192" height="56" rx="8" class="box"/>
+<text x="36" y="160" font-size="13" class="ink" font-weight="600">External MCP client</text>
+<text x="36" y="176" font-size="11.5" class="quiet">Claude Code, Cursor, Codex</text>
+<rect x="256" y="92" width="172" height="72" rx="8" class="box"/>
+<text x="268" y="116" font-size="13" class="ink" font-weight="600">Worker /mcp</text>
+<text x="268" y="132" font-size="11.5" class="quiet">OAuth, scoped tokens</text>
+<text x="268" y="148" font-size="11.5" class="quiet">budgets, audit log</text>
+<rect x="468" y="84" width="268" height="88" rx="8" class="box main"/>
+<text x="480" y="108" font-size="13" class="ink" font-weight="600">Agent's branch FileRoom</text>
+<text x="480" y="124" font-size="11.5" class="ink">validates ops with common</text>
+<text x="480" y="140" font-size="11.5" class="ink">cursor and name tag in the room</text>
+<text x="480" y="156" font-size="11.5" class="ink">render_frame for self-check</text>
+<rect x="468" y="220" width="268" height="72" rx="8" class="box"/>
+<text x="480" y="244" font-size="13" class="ink" font-weight="600">Review</text>
+<text x="480" y="260" font-size="11.5" class="quiet">diff and design-system lint gate</text>
+<text x="480" y="276" font-size="11.5" class="quiet">a person approves or asks for changes</text>
+<rect x="256" y="220" width="172" height="72" rx="8" class="box"/>
+<text x="268" y="244" font-size="13" class="ink" font-weight="600">main FileRoom</text>
+<text x="268" y="260" font-size="11.5" class="quiet">one attributed revision</text>
+<text x="268" y="276" font-size="11.5" class="quiet">steps kept inside it</text>
+</svg>

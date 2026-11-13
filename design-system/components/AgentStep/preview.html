@@ -1,0 +1,19 @@
+<!-- @dsCard group="Agents" height=232 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>AgentStep — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h('div', { role: 'list', style: { width: 360, display: 'grid', gap: 2 } },
+      h(D.AgentStep, { status: 'done', label: 'Read Home — iOS and the Acme library', meta: '2 s' }),
+      h(D.AgentStep, { status: 'done', label: 'Created branch agent/empty-states', meta: '1 s' }),
+      h(D.AgentStep, { status: 'running', label: 'Adding empty state to Upcoming', detail: 'Using EmptyState component, 0 detached values', ops: 'insert EmptyState variant=list in Upcoming' }),
+      h(D.AgentStep, { status: 'queued', label: 'Render and check contrast' }),
+      h(D.AgentStep, { status: 'review', label: 'Request review from Ana' }))
+  );
+</script>
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane one agent run, start to finish</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-page" style="padding: 28px 32px 40px">
+  <header style="display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 20px">
+      <div style="flex: 1 1 360px"><div class="u-sm u-muted">Settings / Agents</div><h1 class="u-h1" style="margin-top: 2px">Run · Add empty and error states</h1></div>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Section" value="runs" options="{{H.agentTabs}}"></x-import>
+    </header>
+  <div style="display: grid; grid-template-columns: 300px minmax(0, 1fr) 320px; gap: 20px; align-items: start">
+    <section class="u-box u-pad u-col">
+      <div class="u-row"><x-import component-from-global-scope="Drawpane.AgentTag" name="Empty states agent" status="waiting"></x-import></div>
+      <div class="u-dl"><dt>Started</dt><dd>Nov 12, 10:12 · by Sam</dd><dt>File</dt><dd>Mobile app · Home — iOS</dd><dt>Branch</dt><dd class="u-mono">agent/empty-states</dd><dt>Model</dt><dd>Claude Opus 5.5 · team key</dd><dt>Skill</dt><dd>empty-and-error-states v3</dd><dt>Duration</dt><dd>3 min 40 s · 1 pause</dd></div>
+      <span class="u-cap">Prompt</span>
+      <p class="u-sm" style="margin: 0; padding: 10px; border-radius: var(--radius-sm); background: var(--surface-sunken)">Add empty and error states for Upcoming, using our components. Keep the tab bar as is.</p>
+      <span class="u-cap">Cost</span>
+      <div class="u-col u-col--tight">
+        <sc-for list="{{cost}}" as="c" hint-placeholder-count="4"><div class="u-row u-sm"><span class="u-grow u-muted">{{c.k}}</span><span class="u-mono">{{c.v}}</span></div></sc-for>
+      </div>
+      <div class="u-row"><x-import component-from-global-scope="Drawpane.Button" size="sm">Open branch</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm">Rerun</x-import></div>
+    </section>
+    <section class="u-box">
+      <div class="u-head"><h2 class="u-h3">Timeline · 31 operations · 9 tool calls</h2><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Detail" value="calls" options="{{det}}"></x-import></div>
+      <div style="padding: 0 14px 14px; display: grid">
+        <sc-for list="{{tl}}" as="t" hint-placeholder-count="9">
+          <div style="display: grid; grid-template-columns: 52px 18px 1fr; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line)">
+            <span class="u-xs u-muted u-mono" style="padding-top: 2px">{{t.time}}</span>
+            <span style="{{t.dot}}"></span>
+            <div class="u-col u-col--tight" style="gap: 4px; min-width: 0">
+              <span class="u-row u-sm"><code class="u-mono" style="color: var(--agent-ink)">{{t.tool}}</code><span class="u-muted u-ellip">{{t.arg}}</span></span>
+              <span class="u-xs u-muted">{{t.res}}</span>
+              <span style="{{t.imgS}}"><span style="{{t.img1}}"></span><span style="{{t.img2}}"></span></span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+    <div class="u-col u-col--loose">
+      <section class="u-box u-pad u-col">
+        <h2 class="u-h3">Result</h2>
+        <div class="u-dl"><dt>Boards</dt><dd>+2 (Empty, Error)</dd><dt>Layers</dt><dd>+41 · 0 removed</dd><dt>Lint</dt><dd>0 issues</dd><dt>Render checks</dt><dd>2 · both passed</dd></div>
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary">Review and merge</x-import>
+      </section>
+      <section class="u-box u-pad u-col">
+        <h2 class="u-h3">What the model saw</h2>
+        <span class="u-sm u-muted">Layer data for 1 board, 18 tokens, 2 renders (PNG, 680 px). No comments, no other files — per Models and limits.</span>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm">Download full log (JSON)</x-import>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var dot = function (c) { return 'width: 10px; height: 10px; margin-top: 4px; border-radius: 50%; background: ' + c; };
+    var img = 'display: flex; gap: 6px';
+    var th = function (bg) { return 'width: 64px; height: 104px; border-radius: 4px; background: ' + bg + '; box-shadow: inset 0 0 0 1px var(--line)'; };
+    var T2 = [['0:00', 'get_board', 'Home — iOS', '18 layers · 3 components', 0], ['0:02', 'get_library', 'Acme design system', '142 components · picked EmptyState, Button', 0], ['0:04', 'create_branch', 'agent/empty-states', 'from main @ v214', 0], ['0:07', 'apply_actions', '14 actions', 'duplicate board × 2 · insert EmptyState · set text × 4', 0], ['0:31', 'ask_user', 'Illustration or icon?', 'Sam picked Icon after 2 min (run paused, no cost)', 0], ['2:36', 'apply_actions', '11 actions', 'Error state with Retry', 0], ['2:58', 'render_frame', 'Error · 2×', 'found 3 problems', 1], ['3:06', 'apply_actions', '6 actions', 'fixed contrast, clipping, wrapping', 0], ['3:30', 'render_frame', 'Empty, Error', 'passed · lint 0', 2]];
+    return {
+      det: H.opts([{ value: 'calls', label: 'Tool calls' }, { value: 'ops', label: 'All ops' }, 'Raw']),
+      cost: [{ k: 'Input tokens', v: '38,210' }, { k: 'Output tokens', v: '3,104' }, { k: 'Renders', v: '3 × ~900' }, { k: 'Total', v: '$0.41' }],
+      tl: T2.map(function (t) { return { time: t[0], tool: t[1], arg: t[2], res: t[3], dot: dot(t[4] === 1 ? 'var(--signal)' : t[1] === 'ask_user' ? 'var(--warning)' : 'var(--agent)'), imgS: t[4] ? img : 'display: none', img1: th(t[4] === 1 ? '#fdecea' : '#ffffff'), img2: th(t[4] === 2 ? '#eef1fb' : '#ffffff') }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

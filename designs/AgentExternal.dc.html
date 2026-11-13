@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane Claude Code working in your file</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" file="Web dashboard" branch="mcp/settings-page" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <section aria-label="Terminal on Ziyang's laptop" style="flex: none; width: 520px; height: 824px; border-radius: var(--radius-lg); background: #0f1012; color: #e6e7ea; font-family: var(--font-mono); font-size: 12px; line-height: 19px; overflow: hidden; box-shadow: var(--shadow-pane)">
+      <div class="u-row" style="height: 34px; padding: 0 12px; background: #1a1b1e; color: #9aa0ab; font-family: var(--font-ui)"><span style="width: 10px; height: 10px; border-radius: 50%; background: #3a3c41"></span><span style="width: 10px; height: 10px; border-radius: 50%; background: #3a3c41"></span><span style="width: 10px; height: 10px; border-radius: 50%; background: #3a3c41"></span><span class="u-sm" style="margin-left: 8px">~/acme/web — claude</span></div>
+      <div style="padding: 12px 14px; white-space: pre-wrap"><span style="color: #9aa0ab">&gt;</span> Build the settings page from our design file, then update the design so it matches what we shipped.
+
+<span style="color: #b49cff">●</span> drawpane · <span style="color: #9aa0ab">get_file</span> "Web dashboard"
+  <span style="color: #9aa0ab">⎿ 6 pages · 41 boards · library Acme 2.4.1</span>
+<span style="color: #b49cff">●</span> drawpane · <span style="color: #9aa0ab">get_board</span> "Settings / Account"
+  <span style="color: #9aa0ab">⎿ 18 layers · uses 7 components</span>
+<span style="color: #b49cff">●</span> drawpane · <span style="color: #9aa0ab">get_tokens</span>
+  <span style="color: #9aa0ab">⎿ 86 tokens → src/styles/tokens.css</span>
+
+<span style="color: #7dd3a8">●</span> Write src/pages/settings/Account.tsx (+142)
+<span style="color: #7dd3a8">●</span> Write src/pages/settings/Danger.tsx (+61)
+
+<span style="color: #b49cff">●</span> drawpane · <span style="color: #9aa0ab">create_branch</span> "mcp/settings-page"
+<span style="color: #b49cff">●</span> drawpane · <span style="color: #9aa0ab">apply_actions</span> 9 actions
+  <span style="color: #9aa0ab">⎿ add "Delete workspace" row · rename "Save" → "Save changes"</span>
+<span style="color: #b49cff">●</span> drawpane · <span style="color: #9aa0ab">render_frame</span> "Settings / Account"
+  <span style="color: #9aa0ab">⎿ 1 image · lint 0 issues</span>
+
+The design now matches the code. Review it here:
+<span style="color: #8fb0ff; text-decoration: underline">design.acme.com/f/web-dashboard?branch=mcp/settings-page</span>
+
+<span style="color: #9aa0ab">&gt;</span> <span style="background: #e6e7ea; color: #0f1012"> </span></div>
+    </section>
+    <main class="u-stage" aria-label="Canvas">
+      <div class="u-pop u-row" style="position: absolute; left: 50%; top: 4px; transform: translateX(-50%); padding: 6px 10px 6px 6px; white-space: nowrap">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Claude Code" status="working" on-behalf-of="Ziyang"></x-import>
+        <span class="u-sm">via MCP · token claude-code-laptop</span>
+      </div>
+      <div class="u-board" style="left: 30px; top: 60px; width: 560px; height: 520px; border-radius: 0">
+        <div style="position: absolute; left: 0; top: 0; bottom: 0; width: 140px; background: #f8f9fb; box-shadow: inset -1px 0 0 #e4e7ec"></div>
+        <div style="position: absolute; left: 164px; top: 28px; font-size: 20px; font-weight: 600">Account</div>
+        <div style="position: absolute; left: 164px; top: 72px; right: 24px; display: grid; gap: 10px">
+          <span style="height: 52px; border-radius: 10px; background: #f3f4f6"></span><span style="height: 52px; border-radius: 10px; background: #f3f4f6"></span><span style="height: 52px; border-radius: 10px; background: #f3f4f6"></span>
+          <span style="height: 52px; border-radius: 10px; background: #fdecea; display: flex; align-items: center; padding: 0 14px; font-size: 13px; font-weight: 600; color: #c8312b">Delete workspace</span>
+        </div>
+        <span style="position: absolute; right: 24px; bottom: 24px; height: 36px; padding: 0 16px; border-radius: 8px; background: #2b4fd6; color: #ffffff; font-size: 13px; line-height: 36px; font-weight: 600">Save changes</span>
+        <span class="u-outline u-outline--agent" style="left: 164px; top: 258px; width: 372px; height: 52px; border-radius: 10px"></span>
+        <span class="u-label u-label--agent" style="left: 164px; top: 314px">added by Claude Code</span>
+      </div>
+      <div class="u-pop u-col" style="position: absolute; right: 12px; bottom: 16px; width: 300px; padding: 12px">
+        <strong class="u-md">Outside agent in this file</strong>
+        <div class="u-dl"><dt>Client</dt><dd>Claude Code 2.4 on MacBook Pro</dd><dt>Acting for</dt><dd>Ziyang</dd><dt>Can</dt><dd>read file · write to its branch</dd><dt>Session</dt><dd>14 min · 23 tool calls</dd></div>
+        <div class="u-row"><x-import component-from-global-scope="Drawpane.Button" size="sm">See tool calls</x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm">Disconnect</x-import></div>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {};
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

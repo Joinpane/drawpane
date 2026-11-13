@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane screenshot or URL to editable design</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" file="Web dashboard" branch="agent/import-billing" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <main class="u-stage" aria-label="Canvas">
+      <div class="u-row" style="position: absolute; left: 0; top: 0; right: 0">
+        <div class="u-input u-input--focus" style="flex: 1"><x-import component-from-global-scope="Drawpane.Icon" name="plug" size="12"></x-import><span class="u-mono u-sm">https://app.acme.com/settings/billing</span></div>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Source" value="url" options="{{src}}"></x-import>
+      </div>
+      <div style="position: absolute; left: 0; top: 52px; right: 0; bottom: 0; display: grid; grid-template-columns: 1fr 60px 1fr; align-items: start">
+        <figure class="u-fig">
+          <figcaption class="u-cap">Captured page · 1280 wide</figcaption>
+          <div style="position: relative; height: 560px; border-radius: var(--radius-md); background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12); overflow: hidden; font-family: var(--font-ui)">
+            <div style="height: 44px; background: #16181d"></div>
+            <div style="position: absolute; left: 0; top: 44px; bottom: 0; width: 90px; background: #f3f4f6"></div>
+            <div style="position: absolute; left: 110px; top: 66px; font-size: 18px; font-weight: 600; color: #16181d">Billing</div>
+            <div style="position: absolute; left: 110px; top: 106px; right: 20px; height: 100px; border-radius: 10px; box-shadow: inset 0 0 0 1px #e4e7ec"></div>
+            <div style="position: absolute; left: 110px; top: 222px; right: 20px; height: 150px; border-radius: 10px; box-shadow: inset 0 0 0 1px #e4e7ec"></div>
+            <div style="position: absolute; left: 110px; top: 388px; width: 120px; height: 34px; border-radius: 8px; background: #2b4fd6"></div>
+            <sc-for list="{{boxes}}" as="b" hint-placeholder-count="5"><span style="{{b.s}}"></span><span style="{{b.l}}">{{b.t}}</span></sc-for>
+          </div>
+        </figure>
+        <div style="display: grid; place-items: center; height: 560px; color: var(--agent)"><x-import component-from-global-scope="Drawpane.Icon" name="chevron-right"></x-import></div>
+        <figure class="u-fig">
+          <figcaption class="u-cap">Editable result · auto layout · your components</figcaption>
+          <div style="position: relative; height: 560px; border-radius: var(--radius-md); background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12); overflow: hidden; font-family: var(--font-ui); color: #16181d">
+            <div style="height: 44px; background: #16181d"></div>
+            <div style="position: absolute; left: 0; top: 44px; bottom: 0; width: 90px; background: #f8f9fb; box-shadow: inset -1px 0 0 #e4e7ec"></div>
+            <div style="position: absolute; left: 110px; top: 66px; font-size: 18px; font-weight: 600">Billing</div>
+            <div style="position: absolute; left: 110px; top: 106px; right: 20px; height: 100px; border-radius: 12px; background: #f8f9fb; padding: 14px; box-sizing: border-box"><div style="font-size: 12px; color: #5b616e">Current plan</div><div style="font-size: 16px; font-weight: 600; margin-top: 4px">Team · 23 seats</div></div>
+            <div style="position: absolute; left: 110px; top: 222px; right: 20px; height: 150px; border-radius: 12px; background: #f8f9fb"></div>
+            <div style="position: absolute; left: 110px; top: 388px; width: 120px; height: 34px; border-radius: 8px; background: #2b4fd6; color: #ffffff; font-size: 13px; line-height: 34px; text-align: center; font-weight: 600">Update card</div>
+            <span class="u-outline u-outline--comp" style="left: 110px; top: 388px; width: 120px; height: 34px; border-radius: 8px"></span>
+            <span class="u-label u-label--comp" style="left: 236px; top: 396px">Button / primary</span>
+            <span class="u-outline u-outline--comp" style="left: 110px; top: 106px; width: calc(100% - 130px); height: 100px; border-radius: 12px"></span>
+            <span class="u-label u-label--comp" style="right: 24px; top: 84px">Card / stat</span>
+          </div>
+        </figure>
+      </div>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Mapping">
+      <div class="u-row" style="padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{H.modes}}"></x-import>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past runs"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+      <div class="u-col" style="flex: 1; min-height: 0; padding: 12px; overflow: hidden">
+        <div class="u-row"><x-import component-from-global-scope="Drawpane.AgentTag" name="Claude" status="working" on-behalf-of="Dev"></x-import></div>
+        <span class="u-cap">Matched to your library · 9 of 11</span>
+        <div class="u-col u-col--tight">
+          <sc-for list="{{map}}" as="m" hint-placeholder-count="6"><div class="u-item" style="min-height: 0; padding: 5px 6px"><span class="u-grow u-sm u-ellip">{{m.a}}</span><x-import component-from-global-scope="Drawpane.Icon" name="chevron-right" size="12"></x-import><span class="{{m.c}}">{{m.b}}</span></div></sc-for>
+        </div>
+        <div class="u-note u-note--signal"><x-import component-from-global-scope="Drawpane.Icon" name="warning" size="12"></x-import><span class="u-grow">2 parts have no match: the usage chart and the invoice table. They're drawn as plain layers, marked for review.</span></div>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Use real text from the page"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" label="Keep the page's own colors"></x-import>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var bx = function (x, y, w, h, t) { var wd = w < 0 ? 'right: ' + (-w) + 'px' : 'width: ' + w + 'px'; return { t: t, s: 'position: absolute; left: ' + x + 'px; top: ' + y + 'px; ' + wd + '; height: ' + h + 'px; box-shadow: inset 0 0 0 1.5px var(--agent); border-radius: 6px; background: color-mix(in srgb, var(--agent) 8%, transparent)', l: 'position: absolute; left: ' + (x + 4) + 'px; top: ' + (y + 4) + 'px; padding: 0 4px; border-radius: 3px; background: var(--agent); color: var(--on-agent); font-size: 10px; line-height: 14px; font-weight: 600' }; };
+    return {
+      src: H.opts([{ value: 'url', label: 'URL' }, 'Screenshot', 'Figma link']),
+      boxes: [bx(2, 2, -2, 40, 'Top bar'), bx(4, 64, 82, 160, 'Side nav'), bx(110, 106, -20, 100, 'Card'), bx(110, 222, -20, 150, 'Table?'), bx(110, 388, 120, 34, 'Button')],
+      map: [
+        { a: 'Top bar', b: 'App header', c: 'u-chip u-chip--comp' }, { a: 'Side nav (7 items)', b: 'Nav rail', c: 'u-chip u-chip--comp' }, { a: 'Plan card', b: 'Card / stat', c: 'u-chip u-chip--comp' },
+        { a: 'Primary button', b: 'Button / primary', c: 'u-chip u-chip--comp' }, { a: 'Usage chart', b: 'no match', c: 'u-chip u-chip--signal' }, { a: 'Invoice table', b: 'no match', c: 'u-chip u-chip--signal' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

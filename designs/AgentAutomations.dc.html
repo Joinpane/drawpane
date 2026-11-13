@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane scheduled and event automations</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; display: flex; flex-wrap: wrap; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 28px 32px 40px; display: grid; gap: 16px; align-content: start">
+    <header style="display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px">
+      <div style="flex: 1 1 360px">
+        <div style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">Settings / Agents</div>
+        <h1 style="margin: 2px 0 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Automations</h1>
+      </div>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg" icon="plus">New automation</x-import>
+    </header>
+    <p style="margin: 0; max-width: 640px; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Agents that run on a schedule or when something happens. They always work on a branch and ask a person before anything ships.</p>
+    <div style="display: grid; gap: 8px">
+      <sc-for list="{{autos}}" as="a" hint-placeholder-count="5">
+        <article style="{{a.row}}">
+          <span style="display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-sm); background: var(--agent-soft); color: var(--agent-ink)"><x-import component-from-global-scope="Drawpane.Icon" name="{{a.icon}}"></x-import></span>
+          <span style="flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column">
+            <span style="font-size: 13px; line-height: 18px; font-weight: 600">{{a.name}}</span>
+            <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{a.trigger}}</span>
+          </span>
+          <code style="font-family: var(--font-mono); font-size: 11px; color: var(--agent-ink)">/{{a.skill}}</code>
+          <span style="width: 150px; font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{a.last}}</span>
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{a.on}}" label="On"></x-import>
+        </article>
+      </sc-for>
+    </div>
+  </main>
+
+  <aside aria-label="Edit automation" style="flex: 1 1 380px; max-width: 440px; box-sizing: border-box; padding: 24px; background: var(--canvas); border-left: 1px solid var(--line); display: grid; gap: 16px; align-content: start">
+    <div style="display: flex; align-items: center; gap: 8px">
+      <h2 style="flex: 1; margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Keep consumers up to date</h2>
+      <x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import>
+    </div>
+    <div style="display: grid; gap: 6px">
+      <span style="font-size: 12px; line-height: 16px; font-weight: 600">When</span>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Trigger type" value="event" options="{{triggers}}"></x-import>
+      <span style="display: flex; align-items: center; justify-content: space-between; height: 32px; padding: 0 10px; border-radius: var(--radius-sm); background: var(--surface-raised); box-shadow: inset 0 0 0 1px var(--line-control); font-size: 13px">Acme design system publishes a version <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+    </div>
+    <div style="display: grid; gap: 6px">
+      <span style="font-size: 12px; line-height: 16px; font-weight: 600">Do</span>
+      <x-import component-from-global-scope="Drawpane.PromptField" rows="3" model="Claude Opus 5.5 · team key" value="In every file that uses Acme, accept the update on a branch, fix anything the update broke, and request review from the file owner." context="{{ctx}}"></x-import>
+    </div>
+    <div style="display: grid; gap: 8px; padding: 12px; border-radius: var(--radius-md); background: var(--surface-raised)">
+      <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Post a summary to #design-system"></x-import>
+      <x-import component-from-global-scope="Drawpane.Switch" checked="{{no}}" label="Merge automatically when there are no visual changes"></x-import>
+      <div class="dp-row"><x-import component-from-global-scope="Drawpane.NumberField" label="$" aria-label="Limit per run" default-value="1.50" unit="run"></x-import><span></span></div>
+    </div>
+    <div style="display: grid; gap: 4px">
+      <span style="font-size: 12px; line-height: 16px; font-weight: 600">Last run · Oct 28 · 9 files</span>
+      <div role="list" style="display: grid; gap: 2px">
+        <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Accepted 2.3.1 in 9 files" meta="40 s"></x-import>
+        <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Fixed 3 overrides broken by Button padding" meta="1 min"></x-import>
+        <x-import component-from-global-scope="Drawpane.AgentStep" status="review" label="Waiting on 2 owners to review"></x-import>
+      </div>
+    </div>
+    <div style="display: flex; justify-content: flex-end; gap: 8px">
+      <x-import component-from-global-scope="Drawpane.Button" variant="ghost">Run now</x-import>
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary">Save</x-import>
+    </div>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var row = 'display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 12px 14px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-pane);';
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true, no: false,
+      autos: [
+        { icon: 'component', name: 'Keep consumers up to date', trigger: 'When Acme design system publishes', skill: 'accept-library-update', last: 'Oct 28 · 9 files', on: true, row: row + ' box-shadow: var(--shadow-pane), inset 0 0 0 1.5px var(--signal);' },
+        { icon: 'history', name: 'Nightly accessibility audit', trigger: 'Every day at 2:00 · 3 files', skill: 'audit-accessibility', last: 'Today 2:00 · 7 issues', on: true, row: row },
+        { icon: 'code', name: 'Sync tokens to code', trigger: 'When a token changes · opens a GitHub pull request', skill: 'token-sync', last: 'Nov 10 · PR #412', on: true, row: row },
+        { icon: 'comment', name: 'Weekly critique recap', trigger: 'Fridays at 4:00 · posts to Slack', skill: 'crit-recap', last: 'Nov 7 · 12 threads', on: true, row: row },
+        { icon: 'bolt', name: 'Localize new screens', trigger: 'When a board is tagged Ready for dev', skill: 'localize', last: 'Never run', on: false, row: row }
+      ],
+      triggers: [{ value: 'schedule', label: 'Schedule' }, { value: 'event', label: 'Event' }, { value: 'manual', label: 'Manual' }],
+      ctx: [{ label: 'Files using Acme', icon: 'layers' }, { label: '/accept-library-update', icon: 'book' }]
+    };
+  }
+}
+</script>
+</body>
+</html>

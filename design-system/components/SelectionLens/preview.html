@@ -1,0 +1,18 @@
+<!-- @dsCard group="Overlays" height=88 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>SelectionLens — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style="background:var(--canvas);justify-content:center"></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(D.SelectionLens, { kind: 'Frame \u00b7 Auto layout', kindIcon: 'board' },
+      h(D.NumberField, { label: 'W', defaultValue: '300' }),
+      h(D.NumberField, { label: 'H', defaultValue: '196', unit: 'hug' }),
+      h(D.NumberField, { icon: 'layout-col', ariaLabel: 'Gap', token: 'space/200' }),
+      h(D.NumberField, { label: '\u25a2', ariaLabel: 'Padding', defaultValue: '12' }))
+  );
+</script>
+</body>
+</html>
