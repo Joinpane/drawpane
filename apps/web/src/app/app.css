@@ -49,7 +49,7 @@ body {
 .app-muted {
   margin: 0;
   color: var(--ink-muted);
-  font: 400 13px/18px var(--font-ui);
+  font: 400 13px / 18px var(--font-ui);
 }
 
 .app-stack {
@@ -82,7 +82,7 @@ body {
 }
 .app-dialog__title {
   margin: 0;
-  font: 600 15px/20px var(--font-ui);
+  font: 600 15px / 20px var(--font-ui);
 }
 .app-dialog__footer {
   display: flex;
@@ -107,7 +107,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 400 12px/16px var(--font-mono);
+  font: 400 12px / 16px var(--font-mono);
 }
 
 .app-radio-row {
@@ -122,7 +122,7 @@ body {
   padding: 0 var(--space-300);
   border-radius: var(--radius-sm);
   box-shadow: inset 0 0 0 1px var(--line-strong);
-  font: 500 12px/16px var(--font-ui);
+  font: 500 12px / 16px var(--font-ui);
   cursor: pointer;
 }
 .app-radio:has(input:checked) {

@@ -19,7 +19,11 @@ export function FileThumbnail({ fileId }: { fileId: string }) {
   const tint = `var(--${TINTS[h % TINTS.length]})`;
   const wide = 40 + (h % 30);
   return (
-    <span className="thumb" style={{ "--thumb-tint": tint } as React.CSSProperties} aria-hidden="true">
+    <span
+      className="thumb"
+      style={{ "--thumb-tint": tint } as React.CSSProperties}
+      aria-hidden="true"
+    >
       <span className="thumb__board" />
       <span className="thumb__block" style={{ width: `${wide}%` }} />
       <span className="thumb__bar" style={{ width: `${wide * 0.7}%` }} />

@@ -1,4 +1,4 @@
-import { Badge, Button, Icon, IconButton, TextField } from "@drawpane/ui";
+import { Badge, Button, Icon, IconButton, type IconName, TextField } from "@drawpane/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -18,10 +18,16 @@ export function DashboardPage() {
 
   const session = useQuery({ queryKey: ["session"], queryFn: api.session });
   const teams = useQuery({ queryKey: ["teams"], queryFn: api.teams });
-  const projects = useQuery({ queryKey: ["projects", teamId], queryFn: () => api.projects(teamId) });
+  const projects = useQuery({
+    queryKey: ["projects", teamId],
+    queryFn: () => api.projects(teamId),
+  });
   const files = useQuery({
     queryKey: ["files", teamId, projectId ?? null, view ?? "recent"],
-    queryFn: () => (projectId ? api.projectFiles(projectId) : api.teamFiles(teamId, view === "trash" ? "trash" : "recent")),
+    queryFn: () =>
+      projectId
+        ? api.projectFiles(projectId)
+        : api.teamFiles(teamId, view === "trash" ? "trash" : "recent"),
   });
 
   const team = teams.data?.teams.find((t) => t.id === teamId);
@@ -51,7 +57,8 @@ export function DashboardPage() {
   };
 
   const createFile = useMutation({
-    mutationFn: (target: Project) => api.post<{ file: FileMeta }>(`/projects/${target.id}/files`, { name: "Untitled" }),
+    mutationFn: (target: Project) =>
+      api.post<{ file: FileMeta }>(`/projects/${target.id}/files`, { name: "Untitled" }),
     onSuccess: ({ file }) => {
       invalidateFiles();
       void navigate({ to: "/f/$fileId", params: { fileId: file.id } });
@@ -72,12 +79,24 @@ export function DashboardPage() {
       <aside className="dash__side" aria-label="Navigation">
         <TeamSwitcher teamName={team?.name ?? "…"} members={null} />
         <nav className="dash__nav">
-          <NavLink active={!projectId && view !== "trash"} icon="history" to={{ teamId }} label="Recent" />
-          <NavLink active={view === "trash"} icon="close" to={{ teamId, view: "trash" }} label="Trash" />
+          <NavLink
+            active={!projectId && view !== "trash"}
+            icon="history"
+            to={{ teamId }}
+            label="Recent"
+          />
+          <NavLink
+            active={view === "trash"}
+            icon="close"
+            to={{ teamId, view: "trash" }}
+            label="Trash"
+          />
         </nav>
         <div className="dash__section">
           <span>Projects</span>
-          {canEdit ? <IconButton icon="plus" label="New project" onClick={() => setNewProjectOpen(true)} /> : null}
+          {canEdit ? (
+            <IconButton icon="plus" label="New project" onClick={() => setNewProjectOpen(true)} />
+          ) : null}
         </div>
         <nav className="dash__nav dash__projects">
           {projects.data?.projects.map((p, i) => (
@@ -157,7 +176,9 @@ export function DashboardPage() {
                 trash={view === "trash"}
                 canEdit={canEdit}
                 isOwner={role === "owner"}
-                projectName={projects.data?.projects.find((p) => p.id === file.projectId)?.name ?? ""}
+                projectName={
+                  projects.data?.projects.find((p) => p.id === file.projectId)?.name ?? ""
+                }
                 onChanged={invalidateFiles}
               />
             ))}
@@ -190,7 +211,16 @@ function TeamSwitcher({ teamName }: { teamName: string; members: number | null }
   );
 }
 
-const DOT_TOKENS = ["presence-1", "presence-3", "signal", "presence-5", "presence-2", "presence-6", "presence-4", "presence-7"];
+const DOT_TOKENS = [
+  "presence-1",
+  "presence-3",
+  "signal",
+  "presence-5",
+  "presence-2",
+  "presence-6",
+  "presence-4",
+  "presence-7",
+];
 
 function NavLink({
   active,
@@ -201,7 +231,7 @@ function NavLink({
   count,
 }: {
   active: boolean;
-  icon?: string;
+  icon?: IconName;
   dot?: number;
   to: { teamId: string; project?: string; view?: "trash" };
   label: string;
@@ -209,10 +239,20 @@ function NavLink({
 }) {
   const { teamId, ...search } = to;
   return (
-    <Link to="/t/$teamId" params={{ teamId }} search={search} className="dash__link" aria-current={active ? "page" : undefined}>
+    <Link
+      to="/t/$teamId"
+      params={{ teamId }}
+      search={search}
+      className="dash__link"
+      aria-current={active ? "page" : undefined}
+    >
       {icon ? <Icon name={icon} /> : null}
       {dot !== undefined ? (
-        <span className="dash__dot" style={{ background: `var(--${DOT_TOKENS[dot % DOT_TOKENS.length]})` }} aria-hidden="true" />
+        <span
+          className="dash__dot"
+          style={{ background: `var(--${DOT_TOKENS[dot % DOT_TOKENS.length]})` }}
+          aria-hidden="true"
+        />
       ) : null}
       <span className="dash__link-label">{label}</span>
       {count !== undefined && count > 0 ? <span className="dash__count">{count}</span> : null}
@@ -296,7 +336,13 @@ function FileCard({
 
   return (
     <li className="dash__card">
-      <button type="button" className="dash__thumb" onClick={open} disabled={trash} aria-label={`Open ${file.name}`}>
+      <button
+        type="button"
+        className="dash__thumb"
+        onClick={open}
+        disabled={trash}
+        aria-label={`Open ${file.name}`}
+      >
         <FileThumbnail fileId={file.id} />
       </button>
       <div className="dash__card-meta">
@@ -329,7 +375,9 @@ function FileCard({
           </button>
         )}
         <span className="dash__card-sub">
-          {trash ? `Deleted ${timeAgo(file.deletedAt ?? file.updatedAt)}` : `Edited ${timeAgo(file.updatedAt)}`}
+          {trash
+            ? `Deleted ${timeAgo(file.deletedAt ?? file.updatedAt)}`
+            : `Edited ${timeAgo(file.updatedAt)}`}
           {projectName ? ` · ${projectName}` : ""}
         </span>
       </div>
@@ -337,11 +385,19 @@ function FileCard({
         <div className="dash__card-actions">
           {trash ? (
             <>
-              <Button size="sm" variant="ghost" onClick={() => act(() => api.post(`/files/${file.id}/restore`))}>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => act(() => api.post(`/files/${file.id}/restore`))}
+              >
                 Restore
               </Button>
               {isOwner ? (
-                <Button size="sm" variant="ghost" onClick={() => act(() => api.delete(`/files/${file.id}?permanent=1`))}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => act(() => api.delete(`/files/${file.id}?permanent=1`))}
+                >
                   Delete forever
                 </Button>
               ) : null}
@@ -349,7 +405,11 @@ function FileCard({
           ) : (
             <>
               <IconButton icon="text" label="Rename" onClick={() => setRenaming(true)} />
-              <IconButton icon="close" label="Move to trash" onClick={() => act(() => api.delete(`/files/${file.id}`))} />
+              <IconButton
+                icon="close"
+                label="Move to trash"
+                onClick={() => act(() => api.delete(`/files/${file.id}`))}
+              />
             </>
           )}
         </div>
@@ -386,14 +446,18 @@ function EmptyState({
     return (
       <div className="dash__empty">
         <p className="app-display-md">Trash is empty.</p>
-        <p className="app-muted">Files you delete stay here until an owner removes them for good.</p>
+        <p className="app-muted">
+          Files you delete stay here until an owner removes them for good.
+        </p>
       </div>
     );
   }
   return (
     <div className="dash__empty">
       <p className="app-display-md">A clean slate.</p>
-      <p className="app-muted">Create a file to start designing. Everyone on the team sees it right away.</p>
+      <p className="app-muted">
+        Create a file to start designing. Everyone on the team sees it right away.
+      </p>
       {canCreate ? (
         <Button variant="primary" size="lg" icon="plus" onClick={onCreate}>
           New file
@@ -403,7 +467,15 @@ function EmptyState({
   );
 }
 
-function InviteDialog({ open, teamId, onClose }: { open: boolean; teamId: string; onClose: () => void }) {
+function InviteDialog({
+  open,
+  teamId,
+  onClose,
+}: {
+  open: boolean;
+  teamId: string;
+  onClose: () => void;
+}) {
   const [role, setRole] = useState<Role>("editor");
   const [link, setLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -440,7 +512,9 @@ function InviteDialog({ open, teamId, onClose }: { open: boolean; teamId: string
     >
       {link ? (
         <div className="app-stack">
-          <p className="app-muted">Send this link to one person. It works once and expires in 7 days.</p>
+          <p className="app-muted">
+            Send this link to one person. It works once and expires in 7 days.
+          </p>
           <div className="app-copy">
             <code>{link}</code>
             <Button
@@ -456,11 +530,19 @@ function InviteDialog({ open, teamId, onClose }: { open: boolean; teamId: string
         </div>
       ) : (
         <div className="app-stack">
-          <p className="app-muted">Create a single-use link. They'll sign up with a passkey and join with this role.</p>
+          <p className="app-muted">
+            Create a single-use link. They'll sign up with a passkey and join with this role.
+          </p>
           <div className="app-radio-row" role="radiogroup" aria-label="Role">
             {(["viewer", "editor", "owner"] as const).map((r) => (
               <label key={r} className="app-radio">
-                <input type="radio" name="role" value={r} checked={role === r} onChange={() => setRole(r)} />
+                <input
+                  type="radio"
+                  name="role"
+                  value={r}
+                  checked={role === r}
+                  onChange={() => setRole(r)}
+                />
                 <span>{r === "viewer" ? "Can view" : r === "editor" ? "Can edit" : "Owner"}</span>
               </label>
             ))}
@@ -502,7 +584,11 @@ function NewProjectDialog({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" disabled={!name.trim() || create.isPending} onClick={() => create.mutate()}>
+          <Button
+            variant="primary"
+            disabled={!name.trim() || create.isPending}
+            onClick={() => create.mutate()}
+          >
             Create project
           </Button>
         </>
@@ -518,7 +604,6 @@ function NewProjectDialog({
           label="Name"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          // biome-ignore lint/a11y/noAutofocus: dialogs focus their first field
           autoFocus
           {...(create.error ? { error: create.error.message } : {})}
         />

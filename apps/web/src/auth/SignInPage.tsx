@@ -16,8 +16,10 @@ export function SignInPage() {
     setBusy(true);
     setError(null);
     try {
-      await signInWithPasskey();
-      await queryClient.invalidateQueries();
+      const user = await signInWithPasskey();
+      // Replace cached signed-out data before the router reads it.
+      queryClient.clear();
+      queryClient.setQueryData(["session"], { user, needsSetup: false });
       await navigate({ to: next ?? "/" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -32,7 +34,10 @@ export function SignInPage() {
         {busy ? "Waiting for your passkey…" : "Continue with a passkey"}
       </Button>
       <FormError message={error} />
-      <p className="auth__note">New here? Ask a teammate for an invite link. Drawpane accounts use passkeys, so there's no password to forget.</p>
+      <p className="auth__note">
+        New here? Ask a teammate for an invite link. Drawpane accounts use passkeys, so there's no
+        password to forget.
+      </p>
     </AuthLayout>
   );
 }

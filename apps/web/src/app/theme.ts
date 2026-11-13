@@ -49,11 +49,8 @@ export function useResolvedTheme(): "light" | "dark" {
 }
 
 export function useThemePreference(): ThemePreference {
-  return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
-    read,
-  );
+  return useSyncExternalStore((cb) => {
+    listeners.add(cb);
+    return () => listeners.delete(cb);
+  }, read);
 }

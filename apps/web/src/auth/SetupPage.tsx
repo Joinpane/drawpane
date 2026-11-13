@@ -20,8 +20,10 @@ export function SetupPage() {
     setBusy(true);
     setError(null);
     try {
-      await registerWithPasskey({ name, email, setupToken: setupToken.trim() });
-      await queryClient.invalidateQueries();
+      const user = await registerWithPasskey({ name, email, setupToken: setupToken.trim() });
+      // Replace cached signed-out data before the router reads it.
+      queryClient.clear();
+      queryClient.setQueryData(["session"], { user, needsSetup: false });
       await navigate({ to: "/" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -31,9 +33,19 @@ export function SetupPage() {
   }
 
   return (
-    <AuthLayout title="Set up this instance" subtitle="Create the first account. You'll own the first team and can invite everyone else.">
+    <AuthLayout
+      title="Set up this instance"
+      subtitle="Create the first account. You'll own the first team and can invite everyone else."
+    >
       <form className="auth__form" onSubmit={submit} style={{ gap: "var(--space-300)" }}>
-        <TextField label="Your name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" required autoFocus />
+        <TextField
+          label="Your name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoComplete="name"
+          required
+          autoFocus
+        />
         <TextField
           label="Email"
           type="email"
@@ -51,7 +63,13 @@ export function SetupPage() {
           spellCheck={false}
           required
         />
-        <Button type="submit" variant="primary" size="lg" icon="key" disabled={busy || !name || !email || !setupToken}>
+        <Button
+          type="submit"
+          variant="primary"
+          size="lg"
+          icon="key"
+          disabled={busy || !name || !email || !setupToken}
+        >
           {busy ? "Waiting for your passkey…" : "Create account with a passkey"}
         </Button>
         <FormError message={error} />

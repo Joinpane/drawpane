@@ -26,6 +26,7 @@ export function Dialog({
   }, [open]);
 
   return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: clicking the backdrop is a mouse shortcut; keyboard users press Escape, which <dialog> handles natively
     <dialog
       ref={ref}
       className="app-dialog"

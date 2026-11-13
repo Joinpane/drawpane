@@ -10,7 +10,10 @@ export function useEditor(): Editor {
 }
 
 /** Subscribes to a slice of editor state; re-renders only when the slice changes. */
-export function useEditorState<T>(select: (state: EditorState) => T, equal: (a: T, b: T) => boolean = Object.is): T {
+export function useEditorState<T>(
+  select: (state: EditorState) => T,
+  equal: (a: T, b: T) => boolean = Object.is,
+): T {
   const editor = useEditor();
   const cache = useRef<{ value: T } | null>(null);
   const getSnapshot = useCallback(() => {
@@ -31,4 +34,5 @@ export function useDocVersion(): number {
   );
 }
 
-export const shallowArray = <T>(a: readonly T[], b: readonly T[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+export const shallowArray = <T>(a: readonly T[], b: readonly T[]) =>
+  a.length === b.length && a.every((v, i) => v === b[i]);

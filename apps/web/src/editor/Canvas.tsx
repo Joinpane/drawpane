@@ -1,9 +1,9 @@
 import {
   CanvasRenderer,
-  CanvasTextMeasurer,
+  type CanvasTextMeasurer,
   drawOverlay,
   fontString,
-  Interaction,
+  type Interaction,
   type OverlayTheme,
   type PointerInput,
 } from "@drawpane/editor";
@@ -100,7 +100,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     });
     const offState = editor.state.subscribe(() => {
       const s = editor.s;
-      if (s.camera !== last.camera || s.pageId !== last.pageId || s.editingText !== last.editingText || s.viewport !== last.viewport) {
+      if (
+        s.camera !== last.camera ||
+        s.pageId !== last.pageId ||
+        s.editingText !== last.editingText ||
+        s.viewport !== last.viewport
+      ) {
         contentDirty = true;
       }
       last = s;
@@ -122,7 +127,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       contentDirty = overlayDirty = true;
       schedule();
     });
-    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
 
     return () => {
       observer.disconnect();
@@ -156,14 +164,23 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const sendPresence = (e: PointerEvent | null) => {
       const s = editor.s;
       const rect = el.getBoundingClientRect();
-      const cursor = e ? s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top }) : null;
-      editor.sync.setPresence({ cursor, pageId: s.pageId, selection: [...s.selection].slice(0, 500) });
+      const cursor = e
+        ? s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top })
+        : null;
+      editor.sync.setPresence({
+        cursor,
+        pageId: s.pageId,
+        selection: [...s.selection].slice(0, 500),
+      });
     };
 
     const onDown = (e: PointerEvent) => {
       if (e.button === 2) return;
       const now = performance.now();
-      clicks = now - lastDown < 400 && Math.hypot(e.clientX - lastPos.x, e.clientY - lastPos.y) < 6 ? clicks + 1 : 1;
+      clicks =
+        now - lastDown < 400 && Math.hypot(e.clientX - lastPos.x, e.clientY - lastPos.y) < 6
+          ? clicks + 1
+          : 1;
       lastDown = now;
       lastPos = { x: e.clientX, y: e.clientY };
       el.setPointerCapture(e.pointerId);
@@ -211,7 +228,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       e.preventDefault();
       const g = e as Event & { scale: number; clientX: number; clientY: number };
       const rect = el.getBoundingClientRect();
-      editor.setCamera(editor.s.camera.zoomAt({ x: g.clientX - rect.left, y: g.clientY - rect.top }, gestureStart * g.scale));
+      editor.setCamera(
+        editor.s.camera.zoomAt(
+          { x: g.clientX - rect.left, y: g.clientY - rect.top },
+          gestureStart * g.scale,
+        ),
+      );
     };
 
     el.addEventListener("pointerdown", onDown);
@@ -249,10 +271,18 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const editingNode = editingText ? editor.doc.get(editingText) : undefined;
 
   return (
-    <div ref={host} className="canvas" role="application" aria-label="Design canvas" aria-roledescription="canvas">
-      <canvas ref={content} className="canvas__layer" aria-hidden="true" />
+    <div
+      ref={host}
+      className="canvas"
+      role="application"
+      aria-label="Design canvas"
+      aria-roledescription="canvas"
+    >
+      <canvas ref={content} className="canvas__layer" />
       <canvas ref={overlay} className="canvas__layer canvas__overlay" />
-      {editingNode && getProp(editingNode.props, "visible") ? <TextEditor nodeId={editingNode.id} /> : null}
+      {editingNode && getProp(editingNode.props, "visible") ? (
+        <TextEditor nodeId={editingNode.id} />
+      ) : null}
     </div>
   );
 }

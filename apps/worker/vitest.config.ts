@@ -12,6 +12,7 @@ export default defineConfig(async () => {
             TEST_MIGRATIONS: migrations,
             SESSION_SECRET: "test-session-secret-0123456789abcdef",
             SETUP_TOKEN: "test-setup-token",
+            PUBLIC_ORIGIN: "https://design.example.com",
           },
         },
       }),
