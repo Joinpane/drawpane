@@ -3,19 +3,41 @@
   "ui": "stream",
   "tasks": {
     "build": {
-      "dependsOn": ["^build"],
-      "outputs": ["dist/**"]
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        "dist/**"
+      ]
     },
     "typecheck": {
-      "dependsOn": ["^build"]
+      "dependsOn": [
+        "^build"
+      ]
     },
     "test": {
-      "dependsOn": ["^build"],
-      "outputs": ["coverage/**"]
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        "coverage/**"
+      ]
     },
     "dev": {
       "cache": false,
       "persistent": true
+    },
+    "@drawpane/worker#build": {
+      "dependsOn": [
+        "@drawpane/web#build"
+      ],
+      "outputs": []
+    },
+    "@drawpane/worker#test": {
+      "dependsOn": [
+        "@drawpane/web#build"
+      ],
+      "outputs": []
     }
   }
 }
