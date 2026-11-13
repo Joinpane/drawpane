@@ -104,5 +104,24 @@ test("prototype tour", async ({ browser }) => {
   await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.9);
   await page.waitForTimeout(900);
   await shot(page, "48-present-overlay");
+
+  // Sharing: the dialog, then the link opened signed out.
+  await page.getByRole("button", { name: "Share prototype" }).click();
+  await shot(page, "49-share-off");
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("switch", { name: "Anyone with the link can play the prototype" }).click();
+  await expect(dialog.locator(".app-copy code")).toBeVisible();
+  await shot(page, "50-share-on");
+  const url = (await dialog.locator(".app-copy code").textContent()) as string;
+  const guest = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const guestPage = await guest.newPage();
+  await guestPage.goto(url);
+  await expect(guestPage.locator(".present__count")).toHaveText("Screen 1 of 3");
+  await guestPage.waitForTimeout(600);
+  await shot(guestPage, "51-shared-player");
+  await guestPage.setViewportSize({ width: 390, height: 844 });
+  await guestPage.waitForTimeout(400);
+  await shot(guestPage, "52-shared-player-phone");
+  await guest.close();
   await context.close();
 });

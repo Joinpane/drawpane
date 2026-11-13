@@ -39,6 +39,11 @@ export interface Member {
   readonly joinedAt: number;
 }
 
+export interface ShareLink {
+  readonly url: string;
+  readonly createdAt: number;
+}
+
 export class ApiError extends Error {
   override name = "ApiError";
   constructor(
@@ -104,4 +109,16 @@ export const api = {
       `/files/${fileId}`,
     ),
   members: (teamId: string) => request<{ members: Member[] }>("GET", `/teams/${teamId}/members`),
+
+  /** The file's prototype link, if it's on. */
+  shareLink: (fileId: string) =>
+    request<{ link: ShareLink | null }>("GET", `/files/${fileId}/share`),
+  /** Turns the prototype link on (or returns the live one). */
+  createShareLink: (fileId: string) =>
+    request<{ link: ShareLink }>("POST", `/files/${fileId}/share`, {}),
+  /** Turns the prototype link off; every copy stops working. */
+  deleteShareLink: (fileId: string) => request<{ ok: true }>("DELETE", `/files/${fileId}/share`),
+  /** What a prototype link opens. Works signed out. */
+  resolveShare: (token: string) =>
+    request<{ file: { id: string; name: string } }>("GET", `/share/${encodeURIComponent(token)}`),
 };
