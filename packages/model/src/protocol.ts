@@ -6,6 +6,7 @@
  * keep them pending until `ack`; everyone else receives them as `txn`.
  */
 import { z } from "zod";
+import type { CommentEvent } from "./comments";
 import { ID_PATTERN } from "./ids";
 import { type NodeRecord, type Op, OpsSchema } from "./ops";
 
@@ -93,4 +94,6 @@ export type ServerMessage =
   | { readonly t: "peer-left"; readonly sessionId: string }
   | { readonly t: "presence"; readonly sessionId: string; readonly presence: Presence }
   | { readonly t: "pong" }
-  | { readonly t: "error"; readonly code: string; readonly message: string };
+  | { readonly t: "error"; readonly code: string; readonly message: string }
+  /** A comment thread changed. Comments live in D1; the Worker asks the room to relay this after each write. */
+  | { readonly t: "comments"; readonly event: CommentEvent };
