@@ -19,7 +19,11 @@ export type LayerKind =
   | "path"
   | "image"
   | "component"
-  | "instance";
+  | "instance"
+  /** Frames with auto layout: the direction or grid shows in the glyph. */
+  | "frame-row"
+  | "frame-column"
+  | "frame-grid";
 
 const KIND_ICONS: Record<LayerKind, IconName> = {
   frame: "board",
@@ -36,6 +40,9 @@ const KIND_ICONS: Record<LayerKind, IconName> = {
   image: "image",
   component: "component",
   instance: "instance",
+  "frame-row": "layout-row",
+  "frame-column": "layout-col",
+  "frame-grid": "layout-grid",
 };
 
 export interface LayerRowProps extends Omit<ComponentPropsWithRef<"div">, "children"> {
@@ -46,6 +53,8 @@ export interface LayerRowProps extends Omit<ComponentPropsWithRef<"div">, "child
   depth?: number;
   selected?: boolean;
   hidden?: boolean;
+  /** Inside a hidden layer: shown dimmed, with its own eye left alone. */
+  hiddenByParent?: boolean;
   locked?: boolean;
   hasChildren?: boolean;
   expanded?: boolean;
@@ -53,12 +62,19 @@ export interface LayerRowProps extends Omit<ComponentPropsWithRef<"div">, "child
   presence?: PresenceSlot;
   /** Who has it selected, for the presence dot's accessible name. */
   presenceLabel?: string;
-  /** Makes the caret clickable. Arrow keys are the tree's job. */
-  onToggleExpanded?: () => void;
+  /**
+   * Makes the caret clickable. Arrow keys are the tree's job. `deep` is true
+   * for an Alt-click, which opens or closes everything inside too.
+   */
+  onToggleExpanded?: (deep: boolean) => void;
   /** Makes the eye a button. */
   onToggleHidden?: () => void;
-  /** Makes the lock (shown while locked) a button that unlocks. */
+  /** Makes the lock a button: it unlocks while locked, and offers to lock on hover. */
   onToggleLocked?: () => void;
+  /** Marks where the name matches a search, case-insensitively. */
+  highlight?: string;
+  /** Shown only for context, like the ancestors of search results: muted. */
+  context?: boolean;
   /** Enables renaming in place: double-click the row or press F2, then Enter or Escape. */
   onRename?: (name: string) => void;
   /** A short muted tag after the name, such as "mask" or "clipped". */
@@ -67,6 +83,21 @@ export interface LayerRowProps extends Omit<ComponentPropsWithRef<"div">, "child
   renaming?: boolean;
   /** Renaming started or ended, from inside the row. */
   onRenamingChange?: (renaming: boolean) => void;
+}
+
+/** The name with the first match of `query` wrapped in a mark. */
+function highlighted(name: string, query: string | undefined) {
+  const q = query?.trim();
+  if (!q) return name;
+  const at = name.toLowerCase().indexOf(q.toLowerCase());
+  if (at === -1) return name;
+  return (
+    <>
+      {name.slice(0, at)}
+      <mark className="dp-layer__match">{name.slice(at, at + q.length)}</mark>
+      {name.slice(at + q.length)}
+    </>
+  );
 }
 
 function stop(event: MouseEvent) {
@@ -83,6 +114,7 @@ export function LayerRow({
   depth = 0,
   selected = false,
   hidden = false,
+  hiddenByParent = false,
   locked = false,
   hasChildren = false,
   expanded = false,
@@ -93,6 +125,8 @@ export function LayerRow({
   onToggleLocked,
   onRename,
   note,
+  highlight,
+  context = false,
   renaming: renamingProp,
   onRenamingChange,
   className,
@@ -142,8 +176,9 @@ export function LayerRow({
       className={cx(
         "dp-layer",
         selected && "is-selected",
-        hidden && "is-hidden",
+        (hidden || hiddenByParent) && "is-hidden",
         component && "is-component",
+        context && "is-context",
         className,
       )}
       style={rowStyle}
@@ -162,7 +197,7 @@ export function LayerRow({
           onDoubleClick={stop}
           onClick={(event) => {
             stop(event);
-            onToggleExpanded();
+            onToggleExpanded(event.altKey);
           }}
         >
           {caret}
@@ -192,7 +227,7 @@ export function LayerRow({
         />
       ) : (
         <span className="dp-layer__name" title={name}>
-          {name}
+          {highlighted(name, highlight)}
         </span>
       )}
       {note && !renaming ? <span className="dp-layer__note">{note}</span> : null}
@@ -206,24 +241,23 @@ export function LayerRow({
         />
       )}
       <span className={cx("dp-layer__actions", (hidden || locked) && "is-pinned")}>
-        {locked &&
-          (onToggleLocked ? (
-            <button
-              type="button"
-              className="dp-layer__toggle"
-              tabIndex={-1}
-              aria-label="Unlock layer"
-              onDoubleClick={stop}
-              onClick={(event) => {
-                stop(event);
-                onToggleLocked();
-              }}
-            >
-              {lock}
-            </button>
-          ) : (
-            lock
-          ))}
+        {onToggleLocked ? (
+          <button
+            type="button"
+            className={cx("dp-layer__toggle", !locked && "is-offer")}
+            tabIndex={-1}
+            aria-label={locked ? "Unlock layer" : "Lock layer"}
+            onDoubleClick={stop}
+            onClick={(event) => {
+              stop(event);
+              onToggleLocked();
+            }}
+          >
+            {locked ? lock : <Icon name="unlock" size={12} />}
+          </button>
+        ) : (
+          locked && lock
+        )}
         {onToggleHidden ? (
           <button
             type="button"

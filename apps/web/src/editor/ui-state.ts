@@ -26,6 +26,10 @@ export interface EditorUi {
   readonly renaming: string | null;
   /** The open context menu, if any. */
   readonly menu: MenuRequest | null;
+  /** Bumped to open the layers search and focus it (⌘F). */
+  readonly findLayers: number;
+  /** Bumped to fold every layer on the page (⌥L). */
+  readonly collapseLayers: number;
 }
 
 const stores = new WeakMap<Editor, Store<EditorUi>>();
@@ -33,7 +37,7 @@ const stores = new WeakMap<Editor, Store<EditorUi>>();
 export function uiFor(editor: Editor): Store<EditorUi> {
   let store = stores.get(editor);
   if (!store) {
-    store = new Store<EditorUi>({ renaming: null, menu: null });
+    store = new Store<EditorUi>({ renaming: null, menu: null, findLayers: 0, collapseLayers: 0 });
     stores.set(editor, store);
   }
   return store;

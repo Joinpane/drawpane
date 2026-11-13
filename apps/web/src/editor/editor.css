@@ -315,6 +315,157 @@
   color: var(--ink-muted);
   font: 400 12px / 16px var(--font-ui);
 }
+.layers__empty p {
+  margin: 0 0 var(--space-100);
+}
+.layers__link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--signal-ink);
+  font: 500 11px / 14px var(--font-ui);
+  cursor: pointer;
+}
+.layers__link:hover {
+  text-decoration: underline;
+}
+.layers__link:focus-visible {
+  outline: none;
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-focus);
+}
+.pane__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Finding layers: a field, filter chips, and what they found */
+.layer-find {
+  display: grid;
+  gap: var(--space-200);
+  padding: 0 var(--space-300) var(--space-200);
+}
+.layer-find__field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  height: var(--size-control-sm);
+  padding: 0 var(--space-100) 0 var(--space-200);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--ink-muted);
+  transition: border-color var(--duration-hover) ease-out;
+}
+.layer-find__field:focus-within {
+  border-color: var(--signal);
+}
+.layer-find__field input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 400 12px / 16px var(--font-ui);
+  outline: none;
+}
+.layer-find__field input::-webkit-search-cancel-button {
+  display: none;
+}
+.layer-find__field input::placeholder {
+  color: var(--ink-muted);
+}
+.layer-find__clear {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.layer-find__clear:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+.layer-find__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-100);
+}
+.layer-find__chip {
+  height: 22px;
+  padding: 0 var(--space-200);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--ink-muted);
+  font: 500 11px / 14px var(--font-ui);
+  cursor: pointer;
+  transition:
+    background var(--duration-hover) ease-out,
+    color var(--duration-hover) ease-out;
+}
+.layer-find__chip:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+.layer-find__chip[aria-checked="true"] {
+  border-color: transparent;
+  background: var(--signal-soft);
+  color: var(--signal-ink);
+}
+.layer-find__chip:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.layer-find__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--ink-muted);
+  font: 500 11px / 14px var(--font-ui);
+}
+
+/* While dragging layers: what the drop will do */
+.layers__status {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-200);
+  min-height: 32px;
+  padding: var(--space-100) var(--space-300);
+  border-top: 1px solid var(--line);
+  color: var(--ink-muted);
+  font: 400 11px / 14px var(--font-ui);
+}
+.layers__status > span:first-of-type {
+  flex: 1;
+  min-width: 0;
+  /* Long names wrap to a second line rather than hiding where the layer goes. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.layers__status strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.layers__status > .dp-icon {
+  flex: none;
+  margin-top: 1px;
+}
+.layers__status-hint {
+  flex: none;
+  font: 500 10px / 14px var(--font-mono);
+}
 .layers__row--drop-before {
   box-shadow: inset 0 2px 0 var(--signal);
 }
