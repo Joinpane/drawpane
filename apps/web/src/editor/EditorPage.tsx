@@ -20,6 +20,7 @@ import { ACTIONS, type ActionContext, matches } from "./actions";
 import { loadBooleanEngine } from "./boolean-engine";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
+import { ContextMenus } from "./ContextMenus";
 import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
 import { connectFile } from "./connection";
 import { ExportPanel } from "./ExportSection";
@@ -40,9 +41,11 @@ import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
 import { filesFrom, importImageFiles, pasteFromClipboard } from "./media";
 import { PrototypePanel } from "./prototype/PrototypePanel";
+import { ShortcutsDialog } from "./ShortcutsDialog";
 import { Toolbar } from "./Toolbar";
 import { useThumbnailPublisher } from "./thumbnail";
 import { TokensWorkspace } from "./tokens/TokensWorkspace";
+import { uiFor } from "./ui-state";
 import "./editor.css";
 
 const CLIPBOARD_MIME = "application/x-drawpane+json";
@@ -76,6 +79,7 @@ function FileEditor({ fileId }: { fileId: string }) {
   );
   const interaction = useMemo(() => new Interaction(editor), [editor]);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [leftOpen, setLeftOpen] = useState(true);
   const [leftTab, setLeftTab] = useState<LeftTab>("layers");
   const [view, setView] = useState<"design" | "tokens">("design");
@@ -215,6 +219,16 @@ function FileEditor({ fileId }: { fileId: string }) {
       saveVersion: () => {
         if (editor.canEdit) setNaming({ version: null });
       },
+      rename: () => {
+        const id = editor.s.selection[0];
+        if (!id || !editor.canEdit) return;
+        // Renaming happens in the layers panel: make sure it's showing.
+        setView("design");
+        setLeftOpen(true);
+        setLeftTab("layers");
+        uiFor(editor).set({ renaming: id });
+      },
+      showShortcuts: () => setShortcutsOpen(true),
       showTab: (tab) => {
         setView("design");
         comments.store.setPanel(false);
@@ -593,6 +607,10 @@ function FileEditor({ fileId }: { fileId: string }) {
         {viewing ? null : <ImageDrop fileId={fileId} />}
         <UploadTray />
         {commandOpen ? <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} /> : null}
+        {view === "design" ? (
+          <ContextMenus editor={active} ctx={ctx} fileId={fileId} commentsShown={commentsOpen} />
+        ) : null}
+        <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
         <NameVersionDialog
           open={naming !== null}
           fileId={fileId}

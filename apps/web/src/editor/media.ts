@@ -310,7 +310,16 @@ export function chooseImageFile(): Promise<File | null> {
  * Pastes from the async clipboard (menu and command bar): images when it
  * holds some, else Drawpane layers. Returns false when there was nothing to paste.
  */
-export async function pasteFromClipboard(editor: Editor, fileId: string): Promise<boolean> {
+/**
+ * Pastes what the system clipboard holds (layers, then images), in place or
+ * centred on `at` ("Paste here").
+ */
+export async function pasteFromClipboard(
+  editor: Editor,
+  fileId: string,
+  at?: { x: number; y: number },
+): Promise<boolean> {
+  const options = at ? { at } : {};
   try {
     const items = await navigator.clipboard.read();
     const images: File[] = [];
@@ -324,14 +333,14 @@ export async function pasteFromClipboard(editor: Editor, fileId: string): Promis
         text = await (await item.getType("text/plain")).text();
       }
     }
-    if (text && editor.paste(text)) return true;
+    if (text && editor.paste(text, options)) return true;
     if (images.length > 0) {
-      await importImageFiles(editor, fileId, images);
+      await importImageFiles(editor, fileId, images, at);
       return true;
     }
     return false;
   } catch {
     // No permission, or a browser without clipboard.read: text only.
-    return editor.paste(await navigator.clipboard.readText().catch(() => ""));
+    return editor.paste(await navigator.clipboard.readText().catch(() => ""), options);
   }
 }

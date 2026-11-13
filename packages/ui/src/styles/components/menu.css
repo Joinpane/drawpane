@@ -7,6 +7,10 @@
   background: var(--surface-raised);
   box-shadow: var(--shadow-popover);
 }
+/* A pointer-opened menu holds focus itself until the keyboard moves into it. */
+.dp-menu:focus {
+  outline: none;
+}
 .dp-menu__item {
   display: grid;
   grid-template-columns: 16px 1fr auto;
@@ -55,4 +59,26 @@
   padding: 6px var(--space-200) 2px;
   font: var(--type-ui-label);
   color: var(--ink-muted);
+}
+
+/* ContextMenu: menus at a point, cascading into submenus */
+.dp-context-menu {
+  position: fixed;
+  inset: 0 auto auto 0;
+  z-index: 70;
+  font: var(--type-ui-body);
+}
+.dp-context-menu__level {
+  position: fixed;
+  animation: dp-context-menu-in var(--duration-popover) ease-out;
+}
+.dp-context-menu__level > .dp-menu {
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+@keyframes dp-context-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
 }

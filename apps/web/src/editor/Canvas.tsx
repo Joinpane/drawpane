@@ -6,6 +6,7 @@ import {
   type Interaction,
   type OverlayTheme,
   type PointerInput,
+  selectionTarget,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import { useEffect, useMemo, useRef } from "react";
@@ -14,6 +15,7 @@ import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { useEditor, useEditorState } from "./hooks";
 import { imagesFor } from "./media";
 import { TextEditor } from "./TextEditor";
+import { openMenu } from "./ui-state";
 import { VectorHints } from "./VectorHints";
 
 function readTheme(): OverlayTheme {
@@ -194,6 +196,17 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
 
     const onDown = (e: PointerEvent) => {
       if (e.button === 2) return;
+      // The canvas takes focus back from controls outside it (a comment pin, an
+      // inspector field), so arrow keys move layers again and typed values commit.
+      // preventDefault below would otherwise leave focus where it was.
+      const active = document.activeElement;
+      const canvasHost = el.parentElement;
+      if (
+        active instanceof HTMLElement &&
+        active !== document.body &&
+        !canvasHost?.contains(active)
+      )
+        active.blur();
       const now = performance.now();
       clicks =
         now - lastDown < 400 && Math.hypot(e.clientX - lastPos.x, e.clientY - lastPos.y) < 6
@@ -254,7 +267,30 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       );
     };
 
+    // Right-click: select what's under the pointer the way a click would
+    // (unless it's already in the selection), then open the menu there.
+    const onContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      if (interaction.busy) return;
+      const pageId = editor.s.pageId;
+      if (!pageId) return;
+      const rect = el.getBoundingClientRect();
+      const point = editor.s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      const leaf = editor.layersAt(point)[0];
+      const { selection } = editor.s;
+      if (!leaf) editor.select([]);
+      else {
+        const hitSelected = editor.layersAt(point).some((id) => selection.includes(id));
+        if (!hitSelected) {
+          const deep = isMac() ? e.metaKey : e.ctrlKey;
+          editor.select([selectionTarget(editor.scene, pageId, leaf, selection, deep)]);
+        }
+      }
+      openMenu(editor, { kind: "canvas", x: e.clientX, y: e.clientY, point });
+    };
+
     el.addEventListener("pointerdown", onDown);
+    el.addEventListener("contextmenu", onContextMenu);
     el.addEventListener("pointermove", onMove);
     el.addEventListener("pointerup", onUp);
     el.addEventListener("pointercancel", onCancel);
@@ -275,6 +311,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let lastPage = editor.s.pageId;
     return () => {
       el.removeEventListener("pointerdown", onDown);
+      el.removeEventListener("contextmenu", onContextMenu);
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerup", onUp);
       el.removeEventListener("pointercancel", onCancel);
