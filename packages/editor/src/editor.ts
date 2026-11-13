@@ -57,6 +57,12 @@ import {
   variablesIn,
 } from "./variables";
 
+import type { BooleanEngine, BooleanEngineLoader, BooleanOp } from "./vector/boolean";
+import * as vector from "./vector/commands";
+import { pathResizeOps } from "./vector/node";
+import type { VectorPath } from "./vector/path";
+import { loadPathKitEngine } from "./vector/pathkit";
+
 export type ToolId =
   | "select"
   | "hand"
@@ -65,8 +71,15 @@ export type ToolId =
   | "ellipse"
   | "line"
   | "text"
+  | "pen"
   /** Drops comment pins. The web app handles its clicks; the canvas interaction ignores them. */
   | "comment";
+
+/** Editing a path's anchors: which path, and which anchors ("subpath:index") are selected. */
+export interface VectorEditState {
+  readonly id: string;
+  readonly anchors: readonly string[];
+}
 
 export interface EditorState {
   readonly pageId: string | null;
@@ -91,6 +104,10 @@ export interface EditorState {
   readonly canRedo: boolean;
   /** Last message worth telling the user (a rejected edit, a desync). */
   readonly notice: { readonly id: number; readonly text: string } | null;
+  /** Vector edit mode on a path, or null. */
+  readonly vectorEdit: VectorEditState | null;
+  /** The pointer in page coordinates while the pen or vector edit draws live feedback. */
+  readonly vectorPointer: Point | null;
 }
 
 export interface CommitOptions {
@@ -104,6 +121,8 @@ export interface CommitOptions {
 export interface EditorOptions {
   readonly clientId?: string;
   readonly measurer: TextMeasurer;
+  /** Loads the boolean geometry engine on first use (defaults to PathKit). */
+  readonly booleanEngine?: BooleanEngineLoader;
 }
 
 /** "State=Hover, Size=Large": how variant layers are named, like Figma. */
@@ -154,12 +173,17 @@ export class Editor {
     canUndo: false,
     canRedo: false,
     notice: null,
+    vectorEdit: null,
+    vectorPointer: null,
   });
   #noticeId = 0;
   readonly #cameras = new Map<string, Camera>();
+  #booleanLoader: BooleanEngineLoader;
+  #booleanEngine: Promise<BooleanEngine> | null = null;
 
   constructor(options: EditorOptions) {
     this.measurer = options.measurer;
+    this.#booleanLoader = options.booleanEngine ?? (() => loadPathKitEngine());
     this.sync = new SyncEngine(this.doc, { clientId: options.clientId ?? newId() });
     this.sync.on("status", (status) => this.state.set({ status }));
     this.sync.on("role", (role) => this.state.set({ role }));
@@ -172,6 +196,9 @@ export class Editor {
       this.state.set({ canUndo: this.history.canUndo, canRedo: this.history.canRedo }),
     );
     this.doc.subscribe(() => this.#reconcile());
+    // Leave vector edit when its path goes away or the selection or tool moves on.
+    this.state.subscribe(() => vector.reconcileVectorEdit(this));
+    this.doc.subscribe(() => vector.reconcileVectorEdit(this));
   }
 
   get s(): EditorState {
@@ -231,7 +258,9 @@ export class Editor {
       const marks = recordOverrides
         ? [...overrideOps(this.doc, ops), ...unbindOps(this.doc, ops)]
         : [];
-      const first = marks.length > 0 ? [...ops, ...marks] : ops;
+      // Resizing a path (handles, inspector) scales its path data with its box.
+      const pathOps = pathResizeOps(this.doc, ops);
+      const first = marks.length > 0 || pathOps.length > 0 ? [...ops, ...marks, ...pathOps] : ops;
       let inverse = this.sync.commit(first);
       let touched = this.#touchedBy(ops, inverse);
       let lastOps: readonly Op[] = first;
@@ -254,6 +283,7 @@ export class Editor {
           this.doc.has(id),
         );
         const layout = layoutOps(this.doc, layoutTargets);
+        layout.push(...pathResizeOps(this.doc, layout));
         const layoutInverse = layout.length > 0 ? this.sync.commit(layout) : [];
         inverse = [...layoutInverse, ...roundInverse, ...inverse];
         touched = new Set([...afterSync, ...this.#touchedBy(layout, layoutInverse)]);
@@ -724,14 +754,16 @@ export class Editor {
 
   /**
    * Moves a node to a new parent and order key without moving it on screen:
-   * its geometry converts into the new coordinate space.
+   * its geometry converts into the new coordinate space. When the new parent
+   * is created in the same commit (a new group), pass the existing node whose
+   * coordinate space it will share as `spaceParent`.
    */
-  reparentOps(id: string, parent: string, key: string): Op[] {
+  reparentOps(id: string, parent: string, key: string, spaceParent = parent): Op[] {
     const node = this.doc.get(id);
     if (!node) return [];
     const ops: Op[] = [{ op: "move", id, parent, key }];
     const fromSpace = this.scene.spaceMatrix(this.scene.spaceOwner(node.parent));
-    const toSpace = this.scene.spaceMatrix(this.scene.spaceOwner(parent));
+    const toSpace = this.scene.spaceMatrix(this.scene.spaceOwner(spaceParent));
     const sameSpace = fromSpace.every((v, i) => Math.abs(v - (toSpace[i] as number)) < 1e-9);
     if (sameSpace) return ops;
     const convert = (n: NodeRecord) => {
@@ -782,7 +814,7 @@ export class Editor {
     ];
     const keys = keysBetween(null, null, ids.length);
     for (const [i, id] of ids.entries())
-      ops.push(...this.reparentOps(id, groupId, keys[i] as string));
+      ops.push(...this.reparentOps(id, groupId, keys[i] as string, parent));
     if (this.commit(ops, "Group")) this.select([groupId]);
   }
 
@@ -1702,6 +1734,75 @@ export class Editor {
     const created = roots.map((n) => idMap.get(n.id) as string);
     if (this.commit(ops, "Paste")) this.select(created);
     return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Vectors: path editing, flatten, booleans (implemented in ./vector)
+
+  /** A path node's geometry in its local box, or null for other nodes. */
+  pathOf(id: string): VectorPath | null {
+    return vector.pathOf(this, id);
+  }
+
+  /** Replaces a path's geometry (given in its current local box) and re-fits its box. */
+  setPath(id: string, path: VectorPath, label = "Edit path"): boolean {
+    return vector.setPath(this, id, path, label);
+  }
+
+  enterVectorEdit(id: string): boolean {
+    return vector.enterVectorEdit(this, id);
+  }
+
+  exitVectorEdit(): void {
+    if (this.s.vectorEdit) this.state.set({ vectorEdit: null });
+  }
+
+  selectAnchors(keys: readonly string[]): void {
+    vector.setAnchorSelection(this, keys);
+  }
+
+  deleteSelectedAnchors(): boolean {
+    return vector.deleteSelectedAnchors(this);
+  }
+
+  /** Moves the selected anchors by a page-space delta. */
+  nudgeAnchors(dx: number, dy: number): boolean {
+    return vector.nudgeAnchors(this, dx, dy);
+  }
+
+  toggleAnchorSmooth(key: string): boolean {
+    return vector.toggleAnchorSmooth(this, key);
+  }
+
+  /** Converts rectangles, ellipses, lines and empty frames into equivalent paths (⌘E). */
+  flatten(ids?: readonly string[]): boolean {
+    return vector.flatten(this, ids);
+  }
+
+  /** True when the selection holds two or more shapes a boolean can combine. */
+  canBoolean(): boolean {
+    return vector.canBoolean(this);
+  }
+
+  /** Combines the selected shapes into one path. Loads the geometry engine on first use. */
+  booleanOp(op: BooleanOp): Promise<boolean> {
+    return vector.booleanSelection(this, op);
+  }
+
+  /** The boolean engine, loaded once. A failed load is retried next time. */
+  booleanEngine(): Promise<BooleanEngine> {
+    if (!this.#booleanEngine) {
+      this.#booleanEngine = this.#booleanLoader().catch((error: unknown) => {
+        this.#booleanEngine = null;
+        throw error;
+      });
+    }
+    return this.#booleanEngine;
+  }
+
+  setBooleanEngine(loader: BooleanEngineLoader): void {
+    this.#booleanLoader = loader;
+    this.#booleanEngine = null;
   }
 
   // -------------------------------------------------------------------------

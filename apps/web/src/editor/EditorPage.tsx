@@ -12,9 +12,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import { modKey } from "../app/format";
+import { isMac, modKey } from "../app/format";
 import { AssetsPanel } from "./AssetsPanel";
 import { ACTIONS, type ActionContext, matches } from "./actions";
+import { loadBooleanEngine } from "./boolean-engine";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
 import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
@@ -58,7 +59,9 @@ function FileEditor({ fileId }: { fileId: string }) {
     queryFn: () => api.file(fileId),
     retry: false,
   });
-  const [editor] = useState(() => new Editor({ measurer: new CanvasTextMeasurer() }));
+  const [editor] = useState(
+    () => new Editor({ measurer: new CanvasTextMeasurer(), booleanEngine: loadBooleanEngine }),
+  );
   const interaction = useMemo(() => new Interaction(editor), [editor]);
   const [commandOpen, setCommandOpen] = useState(false);
   const [leftOpen, setLeftOpen] = useState(true);
@@ -172,6 +175,18 @@ function FileEditor({ fileId }: { fileId: string }) {
       }
       if (e.key === "Alt") {
         editor.state.set({ xray: true });
+        return;
+      }
+      // The pen and vector edit take their keys first (Enter, Escape, Backspace, arrows).
+      if (
+        interaction.key({
+          key: e.key,
+          shift: e.shiftKey,
+          alt: e.altKey,
+          mod: isMac() ? e.metaKey : e.ctrlKey,
+        })
+      ) {
+        e.preventDefault();
         return;
       }
       if (e.key.startsWith("Arrow") && editor.s.selection.length > 0) {

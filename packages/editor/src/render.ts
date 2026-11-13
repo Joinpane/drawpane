@@ -12,6 +12,7 @@ import type { Rect } from "./geometry";
 import { ImageCache, imagePlacement } from "./images";
 import type { Scene } from "./scene";
 import { layoutText, type TextMeasurer } from "./text";
+import { isClosedPath } from "./vector/cache";
 
 /** On screen it's a canvas element; exports and thumbnails draw into an OffscreenCanvas. */
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -367,8 +368,13 @@ export class CanvasRenderer {
     const strokes = getProp(node.props, "strokes").filter((s) => s.visible !== false);
     const weight = getProp(node.props, "strokeWeight");
     if (strokes.length === 0 || weight <= 0) return;
+    // Open paths and lines stroke along their centre; closed paths honour alignment like any shape.
     const align =
-      node.type === "line" || node.type === "path" ? "center" : getProp(node.props, "strokeAlign");
+      node.type === "line" ||
+      (node.type === "path" && !isClosedPath(getProp(node.props, "pathData")))
+        ? "center"
+        : getProp(node.props, "strokeAlign");
+    const rule = node.type === "path" ? getProp(node.props, "windingRule") : "nonzero";
     ctx.save();
     ctx.filter = "none";
     ctx.lineJoin = getProp(node.props, "strokeJoin");
@@ -380,7 +386,7 @@ export class CanvasRenderer {
     if (dashes.length > 0) ctx.setLineDash(dashes);
     // Inside and outside strokes: draw at double width and clip to one side of the edge.
     ctx.lineWidth = align === "center" ? weight : weight * 2;
-    if (align === "inside") ctx.clip(shape);
+    if (align === "inside") ctx.clip(shape, rule);
     if (align === "outside") {
       const outside = new Path2D();
       outside.rect(-weight * 4 - 1e5, -weight * 4 - 1e5, w + 2e5, h + 2e5);
