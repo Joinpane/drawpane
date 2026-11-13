@@ -120,6 +120,13 @@ interface Entry {
 /** Downscaled copies are never smaller than this. */
 const MIN_LEVEL = 32;
 const MAX_RETRY_MS = 60_000;
+/**
+ * Give up after this many failures (about four minutes with the default
+ * delay): long enough for a collaborator's upload to land, short enough not
+ * to poll forever for an image this team can't read, such as one in layers
+ * pasted from another team's file.
+ */
+const MAX_ATTEMPTS = 8;
 
 const bytesOf = (b: ImageBitmap) => b.width * b.height * 4;
 
@@ -349,9 +356,11 @@ export class ImageCache {
         // Often a collaborator's upload that hasn't finished yet: try again, backing off.
         entry.abort = null;
         entry.status = "error";
-        entry.retryAt =
-          this.#now() + Math.min(MAX_RETRY_MS, this.#retryMs * 2 ** Math.min(entry.attempts, 10));
         entry.attempts++;
+        entry.retryAt =
+          entry.attempts >= MAX_ATTEMPTS
+            ? Number.POSITIVE_INFINITY
+            : this.#now() + Math.min(MAX_RETRY_MS, this.#retryMs * 2 ** (entry.attempts - 1));
         this.#notify();
       },
     );
