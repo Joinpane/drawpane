@@ -13,6 +13,7 @@ export * from "./hit";
 export * from "./images";
 export * from "./interaction";
 export * from "./layout";
+export * from "./masks";
 export * from "./overlay";
 export * from "./presets";
 export * from "./prototype";

@@ -954,7 +954,45 @@ export class Editor {
     return ops;
   }
 
-  group(): void {
+  /**
+   * "Use as mask" (⌥⌘M), like Figma. One layer becomes a mask in place,
+   * clipping the layers above it; several are grouped into a "Mask group"
+   * whose bottom layer is the mask. When every selected layer is already a
+   * mask, it stops being one.
+   */
+  toggleMask(): void {
+    const ids = this.#ordered(this.#topmost(this.s.selection));
+    if (ids.length === 0) return;
+    const nodes = ids.map((id) => this.doc.get(id)).filter((n): n is NodeRecord => !!n);
+    if (nodes.every((n) => getProp(n.props, "isMask"))) {
+      this.setProp(ids, "isMask", null, "Remove mask");
+      return;
+    }
+    const bottom = nodes[0] as NodeRecord;
+    if (!propAllowed(bottom.type, "isMask")) {
+      this.notify("A mask needs an outline: use a shape, frame or vector as the bottom layer.");
+      return;
+    }
+    if (nodes.length === 1) {
+      // On the page it would clip everything above it: ask for the layers it should clip.
+      if (this.doc.get(bottom.parent)?.type === "page") {
+        this.notify("Select the mask together with the layers it should clip.");
+        return;
+      }
+      this.setProp([bottom.id], "isMask", true, "Use as mask");
+      return;
+    }
+    if (this.#refuseInsideInstance()) return;
+    this.beginGesture("Use as mask");
+    try {
+      this.group({ name: "Mask group" });
+      this.setProp([bottom.id], "isMask", true);
+    } finally {
+      this.endGesture();
+    }
+  }
+
+  group(options: { name?: string } = {}): void {
     if (this.#refuseInsideInstance()) return;
     const ids = this.#ordered(this.#topmost(this.s.selection));
     const first = ids[0] && this.doc.get(ids[0]);
@@ -971,7 +1009,7 @@ export class Editor {
         type: "group",
         parent,
         key: keyBetween(last?.key ?? null, after ? (this.doc.get(after)?.key ?? null) : null),
-        props: { name: this.defaultName("group") },
+        props: { name: options.name ?? this.defaultName("group") },
       },
     ];
     const keys = keysBetween(null, null, ids.length);
