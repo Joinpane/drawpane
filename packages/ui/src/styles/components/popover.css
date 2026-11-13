@@ -1,0 +1,33 @@
+/* Popover: anchored pickers and small editors */
+.dp-popover {
+  position: fixed;
+  z-index: 60;
+  box-sizing: border-box;
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  font: var(--type-ui-body);
+  outline: none;
+  animation: dp-popover-in var(--duration-popover) ease-out;
+}
+.dp-popover[data-side="left"] {
+  --dp-popover-from: translateX(4px);
+}
+.dp-popover[data-side="right"] {
+  --dp-popover-from: translateX(-4px);
+}
+.dp-popover[data-side="top"] {
+  --dp-popover-from: translateY(4px);
+}
+.dp-popover[data-side="bottom"] {
+  --dp-popover-from: translateY(-4px);
+}
+@keyframes dp-popover-in {
+  from {
+    opacity: 0;
+    transform: var(--dp-popover-from, none);
+  }
+}

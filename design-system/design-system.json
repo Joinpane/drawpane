@@ -112,7 +112,18 @@
     "key.svg",
     "bolt.svg",
     "book.svg",
-    "plug.svg"
+    "plug.svg",
+    "eyedropper.svg",
+    "corners.svg",
+    "flip-horizontal.svg",
+    "flip-vertical.svg",
+    "distribute-horizontal.svg",
+    "distribute-vertical.svg",
+    "tidy.svg",
+    "dash.svg",
+    "portrait.svg",
+    "landscape.svg",
+    "italic.svg"
    ],
    "files": {
     "pointer.svg": {
