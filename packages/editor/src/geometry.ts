@@ -148,6 +148,15 @@ export function rectsIntersect(a: Rect, b: Rect): boolean {
   );
 }
 
+/** The overlap of two rects, or null when they don't overlap. */
+export function intersectRects(a: Rect, b: Rect): Rect | null {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  return right >= x && bottom >= y ? { x, y, width: right - x, height: bottom - y } : null;
+}
+
 export function rectContains(outer: Rect, inner: Rect): boolean {
   return (
     inner.x >= outer.x &&

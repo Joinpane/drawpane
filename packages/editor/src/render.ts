@@ -11,6 +11,7 @@ import { Camera } from "./camera";
 import type { Rect } from "./geometry";
 import { ImageCache, imagePlacement } from "./images";
 import { markerLength, markersOf, trimmedStroke } from "./markers";
+import { hasMask, maskScopes } from "./masks";
 import type { Scene } from "./scene";
 import { layoutText, type TextMeasurer } from "./text";
 import { isClosedPath } from "./vector/cache";
@@ -101,7 +102,7 @@ export class CanvasRenderer {
     ctx.fillStyle = getProp(page.props, "backgroundColor") ?? this.canvasColor;
     ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     const visible = camera.visibleRect(viewport);
-    for (const id of this.#scene.doc.childIds(pageId)) this.#draw(ctx, id, camera, dpr, visible);
+    this.#drawChildren(ctx, pageId, camera, dpr, visible);
     this.stats.ms = performance.now() - start;
   }
 
@@ -161,8 +162,7 @@ export class CanvasRenderer {
       ctx.save();
       ctx.globalAlpha *= opacity;
       ctx.globalCompositeOperation = blend;
-      for (const child of this.#scene.doc.childIds(id))
-        this.#draw(ctx, child, camera, dpr, visible);
+      this.#drawChildren(ctx, id, camera, dpr, visible);
       ctx.restore();
       return;
     }
@@ -204,12 +204,52 @@ export class CanvasRenderer {
         ctx.save();
         if (getProp(node.props, "clipContent")) ctx.clip(shape);
         ctx.filter = "none";
-        for (const child of children) this.#draw(ctx, child, camera, dpr, visible);
+        this.#drawChildren(ctx, id, camera, dpr, visible);
         ctx.restore();
       }
     }
     this.#strokes(ctx, node, shape, width, height);
     ctx.restore();
+  }
+
+  /**
+   * Draws a parent's children bottom first. A mask isn't drawn: its outline
+   * clips the children above it, up to the next mask.
+   */
+  #drawChildren(ctx: Ctx, parentId: string, camera: Camera, dpr: number, visible: Rect): void {
+    const doc = this.#scene.doc;
+    if (!hasMask(doc, parentId)) {
+      for (const child of doc.childIds(parentId)) this.#draw(ctx, child, camera, dpr, visible);
+      return;
+    }
+    let clipping = false;
+    for (const { id, isMask } of maskScopes(doc, parentId)) {
+      if (!isMask) {
+        this.#draw(ctx, id, camera, dpr, visible);
+        continue;
+      }
+      const mask = doc.get(id) as NodeRecord;
+      if (clipping) ctx.restore();
+      ctx.save();
+      clipping = true;
+      const m = this.#scene.worldMatrix(id);
+      const z = camera.zoom * dpr;
+      ctx.setTransform(
+        m[0] * z,
+        m[1] * z,
+        m[2] * z,
+        m[3] * z,
+        (m[4] * camera.zoom + camera.x) * dpr,
+        (m[5] * camera.zoom + camera.y) * dpr,
+      );
+      const shape = this.#shapePath(
+        mask,
+        getProp(mask.props, "width"),
+        getProp(mask.props, "height"),
+      );
+      ctx.clip(shape, mask.type === "path" ? getProp(mask.props, "windingRule") : "nonzero");
+    }
+    if (clipping) ctx.restore();
   }
 
   #effectReach(node: NodeRecord): number {

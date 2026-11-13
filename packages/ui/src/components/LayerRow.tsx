@@ -61,6 +61,8 @@ export interface LayerRowProps extends Omit<ComponentPropsWithRef<"div">, "child
   onToggleLocked?: () => void;
   /** Enables renaming in place: double-click the row or press F2, then Enter or Escape. */
   onRename?: (name: string) => void;
+  /** A short muted tag after the name, such as "mask" or "clipped". */
+  note?: string;
   /** Controls renaming from outside (a menu's Rename, ⌘R). Leave unset to let the row own it. */
   renaming?: boolean;
   /** Renaming started or ended, from inside the row. */
@@ -90,6 +92,7 @@ export function LayerRow({
   onToggleHidden,
   onToggleLocked,
   onRename,
+  note,
   renaming: renamingProp,
   onRenamingChange,
   className,
@@ -192,6 +195,7 @@ export function LayerRow({
           {name}
         </span>
       )}
+      {note && !renaming ? <span className="dp-layer__note">{note}</span> : null}
       {presence !== undefined && (
         <span
           className="dp-layer__presence"
