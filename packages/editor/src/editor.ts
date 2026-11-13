@@ -104,8 +104,8 @@ export interface EditorState {
   readonly peers: ReadonlyMap<string, Peer>;
   readonly canUndo: boolean;
   readonly canRedo: boolean;
-  /** Last message worth telling the user (a rejected edit, a desync). */
-  readonly notice: { readonly id: number; readonly text: string } | null;
+  /** Last message worth telling the user (a rejected edit, a desync, a restore). */
+  readonly notice: Notice | null;
   /** Vector edit mode on a path, or null. */
   readonly vectorEdit: VectorEditState | null;
   /** The pointer in page coordinates while the pen or vector edit draws live feedback. */
@@ -114,6 +114,13 @@ export interface EditorState {
   readonly prototyping: boolean;
   /** A connection being dragged from a layer's handle, or null. */
   readonly connecting: ConnectionDrag | null;
+}
+
+export interface Notice {
+  readonly id: number;
+  readonly text: string;
+  /** One follow-up the message offers, such as "Undo" or "Show". */
+  readonly action?: { readonly label: string; readonly run: () => void };
 }
 
 export interface ConnectionDrag {
@@ -226,8 +233,18 @@ export class Editor {
     return this.s.role !== "viewer";
   }
 
-  notify(text: string): void {
-    this.state.set({ notice: { id: ++this.#noticeId, text } });
+  /**
+   * Shows a fixed document that never syncs, such as a saved version. The
+   * editor is read-only and already live; the page and selection carry over
+   * where the new document still has them.
+   */
+  loadStatic(nodes: Iterable<NodeRecord>): void {
+    this.state.set({ status: "live", role: "viewer", editingText: null, vectorEdit: null });
+    this.doc.reset(nodes);
+  }
+
+  notify(text: string, action?: Notice["action"]): void {
+    this.state.set({ notice: { id: ++this.#noticeId, text, ...(action ? { action } : {}) } });
   }
 
   /** Keeps UI state valid after the document changes (remote deletes, page removal). */

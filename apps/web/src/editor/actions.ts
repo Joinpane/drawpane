@@ -38,6 +38,10 @@ export interface ActionContext {
   readonly present: () => void;
   /** Opens the right pane on Design, Prototype or Inspect. */
   readonly showTab: (tab: "design" | "prototype" | "inspect") => void;
+  /** Opens the History tab. */
+  readonly showHistory: () => void;
+  /** Asks for a name and saves the file as it is now as a version. */
+  readonly saveVersion: () => void;
 }
 
 export interface Action {
@@ -507,6 +511,24 @@ export const ACTIONS: readonly Action[] = [
     keywords: "png jpeg webp svg download image",
     enabled: hasSelection,
     run: ({ editor }) => void exportSelection(editor),
+  },
+  {
+    id: "file.history",
+    label: "Version history",
+    group: "File",
+    icon: "history",
+    keywords: "versions restore undo backup snapshot timeline scrubber",
+    run: ({ showHistory }) => showHistory(),
+  },
+  {
+    id: "file.saveVersion",
+    label: "Save a named version…",
+    group: "File",
+    icon: "history",
+    shortcut: { key: "s", mod: true, alt: true },
+    keywords: "version name milestone checkpoint history",
+    enabled: canEdit,
+    run: ({ saveVersion }) => saveVersion(),
   },
   {
     id: "file.addPage",

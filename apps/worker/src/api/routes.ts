@@ -10,6 +10,7 @@ import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from
 import { comments } from "./comments";
 import { media, thumbnailKey } from "./media";
 import { share } from "./share";
+import { versions } from "./versions";
 
 const Name = z.string().trim().min(1, "Enter a name.").max(120, "Keep names under 120 characters.");
 const RoleSchema = z.enum(["owner", "editor", "viewer"]);
@@ -329,7 +330,8 @@ export const api = new Hono<AppContext>()
   .route("/", comments)
   // Images and thumbnails (./media.ts) ---------------------------------------
   .route("/", media)
-  .route("/", share);
+  .route("/", share)
+  .route("/", versions);
 
 async function projectTeam(db: D1Database, projectId: string) {
   const row = await db
