@@ -2,6 +2,7 @@ import { getProp, keyBetween, type NodeRecord } from "@drawpane/model";
 import { IconButton, type LayerKind, LayerRow, type PresenceSlot } from "@drawpane/ui";
 import { type KeyboardEvent, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { openMenu, uiFor, useUi } from "./ui-state";
 
 const ROW_HEIGHT = 28;
 const OVERSCAN = 8;
@@ -41,6 +42,7 @@ export function LayersPanel() {
   const selection = useEditorState((s) => s.selection);
   const peers = useEditorState((s) => s.peers);
   const canEdit = useEditorState((s) => s.role !== "viewer");
+  const renaming = useUi(editor, (ui) => ui.renaming);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [focusId, setFocusId] = useState<string | null>(null);
   const [drag, setDrag] = useState<{
@@ -311,6 +313,9 @@ export function LayersPanel() {
                             "Lock",
                           ),
                         onRename: (name: string) => editor.rename(node.id, name),
+                        renaming: renaming === node.id,
+                        onRenamingChange: (on: boolean) =>
+                          uiFor(editor).set({ renaming: on ? node.id : null }),
                         draggable: true,
                         onDragStart: (e: React.DragEvent) => {
                           e.dataTransfer.effectAllowed = "move";
@@ -322,6 +327,12 @@ export function LayersPanel() {
                       }
                     : {})}
                   onClick={(e) => select(node.id, e)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    // Right-clicking outside the selection selects that row first.
+                    if (!selection.includes(node.id)) editor.select([node.id]);
+                    openMenu(editor, { kind: "layers", x: e.clientX, y: e.clientY });
+                  }}
                   onMouseEnter={() => editor.state.set({ hover: node.id })}
                   onMouseLeave={() => editor.state.set({ hover: null })}
                 />
@@ -339,7 +350,8 @@ export function PagesList() {
   useDocVersion();
   const pageId = useEditorState((s) => s.pageId);
   const canEdit = useEditorState((s) => s.role !== "viewer");
-  const [renaming, setRenaming] = useState<string | null>(null);
+  const renaming = useUi(editor, (ui) => ui.renaming);
+  const setRenaming = (id: string | null) => uiFor(editor).set({ renaming: id });
   const pages = editor.doc
     .pageIds()
     .map((id) => editor.doc.get(id))
@@ -381,6 +393,10 @@ export function PagesList() {
                 aria-current={page.id === pageId ? "page" : undefined}
                 onClick={() => editor.setPage(page.id)}
                 onDoubleClick={() => canEdit && setRenaming(page.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  openMenu(editor, { kind: "page", x: e.clientX, y: e.clientY, pageId: page.id });
+                }}
               >
                 <span>{getProp(page.props, "name") || "Page"}</span>
                 <span className="pages__count">{editor.doc.childIds(page.id).length || ""}</span>
