@@ -1,0 +1,201 @@
+/* AgentTag */
+.dp-agenttag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-200);
+  font: var(--type-ui-body);
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+.dp-agenttag__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-100);
+  height: 20px;
+  padding: 0 7px 0 5px;
+  border-radius: var(--radius-xs);
+  background: var(--agent);
+  color: var(--on-agent);
+  font: 600 11px / 14px var(--font-ui);
+}
+.dp-agenttag__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.dp-agenttag__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--agent);
+  box-shadow: 0 0 0 3px var(--agent-soft);
+}
+.dp-agenttag--waiting .dp-agenttag__dot {
+  background: var(--warning);
+  box-shadow: none;
+}
+.dp-agenttag--idle .dp-agenttag__dot,
+.dp-agenttag--stopped .dp-agenttag__dot {
+  background: var(--ink-disabled);
+  box-shadow: none;
+}
+.dp-agenttag__for {
+  color: var(--ink-muted);
+}
+
+/* AgentStep */
+.dp-step {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  gap: var(--space-200);
+  align-items: start;
+  padding: 6px var(--space-200);
+  border-radius: var(--radius-sm);
+  font: var(--type-ui-body);
+  color: var(--ink);
+}
+.dp-step__mark {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  box-sizing: border-box;
+  box-shadow: inset 0 0 0 1.5px var(--line-control);
+  color: var(--ink-muted);
+}
+.dp-step--done .dp-step__mark {
+  box-shadow: none;
+  background: var(--surface-active);
+  color: var(--success);
+}
+.dp-step--running {
+  background: var(--agent-soft);
+}
+.dp-step--running .dp-step__mark {
+  box-shadow: inset 0 0 0 2px var(--agent);
+  background: radial-gradient(circle, var(--agent) 0 3px, transparent 3.5px);
+}
+.dp-step--failed .dp-step__mark {
+  box-shadow: none;
+  color: var(--danger);
+}
+.dp-step--review .dp-step__mark {
+  box-shadow: none;
+  background: var(--agent);
+  color: var(--on-agent);
+}
+.dp-step--queued .dp-step__label {
+  color: var(--ink-muted);
+}
+.dp-step__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.dp-step--running .dp-step__label,
+.dp-step--review .dp-step__label {
+  font-weight: 600;
+}
+.dp-step__detail {
+  color: var(--ink-muted);
+}
+.dp-step__ops {
+  font: 400 11px / 16px var(--font-mono);
+  color: var(--agent-ink);
+  white-space: pre-wrap;
+}
+.dp-step__meta {
+  font-size: 11px;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* PromptField */
+.dp-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-200);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: inset 0 0 0 1px var(--line-control);
+}
+.dp-prompt:focus-within {
+  box-shadow: inset 0 0 0 1.5px var(--signal);
+}
+.dp-prompt__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-100);
+}
+.dp-prompt__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-100);
+  height: 20px;
+  padding: 0 6px 0 4px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font: var(--type-ui-label);
+}
+.dp-prompt__chip .dp-icon {
+  color: var(--icon);
+}
+.dp-prompt__input {
+  padding: 2px var(--space-100);
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--ink);
+  font: 400 13px / 18px var(--font-ui);
+  caret-color: var(--signal);
+}
+.dp-prompt__input::placeholder {
+  color: var(--ink-muted);
+}
+.dp-prompt__foot {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.dp-prompt__model {
+  flex: 1;
+  min-width: 0;
+  margin-left: var(--space-100);
+  overflow: hidden;
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dp-prompt__send {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--size-control-md);
+  height: var(--size-control-md);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--signal);
+  color: var(--on-signal);
+  cursor: pointer;
+  transition: background-color var(--duration-hover) ease-out;
+}
+.dp-prompt__send:hover {
+  background: var(--signal-hover);
+}
+.dp-prompt__send:disabled {
+  background: var(--surface-sunken);
+  color: var(--ink-disabled);
+  cursor: not-allowed;
+}
+.dp-prompt__send--stop,
+.dp-prompt__send--stop:hover {
+  background: var(--surface-inverse);
+  color: var(--ink-inverse);
+}
