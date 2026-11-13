@@ -87,7 +87,7 @@ export function findVariable(doc: Doc, name: string, type?: VariableType): NodeR
  */
 export function activeMode(doc: Doc, nodeId: string, collectionId: string): string | null {
   const collection = doc.get(collectionId);
-  if (!collection || collection.type !== "collection") return null;
+  if (collection?.type !== "collection") return null;
   const modes = getProp(collection.props, "modes");
   for (
     let node = doc.get(nodeId);

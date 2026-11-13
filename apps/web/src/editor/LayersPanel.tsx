@@ -18,7 +18,8 @@ const KIND: Record<string, LayerKind> = {
 
 function kindOf(node: NodeRecord): LayerKind {
   if (node.type === "frame") {
-    if (getProp(node.props, "isComponent")) return "component";
+    if (getProp(node.props, "isComponent") || getProp(node.props, "isComponentSet"))
+      return "component";
     if (getProp(node.props, "instanceOf") !== null) return "instance";
   }
   return KIND[node.type] ?? "rect";

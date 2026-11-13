@@ -172,6 +172,9 @@ export function instantiateOps(
     }
     if (isRoot) {
       props.instanceOf = componentId;
+      // An instance of a variant is named after its set ("Button"), like Figma.
+      const set = componentSetOf(doc, componentId);
+      if (set) props.name = getProp(set.props, "name");
       props.x = origin.x;
       props.y = origin.y;
       delete props.positioning;
@@ -289,6 +292,15 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
   };
 
   syncProps(main, instance, true);
+  const set = componentSetOf(doc, main.id);
+  if (set && !getProp(instance.props, "overrides").includes("name")) {
+    // Undo the variant-name sync above: instances of a variant carry the set's name.
+    const wanted = getProp(set.props, "name");
+    const index = ops.findIndex((o) => o.op === "set" && o.id === instance.id && o.prop === "name");
+    if (index !== -1) ops.splice(index, 1);
+    if (getProp(instance.props, "name") !== wanted)
+      ops.push({ op: "set", id: instance.id, prop: "name", value: wanted });
+  }
   visit(main, instance);
 
   // Layers whose main counterpart is gone (or that never had one) don't belong in an instance.
@@ -440,4 +452,134 @@ export function detachOps(doc: Doc, instanceId: string): Op[] {
 /** Properties of a node that differ from its main counterpart because of an override. */
 export function overriddenProps(node: NodeRecord): readonly PropName[] {
   return getProp(node.props, "overrides").filter(isPropName);
+}
+
+// ---------------------------------------------------------------------------
+// Variants
+
+export function isComponentSet(node: NodeRecord | undefined): boolean {
+  return node?.type === "frame" && getProp(node.props, "isComponentSet");
+}
+
+/** The component set a main component belongs to, if it is a variant. */
+export function componentSetOf(doc: Doc, componentId: string): NodeRecord | undefined {
+  const component = doc.get(componentId);
+  const parent = component ? doc.get(component.parent) : undefined;
+  return isMainComponent(component) && isComponentSet(parent) ? parent : undefined;
+}
+
+/** The variants (main components) in a component set, in order. */
+export function variantsOf(doc: Doc, setId: string): NodeRecord[] {
+  return doc
+    .childIds(setId)
+    .map((id) => doc.get(id))
+    .filter((n): n is NodeRecord => !!n && isMainComponent(n));
+}
+
+/** A set's properties in first-seen order, with every value in use. */
+export function variantProperties(
+  doc: Doc,
+  setId: string,
+): Array<{ name: string; values: string[] }> {
+  const order: string[] = [];
+  const values = new Map<string, string[]>();
+  for (const variant of variantsOf(doc, setId)) {
+    for (const [name, value] of Object.entries(getProp(variant.props, "variantProps"))) {
+      if (!values.has(name)) {
+        order.push(name);
+        values.set(name, []);
+      }
+      const list = values.get(name) as string[];
+      if (!list.includes(value)) list.push(value);
+    }
+  }
+  return order.map((name) => ({ name, values: values.get(name) ?? [] }));
+}
+
+/**
+ * The variant whose properties match `wanted` best: all of them if one does,
+ * else the most in common, preferring the earliest variant on ties.
+ */
+export function findVariant(
+  doc: Doc,
+  setId: string,
+  wanted: Readonly<Record<string, string>>,
+): NodeRecord | undefined {
+  let best: NodeRecord | undefined;
+  let bestScore = -1;
+  for (const variant of variantsOf(doc, setId)) {
+    const props = getProp(variant.props, "variantProps");
+    const score = Object.entries(wanted).filter(([k, v]) => props[k] === v).length;
+    if (score > bestScore) {
+      best = variant;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+/** Path of layer names from an instance root down to `id` ("Content/Title"), for matching across variants. */
+function namePath(doc: Doc, rootId: string, id: string): string {
+  const parts: string[] = [];
+  for (let node = doc.get(id); node && node.id !== rootId; node = doc.get(node.parent)) {
+    parts.unshift(getProp(node.props, "name") || node.type);
+  }
+  return parts.join("/");
+}
+
+/**
+ * Swaps an instance to another main component (a sibling variant, usually),
+ * keeping its id, position and the overrides on layers whose name path
+ * matches in the new component, like Figma.
+ */
+export function swapInstanceOps(doc: Doc, instanceId: string, componentId: string): Op[] {
+  const instance = doc.get(instanceId);
+  const target = doc.get(componentId);
+  if (!instance || !isInstanceRoot(instance) || !target || !isMainComponent(target)) return [];
+
+  // Overridden values by name path (the root keeps its own overrides as-is).
+  const carried = new Map<string, Record<string, unknown>>();
+  const stack = [...doc.childIds(instanceId)];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    const node = doc.get(id);
+    if (!node) continue;
+    const overridden = getProp(node.props, "overrides");
+    if (overridden.length > 0) {
+      const values: Record<string, unknown> = {};
+      for (const prop of overridden)
+        values[prop] = (node.props as Record<string, unknown>)[prop] ?? null;
+      carried.set(namePath(doc, instanceId, id), values);
+    }
+    stack.push(...doc.childIds(id));
+  }
+
+  const ops: Op[] = doc.childIds(instanceId).map((id): Op => ({ op: "delete", id }));
+  ops.push({ op: "set", id: instanceId, prop: "instanceOf", value: componentId });
+  const created: Op[] = [];
+  for (const childId of doc.childIds(componentId)) {
+    const child = doc.get(childId);
+    if (child) createMirror(doc, child, instanceId, created);
+  }
+  // Re-apply carried overrides onto the new layers with the same name path.
+  const pathOf = new Map<string, string>();
+  const createdById = new Map(created.filter((o) => o.op === "create").map((o) => [o.id, o]));
+  for (const op of created) {
+    if (op.op !== "create") continue;
+    const parentPath = op.parent === instanceId ? "" : (pathOf.get(op.parent) ?? "");
+    const name = (op.props.name as string | undefined) || op.type;
+    const path = parentPath ? `${parentPath}/${name}` : name;
+    pathOf.set(op.id, path);
+    const values = carried.get(path);
+    if (!values) continue;
+    const props = { ...op.props } as Record<string, unknown>;
+    for (const [prop, value] of Object.entries(values)) {
+      if (value === null) delete props[prop];
+      else props[prop] = value;
+    }
+    props.overrides = Object.keys(values);
+    createdById.set(op.id, { ...op, props: props as Props });
+  }
+  for (const op of created) ops.push(op.op === "create" ? (createdById.get(op.id) as Op) : op);
+  return ops;
 }

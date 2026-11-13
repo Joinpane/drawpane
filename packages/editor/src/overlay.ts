@@ -70,6 +70,21 @@ export function drawOverlay(
     ctx.setLineDash([]);
   };
 
+  // Component sets: a dashed outline in the component colour, like Figma.
+  const sets: string[] = [];
+  for (const id of doc.childIds(pageId)) {
+    const node = doc.get(id);
+    if (node?.type === "frame" && getProp(node.props, "isComponentSet")) sets.push(id);
+    else if (node?.type === "frame") {
+      for (const child of doc.childIds(id))
+        if (getProp(doc.get(child)?.props ?? {}, "isComponentSet")) sets.push(child);
+    }
+  }
+  for (const id of sets) {
+    const corners = scene.corners(id);
+    if (corners) quad(corners, theme.component, 1, [4, 3]);
+  }
+
   // Artboard labels: names above top-level frames.
   ctx.font = `500 11px ${theme.fontUi}`;
   ctx.textBaseline = "bottom";
@@ -80,7 +95,7 @@ export function drawOverlay(
     if (!corners) continue;
     const p = toScreen(corners[0] as Point);
     const selected = selection.includes(id);
-    const isComponent = getProp(node.props, "isComponent");
+    const isComponent = getProp(node.props, "isComponent") || getProp(node.props, "isComponentSet");
     const isInstance = getProp(node.props, "instanceOf") !== null;
     let x = p.x;
     if (isComponent || isInstance) {

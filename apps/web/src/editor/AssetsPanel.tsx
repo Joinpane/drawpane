@@ -1,4 +1,11 @@
-import { Camera, CanvasRenderer, listComponents } from "@drawpane/editor";
+import {
+  Camera,
+  CanvasRenderer,
+  componentSetOf,
+  isComponentSet,
+  listComponents,
+  variantsOf,
+} from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { Icon } from "@drawpane/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -15,9 +22,20 @@ export function AssetsPanel() {
   const editor = useEditor();
   const version = useDocVersion();
   const [query, setQuery] = useState("");
+  // Variants show as one tile for their set; clicking inserts the first variant.
   const components = useMemo(() => {
     void version;
-    return listComponents(editor.doc);
+    const out: NodeRecord[] = [];
+    const seenSets = new Set<string>();
+    for (const c of listComponents(editor.doc)) {
+      const set = componentSetOf(editor.doc, c.id);
+      if (!set) out.push(c);
+      else if (!seenSets.has(set.id)) {
+        seenSets.add(set.id);
+        out.push(set);
+      }
+    }
+    return out;
   }, [editor, version]);
   const q = query.trim().toLowerCase();
   const visible = q
@@ -84,6 +102,10 @@ export function AssetsPanel() {
 function ComponentTile({ node }: { node: NodeRecord }) {
   const editor = useEditor();
   const name = getProp(node.props, "name") || "Component";
+  // A set inserts its first variant.
+  const insertId = isComponentSet(node)
+    ? (variantsOf(editor.doc, node.id)[0]?.id ?? node.id)
+    : node.id;
   const description = getProp(node.props, "componentDescription");
   return (
     <button
@@ -92,10 +114,10 @@ function ComponentTile({ node }: { node: NodeRecord }) {
       title={description ? `${name}: ${description}` : name}
       draggable={editor.canEdit}
       onDragStart={(e) => {
-        e.dataTransfer.setData(COMPONENT_DRAG_MIME, node.id);
+        e.dataTransfer.setData(COMPONENT_DRAG_MIME, insertId);
         e.dataTransfer.effectAllowed = "copy";
       }}
-      onClick={() => editor.insertInstance(node.id)}
+      onClick={() => editor.insertInstance(insertId)}
       disabled={!editor.canEdit}
     >
       <ComponentPreview node={node} />

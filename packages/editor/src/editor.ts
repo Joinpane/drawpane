@@ -22,7 +22,9 @@ import {
 } from "@drawpane/model";
 import { Camera } from "./camera";
 import {
+  componentSetOf,
   detachOps,
+  findVariant,
   instanceRootOf,
   instantiateOps,
   isInsideInstance,
@@ -30,7 +32,10 @@ import {
   overrideOps,
   propagationOps,
   resetOverridesOps,
+  swapInstanceOps,
   syncInstanceOps,
+  variantProperties,
+  variantsOf,
   wouldCycle,
 } from "./components";
 import { Doc } from "./doc";
@@ -89,6 +94,23 @@ export interface CommitOptions {
 export interface EditorOptions {
   readonly clientId?: string;
   readonly measurer: TextMeasurer;
+}
+
+/** "State=Hover, Size=Large": how variant layers are named, like Figma. */
+export function formatVariantName(props: Readonly<Record<string, string>>): string {
+  return Object.entries(props)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ");
+}
+
+/** The longest shared start of several names, trimmed at a separator ("Button/Primary", "Button/Ghost" → "Button"). */
+function commonPrefix(names: readonly string[]): string {
+  if (names.length < 2) return "";
+  let prefix = names[0] ?? "";
+  for (const name of names.slice(1)) {
+    while (!name.startsWith(prefix)) prefix = prefix.slice(0, -1);
+  }
+  return prefix.replace(/[\s/·,=-]+$/, "").trim();
 }
 
 /** Bound on derived-write rounds (sync, text, layout) per commit; real files settle in two or three. */
@@ -943,6 +965,182 @@ export class Editor {
         ops.push(...detachOps(this.doc, id));
     }
     if (ops.length > 0) this.commit(ops, "Detach instance");
+  }
+
+  // -------------------------------------------------------------------------
+  // Variants
+
+  /**
+   * Wraps the selected main components in a component set, one variant each,
+   * named "Property 1=…" from their layer names (⌥⌘V once components exist).
+   */
+  combineAsVariants(): void {
+    const ids = this.#ordered(this.#topmost(this.s.selection));
+    const nodes = ids.map((id) => this.doc.get(id)).filter((n): n is NodeRecord => !!n);
+    if (nodes.length === 0 || !nodes.every((n) => isMainComponent(n))) {
+      this.notify("Select one or more main components to combine them as variants.");
+      return;
+    }
+    if (nodes.some((n) => componentSetOf(this.doc, n.id))) {
+      this.notify("Some of these are already variants of a set.");
+      return;
+    }
+    const names = nodes.map((n) => getProp(n.props, "name") || "Variant");
+    const setName = commonPrefix(names) || names[0] || "Component";
+    this.beginGesture("Combine as variants");
+    this.state.set({ selection: ids });
+    // Always wrap (frameSelection(true) would add auto layout to a lone frame instead).
+    this.frameSelection(false);
+    const setId = this.s.selection[0];
+    if (setId && setId !== ids[0] && this.doc.get(setId)?.type === "frame") {
+      const ops: Op[] = [
+        { op: "set", id: setId, prop: "isComponentSet", value: true },
+        { op: "set", id: setId, prop: "layoutMode", value: "row" },
+        { op: "set", id: setId, prop: "sizingH", value: "hug" },
+        { op: "set", id: setId, prop: "sizingV", value: "hug" },
+        { op: "set", id: setId, prop: "fills", value: null },
+        { op: "set", id: setId, prop: "name", value: setName },
+        { op: "set", id: setId, prop: "layoutWrap", value: true },
+        { op: "set", id: setId, prop: "gap", value: 16 },
+        { op: "set", id: setId, prop: "rowGap", value: 16 },
+        { op: "set", id: setId, prop: "paddingTop", value: 16 },
+        { op: "set", id: setId, prop: "paddingRight", value: 16 },
+        { op: "set", id: setId, prop: "paddingBottom", value: 16 },
+        { op: "set", id: setId, prop: "paddingLeft", value: 16 },
+      ];
+      nodes.forEach((node, i) => {
+        const value =
+          (names[i] as string).slice(setName.length).replace(/^[\s/·,-]+/, "") ||
+          (i === 0 ? "Default" : `Variant ${i + 1}`);
+        ops.push(
+          { op: "set", id: node.id, prop: "variantProps", value: { "Property 1": value } },
+          { op: "set", id: node.id, prop: "name", value: `Property 1=${value}` },
+        );
+      });
+      this.commit(ops, "Combine as variants");
+    }
+    this.endGesture();
+  }
+
+  /** Adds a copy of a variant to its set, with a new value for its last property. */
+  addVariant(variantId: string): string | null {
+    const set = componentSetOf(this.doc, variantId);
+    const variant = this.doc.get(variantId);
+    if (!set || !variant) return null;
+    const props = { ...getProp(variant.props, "variantProps") };
+    const names = Object.keys(props);
+    const last = names.at(-1) ?? "Property 1";
+    const used = new Set(
+      variantProperties(this.doc, set.id).find((p) => p.name === last)?.values ?? [],
+    );
+    let n = used.size + 1;
+    while (used.has(`Variant ${n}`)) n++;
+    props[last] = `Variant ${n}`;
+    const siblings = this.doc.childIds(set.id);
+    const next = siblings[siblings.indexOf(variantId) + 1];
+    const key = keyBetween(variant.key, next ? (this.doc.get(next)?.key ?? null) : null);
+    const { ops, rootId } = this.cloneOps(variantId, set.id, key);
+    const root = ops[0];
+    if (root?.op === "create") {
+      (root.props as Record<string, unknown>).variantProps = props;
+      (root.props as Record<string, unknown>).name = formatVariantName(props);
+    }
+    if (!this.commit(ops, "Add variant")) return null;
+    this.select([rootId]);
+    return rootId;
+  }
+
+  /** Sets one property value on a variant (and keeps its layer name in step). */
+  setVariantProp(variantId: string, name: string, value: string): void {
+    const variant = this.doc.get(variantId);
+    if (!variant || !componentSetOf(this.doc, variantId)) return;
+    const props = { ...getProp(variant.props, "variantProps"), [name]: value.trim() || "Default" };
+    this.commit(
+      [
+        { op: "set", id: variantId, prop: "variantProps", value: props },
+        { op: "set", id: variantId, prop: "name", value: formatVariantName(props) },
+      ],
+      "Change variant",
+    );
+  }
+
+  /** Renames a variant property across every variant in a set. */
+  renameVariantProperty(setId: string, from: string, to: string): void {
+    const name = to.trim();
+    if (!name || name === from) return;
+    const ops: Op[] = [];
+    for (const variant of variantsOf(this.doc, setId)) {
+      const props = getProp(variant.props, "variantProps");
+      if (!(from in props)) continue;
+      const next: Record<string, string> = {};
+      for (const [k, v] of Object.entries(props)) next[k === from ? name : k] = v;
+      ops.push(
+        { op: "set", id: variant.id, prop: "variantProps", value: next },
+        { op: "set", id: variant.id, prop: "name", value: formatVariantName(next) },
+      );
+    }
+    if (ops.length > 0) this.commit(ops, "Rename property");
+  }
+
+  /** Adds a property to every variant in a set, with `value` as everyone's starting value. */
+  addVariantProperty(setId: string, value = "Default"): void {
+    const existing = new Set(variantProperties(this.doc, setId).map((p) => p.name));
+    let n = existing.size + 1;
+    while (existing.has(`Property ${n}`)) n++;
+    const name = `Property ${n}`;
+    const ops: Op[] = [];
+    for (const variant of variantsOf(this.doc, setId)) {
+      const next = { ...getProp(variant.props, "variantProps"), [name]: value };
+      ops.push(
+        { op: "set", id: variant.id, prop: "variantProps", value: next },
+        { op: "set", id: variant.id, prop: "name", value: formatVariantName(next) },
+      );
+    }
+    if (ops.length > 0) this.commit(ops, "Add property");
+  }
+
+  /**
+   * Switches an instance to the variant of its set that matches its current
+   * properties with `name` set to `value`. Overrides carry over by layer name.
+   */
+  setInstanceVariant(instanceId: string, name: string, value: string): void {
+    const instance = this.doc.get(instanceId);
+    const mainId = instance ? getProp(instance.props, "instanceOf") : null;
+    const set = mainId ? componentSetOf(this.doc, mainId) : undefined;
+    const main = mainId ? this.doc.get(mainId) : undefined;
+    if (!instance || !set || !main) return;
+    const wanted = { ...getProp(main.props, "variantProps"), [name]: value };
+    const target = findVariant(this.doc, set.id, wanted);
+    if (!target || target.id === mainId) return;
+    this.swapInstance(instanceId, target.id);
+  }
+
+  /** Replaces an instance's main component, keeping matching overrides (one undo step). */
+  swapInstance(instanceId: string, componentId: string): void {
+    const ops = swapInstanceOps(this.doc, instanceId, componentId);
+    if (ops.length === 0) return;
+    this.beginGesture("Swap instance");
+    // The swap carries the person's overrides as-is; it records none of its own.
+    this.commit(ops, "Swap instance", { overrides: false });
+    const sync = syncInstanceOps(this.doc, instanceId);
+    if (sync.length > 0) this.commit(sync, "Swap instance", { overrides: false });
+    this.endGesture();
+  }
+
+  /** Clears one property override on one layer inside an instance, so it follows its main again. */
+  resetOverride(id: string, prop: string): void {
+    const node = this.doc.get(id);
+    const root = node ? instanceRootOf(this.doc, id) : undefined;
+    if (!node || !root) return;
+    const remaining = getProp(node.props, "overrides").filter((p) => p !== prop);
+    this.beginGesture("Reset override");
+    this.commit(
+      [{ op: "set", id, prop: "overrides", value: remaining.length > 0 ? remaining : null }],
+      "Reset override",
+    );
+    const sync = syncInstanceOps(this.doc, root.id);
+    if (sync.length > 0) this.commit(sync, "Reset override", { overrides: false });
+    this.endGesture();
   }
 
   // -------------------------------------------------------------------------

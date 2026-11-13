@@ -58,11 +58,13 @@ export function Inspector() {
   const first = nodes[0];
   const title =
     nodes.length === 1 && first
-      ? getProp(first.props, "isComponent")
-        ? "Component"
-        : getProp(first.props, "instanceOf") !== null
-          ? "Instance"
-          : (TYPE_LABEL[only ?? ""] ?? "Layer")
+      ? getProp(first.props, "isComponentSet")
+        ? "Component set"
+        : getProp(first.props, "isComponent")
+          ? "Component"
+          : getProp(first.props, "instanceOf") !== null
+            ? "Instance"
+            : (TYPE_LABEL[only ?? ""] ?? "Layer")
       : `${nodes.length} layers`;
   const geometry = nodes.filter((n) => n.type !== "group");
   const frames = nodes.filter((n) => n.type === "frame");

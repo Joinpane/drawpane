@@ -1,8 +1,20 @@
-import { instanceRootOf, instancesOf, isMainComponent } from "@drawpane/editor";
+import {
+  componentSetOf,
+  instanceRootOf,
+  instancesOf,
+  isComponentSet,
+  isMainComponent,
+} from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { Button, Icon, IconButton, PropertySection } from "@drawpane/ui";
 import { useEffect, useState } from "react";
 import { useEditor } from "./hooks";
+import {
+  ComponentSetSection,
+  InstanceVariantControls,
+  OverridesList,
+  VariantSection,
+} from "./VariantSections";
 
 /**
  * What a component, an instance or a layer inside one is, and what you can do
@@ -28,7 +40,15 @@ export function ComponentSection({ nodes }: { nodes: readonly NodeRecord[] }) {
     );
   }
 
-  if (isMainComponent(only)) return <MainComponent node={only} />;
+  if (isComponentSet(only)) return <ComponentSetSection set={only} />;
+  if (isMainComponent(only)) {
+    return (
+      <>
+        {componentSetOf(editor.doc, only.id) ? <VariantSection variant={only} /> : null}
+        <MainComponent node={only} />
+      </>
+    );
+  }
 
   const root = instanceRootOf(editor.doc, only.id);
   if (!root) return null;
@@ -61,7 +81,8 @@ export function ComponentSection({ nodes }: { nodes: readonly NodeRecord[] }) {
                 className="component-link"
                 onClick={() => editor.goToMainComponent(only.id)}
               >
-                {getProp(main.props, "name") || "Component"}
+                {getProp((componentSetOf(editor.doc, main.id) ?? main).props, "name") ||
+                  "Component"}
               </button>
             </>
           ) : (
@@ -74,6 +95,8 @@ export function ComponentSection({ nodes }: { nodes: readonly NodeRecord[] }) {
           Changes here stay on this instance when the main component changes.
         </p>
       ) : null}
+      {isRoot && main ? <InstanceVariantControls instance={only} main={main} /> : null}
+      {isRoot ? <OverridesList instance={only} /> : null}
       {changed > 0 || isRoot ? (
         <div className="component-actions">
           {changed > 0 ? (

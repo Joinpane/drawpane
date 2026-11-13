@@ -141,6 +141,7 @@ export function TokenPicker({
           </p>
         ) : (
           groups.map((group) => (
+            // biome-ignore lint/a11y/useSemanticElements: the ARIA listbox pattern groups options with role="group"
             <div
               key={group.collection.id}
               role="group"
