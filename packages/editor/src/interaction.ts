@@ -170,6 +170,8 @@ export class Interaction {
       return;
     }
     if (input.button !== 0) return;
+    // Comment pins are placed by the host app, over the canvas.
+    if (tool === "comment") return;
 
     if (tool !== "select") {
       if (!editor.canEdit) return;

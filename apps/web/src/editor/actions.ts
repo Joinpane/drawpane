@@ -29,6 +29,7 @@ export interface ActionContext {
   readonly copy: () => void;
   readonly cut: () => void;
   readonly paste: () => void;
+  readonly toggleComments: () => void;
 }
 
 export interface Action {
@@ -67,6 +68,16 @@ export const ACTIONS: readonly Action[] = [
   tool("line", "Line", "l", "minus"),
   tool("text", "Text", "t", "text"),
   tool("hand", "Hand", "h", "hand"),
+  {
+    // Not edit-gated: viewers can comment. Commenting is collaboration, not editing.
+    id: "tool.comment",
+    label: "Comment",
+    group: "Tools",
+    icon: "comment",
+    shortcut: { key: "c" },
+    keywords: "feedback note pin",
+    run: ({ editor }) => editor.setTool("comment"),
+  },
 
   {
     id: "edit.undo",
@@ -390,6 +401,14 @@ export const ACTIONS: readonly Action[] = [
     icon: "eye-off",
     shortcut: { key: "f", shift: true },
     run: ({ editor }) => editor.state.set({ focusMode: !editor.s.focusMode }),
+  },
+  {
+    id: "view.comments",
+    label: "Show or hide comments",
+    group: "View",
+    icon: "comment",
+    shortcut: { key: "c", shift: true },
+    run: ({ toggleComments }) => toggleComments(),
   },
   {
     id: "view.leftPane",

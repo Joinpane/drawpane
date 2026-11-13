@@ -14,6 +14,8 @@ export function connectFile(
   editor: Editor,
   fileId: string,
   onFatal: (message: string) => void,
+  /** Sees every server message after the editor does (comments listen here). */
+  onMessage?: (message: ServerMessage) => void,
 ): () => void {
   let ws: WebSocket | null = null;
   let disposed = false;
@@ -49,6 +51,7 @@ export function connectFile(
         return;
       }
       editor.sync.receive(message);
+      onMessage?.(message);
     });
     socket.addEventListener("close", (event) => {
       if (ping) clearInterval(ping);

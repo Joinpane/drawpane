@@ -1,4 +1,5 @@
 export * from "./apply";
+export * from "./comments";
 export * from "./ids";
 export * from "./ops";
 export * from "./order-key";
