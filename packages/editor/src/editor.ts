@@ -115,6 +115,8 @@ export interface EditorState {
   /** Parts of the viewport covered by floating panels; fitting and revealing avoid them. */
   readonly insets: Insets;
   readonly editingText: string | null;
+  /** A top-level frame whose name is being edited on its canvas label. */
+  readonly renamingFrame: string | null;
   readonly marquee: Rect | null;
   readonly guides: readonly Guide[];
   /** True while a pointer gesture (move, resize, draw) is in progress. */
@@ -259,6 +261,7 @@ export class Editor {
     viewport: { width: 0, height: 0 },
     insets: NO_INSETS,
     editingText: null,
+    renamingFrame: null,
     marquee: null,
     guides: [],
     gesture: false,
@@ -337,6 +340,7 @@ export class Editor {
       status: "live",
       role: "viewer",
       editingText: null,
+      renamingFrame: null,
       vectorEdit: null,
       cropping: null,
     });
@@ -528,6 +532,7 @@ export class Editor {
       selection: [],
       hover: null,
       editingText: null,
+      renamingFrame: null,
       camera: this.#cameras.get(pageId) ?? new Camera(),
       // Going to another page yourself stops following (following re-enters below).
       following: null,
