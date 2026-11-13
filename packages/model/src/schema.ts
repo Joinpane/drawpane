@@ -245,6 +245,10 @@ export const PROPS = {
   // it `mirrors` the main component's layer it copies, and lists the
   // properties you changed in `overrides`, which syncing then leaves alone.
   isComponent: prop(z.boolean(), false, CONTAINERS),
+  /** A frame that groups variants: main components that differ by `variantProps`. */
+  isComponentSet: prop(z.boolean(), false, CONTAINERS),
+  /** A variant's property values, e.g. { State: "Hover", Size: "Large" }. */
+  variantProps: prop(z.record(z.string().min(1).max(64), z.string().max(64)), {}, CONTAINERS),
   componentDescription: prop(z.string().max(2000), "", CONTAINERS),
   instanceOf: prop(z.string().regex(ID_PATTERN).nullable(), null, CONTAINERS),
   mirrors: prop(z.string().regex(ID_PATTERN).nullable(), null, LAYERS),

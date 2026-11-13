@@ -491,7 +491,7 @@ function ValueEditor({ variable, modeId }: { variable: NodeRecord; modeId: strin
   return (
     <span className="tokens__value" data-alias={alias ? true : undefined}>
       {type === "color" ? (
-        <label
+        <span
           className="tokens__swatch"
           style={{ background: typeof resolved === "string" ? resolved : "transparent" }}
         >
@@ -503,7 +503,7 @@ function ValueEditor({ variable, modeId }: { variable: NodeRecord; modeId: strin
               onChange={(e) => editor.setVariableValue(variable.id, modeId, e.target.value)}
             />
           ) : null}
-        </label>
+        </span>
       ) : null}
       <input
         className="tokens__cell-input"
