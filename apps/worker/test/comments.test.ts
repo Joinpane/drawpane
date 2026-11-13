@@ -75,6 +75,17 @@ describe("comments API", () => {
       { method: "PATCH", json: { resolved: false } },
     );
     expect(reopened.thread).toMatchObject({ resolvedAt: null, resolvedBy: null });
+
+    // Replying to a resolved thread reopens it.
+    await browser.json(`/api/files/${fileId}/comments/${thread.id}`, {
+      method: "PATCH",
+      json: { resolved: true },
+    });
+    const revived = await browser.json<{ thread: CommentThread }>(
+      `/api/files/${fileId}/comments/${thread.id}/replies`,
+      { method: "POST", json: { body: "One more thing." } },
+    );
+    expect(revived.thread).toMatchObject({ resolvedAt: null, resolvedBy: null });
   });
 
   it("rejects bad input with a sentence a person can act on", async () => {

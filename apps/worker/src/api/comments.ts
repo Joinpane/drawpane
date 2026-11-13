@@ -3,8 +3,8 @@
  * every write the Worker asks the file's room to relay the change, so
  * everyone in the file sees it at once.
  *
- * Permissions: anyone who can open the file can read, start threads, reply,
- * resolve and reopen (commenting is collaboration, not editing). Only a
+ * Permissions: anyone who can open the file can read, start threads, reply
+ * (which reopens a resolved thread), resolve and reopen (commenting is collaboration, not editing). Only a
  * message's author can edit it. Authors can delete their own messages and
  * threads; team owners can delete anything.
  */
@@ -315,10 +315,10 @@ export const comments = new Hono<AppContext>()
       c.env.DB.prepare(
         "INSERT INTO comments (id, thread_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)",
       ).bind(commentId, threadId, user.id, body.body, now),
-      c.env.DB.prepare("UPDATE comment_threads SET updated_at = ? WHERE id = ?").bind(
-        now,
-        threadId,
-      ),
+      // A reply means the conversation is active again, so it reopens a resolved thread.
+      c.env.DB.prepare(
+        "UPDATE comment_threads SET updated_at = ?, resolved_at = NULL, resolved_by = NULL WHERE id = ?",
+      ).bind(now, threadId),
       ...mentionInserts(c.env.DB, commentId, file.id, mentions, now),
     ]);
     const thread = await loadThread(c.env.DB, file.id, threadId);
