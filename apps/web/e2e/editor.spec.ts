@@ -67,7 +67,7 @@ test.describe
 
       // The command bar sets values by name.
       await page.keyboard.press("ControlOrMeta+k");
-      await page.getByRole("combobox").fill("w 320");
+      await page.getByRole("combobox", { name: "Type a command or a property" }).fill("w 320");
       await page.keyboard.press("Enter");
       await expect(width).toHaveValue("320");
 
@@ -93,7 +93,9 @@ test.describe
       // Change the main's fill from the command bar; the instance follows.
       await page.getByRole("button", { name: "Go to main component" }).click();
       await page.keyboard.press("ControlOrMeta+k");
-      await page.getByRole("combobox").fill("fill #2563eb");
+      await page
+        .getByRole("combobox", { name: "Type a command or a property" })
+        .fill("fill #2563eb");
       await page.keyboard.press("Enter");
       const props = page.getByRole("group", { name: "Properties" });
       await expect(props.getByLabel("Fill hex")).toHaveValue("2563EB");
@@ -125,7 +127,9 @@ test.describe
         .first()
         .click();
       await page.keyboard.press("ControlOrMeta+k");
-      await page.getByRole("combobox").fill("fill color/new");
+      await page
+        .getByRole("combobox", { name: "Type a command or a property" })
+        .fill("fill color/new");
       await page.getByRole("option", { name: /color\/new/ }).click();
       const props = page.getByRole("group", { name: "Properties" });
       await expect(props.getByText("color/new")).toBeVisible();

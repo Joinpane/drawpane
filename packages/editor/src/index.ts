@@ -1,6 +1,7 @@
 export * from "./camera";
 export * from "./code";
 export * from "./components";
+export * from "./constraints";
 export * from "./doc";
 export * from "./dtcg";
 export * from "./editor";
@@ -12,6 +13,7 @@ export * from "./images";
 export * from "./interaction";
 export * from "./layout";
 export * from "./overlay";
+export * from "./presets";
 export * from "./prototype";
 export * from "./render";
 export * from "./scene";

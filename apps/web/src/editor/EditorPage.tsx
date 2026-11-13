@@ -34,8 +34,8 @@ import {
 } from "./history";
 import { EditorContext, useEditor, useEditorState, useEditorStateOutside } from "./hooks";
 import { ImageDrop, UploadTray } from "./ImageDrop";
-import { Inspector } from "./Inspector";
 import { InspectPanel } from "./InspectPanel";
+import { Inspector } from "./inspector/Inspector";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
 import { filesFrom, importImageFiles, pasteFromClipboard } from "./media";

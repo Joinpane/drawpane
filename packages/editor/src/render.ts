@@ -188,6 +188,7 @@ export class CanvasRenderer {
     const shape = this.#shapePath(node, width, height);
 
     this.#shadows(ctx, node, shape, "drop-shadow", camera.zoom * dpr);
+    this.#backgroundBlur(ctx, node, shape, camera.zoom * dpr);
     if (node.type === "text") this.#text(ctx, node, width);
     else
       for (const paint of getProp(node.props, "fills"))
@@ -412,7 +413,11 @@ export class CanvasRenderer {
     const shadows = getProp(node.props, "effects").filter(
       (e) => e.type === kind && e.visible !== false,
     );
-    if (shadows.length === 0 || node.type === "text") return;
+    if (shadows.length === 0) return;
+    // Text casts drop shadows from its glyphs; inner shadows need a filled shape.
+    if (node.type === "text" && kind === "inner-shadow") return;
+    const width = getProp(node.props, "width");
+    const height = getProp(node.props, "height");
     for (const s of shadows) {
       if (s.type !== "drop-shadow" && s.type !== "inner-shadow") continue;
       ctx.save();
@@ -429,13 +434,16 @@ export class CanvasRenderer {
         ctx.shadowOffsetX = s.x * scale - t.a * far;
         ctx.shadowOffsetY = s.y * scale - t.b * far;
         ctx.translate(far, 0);
-        ctx.fillStyle = "#000";
-        ctx.fill(shape);
+        if (node.type === "text") this.#text(ctx, node, width, "#000");
+        else {
+          ctx.fillStyle = "#000";
+          ctx.fill(this.#spreadShape(node, shape, width, height, s.spread));
+        }
       } else {
         ctx.clip(shape);
         const ring = new Path2D();
         ring.rect(-1e4, -1e4, 2e4, 2e4);
-        ring.addPath(shape);
+        ring.addPath(this.#spreadShape(node, shape, width, height, -s.spread));
         ctx.fillStyle = "#000";
         ctx.fill(ring, "evenodd");
       }
@@ -443,7 +451,50 @@ export class CanvasRenderer {
     }
   }
 
-  #text(ctx: Ctx, node: NodeRecord, width: number): void {
+  /**
+   * The shape grown (or shrunk, for negative spread) by `spread` on every
+   * side. Exact for rectangles, frames and ellipses; other shapes keep their
+   * outline, as Figma does for spread on vectors.
+   */
+  #spreadShape(node: NodeRecord, shape: Path2D, w: number, h: number, spread: number): Path2D {
+    if (spread === 0) return shape;
+    const path = new Path2D();
+    const gw = Math.max(0, w + spread * 2);
+    const gh = Math.max(0, h + spread * 2);
+    if (node.type === "ellipse") {
+      path.ellipse(w / 2, h / 2, gw / 2, gh / 2, 0, 0, Math.PI * 2);
+      return path;
+    }
+    if (node.type === "rect" || node.type === "frame") {
+      const radii = getProp(node.props, "cornerRadii");
+      const r = getProp(node.props, "cornerRadius");
+      const max = Math.min(w, h) / 2;
+      const grow = (v: number) => (v > 0 ? Math.max(0, Math.min(v, max) + spread) : 0);
+      const corners = radii ? radii.map(grow) : grow(r);
+      path.roundRect(-spread, -spread, gw, gh, corners);
+      return path;
+    }
+    return shape;
+  }
+
+  /** Background blur: what is already drawn behind the layer, blurred inside its shape. */
+  #backgroundBlur(ctx: Ctx, node: NodeRecord, shape: Path2D, scale: number): void {
+    const blur = getProp(node.props, "effects").find(
+      (e) => e.type === "background-blur" && e.visible !== false,
+    );
+    if (blur?.type !== "background-blur" || blur.radius <= 0) return;
+    ctx.save();
+    ctx.clip(shape);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.filter = `blur(${blur.radius * scale}px)`;
+    ctx.drawImage(ctx.canvas, 0, 0);
+    ctx.restore();
+  }
+
+  /** Draws a text layer's glyphs in its own fills, or all in `override` (shadows). */
+  #text(ctx: Ctx, node: NodeRecord, width: number, override?: string): void {
     const mode = getProp(node.props, "textAutoResize");
     const layout = layoutText(node, this.#measurer, mode === "width" ? null : width);
     const align = getProp(node.props, "textAlign");
@@ -461,9 +512,13 @@ export class CanvasRenderer {
       (ctx as Ctx & { letterSpacing: string }).letterSpacing = `${layout.letterSpacing}px`;
     const decoration = getProp(node.props, "textDecoration");
     const fills = getProp(node.props, "fills");
-    const paints = fills.length > 0 ? fills : [{ type: "solid", color: "#000000" } as Paint];
+    const paints = override
+      ? [{ type: "solid", color: "#000000" } as Paint]
+      : fills.length > 0
+        ? fills
+        : [{ type: "solid", color: "#000000" } as Paint];
     for (const paint of paints) {
-      const style = this.#paintStyle(ctx, paint, width, height);
+      const style = override ?? this.#paintStyle(ctx, paint, width, height);
       if (!style || paint.visible === false) continue;
       ctx.fillStyle = style;
       for (const line of layout.lines) {

@@ -704,7 +704,11 @@ export class Interaction {
         else y0 = frame.height - y1;
       }
     }
-    if (input.shift && frame.width > 0 && frame.height > 0) {
+    // Shift, or a single layer with its aspect ratio locked, keeps proportions.
+    const roots = editor.s.selection;
+    const lockedAspect =
+      roots.length === 1 && getProp(mode.nodes.get(roots[0] as string)?.props ?? {}, "lockAspect");
+    if ((input.shift || lockedAspect) && frame.width > 0 && frame.height > 0) {
       const ratio = frame.width / frame.height;
       let w = x1 - x0;
       let h = y1 - y0;
@@ -739,7 +743,6 @@ export class Interaction {
     const sy = frame.height > 0 ? nh / frame.height : 1;
 
     const ops: Op[] = [];
-    const roots = editor.s.selection;
     const single = roots.length === 1 && mode.nodes.get(roots[0] as string)?.type !== "group";
     for (const node of this.#geometryNodes(mode.nodes)) {
       const box = boxOf(node);
@@ -805,7 +808,8 @@ export class Interaction {
           ops.push({ op: "set", id: node.id, prop: "textAutoResize", value: next });
       }
     }
-    if (ops.length > 0) editor.commit(ops, "Resize");
+    // ⌘ resizes a frame without moving its children by their constraints.
+    if (ops.length > 0) editor.commit(ops, "Resize", { constraints: !input.mod });
   }
 
   #rotate(mode: Extract<Mode, { kind: "rotate" }>, page: Point, input: PointerInput): void {
