@@ -12,7 +12,8 @@
     "typecheck": "tsc -p .",
     "test": "vitest run --passWithNoTests",
     "e2e": "playwright test --project=chromium",
-    "tour": "playwright test --project=tour"
+    "tour": "playwright test --project=tour",
+    "fonts:catalog": "node scripts/build-font-catalog.ts"
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
