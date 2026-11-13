@@ -4,7 +4,7 @@
  * the command bar, shortcuts, menus and agents all call the same methods.
  */
 
-import type { Peer } from "@drawpane/model";
+import type { Peer, Presence } from "@drawpane/model";
 import {
   type BindingKey,
   defaultOf,
@@ -23,7 +23,7 @@ import {
   type RulerGuide,
   type VariableValue,
 } from "@drawpane/model";
-import { Camera, type Insets, NO_INSETS } from "./camera";
+import { Camera, type Insets, MAX_ZOOM, NO_INSETS } from "./camera";
 import {
   componentSetOf,
   detachOps,
@@ -144,6 +144,10 @@ export interface EditorState {
   readonly layoutGrids: boolean;
   /** A guide being dragged (from a ruler, or an existing one), drawn live and committed on drop. */
   readonly guideDraft: GuideDraft | null;
+  /** The collaborator (session id) whose view this one follows, if any. */
+  readonly following: string | null;
+  /** Asking everyone to follow this view ("Spotlight me"). */
+  readonly spotlight: boolean;
   /** An image fill being cropped: the layer and the fill's index. */
   readonly cropping: { readonly id: string; readonly index: number } | null;
   /** The guide under the pointer, highlighted so it reads as grabbable. */
@@ -255,8 +259,12 @@ export class Editor {
     guideDraft: null,
     hoverGuide: null,
     cropping: null,
+    following: null,
+    spotlight: false,
   });
   #noticeId = 0;
+  /** The followed person's name, kept for the notice when they leave. */
+  #leaderName = "";
   /**
    * An image's own size by its content hash, when loaded: set by the app from
    * its image cache, so cropping can start from what a fill shows now.
@@ -272,7 +280,10 @@ export class Editor {
     this.sync = new SyncEngine(this.doc, { clientId: options.clientId ?? newId() });
     this.sync.on("status", (status) => this.state.set({ status }));
     this.sync.on("role", (role) => this.state.set({ role }));
-    this.sync.on("peers", (peers) => this.state.set({ peers: new Map(peers) }));
+    this.sync.on("peers", (peers) => {
+      this.state.set({ peers: new Map(peers) });
+      this.#followLeader();
+    });
     this.sync.on("rejected", (_code, message) =>
       this.notify(`Couldn't apply that change: ${message}`),
     );
@@ -339,6 +350,8 @@ export class Editor {
    */
   commit(ops: readonly Op[], label = "Edit", options: CommitOptions = {}): boolean {
     if (!this.canEdit || ops.length === 0) return false;
+    // Editing takes the view back: you can't follow someone and work at once.
+    if (this.s.following) this.state.set({ following: null });
     let inverse: Op[];
     try {
       inverse = this.#commitWithFixups(ops, options.overrides ?? true, options.constraints ?? true);
@@ -470,6 +483,8 @@ export class Editor {
       hover: null,
       editingText: null,
       camera: this.#cameras.get(pageId) ?? new Camera(),
+      // Going to another page yourself stops following (following re-enters below).
+      following: null,
     });
   }
 
@@ -497,12 +512,89 @@ export class Editor {
     this.state.set({ tool, editingText: null });
   }
 
+  /** Moves the view. Moving it yourself (pan, zoom, fit) stops following someone. */
   setCamera(camera: Camera): void {
+    this.state.set({ camera, ...(this.s.following ? { following: null } : {}) });
+  }
+
+  // -------------------------------------------------------------------------
+  // Following and spotlight
+
+  /** Follows a collaborator's view: their page and what they see, until you move or edit. */
+  follow(sessionId: string): void {
+    const leader = this.s.peers.get(sessionId);
+    if (!leader) return;
+    this.#leaderName = leader.name;
+    this.state.set({ following: sessionId, spotlight: false });
+    this.#followLeader();
+  }
+
+  stopFollowing(): void {
+    if (this.s.following) this.state.set({ following: null });
+  }
+
+  /** Asks everyone in the file to follow you (or stops asking). */
+  setSpotlight(on: boolean): void {
+    this.state.set({ spotlight: on, ...(on ? { following: null } : {}) });
+  }
+
+  /**
+   * The presence to send: pointer, page, selection, what's on screen (the
+   * area the panes don't cover), who you follow and whether you spotlight.
+   */
+  presence(cursor: Point | null): Presence {
+    const { pageId, selection, camera, viewport, insets, following, spotlight } = this.s;
+    const tl = camera.toPage({ x: insets.left, y: insets.top });
+    const br = camera.toPage({
+      x: Math.max(insets.left + 1, viewport.width - insets.right),
+      y: Math.max(insets.top + 1, viewport.height - insets.bottom),
+    });
+    return {
+      cursor,
+      pageId,
+      selection: [...selection].slice(0, 500),
+      viewport:
+        viewport.width > 0
+          ? {
+              x: round2(tl.x),
+              y: round2(tl.y),
+              width: round2(br.x - tl.x),
+              height: round2(br.y - tl.y),
+            }
+          : null,
+      following,
+      spotlight,
+    };
+  }
+
+  /** Shows the followed collaborator's page and view; stops if they left. */
+  #followLeader(): void {
+    const id = this.s.following;
+    if (!id) return;
+    const leader = this.s.peers.get(id);
+    if (!leader) {
+      this.state.set({ following: null });
+      this.notify(`${this.#leaderName || "They"} left the file, so you stopped following.`);
+      return;
+    }
+    const presence = leader.presence;
+    if (!presence) return;
+    if (presence.pageId && presence.pageId !== this.s.pageId && this.doc.has(presence.pageId)) {
+      const following = this.s.following;
+      this.setPage(presence.pageId);
+      this.state.set({ following });
+    }
+    const view = presence.viewport;
+    if (!view || this.s.viewport.width === 0) return;
+    // Show the same area, as large as it fits: the leader's zoom on a screen like theirs.
+    const camera = this.s.camera.fit(view, this.s.viewport, 0, MAX_ZOOM, this.s.insets);
     this.state.set({ camera });
   }
 
   setViewport(width: number, height: number): void {
     this.state.set({ viewport: { width, height } });
+    // A follower's window changed size: show the leader's view again, as large as it fits.
+    this.#followLeader();
   }
 
   zoomBy(factor: number, at?: { x: number; y: number }): void {

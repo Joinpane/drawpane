@@ -1,14 +1,6 @@
 import { CanvasTextMeasurer, Editor, Interaction, liveFlows, screenOf } from "@drawpane/editor";
 import type { VersionInfo } from "@drawpane/model";
-import {
-  Button,
-  Icon,
-  IconButton,
-  Logo,
-  type PresenceSlot,
-  PresenceStack,
-  SegmentedControl,
-} from "@drawpane/ui";
+import { Button, Icon, IconButton, Logo, SegmentedControl } from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
@@ -25,6 +17,7 @@ import { CropBar } from "./CropBar";
 import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
 import { connectFile } from "./connection";
 import { ExportPanel } from "./ExportSection";
+import { FollowOverlay, People } from "./follow";
 import {
   HistoryPanel,
   NameVersionDialog,
@@ -292,6 +285,13 @@ function FileEditor({ fileId }: { fileId: string }) {
       const editor = versionView.active;
       const interaction = viewingNow ? versionView.interaction : liveInteraction;
       const ctx = viewingNow ? { ...liveCtx, editor } : liveCtx;
+      // Escape stops following or spotlighting before anything else.
+      if (e.key === "Escape" && (editor.s.following || editor.s.spotlight)) {
+        if (editor.s.following) editor.stopFollowing();
+        else editor.setSpotlight(false);
+        e.preventDefault();
+        return;
+      }
       if (
         viewingNow &&
         e.key === "Escape" &&
@@ -594,6 +594,7 @@ function FileEditor({ fileId }: { fileId: string }) {
           </aside>
         ) : null}
         {view === "design" && !viewing ? <CropBar /> : null}
+        {view === "design" && !viewing ? <FollowOverlay /> : null}
         {view === "design" && !viewing ? (
           <Lens
             onOpenInspector={() => {
@@ -788,17 +789,13 @@ function TopRight({
   fileName: string;
   onPresent: () => void;
 }) {
-  const peers = useEditorState((s) => s.peers);
+  const hasPeers = useEditorState((s) => s.peers.size > 0);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const [sharing, setSharing] = useState(false);
-  const people = [...peers.values()].map((p) => ({
-    name: p.name,
-    color: (((((p.color - 1) % 8) + 8) % 8) + 1) as PresenceSlot,
-  }));
   return (
     <div className="top-right pane">
-      {people.length > 0 ? <PresenceStack people={people} max={4} /> : null}
-      {people.length > 0 ? <span className="top-right__divider" aria-hidden="true" /> : null}
+      <People />
+      {hasPeers ? <span className="top-right__divider" aria-hidden="true" /> : null}
       <IconButton
         icon="play"
         label="Play prototype"
