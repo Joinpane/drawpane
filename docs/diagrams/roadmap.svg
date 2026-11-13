@@ -21,11 +21,11 @@
 <line x1="36" x2="148" y1="116" y2="116" class="rule"/>
 <text x="36" y="88" font-size="13" class="ink" font-weight="600">M0 · Spike</text>
 <text x="36" y="104" font-size="11.5" class="quiet">Dec 2026 – Jan 2027</text>
-<text x="36" y="140" font-size="11.5" class="ink">common in a DO</text>
+<text x="36" y="140" font-size="11.5" class="ink">Model in a DO</text>
 <text x="36" y="158" font-size="11.5" class="ink">Load and save a file</text>
 <text x="36" y="176" font-size="11.5" class="ink">Websocket fan-out</text>
 <text x="36" y="194" font-size="11.5" class="ink">Cost probe</text>
-<text x="36" y="212" font-size="11.5" class="ink">Repo and rebrand</text>
+<text x="36" y="212" font-size="11.5" class="ink">Repo and tooling</text>
 <rect x="168" y="64" width="136" height="168" rx="8" class="box"/>
 <line x1="180" x2="292" y1="116" y2="116" class="rule"/>
 <text x="180" y="88" font-size="13" class="ink" font-weight="600">v0.1 · Alpha</text>
@@ -65,8 +65,8 @@
 <line x1="164" x2="164" y1="232" y2="246" class="edge" stroke-width="1" stroke-dasharray="3 3"/>
 <path d="M164 247l9 9l-9 9l-9 -9z" class="gate"/>
 <text x="164" y="286" font-size="11.5" class="ink" font-weight="600" text-anchor="middle">Go / no-go</text>
-<text x="164" y="302" font-size="11.5" class="quiet" text-anchor="middle">common validates</text>
-<text x="164" y="318" font-size="11.5" class="quiet" text-anchor="middle">inside workerd</text>
+<text x="164" y="302" font-size="11.5" class="quiet" text-anchor="middle">Model and sync</text>
+<text x="164" y="318" font-size="11.5" class="quiet" text-anchor="middle">meet budgets</text>
 <line x1="308" x2="308" y1="232" y2="246" class="edge" stroke-width="1" stroke-dasharray="3 3"/>
 <path d="M308 247l9 9l-9 9l-9 -9z" class="gate"/>
 <text x="308" y="286" font-size="11.5" class="ink" font-weight="600" text-anchor="middle">Beta gate</text>
