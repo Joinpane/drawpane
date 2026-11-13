@@ -1,0 +1,22 @@
+.dp-tooltip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-200);
+  padding: var(--space-100) var(--space-200);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inverse);
+  color: var(--ink-inverse);
+  font: var(--type-ui-label);
+}
+.dp-tooltip__key {
+  font-family: var(--font-mono);
+  opacity: 0.72;
+}
+.dp-tooltip--floating {
+  position: fixed;
+  z-index: var(--layer-popover);
+  max-width: 240px;
+  pointer-events: none;
+  white-space: nowrap;
+  animation: dp-fade-in var(--duration-popover) ease-out;
+}

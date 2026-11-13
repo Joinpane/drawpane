@@ -1,0 +1,14 @@
+.dp-icon {
+  width: var(--size-icon);
+  height: var(--size-icon);
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.dp-icon[width="12"] {
+  width: 12px;
+  height: 12px;
+}

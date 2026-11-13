@@ -1,0 +1,71 @@
+/* NumberField: the Inspector's numeric input */
+.dp-field {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: var(--size-control-sm);
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  transition: border-color var(--duration-hover) ease-out;
+}
+.dp-field:hover {
+  border-color: var(--line-strong);
+}
+.dp-field:focus-within {
+  border-color: var(--signal);
+}
+.dp-field__label {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 100%;
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+.dp-field__input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 0 var(--space-100) 0 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font: var(--type-ui-body);
+  font-variant-numeric: tabular-nums;
+  caret-color: var(--signal);
+}
+.dp-field__input::placeholder {
+  color: var(--ink-muted);
+}
+.dp-field__unit {
+  padding-right: 6px;
+  color: var(--ink-muted);
+  font: 400 11px / 14px var(--font-ui);
+}
+.dp-field--token {
+  padding-right: 3px;
+}
+.dp-field--token .dp-token {
+  flex: 1;
+  min-width: 0;
+}
+.dp-field--disabled {
+  border-color: transparent;
+}
+.dp-field--disabled:hover {
+  border-color: transparent;
+}
+.dp-field--disabled .dp-field__label {
+  cursor: not-allowed;
+}
+.dp-field--disabled .dp-field__input {
+  color: var(--ink-disabled);
+  cursor: not-allowed;
+}
