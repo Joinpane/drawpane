@@ -214,15 +214,16 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
       if (e.key !== "Escape") return;
       const target = e.target instanceof Node ? e.target : null;
       if (target && popover.current?.contains(target)) return;
+      // A field elsewhere (the command bar, a rename) owns its own Escape.
+      const el = target instanceof HTMLElement ? target : null;
+      if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
       const cs = store.state.get();
       if (cs.openId || cs.draft) {
         e.stopPropagation();
         closeAndRefocus();
         return;
       }
-      const el = target instanceof HTMLElement ? target : null;
-      const typing = el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
-      if (editor.s.tool === "comment" && !typing) {
+      if (editor.s.tool === "comment") {
         e.stopPropagation();
         editor.setTool("select");
       }
