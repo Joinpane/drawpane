@@ -1,0 +1,40 @@
+.dp-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-100);
+  box-sizing: border-box;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-active);
+  color: var(--ink);
+  font: 600 11px / 14px var(--font-ui);
+  white-space: nowrap;
+}
+.dp-badge--signal {
+  background: var(--signal-soft);
+  color: var(--signal-ink);
+}
+.dp-badge--component {
+  background: var(--component-soft);
+  color: var(--component-ink);
+}
+.dp-badge--success,
+.dp-badge--warning,
+.dp-badge--danger,
+.dp-badge--info {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+.dp-badge--success {
+  color: var(--success);
+}
+.dp-badge--warning {
+  color: var(--warning);
+}
+.dp-badge--danger {
+  color: var(--danger);
+}
+.dp-badge--info {
+  color: var(--info);
+}

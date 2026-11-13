@@ -1,29 +1,56 @@
 # Drawpane
 
-Next-gen open-source design platform for agents and teams: an open design and prototyping tool, forked from Penpot, that anyone can deploy to their own Cloudflare account and that runs for cents when idle. AI agents join a file as collaborators, working on their own branch.
+The open design tool you own. Drawpane is a real-time design and prototyping tool that anyone can deploy to their own Cloudflare account in minutes, and that runs for cents when idle. AI agents join a file as collaborators, working on their own branch.
 
-This repository starts with the complete product definition. Everything needed to build Drawpane is here, so nothing has to be looked up elsewhere.
+**Status:** pre-alpha. A live instance runs at [design.dizy.cc](https://design.dizy.cc), where the team designs Drawpane in Drawpane.
+
+## What works today
+
+- Passkey accounts, teams, invites, projects, files and trash
+- A real-time multiplayer editor: frames, rectangles, ellipses, lines and text; move with smart guides, resize, rotate, group, frame, reorder; auto layout that maps 1:1 to CSS flexbox; fills, strokes, shadows and blur; pages and a layers tree
+- The command bar (`⌘K`) that runs actions, jumps to layers, and sets values with a short syntax: `w 320`, `gap 16`, `fill #ff5a1f`, `p 8 16`
+- The Selection Lens, Layout X-ray (hold `Alt`), focus mode, and collaborators' cursors and selections
+- Undo and redo for your own changes, and edits that survive a dropped connection
+
+See the [PRD](docs/PRD.md) for where it's going.
+
+## How it's built
 
 | Where | What |
 | --- | --- |
-| [`docs/PRD.md`](docs/PRD.md) | Product requirements: vision, personas, goals and metrics, positioning, signature UX, AI agents, functional and non-functional requirements, Cloudflare architecture, upstream strategy, cost model, repo layout and governance, roadmap, risks and decisions |
-| [`docs/diagrams/`](docs/diagrams) | The PRD's diagrams (agent flow, architecture, roadmap) as SVG |
-| [`design-system/`](design-system/README.md) | The Drawpane design system: brand book, tokens (`tokens.json`, `tokens.css`), 20 React components (`components/bundle.js`, typed in `index.d.ts`) with guidelines and previews, 43 icons and 4 logo files |
-| [`designs/`](designs/README.md) | 156 product design artboards across 9 pages (a coverage index, AI agents, editor, collaboration, prototype and handoff, dashboard and onboarding, self-hosting and admin, states and devices, building blocks), in light and dark themes |
+| [`packages/model`](packages/model) | The document model: a flat map of nodes, typed operations, validation. Shared by the browser, the server and agents. |
+| [`packages/editor`](packages/editor) | The editor engine: sync client, undo, geometry, auto layout, Canvas renderer, interaction. Framework-free. |
+| [`packages/ui`](packages/ui) | The design system as React components, with tokens generated from [`design-system/tokens.json`](design-system/tokens.json). |
+| [`apps/worker`](apps/worker) | The Cloudflare Worker: passkey auth, REST API, static assets, and a FileRoom Durable Object per file (SQLite, one row per node). |
+| [`apps/web`](apps/web) | The browser app: sign-in, dashboard and the editor. |
+| [`docs/`](docs) | [PRD](docs/PRD.md), [decisions](docs/decisions), [self-hosting guide](docs/self-hosting.md). |
+| [`design-system/`](design-system/README.md), [`designs/`](designs/README.md) | The brand book and 156 product artboards: the visual and behavioral spec. |
 
-## Viewing the designs locally
+Why TypeScript from scratch rather than a Penpot fork: [decision 0001](docs/decisions/0001-build-from-scratch-in-typescript.md).
+
+## Develop
+
+```sh
+mise install && pnpm install
+cp apps/worker/.dev.vars.example apps/worker/.dev.vars
+pnpm --filter @drawpane/worker run db:migrate:local
+pnpm dev
+```
+
+Then open http://localhost:5173. More in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Self-host
+
+Follow [docs/self-hosting.md](docs/self-hosting.md).
+
+## Viewing the designs
 
 ```sh
 python3 -m http.server 8000
 ```
 
-Then open:
+Then open http://localhost:8000/designs/ and http://localhost:8000/design-system/.
 
-- http://localhost:8000/designs/ to browse every artboard
-- http://localhost:8000/design-system/ for live component previews, icons and logos
+## License
 
-The viewers load React 18 from cdn.jsdelivr.net and fonts from Google Fonts.
-
-## Provenance
-
-These files were imported on 2026-11-12 from the project's original PRD document, design-system artifact and design canvas. They are now the source of truth: change them here, through pull requests. `design-system/design-system.json` and `designs/canvas.json` are the original index files, kept for their metadata (asset list, artboard frames, pages and section titles).
+[MPL-2.0](LICENSE). Drawpane was inspired by [Penpot](https://penpot.app) and is not affiliated with it.

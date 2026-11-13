@@ -1,0 +1,139 @@
+import { ROOT_ID } from "@drawpane/model";
+import { describe, expect, it } from "vitest";
+import { cssFor, cssRule, jsxFor, tailwindFor } from "../src/code";
+import { Editor } from "../src/editor";
+import type { TextMeasurer } from "../src/text";
+
+const measurer: TextMeasurer = { width: (_font, text) => text.length * 8 };
+
+function setup() {
+  const editor = new Editor({ measurer, clientId: "test" });
+  editor.state.set({ role: "editor" });
+  editor.doc.apply([
+    { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+  ]);
+  editor.setPage("p");
+  return editor;
+}
+
+const decl = (list: ReturnType<typeof cssFor>) =>
+  Object.fromEntries(list.map((d) => [d.property, d.value]));
+
+describe("design to code", () => {
+  it("writes auto layout as flexbox with sizing", () => {
+    const editor = setup();
+    const card = editor.createLayer("frame", { x: 0, y: 0, width: 300, height: 100 }, "p", {
+      name: "Hero card",
+      layoutMode: "column",
+      gap: 12,
+      paddingTop: 16,
+      paddingBottom: 16,
+      paddingLeft: 24,
+      paddingRight: 24,
+      alignItems: "center",
+      cornerRadius: 12,
+      sizingV: "hug",
+      fills: [{ type: "solid", color: "#ffffff" }],
+      effects: [{ type: "drop-shadow", color: "#00000033", x: 0, y: 4, blur: 12, spread: 0 }],
+    }) as string;
+    const button = editor.createLayer("rect", { x: 0, y: 0, width: 80, height: 32 }, card, {
+      sizingH: "fill",
+    }) as string;
+    const css = decl(cssFor(editor.doc, editor.doc.get(card) as never));
+    expect(css).toMatchObject({
+      display: "flex",
+      "flex-direction": "column",
+      "align-items": "center",
+      gap: "12px",
+      padding: "16px 24px",
+      width: "300px",
+      height: "fit-content",
+      "border-radius": "12px",
+      "background-color": "#ffffff",
+      "box-shadow": "0px 4px 12px 0px rgb(0 0 0 / 20%)",
+    });
+    expect(css).not.toHaveProperty("position");
+    // A Fill child on the cross axis stretches.
+    expect(decl(cssFor(editor.doc, editor.doc.get(button) as never))).toMatchObject({
+      "align-self": "stretch",
+      height: "32px",
+    });
+    expect(cssRule(editor.doc, editor.doc.get(card) as never)).toMatch(
+      /^\/\* Hero card \*\/\n\.hero-card \{/,
+    );
+  });
+
+  it("refers to variables by name, with the value in a comment", () => {
+    const editor = setup();
+    const collection = editor.createCollection("Space") as string;
+    const space = editor.createVariable(collection, "space/300", "number", 12) as string;
+    const frame = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 100 }, "p", {
+      layoutMode: "row",
+    }) as string;
+    editor.bindVariable([frame], "gap", space);
+    const gap = cssFor(editor.doc, editor.doc.get(frame) as never).find(
+      (d) => d.property === "gap",
+    );
+    expect(gap).toEqual({
+      property: "gap",
+      value: "var(--space-300)",
+      resolved: "12px",
+      token: "space/300",
+    });
+    expect(cssRule(editor.doc, editor.doc.get(frame) as never)).toContain(
+      "gap: var(--space-300); /* 12px */",
+    );
+    expect(tailwindFor(editor.doc, editor.doc.get(frame) as never)).toContain(
+      "gap-[var(--space-300)]",
+    );
+  });
+
+  it("writes text styles and absolute children of plain frames", () => {
+    const editor = setup();
+    const frame = editor.createLayer(
+      "frame",
+      { x: 0, y: 0, width: 300, height: 300 },
+      "p",
+    ) as string;
+    const text = editor.createLayer("text", { x: 20, y: 30, width: 0, height: 0 }, frame, {
+      fontSize: 20,
+      fontWeight: 600,
+      textAlign: "center",
+      fills: [{ type: "solid", color: "#16181d" }],
+    }) as string;
+    editor.updateText(text, "Hello");
+    expect(decl(cssFor(editor.doc, editor.doc.get(text) as never))).toMatchObject({
+      position: "absolute",
+      left: "20px",
+      top: "30px",
+      color: "#16181d",
+      "font-size": "20px",
+      "font-weight": "600",
+      "line-height": "25px",
+      "text-align": "center",
+    });
+    expect(jsxFor(editor.doc, editor.doc.get(frame) as never)).toContain(
+      '<p className="absolute left-5 top-[30px] text-[#16181d]',
+    );
+  });
+
+  it("maps scale values to Tailwind steps", () => {
+    const editor = setup();
+    const frame = editor.createLayer("frame", { x: 0, y: 0, width: 64, height: 40 }, "p", {
+      layoutMode: "row",
+      gap: 8,
+      paddingTop: 16,
+      paddingRight: 16,
+      paddingBottom: 16,
+      paddingLeft: 16,
+    }) as string;
+    expect(tailwindFor(editor.doc, editor.doc.get(frame) as never)).toEqual([
+      "flex",
+      "gap-2",
+      "p-4",
+      "w-16",
+      "h-10",
+      "bg-white",
+    ]);
+  });
+});

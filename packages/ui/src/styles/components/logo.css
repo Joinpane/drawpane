@@ -1,0 +1,15 @@
+.dp-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--dp-logo-size) * 0.4);
+  color: var(--ink);
+}
+.dp-logo__mark {
+  flex: none;
+  width: var(--dp-logo-size);
+  height: var(--dp-logo-size);
+}
+.dp-logo__wordmark {
+  font: 600 calc(var(--dp-logo-size) * 0.625) / 1 var(--font-ui);
+  letter-spacing: -0.01em;
+}

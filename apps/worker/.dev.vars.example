@@ -1,0 +1,6 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+SESSION_SECRET=dev-only-secret-change-me-0123456789abcdef
+SETUP_TOKEN=dev-setup-token
+# wrangler dev rewrites the request host to the production route, so tell the
+# Worker which origins you actually open (the Worker itself and Vite).
+PUBLIC_ORIGIN=http://localhost:8787,http://localhost:5173
