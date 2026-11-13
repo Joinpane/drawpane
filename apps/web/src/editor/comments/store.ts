@@ -158,6 +158,35 @@ export class CommentStore {
     return thread;
   }
 
+  /**
+   * Moves a thread's pin. The pin moves at once; if the server refuses, it
+   * goes back and the error is thrown for the caller to show.
+   */
+  async move(threadId: string, anchor: CommentAnchor) {
+    const before = this.s.threads.get(threadId);
+    if (!before) return;
+    this.#replace({ ...before, anchor });
+    try {
+      const { thread } = await api.patch<{ thread: CommentThread }>(`${this.#base()}/${threadId}`, {
+        anchor: { x: anchor.x, y: anchor.y, nodeId: anchor.nodeId, offset: anchor.offset },
+      });
+      this.#replace(thread);
+      return thread;
+    } catch (error) {
+      const now = this.s.threads.get(threadId);
+      // Only undo our own optimistic move, not something newer.
+      if (now && now.anchor === anchor) this.#replace(before);
+      throw error;
+    }
+  }
+
+  /** Puts a thread in the list whatever its timestamp (moves don't change it). */
+  #replace(thread: CommentThread): void {
+    const threads = new Map(this.s.threads);
+    threads.set(thread.id, thread);
+    this.state.set({ threads });
+  }
+
   async deleteMessage(threadId: string, commentId: string) {
     const result = await api.delete<{ threadDeleted: boolean; thread?: CommentThread }>(
       `${this.#base()}/${threadId}/messages/${commentId}`,

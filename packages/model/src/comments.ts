@@ -106,7 +106,25 @@ export type NewCommentReply = z.input<typeof NewCommentReply>;
 export const CommentEdit = z.object({ body: CommentBody, mentions: CommentMentions });
 export type CommentEdit = z.input<typeof CommentEdit>;
 
-export const CommentThreadPatch = z.object({
-  resolved: z.boolean({ error: "Say whether the thread is resolved." }),
-});
+/** Where a thread moves to: a page point, optionally pinned to a layer (like a new thread). */
+export const CommentAnchorInput = z
+  .object({
+    x: Coordinate,
+    y: Coordinate,
+    nodeId: Id.nullable().default(null),
+    offset: z.object({ x: Coordinate, y: Coordinate }).nullable().default(null),
+  })
+  .refine((v) => (v.nodeId === null) === (v.offset === null), {
+    message: "A pinned comment needs both a layer and an offset.",
+  });
+
+/** Resolve or reopen a thread, move its pin, or both. */
+export const CommentThreadPatch = z
+  .object({
+    resolved: z.boolean({ error: "Say whether the thread is resolved." }).optional(),
+    anchor: CommentAnchorInput.optional(),
+  })
+  .refine((v) => v.resolved !== undefined || v.anchor !== undefined, {
+    message: "Say what to change: resolved, or where the comment goes.",
+  });
 export type CommentThreadPatch = z.input<typeof CommentThreadPatch>;
