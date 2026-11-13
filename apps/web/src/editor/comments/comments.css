@@ -1,0 +1,470 @@
+/* Comments: pins over the canvas, the thread popover, and the comments panel. */
+
+/* The layer covers the canvas but lets pointer events through; only its children take them.
+   It sets no z-index, so pins sit under the panes and popovers above them. */
+.comments-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.comments-layer[data-dragging] > * {
+  visibility: hidden;
+}
+
+/* Pins: an avatar marker whose bottom-left tip touches the anchor. Fixed size at every zoom. */
+.comment-pin {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  translate: 0 -100%;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px 12px 12px 2px;
+  background: var(--surface-raised);
+  box-shadow:
+    inset 0 0 0 2px var(--comment-color, var(--presence-8)),
+    var(--shadow-popover);
+  color: var(--ink);
+  font: 700 10px / 1 var(--font-ui);
+  letter-spacing: -0.01em;
+  pointer-events: auto;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-hover) ease-out,
+    opacity var(--duration-toggle) ease-out;
+}
+.comment-pin[hidden],
+.comment-popover[hidden] {
+  display: none;
+}
+.comment-pin:hover {
+  background: var(--surface-hover);
+}
+.comment-pin:focus-visible {
+  outline: none;
+  box-shadow:
+    inset 0 0 0 2px var(--comment-color, var(--presence-8)),
+    var(--shadow-focus);
+}
+/* Your open thread (or your new pin) is yours, so it's signal. */
+.comment-pin[data-open] {
+  width: 28px;
+  height: 28px;
+  border-radius: 14px 14px 14px 2px;
+  background: var(--signal);
+  color: var(--on-signal);
+  font-size: 11px;
+  box-shadow: 0 0 0 3px var(--signal-soft);
+}
+.comment-pin[data-open]:focus-visible {
+  box-shadow: var(--shadow-focus);
+}
+.comment-pin[data-resolved]:not([data-open]) {
+  color: var(--success);
+  box-shadow:
+    inset 0 0 0 2px var(--success),
+    var(--shadow-popover);
+}
+/* Focus mode: other people's pins stay findable but step back. */
+.comment-pin[data-calm] {
+  opacity: 0.5;
+  box-shadow: inset 0 0 0 2px var(--line-strong);
+}
+.comment-pin[data-calm]:hover,
+.comment-pin[data-calm]:focus-visible {
+  opacity: 1;
+}
+.comment-pin--draft {
+  cursor: default;
+}
+
+/* Avatars in threads and the panel. */
+.comment-avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  background: var(--surface-raised);
+  box-shadow: inset 0 0 0 2px var(--comment-color, var(--presence-8));
+  color: var(--ink);
+  font: 700 10px / 1 var(--font-ui);
+  letter-spacing: -0.01em;
+}
+
+/* The thread popover. JS sets its position; it opens beside its pin. */
+.comment-popover {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  width: 320px;
+  max-height: calc(100% - 76px);
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  font: var(--type-ui-body);
+  pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
+  animation: comment-popover-in var(--duration-popover) ease-out;
+}
+@keyframes comment-popover-in {
+  from {
+    opacity: 0;
+  }
+}
+.comment-popover__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-100);
+  min-height: 40px;
+  padding: var(--space-100) var(--space-200) var(--space-100) var(--space-300);
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.comment-popover--draft .comment-popover__head {
+  min-height: 36px;
+}
+.comment-popover__title {
+  flex: 1;
+  min-width: 0;
+  font: var(--type-ui-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.comment-popover__menu,
+.comment-message__menu {
+  position: relative;
+  display: inline-flex;
+}
+.comment-popover__dropdown {
+  position: absolute;
+  top: calc(100% + var(--space-100));
+  right: 0;
+  z-index: 2;
+  min-width: 176px;
+}
+.comment-popover__resolved {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  margin: 0;
+  padding: var(--space-200) var(--space-300);
+  border-bottom: 1px solid var(--line);
+  font: var(--type-ui-label);
+  color: var(--ink-muted);
+}
+.comment-popover__resolved .dp-icon {
+  color: var(--success);
+}
+.comment-popover__messages {
+  display: grid;
+  gap: var(--space-300);
+  margin: 0;
+  padding: var(--space-300);
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+.comment-popover__reply {
+  padding: 0 var(--space-300) var(--space-300);
+  flex: none;
+}
+.comment-popover__reply--draft {
+  padding-top: var(--space-300);
+}
+
+.comment-message {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: var(--space-200);
+  align-items: start;
+}
+.comment-message__main {
+  display: grid;
+  gap: var(--space-050);
+  min-width: 0;
+}
+.comment-message__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-200);
+  min-height: 24px;
+}
+.comment-message__who {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.comment-message__who b {
+  font-weight: 600;
+}
+.comment-message__when {
+  color: var(--ink-muted);
+}
+.comment-message__text {
+  margin: 0;
+  line-height: 17px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Author actions appear on hover or focus, so the thread reads calmly. */
+.comment-message__more {
+  opacity: 0;
+  transition: opacity var(--duration-hover) ease-out;
+}
+.comment-message:hover .comment-message__more,
+.comment-message__more:focus-visible,
+.comment-message__more[aria-expanded="true"] {
+  opacity: 1;
+}
+.comment-mention {
+  font-weight: 600;
+}
+.comment-mention--you {
+  color: var(--signal-ink);
+}
+
+.comment-confirm {
+  display: grid;
+  gap: var(--space-200);
+  margin: var(--space-200) var(--space-300) 0;
+  padding: var(--space-200) var(--space-300);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+.comment-message .comment-confirm {
+  margin: var(--space-100) 0 0;
+}
+.comment-confirm p {
+  margin: 0;
+}
+.comment-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-200);
+}
+
+.comment-error {
+  margin: var(--space-200) 0 0;
+  font: var(--type-ui-label);
+  color: var(--danger);
+}
+
+/* The composer: a field that grows, a hint, and the send button. */
+.comment-composer {
+  position: relative;
+  padding: var(--space-200) var(--space-300);
+  border: 1px solid var(--line-control);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+.comment-composer:focus-within {
+  border-color: var(--signal);
+}
+.comment-composer__field {
+  display: block;
+  width: 100%;
+  min-height: 16px;
+  max-height: 160px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--ink);
+  font: var(--type-ui-body);
+  line-height: 17px;
+  overflow-y: auto;
+}
+.comment-composer__field::placeholder {
+  color: var(--ink-muted);
+}
+.comment-composer__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-200);
+  margin-top: var(--space-200);
+}
+.comment-composer__hint {
+  font: var(--type-ui-label);
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+.comment-composer__hint b {
+  font-weight: 600;
+  color: var(--ink);
+}
+.comment-composer__actions {
+  display: inline-flex;
+  gap: var(--space-200);
+}
+.comment-composer__people {
+  position: absolute;
+  top: calc(100% - var(--space-200));
+  left: var(--space-800);
+  z-index: 4;
+  min-width: 208px;
+}
+.comment-composer__people .dp-menu__item {
+  grid-template-columns: 1fr;
+}
+
+/* The panel, in the inspector's place. */
+.comments-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.comments-panel__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-100);
+  height: 40px;
+  padding: 0 var(--space-200) 0 var(--space-300);
+  flex: none;
+}
+.comments-panel__title {
+  flex: 1;
+  margin: 0;
+  font: var(--type-ui-strong);
+}
+.comments-panel__filters {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  padding: 0 var(--space-300) var(--space-200);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.comments-panel__scope {
+  height: 24px;
+  min-width: 0;
+  padding: 0 var(--space-100);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font: var(--type-ui-body);
+  cursor: pointer;
+}
+.comments-panel__scope:hover {
+  background: var(--surface-hover);
+}
+.comments-panel__scope:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.comments-panel__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-100);
+}
+.comments-panel__rows {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.comments-panel__row {
+  display: grid;
+  gap: var(--space-100);
+  width: 100%;
+  padding: var(--space-200);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font: var(--type-ui-body);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--duration-hover) ease-out;
+}
+.comments-panel__row:hover {
+  background: var(--surface-hover);
+}
+.comments-panel__row[aria-current="true"] {
+  background: var(--signal-soft);
+}
+.comments-panel__row:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.comments-panel__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  min-width: 0;
+  white-space: nowrap;
+}
+.comments-panel__who {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.comments-panel__who b {
+  font-weight: 600;
+}
+.comments-panel__meta .comment-avatar {
+  width: 20px;
+  height: 20px;
+  font-size: 9px;
+}
+.comments-panel__muted {
+  color: var(--ink-muted);
+}
+.comments-panel__count {
+  margin-left: auto;
+  font: var(--type-ui-label);
+  color: var(--ink-muted);
+}
+.comments-panel__text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+}
+.comments-panel__where {
+  font: var(--type-ui-label);
+  color: var(--ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.comments-panel__empty {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-300);
+  margin: 0;
+  padding: var(--space-300) var(--space-200);
+  color: var(--ink-muted);
+}
+.comments-panel__empty p {
+  margin: 0;
+}
+.comments-panel__row[data-resolved] .comments-panel__text {
+  color: var(--ink-muted);
+}

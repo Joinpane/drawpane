@@ -32,7 +32,7 @@
 <text x="380" y="468" font-size="11.5" class="quiet" text-anchor="middle">hourly snapshots and branch bases</text>
 <rect x="180" y="72" width="400" height="88" rx="8" class="box"/>
 <text x="192" y="96" font-size="13" class="ink" font-weight="600">Drawpane web app (browser)</text>
-<text x="192" y="112" font-size="11.5" class="quiet">Penpot common + WASM/WebGL renderer</text>
+<text x="192" y="112" font-size="11.5" class="quiet">Document model + WebGL renderer</text>
 <text x="192" y="128" font-size="11.5" class="quiet">@drawpane/ui shell, command bar, Selection Lens</text>
 <text x="192" y="144" font-size="11.5" class="quiet">Exports and thumbnails render here</text>
 <rect x="228" y="200" width="304" height="72" rx="8" class="box"/>
@@ -51,7 +51,7 @@
 <text x="48" y="344" font-size="13" class="ink" font-weight="600">FileRoom DO</text>
 <text x="48" y="360" font-size="11.5" class="ink">One per file</text>
 <text x="48" y="376" font-size="11.5" class="ink">Orders edits by revn</text>
-<text x="48" y="392" font-size="11.5" class="ink">SQLite: pages + log</text>
+<text x="48" y="392" font-size="11.5" class="ink">SQLite: nodes + log</text>
 <text x="48" y="408" font-size="11.5" class="ink">Fans out to sockets</text>
 <rect x="212" y="320" width="160" height="104" rx="8" class="box"/>
 <text x="224" y="344" font-size="13" class="ink" font-weight="600">TeamHub DO</text>
