@@ -9,6 +9,7 @@ import {
 } from "react";
 import type { IconName } from "../icons";
 import { cx } from "../lib/cx";
+import { assignRef } from "../lib/refs";
 import { Icon } from "./Icon";
 
 export interface MenuActionItem {
@@ -53,8 +54,13 @@ export interface MenuProps
   onSelect?: (item: MenuActionItem, index: number) => void;
   /** Escape, Tab, a selection, or ArrowLeft (to close a submenu). */
   onClose?: (reason: MenuCloseReason) => void;
-  /** Focus the active item, or the first one, on mount. Use it for menus that pop up. */
-  autoFocus?: boolean;
+  /**
+   * Focus on mount, for menus that pop up: `true` focuses the active (or
+   * first) item, for menus opened from the keyboard; `"menu"` focuses the
+   * menu itself, for menus opened with the pointer, so no item looks chosen
+   * until ↓, ↑ or a letter moves into the list.
+   */
+  autoFocus?: boolean | "menu";
 }
 
 const TYPEAHEAD_RESET_MS = 500;
@@ -74,6 +80,7 @@ export function Menu({
   onClose,
   autoFocus = false,
   className,
+  ref,
   ...rest
 }: MenuProps) {
   const baseId = useId();
@@ -89,10 +96,31 @@ export function Menu({
     refs.current[index]?.focus();
   };
 
+  const menuRef = useRef<HTMLDivElement>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: focus once, on mount
   useEffect(() => {
-    if (autoFocus && tabStop >= 0) focusItem(tabStop);
+    if (autoFocus === "menu") menuRef.current?.focus({ preventScroll: true });
+    else if (autoFocus && tabStop >= 0) focusItem(tabStop);
   }, []);
+
+  /** Keys while the menu itself has focus (pointer-opened): move into the items. */
+  const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    const first = actionIndexes[0];
+    const last = actionIndexes.at(-1);
+    if ((event.key === "ArrowDown" || event.key === "Home") && first !== undefined)
+      focusItem(first);
+    else if ((event.key === "ArrowUp" || event.key === "End") && last !== undefined)
+      focusItem(last);
+    else if (event.key === "Escape" && onClose) {
+      event.stopPropagation();
+      onClose("escape");
+    } else if (event.key === "Tab") onClose?.("tab");
+    else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey)
+      matchTypeahead(event.key);
+    else return;
+    event.preventDefault();
+  };
 
   const select = (index: number) => {
     const item = items[index];
@@ -185,6 +213,7 @@ export function Menu({
           refs.current[index] = node;
         }}
         id={`${baseId}-${index}`}
+        data-index={index}
         role="menuitem"
         {...(checkable ? { role: "menuitemcheckbox", "aria-checked": item.checked } : {})}
         aria-disabled={item.disabled || undefined}
@@ -253,10 +282,19 @@ export function Menu({
   return (
     <div
       {...rest}
+      ref={(node) => {
+        menuRef.current = node;
+        assignRef(ref, node);
+      }}
       role="menu"
       aria-label={label}
       aria-orientation="vertical"
+      tabIndex={autoFocus === "menu" ? -1 : undefined}
       className={cx("dp-menu", className)}
+      onKeyDown={(event) => {
+        rest.onKeyDown?.(event);
+        if (!event.defaultPrevented) onMenuKeyDown(event);
+      }}
     >
       {content}
     </div>

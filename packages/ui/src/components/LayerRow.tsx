@@ -1,12 +1,7 @@
-import {
-  type ComponentPropsWithRef,
-  type CSSProperties,
-  type KeyboardEvent,
-  type MouseEvent,
-  useState,
-} from "react";
+import type { ComponentPropsWithRef, CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import type { IconName } from "../icons";
 import { cx } from "../lib/cx";
+import { useControllableState } from "../lib/use-controllable-state";
 import { type PresenceSlot, presenceColor } from "../tokens";
 import { Icon } from "./Icon";
 
@@ -58,6 +53,10 @@ export interface LayerRowProps extends Omit<ComponentPropsWithRef<"div">, "child
   onToggleLocked?: () => void;
   /** Enables renaming in place: double-click the row or press F2, then Enter or Escape. */
   onRename?: (name: string) => void;
+  /** Controls renaming from outside (a menu's Rename, ⌘R). Leave unset to let the row own it. */
+  renaming?: boolean;
+  /** Renaming started or ended, from inside the row. */
+  onRenamingChange?: (renaming: boolean) => void;
 }
 
 function stop(event: MouseEvent) {
@@ -83,13 +82,15 @@ export function LayerRow({
   onToggleHidden,
   onToggleLocked,
   onRename,
+  renaming: renamingProp,
+  onRenamingChange,
   className,
   style,
   onKeyDown,
   onDoubleClick,
   ...rest
 }: LayerRowProps) {
-  const [renaming, setRenaming] = useState(false);
+  const [renaming, setRenaming] = useControllableState(renamingProp, false, onRenamingChange);
   const component = kind === "component" || kind === "instance";
   const rowStyle: CSSProperties & Record<"--dp-depth", number> = { ...style, "--dp-depth": depth };
 
