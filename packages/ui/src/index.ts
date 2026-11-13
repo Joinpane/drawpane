@@ -4,6 +4,7 @@ export * from "./components/Badge";
 export * from "./components/Button";
 export * from "./components/ColorPicker";
 export * from "./components/CommandBar";
+export * from "./components/ContextMenu";
 export * from "./components/Icon";
 export * from "./components/IconButton";
 export * from "./components/Kbd";
