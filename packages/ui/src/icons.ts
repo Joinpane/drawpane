@@ -3,7 +3,7 @@
 /** One shape of an icon: an SVG element name and its React attributes. */
 export type IconNode = readonly [tag: string, attributes: Readonly<Record<string, string>>];
 
-/** Drawpane's 43 icons on a 16px grid; strokes and fills inherit currentColor. */
+/** Drawpane's 65 icons on a 16px grid; strokes and fills inherit currentColor. */
 export const iconData = {
   pointer: [
     [
@@ -658,6 +658,362 @@ export const iconData = {
       "path",
       {
         d: "M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3",
+      },
+    ],
+  ],
+  "align-bottom": [
+    [
+      "path",
+      {
+        d: "M2.5 13.5h11",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "4",
+        y: "2.5",
+        width: "3",
+        height: "8.5",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "9",
+        y: "6",
+        width: "3",
+        height: "5",
+        rx: "0.75",
+      },
+    ],
+  ],
+  "align-center": [
+    [
+      "path",
+      {
+        d: "M8 2v12",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "3",
+        y: "4",
+        width: "10",
+        height: "3",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5",
+        y: "9",
+        width: "6",
+        height: "3",
+        rx: "0.75",
+      },
+    ],
+  ],
+  "align-left": [
+    [
+      "path",
+      {
+        d: "M2.5 2.5v11",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5",
+        y: "4",
+        width: "8.5",
+        height: "3",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5",
+        y: "9",
+        width: "5",
+        height: "3",
+        rx: "0.75",
+      },
+    ],
+  ],
+  "align-middle": [
+    [
+      "path",
+      {
+        d: "M2 8h12",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "4",
+        y: "3",
+        width: "3",
+        height: "10",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "9",
+        y: "5",
+        width: "3",
+        height: "6",
+        rx: "0.75",
+      },
+    ],
+  ],
+  "align-right": [
+    [
+      "path",
+      {
+        d: "M13.5 2.5v11",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "2.5",
+        y: "4",
+        width: "8.5",
+        height: "3",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "6",
+        y: "9",
+        width: "5",
+        height: "3",
+        rx: "0.75",
+      },
+    ],
+  ],
+  "align-top": [
+    [
+      "path",
+      {
+        d: "M2.5 2.5h11",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "4",
+        y: "5",
+        width: "3",
+        height: "8.5",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "9",
+        y: "5",
+        width: "3",
+        height: "5",
+        rx: "0.75",
+      },
+    ],
+  ],
+  fit: [
+    [
+      "path",
+      {
+        d: "M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10",
+      },
+    ],
+  ],
+  "gap-horizontal": [
+    [
+      "path",
+      {
+        d: "M2.75 3v10M13.25 3v10M6 8h4",
+      },
+    ],
+  ],
+  "gap-vertical": [
+    [
+      "path",
+      {
+        d: "M3 2.75h10M3 13.25h10M8 6v4",
+      },
+    ],
+  ],
+  "letter-spacing": [
+    [
+      "path",
+      {
+        d: "M2.25 3v10M13.75 3v10M5.5 11l2.5-6 2.5 6M6.4 9h3.2",
+      },
+    ],
+  ],
+  line: [
+    [
+      "path",
+      {
+        d: "M3 13L13 3",
+      },
+    ],
+  ],
+  "line-height": [
+    [
+      "path",
+      {
+        d: "M2.5 2.75h11M2.5 13.25h11M8 5.5v5M6.5 7 8 5.5 9.5 7M6.5 9 8 10.5 9.5 9",
+      },
+    ],
+  ],
+  link: [
+    [
+      "path",
+      {
+        d: "M7 9a2.5 2.5 0 0 0 3.54 0l2-2A2.5 2.5 0 0 0 9 3.46l-.75.75M9 7a2.5 2.5 0 0 0-3.54 0l-2 2A2.5 2.5 0 0 0 7 12.54l.75-.75",
+      },
+    ],
+  ],
+  moon: [
+    [
+      "path",
+      {
+        d: "M13.25 9.6A5.5 5.5 0 1 1 6.4 2.75a4.5 4.5 0 0 0 6.85 6.85z",
+      },
+    ],
+  ],
+  opacity: [
+    [
+      "circle",
+      {
+        cx: "8",
+        cy: "8",
+        r: "5.25",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M8 2.75a5.25 5.25 0 0 1 0 10.5z",
+        fill: "currentColor",
+        stroke: "none",
+      },
+    ],
+  ],
+  padding: [
+    [
+      "rect",
+      {
+        x: "2.5",
+        y: "2.5",
+        width: "11",
+        height: "11",
+        rx: "1.5",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5.5",
+        y: "5.5",
+        width: "5",
+        height: "5",
+        rx: "0.75",
+        strokeDasharray: "1.5 1.5",
+      },
+    ],
+  ],
+  radius: [
+    [
+      "path",
+      {
+        d: "M3 13V8.5a5.5 5.5 0 0 1 5.5-5.5H13",
+      },
+    ],
+  ],
+  rotate: [
+    [
+      "path",
+      {
+        d: "M13.25 8A5.25 5.25 0 1 1 11.7 4.3",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M12.5 1.75v3h-3",
+      },
+    ],
+  ],
+  "sign-out": [
+    [
+      "path",
+      {
+        d: "M6.5 2.75H4a1.25 1.25 0 0 0-1.25 1.25v8A1.25 1.25 0 0 0 4 13.25h2.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M10 5l3 3-3 3M13 8H6.5",
+      },
+    ],
+  ],
+  "stroke-weight": [
+    [
+      "path",
+      {
+        d: "M2.5 4h11",
+        strokeWidth: "1",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.5 8h11",
+        strokeWidth: "1.75",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.5 12.25h11",
+        strokeWidth: "2.5",
+      },
+    ],
+  ],
+  sun: [
+    [
+      "circle",
+      {
+        cx: "8",
+        cy: "8",
+        r: "2.75",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.05 1.05M11.35 11.35l1.05 1.05M3.6 12.4l1.05-1.05M11.35 4.65l1.05-1.05",
+      },
+    ],
+  ],
+  trash: [
+    [
+      "path",
+      {
+        d: "M2.75 4.5h10.5M6.25 4.5V3h3.5v1.5M4.25 4.5l.65 8.1a1 1 0 0 0 1 .9h4.2a1 1 0 0 0 1-.9l.65-8.1",
       },
     ],
   ],

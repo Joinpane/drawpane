@@ -6,11 +6,13 @@
  */
 import { getProp } from "@drawpane/model";
 import type { Editor } from "./editor";
-import { apply, type Point } from "./geometry";
+import { apply, type Point, type Rect } from "./geometry";
 import type { Interaction } from "./interaction";
+import { drawVectorOverlay } from "./tools/overlay";
 
 export interface OverlayTheme {
   signal: string;
+  componentInk: string;
   onSignal: string;
   guide: string;
   component: string;
@@ -23,6 +25,8 @@ export interface OverlayTheme {
   agent: string;
   onAgent: string;
   fontUi: string;
+  /** Coordinate tags in vector edit (defaults to fontUi). */
+  fontMono?: string;
 }
 
 const HANDLE = 7;
@@ -46,6 +50,7 @@ export function drawOverlay(
     focusMode,
     peers,
     gesture,
+    vectorEdit,
   } = editor.s;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -69,6 +74,21 @@ export function drawOverlay(
     ctx.setLineDash([]);
   };
 
+  // Component sets: a dashed outline in the component colour, like Figma.
+  const sets: string[] = [];
+  for (const id of doc.childIds(pageId)) {
+    const node = doc.get(id);
+    if (node?.type === "frame" && getProp(node.props, "isComponentSet")) sets.push(id);
+    else if (node?.type === "frame") {
+      for (const child of doc.childIds(id))
+        if (getProp(doc.get(child)?.props ?? {}, "isComponentSet")) sets.push(child);
+    }
+  }
+  for (const id of sets) {
+    const corners = scene.corners(id);
+    if (corners) quad(corners, theme.component, 1, [4, 3]);
+  }
+
   // Artboard labels: names above top-level frames.
   ctx.font = `500 11px ${theme.fontUi}`;
   ctx.textBaseline = "bottom";
@@ -79,8 +99,20 @@ export function drawOverlay(
     if (!corners) continue;
     const p = toScreen(corners[0] as Point);
     const selected = selection.includes(id);
-    ctx.fillStyle = selected ? theme.signal : theme.inkMuted;
-    ctx.fillText(getProp(node.props, "name") || "Frame", p.x, p.y - 4);
+    const isComponent = getProp(node.props, "isComponent") || getProp(node.props, "isComponentSet");
+    const isInstance = getProp(node.props, "instanceOf") !== null;
+    let x = p.x;
+    if (isComponent || isInstance) {
+      // Components and instances wear the component colour, with a small diamond.
+      drawDiamond(ctx, x + 4, p.y - 9.5, isComponent, theme.component);
+      x += 12;
+    }
+    ctx.fillStyle = selected
+      ? theme.signal
+      : isComponent || isInstance
+        ? theme.componentInk
+        : theme.inkMuted;
+    ctx.fillText(getProp(node.props, "name") || "Frame", x, p.y - 4);
   }
 
   // Layout X-ray: padding and gaps of the selected or hovered auto-layout frame.
@@ -116,21 +148,25 @@ export function drawOverlay(
     }
   }
 
-  // Hover outline.
+  // Hover outline: components and instances in their own colour.
   if (hover && !selection.includes(hover) && !gesture) {
     const corners = scene.corners(hover);
-    if (corners) quad(corners, theme.signal, 1);
+    const hovered = doc.get(hover);
+    const isComponentish =
+      hovered?.type === "frame" &&
+      (getProp(hovered.props, "isComponent") || getProp(hovered.props, "instanceOf") !== null);
+    if (corners) quad(corners, isComponentish ? theme.component : theme.signal, 1);
   }
 
   // Selection: each layer's outline, then one set of handles.
-  if (!editingText || selection.length > 1) {
+  if ((!editingText || selection.length > 1) && !vectorEdit) {
     for (const id of selection) {
       const corners = scene.corners(id);
       if (corners) quad(corners, theme.signal, 1.5);
     }
   }
   const frame = interaction.selectionFrame();
-  if (frame && selection.length > 0) {
+  if (frame && selection.length > 0 && !vectorEdit) {
     const corners = [
       { x: 0, y: 0 },
       { x: frame.width, y: 0 },
@@ -184,6 +220,15 @@ export function drawOverlay(
     }
   }
 
+  // Alt + hover: measure from the selection to the hovered layer.
+  if (xray && selection.length > 0 && hover && !selection.includes(hover)) {
+    const a = scene.unionBounds(selection);
+    const b = scene.bounds(hover);
+    if (a && b) drawMeasurements(ctx, a, b, (p) => toScreen(p), theme);
+  }
+  // Pen and vector edit: anchors, handles and the pen's rubber band.
+  drawVectorOverlay(ctx, editor, interaction, theme);
+
   // Smart guides.
   if (guides.length > 0) {
     ctx.strokeStyle = theme.guide;
@@ -231,6 +276,138 @@ export function drawOverlay(
       );
     }
   }
+}
+
+/**
+ * Distance lines between two boxes, like browser devtools: from each edge of
+ * `a` to the facing edge of `b` (or to `b`'s inner edges when `b` contains
+ * `a`), each labelled with its length in page units.
+ */
+function drawMeasurements(
+  ctx: CanvasRenderingContext2D,
+  a: Rect,
+  b: Rect,
+  toScreen: (p: Point) => Point,
+  theme: OverlayTheme,
+): void {
+  const lines: Array<{ from: Point; to: Point; length: number }> = [];
+  const contains =
+    b.x <= a.x && b.y <= a.y && b.x + b.width >= a.x + a.width && b.y + b.height >= a.y + a.height;
+  const midY = a.y + a.height / 2;
+  const midX = a.x + a.width / 2;
+  if (contains) {
+    lines.push({ from: { x: a.x, y: midY }, to: { x: b.x, y: midY }, length: a.x - b.x });
+    lines.push({
+      from: { x: a.x + a.width, y: midY },
+      to: { x: b.x + b.width, y: midY },
+      length: b.x + b.width - (a.x + a.width),
+    });
+    lines.push({ from: { x: midX, y: a.y }, to: { x: midX, y: b.y }, length: a.y - b.y });
+    lines.push({
+      from: { x: midX, y: a.y + a.height },
+      to: { x: midX, y: b.y + b.height },
+      length: b.y + b.height - (a.y + a.height),
+    });
+  } else {
+    const overlapY = Math.max(a.y, b.y) < Math.min(a.y + a.height, b.y + b.height);
+    const overlapX = Math.max(a.x, b.x) < Math.min(a.x + a.width, b.x + b.width);
+    const y = overlapY ? (Math.max(a.y, b.y) + Math.min(a.y + a.height, b.y + b.height)) / 2 : midY;
+    const x = overlapX ? (Math.max(a.x, b.x) + Math.min(a.x + a.width, b.x + b.width)) / 2 : midX;
+    if (b.x >= a.x + a.width)
+      lines.push({
+        from: { x: a.x + a.width, y },
+        to: { x: b.x, y },
+        length: b.x - (a.x + a.width),
+      });
+    else if (b.x + b.width <= a.x)
+      lines.push({
+        from: { x: b.x + b.width, y },
+        to: { x: a.x, y },
+        length: a.x - (b.x + b.width),
+      });
+    if (b.y >= a.y + a.height)
+      lines.push({
+        from: { x, y: a.y + a.height },
+        to: { x, y: b.y },
+        length: b.y - (a.y + a.height),
+      });
+    else if (b.y + b.height <= a.y)
+      lines.push({
+        from: { x, y: b.y + b.height },
+        to: { x, y: a.y },
+        length: a.y - (b.y + b.height),
+      });
+  }
+  ctx.save();
+  ctx.strokeStyle = theme.guide;
+  ctx.fillStyle = theme.guide;
+  ctx.lineWidth = 1;
+  ctx.font = `600 11px ${theme.fontUi}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // Outline the hovered box so it's clear what you measure to.
+  const tl = toScreen({ x: b.x, y: b.y });
+  const br = toScreen({ x: b.x + b.width, y: b.y + b.height });
+  ctx.setLineDash([3, 3]);
+  ctx.strokeRect(
+    Math.round(tl.x) + 0.5,
+    Math.round(tl.y) + 0.5,
+    Math.round(br.x - tl.x),
+    Math.round(br.y - tl.y),
+  );
+  ctx.setLineDash([]);
+  for (const line of lines) {
+    if (line.length <= 0.01) continue;
+    const p1 = toScreen(line.from);
+    const p2 = toScreen(line.to);
+    ctx.beginPath();
+    ctx.moveTo(Math.round(p1.x) + 0.5, Math.round(p1.y) + 0.5);
+    ctx.lineTo(Math.round(p2.x) + 0.5, Math.round(p2.y) + 0.5);
+    ctx.stroke();
+    const label = fmt(line.length);
+    const w = ctx.measureText(label).width + 8;
+    const cx = (p1.x + p2.x) / 2;
+    const cy = (p1.y + p2.y) / 2;
+    ctx.beginPath();
+    ctx.roundRect(cx - w / 2, cy - 8, w, 16, 3);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(label, cx, cy + 0.5);
+    ctx.fillStyle = theme.guide;
+  }
+  ctx.restore();
+}
+
+/** The component glyph: a diamond, solid inside for a main component. */
+function drawDiamond(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  solid: boolean,
+  color: string,
+): void {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.beginPath();
+  ctx.moveTo(0, -4.5);
+  ctx.lineTo(4.5, 0);
+  ctx.lineTo(0, 4.5);
+  ctx.lineTo(-4.5, 0);
+  ctx.closePath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.25;
+  ctx.stroke();
+  if (solid) {
+    ctx.beginPath();
+    ctx.moveTo(0, -2);
+    ctx.lineTo(2, 0);
+    ctx.lineTo(0, 2);
+    ctx.lineTo(-2, 0);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawXray(

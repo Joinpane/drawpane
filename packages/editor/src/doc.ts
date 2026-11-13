@@ -52,7 +52,7 @@ export class Doc {
   }
 
   pageIds(): readonly string[] {
-    return this.#store.childIds(ROOT_ID);
+    return this.#store.childIds(ROOT_ID).filter((id) => this.#store.get(id)?.type === "page");
   }
 
   nodes(): IterableIterator<NodeRecord> {
@@ -70,6 +70,11 @@ export class Doc {
       node = parent;
     }
     return out;
+  }
+
+  /** Variable collections, in order. */
+  collectionIds(): readonly string[] {
+    return this.#store.childIds(ROOT_ID).filter((id) => this.#store.get(id)?.type === "collection");
   }
 
   /** The page a node lives on. */

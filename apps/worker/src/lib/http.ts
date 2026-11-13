@@ -6,6 +6,8 @@ export type ErrorCode =
   | "forbidden"
   | "not_found"
   | "conflict"
+  | "too_large"
+  | "unsupported_media"
   | "rate_limited"
   | "internal";
 
@@ -29,3 +31,6 @@ export const forbidden = (message = "You don't have access to this.") =>
 export const notFound = (message = "That doesn't exist, or it was deleted.") =>
   new HttpError(404, "not_found", message);
 export const conflict = (message: string) => new HttpError(409, "conflict", message);
+export const tooLarge = (message: string) => new HttpError(413, "too_large", message);
+export const unsupportedMedia = (message: string) =>
+  new HttpError(415, "unsupported_media", message);
