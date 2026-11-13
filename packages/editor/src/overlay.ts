@@ -6,7 +6,7 @@
  */
 import { getProp } from "@drawpane/model";
 import type { Editor } from "./editor";
-import { apply, type Point } from "./geometry";
+import { apply, type Point, type Rect } from "./geometry";
 import type { Interaction } from "./interaction";
 
 export interface OverlayTheme {
@@ -201,6 +201,13 @@ export function drawOverlay(
     }
   }
 
+  // Alt + hover: measure from the selection to the hovered layer.
+  if (xray && selection.length > 0 && hover && !selection.includes(hover)) {
+    const a = scene.unionBounds(selection);
+    const b = scene.bounds(hover);
+    if (a && b) drawMeasurements(ctx, a, b, (p) => toScreen(p), theme);
+  }
+
   // Smart guides.
   if (guides.length > 0) {
     ctx.strokeStyle = theme.guide;
@@ -248,6 +255,106 @@ export function drawOverlay(
       );
     }
   }
+}
+
+/**
+ * Distance lines between two boxes, like browser devtools: from each edge of
+ * `a` to the facing edge of `b` (or to `b`'s inner edges when `b` contains
+ * `a`), each labelled with its length in page units.
+ */
+function drawMeasurements(
+  ctx: CanvasRenderingContext2D,
+  a: Rect,
+  b: Rect,
+  toScreen: (p: Point) => Point,
+  theme: OverlayTheme,
+): void {
+  const lines: Array<{ from: Point; to: Point; length: number }> = [];
+  const contains =
+    b.x <= a.x && b.y <= a.y && b.x + b.width >= a.x + a.width && b.y + b.height >= a.y + a.height;
+  const midY = a.y + a.height / 2;
+  const midX = a.x + a.width / 2;
+  if (contains) {
+    lines.push({ from: { x: a.x, y: midY }, to: { x: b.x, y: midY }, length: a.x - b.x });
+    lines.push({
+      from: { x: a.x + a.width, y: midY },
+      to: { x: b.x + b.width, y: midY },
+      length: b.x + b.width - (a.x + a.width),
+    });
+    lines.push({ from: { x: midX, y: a.y }, to: { x: midX, y: b.y }, length: a.y - b.y });
+    lines.push({
+      from: { x: midX, y: a.y + a.height },
+      to: { x: midX, y: b.y + b.height },
+      length: b.y + b.height - (a.y + a.height),
+    });
+  } else {
+    const overlapY = Math.max(a.y, b.y) < Math.min(a.y + a.height, b.y + b.height);
+    const overlapX = Math.max(a.x, b.x) < Math.min(a.x + a.width, b.x + b.width);
+    const y = overlapY ? (Math.max(a.y, b.y) + Math.min(a.y + a.height, b.y + b.height)) / 2 : midY;
+    const x = overlapX ? (Math.max(a.x, b.x) + Math.min(a.x + a.width, b.x + b.width)) / 2 : midX;
+    if (b.x >= a.x + a.width)
+      lines.push({
+        from: { x: a.x + a.width, y },
+        to: { x: b.x, y },
+        length: b.x - (a.x + a.width),
+      });
+    else if (b.x + b.width <= a.x)
+      lines.push({
+        from: { x: b.x + b.width, y },
+        to: { x: a.x, y },
+        length: a.x - (b.x + b.width),
+      });
+    if (b.y >= a.y + a.height)
+      lines.push({
+        from: { x, y: a.y + a.height },
+        to: { x, y: b.y },
+        length: b.y - (a.y + a.height),
+      });
+    else if (b.y + b.height <= a.y)
+      lines.push({
+        from: { x, y: b.y + b.height },
+        to: { x, y: a.y },
+        length: a.y - (b.y + b.height),
+      });
+  }
+  ctx.save();
+  ctx.strokeStyle = theme.guide;
+  ctx.fillStyle = theme.guide;
+  ctx.lineWidth = 1;
+  ctx.font = `600 11px ${theme.fontUi}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // Outline the hovered box so it's clear what you measure to.
+  const tl = toScreen({ x: b.x, y: b.y });
+  const br = toScreen({ x: b.x + b.width, y: b.y + b.height });
+  ctx.setLineDash([3, 3]);
+  ctx.strokeRect(
+    Math.round(tl.x) + 0.5,
+    Math.round(tl.y) + 0.5,
+    Math.round(br.x - tl.x),
+    Math.round(br.y - tl.y),
+  );
+  ctx.setLineDash([]);
+  for (const line of lines) {
+    if (line.length <= 0.01) continue;
+    const p1 = toScreen(line.from);
+    const p2 = toScreen(line.to);
+    ctx.beginPath();
+    ctx.moveTo(Math.round(p1.x) + 0.5, Math.round(p1.y) + 0.5);
+    ctx.lineTo(Math.round(p2.x) + 0.5, Math.round(p2.y) + 0.5);
+    ctx.stroke();
+    const label = fmt(line.length);
+    const w = ctx.measureText(label).width + 8;
+    const cx = (p1.x + p2.x) / 2;
+    const cy = (p1.y + p2.y) / 2;
+    ctx.beginPath();
+    ctx.roundRect(cx - w / 2, cy - 8, w, 16, 3);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(label, cx, cy + 0.5);
+    ctx.fillStyle = theme.guide;
+  }
+  ctx.restore();
 }
 
 /** The component glyph: a diamond, solid inside for a main component. */

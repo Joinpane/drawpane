@@ -18,8 +18,9 @@ import { ACTIONS, type ActionContext, matches } from "./actions";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
 import { connectFile } from "./connection";
-import { EditorContext, useEditor, useEditorState } from "./hooks";
+import { EditorContext, useEditor, useEditorState, useEditorStateOutside } from "./hooks";
 import { Inspector } from "./Inspector";
+import { InspectPanel } from "./InspectPanel";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
 import { Toolbar } from "./Toolbar";
@@ -58,6 +59,13 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [leftOpen, setLeftOpen] = useState(true);
   const [leftTab, setLeftTab] = useState<"layers" | "assets">("layers");
   const [view, setView] = useState<"design" | "tokens">("design");
+  const [rightTab, setRightTab] = useState<"design" | "inspect">("design");
+  // Viewers can't edit, so open them straight into Inspect (free for everyone).
+  // The role is only known once the room welcomes us ("viewer" until then).
+  const isViewer = useEditorStateOutside(editor, (s) => s.status === "live" && s.role === "viewer");
+  useEffect(() => {
+    if (isViewer) setRightTab("inspect");
+  }, [isViewer]);
   const [rightOpen, setRightOpen] = useState(true);
   const [fatal, setFatal] = useState<string | null>(null);
 
@@ -298,7 +306,18 @@ function FileEditor({ fileId }: { fileId: string }) {
         ) : null}
         {rightOpen && view === "design" ? (
           <aside className="pane pane--right" aria-label="Inspector">
-            <Inspector />
+            <div className="pane__tabs">
+              <SegmentedControl
+                label="Right pane"
+                options={[
+                  { value: "design", label: "Design" },
+                  { value: "inspect", label: "Inspect" },
+                ]}
+                value={rightTab}
+                onChange={(tab) => setRightTab(tab as "design" | "inspect")}
+              />
+            </div>
+            {rightTab === "design" ? <Inspector /> : <InspectPanel />}
           </aside>
         ) : null}
         {view === "design" ? <Lens onOpenInspector={() => setRightOpen(true)} /> : null}
