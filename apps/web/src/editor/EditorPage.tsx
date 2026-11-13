@@ -1,11 +1,11 @@
 import { CanvasTextMeasurer, Editor, Interaction } from "@drawpane/editor";
-import { Button, Icon, IconButton, PresenceStack, type PresenceSlot } from "@drawpane/ui";
+import { Button, Icon, IconButton, type PresenceSlot, PresenceStack } from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { modKey } from "../app/format";
-import { type ActionContext, ACTIONS, matches } from "./actions";
+import { ACTIONS, type ActionContext, matches } from "./actions";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
 import { connectFile } from "./connection";
@@ -26,12 +26,22 @@ export function EditorPage() {
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
-  return !!el && (el.isContentEditable || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT");
+  return (
+    !!el &&
+    (el.isContentEditable ||
+      el.tagName === "INPUT" ||
+      el.tagName === "TEXTAREA" ||
+      el.tagName === "SELECT")
+  );
 }
 
 function FileEditor({ fileId }: { fileId: string }) {
   const navigate = useNavigate();
-  const meta = useQuery({ queryKey: ["file", fileId], queryFn: () => api.file(fileId), retry: false });
+  const meta = useQuery({
+    queryKey: ["file", fileId],
+    queryFn: () => api.file(fileId),
+    retry: false,
+  });
   const [editor] = useState(() => new Editor({ measurer: new CanvasTextMeasurer() }));
   const interaction = useMemo(() => new Interaction(editor), [editor]);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -49,7 +59,12 @@ function FileEditor({ fileId }: { fileId: string }) {
       if (!pageId || status !== "live" || viewport.width === 0 || fitted.has(pageId)) return;
       fitted.add(pageId);
       if (editor.doc.childIds(pageId).length > 0) editor.zoomToFit();
-      else editor.setCamera(editor.s.camera.zoomAt({ x: 0, y: 0 }, 1).pan(viewport.width / 2 - 200, viewport.height / 2 - 150));
+      else
+        editor.setCamera(
+          editor.s.camera
+            .zoomAt({ x: 0, y: 0 }, 1)
+            .pan(viewport.width / 2 - 200, viewport.height / 2 - 150),
+        );
     };
     check();
     return editor.state.subscribe(check);
@@ -131,7 +146,13 @@ function FileEditor({ fileId }: { fileId: string }) {
         }
       }
       // Native clipboard events handle these.
-      if ((e.metaKey || e.ctrlKey) && ["c", "x", "v"].includes(e.key.toLowerCase()) && !e.shiftKey && !e.altKey) return;
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        ["c", "x", "v"].includes(e.key.toLowerCase()) &&
+        !e.shiftKey &&
+        !e.altKey
+      )
+        return;
       for (const action of ACTIONS) {
         if (action.shortcut && matches(action.shortcut, e)) {
           e.preventDefault();
@@ -163,7 +184,8 @@ function FileEditor({ fileId }: { fileId: string }) {
     };
     const onPaste = (e: ClipboardEvent) => {
       if (isTyping(e.target) || !editor.canEdit) return;
-      const data = e.clipboardData?.getData(CLIPBOARD_MIME) || e.clipboardData?.getData("text/plain") || "";
+      const data =
+        e.clipboardData?.getData(CLIPBOARD_MIME) || e.clipboardData?.getData("text/plain") || "";
       if (editor.paste(data)) e.preventDefault();
     };
     window.addEventListener("keydown", onKeyDown);
@@ -198,7 +220,12 @@ function FileEditor({ fileId }: { fileId: string }) {
     <EditorContext.Provider value={editor}>
       <div className="editor">
         <Canvas interaction={interaction} />
-        <FileTitle fileId={fileId} teamId={meta.data?.file.teamId ?? null} name={meta.data?.file.name ?? ""} project={meta.data?.project?.name ?? ""} />
+        <FileTitle
+          fileId={fileId}
+          teamId={meta.data?.file.teamId ?? null}
+          name={meta.data?.file.name ?? ""}
+          project={meta.data?.project?.name ?? ""}
+        />
         <Toolbar onSearch={() => setCommandOpen(true)} />
         <TopRight fileId={fileId} />
         {leftOpen ? (
@@ -233,7 +260,17 @@ function FileEditor({ fileId }: { fileId: string }) {
   );
 }
 
-function FileTitle({ fileId, teamId, name, project }: { fileId: string; teamId: string | null; name: string; project: string }) {
+function FileTitle({
+  fileId,
+  teamId,
+  name,
+  project,
+}: {
+  fileId: string;
+  teamId: string | null;
+  name: string;
+  project: string;
+}) {
   const queryClient = useQueryClient();
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const [editing, setEditing] = useState(false);
@@ -248,7 +285,13 @@ function FileTitle({ fileId, teamId, name, project }: { fileId: string; teamId: 
   return (
     <div className="file-title pane">
       {teamId ? (
-        <Link to="/t/$teamId" params={{ teamId }} search={{}} className="file-title__home" aria-label="Back to files">
+        <Link
+          to="/t/$teamId"
+          params={{ teamId }}
+          search={{}}
+          className="file-title__home"
+          aria-label="Back to files"
+        >
           <img src="/drawpane-mark.svg" alt="" width={20} height={20} />
         </Link>
       ) : (
@@ -271,7 +314,12 @@ function FileTitle({ fileId, teamId, name, project }: { fileId: string; teamId: 
           }}
         />
       ) : (
-        <button type="button" className="file-title__name" onClick={() => canEdit && setEditing(true)} title={project ? `${project} / ${name}` : name}>
+        <button
+          type="button"
+          className="file-title__name"
+          onClick={() => canEdit && setEditing(true)}
+          title={project ? `${project} / ${name}` : name}
+        >
           {name || "…"}
         </button>
       )}
@@ -285,7 +333,7 @@ function TopRight({ fileId }: { fileId: string }) {
   const [copied, setCopied] = useState(false);
   const people = [...peers.values()].map((p) => ({
     name: p.name,
-    color: ((((p.color - 1) % 8) + 8) % 8 + 1) as PresenceSlot,
+    color: (((((p.color - 1) % 8) + 8) % 8) + 1) as PresenceSlot,
   }));
   return (
     <div className="top-right pane">
@@ -309,14 +357,34 @@ function ZoomControls() {
   const editor = useEditor();
   const zoom = useEditorState((s) => s.camera.zoom);
   return (
-    <div className="zoom pane" role="group" aria-label="Zoom">
-      <IconButton icon="minus" label="Zoom out" shortcut={modKey("−")} onClick={() => editor.zoomBy(1 / 1.5)} />
-      <button type="button" className="zoom__value" onClick={() => editor.zoomTo(1)} title="Zoom to 100% (⇧0)">
+    <fieldset className="zoom pane" aria-label="Zoom">
+      <IconButton
+        icon="minus"
+        label="Zoom out"
+        shortcut={modKey("−")}
+        onClick={() => editor.zoomBy(1 / 1.5)}
+      />
+      <button
+        type="button"
+        className="zoom__value"
+        onClick={() => editor.zoomTo(1)}
+        title="Zoom to 100% (⇧0)"
+      >
         {Math.round(zoom * 100)}%
       </button>
-      <IconButton icon="plus" label="Zoom in" shortcut={modKey("+")} onClick={() => editor.zoomBy(1.5)} />
-      <IconButton icon="xray" label="Zoom to fit" shortcut="⇧1" onClick={() => editor.zoomToFit()} />
-    </div>
+      <IconButton
+        icon="plus"
+        label="Zoom in"
+        shortcut={modKey("+")}
+        onClick={() => editor.zoomBy(1.5)}
+      />
+      <IconButton
+        icon="xray"
+        label="Zoom to fit"
+        shortcut="⇧1"
+        onClick={() => editor.zoomToFit()}
+      />
+    </fieldset>
   );
 }
 
@@ -360,4 +428,3 @@ function Notice() {
     </div>
   );
 }
-

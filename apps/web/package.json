@@ -10,7 +10,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p .",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
@@ -23,6 +24,7 @@
     "react-dom": "catalog:"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.0",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",

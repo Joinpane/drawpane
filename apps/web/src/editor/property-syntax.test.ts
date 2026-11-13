@@ -21,7 +21,11 @@ describe("evaluate", () => {
 
 describe("parsePropertyCommand", () => {
   it("sets numbers with math", () => {
-    expect(parsePropertyCommand("w 320")).toEqual({ label: "Width", display: "320", sets: [{ prop: "width", value: 320 }] });
+    expect(parsePropertyCommand("w 320")).toEqual({
+      label: "Width",
+      display: "320",
+      sets: [{ prop: "width", value: 320 }],
+    });
     expect(parsePropertyCommand("gap 8*2")?.sets).toEqual([{ prop: "gap", value: 16 }]);
   });
 
@@ -31,9 +35,13 @@ describe("parsePropertyCommand", () => {
   });
 
   it("parses colors, percentages and enums", () => {
-    expect(parsePropertyCommand("fill f50")?.sets).toEqual([{ prop: "fills", value: [{ type: "solid", color: "#ff5500" }] }]);
+    expect(parsePropertyCommand("fill f50")?.sets).toEqual([
+      { prop: "fills", value: [{ type: "solid", color: "#ff5500" }] },
+    ]);
     expect(parsePropertyCommand("opacity 50")?.sets).toEqual([{ prop: "opacity", value: 0.5 }]);
-    expect(parsePropertyCommand("layout row")?.sets).toEqual([{ prop: "layoutMode", value: "row" }]);
+    expect(parsePropertyCommand("layout row")?.sets).toEqual([
+      { prop: "layoutMode", value: "row" },
+    ]);
     expect(parsePropertyCommand("layout diagonal")).toBeNull();
   });
 

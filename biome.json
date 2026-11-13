@@ -12,7 +12,8 @@
       "!designs",
       "!docs/diagrams",
       "!**/routeTree.gen.ts",
-      "!**/*.md"
+      "!**/*.md",
+      "!**/*.svg"
     ]
   },
   "formatter": {

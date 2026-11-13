@@ -13,6 +13,12 @@ export interface Env {
   readonly SETUP_TOKEN?: string;
   /** Shown by the browser's passkey prompt. */
   readonly RP_NAME?: string;
+  /**
+   * The origin(s) people open, comma-separated, e.g. `http://localhost:5173`.
+   * Only needed in local development, where `wrangler dev` rewrites the
+   * request host to the production route. Unset in production.
+   */
+  readonly PUBLIC_ORIGIN?: string;
 }
 
 export type Role = "owner" | "editor" | "viewer";

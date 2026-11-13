@@ -39,10 +39,19 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   if (y < 0 || bottom.x < 0 || bottom.x > viewport.width) return null;
 
   const kind = KIND[node.type] ?? { label: "Layer", icon: "rectangle" as IconName };
-  const label = node.type === "frame" && getProp(node.props, "layoutMode") !== "none" ? `${kind.label} · Auto layout` : kind.label;
+  const label =
+    node.type === "frame" && getProp(node.props, "layoutMode") !== "none"
+      ? `${kind.label} · Auto layout`
+      : kind.label;
 
-  const set = (prop: Parameters<typeof editor.setProp>[1], value: unknown) => editor.setProp([node.id], prop, value, "Edit in lens");
-  const num = (n: NodeRecord, prop: "width" | "height" | "gap" | "cornerRadius" | "fontSize" | "paddingLeft", text: string, aria: string) => (
+  const set = (prop: Parameters<typeof editor.setProp>[1], value: unknown) =>
+    editor.setProp([node.id], prop, value, "Edit in lens");
+  const num = (
+    n: NodeRecord,
+    prop: "width" | "height" | "gap" | "cornerRadius" | "fontSize" | "paddingLeft",
+    text: string,
+    aria: string,
+  ) => (
     <NumberField
       key={prop}
       label={text}
@@ -58,12 +67,28 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
     node.type === "text"
       ? [num(node, "fontSize", "Aa", "Font size"), num(node, "width", "W", "Width")]
       : node.type === "frame" && getProp(node.props, "layoutMode") !== "none"
-        ? [num(node, "width", "W", "Width"), num(node, "height", "H", "Height"), num(node, "gap", "↔", "Gap"), num(node, "paddingLeft", "▢", "Padding")]
-        : [num(node, "width", "W", "Width"), num(node, "height", "H", "Height"), ...(node.type === "frame" || node.type === "rect" ? [num(node, "cornerRadius", "◜", "Corner radius")] : [])];
+        ? [
+            num(node, "width", "W", "Width"),
+            num(node, "height", "H", "Height"),
+            num(node, "gap", "↔", "Gap"),
+            num(node, "paddingLeft", "▢", "Padding"),
+          ]
+        : [
+            num(node, "width", "W", "Width"),
+            num(node, "height", "H", "Height"),
+            ...(node.type === "frame" || node.type === "rect"
+              ? [num(node, "cornerRadius", "◜", "Corner radius")]
+              : []),
+          ];
 
   return (
     <div className="lens-anchor" style={{ left: bottom.x, top: y }}>
-      <SelectionLens kind={label} kindIcon={kind.icon} onOpenInspector={onOpenInspector} inspectorShortcut="⌥⌘I">
+      <SelectionLens
+        kind={label}
+        kindIcon={kind.icon}
+        onOpenInspector={onOpenInspector}
+        inspectorShortcut="⌥⌘I"
+      >
         {controls}
       </SelectionLens>
     </div>

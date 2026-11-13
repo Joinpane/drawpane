@@ -1,6 +1,20 @@
 import type { Editor } from "@drawpane/editor";
-import { getProp, type NodeRecord, type Paint, type PropName, type PropValues } from "@drawpane/model";
-import { IconButton, NumberField, PropertyRow, PropertySection, SegmentedControl, Switch } from "@drawpane/ui";
+import {
+  getProp,
+  type NodeRecord,
+  type Paint,
+  type PropName,
+  type PropValues,
+} from "@drawpane/model";
+import {
+  IconButton,
+  NumberField,
+  PropertyRow,
+  PropertySection,
+  SegmentedControl,
+  type SegmentedOption,
+  Switch,
+} from "@drawpane/ui";
 import { useState } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 
@@ -53,11 +67,19 @@ export function Inspector() {
       {inLayout.length > 0 || layoutFrames.length > 0 ? (
         <SizingSection editor={editor} nodes={[...new Set([...inLayout, ...layoutFrames])]} />
       ) : null}
-      {frames.length > 0 && frames.length === nodes.length ? <AutoLayoutSection editor={editor} nodes={frames} /> : null}
+      {frames.length > 0 && frames.length === nodes.length ? (
+        <AutoLayoutSection editor={editor} nodes={frames} />
+      ) : null}
       <AppearanceSection editor={editor} nodes={nodes} corners={corners} frames={frames} />
-      {texts.length > 0 && texts.length === nodes.length ? <TextSection editor={editor} nodes={texts} /> : null}
-      {shapes.length > 0 ? <PaintSection editor={editor} nodes={shapes} prop="fills" title="Fill" /> : null}
-      {shapes.length > 0 ? <PaintSection editor={editor} nodes={shapes} prop="strokes" title="Stroke" /> : null}
+      {texts.length > 0 && texts.length === nodes.length ? (
+        <TextSection editor={editor} nodes={texts} />
+      ) : null}
+      {shapes.length > 0 ? (
+        <PaintSection editor={editor} nodes={shapes} prop="fills" title="Fill" />
+      ) : null}
+      {shapes.length > 0 ? (
+        <PaintSection editor={editor} nodes={shapes} prop="strokes" title="Stroke" />
+      ) : null}
       {shapes.length > 0 ? <EffectsSection editor={editor} nodes={shapes} /> : null}
     </fieldset>
   );
@@ -96,7 +118,14 @@ function Num({
       {...(max !== undefined ? { max } : {})}
       value={value === null ? null : Math.round(value * scale * 100) / 100}
       placeholder="Mixed"
-      onChange={(v) => editor.setProp(nodes.map((n) => n.id), prop, Math.round((v / scale) * 10000) / 10000, ariaLabel)}
+      onChange={(v) =>
+        editor.setProp(
+          nodes.map((n) => n.id),
+          prop,
+          Math.round((v / scale) * 10000) / 10000,
+          ariaLabel,
+        )
+      }
       onScrubStart={() => editor.beginGesture(ariaLabel)}
       onScrubEnd={() => editor.endGesture()}
     />
@@ -115,17 +144,24 @@ function GeometrySection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[
         <Num editor={editor} nodes={nodes} prop="height" label="H" ariaLabel="Height" min={0} />
       </PropertyRow>
       <PropertyRow>
-        <Num editor={editor} nodes={nodes} prop="rotation" label="↻" ariaLabel="Rotation" unit="°" />
+        <Num
+          editor={editor}
+          nodes={nodes}
+          prop="rotation"
+          label="↻"
+          ariaLabel="Rotation"
+          unit="°"
+        />
       </PropertyRow>
     </PropertySection>
   );
 }
 
-const SIZING = [
+const SIZING: readonly SegmentedOption[] = [
   { value: "fixed", label: "Fixed" },
   { value: "hug", label: "Hug" },
   { value: "fill", label: "Fill" },
-] as const;
+];
 
 function SizingSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
@@ -138,7 +174,7 @@ function SizingSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
         <SegmentedControl
           label="Horizontal resizing"
           options={SIZING}
-          value={h ?? undefined}
+          value={h ?? ""}
           onChange={(value) => editor.setProp(ids, "sizingH", value, "Resizing")}
         />
       </PropertyRow>
@@ -147,7 +183,7 @@ function SizingSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
         <SegmentedControl
           label="Vertical resizing"
           options={SIZING}
-          value={v ?? undefined}
+          value={v ?? ""}
           onChange={(value) => editor.setProp(ids, "sizingV", value, "Resizing")}
         />
       </PropertyRow>
@@ -179,7 +215,14 @@ function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: NodeRecor
   return (
     <PropertySection
       title="Auto layout"
-      actions={<IconButton icon={on ? "minus" : "plus"} label={on ? "Remove auto layout" : "Add auto layout"} shortcut="⇧A" onClick={toggle} />}
+      actions={
+        <IconButton
+          icon={on ? "minus" : "plus"}
+          label={on ? "Remove auto layout" : "Add auto layout"}
+          shortcut="⇧A"
+          onClick={toggle}
+        />
+      }
     >
       {on ? (
         <>
@@ -190,19 +233,20 @@ function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: NodeRecor
                 { value: "row", icon: "layout-row", title: "Horizontal" },
                 { value: "column", icon: "layout-col", title: "Vertical" },
               ]}
-              value={mode ?? undefined}
+              value={mode ?? ""}
               onChange={(value) => editor.setProp(ids, "layoutMode", value, "Direction")}
             />
             <Num editor={editor} nodes={nodes} prop="gap" label="↔" ariaLabel="Gap between items" />
           </PropertyRow>
           <div className="inspector__layout">
-            <div className="inspector__align" role="group" aria-label="Alignment">
+            <fieldset className="inspector__align" aria-label="Alignment">
               {ALIGN.map((a) =>
                 JUSTIFY.map((j) => {
                   // Rows: columns = justify (main axis), rows = align. Columns: transposed.
                   const jj = row ? j : a;
                   const aa = row ? a : j;
-                  const active = justify === jj && (align === aa || (align === "stretch" && aa === "start"));
+                  const active =
+                    justify === jj && (align === aa || (align === "stretch" && aa === "start"));
                   return (
                     <button
                       key={`${a}-${j}`}
@@ -220,12 +264,40 @@ function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: NodeRecor
                   );
                 }),
               )}
-            </div>
+            </fieldset>
             <div className="inspector__padding">
-              <Num editor={editor} nodes={nodes} prop="paddingLeft" label="L" ariaLabel="Left padding" min={0} />
-              <Num editor={editor} nodes={nodes} prop="paddingRight" label="R" ariaLabel="Right padding" min={0} />
-              <Num editor={editor} nodes={nodes} prop="paddingTop" label="T" ariaLabel="Top padding" min={0} />
-              <Num editor={editor} nodes={nodes} prop="paddingBottom" label="B" ariaLabel="Bottom padding" min={0} />
+              <Num
+                editor={editor}
+                nodes={nodes}
+                prop="paddingLeft"
+                label="L"
+                ariaLabel="Left padding"
+                min={0}
+              />
+              <Num
+                editor={editor}
+                nodes={nodes}
+                prop="paddingRight"
+                label="R"
+                ariaLabel="Right padding"
+                min={0}
+              />
+              <Num
+                editor={editor}
+                nodes={nodes}
+                prop="paddingTop"
+                label="T"
+                ariaLabel="Top padding"
+                min={0}
+              />
+              <Num
+                editor={editor}
+                nodes={nodes}
+                prop="paddingBottom"
+                label="B"
+                ariaLabel="Bottom padding"
+                min={0}
+              />
             </div>
           </div>
           <PropertyRow columns="label">
@@ -233,7 +305,14 @@ function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: NodeRecor
             <Switch
               label="Space between"
               checked={justify === "space-between"}
-              onChange={(checked) => editor.setProp(ids, "justifyContent", checked ? "space-between" : "start", "Justify")}
+              onChange={(checked) =>
+                editor.setProp(
+                  ids,
+                  "justifyContent",
+                  checked ? "space-between" : "start",
+                  "Justify",
+                )
+              }
             />
           </PropertyRow>
         </>
@@ -257,9 +336,26 @@ function AppearanceSection({
   return (
     <PropertySection title="Appearance">
       <PropertyRow>
-        <Num editor={editor} nodes={nodes} prop="opacity" label="◐" ariaLabel="Opacity" unit="%" min={0} max={100} scale={100} />
+        <Num
+          editor={editor}
+          nodes={nodes}
+          prop="opacity"
+          label="◐"
+          ariaLabel="Opacity"
+          unit="%"
+          min={0}
+          max={100}
+          scale={100}
+        />
         {corners.length === nodes.length ? (
-          <Num editor={editor} nodes={corners} prop="cornerRadius" label="◜" ariaLabel="Corner radius" min={0} />
+          <Num
+            editor={editor}
+            nodes={corners}
+            prop="cornerRadius"
+            label="◜"
+            ariaLabel="Corner radius"
+            min={0}
+          />
         ) : (
           <span />
         )}
@@ -270,7 +366,14 @@ function AppearanceSection({
           <Switch
             label="Clip content"
             checked={clip ?? false}
-            onChange={(checked) => editor.setProp(frames.map((f) => f.id), "clipContent", checked ? null : false, "Clip content")}
+            onChange={(checked) =>
+              editor.setProp(
+                frames.map((f) => f.id),
+                "clipContent",
+                checked ? null : false,
+                "Clip content",
+              )
+            }
           />
         </PropertyRow>
       ) : null}
@@ -278,7 +381,16 @@ function AppearanceSection({
   );
 }
 
-const FONTS = ["Instrument Sans", "Instrument Serif", "JetBrains Mono", "system-ui", "Georgia", "Helvetica", "Times New Roman", "Courier New"];
+const FONTS = [
+  "Instrument Sans",
+  "Instrument Serif",
+  "JetBrains Mono",
+  "system-ui",
+  "Georgia",
+  "Helvetica",
+  "Times New Roman",
+  "Courier New",
+];
 const WEIGHTS = [
   [300, "Light"],
   [400, "Regular"],
@@ -324,7 +436,14 @@ function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] })
             </option>
           ))}
         </select>
-        <Num editor={editor} nodes={nodes} prop="fontSize" label="Aa" ariaLabel="Font size" min={1} />
+        <Num
+          editor={editor}
+          nodes={nodes}
+          prop="fontSize"
+          label="Aa"
+          ariaLabel="Font size"
+          min={1}
+        />
       </PropertyRow>
       <PropertyRow>
         <NumberField
@@ -332,14 +451,18 @@ function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] })
           ariaLabel="Line height"
           placeholder="Auto"
           value={lineHeight && lineHeight.unit === "px" ? lineHeight.value : null}
-          onChange={(v) => editor.setProp(ids, "lineHeight", { unit: "px", value: v }, "Line height")}
+          onChange={(v) =>
+            editor.setProp(ids, "lineHeight", { unit: "px", value: v }, "Line height")
+          }
         />
         <NumberField
           label="|A|"
           ariaLabel="Letter spacing"
           placeholder="Mixed"
           value={letterSpacing && letterSpacing.unit === "px" ? letterSpacing.value : null}
-          onChange={(v) => editor.setProp(ids, "letterSpacing", { unit: "px", value: v }, "Letter spacing")}
+          onChange={(v) =>
+            editor.setProp(ids, "letterSpacing", { unit: "px", value: v }, "Letter spacing")
+          }
         />
       </PropertyRow>
       <SegmentedControl
@@ -349,7 +472,7 @@ function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] })
           { value: "center", label: "Center" },
           { value: "right", label: "Right" },
         ]}
-        value={align ?? undefined}
+        value={align ?? ""}
         onChange={(value) => editor.setProp(ids, "textAlign", value, "Text alignment")}
       />
       <SegmentedControl
@@ -359,14 +482,22 @@ function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] })
           { value: "height", label: "Auto height" },
           { value: "none", label: "Fixed" },
         ]}
-        value={auto ?? undefined}
+        value={auto ?? ""}
         onChange={(value) => editor.setProp(ids, "textAutoResize", value, "Text sizing")}
       />
     </PropertySection>
   );
 }
 
-function ColorField({ color, onChange, label }: { color: string; onChange: (color: string) => void; label: string }) {
+function ColorField({
+  color,
+  onChange,
+  label,
+}: {
+  color: string;
+  onChange: (color: string) => void;
+  label: string;
+}) {
   const [draft, setDraft] = useState<string | null>(null);
   const hex = color.slice(0, 7);
   const commit = (text: string) => {
@@ -401,28 +532,52 @@ function ColorField({ color, onChange, label }: { color: string; onChange: (colo
   );
 }
 
-function PaintSection({ editor, nodes, prop, title }: { editor: Editor; nodes: NodeRecord[]; prop: "fills" | "strokes"; title: string }) {
+function PaintSection({
+  editor,
+  nodes,
+  prop,
+  title,
+}: {
+  editor: Editor;
+  nodes: NodeRecord[];
+  prop: "fills" | "strokes";
+  title: string;
+}) {
   const ids = nodes.map((n) => n.id);
   const paints = common(nodes, prop);
-  const set = (next: Paint[], label: string) => editor.setProp(ids, prop, next.length ? next : null, label);
-  const add = () => set([...(paints ?? []), { type: "solid", color: prop === "fills" ? "#d9d9d6" : "#1c1b1a" }], `Add ${title.toLowerCase()}`);
+  const set = (next: Paint[], label: string) =>
+    editor.setProp(ids, prop, next.length ? next : null, label);
+  const add = () =>
+    set(
+      [...(paints ?? []), { type: "solid", color: prop === "fills" ? "#d9d9d6" : "#1c1b1a" }],
+      `Add ${title.toLowerCase()}`,
+    );
 
   return (
-    <PropertySection title={title} actions={<IconButton icon="plus" label={`Add ${title.toLowerCase()}`} onClick={add} />}>
+    <PropertySection
+      title={title}
+      actions={<IconButton icon="plus" label={`Add ${title.toLowerCase()}`} onClick={add} />}
+    >
       {paints === null ? (
         <p className="inspector__mixed">Mixed {title.toLowerCase()}s. Add one to replace them.</p>
       ) : (
         paints.map((paint, i) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: paints have no identity beyond their position
           <div key={i} className="paint-row">
             {paint.type === "solid" ? (
               <ColorField
                 label={title}
                 color={paint.color}
-                onChange={(color) => set(paints.map((p, j) => (j === i ? { ...paint, color } : p)), `${title} color`)}
+                onChange={(color) =>
+                  set(
+                    paints.map((p, j) => (j === i ? { ...paint, color } : p)),
+                    `${title} color`,
+                  )
+                }
               />
             ) : (
-              <span className="inspector__mixed">{paint.type === "image" ? "Image" : "Gradient"}</span>
+              <span className="inspector__mixed">
+                {paint.type === "image" ? "Image" : "Gradient"}
+              </span>
             )}
             <NumberField
               ariaLabel={`${title} opacity`}
@@ -430,20 +585,52 @@ function PaintSection({ editor, nodes, prop, title }: { editor: Editor; nodes: N
               min={0}
               max={100}
               value={Math.round((paint.opacity ?? 1) * 100)}
-              onChange={(v) => set(paints.map((p, j) => (j === i ? { ...paint, opacity: v / 100 } : p)), `${title} opacity`)}
+              onChange={(v) =>
+                set(
+                  paints.map((p, j) => (j === i ? { ...paint, opacity: v / 100 } : p)),
+                  `${title} opacity`,
+                )
+              }
             />
             <IconButton
               icon={paint.visible === false ? "eye-off" : "eye"}
-              label={paint.visible === false ? `Show ${title.toLowerCase()}` : `Hide ${title.toLowerCase()}`}
-              onClick={() => set(paints.map((p, j) => (j === i ? { ...paint, visible: paint.visible === false } : p)), `Toggle ${title.toLowerCase()}`)}
+              label={
+                paint.visible === false
+                  ? `Show ${title.toLowerCase()}`
+                  : `Hide ${title.toLowerCase()}`
+              }
+              onClick={() =>
+                set(
+                  paints.map((p, j) =>
+                    j === i ? { ...paint, visible: paint.visible === false } : p,
+                  ),
+                  `Toggle ${title.toLowerCase()}`,
+                )
+              }
             />
-            <IconButton icon="minus" label={`Remove ${title.toLowerCase()}`} onClick={() => set(paints.filter((_, j) => j !== i), `Remove ${title.toLowerCase()}`)} />
+            <IconButton
+              icon="minus"
+              label={`Remove ${title.toLowerCase()}`}
+              onClick={() =>
+                set(
+                  paints.filter((_, j) => j !== i),
+                  `Remove ${title.toLowerCase()}`,
+                )
+              }
+            />
           </div>
         ))
       )}
       {prop === "strokes" && paints && paints.length > 0 ? (
         <PropertyRow>
-          <Num editor={editor} nodes={nodes} prop="strokeWeight" label="≡" ariaLabel="Stroke weight" min={0} />
+          <Num
+            editor={editor}
+            nodes={nodes}
+            prop="strokeWeight"
+            label="≡"
+            ariaLabel="Stroke weight"
+            min={0}
+          />
           <select
             className="inspector__select"
             aria-label="Stroke position"
@@ -463,7 +650,8 @@ function PaintSection({ editor, nodes, prop, title }: { editor: Editor; nodes: N
 function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
   const effects = common(nodes, "effects");
-  const set = (next: PropValues["effects"], label: string) => editor.setProp(ids, "effects", next.length ? next : null, label);
+  const set = (next: PropValues["effects"], label: string) =>
+    editor.setProp(ids, "effects", next.length ? next : null, label);
   return (
     <PropertySection
       title="Effects"
@@ -471,12 +659,19 @@ function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[]
         <IconButton
           icon="plus"
           label="Add shadow"
-          onClick={() => set([...(effects ?? []), { type: "drop-shadow", color: "#00000033", x: 0, y: 4, blur: 12, spread: 0 }], "Add shadow")}
+          onClick={() =>
+            set(
+              [
+                ...(effects ?? []),
+                { type: "drop-shadow", color: "#00000033", x: 0, y: 4, blur: 12, spread: 0 },
+              ],
+              "Add shadow",
+            )
+          }
         />
       }
     >
       {(effects ?? []).map((effect, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: effects have no identity beyond their position
         <div key={i} className="effect-row">
           <select
             className="inspector__select"
@@ -497,14 +692,48 @@ function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[]
           </select>
           {effect.type === "drop-shadow" || effect.type === "inner-shadow" ? (
             <PropertyRow columns={3}>
-              <NumberField label="X" ariaLabel="Shadow X" value={effect.x} onChange={(x) => set(effects?.map((e2, j) => (j === i ? { ...effect, x } : e2)) ?? [], "Shadow")} />
-              <NumberField label="Y" ariaLabel="Shadow Y" value={effect.y} onChange={(y) => set(effects?.map((e2, j) => (j === i ? { ...effect, y } : e2)) ?? [], "Shadow")} />
-              <NumberField label="B" ariaLabel="Shadow blur" min={0} value={effect.blur} onChange={(blur) => set(effects?.map((e2, j) => (j === i ? { ...effect, blur } : e2)) ?? [], "Shadow")} />
+              <NumberField
+                label="X"
+                ariaLabel="Shadow X"
+                value={effect.x}
+                onChange={(x) =>
+                  set(effects?.map((e2, j) => (j === i ? { ...effect, x } : e2)) ?? [], "Shadow")
+                }
+              />
+              <NumberField
+                label="Y"
+                ariaLabel="Shadow Y"
+                value={effect.y}
+                onChange={(y) =>
+                  set(effects?.map((e2, j) => (j === i ? { ...effect, y } : e2)) ?? [], "Shadow")
+                }
+              />
+              <NumberField
+                label="B"
+                ariaLabel="Shadow blur"
+                min={0}
+                value={effect.blur}
+                onChange={(blur) =>
+                  set(effects?.map((e2, j) => (j === i ? { ...effect, blur } : e2)) ?? [], "Shadow")
+                }
+              />
             </PropertyRow>
-          ) : (
-            <NumberField label="B" ariaLabel="Blur radius" min={0} value={effect.radius} onChange={(radius) => set(effects?.map((e2, j) => (j === i ? { ...effect, radius } : e2)) ?? [], "Blur")} />
-          )}
-          <IconButton icon="minus" label="Remove effect" onClick={() => set(effects?.filter((_, j) => j !== i) ?? [], "Remove effect")} />
+          ) : effect.type === "layer-blur" || effect.type === "background-blur" ? (
+            <NumberField
+              label="B"
+              ariaLabel="Blur radius"
+              min={0}
+              value={effect.radius}
+              onChange={(radius) =>
+                set(effects?.map((e2, j) => (j === i ? { ...effect, radius } : e2)) ?? [], "Blur")
+              }
+            />
+          ) : null}
+          <IconButton
+            icon="minus"
+            label="Remove effect"
+            onClick={() => set(effects?.filter((_, j) => j !== i) ?? [], "Remove effect")}
+          />
         </div>
       ))}
     </PropertySection>
@@ -524,10 +753,14 @@ function PageInspector() {
         <ColorField
           label="Background"
           color={getProp(page.props, "backgroundColor")}
-          onChange={(color) => editor.setProp([page.id], "backgroundColor", color.slice(0, 7), "Page background")}
+          onChange={(color) =>
+            editor.setProp([page.id], "backgroundColor", color.slice(0, 7), "Page background")
+          }
         />
       </PropertySection>
-      <p className="inspector__hint">Select a layer to edit it, or press ⌘K to search and set values by name.</p>
+      <p className="inspector__hint">
+        Select a layer to edit it, or press ⌘K to search and set values by name.
+      </p>
     </div>
   );
 }

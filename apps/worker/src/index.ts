@@ -3,7 +3,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { ZodError } from "zod";
 import { requireFileRole } from "./api/access";
 import { api } from "./api/routes";
-import { passkeys } from "./auth/passkeys";
+import { passkeys, publicOrigins } from "./auth/passkeys";
 import { requireUser, session } from "./auth/session";
 import type { AppContext } from "./env";
 import { signPayload } from "./lib/crypto";
@@ -34,7 +34,7 @@ app.get("/ws/files/:fileId", async (c) => {
     throw new HttpError(426, "bad_request", "Expected a websocket upgrade.");
   }
   const origin = c.req.header("origin");
-  if (origin && new URL(origin).host !== new URL(c.req.url).host) {
+  if (origin && !publicOrigins(c).includes(origin)) {
     throw new HttpError(403, "forbidden", "Cross-origin websockets aren't allowed.");
   }
   const user = requireUser(c);
@@ -53,7 +53,14 @@ app.get("/ws/files/:fileId", async (c) => {
   return room.fetch(new Request(c.req.raw.url, { headers }));
 });
 
-app.notFound((c) => c.json({ error: { code: "not_found", message: "No such endpoint." } }, 404));
+app.notFound((c) => {
+  const { pathname } = new URL(c.req.url);
+  if (pathname.startsWith("/api/") || pathname.startsWith("/ws/")) {
+    return c.json({ error: { code: "not_found", message: "No such endpoint." } }, 404);
+  }
+  // Anything else belongs to the app; the assets binding serves index.html for client routes.
+  return c.env.ASSETS.fetch(c.req.raw);
+});
 
 app.onError((error, c) => {
   if (error instanceof HttpError) {
