@@ -37,7 +37,7 @@
 <text x="268" y="148" font-size="11.5" class="quiet">budgets, audit log</text>
 <rect x="468" y="84" width="268" height="88" rx="8" class="box main"/>
 <text x="480" y="108" font-size="13" class="ink" font-weight="600">Agent's branch FileRoom</text>
-<text x="480" y="124" font-size="11.5" class="ink">validates ops with common</text>
+<text x="480" y="124" font-size="11.5" class="ink">validates typed ops</text>
 <text x="480" y="140" font-size="11.5" class="ink">cursor and name tag in the room</text>
 <text x="480" y="156" font-size="11.5" class="ink">render_frame for self-check</text>
 <rect x="468" y="220" width="268" height="72" rx="8" class="box"/>
