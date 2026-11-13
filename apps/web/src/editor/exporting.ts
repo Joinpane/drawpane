@@ -4,6 +4,7 @@
  */
 import {
   CanvasRenderer,
+  cssRule,
   type Editor,
   EXPORT_MIME,
   ExportError,
@@ -121,6 +122,43 @@ export async function exportSelection(
       error instanceof ExportError
         ? error.message
         : "Couldn't export. Try a smaller scale, or another format.",
+    );
+  }
+}
+
+export type CopyFormat = "png" | "svg" | "css";
+
+const COPY_LABEL: Record<CopyFormat, string> = { png: "PNG", svg: "SVG", css: "CSS" };
+
+/**
+ * "Copy as": the selection as a PNG image (2×, for crisp pastes into docs and
+ * chat), as SVG markup, or the first layer's CSS, on the system clipboard.
+ */
+export async function copySelectionAs(editor: Editor, format: CopyFormat): Promise<void> {
+  const ids = exportTargets(editor);
+  if (ids.length === 0) {
+    editor.notify("Select a layer to copy.");
+    return;
+  }
+  try {
+    if (format === "css") {
+      const node = editor.doc.get(ids[0] as string);
+      if (!node) return;
+      await navigator.clipboard.writeText(cssRule(editor.doc, node));
+    } else if (format === "svg") {
+      const blob = await renderExport(editor, ids, { format: "svg", scale: 1 });
+      await navigator.clipboard.writeText(await blob.text());
+    } else {
+      // Safari needs the ClipboardItem built synchronously from a promise.
+      const png = renderExport(editor, ids, { format: "png", scale: 2 });
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    }
+    editor.notify(`Copied ${exportName(editor, ids)} as ${COPY_LABEL[format]}.`);
+  } catch (error) {
+    editor.notify(
+      error instanceof ExportError
+        ? error.message
+        : `Couldn't copy as ${COPY_LABEL[format]}. Your browser may have blocked the clipboard.`,
     );
   }
 }

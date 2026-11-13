@@ -208,7 +208,8 @@ export function Popover({
           ...style,
           left: place?.left ?? -9999,
           top: place?.top ?? -9999,
-          visibility: place ? undefined : "hidden",
+          // Measured before it's placed: invisible but focusable (unlike visibility: hidden).
+          opacity: place ? undefined : 0,
         }}
         onKeyDown={(e) => {
           rest.onKeyDown?.(e);

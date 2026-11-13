@@ -68,6 +68,9 @@ body {
   color: var(--ink);
   box-shadow: var(--shadow-modal);
 }
+.app-dialog--lg {
+  width: min(600px, calc(100vw - 32px));
+}
 .app-dialog::backdrop {
   background: color-mix(in srgb, var(--surface-inverse) 32%, transparent);
 }

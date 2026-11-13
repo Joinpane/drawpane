@@ -10,12 +10,15 @@ export function Dialog({
   onClose,
   children,
   footer,
+  size = "md",
 }: {
   open: boolean;
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  /** "lg" for sheets with lists (keyboard shortcuts). */
+  size?: "md" | "lg";
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -29,7 +32,7 @@ export function Dialog({
     // biome-ignore lint/a11y/useKeyWithClickEvents: clicking the backdrop is a mouse shortcut; keyboard users press Escape, which <dialog> handles natively
     <dialog
       ref={ref}
-      className="app-dialog"
+      className={size === "lg" ? "app-dialog app-dialog--lg" : "app-dialog"}
       aria-label={title}
       onClose={onClose}
       onClick={(e) => {
