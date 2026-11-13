@@ -19,7 +19,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const viewport = useEditorState((s) => s.viewport);
   const gesture = useEditorState((s) => s.gesture);
   // Vector edit has its own marks on the canvas; keep the path clear.
-  const vectorEdit = useEditorState((s) => s.vectorEdit !== null);
+  const vectorEdit = useEditorState((s) => s.vectorEdit !== null || s.cropping !== null);
   const editing = useEditorState((s) => s.editingText);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const tool = useEditorState((s) => s.tool);

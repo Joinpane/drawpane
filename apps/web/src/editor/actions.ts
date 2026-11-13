@@ -7,6 +7,7 @@ import {
   BOOLEAN_LABELS,
   BOOLEAN_OPS,
   type BooleanOp,
+  croppableImage,
   type Editor,
   instanceRootOf,
   isInstanceRoot,
@@ -270,6 +271,21 @@ export const ACTIONS: readonly Action[] = [
     shortcut: { key: "g", mod: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.group(),
+  },
+  {
+    id: "layer.crop",
+    label: "Crop image",
+    group: "Layer",
+    icon: "image",
+    keywords: "trim cut photo picture",
+    enabled: (e) =>
+      e.canEdit &&
+      e.s.selection.length === 1 &&
+      croppableImage(e.doc.get(e.s.selection[0] as string)) !== null,
+    run: ({ editor }) => {
+      const id = editor.s.selection[0];
+      if (id) editor.enterCrop(id);
+    },
   },
   {
     id: "layer.mask",
