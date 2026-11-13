@@ -473,6 +473,32 @@ export class Editor {
     this.state.set({ gesture: false, guides: [] });
   }
 
+  /**
+   * Ends the open gesture by reverting it, with nothing to undo or redo
+   * afterwards: Esc after previewing fonts with the arrow keys.
+   */
+  cancelGesture(): void {
+    this.history.discard((ops) => this.#commitWithFixups(ops, false));
+    this.state.set({ gesture: false, guides: [] });
+  }
+
+  /**
+   * Re-measures text set in `families` (all text when omitted) and writes
+   * corrected sizes, without an undo step: a web font arrived after the text
+   * was measured with its fallback. Auto layout around it follows.
+   */
+  refitText(families?: ReadonlySet<string>): void {
+    if (!this.canEdit) return;
+    const ids: string[] = [];
+    for (const node of this.doc.nodes()) {
+      if (node.type !== "text") continue;
+      if (families && !families.has(getProp(node.props, "fontFamily"))) continue;
+      ids.push(node.id);
+    }
+    const ops = this.#textFixups(ids);
+    if (ops.length > 0) this.#commitWithFixups(ops, false);
+  }
+
   undo(): void {
     if (!this.canEdit) return;
     const selection = this.history.undo(

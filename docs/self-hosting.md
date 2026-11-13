@@ -52,6 +52,12 @@ A one-command installer (`npm create drawpane`) is on the roadmap for v0.1. Unti
 
 Pull the new version, then run step 5 again. Migrations are additive and run before the new Worker takes traffic.
 
+## Fonts
+
+The font picker offers the open-source Google Fonts catalog. The first time someone uses a family, the Worker fetches it from Google and keeps a copy in your R2 bucket (under `fonts/gstatic/`). After that, everyone loads it from your server: browsers never contact Google, and files keep rendering even if Google changes the font or removes it.
+
+To keep the Worker from contacting Google at all, set `GOOGLE_FONTS` to `off` in the `vars` of `wrangler.jsonc`. The picker then offers only the built-in fonts, system fonts and fonts installed on each person's computer.
+
 ## Backups
 
 Every file keeps its own version history. While a file is being edited, its FileRoom saves a gzip snapshot to R2 (`files/<file-id>/snapshots/`) once editing pauses for 10 minutes, and at least once an hour during long sessions. It also saves one whenever someone names a version, and just before anyone restores one, so a restore can always be undone. Each snapshot has a row in D1's `versions` table that says who edited and what changed.
