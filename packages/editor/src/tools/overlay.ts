@@ -3,8 +3,9 @@
  * anchors, the pen's rubber band, and a coordinate tag on a lone selected
  * anchor. Only the edited path is drawn, so this stays cheap at 500+ anchors.
  *
- * Anchors are 7px white squares with a signal outline (selected anchors are
- * filled); handles are 7px white circles on 1px `icon` stems.
+ * Everything here is yours, so it is signal (the brand book's canvas
+ * semantics): anchors are 7px white squares with a signal outline, filled
+ * when selected; Bézier handles are 7px white circles on 1px signal stems.
  */
 import type { Editor } from "../editor";
 import { apply, boxOf, localMatrix, type Matrix, multiply, type Point } from "../geometry";
@@ -24,7 +25,6 @@ export function drawVectorOverlay(
 ): void {
   const { camera, vectorEdit, tool } = editor.s;
   const view: Matrix = [camera.zoom, 0, 0, camera.zoom, camera.x, camera.y];
-  const iconColor = theme.icon ?? theme.inkMuted;
 
   if (vectorEdit) {
     const node = editor.doc.get(vectorEdit.id);
@@ -33,14 +33,11 @@ export function drawVectorOverlay(
     const m = multiply(view, editor.scene.worldMatrix(node.id));
     const selected = new Set(vectorEdit.anchors);
     outline(ctx, path, m, theme.signal);
-    handles(
-      ctx,
-      visibleHandles(path, vectorEdit.anchors).map((h) => {
-        const a = path[h.ref.s]?.anchors[h.ref.i] as Anchor;
-        return { from: apply(m, a), to: apply(m, h.at) };
-      }),
-      iconColor,
-    );
+    const marks = visibleHandles(path, vectorEdit.anchors).map((h) => {
+      const a = path[h.ref.s]?.anchors[h.ref.i] as Anchor;
+      return { from: apply(m, a), to: apply(m, h.at) };
+    });
+    handles(ctx, marks, theme.signal);
     path.forEach((sub, s) => {
       sub.anchors.forEach((a, i) => {
         anchorMark(ctx, apply(m, a), selected.has(anchorKey({ s, i })), theme.signal);
@@ -53,7 +50,8 @@ export function drawVectorOverlay(
       if (a) {
         // Coordinates in the layer's parent space, like the inspector's X and Y.
         const p = apply(localMatrix(boxOf(node)), a);
-        tag(ctx, apply(m, a), `${num(p.x)}, ${num(p.y)} · ${anchorKind(a)}`, theme);
+        const avoid = marks.map((h) => h.to);
+        tag(ctx, apply(m, a), `${num(p.x)}, ${num(p.y)} · ${anchorKind(a)}`, theme, avoid);
       }
     }
     return;
@@ -89,7 +87,7 @@ export function drawVectorOverlay(
       const marks: Array<{ from: Point; to: Point }> = [];
       if (last.in) marks.push({ from: camera.toScreen(last), to: camera.toScreen(last.in) });
       if (last.out) marks.push({ from: camera.toScreen(last), to: camera.toScreen(last.out) });
-      handles(ctx, marks, iconColor);
+      handles(ctx, marks, theme.signal);
     }
     anchors.forEach((a, i) => {
       const filled = i === anchors.length - 1 || (i === 0 && preview.nearFirst);
@@ -175,11 +173,34 @@ function anchorMark(
   ctx.restore();
 }
 
-function tag(ctx: CanvasRenderingContext2D, p: Point, label: string, theme: OverlayTheme) {
+/** A coordinate tag beside an anchor, in the first corner that doesn't cover a handle. */
+function tag(
+  ctx: CanvasRenderingContext2D,
+  p: Point,
+  label: string,
+  theme: OverlayTheme,
+  avoid: readonly Point[],
+) {
   ctx.font = `500 11px ${theme.fontMono ?? theme.fontUi}`;
   const w = ctx.measureText(label).width + 12;
-  const x = Math.round(p.x + 10);
-  const y = Math.round(p.y - 24);
+  const h = 16;
+  const corners = [
+    { x: p.x + 10, y: p.y - 10 - h },
+    { x: p.x + 10, y: p.y + 10 },
+    { x: p.x - 10 - w, y: p.y - 10 - h },
+    { x: p.x - 10 - w, y: p.y + 10 },
+  ];
+  const clear = (c: Point) =>
+    avoid.every(
+      (q) =>
+        q.x < c.x - KNOB_R - 2 ||
+        q.x > c.x + w + KNOB_R + 2 ||
+        q.y < c.y - KNOB_R - 2 ||
+        q.y > c.y + h + KNOB_R + 2,
+    );
+  const at = corners.find(clear) ?? (corners[0] as Point);
+  const x = Math.round(at.x);
+  const y = Math.round(at.y);
   ctx.fillStyle = theme.signal;
   ctx.beginPath();
   ctx.roundRect(x, y, w, 16, 3);
