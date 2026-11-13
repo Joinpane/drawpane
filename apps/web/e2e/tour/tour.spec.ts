@@ -49,6 +49,7 @@ test("tour", async ({ browser }) => {
   await passkey(context, page);
 
   await page.goto("/setup");
+  await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
   await shot(page, "01-setup");
   await page.getByLabel("Your name").fill("Ana Lima");
   await page.getByLabel("Email").fill("ana@example.com");
@@ -83,6 +84,22 @@ test("tour", async ({ browser }) => {
   await shot(page, "03-editor-autolayout");
 
   await page.mouse.click(700, 285);
+  console.log(
+    "STATE",
+    await page.evaluate(() => {
+      const e = (window as unknown as { drawpane?: { s: Record<string, unknown> } }).drawpane;
+      if (!e) return "no handle";
+      const { selection, gesture, editingText, tool, role } = e.s;
+      return JSON.stringify({
+        selection,
+        gesture,
+        editingText,
+        tool,
+        role,
+        lens: !!document.querySelector(".lens-anchor"),
+      });
+    }),
+  );
   await shot(page, "04-editor-rect-selected");
 
   await page.keyboard.press("ControlOrMeta+k");

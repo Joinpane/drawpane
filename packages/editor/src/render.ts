@@ -53,6 +53,8 @@ export class CanvasRenderer {
   readonly #paths = new Map<string, { d: string; path: Path2D }>();
   /** Nodes not to draw (e.g. text being edited in a DOM overlay). */
   hidden = new Set<string>();
+  /** Page background when the page doesn't set one: the theme's `canvas` token. */
+  canvasColor = "#ebeae6";
   stats: RenderStats = { drawn: 0, culled: 0, ms: 0 };
 
   constructor(scene: Scene, measurer: TextMeasurer) {
@@ -73,7 +75,7 @@ export class CanvasRenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     if (!page) return;
-    ctx.fillStyle = getProp(page.props, "backgroundColor");
+    ctx.fillStyle = getProp(page.props, "backgroundColor") ?? this.canvasColor;
     ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     const visible = camera.visibleRect(viewport);
     for (const id of this.#scene.doc.childIds(pageId)) this.#draw(ctx, id, camera, dpr, visible);

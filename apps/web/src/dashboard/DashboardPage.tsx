@@ -87,7 +87,7 @@ export function DashboardPage() {
           />
           <NavLink
             active={view === "trash"}
-            icon="close"
+            icon="trash"
             to={{ teamId, view: "trash" }}
             label="Trash"
           />
@@ -275,12 +275,12 @@ function UserMenu({ name, email }: { name: string; email: string }) {
         <span>{email}</span>
       </span>
       <IconButton
-        icon={theme === "dark" ? "eye-off" : "eye"}
+        icon={theme === "dark" ? "moon" : theme === "light" ? "sun" : "fit"}
         label={`Theme: ${theme}. Switch to ${next}`}
         onClick={() => setTheme(next)}
       />
       <IconButton
-        icon="export"
+        icon="sign-out"
         label="Sign out"
         onClick={async () => {
           await signOut();
@@ -406,7 +406,7 @@ function FileCard({
             <>
               <IconButton icon="text" label="Rename" onClick={() => setRenaming(true)} />
               <IconButton
-                icon="close"
+                icon="trash"
                 label="Move to trash"
                 onClick={() => act(() => api.delete(`/files/${file.id}`))}
               />

@@ -246,8 +246,8 @@ export const PROPS = {
   pathData: prop(PathData, "", ["path"]),
   windingRule: prop(z.enum(["nonzero", "evenodd"]), "nonzero", ["path"]),
 
-  // Pages
-  backgroundColor: prop(Color, "#ebeae6", ["page"]),
+  // Pages. Null follows the viewer's theme (the `canvas` token).
+  backgroundColor: prop(Color.nullable(), null, ["page"]),
 } as const satisfies Record<string, PropSpec>;
 
 export type PropName = keyof typeof PROPS;

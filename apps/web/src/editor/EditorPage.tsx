@@ -1,5 +1,5 @@
 import { CanvasTextMeasurer, Editor, Interaction } from "@drawpane/editor";
-import { Button, Icon, IconButton, type PresenceSlot, PresenceStack } from "@drawpane/ui";
+import { Button, Icon, IconButton, Logo, type PresenceSlot, PresenceStack } from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -50,6 +50,22 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [fatal, setFatal] = useState<string | null>(null);
 
   useEffect(() => connectFile(editor, fileId, setFatal), [editor, fileId]);
+
+  // A handle for debugging and end-to-end tests: `localStorage.setItem("drawpane:debug", "1")`.
+  useEffect(() => {
+    let debug = import.meta.env.DEV;
+    try {
+      debug ||= localStorage.getItem("drawpane:debug") === "1";
+    } catch {
+      // Storage blocked.
+    }
+    if (!debug) return;
+    const w = window as unknown as { drawpane?: Editor };
+    w.drawpane = editor;
+    return () => {
+      delete w.drawpane;
+    };
+  }, [editor]);
 
   // The first time a page shows with content, fit it to the screen.
   useEffect(() => {
@@ -292,7 +308,7 @@ function FileTitle({
           className="file-title__home"
           aria-label="Back to files"
         >
-          <img src="/drawpane-mark.svg" alt="" width={20} height={20} />
+          <Logo size={20} label="" />
         </Link>
       ) : (
         <span className="file-title__home" />
@@ -378,12 +394,7 @@ function ZoomControls() {
         shortcut={modKey("+")}
         onClick={() => editor.zoomBy(1.5)}
       />
-      <IconButton
-        icon="xray"
-        label="Zoom to fit"
-        shortcut="⇧1"
-        onClick={() => editor.zoomToFit()}
-      />
+      <IconButton icon="fit" label="Zoom to fit" shortcut="⇧1" onClick={() => editor.zoomToFit()} />
     </fieldset>
   );
 }

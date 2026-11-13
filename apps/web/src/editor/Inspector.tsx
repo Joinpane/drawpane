@@ -8,6 +8,7 @@ import {
 } from "@drawpane/model";
 import {
   IconButton,
+  type IconName,
   NumberField,
   PropertyRow,
   PropertySection,
@@ -91,6 +92,7 @@ function Num({
   nodes,
   prop,
   label,
+  icon,
   ariaLabel,
   min,
   max,
@@ -101,6 +103,7 @@ function Num({
   nodes: readonly NodeRecord[];
   prop: PropName;
   label?: string;
+  icon?: IconName;
   ariaLabel: string;
   min?: number;
   max?: number;
@@ -112,6 +115,7 @@ function Num({
   return (
     <NumberField
       {...(label ? { label } : {})}
+      {...(icon ? { icon } : {})}
       ariaLabel={ariaLabel}
       {...(unit ? { unit } : {})}
       {...(min !== undefined ? { min } : {})}
@@ -148,7 +152,7 @@ function GeometrySection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[
           editor={editor}
           nodes={nodes}
           prop="rotation"
-          label="↻"
+          icon="rotate"
           ariaLabel="Rotation"
           unit="°"
         />
@@ -236,7 +240,13 @@ function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: NodeRecor
               value={mode ?? ""}
               onChange={(value) => editor.setProp(ids, "layoutMode", value, "Direction")}
             />
-            <Num editor={editor} nodes={nodes} prop="gap" label="↔" ariaLabel="Gap between items" />
+            <Num
+              editor={editor}
+              nodes={nodes}
+              prop="gap"
+              icon={row ? "gap-horizontal" : "gap-vertical"}
+              ariaLabel="Gap between items"
+            />
           </PropertyRow>
           <div className="inspector__layout">
             <fieldset className="inspector__align" aria-label="Alignment">
@@ -340,7 +350,7 @@ function AppearanceSection({
           editor={editor}
           nodes={nodes}
           prop="opacity"
-          label="◐"
+          icon="opacity"
           ariaLabel="Opacity"
           unit="%"
           min={0}
@@ -352,7 +362,7 @@ function AppearanceSection({
             editor={editor}
             nodes={corners}
             prop="cornerRadius"
-            label="◜"
+            icon="radius"
             ariaLabel="Corner radius"
             min={0}
           />
@@ -447,7 +457,7 @@ function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] })
       </PropertyRow>
       <PropertyRow>
         <NumberField
-          label="↕"
+          icon="line-height"
           ariaLabel="Line height"
           placeholder="Auto"
           value={lineHeight && lineHeight.unit === "px" ? lineHeight.value : null}
@@ -456,7 +466,7 @@ function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] })
           }
         />
         <NumberField
-          label="|A|"
+          icon="letter-spacing"
           ariaLabel="Letter spacing"
           placeholder="Mixed"
           value={letterSpacing && letterSpacing.unit === "px" ? letterSpacing.value : null}
@@ -627,7 +637,7 @@ function PaintSection({
             editor={editor}
             nodes={nodes}
             prop="strokeWeight"
-            label="≡"
+            icon="stroke-weight"
             ariaLabel="Stroke weight"
             min={0}
           />
@@ -746,17 +756,43 @@ function PageInspector() {
   const pageId = useEditorState((s) => s.pageId);
   const page = pageId ? editor.doc.get(pageId) : undefined;
   if (!page) return null;
+  const background = getProp(page.props, "backgroundColor");
   return (
     <div className="inspector">
       <h2 className="inspector__title">Page</h2>
-      <PropertySection title="Background">
-        <ColorField
-          label="Background"
-          color={getProp(page.props, "backgroundColor")}
-          onChange={(color) =>
-            editor.setProp([page.id], "backgroundColor", color.slice(0, 7), "Page background")
-          }
-        />
+      <PropertySection
+        title="Background"
+        actions={
+          background ? (
+            <IconButton
+              icon="close"
+              label="Use the theme's canvas color"
+              onClick={() => editor.setProp([page.id], "backgroundColor", null, "Page background")}
+            />
+          ) : null
+        }
+      >
+        {background ? (
+          <ColorField
+            label="Background"
+            color={background}
+            onChange={(color) =>
+              editor.setProp([page.id], "backgroundColor", color.slice(0, 7), "Page background")
+            }
+          />
+        ) : (
+          <button
+            type="button"
+            className="inspector__default"
+            onClick={() =>
+              editor.setProp([page.id], "backgroundColor", "#ebeae6", "Page background")
+            }
+          >
+            <span className="inspector__default-swatch" aria-hidden="true" />
+            <span>Follows your theme</span>
+            <span className="inspector__default-action">Set a color</span>
+          </button>
+        )}
       </PropertySection>
       <p className="inspector__hint">
         Select a layer to edit it, or press ⌘K to search and set values by name.
