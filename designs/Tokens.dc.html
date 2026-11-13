@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane tokens</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" file="Acme design system" branch="main" primary="Publish" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+
+    <aside aria-label="Token collections" style="width: 248px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 6px 6px 12px">
+        <span style="font-size: 12px; line-height: 16px; font-weight: 600">Collections</span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="New collection"></x-import>
+      </div>
+      <nav style="padding: 0 4px">
+        <sc-for list="{{collections}}" as="c" hint-placeholder-count="7">
+          <a href="#" style="{{c.style}}">
+            <span style="display: inline-flex; color: var(--icon)"><x-import component-from-global-scope="Drawpane.Icon" name="token"></x-import></span>
+            <span style="flex: 1">{{c.name}}</span>
+            <span style="font-size: 11px; color: var(--ink-muted); font-variant-numeric: tabular-nums">{{c.count}}</span>
+          </a>
+        </sc-for>
+      </nav>
+      <div style="margin-top: auto; padding: 12px; border-top: 1px solid var(--line); display: grid; gap: 8px">
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25" fill="none" stroke="var(--icon)" stroke-width="1.5"></circle><path d="M5.5 8.5l1.8 1.8 3.4-4" fill="none" stroke="var(--success)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          <span style="flex: 1">Synced with <b style="font-weight: 600">acme/web</b></span>
+        </div>
+        <div style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">tokens/drawpane.json · 2 minutes ago · 3 changes ready to push</div>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm" icon="branch">Open pull request</x-import>
+      </div>
+    </aside>
+
+    <main aria-label="Semantic color tokens" style="flex: 999 1 560px; min-width: 0; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="display: flex; align-items: center; gap: 12px; padding: 14px 16px 12px">
+        <div style="flex: 1; min-width: 0">
+          <h1 style="margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Color · Semantic</h1>
+          <p style="margin: 2px 0 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Aliases of primitives, with one value per mode. Each token exports as a CSS variable, a DTCG entry and a Tailwind color.</p>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; height: 28px; width: 200px; padding: 0 8px; box-sizing: border-box; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font-size: 12px">
+          <x-import component-from-global-scope="Drawpane.Icon" name="search"></x-import><span>Filter tokens</span>
+        </div>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm" icon="plus">Token</x-import>
+      </div>
+      <div style="flex: 1; min-height: 0; overflow: auto">
+        <div role="table" style="display: table; width: 100%; border-collapse: collapse; font-size: 12px; line-height: 16px">
+          <div role="rowgroup" style="display: table-header-group; ">
+            <div role="row" style="display: table-row; text-align: left; color: var(--ink-muted)">
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px 16px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line)">Name</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line)">Light</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line)">Dark</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line)">High contrast</div>
+              <div role="columnheader" scope="col" style="display: table-cell; font-weight: 600; padding: 8px 16px 8px 8px; font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--line); text-align: right">Uses</div>
+            </div>
+          </div>
+          <div role="rowgroup" style="display: table-row-group; ">
+            <sc-for list="{{rows}}" as="r" hint-placeholder-count="10">
+              <div role="row" style="display: table-row; {{r.rowStyle}}">
+                <div role="columnheader" scope="row" style="display: table-cell; font-weight: 600; padding: 0 16px; height: 40px; text-align: left; font-weight: 400; border-bottom: 1px solid var(--line)">
+                  <span style="font-family: var(--font-mono); font-size: 11.5px">{{r.name}}</span>
+                </div>
+                <div role="cell" style="display: table-cell; padding: 0 8px; border-bottom: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.TokenChip" name="{{r.l}}" swatch="{{r.lc}}"></x-import></div>
+                <div role="cell" style="display: table-cell; padding: 0 8px; border-bottom: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.TokenChip" name="{{r.d}}" swatch="{{r.dc}}"></x-import></div>
+                <div role="cell" style="display: table-cell; padding: 0 8px; border-bottom: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.TokenChip" name="{{r.h}}" swatch="{{r.hc}}"></x-import></div>
+                <div role="cell" style="display: table-cell; padding: 0 16px 0 8px; border-bottom: 1px solid var(--line); text-align: right; color: var(--ink-muted); font-variant-numeric: tabular-nums">{{r.uses}}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <aside aria-label="Token details" style="width: 264px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 14px 12px 10px; border-bottom: 1px solid var(--line)">
+        <div style="font-family: var(--font-mono); font-size: 12px; line-height: 16px; font-weight: 500">action/primary</div>
+        <div style="margin-top: 4px; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Fill of the one primary action per screen.</div>
+      </div>
+      <section class="dp-section" aria-label="Values">
+        <div class="dp-section__head"><h3 class="dp-section__title">Values</h3></div>
+        <div class="dp-section__body">
+          <div class="dp-row dp-row--label"><span class="dp-caption">Light</span><x-import component-from-global-scope="Drawpane.TokenChip" name="blue/600" swatch="#2b4fd6"></x-import></div>
+          <div class="dp-row dp-row--label"><span class="dp-caption">Dark</span><x-import component-from-global-scope="Drawpane.TokenChip" name="blue/400" swatch="#6d8bf5"></x-import></div>
+          <div class="dp-row dp-row--label"><span class="dp-caption">High contrast</span><x-import component-from-global-scope="Drawpane.TokenChip" name="blue/800" swatch="#1a2f86"></x-import></div>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Used by">
+        <div class="dp-section__head"><h3 class="dp-section__title">Used by</h3><span class="dp-caption">212 layers · 7 files</span></div>
+        <div class="dp-section__body" style="gap: 2px">
+          <sc-for list="{{usage}}" as="u" hint-placeholder-count="4">
+            <div style="display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 6px; border-radius: var(--radius-sm); font-size: 12px">
+              <span style="display: inline-flex; color: var(--component)"><x-import component-from-global-scope="Drawpane.Icon" name="{{u.icon}}" size="12"></x-import></span>
+              <span style="flex: 1">{{u.name}}</span><span style="color: var(--ink-muted); font-variant-numeric: tabular-nums">{{u.n}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Code">
+        <div class="dp-section__head">
+          <h3 class="dp-section__title">Code</h3>
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Format" value="css" options="{{formats}}"></x-import>
+        </div>
+        <pre style="margin: 6px 0 0; padding: 10px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-family: var(--font-mono); font-size: 11px; line-height: 16px; white-space: pre-wrap">:root {
+  --action-primary: #2b4fd6;
+}
+[data-theme="dark"] {
+  --action-primary: #6d8bf5;
+}</pre>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var link = 'display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; font-size: 12px; line-height: 16px;';
+    var data = [
+      ['action/primary', 'blue/600', '#2b4fd6', 'blue/400', '#6d8bf5', 'blue/800', '#1a2f86', '212', true],
+      ['action/primary-hover', 'blue/700', '#2443b8', 'blue/300', '#94acf8', 'blue/900', '#13226a', '212'],
+      ['surface/page', 'gray/0', '#ffffff', 'gray/950', '#0d0f13', 'gray/0', '#ffffff', '64'],
+      ['surface/raised', 'gray/50', '#f8f9fb', 'gray/900', '#16181d', 'gray/0', '#ffffff', '118'],
+      ['surface/sunken', 'gray/100', '#f3f4f6', 'gray/925', '#111318', 'gray/100', '#f3f4f6', '41'],
+      ['text/strong', 'gray/900', '#16181d', 'gray/50', '#f8f9fb', 'gray/1000', '#000000', '506'],
+      ['text/muted', 'gray/600', '#5b616e', 'gray/400', '#9aa0ab', 'gray/800', '#2e323a', '338'],
+      ['border/subtle', 'gray/200', '#e4e7ec', 'gray/800', '#2e323a', 'gray/600', '#5b616e', '97'],
+      ['status/danger', 'red/600', '#c8312b', 'red/400', '#ff7b72', 'red/800', '#8a1712', '23'],
+      ['status/success', 'teal/700', '#0f766e', 'teal/400', '#2dd4bf', 'teal/900', '#0a4c47', '19']
+    ];
+    return {
+      theme: this.props.theme ?? 'light',
+      collections: [
+        { name: 'Color · Primitives', count: '96', style: link },
+        { name: 'Color · Semantic', count: '38', style: link + ' font-weight: 600; background: var(--signal-soft)' },
+        { name: 'Spacing', count: '12', style: link },
+        { name: 'Radius', count: '6', style: link },
+        { name: 'Typography', count: '14', style: link },
+        { name: 'Shadow', count: '5', style: link },
+        { name: 'Motion', count: '8', style: link }
+      ],
+      rows: data.map(function (d) {
+        return { name: d[0], l: d[1], lc: d[2], d: d[3], dc: d[4], h: d[5], hc: d[6], uses: d[7], rowStyle: d[8] ? 'background: var(--signal-soft)' : '' };
+      }),
+      usage: [
+        { icon: 'component', name: 'Button · Primary', n: '186' },
+        { icon: 'component', name: 'Tab bar · Active', n: '14' },
+        { icon: 'instance', name: 'Checkout · Pay now', n: '8' },
+        { icon: 'instance', name: 'Onboarding · Next', n: '4' }
+      ],
+      formats: [{ value: 'css', label: 'CSS' }, { value: 'dtcg', label: 'DTCG' }, { value: 'tw', label: 'Tailwind' }]
+    };
+  }
+}
+</script>
+</body>
+</html>

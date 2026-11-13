@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane inspect mode</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" tool="pointer" primary="Share" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="upcoming" hint-size="248px,824px"></dc-import>
+
+    <main aria-label="Canvas with measurements" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: 50%; top: 40px; width: 340px; height: 560px; margin-left: -170px">
+        <span style="position: absolute; left: 0; top: -20px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Home — iOS</span>
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 200px; width: 300px; height: 196px; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+        <span aria-hidden="true" style="position: absolute; left: 20px; top: 118px; width: 300px; height: 66px; border-radius: 14px; box-shadow: inset 0 0 0 1px var(--guide)"></span>
+
+        <span aria-hidden="true" style="position: absolute; left: 0; top: 297px; width: 20px; height: 1px; background: var(--guide)"></span>
+        <span style="position: absolute; left: 2px; top: 282px; padding: 0 3px; border-radius: 2px; background: var(--guide); color: #ffffff; font-family: var(--font-mono); font-size: 10.5px; line-height: 13px">20</span>
+        <span aria-hidden="true" style="position: absolute; left: 169px; top: 184px; width: 1px; height: 16px; background: var(--guide)"></span>
+        <span style="position: absolute; left: 175px; top: 185px; padding: 0 3px; border-radius: 2px; background: var(--guide); color: #ffffff; font-family: var(--font-mono); font-size: 10.5px; line-height: 13px">16</span>
+        <span aria-hidden="true" style="position: absolute; left: 320px; top: 297px; width: 20px; height: 1px; background: var(--guide)"></span>
+        <span style="position: absolute; left: 318px; top: 300px; padding: 0 3px; border-radius: 2px; background: var(--guide); color: #ffffff; font-family: var(--font-mono); font-size: 10.5px; line-height: 13px">20</span>
+        <span style="position: absolute; left: 170px; top: 404px; transform: translateX(-50%); padding: 1px 6px; border-radius: var(--radius-xs); background: var(--signal); color: var(--on-signal); font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 500; white-space: nowrap">Upcoming · 300 × 196</span>
+      </div>
+      <div style="position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); font-size: 11px; line-height: 14px; color: var(--ink-muted); white-space: nowrap">
+        <span style="display: inline-flex; align-items: center; gap: 6px"><x-import component-from-global-scope="Drawpane.Kbd">Alt</x-import> hover to measure</span>
+        <span>Viewers get Inspect for free</span>
+      </div>
+    </main>
+
+    <aside aria-label="Inspect" style="width: 264px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="inspect" options="{{modes}}"></x-import></div>
+      <section class="dp-section" aria-label="Properties">
+        <div class="dp-section__head"><h3 class="dp-section__title">Upcoming</h3><x-import component-from-global-scope="Drawpane.Badge">Frame</x-import></div>
+        <dl style="margin: 6px 0 0; display: grid; grid-template-columns: 76px 1fr; row-gap: 6px; column-gap: 8px; font-size: 12px; line-height: 16px">
+          <sc-for list="{{props}}" as="p" hint-placeholder-count="6">
+            <dt style="color: var(--ink-muted)">{{p.k}}</dt>
+            <dd style="margin: 0; display: flex; align-items: center; gap: 6px; min-width: 0"><span style="{{p.style}}">{{p.v}}</span></dd>
+          </sc-for>
+        </dl>
+      </section>
+      <section class="dp-section" aria-label="Code" style="flex: 1; min-height: 0">
+        <div class="dp-section__head">
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Language" value="css" options="{{langs}}"></x-import>
+          <x-import component-from-global-scope="Drawpane.IconButton" icon="export" label="Copy code" shortcut="⌘ ⇧ C"></x-import>
+        </div>
+        <pre style="margin: 8px 0 0; padding: 10px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-family: var(--font-mono); font-size: 11px; line-height: 17px; white-space: pre-wrap; color: var(--ink)"><span style="color: var(--ink-muted)">/* Upcoming */</span>
+.upcoming {
+  display: flex;
+  flex-direction: column;
+  gap: <span style="color: var(--signal-ink)">var(--space-200)</span>; <span style="color: var(--ink-muted)">/* 8px */</span>
+  padding: 12px;
+  width: 100%;
+  border-radius: <span style="color: var(--signal-ink)">var(--radius-lg)</span>;
+  background: <span style="color: var(--signal-ink)">var(--gray-100)</span>;
+}</pre>
+      </section>
+      <section class="dp-section" aria-label="Assets">
+        <div class="dp-section__head"><h3 class="dp-section__title">Assets</h3><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost" icon="export">All</x-import></div>
+        <div class="dp-section__body" style="gap: 4px">
+          <sc-for list="{{assets}}" as="a" hint-placeholder-count="2">
+            <div style="display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 6px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px">
+              <span style="width: 16px; height: 16px; border-radius: 4px; background: #e4e7ec"></span>
+              <span style="flex: 1">{{a.name}}</span><span style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted)">{{a.fmt}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var mono = 'font-family: var(--font-mono); font-size: 11px;';
+    return {
+      theme: this.props.theme ?? 'light',
+      modes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }],
+      langs: [{ value: 'css', label: 'CSS' }, { value: 'tw', label: 'Tailwind' }, { value: 'jsx', label: 'JSX' }],
+      props: [
+        { k: 'Size', v: '300 × 196 · fill × hug', style: mono },
+        { k: 'Layout', v: 'Flex column', style: '' },
+        { k: 'Gap', v: 'space/200 · 8', style: mono + ' color: var(--signal-ink)' },
+        { k: 'Padding', v: '12', style: mono },
+        { k: 'Radius', v: 'radius/lg · 14', style: mono + ' color: var(--signal-ink)' },
+        { k: 'Fill', v: 'gray/100 · #f3f4f6', style: mono + ' color: var(--signal-ink)' }
+      ],
+      assets: [{ name: 'Event icon', fmt: 'SVG · 1× 2× 3×' }, { name: 'Tab bar icons', fmt: 'SVG' }]
+    };
+  }
+}
+</script>
+</body>
+</html>

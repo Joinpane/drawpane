@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Design inspector</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<aside aria-label="Inspector" style="width: 264px; height: 824px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); font-family: var(--font-ui); color: var(--ink); overflow: hidden">
+  <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 6px 4px 12px">
+    <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="design" options="{{modes}}"></x-import>
+    <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Inspector options"></x-import>
+  </div>
+
+  <section class="dp-section" aria-label="Frame">
+    <div class="dp-section__head">
+      <h3 class="dp-section__title">Frame</h3>
+      <div class="dp-section__actions">
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="component" label="Create component" shortcut="⌥ ⌘ K"></x-import>
+      </div>
+    </div>
+    <div class="dp-section__body">
+      <div class="dp-row">
+        <x-import component-from-global-scope="Drawpane.NumberField" label="X" default-value="20"></x-import>
+        <x-import component-from-global-scope="Drawpane.NumberField" label="Y" default-value="200"></x-import>
+      </div>
+      <div class="dp-row">
+        <x-import component-from-global-scope="Drawpane.NumberField" label="W" default-value="300" unit="fill"></x-import>
+        <x-import component-from-global-scope="Drawpane.NumberField" label="H" default-value="196" unit="hug"></x-import>
+      </div>
+      <div class="dp-row">
+        <x-import component-from-global-scope="Drawpane.NumberField" label="↻" aria-label="Rotation" default-value="0" unit="°"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Clip"></x-import>
+      </div>
+    </div>
+  </section>
+
+  <section class="dp-section" aria-label="Auto layout">
+    <div class="dp-section__head">
+      <h3 class="dp-section__title">Auto layout</h3>
+      <div class="dp-section__actions">
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="xray" label="Layout X-ray" shortcut="Hold Alt" pressed="{{xray}}"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="minus" label="Remove auto layout" shortcut="⌥ ⇧ A"></x-import>
+      </div>
+    </div>
+    <div class="dp-section__body">
+      <div style="display: grid; grid-template-columns: 1fr 64px; gap: 8px; align-items: start">
+        <div style="display: grid; gap: 8px">
+          <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Direction" value="col" options="{{dirs}}"></x-import>
+          <x-import component-from-global-scope="Drawpane.NumberField" icon="layout-col" aria-label="Gap" token="{{gap}}"></x-import>
+          <x-import component-from-global-scope="Drawpane.NumberField" label="▢" aria-label="Padding" default-value="12"></x-import>
+        </div>
+        <div role="radiogroup" aria-label="Alignment" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; width: 64px; height: 64px; box-sizing: border-box; padding: 4px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+          <sc-for list="{{align}}" as="a" hint-placeholder-count="9">
+            <button type="button" role="radio" aria-checked="{{a.on}}" aria-label="{{a.label}}" style="display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer">
+              <span style="{{a.style}}"></span>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="dp-section" aria-label="Appearance">
+    <div class="dp-section__head"><h3 class="dp-section__title">Appearance</h3></div>
+    <div class="dp-section__body">
+      <div class="dp-row">
+        <x-import component-from-global-scope="Drawpane.NumberField" label="◐" aria-label="Opacity" default-value="100" unit="%"></x-import>
+        <x-import component-from-global-scope="Drawpane.NumberField" label="◜" aria-label="Corner radius" token="radius/lg"></x-import>
+      </div>
+    </div>
+  </section>
+
+  <section class="dp-section" aria-label="Fill">
+    <div class="dp-section__head">
+      <h3 class="dp-section__title">Fill</h3>
+      <div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add fill"></x-import></div>
+    </div>
+    <div class="dp-section__body">
+      <div class="dp-row" style="grid-template-columns: 1fr 72px">
+        <x-import component-from-global-scope="Drawpane.NumberField" icon="rectangle" aria-label="Fill" token="gray/100" swatch="#f3f4f6"></x-import>
+        <x-import component-from-global-scope="Drawpane.NumberField" label="%" default-value="100"></x-import>
+      </div>
+    </div>
+  </section>
+
+  <section class="dp-section" aria-label="Stroke">
+    <div class="dp-section__head">
+      <h3 class="dp-section__title" style="color: var(--ink-muted)">Stroke</h3>
+      <div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add stroke"></x-import></div>
+    </div>
+  </section>
+  <section class="dp-section" aria-label="Effects">
+    <div class="dp-section__head">
+      <h3 class="dp-section__title" style="color: var(--ink-muted)">Effects</h3>
+      <div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add effect"></x-import></div>
+    </div>
+  </section>
+  <section class="dp-section" aria-label="Export">
+    <div class="dp-section__head">
+      <h3 class="dp-section__title" style="color: var(--ink-muted)">Export</h3>
+      <div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add export"></x-import></div>
+    </div>
+  </section>
+</aside>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"xray":{"editor":"boolean","default":false},"gap":{"editor":"text","default":"space/200"},"$preview":{"width":264,"height":824}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var labels = ['Top left', 'Top center', 'Top right', 'Middle left', 'Center', 'Middle right', 'Bottom left', 'Bottom center', 'Bottom right'];
+    return {
+      yes: true,
+      xray: this.props.xray ?? false,
+      gap: this.props.gap ?? 'space/200',
+      modes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }],
+      dirs: [{ value: 'row', icon: 'layout-row', title: 'Horizontal' }, { value: 'col', icon: 'layout-col', title: 'Vertical' }, { value: 'grid', icon: 'layout-grid', title: 'Grid' }],
+      align: labels.map(function (l, i) {
+        var on = i === 0;
+        return { label: l, on: String(on), style: on ? 'width: 14px; height: 4px; border-radius: 2px; background: var(--signal)' : 'width: 3px; height: 3px; border-radius: 50%; background: var(--ink-muted)' };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>

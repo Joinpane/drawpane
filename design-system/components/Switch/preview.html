@@ -1,0 +1,17 @@
+<!-- @dsCard group="Inputs" height=72 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Switch — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.Switch, { checked: true, label: 'Clip content' }),
+      h(D.Switch, { checked: false, label: 'Show in prototype' }),
+      h(D.Switch, { checked: false, label: 'Disabled', disabled: true }))
+  );
+</script>
+</body>
+</html>

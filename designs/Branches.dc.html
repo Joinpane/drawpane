@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane branches and merge conflicts</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" branch="feature/greeting" primary="Merge" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <aside aria-label="Branches" style="width: 280px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="display: flex; align-items: center; padding: 12px 12px 8px"><h2 style="flex: 1; margin: 0; font-size: 13px; font-weight: 600">Branches</h2><x-import component-from-global-scope="Drawpane.Button" size="sm" icon="plus">New branch</x-import></div>
+      <div style="padding: 0 12px 8px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Filter branches" value="open" options="{{filters}}"></x-import></div>
+      <div style="display: grid; gap: 2px; padding: 0 6px">
+        <sc-for list="{{branches}}" as="b" hint-placeholder-count="5">
+          <div style="{{b.row}}">
+            <span style="{{b.icon}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{b.glyph}}" size="12"></x-import></span>
+            <span style="flex: 1; min-width: 0; display: grid"><span style="font-size: 13px; line-height: 18px; font-weight: 600; font-family: var(--font-mono)">{{b.name}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{b.meta}}</span></span>
+            <span style="{{b.badge}}">{{b.badgeText}}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="margin: auto 8px 8px; padding: 12px; border-radius: var(--radius-md); background: var(--surface-sunken); display: grid; gap: 8px">
+        <strong style="font-size: 12px">New branch from main</strong>
+        <x-import component-from-global-scope="Drawpane.TextField" label="Name" default-value="feature/settings-v2"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Only copy the Settings page"></x-import>
+        <x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Create</x-import>
+      </div>
+    </aside>
+
+    <main aria-label="Resolve conflicts" style="flex: 999 1 560px; min-width: 0; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <header style="display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line)">
+        <div style="flex: 1; display: grid; gap: 2px"><h1 style="margin: 0; font-size: 16px; line-height: 22px; font-weight: 600">Merge feature/greeting into main</h1><span style="font-size: 12px; color: var(--ink-muted)">Lena changed main while Ana was on this branch. 3 conflicts, 14 changes merge cleanly.</span></div>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Compare" value="side" options="{{views}}"></x-import>
+      </header>
+      <div style="flex: 1; min-height: 0; display: flex">
+        <nav aria-label="Conflicts" style="width: 220px; border-right: 1px solid var(--line); padding: 8px 6px; display: grid; align-content: start; gap: 2px">
+          <sc-for list="{{conflicts}}" as="c" hint-placeholder-count="3">
+            <div style="{{c.row}}"><span style="{{c.dot}}"></span><span style="flex: 1; display: grid"><span style="font-size: 12px; line-height: 16px; font-weight: 600">{{c.layer}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{c.prop}}</span></span></div>
+          </sc-for>
+          <div style="margin-top: 8px; padding: 6px 8px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Clean changes · 14<br>Text, fills, 2 new boards</div>
+        </nav>
+        <div style="flex: 1; min-width: 0; padding: 16px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr auto; gap: 12px">
+          <sc-for list="{{sides}}" as="s" hint-placeholder-count="2">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 12px"><span style="{{s.av}}">{{s.ini}}</span><strong style="font-family: var(--font-mono)">{{s.branch}}</strong><span style="color: var(--ink-muted)">{{s.who}}</span></div>
+          </sc-for>
+          <sc-for list="{{sides}}" as="s" hint-placeholder-count="2">
+            <div style="{{s.card}}">
+              <div style="display: grid; place-items: center; flex: 1; border-radius: 8px; background: #f8f9fb; min-height: 260px">
+                <div style="width: 240px; padding: 16px; border-radius: 14px; background: #2b4fd6; color: #ffffff; display: grid; gap: 4px; font-family: var(--font-ui)">
+                  <span style="font-size: 11px; opacity: .8">Today</span>
+                  <span style="{{s.title}}">{{s.text}}</span>
+                  <span style="font-size: 12px; opacity: .85">3 events · first at 9:30</span>
+                </div>
+              </div>
+              <dl style="margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px"><dt style="color: var(--ink-muted)">Text</dt><dd style="margin: 0">{{s.text}}</dd><dt style="color: var(--ink-muted)">Font size</dt><dd style="margin: 0; font-family: var(--font-mono)">{{s.size}}</dd><dt style="color: var(--ink-muted)">Changed</dt><dd style="margin: 0">{{s.when}}</dd></dl>
+              <span role="radio" aria-checked="{{s.picked}}" style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600"><span style="{{s.radio}}"></span>{{s.keep}}</span>
+            </div>
+          </sc-for>
+          <div style="grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--agent-soft); color: var(--agent-ink); font-size: 12px; line-height: 16px">
+            <x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import>
+            <span style="flex: 1">Suggestion: keep Ana's text with Lena's type size. Both edits stay, no one's work is lost.</span>
+            <x-import component-from-global-scope="Drawpane.Button" size="sm">Use both</x-import>
+          </div>
+        </div>
+      </div>
+      <footer style="display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line)"><span style="flex: 1; font-size: 12px; color: var(--ink-muted)">Conflict 1 of 3 · ⌥ ← and ⌥ → pick a side</span><x-import component-from-global-scope="Drawpane.Button">Previous</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Next conflict</x-import></footer>
+    </main>
+
+    <aside aria-label="Merge checks" style="width: 264px; height: 824px; box-sizing: border-box; padding: 14px; display: flex; flex-direction: column; gap: 12px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+      <h2 style="margin: 0; font-size: 13px; font-weight: 600">Before merging</h2>
+      <sc-for list="{{checks}}" as="k" hint-placeholder-count="5">
+        <div style="display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 16px"><span style="{{k.c}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{k.icon}}" size="12"></x-import></span><span style="display: grid"><span style="font-weight: 600">{{k.label}}</span><span style="color: var(--ink-muted)">{{k.detail}}</span></span></div>
+      </sc-for>
+      <div style="margin-top: auto; display: grid; gap: 8px">
+        <x-import component-from-global-scope="Drawpane.TextField" label="Merge note" default-value="New greeting copy and type scale"></x-import>
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary" disabled="{{yes}}">Merge · 3 conflicts left</x-import>
+        <span class="dp-caption">Merging saves a named version on main, so it can be undone from History.</span>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var row = function (sel) { return 'display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-radius: var(--radius-sm);' + (sel ? ' background: var(--surface-active)' : ''); };
+    var ic = function (c) { return 'flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; background: ' + c + '; color: var(--icon)'; };
+    var bb = function (t) { return 'height: 18px; padding: 0 6px; border-radius: var(--radius-xs); font-size: 11px; line-height: 18px; font-weight: 600; ' + t; };
+    var B = [
+      ['main', 'Protected · Lena merged 2 h ago', 'var(--surface-sunken)', 'branch', '', '', 0],
+      ['feature/greeting', 'Ana · 17 changes · 3 conflicts', 'var(--signal-soft)', 'branch', 'Conflicts', 'background: var(--signal-soft); color: var(--signal-ink)', 1],
+      ['agent/empty-states', 'Empty states agent for Sam · 6 boards', 'var(--agent-soft)', 'agent', 'Review', 'background: var(--agent-soft); color: var(--agent-ink)', 0],
+      ['feature/checkout-v3', 'Mo · 41 changes · up to date', 'var(--surface-sunken)', 'branch', '', '', 0],
+      ['experiment/dark-nav', 'Dev · no changes in 30 days', 'var(--surface-sunken)', 'branch', 'Stale', 'background: var(--surface-active); color: var(--ink-muted)', 0]
+    ];
+    var cdot = function (done, sel) { return 'width: 8px; height: 8px; border-radius: 50%; background: ' + (done ? 'var(--success)' : 'var(--signal)'); };
+    var card = function (sel) { return 'display: flex; flex-direction: column; gap: 12px; padding: 12px; border-radius: var(--radius-md); box-shadow: inset 0 0 0 ' + (sel ? '2px var(--signal)' : '1px var(--line)'); };
+    var avs = function (c) { return 'display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(' + c + '); color: var(--on-presence); font-size: 9px; font-weight: 700'; };
+    var ck = function (c) { return 'flex: none; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--surface-sunken); color: ' + c; };
+    return {
+      theme: T, yes: true,
+      filters: [{ value: 'open', label: 'Open · 5' }, { value: 'merged', label: 'Merged' }, { value: 'mine', label: 'Mine' }],
+      views: [{ value: 'side', label: 'Side by side' }, { value: 'overlay', label: 'Overlay' }, { value: 'props', label: 'Properties' }],
+      branches: B.map(function (b) { return { name: b[0], meta: b[1], icon: ic(b[2]), glyph: b[3], badgeText: b[4], badge: b[4] ? bb(b[5]) : 'display: none', row: row(b[6]) }; }),
+      conflicts: [
+        { layer: 'Hero card / Title', prop: 'Text and font size', dot: cdot(false), row: row(true) },
+        { layer: 'Tab bar', prop: 'Item order', dot: cdot(false), row: row(false) },
+        { layer: 'Event row', prop: 'Padding token', dot: cdot(false), row: row(false) }
+      ],
+      sides: [
+        { branch: 'main', who: 'Lena · 2 h ago', ini: 'LP', av: avs('--presence-2'), text: 'Good morning', size: 'type/title-lg · 24', when: 'Type scale update', keep: 'Keep main', picked: 'false', radio: 'width: 14px; height: 14px; box-sizing: border-box; border-radius: 50%; border: 1.5px solid var(--line-control)', card: card(false), title: 'font-size: 24px; line-height: 30px; font-weight: 600' },
+        { branch: 'feature/greeting', who: 'Ana · 40 min ago', ini: 'AR', av: avs('--presence-1'), text: 'Morning, Ziyang', size: 'type/title · 20', when: 'Personal greeting', keep: 'Keep feature/greeting', picked: 'true', radio: 'width: 14px; height: 14px; box-sizing: border-box; border-radius: 50%; border: 4px solid var(--signal); background: var(--surface)', card: card(true), title: 'font-size: 20px; line-height: 26px; font-weight: 600' }
+      ],
+      checks: [
+        { icon: 'warning', label: '3 conflicts to resolve', detail: '0 of 3 decided', c: ck('var(--signal-ink)') },
+        { icon: 'check', label: 'Design-system lint', detail: '0 raw colors, 0 detached tokens', c: ck('var(--success)') },
+        { icon: 'check', label: 'Contrast', detail: 'All text 4.5:1 or better', c: ck('var(--success)') },
+        { icon: 'check', label: 'Approvals', detail: 'Lena approved · 1 of 1 needed', c: ck('var(--success)') },
+        { icon: 'history', label: 'Main moved since review', detail: 'Re-run checks after resolving', c: ck('var(--icon)') }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

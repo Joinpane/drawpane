@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane rulers, guides, grids and constraints</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 32px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <header style="display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 24px">
+    <h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Rulers, guides, grids and constraints</h1>
+    <p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Guides and measurements use the guide blue; nothing else on the canvas does.</p>
+  </header>
+  <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+
+    <figure style="margin: 0; display: grid; gap: 8px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Rulers, guides and a 4-column layout grid</figcaption>
+      <div style="position: relative; width: 560px; height: 520px; border-radius: var(--radius-lg); background: var(--canvas); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden">
+        <div aria-hidden="true" style="position: absolute; left: 20px; right: 0; top: 0; height: 20px; background: var(--surface); border-bottom: 1px solid var(--line); background-image: repeating-linear-gradient(90deg, var(--line-strong) 0 1px, transparent 1px 10px); background-size: 100% 5px; background-repeat: no-repeat; background-position: 0 15px">
+          <sc-for list="{{marksX}}" as="m" hint-placeholder-count="6"><span style="{{m.s}}">{{m.t}}</span></sc-for>
+          <span style="position: absolute; left: 80px; width: 340px; top: 0; height: 20px; background: color-mix(in srgb, var(--signal) 18%, transparent)"></span>
+        </div>
+        <div aria-hidden="true" style="position: absolute; left: 0; top: 20px; bottom: 0; width: 20px; background: var(--surface); border-right: 1px solid var(--line)">
+          <sc-for list="{{marksY}}" as="m" hint-placeholder-count="5"><span style="{{m.s}}">{{m.t}}</span></sc-for>
+        </div>
+        <div style="position: absolute; left: 100px; top: 60px; width: 340px; height: 420px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12)">
+          <div style="position: absolute; inset: 0 16px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px">
+            <span style="background: rgba(224,79,26,.08)"></span><span style="background: rgba(224,79,26,.08)"></span><span style="background: rgba(224,79,26,.08)"></span><span style="background: rgba(224,79,26,.08)"></span>
+          </div>
+          <span style="position: absolute; left: 16px; top: 64px; width: 151px; height: 96px; border-radius: 10px; background: #2b4fd6"></span>
+          <span style="position: absolute; left: 179px; top: 64px; width: 145px; height: 96px; border-radius: 10px; background: #f3f4f6; box-shadow: 0 0 0 1.5px var(--signal)"></span>
+          <span style="position: absolute; left: 167px; top: 106px; width: 12px; height: 1px; background: var(--guide)"></span>
+          <span style="position: absolute; left: 160px; top: 112px; padding: 0 3px; border-radius: 3px; background: var(--guide); color: #ffffff; font-size: 10px; line-height: 14px; font-family: var(--font-mono)">12</span>
+          <span style="position: absolute; left: 251px; top: 0; width: 1px; height: 64px; background: var(--guide)"></span>
+          <span style="position: absolute; left: 255px; top: 26px; padding: 0 3px; border-radius: 3px; background: var(--guide); color: #ffffff; font-size: 10px; line-height: 14px; font-family: var(--font-mono)">64</span>
+          <span style="position: absolute; left: 16px; top: 184px; width: 308px; height: 16px; border-radius: 4px; background: #e4e7ec"></span>
+          <span style="position: absolute; left: 16px; top: 212px; width: 200px; height: 12px; border-radius: 4px; background: #eceef1"></span>
+        </div>
+        <span aria-hidden="true" style="position: absolute; left: 20px; right: 0; top: 260px; height: 1px; background: var(--guide)"></span>
+        <span style="position: absolute; left: 24px; top: 248px; padding: 0 4px; border-radius: 3px; background: var(--guide); color: #ffffff; font-size: 10px; line-height: 14px; font-family: var(--font-mono)">y 240</span>
+        <span aria-hidden="true" style="position: absolute; top: 20px; bottom: 0; left: 456px; width: 1px; background: var(--guide); opacity: .5"></span>
+        <div role="menu" aria-label="Guide" style="position: absolute; left: 470px; top: 236px; width: 80px"><x-import component-from-global-scope="Drawpane.Menu" label="Guide" items="{{guideMenu}}"></x-import></div>
+        <span style="position: absolute; left: 278px; top: 488px; padding: 2px 6px; border-radius: 4px; background: var(--signal); color: var(--on-signal); font-size: 11px; line-height: 14px; font-family: var(--font-mono)">145 × 96</span>
+      </div>
+    </figure>
+
+    <div style="display: grid; gap: 24px; width: 280px">
+      <figure style="margin: 0; display: grid; gap: 8px">
+        <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Layout grids in the inspector</figcaption>
+        <section class="dp-section" aria-label="Layout grids" style="border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+          <div class="dp-section__head"><h3 class="dp-section__title">Layout grids</h3><div class="dp-section__actions"><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add grid"></x-import></div></div>
+          <div class="dp-section__body">
+            <sc-for list="{{grids}}" as="g" hint-placeholder-count="2">
+              <div style="display: flex; align-items: center; gap: 8px; height: 28px; font-size: 12px"><x-import component-from-global-scope="Drawpane.Icon" name="{{g.icon}}" size="12"></x-import><span style="flex: 1">{{g.label}}</span><x-import component-from-global-scope="Drawpane.IconButton" icon="eye" label="Hide grid"></x-import></div>
+            </sc-for>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+              <x-import component-from-global-scope="Drawpane.NumberField" label="#" aria-label="Count" default-value="4"></x-import>
+              <span style="display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface); font-size: 12px">Stretch <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+              <x-import component-from-global-scope="Drawpane.NumberField" label="M" aria-label="Margin" default-value="16"></x-import>
+              <x-import component-from-global-scope="Drawpane.NumberField" label="G" aria-label="Gutter" default-value="12"></x-import>
+            </div>
+            <x-import component-from-global-scope="Drawpane.TokenChip" name="grid/mobile" swatch="#e04f1a"></x-import>
+          </div>
+        </section>
+      </figure>
+
+      <figure style="margin: 0; display: grid; gap: 8px">
+        <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Constraints</figcaption>
+        <section class="dp-section" aria-label="Constraints" style="border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+          <div class="dp-section__head"><h3 class="dp-section__title">Constraints</h3></div>
+          <div class="dp-section__body" style="grid-template-columns: 88px 1fr; align-items: center">
+            <div aria-label="Constraint diagram" style="position: relative; width: 88px; height: 88px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+              <span style="position: absolute; left: 28px; top: 28px; width: 32px; height: 32px; border-radius: 3px; box-shadow: inset 0 0 0 1px var(--line-strong)"></span>
+              <span style="position: absolute; left: 8px; top: 43px; width: 14px; height: 2px; border-radius: 1px; background: var(--signal)"></span>
+              <span style="position: absolute; right: 8px; top: 43px; width: 14px; height: 2px; border-radius: 1px; background: var(--signal)"></span>
+              <span style="position: absolute; left: 43px; top: 8px; width: 2px; height: 14px; border-radius: 1px; background: var(--signal)"></span>
+              <span style="position: absolute; left: 43px; bottom: 8px; width: 2px; height: 14px; border-radius: 1px; background: var(--line-strong)"></span>
+            </div>
+            <div style="display: grid; gap: 6px">
+              <span style="display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px">Left and right <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+              <span style="display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px">Top <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+              <x-import component-from-global-scope="Drawpane.Switch" label="Fix position when scrolling"></x-import>
+            </div>
+          </div>
+        </section>
+      </figure>
+    </div>
+
+    <figure style="margin: 0; display: grid; gap: 8px; width: 300px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Snapping and view options</figcaption>
+      <div style="padding: 12px; border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-popover); display: grid; gap: 10px">
+        <sc-for list="{{snaps}}" as="s" hint-placeholder-count="6"><div style="display: flex; align-items: center; justify-content: space-between; gap: 8px"><x-import component-from-global-scope="Drawpane.Switch" checked="{{s.on}}" label="{{s.label}}"></x-import><span style="{{s.ks}}">{{s.key}}</span></div></sc-for>
+        <div style="display: grid; grid-template-columns: 1fr 80px; align-items: center; gap: 8px; font-size: 12px"><span>Nudge amount</span><x-import component-from-global-scope="Drawpane.NumberField" label="px" default-value="1"></x-import></div>
+        <div style="display: grid; grid-template-columns: 1fr 80px; align-items: center; gap: 8px; font-size: 12px"><span>Big nudge (⇧)</span><x-import component-from-global-scope="Drawpane.NumberField" label="px" default-value="8"></x-import></div>
+        <span class="dp-caption">Big nudge defaults to your spacing token space/100, so arrows land on the scale.</span>
+      </div>
+    </figure>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var mx = [0, 100, 200, 300, 400, 500].map(function (v, i) { return { t: String(v), s: 'position: absolute; left: ' + (i * 100 + 62) + 'px; top: 2px; font-size: 9px; line-height: 10px; font-family: var(--font-mono); color: var(--ink-muted)' }; });
+    var my = [0, 100, 200, 300, 400].map(function (v, i) { return { t: String(v), s: 'position: absolute; left: 3px; top: ' + (i * 100 + 44) + 'px; font-size: 9px; line-height: 10px; font-family: var(--font-mono); color: var(--ink-muted); writing-mode: vertical-rl; transform: rotate(180deg)' }; });
+    return {
+      theme: T,
+      marksX: mx, marksY: my,
+      guideMenu: [{ label: 'Set y…' }, { label: 'Lock' }, { label: 'Delete', danger: true }],
+      grids: [{ icon: 'layout-col', label: 'Columns · 4 · stretch' }, { icon: 'layout-row', label: 'Baseline · 4 px' }],
+      snaps: [
+        { label: 'Snap to pixel grid', on: true, key: '⇧ ⌘ \'' }, { label: 'Snap to layout grids', on: true, key: '⇧ ⌘ G' }, { label: 'Snap to guides', on: true, key: '' },
+        { label: 'Smart guides', on: true, key: '' }, { label: 'Show rulers', on: true, key: '⇧ R' }, { label: 'Show pixel grid at 800%', on: false, key: '' }
+      ].map(function (s) { s.ks = s.key ? 'flex: none; padding: 0 5px; border-radius: var(--radius-xs); background: var(--surface-sunken); box-shadow: inset 0 -1px 0 var(--line-strong); font-size: 11px; line-height: 18px; font-family: var(--font-ui); color: var(--ink-muted)' : 'display: none'; return s; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

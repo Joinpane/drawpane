@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane import report</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-page" style="padding: 28px 32px 40px">
+  <header class="u-row" style="margin-bottom: 18px"><div class="u-grow u-col u-col--tight"><span class="u-sm u-muted">Import · from Figma · finished 4 min ago</span><h1 class="u-h1">Brand 2025.fig → Imported: Brand 2025</h1></div><x-import component-from-global-scope="Drawpane.Button" size="lg">Download report</x-import><x-import component-from-global-scope="Drawpane.Button" size="lg" variant="primary">Open file</x-import></header>
+  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px">
+    <sc-for list="{{kpi}}" as="k" hint-placeholder-count="4"><div class="u-box u-pad u-col u-col--tight"><span class="u-sm u-muted">{{k.l}}</span><span style="font-size: 26px; line-height: 32px; font-weight: 600">{{k.v}}</span><span class="u-xs" style="{{k.ds}}">{{k.d}}</span></div></sc-for>
+  </div>
+  <div style="display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px">
+    <section class="u-box">
+      <div class="u-head"><h2 class="u-h3">Needs a look · 23</h2><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Filter" value="all" options="{{f}}"></x-import></div>
+      <sc-for list="{{issues}}" as="i" hint-placeholder-count="6">
+        <div class="u-trow" style="grid-template-columns: 110px minmax(0, 1fr) 90px 110px; padding: 0 14px"><span class="{{i.c}}" style="justify-self: start">{{i.k}}</span><span class="u-col" style="gap: 0; min-width: 0"><span class="u-b u-ellip">{{i.t}}</span><span class="u-xs u-muted u-ellip">{{i.d}}</span></span><span class="u-muted u-sm">{{i.n}}</span><span class="u-sm" style="color: var(--signal-ink)">{{i.a}}</span></div>
+      </sc-for>
+    </section>
+    <div class="u-col u-col--loose">
+      <section class="u-box u-pad u-col">
+        <h2 class="u-h3">Converted cleanly</h2>
+        <sc-for list="{{ok}}" as="o" hint-placeholder-count="6"><div class="u-row u-sm"><span class="u-ico u-ico--ok u-ico--sm"><x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import></span><span class="u-grow">{{o.t}}</span><span class="u-mono u-xs u-muted">{{o.n}}</span></div></sc-for>
+      </section>
+      <section class="u-box u-pad u-col" style="box-shadow: inset 0 0 0 1.5px var(--agent)">
+        <div class="u-row"><span class="u-av u-av--agent"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import></span><strong class="u-md u-grow">Let an agent finish the job</strong></div>
+        <span class="u-sm u-muted">Relink look-alikes to your library, swap the 2 missing fonts, rebuild the 4 prototype interactions. Everything on a branch.</span>
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary" icon="agent">Start · about $0.60</x-import>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var c = { warn: 'u-chip u-chip--signal', info: 'u-chip u-chip--muted' };
+    return {
+      kpi: [{ l: 'Pages', v: '9', d: 'all converted', ds: 'color: var(--success)' }, { l: 'Layers', v: '14,208', d: '99.4% exact', ds: 'color: var(--success)' }, { l: 'Components', v: '96', d: '4 approximated', ds: 'color: var(--signal-ink)' }, { l: 'Needs a look', v: '23', d: 'nothing lost, all listed', ds: 'color: var(--ink-muted)' }],
+      f: H.opts(['All', 'Fonts', 'Effects', 'Prototype']),
+      issues: [
+        { k: 'Font', c: c.warn, t: 'Circular Std not on this instance', d: '412 text layers use a fallback', n: '412', a: 'Upload or replace' },
+        { k: 'Effect', c: c.warn, t: 'Layer blur with progressive mask', d: 'Drawn as a plain blur', n: '6', a: 'Show layers' },
+        { k: 'Variable', c: c.warn, t: 'Number variables in text', d: 'Kept as plain text with the value', n: '11', a: 'Convert' },
+        { k: 'Prototype', c: c.info, t: 'Scroll-to interactions', d: 'Converted to navigate + scroll position', n: '4', a: 'Review' },
+        { k: 'Component', c: c.info, t: 'Slot properties', d: 'Became instance-swap properties', n: '3', a: 'Review' },
+        { k: 'Image', c: c.info, t: 'Images over 8,000 px', d: 'Stored full size, previewed at 4,000', n: '2', a: '—' }
+      ],
+      ok: [{ t: 'Auto layout (incl. wrap)', n: '2,140' }, { t: 'Text styles → tokens', n: '18' }, { t: 'Color styles → tokens', n: '42' }, { t: 'Variants and properties', n: '96' }, { t: 'Comments and authors', n: '210' }, { t: 'Version history', n: 'last 30' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

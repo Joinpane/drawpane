@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane plugin development</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <aside class="u-side" aria-label="Plugins, development" style="width: 320px">
+      <div class="u-head"><h2 class="u-h3">Plugins</h2></div>
+      <div style="padding: 0 12px 8px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Plugin list" value="dev" options="{{tabs}}"></x-import></div>
+      <div class="u-col" style="padding: 0 12px">
+        <div class="u-box u-col" style="padding: 12px; border-radius: var(--radius-md)">
+          <div class="u-row"><span class="u-ico u-ico--signal"><x-import component-from-global-scope="Drawpane.Icon" name="code"></x-import></span><span class="u-grow u-col" style="gap: 0"><strong class="u-md">token-sync (local)</strong><span class="u-xs u-muted u-mono">http://localhost:4400/manifest.json</span></span></div>
+          <div class="u-row"><span class="u-chip u-chip--ok">● hot reload</span><span class="u-chip">API v2</span><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm">Reload</x-import></div>
+        </div>
+        <x-import component-from-global-scope="Drawpane.Button" icon="plus">Load plugin from URL</x-import>
+        <span class="u-cap" style="margin-top: 6px">Permissions in manifest</span>
+        <pre class="u-code">{
+  "name": "token-sync",
+  "api": "2",
+  "permissions": ["file:read", "library:read"],
+  "network": ["api.github.com"],
+  "actions": ["set_fill", "create_branch"]
+}</pre>
+        <span class="u-xs u-muted">Plugins written for Penpot (API v1) load unchanged. v2 adds typed actions, branches and render_frame.</span>
+      </div>
+    </aside>
+    <main class="u-stage" aria-label="Canvas and console">
+      <section aria-label="Plugin window" class="u-pop" style="position: absolute; left: 20px; top: 20px; width: 320px">
+        <div class="u-row" style="height: 36px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--line)"><span class="u-sm u-b u-grow">token-sync · dev</span><x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import></div>
+        <div class="u-col" style="padding: 12px"><x-import component-from-global-scope="Drawpane.TextField" label="Repository" default-value="acme/tokens"></x-import><x-import component-from-global-scope="Drawpane.TextField" label="Branch" default-value="design-tokens"></x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Push 86 tokens</x-import></div>
+      </section>
+      <section aria-label="Console" class="u-pane" style="position: absolute; left: 0; right: 0; bottom: 0; height: 330px; display: flex; flex-direction: column">
+        <div class="u-row" style="height: 36px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Console tab" value="console" options="{{ctabs}}"></x-import><span class="u-spacer"></span><span class="u-xs u-muted">2 errors · 1 warning</span><x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Clear"></x-import></div>
+        <div style="flex: 1; overflow: hidden; font-family: var(--font-mono); font-size: 12px; line-height: 20px">
+          <sc-for list="{{logs}}" as="l" hint-placeholder-count="8"><div style="{{l.s}}"><span style="width: 64px; flex: none; color: var(--ink-muted)">{{l.t}}</span><span style="flex: 1; white-space: pre-wrap">{{l.m}}</span><span style="color: var(--ink-muted)">{{l.f}}</span></div></sc-for>
+        </div>
+        <div class="u-row" style="height: 36px; padding: 0 12px; border-top: 1px solid var(--line); font-family: var(--font-mono); font-size: 12px"><span style="color: var(--signal-ink)">›</span><span class="u-muted">drawpane.selection[0].fills</span></div>
+      </section>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var lg = function (k, t, m, f) { var bg = k === 'e' ? 'background: color-mix(in srgb, var(--danger) 8%, transparent); color: var(--danger);' : k === 'w' ? 'background: var(--signal-soft); color: var(--signal-ink);' : ''; return { t: t, m: m, f: f, s: 'display: flex; gap: 10px; padding: 2px 12px; border-bottom: 1px solid var(--line);' + bg }; };
+    return {
+      tabs: H.opts(['Installed', 'Browse', { value: 'dev', label: 'Development' }]),
+      ctabs: H.opts(['Console', 'Actions', 'Network']),
+      logs: [lg('', '10:41:02', 'plugin loaded · api v2 · 3 permissions granted', 'host'), lg('', '10:41:05', 'drawpane.library.tokens() → 86 tokens', 'main.ts:14'), lg('w', '10:41:05', '3 tokens use raw values with no alias', 'main.ts:22'), lg('', '10:41:09', 'fetch https://api.github.com/repos/acme/tokens → 200', 'network'), lg('e', '10:41:12', 'PermissionError: action "publish_library" not in manifest', 'main.ts:51'), lg('e', '10:41:12', 'fetch https://hooks.slack.com/… blocked: not in "network"', 'network'), lg('', '10:41:20', 'apply_actions dry run · 0 changes', 'main.ts:60')]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

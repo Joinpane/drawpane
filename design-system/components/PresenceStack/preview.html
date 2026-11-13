@@ -1,0 +1,16 @@
+<!-- @dsCard group="Status" height=72 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>PresenceStack — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.PresenceStack, { people: [{ name: 'Ana Ruiz', color: 1, where: 'Home — iOS' }, { name: 'Lena Park', color: 2 }, { name: 'Sam Okafor', color: 3 }, { name: 'Dev Shah', color: 4 }, { name: 'Mo Chen', color: 5 }, { name: 'Ida Berg', color: 6 }] }),
+      h(D.PresenceStack, { people: [{ name: 'Lena Park', color: 2 }, { name: 'Sam Okafor', color: 3 }] }))
+  );
+</script>
+</body>
+</html>

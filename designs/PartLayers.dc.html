@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Layers pane</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<aside aria-label="Layers" style="width: 248px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); font-family: var(--font-ui); color: var(--ink); overflow: hidden">
+  <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 6px 8px 12px">
+    <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Left pane" value="{{tab}}" options="{{tabs}}"></x-import>
+    <x-import component-from-global-scope="Drawpane.IconButton" icon="search" label="Find layer" shortcut="⌘ F"></x-import>
+  </div>
+
+  <div style="padding: 0 4px 6px; border-bottom: 1px solid var(--line)">
+    <div style="display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 2px 0 8px">
+      <span style="font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Pages</span>
+      <x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add page"></x-import>
+    </div>
+    <sc-for list="{{pages}}" as="p" hint-placeholder-count="3">
+      <div style="{{p.style}}">
+        <span style="flex: 1">{{p.name}}</span>
+        <span style="font-size: 11px; color: var(--ink-muted); font-variant-numeric: tabular-nums">{{p.count}}</span>
+      </div>
+    </sc-for>
+  </div>
+
+  <div role="tree" aria-label="Layers on Mobile v2" style="flex: 1; min-height: 0; padding: 6px 4px; overflow: hidden">
+    <sc-for list="{{layers}}" as="l" hint-placeholder-count="11">
+      <x-import component-from-global-scope="Drawpane.LayerRow" name="{{l.name}}" kind="{{l.kind}}" depth="{{l.depth}}" selected="{{l.selected}}" hidden="{{l.hidden}}" locked="{{l.locked}}" has-children="{{l.hasChildren}}" expanded="{{l.expanded}}" presence="{{l.presence}}"></x-import>
+    </sc-for>
+  </div>
+
+  <div style="padding: 6px 4px 8px; border-top: 1px solid var(--line)">
+    <div style="display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 2px 0 8px">
+      <span style="font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Local components</span>
+      <x-import component-from-global-scope="Drawpane.IconButton" icon="component" label="Create component" shortcut="⌥ ⌘ K"></x-import>
+    </div>
+    <x-import component-from-global-scope="Drawpane.LayerRow" name="Event row" kind="component" has-children="{{yes}}"></x-import>
+    <x-import component-from-global-scope="Drawpane.LayerRow" name="Tab bar" kind="component" has-children="{{yes}}"></x-import>
+  </div>
+</aside>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"selected":{"editor":"enum","options":["none","home","hero","upcoming","greeting","row1"],"default":"upcoming"},"tab":{"editor":"enum","options":["layers","assets","history"],"default":"layers"},"$preview":{"width":248,"height":824}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var sel = this.props.selected ?? 'upcoming';
+    var rows = [
+      { id: 'home', name: 'Home — iOS', kind: 'board', depth: 0, hasChildren: true, expanded: true },
+      { id: 'status', name: 'Status bar', kind: 'instance', depth: 1 },
+      { id: 'greeting', name: 'Greeting', kind: 'text', depth: 1 },
+      { id: 'hero', name: 'Hero card', kind: 'instance', depth: 1, presence: 2 },
+      { id: 'upcoming', name: 'Upcoming', kind: 'frame', depth: 1, hasChildren: true, expanded: true },
+      { id: 'row1', name: 'Event row', kind: 'instance', depth: 2 },
+      { id: 'row2', name: 'Event row', kind: 'instance', depth: 2 },
+      { id: 'row3', name: 'Event row', kind: 'instance', depth: 2 },
+      { id: 'tabbar', name: 'Tab bar', kind: 'instance', depth: 1, locked: true },
+      { id: 'settings', name: 'Settings — iOS', kind: 'board', depth: 0, hasChildren: true, presence: 3 },
+      { id: 'onboarding', name: 'Onboarding', kind: 'board', depth: 0, hasChildren: true, hidden: true }
+    ];
+    var base = 'display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); font-size: 12px; line-height: 16px;';
+    return {
+      yes: true,
+      tab: this.props.tab ?? 'layers',
+      tabs: [{ value: 'layers', label: 'Layers' }, { value: 'assets', label: 'Assets' }, { value: 'history', label: 'History' }],
+      pages: [
+        { name: 'Mobile v2', count: '3', style: base + ' font-weight: 600; background: var(--surface-active)' },
+        { name: 'Web dashboard', count: '5', style: base },
+        { name: 'Archive', count: '12', style: base + ' color: var(--ink-muted)' }
+      ],
+      layers: rows.map(function (r) {
+        return { name: r.name, kind: r.kind, depth: r.depth, selected: r.id === sel, hidden: !!r.hidden, locked: !!r.locked, hasChildren: !!r.hasChildren, expanded: !!r.expanded, presence: r.presence };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>

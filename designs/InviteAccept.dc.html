@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane accept an invite</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 40px; display: flex; flex-wrap: wrap; gap: 40px; align-items: center; justify-content: center; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <section aria-label="Invite" style="width: 440px; padding: 32px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-modal); display: grid; gap: 20px">
+    <span style="display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px"><span style="width: 20px; height: 20px; border-radius: 5px; background: var(--surface-inverse); box-shadow: inset -6px -6px 0 var(--signal)"></span>Drawpane</span>
+    <div style="display: flex; align-items: center">
+      <span style="display: grid; place-items: center; width: 48px; height: 48px; border-radius: 12px; background: var(--surface-inverse); color: var(--ink-inverse); font-size: 20px; font-weight: 700">A</span>
+      <span style="display: grid; place-items: center; width: 36px; height: 36px; margin-left: -10px; border-radius: 50%; background: var(--presence-2); color: var(--on-presence); font-size: 13px; font-weight: 700; box-shadow: 0 0 0 3px var(--surface)">LP</span>
+    </div>
+    <div style="display: grid; gap: 6px">
+      <h1 style="margin: 0; font-family: var(--font-display); font-size: 32px; line-height: 38px; font-weight: 400; letter-spacing: -0.01em">Join Acme Design</h1>
+      <p style="margin: 0; font-size: 14px; line-height: 21px; color: var(--ink-muted)">Lena Park invited you to edit. You'll see 4 projects, the Acme design system and 2 shared agents.</p>
+    </div>
+    <dl style="margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; padding: 12px 14px; border-radius: var(--radius-md); background: var(--surface-sunken); font-size: 13px">
+      <dt style="color: var(--ink-muted)">Role</dt><dd style="margin: 0; font-weight: 600">Editor</dd>
+      <dt style="color: var(--ink-muted)">Hosted at</dt><dd style="margin: 0">design.acme.com · Acme's own Cloudflare</dd>
+      <dt style="color: var(--ink-muted)">Sign-in</dt><dd style="margin: 0">Acme SSO or an @acme.com address</dd>
+    </dl>
+    <div style="display: grid; gap: 8px">
+      <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="lg">Continue with Acme SSO</x-import>
+      <x-import component-from-global-scope="Drawpane.Button" size="lg">Continue with email</x-import>
+    </div>
+    <p style="margin: 0; font-size: 12px; line-height: 16px; color: var(--ink-muted)">Invited as ziyang@acme.com · expires Nov 19 · <a href="#" style="color: inherit">Not you?</a></p>
+  </section>
+
+  <div style="display: grid; gap: 20px; width: 380px">
+    <sc-for list="{{states}}" as="s" hint-placeholder-count="3">
+      <section aria-label="{{s.title}}" style="padding: 20px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); display: grid; gap: 10px">
+        <span class="dp-caption">{{s.kind}}</span>
+        <div style="display: flex; gap: 10px; align-items: flex-start"><span style="{{s.ic}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{s.icon}}"></x-import></span><span style="display: grid; gap: 4px"><strong style="font-size: 15px; line-height: 20px">{{s.title}}</strong><span style="font-size: 13px; line-height: 18px; color: var(--ink-muted)">{{s.body}}</span></span></div>
+        <div style="display: flex; gap: 8px; justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button" size="sm">{{s.a1}}</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">{{s.a2}}</x-import></div>
+      </section>
+    </sc-for>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var ic = function (c) { return 'flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--surface-sunken); color: ' + c; };
+    return {
+      theme: T,
+      states: [
+        { kind: 'Signed in as someone else', title: 'This invite is for ziyang@acme.com', body: 'You are signed in as ziyang@gmail.com. Switch accounts to accept, or ask Lena to invite this address.', icon: 'key', ic: ic('var(--icon)'), a1: 'Ask Lena', a2: 'Switch account' },
+        { kind: 'Expired', title: 'This invite has expired', body: 'Invites last 7 days. We let Lena know; you can also request a new one.', icon: 'history', ic: ic('var(--warning)'), a1: 'Go to Drawpane', a2: 'Request a new invite' },
+        { kind: 'Seat limit (self-hosted cap set by admin)', title: 'Acme Design is full', body: 'The admin set a cap of 25 editors. You can join as a viewer now and get edit access when a seat opens.', icon: 'warning', ic: ic('var(--signal-ink)'), a1: 'Not now', a2: 'Join as viewer' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

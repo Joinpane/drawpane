@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane present mode</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="position: relative; height: 900px; box-sizing: border-box; display: flex; flex-direction: column; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <header style="display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 12px 16px">
+    <x-import component-from-global-scope="Drawpane.Button" variant="ghost" size="sm">Back to editor</x-import>
+    <span style="width: 1px; height: 16px; background: var(--line-strong)"></span>
+    <button type="button" style="display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 0; border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); font: 600 12px/16px var(--font-ui); cursor: pointer">Flow 1 · Today <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></button>
+    <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted); font-variant-numeric: tabular-nums">Screen 1 of 6</span>
+    <span style="flex: 1"></span>
+    <x-import component-from-global-scope="Drawpane.PresenceStack" people="{{people}}"></x-import>
+    <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Restart flow" shortcut="R"></x-import>
+    <x-import component-from-global-scope="Drawpane.IconButton" icon="comment" label="Show comments" shortcut="C"></x-import>
+    <x-import component-from-global-scope="Drawpane.IconButton" icon="inspector" label="Device and scaling"></x-import>
+    <x-import component-from-global-scope="Drawpane.Button" variant="primary" size="sm">Share prototype</x-import>
+  </header>
+
+  <div style="flex: 1; min-height: 0; display: flex; gap: 24px; padding: 0 16px 16px">
+    <div style="flex: 1; min-width: 0; display: grid; place-items: center; position: relative">
+      <div style="position: relative; width: 364px; height: 584px; box-sizing: border-box; padding: 12px; border-radius: 52px; background: #0b0b0c; box-shadow: 0 0 0 1px var(--line-strong), 0 30px 80px rgba(0,0,0,.35)">
+        <div style="width: 340px; height: 560px; border-radius: 40px; overflow: hidden">
+          <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        </div>
+        <span aria-hidden="true" style="position: absolute; left: 44px; top: 224px; width: 276px; height: 52px; border-radius: 10px; background: var(--signal); opacity: .28; box-shadow: inset 0 0 0 2px var(--signal)"></span>
+        <span aria-hidden="true" style="position: absolute; left: 44px; top: 284px; width: 276px; height: 52px; border-radius: 10px; background: var(--signal); opacity: .28; box-shadow: inset 0 0 0 2px var(--signal)"></span>
+        <span aria-hidden="true" style="position: absolute; left: 18px; top: 512px; width: 328px; height: 56px; border-radius: 10px; background: var(--signal); opacity: .28; box-shadow: inset 0 0 0 2px var(--signal)"></span>
+      </div>
+      <div style="position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-pane); font-size: 12px; line-height: 16px; color: var(--ink-muted); white-space: nowrap">
+        Hotspots shown because you clicked an empty area · <x-import component-from-global-scope="Drawpane.Kbd">←</x-import><x-import component-from-global-scope="Drawpane.Kbd">→</x-import> screens
+      </div>
+    </div>
+
+    <aside aria-label="Screens in this flow" style="width: 200px; flex: none; padding: 12px; box-sizing: border-box; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+      <div style="font-size: 12px; line-height: 16px; font-weight: 600; margin-bottom: 10px">Screens</div>
+      <ol style="margin: 0; padding: 0; list-style: none; display: grid; gap: 10px">
+        <sc-for list="{{screens}}" as="s" hint-placeholder-count="6">
+          <li style="display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: center">
+            <span style="{{s.thumb}}"></span>
+            <span style="display: flex; flex-direction: column; font-size: 12px; line-height: 16px">
+              <span style="{{s.title}}">{{s.name}}</span>
+              <span style="font-size: 11px; color: var(--ink-muted)">{{s.note}}</span>
+            </span>
+          </li>
+        </sc-for>
+      </ol>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"dark"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var names = [['Home', '3 hotspots'], ['Event detail', 'Smart animate'], ['Mark done', 'Overlay'], ['Done state', ''], ['Settings', ''], ['Notifications', '2 comments']];
+    return {
+      theme: this.props.theme ?? 'dark',
+      people: [{ name: 'Ana Ruiz', color: 1, where: 'Presenting' }, { name: 'Client · Mo Haddad', color: 5, where: 'Following' }],
+      screens: names.map(function (n, i) {
+        return {
+          name: n[0], note: n[1],
+          title: i === 0 ? 'font-weight: 600; color: var(--signal-ink)' : 'color: var(--ink)',
+          thumb: 'width: 44px; height: 72px; border-radius: 6px; background: #ffffff; box-shadow: ' + (i === 0 ? '0 0 0 2px var(--signal)' : '0 0 0 1px var(--line-strong)')
+        };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>

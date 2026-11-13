@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane branch review</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" branch="feature/greeting" primary="Merge" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+
+    <aside aria-label="Changes" style="width: 248px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="padding: 12px 12px 8px">
+        <div style="font-size: 12px; line-height: 16px; font-weight: 600">feature/greeting → main</div>
+        <div style="margin-top: 2px; font-size: 11px; line-height: 14px; color: var(--ink-muted)">Lena Park · branched Nov 10 from revision 1,180</div>
+      </div>
+      <div style="display: flex; gap: 6px; padding: 0 12px 10px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.Badge" tone="success">2 added</x-import>
+        <x-import component-from-global-scope="Drawpane.Badge" tone="info">3 changed</x-import>
+        <x-import component-from-global-scope="Drawpane.Badge" tone="danger">1 removed</x-import>
+      </div>
+      <ol style="margin: 0; padding: 6px 4px; list-style: none; flex: 1; min-height: 0">
+        <sc-for list="{{changes}}" as="c" hint-placeholder-count="6">
+          <li style="{{c.row}}">
+            <span style="{{c.num}}">{{c.n}}</span>
+            <span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+              <span style="font-size: 12px; line-height: 16px; font-weight: 600">{{c.layer}}</span>
+              <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{c.what}}</span>
+            </span>
+            <span style="{{c.tag}}">{{c.kind}}</span>
+          </li>
+        </sc-for>
+      </ol>
+      <div style="padding: 10px 12px; border-top: 1px solid var(--line); font-size: 11px; line-height: 14px; color: var(--ink-muted)">
+        <span style="display: inline-flex; align-items: center; gap: 6px"><x-import component-from-global-scope="Drawpane.Kbd">J</x-import><x-import component-from-global-scope="Drawpane.Kbd">K</x-import> next and previous change</span>
+      </div>
+    </aside>
+
+    <main aria-label="Comparison" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: 50%; top: 0; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 4px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); white-space: nowrap">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Compare" value="side" options="{{modes}}"></x-import>
+        <span style="width: 1px; height: 16px; background: var(--line-strong)"></span>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Highlight changes"></x-import>
+      </div>
+
+      <div style="position: absolute; left: 50%; top: 92px; transform: translateX(-50%); display: flex; gap: 48px">
+        <div style="position: relative; width: 340px; height: 560px; opacity: .92">
+          <span style="position: absolute; left: 0; top: -22px; display: flex; gap: 6px; align-items: center; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">main · revision 1,204</span>
+          <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        </div>
+        <div style="position: relative; width: 340px; height: 560px">
+          <span style="position: absolute; left: 0; top: -22px; font-size: 11px; line-height: 14px; font-weight: 600; color: var(--ink)">feature/greeting · 6 changes</span>
+          <dc-import name="PartBoard" variant="branch" hint-size="340px,560px"></dc-import>
+          <span aria-hidden="true" style="position: absolute; left: 18px; top: 46px; width: 222px; height: 32px; box-shadow: inset 0 0 0 1.5px var(--info); border-radius: 3px"></span>
+          <span style="position: absolute; left: 244px; top: 52px; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--info); color: var(--surface-raised); font-size: 10.5px; font-weight: 700">1</span>
+          <span aria-hidden="true" style="position: absolute; left: 18px; top: 116px; width: 304px; height: 70px; box-shadow: inset 0 0 0 1.5px var(--info); border-radius: 15px"></span>
+          <span style="position: absolute; left: 326px; top: 142px; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--info); color: var(--surface-raised); font-size: 10.5px; font-weight: 700">2</span>
+          <span aria-hidden="true" style="position: absolute; left: 41px; top: 221px; width: 34px; height: 34px; box-shadow: inset 0 0 0 1.5px var(--success); border-radius: 10px"></span>
+          <span style="position: absolute; left: 8px; top: 229px; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--success); color: var(--surface-raised); font-size: 10.5px; font-weight: 700">3</span>
+        </div>
+      </div>
+    </main>
+
+    <aside aria-label="Review" style="width: 264px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <section class="dp-section" aria-label="Reviewers">
+        <div class="dp-section__head"><h3 class="dp-section__title">Reviewers</h3><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Request review"></x-import></div>
+        <div class="dp-section__body" style="gap: 6px">
+          <sc-for list="{{reviewers}}" as="r" hint-placeholder-count="2">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px">
+              <span style="{{r.avatar}}">{{r.initials}}</span>
+              <span style="flex: 1">{{r.name}}</span>
+              <x-import component-from-global-scope="Drawpane.Badge" tone="{{r.tone}}">{{r.status}}</x-import>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      <section class="dp-section" aria-label="Discussion" style="flex: 1; min-height: 0">
+        <div class="dp-section__head"><h3 class="dp-section__title">On change 2 · Hero card</h3></div>
+        <div class="dp-section__body" style="gap: 10px">
+          <div style="display: grid; gap: 4px; font-size: 12px; line-height: 17px">
+            <span><b style="font-weight: 600">Sam Okafor</b> <span style="color: var(--ink-muted)">· 2h</span></span>
+            <span>Blue hero reads better. White on #2b4fd6 is 6.6:1, so the title passes AA.</span>
+          </div>
+          <div style="display: grid; gap: 4px; font-size: 12px; line-height: 17px">
+            <span><b style="font-weight: 600">Lena Park</b> <span style="color: var(--ink-muted)">· 1h</span></span>
+            <span>Switched the subtitle to #d6defc so it passes AA too.</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink-muted); font-size: 12px">Reply, or @ to mention</div>
+        </div>
+      </section>
+      <div style="padding: 12px; border-top: 1px solid var(--line); display: grid; gap: 8px">
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; color: var(--success)">
+          <x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import><span>No conflicts with main</span>
+        </div>
+        <div style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Merging applies 6 changes as one revision. main keeps a restore point.</div>
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary" icon="branch" shortcut="⌘ ↵">Merge into main</x-import>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var tone = { Changed: 'var(--info)', Added: 'var(--success)', Removed: 'var(--danger)' };
+    var list = [
+      ['Greeting', 'Text “morning” → “afternoon”', 'Changed', true],
+      ['Hero card', 'Fill #16181d → #2b4fd6', 'Changed'],
+      ['Event row icons', 'Fill tints per category', 'Added'],
+      ['Hero card subtitle', 'Fill #b9bec8 → #d6defc', 'Changed'],
+      ['Category legend', 'New text layer', 'Added'],
+      ['Divider', 'Removed from Upcoming', 'Removed']
+    ];
+    var av = 'display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--surface-raised); font-size: 10px; font-weight: 600; box-shadow: inset 0 0 0 2px ';
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      modes: [{ value: 'side', label: 'Side by side' }, { value: 'overlay', label: 'Overlay' }, { value: 'swipe', label: 'Swipe' }],
+      changes: list.map(function (c, i) {
+        return {
+          n: String(i + 1), layer: c[0], what: c[1], kind: c[2],
+          row: 'display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-sm);' + (c[3] ? ' background: var(--signal-soft);' : ''),
+          num: 'display: grid; place-items: center; width: 18px; height: 18px; flex: none; border-radius: 50%; background: ' + tone[c[2]] + '; color: var(--surface-raised); font-size: 10.5px; font-weight: 700',
+          tag: 'font-size: 11px; line-height: 14px; font-weight: 600; color: ' + tone[c[2]]
+        };
+      }),
+      reviewers: [
+        { name: 'Sam Okafor', initials: 'SO', status: 'Approved', tone: 'success', avatar: av + 'var(--presence-3)' },
+        { name: 'Ana Ruiz', initials: 'AR', status: 'Reviewing', tone: 'neutral', avatar: av + 'var(--presence-1)' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

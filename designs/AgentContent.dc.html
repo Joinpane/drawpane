@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane realistic content and translation</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" branch="agent/content-de-ja" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <main class="u-stage" aria-label="Boards in four languages">
+      <div class="u-row" style="position: absolute; left: 0; right: 0; top: 0; height: 40px">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Copy editor" status="working" on-behalf-of="Mo"></x-import>
+        <span class="u-md">Translating Home into 3 languages, with realistic events</span>
+        <span class="u-spacer"></span>
+        <span class="u-sm u-muted">Language on canvas</span>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Language" value="all" options="{{langs}}"></x-import>
+      </div>
+      <div style="position: absolute; left: 0; top: 56px; display: flex; gap: 20px">
+        <sc-for list="{{boards}}" as="b" hint-placeholder-count="4">
+          <div class="u-col u-col--tight" style="justify-items: start">
+            <span class="u-row u-xs u-muted"><span class="u-chip">{{b.code}}</span>{{b.name}}</span>
+            <div style="position: relative; width: 200px; height: 400px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12); overflow: hidden; color: #16181d; font-family: var(--font-ui)" dir="{{b.dir}}">
+              <div style="margin: 34px 14px 0; font-size: 17px; line-height: 22px; font-weight: 600">{{b.greet}}</div>
+              <div style="margin: 2px 14px 0; font-size: 11px; color: #5b616e">{{b.sub}}</div>
+              <div style="{{b.hero}}"><div style="font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden">{{b.ev}}</div><div style="font-size: 10px; color: #b9bec8">{{b.evs}}</div></div>
+              <div style="margin: 10px 14px 0; display: grid; gap: 6px">
+                <sc-for list="{{b.rows}}" as="r" hint-placeholder-count="3"><div style="height: 36px; border-radius: 8px; background: #f3f4f6; padding: 0 10px; display: grid; align-content: center"><span style="font-size: 11px; font-weight: 500">{{r.t}}</span><span style="font-size: 9px; color: #5b616e">{{r.d}}</span></div></sc-for>
+              </div>
+            </div>
+            <span class="{{b.warnc}}">{{b.warn}}</span>
+          </div>
+        </sc-for>
+      </div>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Agent">
+      <div class="u-row" style="padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{H.modes}}"></x-import>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past runs"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+      <div class="u-col" style="flex: 1; min-height: 0; padding: 12px; overflow: hidden">
+        <div role="list" style="display: grid; gap: 2px">
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Filled 3 boards with realistic events" detail="Names and times from your data sample, not lorem ipsum" meta="5 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Translated to German and Japanese" detail="Glossary: Acme product terms stay in English" meta="9 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="running" label="Arabic, mirrored layout" ops="set direction rtl · mirror icons × 6"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="queued" label="Check overflow in all languages"></x-import>
+        </div>
+        <div class="u-note u-note--signal"><x-import component-from-global-scope="Drawpane.Icon" name="warning" size="12"></x-import><span class="u-grow">German hero title is cut off at 200 wide. Options: allow 2 lines, shorten the copy, or shrink to type/title-sm.</span></div>
+        <div class="u-dl u-well" style="padding: 10px"><dt>Glossary</dt><dd>Acme · 12 terms</dd><dt>Tone</dt><dd>Friendly, short · skill copy-voice</dd><dt>Data</dt><dd>sample-events.csv (40 rows)</dd></div>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var hero = 'margin: 12px 14px 0; height: 46px; padding: 9px 12px; box-sizing: border-box; border-radius: 10px; background: #16181d; color: #ffffff';
+    var mk = function (code, name, dir, greet, sub, ev, evs, rows, warn) { return { code: code, name: name, dir: dir, greet: greet, sub: sub, ev: ev, evs: evs, hero: hero, rows: rows.map(function (r) { return { t: r[0], d: r[1] }; }), warn: warn || 'No overflow', warnc: warn ? 'u-chip u-chip--signal' : 'u-chip u-chip--ok' }; };
+    return {
+      langs: H.opts([{ value: 'all', label: 'All' }, 'EN', 'DE', 'JA', 'AR']),
+      boards: [
+        mk('EN', 'Home — iOS', 'ltr', 'Good morning, Ana', 'Three things on today', 'Design review at 2:00', 'Checkout flow · 4 people', [['Ship onboarding v2', 'Due today'], ['Token audit', 'Tomorrow'], ['Lena: icon review', 'Friday']]),
+        mk('DE', 'Home — iOS · German', 'ltr', 'Guten Morgen, Ana', 'Heute stehen drei Dinge an', 'Designbesprechung um 14:00 Uhr', 'Checkout-Ablauf · 4 Personen', [['Onboarding v2 ausliefern', 'Heute fällig'], ['Token-Prüfung', 'Morgen'], ['Lena: Icon-Review', 'Freitag']], 'Title cut off'),
+        mk('JA', 'Home — iOS · Japanese', 'ltr', 'おはようございます、Ana', '今日の予定は3件', '14:00 デザインレビュー', 'Checkout フロー · 4人', [['オンボーディング v2 をリリース', '今日まで'], ['トークン監査', '明日'], ['Lena: アイコンレビュー', '金曜日']]),
+        mk('AR', 'Home — iOS · Arabic', 'rtl', 'صباح الخير يا آنا', 'ثلاثة أشياء اليوم', 'مراجعة التصميم الساعة 2:00', 'مسار الدفع · 4 أشخاص', [['إطلاق التهيئة v2', 'مستحق اليوم'], ['تدقيق الرموز', 'غدًا'], ['لينا: مراجعة الأيقونات', 'الجمعة']])
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

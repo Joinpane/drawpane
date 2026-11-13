@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane publish to web and embed</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 32px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <header style="display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 24px">
+    <h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Publish to the web and embed</h1>
+    <p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Published prototypes are static files on your own Cloudflare account. They load fast and cost almost nothing to serve.</p>
+  </header>
+  <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <section role="dialog" aria-label="Publish to the web" style="width: 460px; border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-modal); overflow: hidden">
+      <div style="display: flex; align-items: center; padding: 14px 16px 6px"><h2 style="flex: 1; margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Publish Mobile app</h2><x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import></div>
+      <div style="padding: 0 16px 12px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Publish what" value="proto" options="{{what}}"></x-import></div>
+      <div style="padding: 0 16px; display: grid; gap: 12px">
+        <div style="display: grid; gap: 4px"><span class="dp-caption">Address</span>
+          <div style="display: flex; align-items: center; height: 32px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 13px; overflow: hidden"><span style="padding: 0 4px 0 10px; color: var(--ink-muted)">https://</span><span style="flex: 1; font-weight: 600">mobile-app</span><span style="padding: 0 10px; color: var(--ink-muted)">.design.acme.com</span></div>
+          <span style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--success)"><x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import>Available · or use a custom domain</span>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px">
+          <div style="display: grid; gap: 4px"><span class="dp-caption">Start on</span><span style="display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px">Sign in <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+          <div style="display: grid; gap: 4px"><span class="dp-caption">Version</span><span style="display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 12px">Follow main <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+        </div>
+        <div style="display: grid; gap: 10px; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-sunken)">
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Require a password"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Hide Drawpane chrome and hotspot hints"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" label="Allow viewers to comment (sign-in needed)"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Count views (no cookies)"></x-import>
+          <x-import component-from-global-scope="Drawpane.Switch" label="Let search engines index it"></x-import>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 14px 16px"><span style="flex: 1; font-size: 12px; color: var(--ink-muted)">Last published 2 days ago · 312 views</span><x-import component-from-global-scope="Drawpane.Button">Unpublish</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Update site</x-import></div>
+    </section>
+
+    <div style="flex: 1 1 520px; display: grid; gap: 24px; max-width: 700px">
+      <section aria-label="Embed code" style="padding: 16px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); display: grid; gap: 10px">
+        <div style="display: flex; align-items: center; gap: 8px"><h2 style="flex: 1; margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Embed</h2><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Embed shows" value="board" options="{{embed}}"></x-import></div>
+        <pre style="margin: 0; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-sunken); font-family: var(--font-mono); font-size: 12px; line-height: 18px; white-space: pre-wrap">&lt;iframe src="https://mobile-app.design.acme.com/embed/home?theme=auto"
+  width="800" height="450" allowfullscreen&gt;&lt;/iframe&gt;</pre>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap"><x-import component-from-global-scope="Drawpane.Button" size="sm" icon="code">Copy embed</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm">Copy oEmbed link</x-import><span style="flex: 1"></span><span style="font-size: 12px; color: var(--ink-muted); align-self: center">Works in Notion, Linear, GitHub, Confluence and Slack unfurls</span></div>
+      </section>
+
+      <figure style="margin: 0; display: grid; gap: 8px">
+        <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">How it looks in a doc</figcaption>
+        <div style="padding: 24px 32px; border-radius: var(--radius-lg); background: #ffffff; color: #16181d; box-shadow: var(--shadow-pane); display: grid; gap: 12px; font-size: 14px; line-height: 21px">
+          <strong style="font-size: 18px">Spec · Home screen refresh</strong>
+          <p style="margin: 0; color: #5b616e">The new hero card brings the next event to the top. Live design below:</p>
+          <div style="border-radius: 10px; box-shadow: 0 0 0 1px #e4e7ec; overflow: hidden">
+            <div style="display: grid; place-items: center; height: 220px; background: #f3f4f6">
+              <div style="width: 150px; height: 190px; border-radius: 14px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12); padding: 10px; box-sizing: border-box; display: grid; align-content: start; gap: 6px"><span style="height: 8px; width: 60%; border-radius: 3px; background: #e4e7ec"></span><span style="height: 52px; border-radius: 8px; background: #2b4fd6"></span><span style="height: 22px; border-radius: 6px; background: #f3f4f6"></span><span style="height: 22px; border-radius: 6px; background: #f3f4f6"></span></div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border-top: 1px solid #e4e7ec; font-size: 12px; color: #5b616e"><span style="width: 12px; height: 12px; border-radius: 3px; background: #16181d; box-shadow: inset -4px -4px 0 #e04f1a"></span><span style="flex: 1">Mobile app · Home · updated 2 h ago</span><span>Open in Drawpane ↗</span></div>
+          </div>
+        </div>
+      </figure>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      theme: T, yes: true,
+      what: [{ value: 'proto', label: 'Prototype' }, { value: 'boards', label: 'Boards as pages' }, { value: 'spec', label: 'Spec page' }],
+      embed: [{ value: 'board', label: 'One board' }, { value: 'proto', label: 'Prototype' }, { value: 'file', label: 'Whole file' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

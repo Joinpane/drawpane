@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane tidy a file</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" file="Checkout flow" branch="agent/tidy-checkout" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <main class="u-stage" aria-label="Before and after">
+      <div class="u-row" style="position: absolute; left: 0; right: 0; top: 0; height: 40px">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Tidy-up" status="waiting" on-behalf-of="Ana"></x-import>
+        <span class="u-md"><strong>512 layers tidied</strong> on Checkout / Payment · nothing moved on screen</span>
+        <span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm">Undo all</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Merge tidy-up</x-import>
+      </div>
+      <div style="position: absolute; left: 0; right: 0; top: 52px; bottom: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px">
+        <section class="u-pane u-col" style="padding: 12px; align-content: start">
+          <div class="u-row"><span class="u-chip">Before</span><span class="u-sm u-muted">layer names from 3 people and a Figma import</span></div>
+          <sc-for list="{{before}}" as="l" hint-placeholder-count="12"><div class="u-row u-sm" style="{{l.ind}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{l.i}}" size="12"></x-import><span class="u-ellip u-mono" style="color: var(--ink-muted)">{{l.n}}</span></div></sc-for>
+        </section>
+        <section class="u-pane u-col" style="padding: 12px; align-content: start">
+          <div class="u-row"><span class="u-chip u-chip--agent">After</span><span class="u-sm u-muted">named by role, grouped, auto layout</span></div>
+          <sc-for list="{{after}}" as="l" hint-placeholder-count="12"><div class="u-row u-sm" style="{{l.ind}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{l.i}}" size="12"></x-import><span class="u-ellip">{{l.n}}</span><span class="u-spacer"></span><span class="{{l.tc}}">{{l.t}}</span></div></sc-for>
+        </section>
+        <section class="u-pane u-col" style="padding: 12px; align-content: start; gap: 12px">
+          <strong class="u-md">What changed</strong>
+          <sc-for list="{{stats}}" as="s" hint-placeholder-count="5"><div class="u-row u-sm"><span class="u-ico u-ico--agent u-ico--sm"><x-import component-from-global-scope="Drawpane.Icon" name="{{s.i}}" size="12"></x-import></span><span class="u-grow">{{s.t}}</span><strong>{{s.n}}</strong></div></sc-for>
+          <div class="u-line"></div>
+          <strong class="u-md">Rules it followed</strong>
+          <ul class="u-sm" style="margin: 0; padding-left: 16px; display: grid; gap: 4px; color: var(--ink-muted)"><li>Names say what a layer is for, not how it looks</li><li>Never change position, size or fill</li><li>Auto layout only where spacing was already even (±1 px)</li><li>Hidden layers older than 90 days: listed, not deleted</li></ul>
+          <div class="u-note u-note--plain"><x-import component-from-global-scope="Drawpane.Icon" name="eye" size="12"></x-import><span class="u-grow">Pixel diff against main: 0 changed pixels on all 14 boards.</span></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var L = function (arr, after) { return arr.map(function (x) { return { n: x[1], i: x[2], ind: 'padding-left: ' + (x[0] * 14) + 'px; min-height: 22px', t: x[3] || '', tc: x[3] ? 'u-chip u-chip--agent' : 'display: none' }; }); };
+    return {
+      before: L([[0, 'Frame 412', 'board'], [1, 'Group 88', 'group'], [2, 'Rectangle 1203', 'rectangle'], [2, 'Rectangle 1203 copy', 'rectangle'], [2, 'Text', 'text'], [1, 'Frame 7', 'board'], [2, 'Group 12 copy 2', 'group'], [3, 'Vector', 'pen'], [3, 'Text', 'text'], [2, 'Rectangle 3', 'rectangle'], [1, 'image 44', 'image'], [1, 'Frame 9 (old)', 'eye-off']]),
+      after: L([[0, 'Payment', 'board', ''], [1, 'Header', 'layout-row', 'auto'], [2, 'Back button', 'instance', ''], [2, 'Title', 'text', ''], [1, 'Card form', 'layout-col', 'auto'], [2, 'Card number', 'instance', 'relinked'], [3, 'Card brand icon', 'pen', ''], [3, 'Label', 'text', ''], [2, 'Expiry and CVC', 'layout-row', 'auto'], [1, 'Card illustration', 'image', ''], [1, 'Pay button', 'instance', 'relinked'], [1, 'Unused · old header', 'eye-off', 'flagged']]),
+      stats: [{ i: 'text', t: 'Layers renamed', n: '412' }, { i: 'layout-col', t: 'Auto layout added', n: '38' }, { i: 'group', t: 'Groups made or removed', n: '61' }, { i: 'instance', t: 'Copies relinked to components', n: '14' }, { i: 'eye-off', t: 'Old hidden layers flagged', n: '9' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

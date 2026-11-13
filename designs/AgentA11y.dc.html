@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane accessibility review</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" branch="agent/a11y-home" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas with accessibility overlay">
+      <div class="u-pop u-row" style="position: absolute; left: 50%; top: 4px; transform: translateX(-50%); padding: 4px 6px 4px 10px; white-space: nowrap">
+        <span class="u-sm u-b">Overlay</span>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Overlay" value="order" options="{{ov}}"></x-import>
+      </div>
+      <div style="position: absolute; left: 60px; top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <sc-for list="{{order}}" as="o" hint-placeholder-count="7"><span style="{{o.s}}">{{o.n}}</span></sc-for>
+        <svg width="340" height="560" style="position: absolute; left: 0; top: 0; pointer-events: none" aria-hidden="true"><polyline points="10,62 10,88 10,151 18,238 18,298 18,358 16,528" fill="none" stroke="var(--agent)" stroke-width="1.5" stroke-dasharray="4 3"/></svg>
+        <span style="position: absolute; left: 104px; top: 504px; width: 48px; height: 48px; border-radius: 8px; box-shadow: inset 0 0 0 2px var(--danger)"></span>
+        <span class="u-label" style="left: 158px; top: 518px; background: var(--danger); color: #ffffff">22 × 22 · needs 44</span>
+      </div>
+      <div class="u-pop u-col" style="position: absolute; left: 440px; top: 60px; width: 300px; padding: 12px">
+        <strong class="u-md">Reading order</strong>
+        <span class="u-sm u-muted">How a screen reader moves through Home. Drag to reorder; the agent proposes fixes.</span>
+        <sc-for list="{{order}}" as="o" hint-placeholder-count="7"><div class="u-row u-sm"><span class="u-chip u-chip--agent">{{o.n}}</span><span class="u-grow">{{o.t}}</span><span class="u-xs u-muted">{{o.role}}</span></div></sc-for>
+      </div>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Accessibility issues">
+      <div class="u-row" style="padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{H.modes}}"></x-import>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past runs"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+      <div class="u-col" style="flex: 1; min-height: 0; padding: 12px; overflow: hidden">
+        <div class="u-row"><x-import component-from-global-scope="Drawpane.AgentTag" name="Accessibility reviewer" status="waiting" on-behalf-of="Dev"></x-import></div>
+        <div class="u-row" style="gap: 6px"><span class="u-chip u-chip--signal">3 to fix</span><span class="u-chip u-chip--ok">11 passed</span><span class="u-chip">WCAG 2.2 AA</span></div>
+        <sc-for list="{{issues}}" as="i" hint-placeholder-count="4">
+          <div class="u-box u-col" style="padding: 10px 12px; gap: 6px">
+            <div class="u-row"><span class="{{i.c}}">{{i.k}}</span><strong class="u-sm u-grow">{{i.t}}</strong></div>
+            <span class="u-xs u-muted">{{i.d}}</span>
+            <div class="u-row"><span class="u-xs u-mono" style="color: var(--agent-ink)">{{i.fix}}</span><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm">{{i.a}}</x-import></div>
+          </div>
+        </sc-for>
+        <x-import component-from-global-scope="Drawpane.Button" variant="primary" icon="agent">Fix 3 on the branch</x-import>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var pin = function (n, x, y, t, role) { return { n: n, t: t, role: role, s: 'position: absolute; left: ' + (x - 10) + 'px; top: ' + (y - 10) + 'px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--agent); color: var(--on-agent); font-size: 11px; font-weight: 700; box-shadow: 0 0 0 2px #ffffff' }; };
+    return {
+      ov: H.opts([{ value: 'order', label: 'Reading order' }, 'Contrast', 'Targets', 'Alt text']),
+      order: [pin(1, 10, 62, 'Good morning, Ana', 'heading'), pin(2, 10, 88, 'Three things on today', 'text'), pin(3, 10, 151, 'Design review at 2:00', 'button'), pin(4, 18, 238, 'Ship onboarding v2, due today', 'button'), pin(5, 18, 298, 'Token audit, tomorrow', 'button'), pin(6, 18, 358, 'Lena: icon review, Friday', 'button'), pin(7, 16, 528, 'Home tab, selected', 'tab')],
+      issues: [
+        { k: 'Target', c: 'u-chip u-chip--signal', t: 'Tab bar icons are 22 × 22', d: 'Touch targets should be at least 44 × 44 on iOS.', fix: 'pad tab items to 44 × 44', a: 'Show' },
+        { k: 'Alt', c: 'u-chip u-chip--signal', t: '3 event icons have no label', d: 'They read as "image". Suggested: "Project", "Audit", "Person".', fix: 'set alt text × 3', a: 'Edit' },
+        { k: 'Contrast', c: 'u-chip u-chip--signal', t: 'Hero subtitle is 4.1:1', d: '#b9bec8 on #16181d at 12 px needs 4.5:1.', fix: 'fill → text/on-dark-muted (5.2:1)', a: 'Show' },
+        { k: 'Order', c: 'u-chip u-chip--ok', t: 'Reading order follows the layout', d: 'Heading first, tab bar last.', fix: '', a: 'Details' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

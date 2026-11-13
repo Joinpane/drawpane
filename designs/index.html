@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drawpane designs</title>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body { display: grid; grid-template-columns: 300px 1fr; background: var(--canvas); color: var(--ink); font: 400 12px/16px var(--font-ui); }
+  nav { overflow: auto; background: var(--surface); border-right: 1px solid var(--line); padding: 12px 8px 24px; }
+  nav h1 { display: flex; align-items: center; gap: 8px; margin: 4px 8px 12px; font-size: 15px; line-height: 20px; }
+  nav select { width: calc(100% - 16px); margin: 0 8px 8px; height: 28px; border-radius: var(--radius-sm); border: 1px solid var(--line-control); background: var(--surface-raised); color: var(--ink); font: inherit; }
+  nav h2 { margin: 14px 8px 4px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted); }
+  nav a { display: block; padding: 6px 8px; border-radius: var(--radius-sm); color: var(--ink); text-decoration: none; }
+  nav a:hover { background: var(--surface-hover); }
+  nav a[aria-current="page"] { background: var(--signal-soft); font-weight: 600; }
+  nav a small { display: block; color: var(--ink-muted); font: 400 11px/14px var(--font-mono); }
+  main { display: grid; grid-template-rows: auto 1fr; min-width: 0; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--line); }
+  header strong { font-size: 13px; line-height: 18px; }
+  header code { font: 400 11px/14px var(--font-mono); color: var(--ink-muted); }
+  header .spacer { flex: 1; }
+  button, header a { height: 28px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--ink); font: 600 12px/26px var(--font-ui); cursor: pointer; text-decoration: none; box-sizing: border-box; }
+  button:focus-visible, a:focus-visible, select:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
+  .stage { overflow: auto; padding: 24px; }
+  .frame { transform-origin: 0 0; background: var(--surface); box-shadow: var(--shadow-pane); }
+  iframe { display: block; border: 0; }
+  @media (max-width: 760px) { body { grid-template-columns: 1fr; grid-template-rows: 40vh 1fr; } nav { border-right: 0; border-bottom: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<nav aria-label="Artboards">
+  <h1><svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true"><rect x="3.25" y="3.25" width="18.5" height="18.5" rx="4" fill="none" stroke="currentColor" stroke-width="2.5"></rect><rect x="10" y="10" width="19" height="19" rx="4" fill="var(--signal)"></rect></svg>Drawpane designs</h1>
+  <label for="page" style="display:block;margin:0 8px 4px;color:var(--ink-muted);font-size:11px">Page</label>
+  <select id="page"></select>
+  <div id="list"></div>
+</nav>
+<main>
+  <header>
+    <strong id="title">Loading…</strong><code id="file"></code>
+    <span class="spacer"></span>
+    <button id="prev" type="button">Previous</button>
+    <button id="next" type="button">Next</button>
+    <button id="theme" type="button" aria-pressed="false">Dark theme</button>
+    <button id="fit" type="button" aria-pressed="true">Fit width</button>
+    <a id="open" href="#" target="_blank" rel="noopener">Open alone</a>
+  </header>
+  <div class="stage" id="stage"><div class="frame" id="frame"><iframe id="view" title="Artboard"></iframe></div></div>
+</main>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var state = { theme: 'light', fit: true, file: null }, canvas, flat = [];
+  try { state.theme = localStorage.getItem('dp-theme') || 'light'; } catch (e) {}
+
+  fetch('canvas.json').then(function (r) { return r.json(); }).then(function (c) {
+    canvas = c;
+    c.pages.forEach(function (p) { var o = document.createElement('option'); o.value = p.id; o.textContent = p.name; $('page').appendChild(o); });
+    c.order.forEach(function (file) { var b = c.boards[file]; flat.push({ file: file, b: b, page: b.page || c.pages[0].id }); });
+    var start = decodeURIComponent(location.hash.slice(1)) || c.order[0];
+    show(c.boards[start] ? start : c.order[0]);
+  });
+
+  function sectionsFor(page) {
+    var rows = Object.keys(canvas.notes).map(function (k) { return canvas.notes[k]; })
+      .filter(function (n) { return n.kind === 'title1' && (n.page || canvas.pages[0].id) === page; })
+      .sort(function (a, b) { return a.y - b.y; });
+    var groups = rows.map(function (r) { return { title: r.text, y: r.y, items: [] }; });
+    flat.filter(function (x) { return x.page === page; }).forEach(function (x) {
+      var g = null;
+      groups.forEach(function (cand) { if (cand.y <= x.b.y) g = cand; });
+      if (!g) { if (!groups.length || groups[0].y <= x.b.y) groups.unshift({ title: '', y: -Infinity, items: [] }); g = groups[0]; }
+      g.items.push(x);
+    });
+    groups.forEach(function (g) { g.items.sort(function (a, b) { return a.b.y - b.b.y || a.b.x - b.b.x; }); });
+    return groups.filter(function (g) { return g.items.length; });
+  }
+
+  function renderList(page) {
+    var list = $('list'); list.textContent = '';
+    sectionsFor(page).forEach(function (g) {
+      if (g.title) { var h = document.createElement('h2'); h.textContent = g.title; list.appendChild(h); }
+      g.items.forEach(function (x) {
+        var a = document.createElement('a');
+        a.href = '#' + encodeURIComponent(x.file);
+        a.textContent = x.b.title || x.file;
+        var s = document.createElement('small'); s.textContent = x.file + ' · ' + x.b.w + ' × ' + x.b.h; a.appendChild(s);
+        if (x.file === state.file) a.setAttribute('aria-current', 'page');
+        a.addEventListener('click', function (e) { e.preventDefault(); show(x.file); });
+        list.appendChild(a);
+      });
+    });
+  }
+
+  function src() { return state.file + (state.theme === 'dark' ? '?theme=dark' : ''); }
+
+  function layout() {
+    var b = canvas.boards[state.file];
+    var avail = $('stage').clientWidth - 48;
+    var scale = state.fit ? Math.min(1, avail / b.w) : 1;
+    var v = $('view'); v.style.width = b.w + 'px'; v.style.height = b.h + 'px';
+    var f = $('frame'); f.style.width = b.w + 'px'; f.style.height = b.h + 'px'; f.style.transform = 'scale(' + scale + ')';
+    f.parentNode.style.height = '';
+    f.style.marginBottom = (b.h * scale - b.h) + 'px';
+    f.style.marginRight = (b.w * scale - b.w) + 'px';
+  }
+
+  function show(file) {
+    state.file = file;
+    var b = canvas.boards[file];
+    var page = b.page || canvas.pages[0].id;
+    $('page').value = page;
+    renderList(page);
+    $('title').textContent = b.title || file;
+    $('file').textContent = file + ' · ' + b.w + ' × ' + b.h;
+    $('view').src = src();
+    $('open').href = src();
+    $('theme').setAttribute('aria-pressed', String(state.theme === 'dark'));
+    $('fit').setAttribute('aria-pressed', String(state.fit));
+    history.replaceState(null, '', '#' + encodeURIComponent(file));
+    layout();
+    var cur = document.querySelector('nav a[aria-current="page"]'); if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+
+  function step(d) {
+    var i = flat.findIndex(function (x) { return x.file === state.file; });
+    show(flat[(i + d + flat.length) % flat.length].file);
+  }
+
+  $('page').addEventListener('change', function () { var first = sectionsFor(this.value)[0]; if (first) show(first.items[0].file); });
+  $('prev').addEventListener('click', function () { step(-1); });
+  $('next').addEventListener('click', function () { step(1); });
+  $('theme').addEventListener('click', function () {
+    state.theme = state.theme === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem('dp-theme', state.theme); } catch (e) {}
+    show(state.file);
+  });
+  $('fit').addEventListener('click', function () { state.fit = !state.fit; show(state.file); });
+  window.addEventListener('resize', function () { if (state.file) layout(); });
+  window.addEventListener('hashchange', function () { var f = decodeURIComponent(location.hash.slice(1)); if (canvas && canvas.boards[f] && f !== state.file) show(f); });
+  document.addEventListener('keydown', function (e) {
+    if (e.target.closest('select')) return;
+    if (e.key === 'ArrowRight' || e.key === 'j') step(1);
+    if (e.key === 'ArrowLeft' || e.key === 'k') step(-1);
+  });
+})();
+</script>
+</body>
+</html>

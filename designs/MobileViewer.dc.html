@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane on a phone, prototype viewer</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="position: relative; width: 390px; height: 844px; overflow: hidden; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <div style="position: absolute; left: 0; top: 64px; width: 340px; height: 560px; transform: scale(1.147); transform-origin: top left">
+    <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+  </div>
+
+  <header style="position: absolute; left: 8px; right: 8px; top: 8px; height: 48px; display: flex; align-items: center; gap: 4px; padding: 0 4px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+    <button type="button" aria-label="Close prototype" style="display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--icon); cursor: pointer"><x-import component-from-global-scope="Drawpane.Icon" name="close"></x-import></button>
+    <span style="flex: 1; display: flex; flex-direction: column; min-width: 0">
+      <span style="font-size: 13px; line-height: 18px; font-weight: 600">Flow 1 · Today</span>
+      <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Mobile app · screen 1 of 6</span>
+    </span>
+    <button type="button" aria-label="Comments, 3 open" style="position: relative; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--icon); cursor: pointer">
+      <x-import component-from-global-scope="Drawpane.Icon" name="comment"></x-import>
+      <span style="position: absolute; right: 7px; top: 8px; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 7px; background: var(--signal); color: var(--on-signal); font-size: 9.5px; line-height: 14px; font-weight: 700">3</span>
+    </button>
+  </header>
+
+  <div role="status" style="position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); padding: 6px 12px; border-radius: 999px; background: var(--surface-inverse); color: var(--ink-inverse); font-size: 12px; line-height: 16px; white-space: nowrap">Tap empty space to show hotspots</div>
+
+  <nav aria-label="Screens" style="position: absolute; left: 8px; right: 8px; bottom: 16px; height: 64px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane)">
+    <button type="button" aria-label="Previous screen" style="display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--radius-md); background: var(--surface-sunken); color: var(--ink-disabled); cursor: not-allowed"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.75 4.5L6.25 8l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
+    <div aria-hidden="true" style="flex: 1; display: flex; justify-content: center; gap: 6px">
+      <span style="width: 18px; height: 6px; border-radius: 3px; background: var(--signal)"></span>
+      <span style="width: 6px; height: 6px; border-radius: 3px; background: var(--line-strong)"></span>
+      <span style="width: 6px; height: 6px; border-radius: 3px; background: var(--line-strong)"></span>
+      <span style="width: 6px; height: 6px; border-radius: 3px; background: var(--line-strong)"></span>
+      <span style="width: 6px; height: 6px; border-radius: 3px; background: var(--line-strong)"></span>
+      <span style="width: 6px; height: 6px; border-radius: 3px; background: var(--line-strong)"></span>
+    </div>
+    <button type="button" aria-label="Next screen" style="display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--radius-md); background: var(--surface-sunken); color: var(--ink); cursor: pointer"><x-import component-from-global-scope="Drawpane.Icon" name="chevron-right"></x-import></button>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"dark"},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.theme ?? 'dark' };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane token export and sync</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-sheet">
+  <header class="u-sheethead"><h1 class="u-h1">Tokens out to code</h1><p class="u-lead">Export once, or keep a repo in sync. Every push is a pull request you can read before it lands.</p></header>
+  <div class="u-grid">
+    <section class="u-modal" style="width: 420px">
+      <div class="u-head" style="padding: 14px 16px 8px"><h2 class="u-h2">Export tokens</h2></div>
+      <div class="u-col" style="padding: 0 16px 16px">
+        <span class="u-xs u-muted">Format</span>
+        <sc-for list="{{fmt}}" as="f" hint-placeholder-count="5"><div class="u-row u-sm" style="height: 30px"><span class="u-radio {{f.on}}"></span><span class="u-grow">{{f.n}}</span><span class="u-xs u-muted">{{f.d}}</span></div></sc-for>
+        <span class="u-xs u-muted">Include</span>
+        <div class="u-row" style="gap: 4px; flex-wrap: wrap"><span class="u-chip u-chip--comp">Color · 3 modes</span><span class="u-chip u-chip--comp">Type</span><span class="u-chip u-chip--comp">Space</span><span class="u-chip u-chip--comp">Radius</span><span class="u-chip u-chip--muted">Motion</span></div>
+        <div class="u-row" style="justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button">Download</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Set up sync</x-import></div>
+      </div>
+    </section>
+    <section class="u-modal" style="width: 420px">
+      <div class="u-head" style="padding: 14px 16px 8px"><h2 class="u-h2">Sync to GitHub</h2><span class="u-chip u-chip--ok">connected</span></div>
+      <div class="u-col" style="padding: 0 16px 16px">
+        <div class="u-dl"><dt>Repository</dt><dd class="u-mono">acme/web</dd><dt>Path</dt><dd class="u-mono">packages/ui/tokens/</dd><dt>Branch</dt><dd class="u-mono">design-tokens → main</dd><dt>When</dt><dd>Each time the library is published</dd></div>
+        <span class="u-cap">Next push · 4 changes</span>
+        <pre class="u-code"><span style="color: var(--danger)">-  "brand-600": "#1e3aa8",</span>
+<span style="color: var(--success)">+  "brand-600": "#1d39a3",</span>
+<span style="color: var(--success)">+  "brand-700": "#172d82",</span>
+<span style="color: var(--danger)">-  "radius-lg": "12px",</span>
+<span style="color: var(--success)">+  "radius-lg": "14px",</span></pre>
+        <div class="u-note u-note--signal"><x-import component-from-global-scope="Drawpane.Icon" name="warning" size="12"></x-import><span class="u-grow">radius-lg is used in 41 code files. The PR will list them.</span></div>
+        <div class="u-row" style="justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button">Skip this time</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Open pull request</x-import></div>
+      </div>
+    </section>
+    <section class="u-pane" style="width: 360px">
+      <div class="u-head" style="padding: 14px 16px 8px"><h2 class="u-h2">Sync history</h2></div>
+      <sc-for list="{{hist}}" as="h" hint-placeholder-count="4"><div class="u-row" style="padding: 10px 16px; border-top: 1px solid var(--line)"><span class="u-grow u-col" style="gap: 0"><span class="u-sm u-b">{{h.t}}</span><span class="u-xs u-muted">{{h.d}}</span></span><span class="{{h.c}}">{{h.s}}</span></div></sc-for>
+      <div class="u-xs u-muted" style="padding: 12px 16px; border-top: 1px solid var(--line)">Code → design works too: tokens changed in the repo show up here as a proposed library update.</div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      fmt: [{ n: 'W3C Design Tokens (JSON)', d: 'with modes', on: 'is-on' }, { n: 'Style Dictionary', d: 'config included', on: '' }, { n: 'CSS variables', d: 'per mode', on: '' }, { n: 'Tailwind theme', d: 'tailwind.config', on: '' }, { n: 'Swift / Kotlin', d: 'enums', on: '' }],
+      hist: [{ t: 'PR #482 · library 2.4.1', d: 'Nov 4 · merged by Kai', s: 'merged', c: 'u-chip u-chip--ok' }, { t: 'PR #470 · library 2.4.0', d: 'Oct 28 · merged by Kai', s: 'merged', c: 'u-chip u-chip--ok' }, { t: 'From code · spacing-50 added', d: 'Oct 20 · proposed to library', s: 'accepted', c: 'u-chip u-chip--comp' }, { t: 'PR #455 · library 2.3.2', d: 'Oct 9 · closed', s: 'closed', c: 'u-chip u-chip--muted' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

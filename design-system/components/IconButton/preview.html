@@ -1,0 +1,23 @@
+<!-- @dsCard group="Actions" height=88 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>IconButton — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.IconButton, { icon: 'pointer', label: 'Move', shortcut: 'V', pressed: true, size: 'md' }),
+      h(D.IconButton, { icon: 'board', label: 'Board', shortcut: 'B', pressed: false, size: 'md' }),
+      h(D.IconButton, { icon: 'rectangle', label: 'Rectangle', shortcut: 'R', pressed: false, size: 'md' }),
+      h(D.IconButton, { icon: 'pen', label: 'Pen', shortcut: 'P', pressed: false, size: 'md' }),
+      h(D.IconButton, { icon: 'text', label: 'Text', shortcut: 'T', pressed: false, size: 'md' }),
+      h('span', { style: { width: 1, height: 16, background: 'var(--line-strong)' } }),
+      h(D.IconButton, { icon: 'xray', label: 'Layout X-ray', shortcut: 'Alt', pressed: true }),
+      h(D.IconButton, { icon: 'plus', label: 'Add fill' }),
+      h(D.IconButton, { icon: 'more', label: 'More options' }))
+  );
+</script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+<!-- @dsCard group="Overlays" height=312 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Menu — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style="background:var(--canvas);align-items:flex-start"></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(D.Menu, { label: 'Layer', items: [
+      { label: 'Copy', shortcut: '\u2318 C' },
+      { label: 'Paste here', shortcut: '\u2318 V', active: true },
+      { separator: true },
+      { heading: 'Selection' },
+      { label: 'Add auto layout', shortcut: '\u21e7 A', icon: 'layout-col' },
+      { label: 'Create component', shortcut: '\u2325 \u2318 K', icon: 'component' },
+      { label: 'Branch from here', icon: 'branch' },
+      { label: 'Show history', icon: 'history', submenu: true },
+      { separator: true },
+      { label: 'Delete', shortcut: '\u232b', danger: true }
+    ] })
+  );
+</script>
+</body>
+</html>

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane agent asks a question</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" branch="agent/empty-states" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="upcoming" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas">
+      <div class="u-pop u-row" style="position: absolute; left: 50%; top: 4px; transform: translateX(-50%); padding: 6px 8px 6px 6px; white-space: nowrap">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Empty states agent" status="waiting" on-behalf-of="Sam" hide-status="{{H.yes}}"></x-import>
+        <span class="u-sm">Paused 2 min · waiting for your answer</span>
+      </div>
+      <div style="position: absolute; left: 24px; top: 70px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="empty" hint-size="340px,560px"></dc-import>
+        <span class="u-outline u-outline--agent" style="left: 32px; top: 212px; width: 276px; height: 172px; border-radius: 10px"></span>
+        <span class="u-label u-label--agent" style="left: 32px; top: 390px">Which empty-state art?</span>
+      </div>
+      <div style="position: absolute; left: 392px; top: 70px; display: grid; gap: 14px">
+        <sc-for list="{{opts}}" as="o" hint-placeholder-count="3">
+          <div class="u-row" style="align-items: stretch">
+            <div style="{{o.card}}">
+              <span style="{{o.art}}">{{o.glyph}}</span>
+              <span style="font-size: 12px; font-weight: 600; color: #16181d">Nothing on today</span>
+              <span style="font-size: 10px; color: #5b616e">Enjoy the quiet</span>
+            </div>
+            <div class="u-col u-col--tight" style="width: 150px; align-content: center">
+              <span class="u-row"><span class="u-chip u-chip--agent">{{o.key}}</span><strong class="u-md">{{o.name}}</strong></span>
+              <span class="u-xs u-muted">{{o.note}}</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Agent">
+      <div class="u-row" style="padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{H.modes}}"></x-import>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past runs"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+      <div class="u-col u-col--loose" style="flex: 1; min-height: 0; padding: 12px; overflow: hidden">
+        <div role="list" style="display: grid; gap: 2px">
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Read Upcoming and the Acme library" meta="2 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="done" label="Inserted EmptyState in Upcoming" ops="insert EmptyState variant=list" meta="1 s"></x-import>
+          <x-import component-from-global-scope="Drawpane.AgentStep" status="review" label="Needs a decision from Sam" detail="Your library has both an illustration set and an icon set"></x-import>
+        </div>
+        <div class="u-pane" style="box-shadow: inset 0 0 0 1.5px var(--agent); background: var(--surface-raised)">
+          <div class="u-col" style="padding: 12px">
+            <span class="u-row u-xs" style="color: var(--agent-ink)"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import>Question from the agent</span>
+            <strong class="u-md">Illustrations or icons for empty lists? Your skill doesn't say, and both exist in Acme.</strong>
+            <sc-for list="{{opts}}" as="o" hint-placeholder-count="3">
+              <div class="u-item {{o.sel}}" style="box-shadow: inset 0 0 0 1px var(--line)"><span class="u-chip u-chip--agent">{{o.key}}</span><span class="u-grow">{{o.name}}</span><span class="u-xs u-muted">{{o.cost}}</span></div>
+            </sc-for>
+            <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Remember for this skill"></x-import>
+            <div class="u-row"><x-import component-from-global-scope="Drawpane.Button" size="sm">You decide</x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Use B · Icon</x-import></div>
+          </div>
+        </div>
+        <span class="u-xs u-muted">Sam was notified on the phone and in the inbox. The run stays paused and costs nothing while it waits.</span>
+      </div>
+      <div style="padding: 10px 12px 12px; border-top: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.PromptField" model="Claude Opus 5.5" placeholder="Or answer in your own words" context="{{ctx}}"></x-import></div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var card = function (sel) { return 'width: 170px; height: 112px; box-sizing: border-box; display: grid; place-content: center; justify-items: center; gap: 4px; border-radius: 10px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12)' + (sel ? ', 0 0 0 2px var(--agent)' : ''); };
+    return {
+      ctx: [{ label: 'Upcoming', icon: 'board' }],
+      opts: [
+        { key: 'A', name: 'Illustration', note: 'Acme illustration set · 3 KB each · warmer', cost: '+2 steps', glyph: '', card: card(false), art: 'width: 64px; height: 40px; border-radius: 10px; background: linear-gradient(135deg, #ffd8c7, #eef1fb)', sel: '' },
+        { key: 'B', name: 'Icon', note: 'Calendar icon in a soft square · matches tab bar', cost: 'fastest', glyph: '', card: card(true), art: 'width: 36px; height: 36px; border-radius: 10px; background: #eef1fb; box-shadow: inset 0 0 0 8px #eef1fb, inset 0 0 0 20px #2b4fd6', sel: 'is-sel' },
+        { key: 'C', name: 'Text only', note: 'No art · quietest, smallest', cost: '+0 steps', glyph: '', card: card(false), art: 'display: none', sel: '' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

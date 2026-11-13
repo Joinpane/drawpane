@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane menus and shortcuts</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; padding: 32px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui)">
+  <header style="display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 24px">
+    <h1 style="margin: 0; font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em">Menus and shortcuts</h1>
+    <p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted)">Every menu item is also a command in ⌘K and an action agents can call, with the same name.</p>
+  </header>
+  <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <figure style="margin: 0; display: grid; gap: 8px; width: 240px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">App menu</figcaption>
+      <div style="display: flex; gap: 4px; align-items: flex-start">
+        <x-import component-from-global-scope="Drawpane.Menu" label="Drawpane" items="{{app}}"></x-import>
+      </div>
+    </figure>
+    <figure style="margin: 0; display: grid; gap: 8px; width: 220px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Submenu · Export</figcaption>
+      <x-import component-from-global-scope="Drawpane.Menu" label="Export" items="{{exportMenu}}"></x-import>
+    </figure>
+    <figure style="margin: 0; display: grid; gap: 8px; width: 240px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Layer context menu</figcaption>
+      <x-import component-from-global-scope="Drawpane.Menu" label="Hero card" items="{{layer}}"></x-import>
+    </figure>
+    <figure style="margin: 0; display: grid; gap: 8px; width: 220px">
+      <figcaption style="font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Canvas context menu · nothing selected</figcaption>
+      <x-import component-from-global-scope="Drawpane.Menu" label="Canvas" items="{{canvasMenu}}"></x-import>
+      <figcaption style="margin-top: 16px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-muted)">Shape tool dropdown</figcaption>
+      <x-import component-from-global-scope="Drawpane.Menu" label="Shapes" items="{{shapes}}"></x-import>
+    </figure>
+
+    <section aria-label="Keyboard shortcuts" style="flex: 1 1 360px; max-width: 420px; border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-modal); overflow: hidden">
+      <div style="display: flex; align-items: center; gap: 8px; padding: 14px 14px 10px">
+        <h2 style="flex: 1; margin: 0; font-size: 15px; line-height: 20px; font-weight: 600">Keyboard shortcuts</h2>
+        <x-import component-from-global-scope="Drawpane.Kbd">⌘ /</x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import>
+      </div>
+      <div style="padding: 0 14px 10px; display: grid; gap: 8px">
+        <x-import component-from-global-scope="Drawpane.TextField" aria-label="Search shortcuts" default-value="" placeholder="Search 186 shortcuts or press a key"></x-import>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Shortcut group" value="tools" options="{{groups}}"></x-import>
+      </div>
+      <div style="padding: 0 14px 14px; display: grid">
+        <sc-for list="{{keys}}" as="k" hint-placeholder-count="10">
+          <div style="{{k.row}}"><span style="flex: 1">{{k.label}}</span><span style="{{k.learn}}">{{k.learnText}}</span><x-import component-from-global-scope="Drawpane.Kbd">{{k.key}}</x-import></div>
+        </sc-for>
+      </div>
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-muted)"><span>Layout: Figma-compatible</span><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="ghost">Customize…</x-import></div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var row = 'display: flex; align-items: center; gap: 8px; height: 32px; border-bottom: 1px solid var(--line); font-size: 13px';
+    var K = [['Move', 'V', 0], ['Board', 'F', 0], ['Rectangle', 'R', 0], ['Ellipse', 'O', 0], ['Pen', 'P', 0], ['Text', 'T', 0], ['Comment', 'C', 0], ['Hand (hold)', 'Space', 0], ['Layout X-ray', '⌥ X', 1], ['Focus mode', '⇧ F', 1], ['Ask an agent', '⌘ ⇧ A', 1]];
+    return {
+      theme: T,
+      app: [
+        { heading: 'Mobile app' },
+        { label: 'New file', shortcut: '⌘ N' }, { label: 'Open recent', submenu: true }, { label: 'Import…', shortcut: '⌘ ⇧ I' }, { label: 'Export', submenu: true, active: true },
+        { separator: true },
+        { label: 'Edit', submenu: true }, { label: 'View', submenu: true }, { label: 'Object', submenu: true }, { label: 'Text', submenu: true }, { label: 'Arrange', submenu: true },
+        { separator: true },
+        { label: 'Plugins', submenu: true }, { label: 'Agents', submenu: true }, { label: 'Preferences', shortcut: '⌘ ,' }, { label: 'Help and shortcuts', shortcut: '⌘ /' }
+      ],
+      exportMenu: [
+        { label: 'Selection…', shortcut: '⌘ ⇧ E' }, { label: 'All boards as PNG' }, { label: 'Boards as PDF' }, { label: 'Copy as SVG', shortcut: '⌘ ⇧ C' }, { label: 'Copy as code' },
+        { separator: true }, { label: 'Penpot file (.penpot)' }, { label: 'Drawpane bundle (.dpz)' }, { label: 'Tokens (W3C JSON)' }
+      ],
+      layer: [
+        { label: 'Copy', shortcut: '⌘ C' }, { label: 'Paste here', shortcut: '⌘ V' }, { label: 'Paste properties', shortcut: '⌘ ⌥ V' }, { label: 'Duplicate', shortcut: '⌘ D' },
+        { separator: true },
+        { label: 'Bring to front', shortcut: '⌘ ]' }, { label: 'Send to back', shortcut: '⌘ [' }, { label: 'Group', shortcut: '⌘ G' }, { label: 'Add auto layout', shortcut: '⇧ A' },
+        { separator: true },
+        { icon: 'component', label: 'Create component', shortcut: '⌘ ⌥ K' }, { icon: 'agent', label: 'Ask agent about this…', shortcut: '⌘ ⇧ A' }, { label: 'Copy link to layer' },
+        { separator: true },
+        { label: 'Hide', shortcut: '⇧ ⌘ H' }, { label: 'Lock', shortcut: '⇧ ⌘ L' }, { label: 'Delete', shortcut: '⌫', danger: true }
+      ],
+      canvasMenu: [{ label: 'Paste', shortcut: '⌘ V' }, { label: 'Show rulers', checked: true, shortcut: '⇧ R' }, { label: 'Show comments', checked: true }, { label: 'Show agent activity', checked: true }, { label: 'Pixel grid' }, { separator: true }, { label: 'Zoom to fit', shortcut: '⇧ 1' }],
+      shapes: [{ icon: 'rectangle', label: 'Rectangle', shortcut: 'R', active: true }, { icon: 'ellipse', label: 'Ellipse', shortcut: 'O' }, { icon: 'pen', label: 'Line', shortcut: 'L' }, { icon: 'pen', label: 'Arrow', shortcut: '⇧ L' }, { icon: 'image', label: 'Place image…', shortcut: '⌘ ⇧ K' }],
+      groups: [{ value: 'tools', label: 'Tools' }, { value: 'edit', label: 'Edit' }, { value: 'view', label: 'View' }, { value: 'text', label: 'Text' }],
+      keys: K.map(function (k) { return { label: k[0], key: k[1], row: row, learn: k[2] ? 'height: 16px; padding: 0 5px; border-radius: var(--radius-xs); background: var(--signal-soft); color: var(--signal-ink); font-size: 10px; line-height: 16px; font-weight: 600' : 'display: none', learnText: k[2] ? 'Drawpane' : '' }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

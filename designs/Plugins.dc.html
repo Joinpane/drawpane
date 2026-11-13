@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane plugins</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <aside aria-label="Plugins" style="width: 320px; height: 824px; box-sizing: border-box; display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pane); overflow: hidden">
+      <div style="display: flex; align-items: center; gap: 8px; padding: 12px 12px 8px">
+        <h2 style="flex: 1; margin: 0; font-size: 13px; line-height: 18px; font-weight: 600">Plugins</h2>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Install from URL"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close plugins"></x-import>
+      </div>
+      <div style="padding: 0 12px 8px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Plugin list" value="installed" options="{{tabs}}"></x-import></div>
+      <div style="padding: 0 12px 10px"><x-import component-from-global-scope="Drawpane.TextField" aria-label="Search plugins" default-value="" placeholder="Search 412 plugins"></x-import></div>
+      <div style="flex: 1; min-height: 0; overflow: hidden; display: grid; align-content: start; gap: 2px; padding: 0 6px">
+        <sc-for list="{{plugins}}" as="p" hint-placeholder-count="6">
+          <div style="{{p.row}}">
+            <span style="{{p.logo}}">{{p.mono}}</span>
+            <span style="flex: 1; min-width: 0; display: grid">
+              <span style="display: flex; align-items: center; gap: 6px; font-size: 13px; line-height: 18px; font-weight: 600">{{p.name}}<span style="{{p.badge}}">{{p.badgeText}}</span></span>
+              <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{p.meta}}</span>
+            </span>
+            <x-import component-from-global-scope="Drawpane.IconButton" icon="play" label="Run plugin"></x-import>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display: grid; gap: 6px; margin: 8px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-sunken); font-size: 12px; line-height: 16px">
+        <span style="display: flex; align-items: center; gap: 6px; font-weight: 600"><x-import component-from-global-scope="Drawpane.Icon" name="plug" size="12"></x-import>Runs Penpot plugins unchanged</span>
+        <span style="color: var(--ink-muted)">API v1 matches Penpot 2.x. API v2 adds branches, typed actions and render checks, the same actions agents use.</span>
+      </div>
+    </aside>
+
+    <main aria-label="Canvas" style="flex: 999 1 560px; min-width: 0; height: 824px; position: relative">
+      <div style="position: absolute; left: 40px; top: 40px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+      </div>
+
+      <section aria-label="Plugin window: Unsplash" style="position: absolute; left: 420px; top: 40px; width: 340px; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); overflow: hidden">
+        <div style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--line)">
+          <span style="display: grid; place-items: center; width: 18px; height: 18px; border-radius: 4px; background: #16181d; color: #ffffff; font-size: 10px; font-weight: 700">U</span>
+          <span style="flex: 1; font-size: 12px; font-weight: 600">Unsplash</span>
+          <span style="font-size: 11px; color: var(--ink-muted)">sandboxed</span>
+          <x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close plugin"></x-import>
+        </div>
+        <div style="padding: 10px; display: grid; gap: 10px">
+          <x-import component-from-global-scope="Drawpane.TextField" aria-label="Search photos" default-value="calendar desk"></x-import>
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px">
+            <sc-for list="{{photos}}" as="ph" hint-placeholder-count="6"><span style="{{ph}}"></span></sc-for>
+          </div>
+          <span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">Click a photo to fill the selected layer · Hero card / Image</span>
+        </div>
+      </section>
+
+      <div role="alertdialog" aria-label="Plugin permissions" style="position: absolute; left: 420px; top: 440px; width: 360px; padding: 16px; box-sizing: border-box; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-popover); display: grid; gap: 12px">
+        <div style="display: flex; gap: 10px; align-items: center">
+          <span style="display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: #0f766e; color: #ffffff; font-size: 13px; font-weight: 700">T</span>
+          <div style="display: grid"><strong style="font-size: 14px; line-height: 20px">Token Sync wants access</strong><span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">by Ana Ruiz · v3.2 · open source</span></div>
+        </div>
+        <ul style="margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; font-size: 13px; line-height: 18px">
+          <sc-for list="{{perms}}" as="pm" hint-placeholder-count="3">
+            <li style="display: flex; gap: 8px; align-items: flex-start"><span style="{{pm.dot}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{pm.icon}}" size="12"></x-import></span><span style="display: grid"><span>{{pm.label}}</span><span style="font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{pm.detail}}</span></span></li>
+          </sc-for>
+        </ul>
+        <div style="display: flex; gap: 8px; justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button">Not now</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary">Allow for this file</x-import></div>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var row = 'display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 6px; border-radius: var(--radius-sm);';
+    var logo = function (c) { return 'flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: #ffffff; font-size: 12px; font-weight: 700; background: ' + c; };
+    var bb = 'height: 16px; padding: 0 5px; border-radius: var(--radius-xs); font-size: 10px; line-height: 16px; font-weight: 600; ';
+    var P = [
+      ['Unsplash', 'Running · photos into fills', '#16181d', 'U', 'Running', 'background: var(--surface-active); color: var(--success)', true],
+      ['Token Sync', 'Push tokens to GitHub · needs permission', '#0f766e', 'T', 'v2', 'background: var(--agent-soft); color: var(--agent-ink)', false],
+      ['Contrast checker', 'Last run 2 days ago', '#c8312b', 'C', '', '', false],
+      ['Lorem ipsum', 'Penpot plugin · API v1', '#b7791f', 'L', '', '', false],
+      ['Iconify', '200,000 icons · Penpot plugin', '#2b4fd6', 'I', '', '', false],
+      ['Table builder', 'Update available · 1.4 → 1.5', '#6b4bd6', 'Tb', 'Update', 'background: var(--signal-soft); color: var(--signal-ink)', false],
+      ['Rename it', 'Batch rename layers', '#5b616e', 'R', '', '', false]
+    ];
+    var ph = ['#d8c8b0', '#9fb3c8', '#c9d6c2', '#e6d3c5', '#a9a29a', '#cfd8e3'];
+    return {
+      theme: T,
+      tabs: [{ value: 'installed', label: 'Installed' }, { value: 'browse', label: 'Browse' }, { value: 'dev', label: 'Development' }],
+      plugins: P.map(function (p) { return { name: p[0], meta: p[1], logo: logo(p[2]), mono: p[3], badgeText: p[4], badge: p[4] ? bb + p[5] : 'display: none', row: row + (p[6] ? ' background: var(--surface-active)' : '') }; }),
+      photos: ph.map(function (c, i) { return 'display: block; aspect-ratio: 1; border-radius: 6px; background: linear-gradient(135deg,' + c + ', #ffffff 160%)' + (i === 1 ? '; box-shadow: 0 0 0 2px var(--signal)' : ''); }),
+      perms: [
+        { icon: 'layers', label: 'Read and change this file', detail: 'Only while the plugin window is open', dot: 'display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--surface-sunken); color: var(--icon)' },
+        { icon: 'token', label: 'Read the team library', detail: 'Acme design system tokens', dot: 'display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--surface-sunken); color: var(--icon)' },
+        { icon: 'plug', label: 'Reach api.github.com', detail: 'No other network access', dot: 'display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--signal-soft); color: var(--signal-ink)' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

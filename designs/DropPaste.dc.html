@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane drop and paste</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas with a drop in progress">
+      <div style="position: absolute; inset: 0; border-radius: var(--radius-lg); box-shadow: inset 0 0 0 2px var(--signal); background: color-mix(in srgb, var(--signal) 5%, transparent)"></div>
+      <div style="position: absolute; left: 40px; top: 50px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span style="position: absolute; left: 20px; top: 118px; width: 300px; height: 66px; border-radius: 14px; box-shadow: inset 0 0 0 2px var(--signal); background: color-mix(in srgb, var(--signal) 14%, transparent)"></span>
+        <span class="u-label u-label--signal" style="left: 20px; top: 190px">Drop to fill Hero card</span>
+      </div>
+      <div class="u-pop u-row" style="position: absolute; left: 250px; top: 210px; padding: 6px 10px 6px 6px; transform: rotate(-3deg)"><span style="width: 44px; height: 32px; border-radius: 4px; background: linear-gradient(135deg,#cfd8e3,#6f7f94)"></span><span class="u-sm u-b">3 files</span></div>
+      <section class="u-pop u-col" style="position: absolute; left: 420px; top: 50px; width: 330px; padding: 12px">
+        <strong class="u-md">What happens when you drop or paste</strong>
+        <sc-for list="{{kinds}}" as="k" hint-placeholder-count="7"><div class="u-row u-row--top u-sm"><span class="u-chip u-chip--muted" style="width: 70px; justify-content: center">{{k.k}}</span><span class="u-grow">{{k.d}}</span></div></sc-for>
+      </section>
+      <section class="u-pop u-col" style="position: absolute; left: 420px; top: 420px; width: 330px; padding: 12px">
+        <div class="u-row"><strong class="u-md u-grow">Pasted from Figma</strong><span class="u-chip u-chip--ok">converted</span></div>
+        <span class="u-sm u-muted">Settings card · 34 layers. Auto layout, text styles and 2 components came across; 1 effect was approximated.</span>
+        <div class="u-row"><x-import component-from-global-scope="Drawpane.Button" size="sm">Show what changed</x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm">Link to Acme components</x-import></div>
+      </section>
+      <div class="u-pop u-col" style="position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); width: 420px; padding: 10px 12px">
+        <sc-for list="{{up}}" as="u" hint-placeholder-count="3"><div class="u-row u-sm"><x-import component-from-global-scope="Drawpane.Icon" name="image" size="12"></x-import><span class="u-grow u-ellip">{{u.n}}</span><span class="u-xs u-muted" style="width: 90px; text-align: right">{{u.s}}</span><div class="u-bar" style="width: 90px; height: 4px"><span style="{{u.w}}"></span></div></div></sc-for>
+        <span class="u-xs u-muted">Uploading to R2 · images over 4,000 px are kept full size and shown at screen resolution</span>
+      </div>
+    </main>
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      kinds: [{ k: 'Images', d: 'Onto a shape: fill it. Onto empty canvas: new image layer at real size.' }, { k: 'SVG', d: 'Editable vectors, groups kept, colors matched to tokens when exact.' }, { k: 'Figma', d: 'Paste a Figma selection: layers, auto layout and text styles convert.' }, { k: 'Penpot', d: 'Paste between Penpot and Drawpane: identical, same file format.' }, { k: 'HTML/CSS', d: 'Paste markup: becomes frames with auto layout.' }, { k: 'Text', d: 'Plain text: a text layer. Tabs or CSV: a table of text.' }, { k: 'Fonts', d: 'Drop .otf / .ttf: offered to add to team fonts.' }],
+      up: [{ n: 'hero-photo@2x.png · 2.4 MB', s: 'done', w: 'width: 100%; background: var(--success)' }, { n: 'team-offsite.jpg · 5.1 MB', s: '64%', w: 'width: 64%' }, { n: 'icons.svg · 18 KB', s: 'waiting', w: 'width: 0' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

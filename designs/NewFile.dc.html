@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane new file</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="min-height: 900px; box-sizing: border-box; background: var(--surface); color: var(--ink); font-family: var(--font-ui)">
+  <header style="display: flex; align-items: center; gap: 12px; padding: 12px 24px; border-bottom: 1px solid var(--line)">
+    <svg width="22" height="22" viewBox="0 0 32 32" role="img" aria-label="Drawpane"><rect x="3.25" y="3.25" width="18.5" height="18.5" rx="4" fill="none" stroke="var(--ink)" stroke-width="2.5"></rect><rect x="10" y="10" width="19" height="19" rx="4" fill="var(--signal)"></rect></svg>
+    <span style="font-size: 13px; line-height: 18px; color: var(--ink-muted)">Acme Design / <b style="color: var(--ink); font-weight: 600">Mobile</b> / New file</span>
+    <span style="flex: 1"></span>
+    <x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close" shortcut="esc" size="md"></x-import>
+  </header>
+
+  <main style="max-width: 1120px; margin: 0 auto; padding: 40px 24px 48px; display: grid; gap: 36px">
+    <div style="display: flex; align-items: flex-end; flex-wrap: wrap; gap: 16px">
+      <div style="flex: 1 1 420px">
+        <h1 style="margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 40px; line-height: 44px">Start with a blank pane</h1>
+        <p style="margin: 8px 0 0; font-size: 14px; line-height: 20px; color: var(--ink-muted)">Pick a size, or begin from your team's design system so tokens and components are ready.</p>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px; color: var(--ink-muted)">
+        Or press <x-import component-from-global-scope="Drawpane.Kbd">N</x-import> anywhere for a blank file
+      </div>
+    </div>
+
+    <section aria-labelledby="sizes">
+      <h2 id="sizes" style="margin: 0 0 12px; font-size: 13px; line-height: 18px; font-weight: 600">Frame size</h2>
+      <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px">
+        <sc-for list="{{sizes}}" as="s" hint-placeholder-count="6">
+          <button type="button" style="{{s.card}}">
+            <span style="display: grid; place-items: center; height: 72px"><span style="{{s.shape}}"></span></span>
+            <span style="font-size: 13px; line-height: 18px; font-weight: 600">{{s.name}}</span>
+            <span style="font-family: var(--font-mono); font-size: 11px; line-height: 14px; color: var(--ink-muted)">{{s.dim}}</span>
+          </button>
+        </sc-for>
+      </div>
+    </section>
+
+    <section aria-labelledby="systems" style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 16px; border-radius: var(--radius-md); background: var(--component-soft)">
+      <span style="display: grid; place-items: center; width: 44px; height: 44px; border-radius: var(--radius-md); background: var(--surface-raised); color: var(--component)"><x-import component-from-global-scope="Drawpane.Icon" name="component"></x-import></span>
+      <div style="flex: 1 1 320px">
+        <h2 id="systems" style="margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--component-ink)">Start from Acme design system 2.4.0</h2>
+        <p style="margin: 2px 0 0; font-size: 13px; line-height: 18px; color: var(--ink)">48 components, 179 tokens, 2 themes. New frames get its page and grid.</p>
+      </div>
+      <x-import component-from-global-scope="Drawpane.Button" size="lg">Use this system</x-import>
+    </section>
+
+    <section aria-labelledby="templates">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px">
+        <h2 id="templates" style="margin: 0; font-size: 13px; line-height: 18px; font-weight: 600">Templates</h2>
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Source" value="team" options="{{sources}}"></x-import>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 16px">
+        <sc-for list="{{templates}}" as="t" hint-placeholder-count="4">
+          <button type="button" style="display: grid; gap: 10px; padding: 0; border: 0; background: transparent; color: var(--ink); text-align: left; cursor: pointer">
+            <span style="{{t.thumb}}"><span style="{{t.a}}"></span><span style="{{t.b}}"></span></span>
+            <span style="display: flex; flex-direction: column">
+              <span style="font-size: 13px; line-height: 18px; font-weight: 600">{{t.name}}</span>
+              <span style="font-size: 12px; line-height: 16px; color: var(--ink-muted)">{{t.meta}}</span>
+            </span>
+          </button>
+        </sc-for>
+      </div>
+    </section>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var card = 'display: grid; gap: 4px; justify-items: center; padding: 12px; border-radius: var(--radius-md); background: var(--surface-sunken); color: var(--ink); cursor: pointer; border: 1px solid ';
+    var shape = function (w, h) { return 'width: ' + w + 'px; height: ' + h + 'px; border-radius: 4px; background: var(--surface-raised); box-shadow: 0 0 0 1.5px var(--line-control)'; };
+    var thumb = function (bg) { return 'position: relative; display: block; aspect-ratio: 16 / 10; border-radius: var(--radius-md); background: ' + bg + '; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden'; };
+    return {
+      theme: this.props.theme ?? 'light',
+      sizes: [
+        { name: 'Phone', dim: '390 × 844', card: card + 'var(--signal); box-shadow: inset 0 0 0 1px var(--signal); background: var(--signal-soft)', shape: shape(32, 64) },
+        { name: 'Tablet', dim: '834 × 1194', card: card + 'transparent', shape: shape(46, 64) },
+        { name: 'Desktop', dim: '1440 × 1024', card: card + 'transparent', shape: shape(80, 56) },
+        { name: 'Watch', dim: '198 × 242', card: card + 'transparent', shape: shape(32, 38) },
+        { name: 'Slide', dim: '1920 × 1080', card: card + 'transparent', shape: shape(88, 50) },
+        { name: 'Custom', dim: 'Type W × H', card: card + 'transparent', shape: 'width: 48px; height: 48px; border-radius: 4px; box-shadow: 0 0 0 1.5px var(--line-control); background: transparent; outline: 1.5px dashed var(--line-control); outline-offset: -1px' }
+      ],
+      sources: [{ value: 'team', label: 'Your team' }, { value: 'community', label: 'Community' }],
+      templates: [
+        { name: 'iOS app starter', meta: 'Acme · 12 screens · uses Acme DS', thumb: thumb('#eef1fb'), a: 'position: absolute; left: 12%; top: 14%; width: 22%; height: 72%; border-radius: 6px; background: #ffffff', b: 'position: absolute; left: 40%; top: 14%; width: 22%; height: 72%; border-radius: 6px; background: #2b4fd6' },
+        { name: 'Admin dashboard', meta: 'Acme · 8 pages · responsive', thumb: thumb('#f3f4f6'), a: 'position: absolute; left: 8%; top: 12%; width: 18%; height: 76%; border-radius: 4px; background: #16181d', b: 'position: absolute; left: 30%; top: 12%; width: 62%; height: 30%; border-radius: 4px; background: #ffffff' },
+        { name: 'Design review board', meta: 'Acme · critique template', thumb: thumb('#fff4ed'), a: 'position: absolute; left: 10%; top: 18%; width: 36%; height: 50%; border-radius: 6px; background: #ffffff', b: 'position: absolute; left: 54%; top: 18%; width: 36%; height: 50%; border-radius: 6px; background: #ffd8c7' },
+        { name: 'Release notes slides', meta: 'Acme · 16:9 · 6 layouts', thumb: thumb('#16181d'), a: 'position: absolute; left: 10%; top: 30%; width: 50%; height: 12%; border-radius: 3px; background: #ffffff', b: 'position: absolute; left: 10%; top: 50%; width: 30%; height: 6%; border-radius: 3px; background: #9aa0ab' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

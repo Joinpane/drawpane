@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane high contrast and large text</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: #000000; color: #ffffff; font-family: var(--font-ui); overflow: hidden; font-size: 15px">
+  <header class="u-row" style="height: 48px; padding: 0 12px; border-radius: 10px; border: 2px solid #ffffff">
+    <strong style="font-size: 17px">Mobile app</strong><span style="padding: 2px 8px; border: 2px solid #ffffff; border-radius: 6px; font-size: 14px">main</span>
+    <span class="u-spacer"></span>
+    <sc-for list="{{tools}}" as="t" hint-placeholder-count="6"><span style="{{t.s}}">{{t.n}}</span></sc-for>
+    <span class="u-spacer"></span>
+    <span style="padding: 6px 14px; border-radius: 8px; background: #ffd400; color: #000000; font-weight: 700">Share</span>
+  </header>
+  <div style="flex: 1; display: flex; gap: 12px; min-height: 0">
+    <aside style="width: 280px; border: 2px solid #ffffff; border-radius: 10px; padding: 12px; display: grid; gap: 4px; align-content: start" aria-label="Layers">
+      <strong style="font-size: 16px; margin-bottom: 6px">Layers</strong>
+      <sc-for list="{{layers}}" as="l" hint-placeholder-count="7"><span style="{{l.s}}">{{l.n}}</span></sc-for>
+    </aside>
+    <main style="flex: 1; position: relative">
+      <div style="position: absolute; left: 80px; top: 40px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span style="position: absolute; left: 30px; top: 270px; width: 280px; height: 56px; border-radius: 12px; box-shadow: 0 0 0 3px #000000, 0 0 0 6px #ffd400"></span>
+      </div>
+      <div style="position: absolute; left: 470px; top: 40px; width: 260px; display: grid; gap: 14px">
+        <div style="padding: 10px 12px; border-radius: 10px; border: 2px solid #ffffff"><strong>Presence with patterns</strong>
+          <div class="u-row" style="margin-top: 8px; gap: 10px"><sc-for list="{{pres}}" as="p" hint-placeholder-count="3"><span style="{{p}}"></span></sc-for></div>
+          <span style="display: block; margin-top: 6px; font-size: 13px">Stripes, dots and solid tell people apart without color.</span>
+        </div>
+        <div style="padding: 10px 12px; border-radius: 10px; border: 2px dashed #c4b2ff; color: #c4b2ff"><strong>Agents</strong><span style="display: block; font-size: 13px">Always dashed, always labeled "Agent".</span></div>
+      </div>
+    </main>
+    <aside style="width: 300px; border: 2px solid #ffffff; border-radius: 10px; padding: 12px; display: grid; gap: 10px; align-content: start" aria-label="Inspector">
+      <strong style="font-size: 16px">Event row</strong>
+      <sc-for list="{{props}}" as="p" hint-placeholder-count="5"><div class="u-row" style="gap: 10px"><span style="width: 80px">{{p.k}}</span><span style="flex: 1; padding: 6px 10px; border: 2px solid #ffffff; border-radius: 6px">{{p.v}}</span></div></sc-for>
+      <span style="font-size: 13px">High contrast theme · UI text 115% · settings under Preferences · Accessibility</span>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      tools: ['Move', 'Board', 'Shape', 'Pen', 'Text', 'Comment'].map(function (n, i) { return { n: n, s: 'padding: 6px 10px; border-radius: 6px; font-weight: 600; ' + (i === 0 ? 'background: #ffffff; color: #000000' : 'border: 2px solid #5c5c5c') }; }),
+      layers: [[0, 'Home — iOS'], [1, 'Greeting'], [1, 'Hero card'], [1, 'Upcoming'], [2, 'Event row'], [2, 'Event row', 1], [2, 'Event row']].map(function (l) { return { n: l[1], s: 'padding: 6px 8px 6px ' + (8 + l[0] * 16) + 'px; border-radius: 6px;' + (l[2] ? ' background: #ffd400; color: #000000; font-weight: 700' : '') }; }),
+      pres: ['width: 28px; height: 28px; border-radius: 50%; border: 2px solid #ffffff; background: repeating-linear-gradient(45deg, #ffffff 0 3px, #000000 3px 7px)', 'width: 28px; height: 28px; border-radius: 50%; border: 2px solid #ffffff; background: radial-gradient(#ffffff 25%, transparent 26%) 0 0 / 7px 7px, #000000', 'width: 28px; height: 28px; border-radius: 50%; border: 2px solid #ffffff; background: #ffffff'],
+      props: [{ k: 'Width', v: '276 · fill' }, { k: 'Height', v: '52' }, { k: 'Gap', v: 'space/150' }, { k: 'Fill', v: 'surface/default' }, { k: 'Radius', v: 'radius/md' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<!-- @dsCard group="Overlays" height=420 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>CommandBar — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style="background:var(--canvas);justify-content:center"></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(D.CommandBar, { query: 'gap 16', readOnly: true, scope: '3 layers selected', groups: [
+      { title: 'Set property', items: [
+        { label: 'Set gap', from: '8', to: '16', icon: 'layout-col', active: true, shortcut: '\u21b5' },
+        { label: 'Bind gap to token', hint: 'space/400 = 16px', icon: 'token' } ] },
+      { title: 'Layers', items: [
+        { label: 'Gallery grid', hint: 'Home — iOS', icon: 'board' },
+        { label: 'Event row', hint: 'Main component', icon: 'component', kind: 'component' } ] },
+      { title: 'Actions', items: [
+        { label: 'Toggle Layout X-ray', icon: 'xray', shortcut: 'Alt' } ] }
+    ] })
+  );
+</script>
+</body>
+</html>

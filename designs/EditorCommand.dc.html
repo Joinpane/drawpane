@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane editor, command bar</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" style="height: 900px; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <dc-import name="PartTopBar" tool="pointer" hint-size="100%,40px"></dc-import>
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 12px">
+    <dc-import name="PartLayers" selected="upcoming" hint-size="248px,824px"></dc-import>
+
+    <main aria-label="Canvas" style="flex: 999 1 560px; min-width: 0; position: relative; height: 824px">
+      <div style="position: absolute; left: 50%; top: 200px; width: 340px; height: 560px; margin-left: -170px">
+        <span style="position: absolute; left: 0; top: -20px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Home — iOS</span>
+        <dc-import name="PartBoard" variant="gap16" hint-size="340px,560px"></dc-import>
+        <div aria-hidden="true" style="position: absolute; left: 20px; top: 200px; width: 300px; height: 212px; box-shadow: inset 0 0 0 1.5px var(--signal)"></div>
+        <span aria-hidden="true" style="position: absolute; left: 32px; top: 264px; width: 276px; height: 16px; background: var(--xray-gap); opacity: .35"></span>
+        <span aria-hidden="true" style="position: absolute; left: 32px; top: 332px; width: 276px; height: 16px; background: var(--xray-gap); opacity: .35"></span>
+        <span style="position: absolute; left: 330px; top: 265px; padding: 0 5px; border-radius: var(--radius-xs); background: var(--surface-raised); box-shadow: var(--shadow-popover); font-family: var(--font-mono); font-size: 11px; line-height: 14px; color: var(--ink); white-space: nowrap"><s style="color: var(--ink-muted)">8</s> → <b style="color: var(--signal-ink); font-weight: 500">16</b></span>
+        <span style="position: absolute; left: 170px; top: 420px; transform: translateX(-50%); padding: 1px 6px; border-radius: var(--radius-xs); background: var(--signal); color: var(--on-signal); font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 500; white-space: nowrap">Preview · 300 × 212</span>
+      </div>
+
+      <div style="position: absolute; left: 50%; top: 8px; transform: translateX(-50%); width: min(560px, 100%)">
+        <x-import component-from-global-scope="Drawpane.CommandBar" query="gap 16" read-only="{{yes}}" scope="Upcoming · 1 frame selected" groups="{{groups}}"></x-import>
+      </div>
+    </main>
+
+    <dc-import name="PartInspector" gap="space/400" hint-size="264px,824px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      groups: [
+        { title: 'Set property', items: [
+          { label: 'Set gap', from: '8', to: '16', icon: 'layout-col', active: true, shortcut: '↵' },
+          { label: 'Bind gap to token', hint: 'space/400 = 16px · used 212 times', icon: 'token', shortcut: 'tab' },
+          { label: 'Set gap on all Event row parents', hint: '6 frames in this file', icon: 'layers' } ] },
+        { title: 'Layers', items: [
+          { label: 'Gallery grid', hint: 'Web dashboard', icon: 'board' },
+          { label: 'Event row', hint: 'Main component', icon: 'component', kind: 'component' } ] },
+        { title: 'Actions', items: [
+          { label: 'Toggle Layout X-ray', icon: 'xray', shortcut: 'Alt' },
+          { label: 'Explain this layout', icon: 'search', shortcut: '⌥ E' } ] }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

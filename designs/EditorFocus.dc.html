@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane editor, focus mode</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<main data-theme="{{theme}}" aria-label="Canvas in focus mode" style="position: relative; height: 900px; background: var(--canvas); color: var(--ink); font-family: var(--font-ui); overflow: hidden">
+  <div style="position: absolute; left: 50%; top: 12px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 4px 4px 4px 12px; border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-pane); font-size: 12px; line-height: 16px; color: var(--ink-muted); white-space: nowrap">
+    <svg width="14" height="14" viewBox="0 0 32 32" aria-hidden="true"><rect x="3.25" y="3.25" width="18.5" height="18.5" rx="4" fill="none" stroke="var(--ink)" stroke-width="2.5"></rect><rect x="10" y="10" width="19" height="19" rx="4" fill="var(--signal)"></rect></svg>
+    <span><b style="color: var(--ink); font-weight: 600">Focus mode</b> · panes hidden</span>
+    <span style="display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: 999px; background: var(--surface-sunken)"><x-import component-from-global-scope="Drawpane.Kbd">\</x-import> show panes</span>
+  </div>
+
+  <div style="position: absolute; left: 50%; top: 50%; width: 340px; height: 560px; margin: -300px 0 0 -170px">
+    <span style="position: absolute; left: 0; top: -20px; font-size: 11px; line-height: 14px; font-weight: 500; color: var(--ink-muted)">Home — iOS</span>
+    <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+    <div aria-hidden="true" style="position: absolute; left: 20px; top: 118px; width: 300px; height: 66px; border-radius: 14px; box-shadow: inset 0 0 0 1.5px var(--signal)"></div>
+    <span aria-hidden="true" style="position: absolute; left: 16.5px; top: 114.5px; width: 7px; height: 7px; background: #ffffff; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+    <span aria-hidden="true" style="position: absolute; left: 316.5px; top: 114.5px; width: 7px; height: 7px; background: #ffffff; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+    <span aria-hidden="true" style="position: absolute; left: 16.5px; top: 180.5px; width: 7px; height: 7px; background: #ffffff; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+    <span aria-hidden="true" style="position: absolute; left: 316.5px; top: 180.5px; width: 7px; height: 7px; background: #ffffff; box-shadow: inset 0 0 0 1.5px var(--signal)"></span>
+    <div style="position: absolute; left: 170px; top: 196px; transform: translateX(-50%); white-space: nowrap">
+      <x-import component-from-global-scope="Drawpane.SelectionLens" kind="Instance · Hero card" kind-icon="instance">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Variant" value="dark" options="{{variants}}"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{yes}}" label="Subtitle"></x-import>
+      </x-import>
+    </div>
+  </div>
+
+  <div aria-label="Lena is off-screen to the right" style="position: absolute; right: 12px; top: 46%; display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 6px; border-radius: 999px; background: var(--presence-2); color: var(--on-presence); font-size: 11px; line-height: 14px; font-weight: 600">
+    <span>Lena · Settings — iOS</span>
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+  </div>
+  <div aria-label="Sam is off-screen below" style="position: absolute; left: 30%; bottom: 12px; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; background: var(--presence-3); color: var(--on-presence); font-size: 11px; line-height: 14px; font-weight: 600">
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 3l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+    <span>Sam · Onboarding</span>
+  </div>
+
+  <div style="position: absolute; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-pane); font-size: 11px; line-height: 14px; color: var(--ink-muted); font-variant-numeric: tabular-nums">
+    <span>100%</span><span style="width: 1px; height: 12px; background: var(--line-strong)"></span><span>Saved</span>
+  </div>
+</main>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      theme: this.props.theme ?? 'light',
+      yes: true,
+      variants: [{ value: 'dark', label: 'Dark' }, { value: 'brand', label: 'Brand' }, { value: 'quiet', label: 'Quiet' }]
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane cursor chat and reactions</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas with people">
+      <div style="position: absolute; left: 60px; top: 60px; width: 340px; height: 560px"><dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import></div>
+      <div style="position: absolute; left: 440px; top: 60px; width: 340px; height: 560px"><dc-import name="PartBoard" variant="branch" hint-size="340px,560px"></dc-import></div>
+      <sc-for list="{{cursors}}" as="c" hint-placeholder-count="3">
+        <div style="{{c.pos}}">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" style="display: block"><path d="M2 1l11 6-5 1.5L6 14z" fill="{{c.col}}" stroke="#ffffff" stroke-width="1"/></svg>
+          <span style="{{c.bub}}">{{c.msg}}</span>
+        </div>
+      </sc-for>
+      <div style="position: absolute; left: 560px; top: 150px; font-size: 28px; line-height: 1">👍</div>
+      <div style="position: absolute; left: 600px; top: 120px; font-size: 22px; line-height: 1; opacity: .7">👍</div>
+      <div style="position: absolute; left: 470px; top: 330px; display: flex; gap: 4px"><span style="padding: 2px 8px; border-radius: 999px; background: var(--presence-3); color: var(--on-presence); font-size: 12px; font-weight: 700; box-shadow: 0 2px 6px rgba(0,0,0,.2)">✓ Sam</span><span style="padding: 2px 8px; border-radius: 999px; background: var(--presence-2); color: var(--on-presence); font-size: 12px; font-weight: 700; box-shadow: 0 2px 6px rgba(0,0,0,.2)">★ Lena</span></div>
+      <div class="u-pop u-row" style="position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px; gap: 2px">
+        <sc-for list="{{emoji}}" as="e" hint-placeholder-count="6"><span style="display: grid; place-items: center; width: 36px; height: 36px; border-radius: var(--radius-sm); font-size: 20px">{{e}}</span></sc-for>
+        <span style="width: 1px; height: 24px; background: var(--line); margin: 0 4px"></span>
+        <span class="u-tbtn" style="background: var(--surface-sunken); color: var(--ink)">Stamp</span><span class="u-kbd">E</span>
+      </div>
+    </main>
+    <aside class="u-side" aria-label="Quick talk">
+      <div class="u-head"><h2 class="u-h3">Cursor chat</h2><span class="u-kbd">/</span></div>
+      <div class="u-col" style="padding: 0 14px">
+        <span class="u-sm u-muted">Press / anywhere to say something at your cursor. Messages fade after 10 seconds and aren't saved. For anything that should stick, leave a comment.</span>
+        <span class="u-cap" style="margin-top: 8px">Reactions and stamps</span>
+        <span class="u-sm u-muted">Reactions float up and vanish. Stamps stay on a board until the next version is saved, so reviews leave a light trace.</span>
+        <span class="u-cap" style="margin-top: 8px">Settings</span>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Show other people's cursor chat"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Show reactions"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" label="Hide cursors while I'm editing text"></x-import>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var cur = function (x, y, slot, msg, typing) { var col = 'var(--presence-' + slot + ')'; return { pos: 'position: absolute; left: ' + x + 'px; top: ' + y + 'px', col: col, msg: msg, bub: 'display: inline-block; margin: 2px 0 0 12px; padding: 6px 10px; border-radius: 4px 12px 12px 12px; background: ' + col + '; color: var(--on-presence); font-size: 13px; line-height: 18px; max-width: 220px' + (typing ? '; opacity: .85' : '') }; };
+    return {
+      cursors: [cur(260, 200, 2, 'this card feels heavy now?'), cur(620, 230, 3, 'agree, try the lighter blue'), cur(330, 420, 1, 'typing…', true)],
+      emoji: ['👍', '❤️', '🎉', '👀', '🤔', '✅']
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

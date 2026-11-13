@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane start an agent</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor" style="position: relative">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="upcoming" hint-size="248px,824px"></dc-import>
+    <main class="u-stage" aria-label="Canvas">
+      <div style="position: absolute; left: calc(50% - 170px); top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span class="u-outline" style="left: 20px; top: 200px; width: 300px; height: 196px; border-radius: 14px"></span>
+      </div>
+    </main>
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+  <div class="u-dim"></div>
+  <section role="dialog" aria-label="Start an agent" class="u-modal" style="position: absolute; left: 50%; top: 70px; transform: translateX(-50%); width: 860px; display: grid; grid-template-columns: 280px 1fr">
+    <div style="border-right: 1px solid var(--line); background: var(--surface); display: grid; align-content: start">
+      <div class="u-head"><h2 class="u-h3">Pick an agent</h2><x-import component-from-global-scope="Drawpane.Kbd">⌘ ⇧ A</x-import></div>
+      <div style="padding: 0 10px 8px"><x-import component-from-global-scope="Drawpane.TextField" aria-label="Search agents" placeholder="Search agents and skills" default-value=""></x-import></div>
+      <div class="u-list">
+        <sc-for list="{{agents}}" as="a" hint-placeholder-count="6">
+          <div class="u-item {{a.sel}}"><span class="u-ico {{a.ico}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{a.icon}}"></x-import></span><span class="u-grow u-col u-col--tight" style="gap: 0"><span class="u-b u-ellip">{{a.name}}</span><span class="u-xs u-muted u-ellip">{{a.meta}}</span></span></div>
+        </sc-for>
+      </div>
+      <div class="u-xs u-muted" style="padding: 10px 16px 14px">Team agents are defined in Settings · Agents. Anyone can run them; what they may change is set per agent.</div>
+    </div>
+    <div class="u-col u-col--loose" style="padding: 16px 18px 18px">
+      <div class="u-row"><span class="u-av u-av--agent" style="width: 32px; height: 32px"><x-import component-from-global-scope="Drawpane.Icon" name="agent"></x-import></span><span class="u-grow u-col u-col--tight" style="gap: 0"><strong class="u-lg">Empty states agent</strong><span class="u-sm u-muted">Adds empty, loading and error states using your library</span></span><x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import></div>
+      <x-import component-from-global-scope="Drawpane.PromptField" model="Claude Opus 5.5" rows="3" value="Add empty and error states for Upcoming. Keep the tab bar as is." context="{{ctx}}"></x-import>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px">
+        <div class="u-col u-col--tight"><span class="u-xs u-muted">Skill</span><span class="u-select">empty-and-error-states <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+        <div class="u-col u-col--tight"><span class="u-xs u-muted">Model</span><span class="u-select">Claude Opus 5.5 · team key <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+        <div class="u-col u-col--tight"><span class="u-xs u-muted">Works on</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Scope" value="sel" options="{{scope}}"></x-import></div>
+        <div class="u-col u-col--tight"><span class="u-xs u-muted">Branch</span><span class="u-select u-mono">agent/empty-states <x-import component-from-global-scope="Drawpane.Icon" name="branch" size="12"></x-import></span></div>
+      </div>
+      <div class="u-col u-col--tight">
+        <div class="u-row u-sm"><span class="u-muted u-grow">Budget for this run</span><strong>$2.00</strong></div>
+        <div class="u-bar" style="height: 4px"><span style="width: 20%; background: var(--agent)"></span></div>
+        <span class="u-xs u-muted">Typical run of this skill: $0.20 – $0.60 · stops and asks before going over</span>
+      </div>
+      <div class="u-note u-note--plain">
+        <x-import component-from-global-scope="Drawpane.Icon" name="key" size="12"></x-import>
+        <span class="u-grow">It can <strong>read</strong> this file and the Acme library, and <strong>change</strong> only its own branch. Merging needs you. Publishing libraries is off for this agent.</span>
+      </div>
+      <div class="u-row"><x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Show its cursor while it works"></x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button">Save as automation</x-import><x-import component-from-global-scope="Drawpane.Button" variant="primary" icon="agent">Start on a branch</x-import></div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var A = [['Claude', 'General help on this file', 'agent', 0], ['Empty states agent', 'Team · uses empty-and-error-states', 'agent', 1], ['Accessibility reviewer', 'Team · contrast, targets, reading order', 'eye', 0], ['Copy editor', 'Team · tone and length of text', 'text', 0], ['Tidy-up', 'Rename layers, add auto layout', 'layers', 0], ['Token enforcer', 'Replace raw values with tokens', 'token', 0]];
+    return {
+      agents: A.map(function (a) { return { name: a[0], meta: a[1], icon: a[2], ico: 'u-ico--agent', sel: H.sel(a[3]) }; }),
+      ctx: [{ label: 'Upcoming', icon: 'board' }, { label: 'Acme design system', icon: 'component' }, { label: 'PRD: Home v2', icon: 'book' }],
+      scope: H.opts([{ value: 'sel', label: 'Selection' }, 'Page', 'File'])
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

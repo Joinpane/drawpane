@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane access requests and guests</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-sheet">
+  <header class="u-sheethead"><h1 class="u-h1">Access requests, guests and links</h1><p class="u-lead">Who can open a file, and how they asked. Owners and admins see these in the Share dialog and the inbox.</p></header>
+  <div class="u-grid">
+    <section class="u-modal" style="width: 480px">
+      <div class="u-head" style="padding: 14px 16px 8px"><h2 class="u-h2">Share Checkout flow</h2><x-import component-from-global-scope="Drawpane.IconButton" icon="close" label="Close"></x-import></div>
+      <div class="u-tabs" style="padding: 0 16px"><span class="u-tab">People</span><span class="u-tab is-on">Requests · 3</span><span class="u-tab">Link</span></div>
+      <div style="padding: 6px 0">
+        <sc-for list="{{reqs}}" as="r" hint-placeholder-count="3">
+          <div class="u-row" style="padding: 10px 16px; border-bottom: 1px solid var(--line)">
+            <span class="u-av" style="{{r.st}}">{{r.ini}}</span>
+            <span class="u-grow u-col" style="gap: 0"><span class="u-md u-b">{{r.n}}</span><span class="u-xs u-muted">{{r.d}}</span><span class="u-xs" style="{{r.ns}}">{{r.note}}</span></span>
+            <span class="u-select" style="height: 26px">{{r.role}} <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+            <x-import component-from-global-scope="Drawpane.Button" size="sm">Decline</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Approve</x-import>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+    <section class="u-modal" style="width: 420px">
+      <div class="u-head" style="padding: 14px 16px 8px"><h2 class="u-h2">Guests</h2><span class="u-xs u-muted">people outside Acme</span></div>
+      <sc-for list="{{guests}}" as="g" hint-placeholder-count="3">
+        <div class="u-row" style="padding: 10px 16px; border-top: 1px solid var(--line)"><span class="u-av" style="background: var(--presence-7)">{{g.ini}}</span><span class="u-grow u-col" style="gap: 0"><span class="u-md">{{g.n}}</span><span class="u-xs u-muted">{{g.d}}</span></span><span class="{{g.c}}">{{g.s}}</span></div>
+      </sc-for>
+      <div class="u-col" style="padding: 12px 16px; border-top: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Guests expire after 30 days"></x-import><x-import component-from-global-scope="Drawpane.Switch" label="Guests can see other files in the project"></x-import></div>
+    </section>
+    <section class="u-modal" style="width: 380px">
+      <div class="u-head" style="padding: 14px 16px 8px"><h2 class="u-h2">Link settings</h2></div>
+      <div class="u-col" style="padding: 0 16px 16px">
+        <div class="u-row"><div class="u-input u-grow u-mono" style="font-size: 12px">design.acme.com/f/checkout-flow</div><x-import component-from-global-scope="Drawpane.Button">Copy</x-import></div>
+        <sc-for list="{{link}}" as="l" hint-placeholder-count="3"><div class="u-row"><span class="u-radio {{l.on}}"></span><span class="u-grow u-col" style="gap: 0"><span class="u-md">{{l.t}}</span><span class="u-xs u-muted">{{l.d}}</span></span></div></sc-for>
+        <div class="u-row u-sm"><span class="u-grow">Link expires</span><span class="u-select" style="height: 26px">Dec 12 <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+        <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Require a password"></x-import>
+        <x-import component-from-global-scope="Drawpane.Switch" label="Allow downloads"></x-import>
+        <span class="u-xs u-muted">Public links are off for this team except for admins (Settings · Security).</span>
+      </div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      reqs: [{ ini: 'KT', n: 'Kai Tanaka', d: 'kai@acme.com · Engineering', note: '"Need to check the payment error states"', ns: 'color: var(--ink)', role: 'Can view', st: 'background: var(--presence-7)' }, { ini: 'JN', n: 'Jo Nguyen', d: 'jo@acme.com · Support', note: '', ns: 'display: none', role: 'Can comment', st: 'background: var(--presence-8)' }, { ini: 'DP', n: 'Dev Patel', d: 'dev@acme.com · wants edit', note: '"Fixing tab bar spacing"', ns: 'color: var(--ink)', role: 'Can edit', st: 'background: var(--presence-6)' }],
+      guests: [{ ini: 'RB', n: 'Rae Brooks · agency', d: 'rae@northstudio.co · can comment', s: '12 days left', c: 'u-chip u-chip--muted' }, { ini: 'PL', n: 'Priya L. · client', d: 'priya@client.com · can view', s: 'expires today', c: 'u-chip u-chip--signal' }, { ini: 'TS', n: 'Tom S. · contractor', d: 'tom@freelance.dev · can edit', s: '27 days left', c: 'u-chip u-chip--muted' }],
+      link: [{ t: 'Only people invited', d: 'Default', on: '' }, { t: 'Anyone at Acme with the link', d: 'Can view and comment', on: 'is-on' }, { t: 'Anyone with the link', d: 'Off by admin policy', on: '' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

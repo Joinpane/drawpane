@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane help and feedback</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor" style="position: relative">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <dc-import name="PartLayers" selected="none" hint-size="248px,824px"></dc-import>
+    <main class="u-stage"><div style="position: absolute; left: 60px; top: 60px; width: 340px; height: 560px"><dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import></div></main>
+    <dc-import name="PartInspector" hint-size="264px,824px"></dc-import>
+  </div>
+  <div style="position: absolute; right: 290px; bottom: 70px; width: 260px"><x-import component-from-global-scope="Drawpane.Menu" label="Help" items="{{menu}}"></x-import></div>
+  <div class="u-pop" style="position: absolute; right: 290px; bottom: 24px; width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; font-weight: 700">?</div>
+  <section class="u-modal u-col" style="position: absolute; left: 420px; top: 120px; width: 420px; padding: 0" aria-label="Help search">
+    <div style="padding: 12px"><div class="u-input u-input--focus"><x-import component-from-global-scope="Drawpane.Icon" name="search" size="12"></x-import><span class="u-grow">variants vs properties</span></div></div>
+    <div class="u-list" style="padding: 0 6px 6px">
+      <sc-for list="{{res}}" as="r" hint-placeholder-count="4"><div class="u-item {{r.sel}}" style="align-items: flex-start"><x-import component-from-global-scope="Drawpane.Icon" name="{{r.i}}" size="12"></x-import><span class="u-grow u-col" style="gap: 0"><span class="u-sm u-b">{{r.t}}</span><span class="u-xs u-muted">{{r.d}}</span></span></div></sc-for>
+    </div>
+    <div class="u-note u-note--agent" style="margin: 0 12px 12px"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import><span class="u-grow">Or ask Claude: it can show you on your own file instead of a generic example.</span></div>
+  </section>
+  <section class="u-modal u-col" style="position: absolute; left: 420px; top: 470px; width: 420px; padding: 16px" aria-label="Report a bug">
+    <strong class="u-md">Report a problem</strong>
+    <x-import component-from-global-scope="Drawpane.TextField" label="What happened?" default-value="Grid layout loses span when I paste from Figma"></x-import>
+    <x-import component-from-global-scope="Drawpane.Switch" checked="{{H.yes}}" label="Attach a screenshot and the last 200 log lines"></x-import>
+    <span class="u-xs u-muted">Goes to your admin (Ziyang) first. They can forward it to github.com/dizys/drawpane with one click; nothing leaves your instance otherwise.</span>
+    <div class="u-row" style="justify-content: flex-end"><x-import component-from-global-scope="Drawpane.Button" size="sm">Cancel</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Send</x-import></div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    return {
+      menu: [{ label: 'Search help', shortcut: '⌘ ?' }, { label: 'Keyboard shortcuts', shortcut: '⌘ /' }, { label: "What's new" }, { label: 'Ask Claude how to…', icon: 'agent' }, { separator: true }, { label: 'Documentation ↗' }, { label: 'Community forum ↗' }, { label: 'Report a problem' }, { label: 'Suggest a feature' }, { separator: true }, { label: 'About this instance' }],
+      res: [{ i: 'book', t: 'Variants and component properties', d: 'Docs · when to use a variant, when to use a property', sel: 'is-sel' }, { i: 'play', t: 'Video · building a button with variants', d: '3 min · Drawpane channel', sel: '' }, { i: 'component', t: 'Example: Button in Acme design system', d: 'Opens in your library', sel: '' }, { i: 'comment', t: 'Forum · converting Figma variants', d: '12 replies · answered', sel: '' }]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane token modes and themes</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" file="Acme design system" branch="main" primary="Publish" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <section aria-label="Token sets" class="u-side" style="width: 600px">
+      <div class="u-head"><h2 class="u-h3">Tokens · color</h2><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Group" value="color" options="{{groups}}"></x-import><x-import component-from-global-scope="Drawpane.IconButton" icon="plus" label="Add token"></x-import></div>
+      <div style="display: grid; grid-template-columns: 1.3fr repeat(3, 1fr); gap: 0; padding: 0 14px; font-size: 12px">
+        <span class="u-xs u-muted" style="padding: 6px 0">Token</span>
+        <sc-for list="{{modes}}" as="m" hint-placeholder-count="3"><span class="u-xs u-muted u-row" style="padding: 6px 0">{{m}}</span></sc-for>
+        <sc-for list="{{rows}}" as="r" hint-placeholder-count="30"><span style="{{r.s}}"><span style="{{r.sw}}"></span><span style="{{r.ts}}">{{r.t}}</span></span></sc-for>
+      </div>
+      <div class="u-row" style="margin-top: auto; padding: 10px 14px; border-top: 1px solid var(--line)"><x-import component-from-global-scope="Drawpane.Button" size="sm" icon="plus">Add mode</x-import><span class="u-spacer"></span><span class="u-xs u-muted">Exports as W3C design tokens with modes</span></div>
+    </section>
+    <main class="u-stage" aria-label="Same board in three modes">
+      <div style="position: absolute; left: 0; top: 0; display: flex; gap: 20px">
+        <sc-for list="{{previews}}" as="p" hint-placeholder-count="3">
+          <div class="u-col u-col--tight">
+            <span class="u-row"><span class="u-chip">{{p.m}}</span><span class="u-xs u-muted">mode set on the board</span></span>
+            <div style="{{p.bg}}">
+              <div style="{{p.h}}">Good morning, Ana</div>
+              <div style="{{p.sub}}">Three things on today</div>
+              <div style="{{p.hero}}"><div style="font-size: 13px; font-weight: 600">Design review at 2:00</div><div style="{{p.heroSub}}">Checkout flow · 4 people</div></div>
+              <div style="{{p.list}}"><span style="{{p.row}}"></span><span style="{{p.row}}"></span><span style="{{p.row}}"></span></div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+      <div class="u-pop u-col" style="position: absolute; left: 0; top: 470px; width: 300px; padding: 12px">
+        <strong class="u-sm">Board · Home — iOS</strong>
+        <div class="u-row u-sm"><span class="u-grow u-muted">Color mode</span><span class="u-select" style="height: 24px">Dark <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+        <div class="u-row u-sm"><span class="u-grow u-muted">Density mode</span><span class="u-select" style="height: 24px">Comfortable <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span></div>
+        <span class="u-xs u-muted">Children inherit. Prototype viewers can switch modes live.</span>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var modes = ['Light', 'Dark', 'Brand'];
+    var T3 = [['surface/default', ['#ffffff', '#16181d', '#ffffff']], ['surface/sunken', ['#f3f4f6', '#202329', '#eef1fb']], ['text/strong', ['#16181d', '#f3f4f6', '#16181d']], ['text/muted', ['#5b616e', '#a2a8b4', '#4a5578']], ['brand/500', ['#2b4fd6', '#6b8cff', '#2b4fd6']], ['hero/bg', ['#16181d', '#2b4fd6', '{brand/500}']], ['hero/text', ['#ffffff', '#ffffff', '#ffffff']], ['border/default', ['#e4e7ec', '#2c3038', '#d6defc']]];
+    var rows = [];
+    T3.forEach(function (t, i) {
+      var sel = i === 5;
+      var base = 'display: flex; align-items: center; gap: 6px; height: 36px; border-top: 1px solid var(--line);' + (sel ? ' background: var(--surface-active)' : '');
+      rows.push({ t: t[0], s: base + '; padding-left: 4px', sw: 'display: none', ts: 'font-family: var(--font-mono); font-size: 12px' });
+      t[1].forEach(function (v) { var ref = v[0] === '{'; rows.push({ t: v, s: base, sw: ref ? 'display: none' : 'width: 14px; height: 14px; border-radius: 4px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.12); background: ' + v, ts: ref ? 'padding: 1px 6px; border-radius: 4px; background: var(--component-soft); color: var(--component-ink); font-size: 11px; font-weight: 600' : 'font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted)' }); });
+    });
+    var pv = function (m, bg, h, sub, hero, hs, sunk) { return { m: m, bg: 'position: relative; width: 200px; height: 400px; box-shadow: 0 1px 3px rgba(0,0,0,.18); background: ' + bg + '; font-family: var(--font-ui)', h: 'margin: 34px 14px 0; font-size: 16px; font-weight: 600; color: ' + h, sub: 'margin: 2px 14px 0; font-size: 11px; color: ' + sub, hero: 'margin: 12px 14px 0; padding: 10px 12px; border-radius: 10px; color: #ffffff; background: ' + hero, heroSub: 'font-size: 10px; color: ' + hs, list: 'margin: 12px 14px 0; padding: 8px; border-radius: 10px; display: grid; gap: 6px; background: ' + sunk, row: 'height: 30px; border-radius: 7px; background: ' + bg }; };
+    return {
+      groups: H.opts(['Color', 'Type', 'Space', 'Radius']), modes: modes, rows: rows,
+      previews: [pv('Light', '#ffffff', '#16181d', '#5b616e', '#16181d', '#b9bec8', '#f3f4f6'), pv('Dark', '#16181d', '#f3f4f6', '#a2a8b4', '#2b4fd6', '#d6defc', '#202329'), pv('Brand', '#ffffff', '#16181d', '#4a5578', '#2b4fd6', '#d6defc', '#eef1fb')]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

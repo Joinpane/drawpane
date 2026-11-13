@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane keyboard and screen reader</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <aside class="u-side u-side--left" aria-label="Layers, keyboard focus">
+      <div class="u-row" style="padding: 8px 12px 4px"><x-import component-from-global-scope="Drawpane.SegmentedControl" label="Left pane" value="layers" options="{{tabs}}"></x-import></div>
+      <div class="u-list" style="padding: 6px">
+        <sc-for list="{{layers}}" as="l" hint-placeholder-count="8"><div class="u-item" style="{{l.st}}"><x-import component-from-global-scope="Drawpane.Icon" name="{{l.i}}" size="12"></x-import><span class="u-grow">{{l.n}}</span></div></sc-for>
+      </div>
+    </aside>
+    <main class="u-stage" aria-label="Canvas, keyboard mode">
+      <div style="position: absolute; left: 40px; top: 60px; width: 340px; height: 560px">
+        <dc-import name="PartBoard" variant="default" hint-size="340px,560px"></dc-import>
+        <span style="position: absolute; left: 30px; top: 270px; width: 280px; height: 56px; border-radius: 12px; box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--signal)"></span>
+        <div class="u-pop" style="position: absolute; left: 30px; top: 408px; padding: 6px 10px; white-space: nowrap"><span class="u-sm">Event row · 276 × 52 · x 32 y 272</span></div>
+      </div>
+      <section aria-label="Screen reader output" class="u-pane u-col" style="position: absolute; left: 420px; top: 60px; width: 330px; padding: 14px; background: var(--surface-inverse); color: var(--ink-inverse)">
+        <span class="u-row u-xs" style="opacity: .75"><x-import component-from-global-scope="Drawpane.Icon" name="eye" size="12"></x-import>VoiceOver says</span>
+        <span class="u-md" style="font-family: var(--font-mono)">"Event row, instance of Event row, 2 of 3 in Upcoming, auto layout column. Text: Token audit, Tomorrow. Press Enter to edit, arrows to move 1 pixel, Shift arrows 8."</span>
+      </section>
+      <section class="u-pop u-col" style="position: absolute; left: 420px; top: 260px; width: 330px; padding: 12px">
+        <strong class="u-md">Everything works without a mouse</strong>
+        <sc-for list="{{keys}}" as="k" hint-placeholder-count="7"><div class="u-row u-sm"><span class="u-grow">{{k.t}}</span><span class="u-kbd">{{k.k}}</span></div></sc-for>
+      </section>
+    </main>
+    <aside class="u-side" aria-label="Accessibility settings">
+      <div class="u-head"><h2 class="u-h3">Accessibility</h2></div>
+      <div class="u-col" style="padding: 0 14px 14px">
+        <sc-for list="{{prefs}}" as="p" hint-placeholder-count="7"><div class="u-row"><span class="u-grow u-col" style="gap: 0"><span class="u-md">{{p.t}}</span><span class="u-xs u-muted">{{p.d}}</span></span><x-import component-from-global-scope="Drawpane.Switch" checked="{{p.on}}" aria-label="{{p.t}}"></x-import></div></sc-for>
+        <div class="u-col u-col--tight"><span class="u-xs u-muted">UI text size</span><x-import component-from-global-scope="Drawpane.SegmentedControl" label="UI text size" value="100" options="{{sizes}}"></x-import></div>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }],
+      dmodes: [{ value: 'design', label: 'Design' }, { value: 'prototype', label: 'Prototype' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var L = [[0, 'Home — iOS', 'board', 0], [1, 'Greeting', 'text', 0], [1, 'Hero card', 'instance', 0], [1, 'Upcoming', 'layout-col', 0], [2, 'Event row', 'instance', 0], [2, 'Event row', 'instance', 1], [2, 'Event row', 'instance', 0], [1, 'Tab bar', 'instance', 0]];
+    return {
+      tabs: H.opts(['Layers', 'Assets', 'History']),
+      layers: L.map(function (l) { return { n: l[1], i: l[2], st: 'padding-left: ' + (8 + l[0] * 16) + 'px; min-height: 30px;' + (l[3] ? ' background: var(--surface-active); box-shadow: inset 0 0 0 2px var(--signal)' : '') }; }),
+      keys: [{ t: 'Move focus between panes', k: 'F6' }, { t: 'Walk layers in reading order', k: 'Tab' }, { t: 'Into a group / out of it', k: '↵ / esc' }, { t: 'Nudge, big nudge', k: '← ⇧←' }, { t: 'Resize from the keyboard', k: '⌥ ←' }, { t: 'Open the inspector field', k: '⌘ ⌥ I' }, { t: 'Announce position and size', k: '⌥ space' }],
+      prefs: [{ t: 'Keyboard mode', d: 'Show focus on canvas layers', on: true }, { t: 'Announce selection changes', d: 'For screen readers', on: true }, { t: 'Reduce motion', d: 'No zoom animation or smart-animate in the editor', on: false }, { t: 'High contrast UI', d: 'Stronger borders and text', on: false }, { t: 'Underline links', d: 'Everywhere in Drawpane', on: true }, { t: 'Color-blind safe presence', d: 'Adds patterns to cursors', on: false }],
+      sizes: H.opts([{ value: '90', label: '90%' }, { value: '100', label: '100%' }, { value: '115', label: '115%' }, { value: '130', label: '130%' }])
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

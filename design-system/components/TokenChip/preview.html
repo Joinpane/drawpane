@@ -1,0 +1,18 @@
+<!-- @dsCard group="Inputs" height=72 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>TokenChip — preview</title></head>
+<body>
+<div id="root" class="dp-stage" style=""></div>
+<script>
+  var D = window.Drawpane, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    h(React.Fragment, null,
+      h(D.TokenChip, { name: 'brand/500', swatch: 'var(--signal)' }),
+      h(D.TokenChip, { name: 'surface/raised', swatch: 'var(--surface-raised)' }),
+      h(D.TokenChip, { name: 'space/300' }),
+      h(D.TokenChip, { name: 'radius/md', detached: true }))
+  );
+</script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane agent runs</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-page" style="padding: 28px 32px 40px">
+  <header style="display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 20px">
+      <div style="flex: 1 1 360px"><div class="u-sm u-muted">Settings / Agents</div><h1 class="u-h1" style="margin-top: 2px">Runs</h1></div>
+      <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Section" value="runs" options="{{H.agentTabs}}"></x-import>
+    </header>
+  <div class="u-row" style="margin-bottom: 12px; flex-wrap: wrap">
+    <div class="u-input" style="width: 260px"><x-import component-from-global-scope="Drawpane.Icon" name="search" size="12"></x-import>Search runs</div>
+    <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Status" value="all" options="{{status}}"></x-import>
+    <span class="u-select">Any agent <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+    <span class="u-select">Anyone <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+    <span class="u-select">Last 7 days <x-import component-from-global-scope="Drawpane.Icon" name="chevron-down" size="12"></x-import></span>
+    <span class="u-spacer"></span>
+    <span class="u-sm u-muted">2 running · $61.40 this month</span>
+  </div>
+  <div role="table" aria-label="Agent runs">
+    <div class="u-trow u-thead" style="{{cols}}"><span></span><span>Run</span><span>Agent</span><span>For</span><span>File</span><span>Status</span><span>Steps</span><span>Cost</span><span>Started</span></div>
+    <sc-for list="{{runs}}" as="r" hint-placeholder-count="10">
+      <div class="u-trow {{r.sel}}" style="{{r.st}}">
+        <span class="u-check {{r.chk}}"><x-import component-from-global-scope="Drawpane.Icon" name="check" size="12"></x-import></span>
+        <span class="u-col" style="gap: 0; min-width: 0"><span class="u-b u-ellip">{{r.t}}</span><span class="u-xs u-muted u-mono u-ellip">{{r.b}}</span></span>
+        <span class="u-row u-ellip"><span class="u-av u-av--agent u-av--sm"><x-import component-from-global-scope="Drawpane.Icon" name="agent" size="12"></x-import></span>{{r.a}}</span>
+        <span class="u-row"><span class="u-av u-av--sm" style="{{r.pst}}">{{r.p}}</span></span>
+        <span class="u-muted u-ellip">{{r.f}}</span>
+        <span><span class="{{r.c}}">{{r.s}}</span></span>
+        <span class="u-mono u-sm">{{r.n}}</span>
+        <span class="u-mono u-sm">{{r.cost}}</span>
+        <span class="u-muted u-sm">{{r.w}}</span>
+      </div>
+    </sc-for>
+  </div>
+  <div class="u-toast" style="position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: none"></div>
+  <div class="u-row" style="margin-top: 14px"><span class="u-sm u-muted u-grow">Showing 10 of 143 runs · runs older than 90 days keep their summary, not their full log</span><x-import component-from-global-scope="Drawpane.Button" size="sm">Stop 2 selected</x-import><x-import component-from-global-scope="Drawpane.Button" size="sm" icon="export">Export CSV</x-import></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      agentTabs: [{ value: 'agents', label: 'Agents' }, { value: 'runs', label: 'Runs' }, { value: 'usage', label: 'Usage' }, { value: 'connections', label: 'Connections' }, { value: 'models', label: 'Models and limits' }, { value: 'skills', label: 'Skills' }, { value: 'automations', label: 'Automations' }],
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var cols = 'grid-template-columns: 28px minmax(220px, 2fr) 170px 52px 150px 120px 60px 70px 100px';
+    var S = { run: ['running', 'u-chip u-chip--agent'], wait: ['needs you', 'u-chip u-chip--signal'], rev: ['in review', 'u-chip u-chip--agent'], ok: ['merged', 'u-chip u-chip--ok'], fail: ['failed', 'u-chip u-chip--signal'], closed: ['closed', 'u-chip u-chip--muted'] };
+    var R = [
+      ['Add empty and error states', 'agent/empty-states', 'Empty states agent', 'SO', 'Mobile app', 'run', '4 / 6', '$0.21', '2 min ago', 1],
+      ['Translate Home to DE, JA, AR', 'agent/content-de-ja', 'Copy editor', 'MH', 'Mobile app', 'run', '3 / 4', '$0.14', '6 min ago', 1],
+      ['Replace raw colors in 9 files', 'agent/token-*', 'Token enforcer', 'AR', '9 files', 'wait', '2 / 5', '$0.08', '18 min ago', 0],
+      ['Accessibility pass on Home', 'agent/a11y-home', 'Accessibility reviewer', 'DP', 'Mobile app', 'rev', '6 / 6', '$0.19', '1 h ago', 0],
+      ['Settings page from code', 'mcp/settings-page', 'Claude Code (MCP)', 'Z', 'Web dashboard', 'rev', '23 calls', '—', '2 h ago', 0],
+      ['Onboarding v3 from PRD', 'agent/onboarding-v3', 'Claude', 'Z', 'Mobile app', 'ok', '6 / 6', '$0.62', 'Yesterday', 0],
+      ['Rewrite Settings labels', 'agent/settings-copy', 'Copy editor', 'MH', 'Mobile app', 'fail', '2 / 4', '$0.12', 'Yesterday', 0],
+      ['Tidy Checkout layers', 'agent/tidy-checkout', 'Tidy-up', 'AR', 'Checkout flow', 'ok', '5 / 5', '$0.88', 'Nov 10', 0],
+      ['Weekly lint', '—', 'Weekly lint', 'AI', 'All files', 'closed', 'report', '$0.00', 'Nov 10', 0],
+      ['Three directions for Home', 'agent/explore-*', 'Claude', 'LP', 'Mobile app', 'closed', '3 × 5', '$1.10', 'Nov 9', 0]
+    ];
+    return {
+      cols: cols,
+      status: H.opts([{ value: 'all', label: 'All' }, 'Running', { value: 'needs', label: 'Needs you' }, 'Review', 'Failed']),
+      runs: R.map(function (r) { var p = H.p(r[3]); return { t: r[0], b: r[1], a: r[2], p: r[3], pst: p.st || 'background: var(--agent); color: var(--on-agent)', f: r[4], s: S[r[5]][0], c: S[r[5]][1], n: r[6], cost: r[7], w: r[8], chk: H.on(r[9]), sel: r[9] ? 'is-sel' : '', st: cols + (r[9] ? '; background: var(--surface-active)' : '') }; })
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawpane agent wires a prototype</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/drawpane/tokens.css">
+<link rel="stylesheet" href="ds/drawpane/components/bundle.css">
+<script src="ds/drawpane/components/bundle.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&amp;family=Instrument+Serif&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>body{margin:0}</style>
+</helmet>
+<div data-theme="{{theme}}" class="u-editor">
+  <dc-import name="PartTopBar" branch="agent/onboarding-v3" primary="Review" hint-size="100%,40px"></dc-import>
+  <div class="u-work">
+    <main class="u-stage" aria-label="Proposed flow">
+      <div class="u-row" style="position: absolute; left: 0; right: 0; top: 0; height: 40px">
+        <x-import component-from-global-scope="Drawpane.AgentTag" name="Claude" status="waiting" on-behalf-of="Ziyang"></x-import>
+        <span class="u-md"><strong>7 connections proposed</strong> · 2 flows · dashed until you accept</span>
+      </div>
+      <svg width="100%" height="740" viewBox="0 0 1060 740" style="position: absolute; left: 0; top: 50px" aria-label="Flow map">
+        <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--agent)"/></marker><marker id="ahs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--signal)"/></marker></defs>
+        <path d="M140 200 C 180 200, 190 200, 226 200" fill="none" stroke="var(--agent)" stroke-width="2" stroke-dasharray="0" marker-end="url(#ah)"/><path d="M350 200 C 390 200, 400 200, 436 200" fill="none" stroke="var(--agent)" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ah)"/><path d="M560 200 C 600 200, 610 200, 646 200" fill="none" stroke="var(--agent)" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ah)"/><path d="M80 290 C 80 480, 150 520, 226 520" fill="none" stroke="var(--agent)" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ah)"/><path d="M290 290 C 300 380, 420 420, 436 500" fill="none" stroke="var(--agent)" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ah)"/><path d="M560 480 C 640 470, 700 380, 710 294" fill="none" stroke="var(--signal)" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ahs)"/><path d="M350 520 C 500 600, 640 560, 700 294" fill="none" stroke="var(--agent)" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ah)"/>
+      </svg>
+      <sc-for list="{{nodes}}" as="n" hint-placeholder-count="6">
+        <div style="{{n.pos}}">
+          <span class="u-xs u-muted" style="display: block; margin-bottom: 4px">{{n.name}}</span>
+          <div style="{{n.box}}"><span style="{{n.bar}}"></span><span style="{{n.btn}}"></span></div>
+        </div>
+      </sc-for>
+      <sc-for list="{{labels}}" as="t" hint-placeholder-count="4"><span style="{{t.s}}">{{t.t}}</span></sc-for>
+    </main>
+    <aside class="u-side u-side--wide" aria-label="Connections">
+      <div class="u-row" style="padding: 10px 6px 10px 12px; border-bottom: 1px solid var(--line)">
+        <x-import component-from-global-scope="Drawpane.SegmentedControl" label="Right pane" value="agent" options="{{H.modes}}"></x-import>
+        <span class="u-spacer"></span>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="history" label="Past runs"></x-import>
+        <x-import component-from-global-scope="Drawpane.IconButton" icon="more" label="Agent options"></x-import>
+      </div>
+      <div class="u-col" style="flex: 1; min-height: 0; padding: 12px; overflow: hidden">
+        <span class="u-cap">Proposed connections</span>
+        <sc-for list="{{rows}}" as="r" hint-placeholder-count="7">
+          <div class="u-item" style="box-shadow: inset 0 0 0 1px var(--line); min-height: 0; padding: 6px 8px"><span class="u-grow u-col" style="gap: 0"><span class="u-sm"><strong>{{r.from}}</strong> → {{r.to}}</span><span class="u-xs u-muted">{{r.how}}</span></span><span class="{{r.c}}">{{r.s}}</span></div>
+        </sc-for>
+        <div class="u-row"><x-import component-from-global-scope="Drawpane.Button" size="sm">Reject all</x-import><span class="u-spacer"></span><x-import component-from-global-scope="Drawpane.Button" size="sm" variant="primary">Accept 6</x-import></div>
+        <span class="u-xs u-muted">Built from button labels and the PRD's flow. "Skip" is a guess, so it's flagged.</span>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["light", "dark"], "default": "light"}, "$preview": {"width": 1440, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var T = this.props.theme ?? 'light';
+    var H = {
+      slot: { AR: 1, LP: 2, SO: 3, Z: 4, MH: 5, DP: 6, KT: 7, JN: 8 },
+      p: function (ini, name) { var a = ini === 'AI'; return { ini: ini, name: name || '', cls: 'u-av' + (a ? ' u-av--agent' : ''), st: a ? '' : 'background: var(--presence-' + (H.slot[ini] || 7) + ')' }; },
+      sel: function (b) { return b ? 'is-sel' : ''; },
+      on: function (b) { return b ? 'is-on' : ''; },
+      chip: function (t) { return 'u-chip' + (t ? ' u-chip--' + t : ''); },
+      opts: function (a) { return a.map(function (x) { return typeof x === 'string' ? { value: x.toLowerCase(), label: x } : x; }); },
+      bg: function (c) { return 'background: ' + c; },
+      hide: function (b) { return b ? '' : 'display: none'; },
+      yes: true, no: false,
+      modes: [{ value: 'design', label: 'Design' }, { value: 'agent', label: 'Agent' }, { value: 'inspect', label: 'Inspect' }]
+    };
+    var __v = (function () {
+    var node = function (x, y, name, tone) { return { name: name, pos: 'position: absolute; left: ' + x + 'px; top: ' + (y + 50) + 'px', box: 'position: relative; width: 120px; height: 220px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.12)', bar: 'position: absolute; left: 12px; right: 12px; top: 26px; height: 70px; border-radius: 8px; background: ' + tone, btn: 'position: absolute; left: 12px; right: 12px; bottom: 16px; height: 20px; border-radius: 6px; background: #2b4fd6' }; };
+    var ln = function (d, ok) { return { d: d, c: ok === 'flag' ? 'var(--signal)' : 'var(--agent)', dash: ok === true ? '0' : '6 4', m: ok === 'flag' ? 'url(#ahs)' : 'url(#ah)' }; };
+    var lab = function (x, y, t, flag) { return { t: t, s: 'position: absolute; left: ' + x + 'px; top: ' + (y + 50) + 'px; padding: 1px 6px; border-radius: 4px; font-size: 11px; line-height: 16px; font-weight: 600; white-space: nowrap; background: ' + (flag ? 'var(--signal)' : 'var(--agent)') + '; color: ' + (flag ? 'var(--on-signal)' : 'var(--on-agent)') }; };
+    return {
+      nodes: [node(20, 40, 'Welcome', 'linear-gradient(160deg,#eef1fb,#ffd8c7)'), node(230, 40, 'Calendar', '#eef1fb'), node(440, 40, 'Reminders', '#f3f4f6'), node(650, 40, 'Home', '#16181d'), node(230, 380, 'Sign in', '#fff4ed'), node(440, 380, 'Permission denied', '#fdecea')],
+      links: [ln('M140 200 C 180 200, 190 200, 226 200', true), ln('M350 200 C 390 200, 400 200, 436 200'), ln('M560 200 C 600 200, 610 200, 646 200'), ln('M80 290 C 80 480, 150 520, 226 520'), ln('M290 290 C 300 380, 420 420, 436 500'), ln('M560 480 C 640 470, 700 380, 710 294', 'flag'), ln('M350 520 C 500 600, 640 560, 700 294')],
+      labels: [lab(158, 172, 'Get started'), lab(366, 172, 'Allow'), lab(576, 172, 'Finish'), lab(60, 440, 'I have an account'), lab(330, 352, 'Not now'), lab(600, 420, 'Skip ?', true)],
+      rows: [
+        { from: 'Welcome', to: 'Calendar', how: 'Tap "Get started" · slide left', s: 'accepted', c: 'u-chip u-chip--ok' },
+        { from: 'Calendar', to: 'Reminders', how: 'Tap "Allow" · slide left', s: 'proposed', c: 'u-chip u-chip--agent' },
+        { from: 'Reminders', to: 'Home', how: 'Tap "Finish" · dissolve', s: 'proposed', c: 'u-chip u-chip--agent' },
+        { from: 'Welcome', to: 'Sign in', how: 'Tap "I have an account"', s: 'proposed', c: 'u-chip u-chip--agent' },
+        { from: 'Calendar', to: 'Permission denied', how: 'Tap "Not now"', s: 'proposed', c: 'u-chip u-chip--agent' },
+        { from: 'Permission denied', to: 'Home', how: 'Tap "Skip" · not in the PRD', s: 'check', c: 'u-chip u-chip--signal' },
+        { from: 'Sign in', to: 'Home', how: 'After sign-in · smart animate', s: 'proposed', c: 'u-chip u-chip--agent' }
+      ]
+    };
+    }).call(this);
+    __v.H = H; if (!__v.theme) __v.theme = T; return __v;
+  }
+}
+</script>
+</body>
+</html>
