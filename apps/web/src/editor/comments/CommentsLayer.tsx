@@ -308,7 +308,7 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
         d.screen = { x: p.x - d.grab.x, y: p.y - d.grab.y };
         const el = e.currentTarget;
         el.dataset.moving = "";
-        el.style.transform = `translate3d(${Math.round(d.screen.x)}px, ${Math.round(d.screen.y)}px, 0)`;
+        el.style.transform = `translate3d(${Math.round(d.screen.x)}px, ${Math.round(d.screen.y)}px, 0) scale(1.08)`;
       },
       onPointerUp: (e: React.PointerEvent<HTMLButtonElement>) => {
         const d = drag.current;
