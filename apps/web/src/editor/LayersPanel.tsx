@@ -1,49 +1,42 @@
-import { hasMask, maskScopes } from "@drawpane/editor";
-import { getProp, keyBetween, type NodeRecord } from "@drawpane/model";
-import { IconButton, type LayerKind, LayerRow, type PresenceSlot } from "@drawpane/ui";
-import { type KeyboardEvent, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+/**
+ * The layers panel: the page's layer tree with search and filters, drag to
+ * reorder (⌥ to duplicate), hide and lock on each row, and rename in place.
+ * Long trees stay fast: only the rows in view are drawn.
+ */
+import { getProp, keyBetween, type NodeRecord, type Op } from "@drawpane/model";
+import { Icon, IconButton, LayerRow, type PresenceSlot } from "@drawpane/ui";
+import {
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import {
+  containersWithin,
+  kindOf,
+  LAYER_FILTERS,
+  type LayerFilter,
+  layerName,
+  layerRows,
+  type Row,
+} from "./layer-tree";
 import { openMenu, uiFor, useUi } from "./ui-state";
 
 const ROW_HEIGHT = 28;
 const OVERSCAN = 8;
 
-const KIND: Record<string, LayerKind> = {
-  frame: "frame",
-  group: "group",
-  rect: "rect",
-  ellipse: "ellipse",
-  polygon: "polygon",
-  star: "star",
-  line: "line",
-  path: "path",
-  text: "text",
-};
+type Where = "before" | "after" | "inside";
 
-function kindOf(node: NodeRecord): LayerKind {
-  if (node.type === "frame") {
-    if (getProp(node.props, "isComponent") || getProp(node.props, "isComponentSet"))
-      return "component";
-    if (getProp(node.props, "instanceOf") !== null) return "instance";
-  }
-  // A line with an end marker reads as an arrow.
-  if (
-    node.type === "line" &&
-    (getProp(node.props, "markerEnd") !== "none" || getProp(node.props, "markerStart") !== "none")
-  )
-    return "arrow";
-  // A rectangle filled with an image reads as an image layer.
-  if (node.type === "rect" && getProp(node.props, "fills").some((f) => f.type === "image"))
-    return "image";
-  return KIND[node.type] ?? "rect";
-}
-
-interface Row {
-  readonly node: NodeRecord;
-  readonly depth: number;
-  readonly hasChildren: boolean;
-  /** "mask" for masks, "clipped" for the layers a mask clips. */
-  readonly note?: string;
+interface DragState {
+  readonly id: string;
+  readonly over: string | null;
+  readonly where: Where;
+  /** ⌥ held: the drop duplicates instead of moving. */
+  readonly copy: boolean;
 }
 
 export function LayersPanel() {
@@ -54,15 +47,37 @@ export function LayersPanel() {
   const peers = useEditorState((s) => s.peers);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const renaming = useUi(editor, (ui) => ui.renaming);
+  const findRequest = useUi(editor, (ui) => ui.findLayers);
+  const collapseRequest = useUi(editor, (ui) => ui.collapseLayers);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [focusId, setFocusId] = useState<string | null>(null);
-  const [drag, setDrag] = useState<{
-    id: string;
-    over: string | null;
-    where: "before" | "after" | "inside";
-  } | null>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<LayerFilter>("all");
   const scroller = useRef<HTMLDivElement>(null);
+  const searchField = useRef<HTMLInputElement>(null);
   const [scroll, setScroll] = useState({ top: 0, height: 400 });
+
+  // ⌘F opens the search in the same render, so the field (which focuses
+  // itself, see LayerSearch) catches the very next keystroke.
+  const [seenFind, setSeenFind] = useState(findRequest);
+  if (findRequest !== seenFind) {
+    setSeenFind(findRequest);
+    setSearching(true);
+  }
+
+  const collapseAll = useCallback(() => {
+    if (!pageId) return;
+    setCollapsed(
+      new Set(editor.doc.childIds(pageId).flatMap((id) => containersWithin(editor.doc, id))),
+    );
+  }, [editor, pageId]);
+
+  // ⌥L folds everything.
+  useEffect(() => {
+    if (collapseRequest > 0) collapseAll();
+  }, [collapseRequest, collapseAll]);
 
   // Expand ancestors of the selection so selected layers are always visible.
   const selectionKey = selection.join(",");
@@ -80,29 +95,12 @@ export function LayersPanel() {
     });
   }, [selectionKey, editor]);
 
-  // The tree, flattened to visible rows (topmost layer first, like every design tool).
-  const rows = useMemo(() => {
+  const active = searching && (query.trim() !== "" || filter !== "all");
+  const { rows, found } = useMemo(() => {
     void version;
-    const out: Row[] = [];
-    if (!pageId) return out;
-    const walk = (parent: string, depth: number) => {
-      const ids = editor.doc.childIds(parent);
-      const scopes = hasMask(editor.doc, parent)
-        ? new Map(maskScopes(editor.doc, parent).map((s) => [s.id, s]))
-        : null;
-      for (let i = ids.length - 1; i >= 0; i--) {
-        const node = editor.doc.get(ids[i] as string);
-        if (!node) continue;
-        const children = editor.doc.childIds(node.id);
-        const scope = scopes?.get(node.id);
-        const note = scope?.isMask ? "mask" : scope?.mask ? "clipped" : undefined;
-        out.push({ node, depth, hasChildren: children.length > 0, ...(note ? { note } : {}) });
-        if (children.length > 0 && !collapsed.has(node.id)) walk(node.id, depth + 1);
-      }
-    };
-    walk(pageId, 0);
-    return out;
-  }, [editor, pageId, version, collapsed]);
+    if (!pageId) return { rows: [] as Row[], found: [] as string[] };
+    return layerRows(editor.doc, pageId, active ? { collapsed, query, filter } : { collapsed });
+  }, [editor, pageId, version, collapsed, active, query, filter]);
 
   const presenceBy = useMemo(() => {
     const map = new Map<string, { slot: PresenceSlot; name: string }>();
@@ -141,13 +139,21 @@ export function LayersPanel() {
     };
   }, []);
 
-  const toggle = useCallback((id: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
-  }, []);
+  /** Folds or opens a container; `deep` (⌥-click) does the same to everything inside it. */
+  const toggle = useCallback(
+    (id: string, deep = false) => {
+      setCollapsed((prev) => {
+        const next = new Set(prev);
+        const opening = prev.has(id);
+        for (const c of deep ? containersWithin(editor.doc, id) : [id]) {
+          if (opening) next.delete(c);
+          else next.add(c);
+        }
+        return next;
+      });
+    },
+    [editor],
+  );
 
   const select = (id: string, e: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }) => {
     setFocusId(id);
@@ -165,6 +171,12 @@ export function LayersPanel() {
     }
   };
 
+  const closeSearch = () => {
+    setSearching(false);
+    setQuery("");
+    setFilter("all");
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     const current = focusId ?? selection[0] ?? rows[0]?.node.id;
     const index = rows.findIndex((r) => r.node.id === current);
@@ -180,21 +192,27 @@ export function LayersPanel() {
       case "ArrowDown":
         return move(index + 1);
       case "ArrowUp":
+        // From the top row, back up into the search field.
+        if (index <= 0 && searching) {
+          e.preventDefault();
+          searchField.current?.focus();
+          return;
+        }
         return move(index - 1);
       case "Home":
         return move(0);
       case "End":
         return move(rows.length - 1);
       case "ArrowRight":
-        if (row?.hasChildren && collapsed.has(row.node.id)) {
+        if (!active && row?.hasChildren && collapsed.has(row.node.id)) {
           e.preventDefault();
-          toggle(row.node.id);
+          toggle(row.node.id, e.altKey);
         }
         return;
       case "ArrowLeft":
-        if (row?.hasChildren && !collapsed.has(row.node.id)) {
+        if (!active && row?.hasChildren && !collapsed.has(row.node.id)) {
           e.preventDefault();
-          toggle(row.node.id);
+          toggle(row.node.id, e.altKey);
         } else if (row) {
           const parent = rows.find((r) => r.node.id === row.node.parent);
           if (parent) move(rows.indexOf(parent));
@@ -207,42 +225,71 @@ export function LayersPanel() {
   const onDragOver = (row: Row, e: React.DragEvent<HTMLDivElement>) => {
     if (!drag || drag.id === row.node.id) return;
     e.preventDefault();
+    e.dataTransfer.dropEffect = e.altKey ? "copy" : "move";
     const rect = e.currentTarget.getBoundingClientRect();
     const y = (e.clientY - rect.top) / rect.height;
     const container = row.node.type === "frame" || row.node.type === "group";
-    const where = container && y > 0.3 && y < 0.7 ? "inside" : y < 0.5 ? "before" : "after";
-    if (drag.over !== row.node.id || drag.where !== where)
-      setDrag({ ...drag, over: row.node.id, where });
+    const where: Where = container && y > 0.3 && y < 0.7 ? "inside" : y < 0.5 ? "before" : "after";
+    if (drag.over !== row.node.id || drag.where !== where || drag.copy !== e.altKey)
+      setDrag({ ...drag, over: row.node.id, where, copy: e.altKey });
   };
 
   const onDrop = () => {
     if (!drag?.over) return setDrag(null);
     const target = editor.doc.get(drag.over);
-    const moving = selection.includes(drag.id) ? selection : [drag.id];
+    const dragged = selection.includes(drag.id) ? selection : [drag.id];
+    const { where, copy } = drag;
     setDrag(null);
     if (!target) return;
     // Refuse to drop a layer into itself.
     if (
-      moving.some(
+      dragged.some(
         (id) => id === target.id || editor.doc.ancestors(target.id).some((a) => a.id === id),
       )
     )
       return;
+    const keyOf = (id: string | null) => (id ? (editor.doc.get(id)?.key ?? null) : null);
+    // Bottom first, so the layers keep their order relative to each other.
+    const byKey = (ids: readonly string[]) =>
+      [...ids].sort((a, b) =>
+        (editor.doc.get(a)?.key ?? "") < (editor.doc.get(b)?.key ?? "") ? -1 : 1,
+      );
+
+    editor.beginGesture(copy ? "Duplicate layers" : "Reorder layers");
+    let moving = byKey(dragged);
+    if (copy) {
+      // Copies first, right above their originals; then they move like a plain drag.
+      const ops: Op[] = [];
+      const copies: string[] = [];
+      for (const id of moving) {
+        const node = editor.doc.get(id);
+        if (!node) continue;
+        const siblings = editor.doc.childIds(node.parent);
+        const next = siblings[siblings.indexOf(id) + 1];
+        const made = editor.cloneOps(id, node.parent, keyBetween(node.key, keyOf(next ?? null)), {
+          x: 0,
+          y: 0,
+        });
+        ops.push(...made.ops);
+        copies.push(made.rootId);
+      }
+      editor.commit(ops, "Duplicate layers");
+      moving = copies.filter((id) => editor.doc.has(id));
+    }
     let parent: string;
     let below: string | null;
     let above: string | null;
     const siblingsOf = (p: string) => editor.doc.childIds(p).filter((id) => !moving.includes(id));
-    if (drag.where === "inside") {
+    if (where === "inside") {
       parent = target.id;
-      const kids = siblingsOf(parent);
-      below = kids.at(-1) ?? null;
+      below = siblingsOf(parent).at(-1) ?? null;
       above = null;
     } else {
       parent = target.parent;
       const kids = siblingsOf(parent);
       const index = kids.indexOf(target.id);
       // The panel lists topmost first, so "before" in the list means above in z-order.
-      if (drag.where === "before") {
+      if (where === "before") {
         below = target.id;
         above = kids[index + 1] ?? null;
       } else {
@@ -250,22 +297,17 @@ export function LayersPanel() {
         above = target.id;
       }
     }
-    const keyOf = (id: string | null) => (id ? (editor.doc.get(id)?.key ?? null) : null);
     let lo = keyOf(below);
     const hi = keyOf(above);
-    const ops = [];
-    // Keep the moving layers' relative order (bottom first).
-    const ordered = [...moving].sort((a, b) => {
-      const ka = editor.doc.get(a)?.key ?? "";
-      const kb = editor.doc.get(b)?.key ?? "";
-      return ka < kb ? -1 : 1;
-    });
-    for (const id of ordered) {
+    const ops: Op[] = [];
+    for (const id of moving) {
       const key = keyBetween(lo, hi);
       ops.push(...editor.reparentOps(id, parent, key));
       lo = key;
     }
-    editor.commit(ops, "Reorder layers");
+    editor.commit(ops, copy ? "Duplicate layers" : "Reorder layers");
+    if (copy) editor.select(moving);
+    editor.endGesture();
   };
 
   const start = Math.max(0, Math.floor(scroll.top / ROW_HEIGHT) - OVERSCAN);
@@ -277,6 +319,50 @@ export function LayersPanel() {
 
   return (
     <div className="layers">
+      <div className="pane__head pane__head--layers">
+        <span className="pane__label">Layers</span>
+        <span className="pane__actions">
+          <IconButton
+            icon="search"
+            label="Find layers"
+            shortcut="⌘F"
+            pressed={searching}
+            onClick={() => {
+              if (searching) closeSearch();
+              else uiFor(editor).set({ findLayers: uiFor(editor).get().findLayers + 1 });
+            }}
+          />
+          <IconButton
+            icon="collapse-all"
+            label="Collapse all layers"
+            shortcut="⌥L"
+            disabled={active}
+            onClick={collapseAll}
+          />
+        </span>
+      </div>
+      {searching ? (
+        <LayerSearch
+          field={searchField}
+          focusRequest={findRequest}
+          query={query}
+          filter={filter}
+          found={found.length}
+          active={active}
+          onQuery={setQuery}
+          onFilter={setFilter}
+          onClose={closeSearch}
+          onSelectAll={() => editor.select(found)}
+          onFocusTree={() => {
+            const first = found[0];
+            if (!first) return;
+            select(first, { shiftKey: false, metaKey: false, ctrlKey: false });
+            requestAnimationFrame(() =>
+              scroller.current?.querySelector<HTMLElement>('[tabindex="0"]')?.focus(),
+            );
+          }}
+        />
+      ) : null}
       <div
         ref={scroller}
         className="layers__scroll"
@@ -286,7 +372,16 @@ export function LayersPanel() {
         onKeyDown={onKeyDown}
       >
         {rows.length === 0 ? (
-          <p className="layers__empty">Layers you draw appear here.</p>
+          active ? (
+            <div className="layers__empty">
+              <p>No layers match.</p>
+              <button type="button" className="layers__link" onClick={closeSearch}>
+                Clear search
+              </button>
+            </div>
+          ) : (
+            <p className="layers__empty">Layers you draw appear here.</p>
+          )
         ) : (
           <div style={{ height: rows.length * ROW_HEIGHT, position: "relative" }}>
             {rows.slice(start, end).map((row, i) => {
@@ -299,20 +394,26 @@ export function LayersPanel() {
                   key={node.id}
                   className={dropClass}
                   style={{ position: "absolute", top: (start + i) * ROW_HEIGHT, left: 0, right: 0 }}
-                  name={getProp(node.props, "name") || node.type}
+                  name={layerName(node)}
                   {...(row.note ? { note: row.note } : {})}
+                  {...(active && query.trim() ? { highlight: query } : {})}
+                  context={row.context === true}
                   kind={kindOf(node)}
                   depth={row.depth}
                   selected={selection.includes(node.id)}
                   hidden={!getProp(node.props, "visible")}
+                  hiddenByParent={row.hiddenByParent === true}
                   locked={getProp(node.props, "locked")}
                   hasChildren={row.hasChildren}
-                  expanded={!collapsed.has(node.id)}
+                  // Search results always show what's inside them.
+                  expanded={active || !collapsed.has(node.id)}
                   tabIndex={node.id === tabStop ? 0 : -1}
                   {...(presence
                     ? { presence: presence.slot, presenceLabel: `Selected by ${presence.name}` }
                     : {})}
-                  onToggleExpanded={() => toggle(node.id)}
+                  {...(active
+                    ? {}
+                    : { onToggleExpanded: (deep: boolean) => toggle(node.id, deep) })}
                   {...(canEdit
                     ? {
                         onToggleHidden: () =>
@@ -320,14 +421,14 @@ export function LayersPanel() {
                             [node.id],
                             "visible",
                             getProp(node.props, "visible") ? false : null,
-                            "Hide",
+                            getProp(node.props, "visible") ? "Hide" : "Show",
                           ),
                         onToggleLocked: () =>
                           editor.setProp(
                             [node.id],
                             "locked",
                             getProp(node.props, "locked") ? null : true,
-                            "Lock",
+                            getProp(node.props, "locked") ? "Unlock" : "Lock",
                           ),
                         onRename: (name: string) => editor.rename(node.id, name),
                         renaming: renaming === node.id,
@@ -335,8 +436,8 @@ export function LayersPanel() {
                           uiFor(editor).set({ renaming: on ? node.id : null }),
                         draggable: true,
                         onDragStart: (e: React.DragEvent) => {
-                          e.dataTransfer.effectAllowed = "move";
-                          setDrag({ id: node.id, over: null, where: "before" });
+                          e.dataTransfer.effectAllowed = "copyMove";
+                          setDrag({ id: node.id, over: null, where: "before", copy: e.altKey });
                         },
                         onDragOver: (e: React.DragEvent<HTMLDivElement>) => onDragOver(row, e),
                         onDrop,
@@ -358,6 +459,145 @@ export function LayersPanel() {
           </div>
         )}
       </div>
+      {drag?.over ? <DragStatus editor={editor} drag={drag} selection={selection} /> : null}
+    </div>
+  );
+}
+
+/** The search field, the filter chips and what they found. */
+function LayerSearch({
+  field,
+  focusRequest,
+  query,
+  filter,
+  found,
+  active,
+  onQuery,
+  onFilter,
+  onClose,
+  onSelectAll,
+  onFocusTree,
+}: {
+  field: React.RefObject<HTMLInputElement | null>;
+  /** Changes on every ⌘F: focus the field (and select what's typed) when it does. */
+  focusRequest: number;
+  query: string;
+  filter: LayerFilter;
+  found: number;
+  active: boolean;
+  onQuery: (query: string) => void;
+  onFilter: (filter: LayerFilter) => void;
+  onClose: () => void;
+  onSelectAll: () => void;
+  onFocusTree: () => void;
+}) {
+  // Focus on opening, and again on every ⌘F while open.
+  useLayoutEffect(() => {
+    field.current?.focus();
+    field.current?.select();
+  }, [focusRequest, field]);
+  return (
+    <div className="layer-find">
+      <div className="layer-find__field">
+        <Icon name="search" size={12} />
+        <input
+          ref={field}
+          type="search"
+          aria-label="Find layers"
+          placeholder="Find layers"
+          value={query}
+          spellCheck={false}
+          autoComplete="off"
+          onChange={(e) => onQuery(e.target.value)}
+          onKeyDown={(e) => {
+            // The field owns its keys: no canvas shortcuts while typing.
+            e.stopPropagation();
+            if (e.key === "Escape") {
+              e.preventDefault();
+              onClose();
+            } else if (e.key === "Enter") {
+              e.preventDefault();
+              onSelectAll();
+            } else if (e.key === "ArrowDown") {
+              e.preventDefault();
+              onFocusTree();
+            }
+          }}
+        />
+        {query ? (
+          <button
+            type="button"
+            className="layer-find__clear"
+            aria-label="Clear search"
+            onClick={() => {
+              onQuery("");
+              field.current?.focus();
+            }}
+          >
+            <Icon name="close" size={12} />
+          </button>
+        ) : null}
+      </div>
+      <div className="layer-find__filters" role="radiogroup" aria-label="Show only">
+        {LAYER_FILTERS.map((f) => (
+          // biome-ignore lint/a11y/useSemanticElements: chips styled as a radio group, like the design
+          <button
+            key={f.value}
+            type="button"
+            role="radio"
+            aria-checked={filter === f.value}
+            className="layer-find__chip"
+            onClick={() => {
+              onFilter(f.value);
+              field.current?.focus();
+            }}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+      {active ? (
+        <div className="layer-find__summary" aria-live="polite">
+          <span>{found === 1 ? "1 found" : `${found} found`}</span>
+          {found > 0 ? (
+            <button type="button" className="layers__link" onClick={onSelectAll}>
+              Select all
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** What a drop will do, said in words while you drag. */
+function DragStatus({
+  editor,
+  drag,
+  selection,
+}: {
+  editor: ReturnType<typeof useEditor>;
+  drag: DragState;
+  selection: readonly string[];
+}) {
+  const moving = selection.includes(drag.id) ? selection.length : 1;
+  const node = editor.doc.get(drag.id);
+  const target = drag.over ? editor.doc.get(drag.over) : undefined;
+  if (!node || !target) return null;
+  const what = moving > 1 ? `${moving} layers` : layerName(node);
+  const where =
+    drag.where === "inside"
+      ? `into ${layerName(target)}`
+      : drag.where === "before"
+        ? `above ${layerName(target)}`
+        : `below ${layerName(target)}`;
+  return (
+    <div className="layers__status" role="status">
+      <Icon name={drag.copy ? "duplicate" : "layers"} size={12} />
+      <span>
+        <strong>{what}</strong> · {drag.copy ? "copying" : "moving"} {where}
+      </span>
+      {drag.copy ? null : <span className="layers__status-hint">⌥ to copy</span>}
     </div>
   );
 }
