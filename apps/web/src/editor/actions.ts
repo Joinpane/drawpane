@@ -16,7 +16,7 @@ import {
 } from "@drawpane/editor";
 import type { IconName } from "@drawpane/ui";
 import { isMac } from "../app/format";
-import { copySelectionAs, exportSelection } from "./exporting";
+import { copySelectionAs, exportPageAsPdf, exportSelection } from "./exporting";
 import { uiFor } from "./ui-state";
 
 export interface Shortcut {
@@ -805,6 +805,14 @@ export const ACTIONS: readonly Action[] = [
     keywords: "png jpeg webp svg download image",
     enabled: hasSelection,
     run: ({ editor }) => void exportSelection(editor),
+  },
+  {
+    id: "file.exportPagePdf",
+    label: "Export page as PDF",
+    group: "File",
+    icon: "export",
+    keywords: "pdf deck print frames pages download",
+    run: ({ editor }) => void exportPageAsPdf(editor),
   },
   {
     id: "file.history",

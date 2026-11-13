@@ -14,7 +14,9 @@ import {
   exportRaster,
   exportSvg,
 } from "@drawpane/editor";
+import { embeddedImages } from "./export-assets";
 import { imagesFor } from "./media";
+import { type PdfPage, pdfPageOf, pdfPages, renderPdf } from "./pdf";
 
 export interface ExportSettings {
   readonly scale: 1 | 2 | 3;
@@ -22,7 +24,7 @@ export interface ExportSettings {
 }
 
 const KEY = "drawpane.export";
-const FORMATS: readonly ExportFormat[] = ["png", "jpeg", "webp", "svg"];
+const FORMATS: readonly ExportFormat[] = ["png", "jpeg", "webp", "svg", "pdf"];
 let settings: ExportSettings = load();
 const listeners = new Set<() => void>();
 
@@ -76,10 +78,15 @@ export async function renderExport(
   ids: readonly string[],
   { format, scale }: ExportSettings,
 ): Promise<Blob> {
+  if (format === "pdf") {
+    return (await renderPdf(editor, pdfPages(editor, ids), exportName(editor, ids))).blob;
+  }
   if (format === "svg") {
     const bounds = exportBounds(editor.scene, ids);
     if (!bounds) throw new ExportError("Nothing visible to export. Show the layer and try again.");
-    return new Blob([exportSvg(editor.scene, editor.measurer, ids, bounds)], {
+    // Images go inside as data: URLs, so the file stands on its own.
+    const images = await embeddedImages(editor, ids);
+    return new Blob([exportSvg(editor.scene, editor.measurer, ids, bounds, { images })], {
       type: EXPORT_MIME.svg,
     });
   }
@@ -115,6 +122,10 @@ export async function exportSelection(
   }
   const name = exportFileName(exportName(editor, ids), options.format, options.scale);
   try {
+    if (options.format === "pdf") {
+      await savePdf(editor, pdfPages(editor, ids), exportName(editor, ids));
+      return;
+    }
     download(await renderExport(editor, ids, options), name);
     editor.notify(`Exported ${name}.`);
   } catch (error) {
@@ -122,6 +133,52 @@ export async function exportSelection(
       error instanceof ExportError
         ? error.message
         : "Couldn't export. Try a smaller scale, or another format.",
+    );
+  }
+}
+
+/** Renders pages into a PDF and saves it, saying which fonts were swapped. */
+async function savePdf(editor: Editor, pages: readonly PdfPage[], title: string): Promise<void> {
+  if (pages.length > 1) editor.notify(`Preparing ${pages.length} pages…`);
+  const name = exportFileName(title, "pdf");
+  const { blob, missingFonts } = await renderPdf(editor, pages, title);
+  download(blob, name);
+  editor.notify(
+    missingFonts.length > 0
+      ? `Exported ${name}. ${listOf(missingFonts)} ${missingFonts.length === 1 ? "isn't" : "aren't"} available, so ${missingFonts.length === 1 ? "it's" : "they're"} set in Helvetica.`
+      : `Exported ${name}.`,
+  );
+}
+
+const listOf = (items: readonly string[]) =>
+  items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+
+/**
+ * Exports every top-level frame on the page as one PDF, a page per frame in
+ * reading order, like a deck. With no frames, the page's layers make one page.
+ */
+export async function exportPageAsPdf(editor: Editor): Promise<void> {
+  const pageId = editor.s.pageId;
+  const page = pageId ? editor.doc.get(pageId) : undefined;
+  if (!pageId || !page) return;
+  const top = editor.doc
+    .childIds(pageId)
+    .filter((id) => editor.doc.get(id)?.props.visible !== false);
+  const frames = top.filter((id) => editor.doc.get(id)?.type === "frame");
+  if (top.length === 0) {
+    editor.notify("Nothing on this page to export yet.");
+    return;
+  }
+  try {
+    const name = page.props.name || "Page";
+    await savePdf(
+      editor,
+      frames.length > 0 ? pdfPages(editor, frames) : pdfPageOf(editor, top, name),
+      name,
+    );
+  } catch (error) {
+    editor.notify(
+      error instanceof ExportError ? error.message : "Couldn't export the PDF. Try again.",
     );
   }
 }

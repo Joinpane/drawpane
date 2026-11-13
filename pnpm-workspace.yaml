@@ -19,6 +19,8 @@ allowBuilds:
   esbuild: true
   workerd: true
   sharp: false
+  # Pulled in by jsPDF (via canvg); its postinstall only prints a banner.
+  core-js: false
 
 minimumReleaseAgeExclude:
   - "@cloudflare/workers-types@5.20261113.1"

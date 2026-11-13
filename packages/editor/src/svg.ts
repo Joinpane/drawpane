@@ -10,8 +10,12 @@
  * (inside and outside are emulated with a clip path or mask), dashes, joins
  * and caps.
  *
+ * Image fills are drawn when the caller supplies the image (`options.images`:
+ * a URL, such as a data: URL for a self-contained file, and its natural
+ * size), placed by their scale mode and clipped to the layer's shape.
+ *
  * Not covered yet:
- * - image fills and image strokes (skipped; export PNG instead)
+ * - image fills without a supplied image, and image strokes (left out)
  * - shadows, layer blur and background blur
  * - per-paint blend modes on strokes
  * - text that depends on fonts the viewer lacks: text stays live, so it
@@ -21,6 +25,7 @@
  */
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { type Matrix, type Rect, round2 } from "./geometry";
+import { FULL_CROP, imagePlacement } from "./images";
 import { markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
 import type { Scene } from "./scene";
@@ -251,13 +256,61 @@ function shapeOf(node: NodeRecord, w: number, h: number): { tag: string; attrs: 
  * viewBox is `bounds` in page coordinates. See the module comment for what
  * is and isn't covered.
  */
+/** An image for an image fill: where to load it from, and its natural size in pixels. */
+export interface SvgImageSource {
+  readonly href: string;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface SvgExportOptions {
+  /** Images by content hash; image fills without one are left out. */
+  readonly images?: (ref: string) => SvgImageSource | null;
+}
+
 export function exportSvg(
   scene: Scene,
   measurer: TextMeasurer,
   ids: readonly string[],
   bounds: Rect,
+  options: SvgExportOptions = {},
 ): string {
   const out = new SvgWriter();
+
+  /** An image fill: the image placed by its scale mode, clipped to the layer's shape. */
+  const imageFill = (
+    paint: Extract<Paint, { type: "image" }>,
+    shape: { tag: string; attrs: string },
+    w: number,
+    h: number,
+    transform: string,
+    blendStyle: string,
+  ): string | null => {
+    const source = options.images?.(paint.ref);
+    if (!source) return null;
+    const p = imagePlacement(
+      paint.scaleMode,
+      { width: w, height: h },
+      source,
+      paint.crop ?? FULL_CROP,
+    );
+    const href = attr("href", source.href);
+    const clip = out.id("clip");
+    out.defs.push(`<clipPath id="${clip}"><${shape.tag}${transform}${shape.attrs}/></clipPath>`);
+    let body: string;
+    if (p.tile) {
+      const tile = out.id("tile");
+      out.defs.push(
+        `<pattern id="${tile}" patternUnits="userSpaceOnUse"${attr("width", round2(p.width))}${attr("height", round2(p.height))}><image${attr("width", round2(p.width))}${attr("height", round2(p.height))}${href} preserveAspectRatio="none"/></pattern>`,
+      );
+      body = `<rect${attr("width", w)}${attr("height", h)} fill="url(#${tile})"/>`;
+    } else {
+      body = `<image${attr("x", round2(p.x))}${attr("y", round2(p.y))}${attr("width", round2(p.width))}${attr("height", round2(p.height))}${href} preserveAspectRatio="none"/>`;
+    }
+    const opacity =
+      paint.opacity !== undefined && paint.opacity < 1 ? attr("opacity", paint.opacity) : "";
+    return `<g clip-path="url(#${clip})"${opacity}${blendStyle}><g${transform}>${body}</g></g>`;
+  };
 
   const visit = (id: string, into: string[]) => {
     const node = scene.doc.get(id);
@@ -288,12 +341,17 @@ export function exportSvg(
         if (node.type !== "line")
           for (const paint of getProp(node.props, "fills")) {
             if (paint.visible === false) continue;
-            const fill = out.paint("fill", paint, w, h);
-            if (!fill) continue;
             const blendStyle =
               paint.blendMode && BLEND_CSS.has(paint.blendMode)
                 ? ` style="mix-blend-mode:${paint.blendMode}"`
                 : "";
+            if (paint.type === "image") {
+              const image = imageFill(paint, shape, w, h, transform, blendStyle);
+              if (image) parts.push(image);
+              continue;
+            }
+            const fill = out.paint("fill", paint, w, h);
+            if (!fill) continue;
             parts.push(`<${shape.tag}${transform}${shape.attrs}${fill}${blendStyle}/>`);
           }
         if (node.type === "frame") {

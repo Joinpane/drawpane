@@ -4,6 +4,7 @@ import {
   exportBounds,
   exportFileName,
   fitScale,
+  isVectorFormat,
   snapToPixels,
 } from "@drawpane/editor";
 import type { NodeRecord } from "@drawpane/model";
@@ -29,6 +30,7 @@ const FORMATS: readonly SegmentedOption<ExportSettings["format"]>[] = [
   { value: "jpeg", label: "JPEG" },
   { value: "webp", label: "WebP" },
   { value: "svg", label: "SVG" },
+  { value: "pdf", label: "PDF" },
 ];
 
 /**
@@ -80,6 +82,9 @@ function useExportPreview(editor: Editor, ids: readonly string[], version: numbe
   return url;
 }
 
+/** Each selected layer is a page of the PDF. */
+const pageCount = (n: number) => (n === 1 ? "1 page" : `${n} pages`);
+
 /** The Export section: scale, format and a button, plus ⇧⌘E. Viewers can export too. */
 export function ExportSection({
   editor,
@@ -105,8 +110,8 @@ export function ExportSection({
         <SegmentedControl
           label="Export scale"
           options={SCALES}
-          value={settings.format === "svg" ? "1" : String(settings.scale)}
-          disabled={settings.format === "svg"}
+          value={isVectorFormat(settings.format) ? "1" : String(settings.scale)}
+          disabled={isVectorFormat(settings.format)}
           onChange={(value) =>
             exportSettings.set({ scale: Number(value) as ExportSettings["scale"] })
           }
@@ -125,10 +130,15 @@ export function ExportSection({
           aria-keyshortcuts={isMac() ? "Shift+Meta+E" : "Shift+Control+E"}
           onClick={() => void exportSelection(editor)}
         >
-          {nodes.length > 1 ? `Export ${nodes.length} layers` : "Export layer"}
+          {settings.format === "pdf"
+            ? "Export PDF"
+            : nodes.length > 1
+              ? `Export ${nodes.length} layers`
+              : "Export layer"}
         </Button>
         <p className="export-section__hint" title={file}>
           Saves {file}
+          {settings.format === "pdf" ? ` · ${pageCount(nodes.length)}` : ""}
         </p>
       </PropertySection>
     </div>
