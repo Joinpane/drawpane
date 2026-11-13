@@ -331,6 +331,16 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.frameSelection(true),
   },
   {
+    id: "layer.gridLayout",
+    label: "Add grid layout",
+    group: "Layer",
+    icon: "layout-grid",
+    shortcut: { key: "a", shift: true, alt: true },
+    keywords: "css grid columns rows tracks",
+    enabled: canEditSelection,
+    run: ({ editor }) => editor.addGridLayout(),
+  },
+  {
     id: "layer.rename",
     label: "Rename",
     group: "Layer",
