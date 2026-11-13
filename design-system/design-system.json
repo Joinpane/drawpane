@@ -93,6 +93,8 @@
     "layout-row.svg",
     "layout-col.svg",
     "layout-grid.svg",
+      "wrap.svg",
+      "absolute.svg",
     "branch.svg",
     "history.svg",
     "token.svg",

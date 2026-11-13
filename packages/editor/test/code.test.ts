@@ -136,4 +136,69 @@ describe("design to code", () => {
       "bg-white",
     ]);
   });
+
+  it("writes grid layout as CSS grid, with areas and self alignment", () => {
+    const editor = setup();
+    const grid = editor.createLayer("frame", { x: 0, y: 0, width: 400, height: 300 }, "p", {
+      layoutMode: "grid",
+      gridColumns: [
+        { unit: "fr", value: 1 },
+        { unit: "fr", value: 1 },
+        { unit: "fr", value: 1 },
+      ],
+      gridRows: [{ unit: "px", value: 120 }, { unit: "auto" }],
+      gap: 16,
+      rowGap: 8,
+      justifyItems: "center",
+    }) as string;
+    const header = editor.createLayer("rect", { x: 0, y: 0, width: 80, height: 32 }, grid, {
+      gridArea: { column: 2, row: 1, columnSpan: 2, rowSpan: 1 },
+      sizingH: "fill",
+      alignSelf: "end",
+    }) as string;
+    expect(decl(cssFor(editor.doc, editor.doc.get(grid) as never))).toMatchObject({
+      display: "grid",
+      "grid-template-columns": "repeat(3, 1fr)",
+      "grid-template-rows": "120px auto",
+      "justify-items": "center",
+      "row-gap": "8px",
+      "column-gap": "16px",
+    });
+    const css = decl(cssFor(editor.doc, editor.doc.get(header) as never));
+    expect(css).toMatchObject({
+      "grid-column": "2 / span 2",
+      "grid-row": "1",
+      "align-self": "end",
+      "justify-self": "stretch",
+    });
+    expect(css).not.toHaveProperty("width");
+    expect(tailwindFor(editor.doc, editor.doc.get(header) as never)).toEqual(
+      expect.arrayContaining([
+        "col-start-2",
+        "col-span-2",
+        "row-start-1",
+        "self-end",
+        "justify-self-stretch",
+      ]),
+    );
+    expect(tailwindFor(editor.doc, editor.doc.get(grid) as never)).toEqual(
+      expect.arrayContaining(["grid", "grid-cols-3", "gap-y-2", "gap-x-4"]),
+    );
+  });
+
+  it("writes wrapping lines with their own gap", () => {
+    const editor = setup();
+    const row = editor.createLayer("frame", { x: 0, y: 0, width: 400, height: 300 }, "p", {
+      layoutMode: "row",
+      layoutWrap: true,
+      gap: 8,
+      rowGap: 24,
+    }) as string;
+    expect(decl(cssFor(editor.doc, editor.doc.get(row) as never))).toMatchObject({
+      "flex-wrap": "wrap",
+      "align-content": "flex-start",
+      "row-gap": "24px",
+      "column-gap": "8px",
+    });
+  });
 });

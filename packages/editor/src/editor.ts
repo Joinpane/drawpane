@@ -224,6 +224,26 @@ const MAX_FIXUP_ROUNDS = 8;
 const ALIGN_EDGES = ["left", "center", "right", "top", "middle", "bottom"] as const;
 export type AlignEdge = (typeof ALIGN_EDGES)[number];
 
+/** Layers grouped into rows by vertical overlap, each row read left to right. */
+function readingRows(nodes: readonly NodeRecord[]): NodeRecord[][] {
+  const box = (n: NodeRecord) => ({
+    x: getProp(n.props, "x"),
+    y: getProp(n.props, "y"),
+    h: getProp(n.props, "height"),
+  });
+  const rows: { bottom: number; nodes: NodeRecord[] }[] = [];
+  for (const node of [...nodes].sort((a, b) => box(a).y - box(b).y)) {
+    const b = box(node);
+    const row = rows.at(-1);
+    // Joins the row when its middle is above the row's bottom edge.
+    if (row && b.y + b.h / 2 < row.bottom) {
+      row.nodes.push(node);
+      row.bottom = Math.max(row.bottom, b.y + b.h);
+    } else rows.push({ bottom: b.y + b.h, nodes: [node] });
+  }
+  return rows.map((r) => r.nodes.sort((a, b) => box(a).x - box(b).x));
+}
+
 export class Editor {
   readonly doc = new Doc();
   readonly scene = new Scene(this.doc);
@@ -1235,6 +1255,96 @@ export class Editor {
     });
     if (this.commit(ops, autoLayout ? "Add auto layout" : "Frame selection"))
       this.select([frameId]);
+  }
+
+  /**
+   * Switches frames' layout. Going to grid from free placement reads the grid
+   * the layers already form: rows of overlapping layers, as many columns as
+   * the widest row, children reordered to read left to right, top to bottom.
+   * Going to grid from a row or column keeps their order in one row or column.
+   */
+  setLayoutMode(ids: readonly string[], mode: "none" | "row" | "column" | "grid"): void {
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const frame = this.doc.get(id);
+      if (frame?.type !== "frame") continue;
+      const from = getProp(frame.props, "layoutMode");
+      if (from === mode) continue;
+      ops.push({ op: "set", id, prop: "layoutMode", value: mode === "none" ? null : mode });
+      if (mode !== "grid") {
+        if (from === "none" && getProp(frame.props, "gap") === 0)
+          ops.push({ op: "set", id, prop: "gap", value: 8 });
+        continue;
+      }
+      const gap = getProp(frame.props, "gap") || 8;
+      ops.push({ op: "set", id, prop: "gap", value: gap });
+      if (getProp(frame.props, "rowGap") === 0)
+        ops.push({ op: "set", id, prop: "rowGap", value: gap });
+      if (getProp(frame.props, "gridColumns").length > 0) continue;
+      const children = this.doc
+        .childIds(id)
+        .map((c) => this.doc.get(c))
+        .filter(
+          (c): c is NodeRecord =>
+            !!c && getProp(c.props, "visible") && getProp(c.props, "positioning") === "auto",
+        );
+      let columns = 2;
+      let rows = 1;
+      if (from === "row") columns = Math.max(1, children.length);
+      else if (from === "column") columns = 1;
+      else if (children.length > 0) {
+        const lines = readingRows(children);
+        columns = Math.min(12, Math.max(...lines.map((line) => line.length)));
+        rows = lines.length;
+        const ordered = lines.flat();
+        const keys = keysBetween(null, null, ordered.length);
+        ordered.forEach((child, i) => {
+          ops.push({ op: "move", id: child.id, parent: id, key: keys[i] as string });
+        });
+      }
+      const fr = { unit: "fr", value: 1 } as const;
+      ops.push({
+        op: "set",
+        id,
+        prop: "gridColumns",
+        value: Array.from({ length: columns }, () => fr),
+      });
+      // Rows hug their content unless the frame is empty, where they share it.
+      ops.push({
+        op: "set",
+        id,
+        prop: "gridRows",
+        value: Array.from({ length: Math.max(rows, children.length === 0 ? 2 : 1) }, () =>
+          children.length === 0 ? fr : ({ unit: "auto" } as const),
+        ),
+      });
+    }
+    if (ops.length > 0)
+      this.commit(
+        ops,
+        mode === "none" ? "Remove auto layout" : mode === "grid" ? "Grid layout" : "Auto layout",
+      );
+  }
+
+  /** Puts the selection in a grid: a frame becomes one, other layers are framed first. */
+  addGridLayout(): void {
+    if (this.#refuseInsideInstance()) return;
+    const ids = this.#topmost(this.s.selection);
+    const only = ids.length === 1 ? this.doc.get(ids[0] as string) : undefined;
+    if (only?.type === "frame") {
+      this.setLayoutMode([only.id], "grid");
+      return;
+    }
+    if (ids.length === 0) return;
+    this.beginGesture("Add grid layout");
+    this.frameSelection(false);
+    const frame = this.s.selection[0];
+    if (frame && this.doc.get(frame)?.type === "frame") {
+      this.setLayoutMode([frame], "grid");
+      this.setProp([frame], "sizingH", "hug");
+      this.setProp([frame], "sizingV", "hug");
+    }
+    this.endGesture();
   }
 
   /** True (and tells the user) when the selection reaches inside an instance. */
