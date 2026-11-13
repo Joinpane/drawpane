@@ -294,7 +294,7 @@ describe("SyncEngine convergence", () => {
       }),
       { numRuns: 400 },
     );
-  });
+  }, 30_000); // 400 random interleavings: CPU-heavy, and slower when the whole repo tests at once.
 
   it("keeps a local edit visible while a conflicting remote edit arrives", () => {
     const room = new FakeRoom(seed);

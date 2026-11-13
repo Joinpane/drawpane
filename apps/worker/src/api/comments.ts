@@ -328,18 +328,46 @@ export const comments = new Hono<AppContext>()
 
   .patch("/files/:fileId/comments/:threadId", async (c) => {
     const user = requireUser(c);
-    const { file } = await fileForWrite(c, user);
+    const { file, role } = await fileForWrite(c, user);
     const threadId = c.req.param("threadId");
-    const { resolved } = await readBody(c, CommentThreadPatch);
-    const now = Date.now();
-    const result = await c.env.DB.prepare(
-      `UPDATE comment_threads SET resolved_at = ?, resolved_by = ?, updated_at = ?
-        WHERE id = ? AND file_id = ?`,
+    const { resolved, anchor } = await readBody(c, CommentThreadPatch);
+    const row = await c.env.DB.prepare(
+      "SELECT created_by FROM comment_threads WHERE id = ? AND file_id = ?",
     )
-      .bind(resolved ? now : null, resolved ? user.id : null, now, threadId, file.id)
-      .run();
-    if (result.meta.changes === 0)
-      throw notFound("That comment was deleted. Refresh the comments list.");
+      .bind(threadId, file.id)
+      .first<{ created_by: string | null }>();
+    if (!row) throw notFound("That comment was deleted. Refresh the comments list.");
+    // Anyone who can comment can resolve; moving someone else's pin takes edit access.
+    if (anchor && role === "viewer" && row.created_by !== user.id)
+      throw forbidden("Only the person who started this thread, or an editor, can move it.");
+    const now = Date.now();
+    const writes: D1PreparedStatement[] = [];
+    if (resolved !== undefined) {
+      writes.push(
+        c.env.DB.prepare(
+          `UPDATE comment_threads SET resolved_at = ?, resolved_by = ?, updated_at = ?
+            WHERE id = ? AND file_id = ?`,
+        ).bind(resolved ? now : null, resolved ? user.id : null, now, threadId, file.id),
+      );
+    }
+    if (anchor) {
+      // Moving a pin isn't activity: it leaves updated_at (and list order) alone.
+      writes.push(
+        c.env.DB.prepare(
+          `UPDATE comment_threads SET x = ?, y = ?, node_id = ?, node_x = ?, node_y = ?
+            WHERE id = ? AND file_id = ?`,
+        ).bind(
+          anchor.x,
+          anchor.y,
+          anchor.nodeId,
+          anchor.offset?.x ?? null,
+          anchor.offset?.y ?? null,
+          threadId,
+          file.id,
+        ),
+      );
+    }
+    await c.env.DB.batch(writes);
     const thread = await loadThread(c.env.DB, file.id, threadId);
     await relay(c.env, file.id, { kind: "thread", thread });
     return c.json({ thread });

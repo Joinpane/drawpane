@@ -98,6 +98,8 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
       }
       let anchor: { x: number; y: number } | null = null;
       for (const [id, el] of pins.current) {
+        // A pin being dragged follows the pointer, not its anchor.
+        if (el.dataset.moving !== undefined) continue;
         const thread = cs.threads.get(id);
         const p = place(el, thread ? positionOf(thread) : null);
         if (id === cs.openId) anchor = p;
@@ -232,6 +234,135 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
     return () => window.removeEventListener("keydown", onKey, true);
   }, [editor, store, closeAndRefocus]);
 
+  // Moving pins: drag with the pointer, or arrow keys while a pin has focus.
+  // Authors move their own threads; editors can move anyone's.
+  const canMove = (thread: CommentThread) =>
+    role !== "viewer" || (me !== null && thread.author?.id === me);
+  const drag = useRef<{
+    id: string;
+    pointerId: number;
+    start: { x: number; y: number };
+    /** Pointer minus pin anchor, in layer pixels, so the pin doesn't jump. */
+    grab: { x: number; y: number };
+    screen: { x: number; y: number } | null;
+  } | null>(null);
+  const dragged = useRef<string | null>(null);
+  const keyMove = useRef<{ id: string; timer: number; point: { x: number; y: number } } | null>(
+    null,
+  );
+
+  const layerPoint = (e: { clientX: number; clientY: number }) => {
+    const rect = root.current?.getBoundingClientRect();
+    return { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) };
+  };
+
+  const commitMove = useCallback(
+    (threadId: string, page: { x: number; y: number }) => {
+      const thread = store.state.get().threads.get(threadId);
+      if (!thread) return;
+      store.move(threadId, anchorAt(editor.scene, thread.pageId, page)).catch((error: unknown) => {
+        editor.notify(
+          error instanceof Error ? error.message : "Couldn't move the comment. Try again.",
+        );
+      });
+    },
+    [editor, store],
+  );
+
+  const commitMoveRef = useRef(commitMove);
+  commitMoveRef.current = commitMove;
+
+  // A pending keyboard move saves now if the layer goes away.
+  useEffect(
+    () => () => {
+      const pending = keyMove.current;
+      if (!pending) return;
+      window.clearTimeout(pending.timer);
+      commitMoveRef.current(pending.id, pending.point);
+    },
+    [],
+  );
+
+  const pinHandlers = (thread: CommentThread) => {
+    if (!canMove(thread)) return {};
+    return {
+      onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
+        if (e.button !== 0) return;
+        const pos = resolveAnchor(editor.scene, thread.anchor, thread.pageId);
+        const anchor = editor.s.camera.toScreen(pos.point);
+        const p = layerPoint(e);
+        drag.current = {
+          id: thread.id,
+          pointerId: e.pointerId,
+          start: p,
+          grab: { x: p.x - anchor.x, y: p.y - anchor.y },
+          screen: null,
+        };
+        e.currentTarget.setPointerCapture(e.pointerId);
+      },
+      onPointerMove: (e: React.PointerEvent<HTMLButtonElement>) => {
+        const d = drag.current;
+        if (!d || d.pointerId !== e.pointerId) return;
+        const p = layerPoint(e);
+        if (!d.screen && Math.hypot(p.x - d.start.x, p.y - d.start.y) < 4) return;
+        d.screen = { x: p.x - d.grab.x, y: p.y - d.grab.y };
+        const el = e.currentTarget;
+        el.dataset.moving = "";
+        el.style.transform = `translate3d(${Math.round(d.screen.x)}px, ${Math.round(d.screen.y)}px, 0)`;
+      },
+      onPointerUp: (e: React.PointerEvent<HTMLButtonElement>) => {
+        const d = drag.current;
+        if (!d || d.pointerId !== e.pointerId) return;
+        drag.current = null;
+        delete e.currentTarget.dataset.moving;
+        if (!d.screen) return;
+        // The click that ends a drag doesn't open the thread.
+        dragged.current = d.id;
+        commitMove(d.id, editor.s.camera.toPage(d.screen));
+      },
+      onLostPointerCapture: (e: React.PointerEvent<HTMLButtonElement>) => {
+        if (drag.current?.pointerId !== e.pointerId) return;
+        drag.current = null;
+        delete e.currentTarget.dataset.moving;
+        schedule.current();
+      },
+      onKeyDown: (e: React.KeyboardEvent<HTMLButtonElement>) => {
+        const step = (e.shiftKey ? 10 : 1) / editor.s.camera.zoom;
+        const d: Record<string, [number, number]> = {
+          ArrowLeft: [-step, 0],
+          ArrowRight: [step, 0],
+          ArrowUp: [0, -step],
+          ArrowDown: [0, step],
+        };
+        const delta = d[e.key];
+        if (!delta) return;
+        // Arrows move the pin, not the selected layers.
+        e.preventDefault();
+        e.stopPropagation();
+        const current =
+          keyMove.current?.id === thread.id
+            ? keyMove.current.point
+            : resolveAnchor(editor.scene, thread.anchor, thread.pageId).point;
+        const point = { x: current.x + delta[0], y: current.y + delta[1] };
+        const screen = editor.s.camera.toScreen(point);
+        const el = e.currentTarget;
+        el.dataset.moving = "";
+        el.style.transform = `translate3d(${Math.round(screen.x)}px, ${Math.round(screen.y)}px, 0)`;
+        if (keyMove.current) window.clearTimeout(keyMove.current.timer);
+        // Save once the keys rest, not on every press.
+        keyMove.current = {
+          id: thread.id,
+          point,
+          timer: window.setTimeout(() => {
+            keyMove.current = null;
+            delete el.dataset.moving;
+            commitMove(thread.id, point);
+          }, 400),
+        };
+      },
+    };
+  };
+
   const myInitials = personInitials(store.me);
 
   return (
@@ -265,7 +396,17 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
               replies > 0 ? `, ${replies} ${replies === 1 ? "reply" : "replies"}` : ""
             }`}
             aria-expanded={isOpen}
-            onClick={() => (isOpen ? store.close() : store.open(thread.id))}
+            aria-roledescription={canMove(thread) ? "movable comment pin" : undefined}
+            data-movable={canMove(thread) || undefined}
+            {...pinHandlers(thread)}
+            onClick={() => {
+              if (dragged.current === thread.id) {
+                dragged.current = null;
+                return;
+              }
+              if (isOpen) store.close();
+              else store.open(thread.id);
+            }}
           >
             {resolved && !isOpen ? (
               <Icon name="check" size={12} />

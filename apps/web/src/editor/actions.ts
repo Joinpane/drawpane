@@ -14,7 +14,7 @@ import {
   type ToolId,
 } from "@drawpane/editor";
 import { isMac } from "../app/format";
-import { exportSelection } from "./exporting";
+import { copySelectionAs, exportSelection } from "./exporting";
 
 export interface Shortcut {
   /** `KeyboardEvent.key`, lowercased. */
@@ -42,12 +42,16 @@ export interface ActionContext {
   readonly showHistory: () => void;
   /** Asks for a name and saves the file as it is now as a version. */
   readonly saveVersion: () => void;
+  /** Starts renaming the selected layer in the layers panel. */
+  readonly rename: () => void;
+  /** Opens the keyboard shortcuts sheet. */
+  readonly showShortcuts: () => void;
 }
 
 export interface Action {
   readonly id: string;
   readonly label: string;
-  readonly group: "Tools" | "Edit" | "Arrange" | "Layer" | "View" | "File";
+  readonly group: "Tools" | "Edit" | "Arrange" | "Layer" | "View" | "File" | "Help";
   readonly icon?: string;
   readonly shortcut?: Shortcut;
   readonly keywords?: string;
@@ -158,6 +162,51 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.deleteSelection(),
   },
   {
+    id: "edit.copyAsPng",
+    label: "Copy as PNG",
+    group: "Edit",
+    shortcut: { key: "c", mod: true, shift: true },
+    keywords: "image clipboard screenshot",
+    enabled: hasSelection,
+    run: ({ editor }) => void copySelectionAs(editor, "png"),
+  },
+  {
+    id: "edit.copyAsSvg",
+    label: "Copy as SVG",
+    group: "Edit",
+    keywords: "vector markup clipboard",
+    enabled: hasSelection,
+    run: ({ editor }) => void copySelectionAs(editor, "svg"),
+  },
+  {
+    id: "edit.copyAsCss",
+    label: "Copy as CSS",
+    group: "Edit",
+    keywords: "code style clipboard",
+    enabled: hasSelection,
+    run: ({ editor }) => void copySelectionAs(editor, "css"),
+  },
+  {
+    id: "edit.copyProperties",
+    label: "Copy properties",
+    group: "Edit",
+    shortcut: { key: "c", mod: true, alt: true },
+    keywords: "style fill stroke effects",
+    enabled: (e) => e.s.selection.length === 1,
+    run: ({ editor }) => {
+      if (editor.copyProperties()) editor.notify("Copied properties. Paste them with ⌥⌘V.");
+    },
+  },
+  {
+    id: "edit.pasteProperties",
+    label: "Paste properties",
+    group: "Edit",
+    shortcut: { key: "v", mod: true, alt: true },
+    keywords: "style fill stroke effects apply",
+    enabled: (e) => e.canEdit && e.s.selection.length > 0 && e.hasCopiedProperties,
+    run: ({ editor }) => void editor.pasteProperties(),
+  },
+  {
     id: "edit.selectAll",
     label: "Select all",
     group: "Edit",
@@ -187,7 +236,13 @@ export const ACTIONS: readonly Action[] = [
     label: "Ungroup",
     group: "Layer",
     shortcut: { key: "g", mod: true, shift: true },
-    enabled: canEditSelection,
+    // Groups, and frames with something inside (ungrouping a frame removes it).
+    enabled: (e) =>
+      e.canEdit &&
+      e.s.selection.some((id) => {
+        const n = e.doc.get(id);
+        return n?.type === "group" || (n?.type === "frame" && e.doc.childIds(id).length > 0);
+      }),
     run: ({ editor }) => editor.ungroup(),
   },
   {
@@ -208,6 +263,15 @@ export const ACTIONS: readonly Action[] = [
     keywords: "flex stack",
     enabled: canEditSelection,
     run: ({ editor }) => editor.frameSelection(true),
+  },
+  {
+    id: "layer.rename",
+    label: "Rename",
+    group: "Layer",
+    shortcut: { key: "r", mod: true },
+    keywords: "name label",
+    enabled: (e) => e.canEdit && e.s.selection.length === 1,
+    run: ({ rename }) => rename(),
   },
   {
     id: "layer.hide",
@@ -418,6 +482,16 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.distribute("vertical"),
   },
   {
+    id: "arrange.tidyUp",
+    label: "Tidy up",
+    group: "Arrange",
+    icon: "tidy",
+    shortcut: { key: "t", alt: true, shift: true },
+    keywords: "grid arrange spacing even clean",
+    enabled: (e) => e.canEdit && e.s.selection.length > 1,
+    run: ({ editor }) => editor.tidyUp(),
+  },
+  {
     id: "arrange.flipHorizontal",
     label: "Flip horizontal",
     group: "Arrange",
@@ -559,6 +633,15 @@ export const ACTIONS: readonly Action[] = [
     run: ({ toggleRightPane }) => toggleRightPane(),
   },
   {
+    id: "help.shortcuts",
+    label: "Keyboard shortcuts",
+    group: "Help",
+    icon: "key",
+    shortcut: { key: "/", mod: true },
+    keywords: "keys hotkeys help cheat sheet",
+    run: ({ showShortcuts }) => showShortcuts(),
+  },
+  {
     id: "file.export",
     label: "Export selection",
     group: "File",
@@ -613,6 +696,20 @@ export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
   );
 }
 
+/** A shortcut as key caps, one per key, in the platform's order: ["⌥", "⇧", "⌘", "K"]. */
+export function shortcutCaps(s: Shortcut): string[] {
+  const mac = isMac();
+  const keyLabel: Record<string, string> = {
+    backspace: "⌫",
+    escape: "Esc",
+    enter: "↵",
+    "=": "+",
+  };
+  const key = keyLabel[s.key] ?? s.key.toUpperCase();
+  if (mac) return [s.alt ? "⌥" : "", s.shift ? "⇧" : "", s.mod ? "⌘" : "", key].filter(Boolean);
+  return [s.mod ? "Ctrl" : "", s.alt ? "Alt" : "", s.shift ? "Shift" : "", key].filter(Boolean);
+}
+
 export function formatShortcut(s: Shortcut): string {
   const mac = isMac();
   const keyLabel: Record<string, string> = {
@@ -621,6 +718,7 @@ export function formatShortcut(s: Shortcut): string {
     enter: "↵",
     "=": "+",
     "\\": "\\",
+    "/": "/",
   };
   const key = keyLabel[s.key] ?? s.key.toUpperCase();
   if (mac) return `${s.alt ? "⌥" : ""}${s.shift ? "⇧" : ""}${s.mod ? "⌘" : ""}${key}`;

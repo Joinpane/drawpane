@@ -7,11 +7,13 @@
 import type { Peer } from "@drawpane/model";
 import {
   type BindingKey,
+  defaultOf,
   getProp,
   keyBetween,
   keysBetween,
   type LayerType,
   type NodeRecord,
+  type NodeType,
   newId,
   type Op,
   type PropName,
@@ -56,6 +58,7 @@ import {
   unionRects,
 } from "./geometry";
 import { applyBestEffort, History } from "./history";
+import { hitAll } from "./hit";
 import { layoutImageRow } from "./images";
 import { layoutOps } from "./layout";
 import { Scene } from "./scene";
@@ -788,7 +791,8 @@ export class Editor {
       const copyId = newId();
       ids.set(nodeId, copyId);
       const props: Record<string, unknown> = { ...node.props };
-      if (isRoot && node.type !== "group") {
+      // Groups and pages have no position of their own.
+      if (isRoot && propAllowed(node.type, "x")) {
         props.x = round2(getProp(node.props, "x") + offset.x);
         props.y = round2(getProp(node.props, "y") + offset.y);
       }
@@ -1859,6 +1863,23 @@ export class Editor {
     }
   }
 
+  /** Copies a page and everything on it, right after it, and opens the copy. */
+  duplicatePage(id: string): string | null {
+    const page = this.doc.get(id);
+    if (page?.type !== "page") return null;
+    const siblings = this.doc.childIds(ROOT_ID);
+    const next = siblings[siblings.indexOf(id) + 1];
+    const key = keyBetween(page.key, next ? (this.doc.get(next)?.key ?? null) : null);
+    const { ops, rootId } = this.cloneOps(id, ROOT_ID, key);
+    const root = ops[0];
+    if (root?.op === "create")
+      (root.props as Record<string, unknown>).name =
+        `${getProp(page.props, "name") || "Page"} copy`;
+    if (!this.commit(ops, "Duplicate page")) return null;
+    this.setPage(rootId);
+    return rootId;
+  }
+
   deletePage(id: string): void {
     if (this.doc.pageIds().length <= 1) {
       this.notify("A file needs at least one page.");
@@ -1920,7 +1941,12 @@ export class Editor {
   }
 
   /** Pastes clipboard data into the selected frame or the page. Returns false when it isn't Drawpane data. */
-  paste(text: string): boolean {
+  /**
+   * Pastes copied layers: in place, into the selected frame (or beside the
+   * selection), or with `at` centred on a page point inside whatever frame is
+   * there ("Paste here"). One undo step either way.
+   */
+  paste(text: string, options: { at?: Point } = {}): boolean {
     let data: { format?: string; nodes?: NodeRecord[] };
     try {
       data = JSON.parse(text) as typeof data;
@@ -1928,7 +1954,7 @@ export class Editor {
       return false;
     }
     if (data.format !== "drawpane/nodes" || !Array.isArray(data.nodes)) return false;
-    const parent = this.insertionParent();
+    const parent = options.at ? this.dropTarget(options.at) : this.insertionParent();
     if (!parent) return false;
     const target =
       this.doc.get(parent)?.type === "frame" || this.doc.get(parent)?.type === "page"
@@ -1991,8 +2017,198 @@ export class Editor {
       });
     }
     const created = roots.map((n) => idMap.get(n.id) as string);
-    if (this.commit(ops, "Paste")) this.select(created);
+    const at = options.at;
+    if (!at) {
+      if (this.commit(ops, "Paste")) this.select(created);
+      return true;
+    }
+    this.beginGesture("Paste here");
+    try {
+      if (!this.commit(ops, "Paste here")) return true;
+      const bounds = this.scene.unionBounds(created);
+      if (bounds) {
+        const dx = at.x - (bounds.x + bounds.width / 2);
+        const dy = at.y - (bounds.y + bounds.height / 2);
+        const moves = created.flatMap((id) => this.#moveOps(id, dx, dy));
+        if (moves.length > 0) this.commit(moves, "Paste here");
+      }
+      this.select(created);
+    } finally {
+      this.endGesture();
+    }
     return true;
+  }
+
+  /** Style properties copied by "Copy properties": how a layer looks, not where it is. */
+  static readonly STYLE_PROPS: readonly PropName[] = [
+    "opacity",
+    "blendMode",
+    "fills",
+    "strokes",
+    "strokeWeight",
+    "strokeAlign",
+    "strokeCap",
+    "strokeJoin",
+    "strokeDashes",
+    "effects",
+    "cornerRadius",
+    "cornerRadii",
+    "fontFamily",
+    "fontWeight",
+    "fontStyle",
+    "fontSize",
+    "lineHeight",
+    "letterSpacing",
+    "textAlign",
+    "textAlignVertical",
+    "textDecoration",
+    "textCase",
+    "bindings",
+  ];
+
+  #styleClipboard: { type: NodeType; props: Props } | null = null;
+
+  /** True after "Copy properties", so "Paste properties" can say whether it will do anything. */
+  get hasCopiedProperties(): boolean {
+    return this.#styleClipboard !== null;
+  }
+
+  /** Remembers the first selected layer's style (⌥⌘C). */
+  copyProperties(): boolean {
+    const node = this.doc.get(this.s.selection[0] ?? "");
+    if (!node || node.type === "page" || node.type === "group") return false;
+    const props: Record<string, unknown> = {};
+    for (const prop of Editor.STYLE_PROPS) {
+      if (propAllowed(node.type, prop)) props[prop] = getProp(node.props, prop);
+    }
+    this.#styleClipboard = { type: node.type, props: props as Props };
+    return true;
+  }
+
+  /**
+   * Applies the copied style to every selected layer (⌥⌘V), skipping
+   * properties a layer can't have (text styles on a rectangle). Bindings
+   * carry over only for properties that came along.
+   */
+  pasteProperties(): boolean {
+    const copied = this.#styleClipboard;
+    if (!copied) return false;
+    const ops: Op[] = [];
+    for (const id of this.s.selection) {
+      const node = this.doc.get(id);
+      if (!node || node.type === "page" || node.type === "group") continue;
+      for (const [prop, value] of Object.entries(copied.props) as Array<[PropName, unknown]>) {
+        if (!propAllowed(node.type, prop)) continue;
+        let next = value;
+        if (prop === "bindings") {
+          const bindings = value as Record<string, string>;
+          next = Object.fromEntries(
+            Object.entries(bindings).filter(([key]) => {
+              const target = BINDING_TARGETS[key as BindingKey];
+              return target && propAllowed(node.type, target.prop as PropName);
+            }),
+          );
+        }
+        const isDefault = JSON.stringify(next) === JSON.stringify(defaultOf(prop));
+        const current = node.props[prop];
+        if (JSON.stringify(current ?? null) === JSON.stringify(isDefault ? null : next)) continue;
+        ops.push({ op: "set", id, prop, value: isDefault ? null : next });
+      }
+    }
+    if (ops.length === 0) return false;
+    // Pasted style is applied by hand: overrides are recorded, as for any edit.
+    return this.commit(ops, "Paste properties");
+  }
+
+  /** Every layer under a page point, topmost and deepest first ("Select layer"). */
+  layersAt(p: Point): string[] {
+    const pageId = this.s.pageId;
+    if (!pageId) return [];
+    return hitAll(this.scene, pageId, p, 2 / this.s.camera.zoom);
+  }
+
+  /**
+   * Tidy up (⌃⌥T): arranges the selection into the grid it already roughly
+   * forms, every cell the size of the largest layer, with the average gap
+   * between them, starting where the selection starts. A single row or
+   * column just gets even spacing.
+   */
+  tidyUp(): void {
+    const items = this.#topmost(this.s.selection)
+      .filter((id) => !this.scene.isLocked(id))
+      .map((id) => ({ id, b: this.scene.bounds(id) }))
+      .filter((i): i is { id: string; b: Rect } => i.b !== null);
+    if (items.length < 2) return;
+    // Rows: layers whose vertical centres fall inside a row's span.
+    const sorted = [...items].sort((a, b) => a.b.y - b.b.y || a.b.x - b.b.x);
+    const rows: Array<typeof items> = [];
+    for (const item of sorted) {
+      const cy = item.b.y + item.b.height / 2;
+      const row = rows.find((r) => {
+        const top = Math.min(...r.map((i) => i.b.y));
+        const bottom = Math.max(...r.map((i) => i.b.y + i.b.height));
+        return cy >= top && cy <= bottom;
+      });
+      if (row) row.push(item);
+      else rows.push([item]);
+    }
+    for (const row of rows) row.sort((a, b) => a.b.x - b.b.x);
+    const columns = Math.max(...rows.map((r) => r.length));
+    const cellW = Math.max(...items.map((i) => i.b.width));
+    const cellH = Math.max(...items.map((i) => i.b.height));
+    // The average gap people left between neighbours, never negative.
+    const average = (gaps: number[]) =>
+      gaps.length ? Math.max(0, Math.round(gaps.reduce((sum, g) => sum + g, 0) / gaps.length)) : 0;
+    const gapX = average(
+      rows.flatMap((row) =>
+        row.slice(1).map((it, i) => {
+          const left = (row[i] as (typeof row)[number]).b;
+          return it.b.x - (left.x + left.width);
+        }),
+      ),
+    );
+    const gapY = average(
+      rows.slice(1).map((row, i) => {
+        const above = rows[i] as typeof row;
+        return (
+          Math.min(...row.map((it) => it.b.y)) -
+          Math.max(...above.map((it) => it.b.y + it.b.height))
+        );
+      }),
+    );
+    const originX = Math.min(...items.map((i) => i.b.x));
+    const originY = Math.min(...items.map((i) => i.b.y));
+    const single = rows.length === 1 || columns === 1;
+    const ops: Op[] = [];
+    if (single && rows.length === 1) {
+      // One row: keep each layer's own width, even gaps, tops aligned.
+      let x = originX;
+      for (const it of rows[0] as typeof items) {
+        ops.push(...this.#moveOps(it.id, x - it.b.x, originY - it.b.y));
+        x += it.b.width + gapX;
+      }
+    } else if (single) {
+      let y = originY;
+      for (const row of rows) {
+        const it = row[0] as (typeof items)[number];
+        ops.push(...this.#moveOps(it.id, originX - it.b.x, y - it.b.y));
+        y += it.b.height + gapY;
+      }
+    } else {
+      rows.forEach((row, r) => {
+        row.forEach((it, c) => {
+          const x = originX + c * (cellW + gapX);
+          const y = originY + r * (cellH + gapY);
+          ops.push(...this.#moveOps(it.id, x - it.b.x, y - it.b.y));
+        });
+      });
+    }
+    const real = ops.filter((op) => {
+      if (op.op !== "set") return true;
+      const node = this.doc.get(op.id);
+      return !node || round2(getProp(node.props, op.prop as "x")) !== op.value;
+    });
+    if (real.length > 0) this.commit(real, "Tidy up");
   }
 
   // -------------------------------------------------------------------------

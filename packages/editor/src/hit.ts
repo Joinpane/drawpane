@@ -76,6 +76,34 @@ export function hitTest(scene: Scene, pageId: string, p: Point, tolerance: numbe
 }
 
 /**
+ * Every visible, unlocked layer under `p` with its ancestors, topmost and
+ * deepest first: what Figma's "Select layer" submenu lists. Groups count when
+ * a member is hit; frames when their body or a child is.
+ */
+export function hitAll(scene: Scene, pageId: string, p: Point, tolerance: number): string[] {
+  const doc = scene.doc;
+  const out: string[] = [];
+  const visit = (id: string): boolean => {
+    const node = doc.get(id);
+    if (!node || node.props.visible === false || node.props.locked === true) return false;
+    if (node.type === "frame" && getProp(node.props, "clipContent") && !hitsNode(scene, node, p, 0))
+      return false;
+    let any = false;
+    const children = doc.childIds(id);
+    for (let i = children.length - 1; i >= 0; i--) if (visit(children[i] as string)) any = true;
+    const self =
+      node.type === "group"
+        ? any
+        : any || hitsNode(scene, node, p, node.type === "frame" ? 0 : tolerance);
+    if (self) out.push(id);
+    return self;
+  };
+  const top = doc.childIds(pageId);
+  for (let i = top.length - 1; i >= 0; i--) visit(top[i] as string);
+  return out;
+}
+
+/**
  * Turns the deepest hit into what a click should select, like Figma: top-level
  * frames are artboards, so a click inside one selects its direct child; groups
  * select as a whole until you enter them (double-click) or hold ⌘.

@@ -7,13 +7,15 @@ The open design tool you own. Drawpane is a real-time design and prototyping too
 ## What works today
 
 - Passkey accounts, teams, invites, projects, files and trash
-- A real-time multiplayer editor: frames, rectangles, ellipses, lines, text, images and vector paths; move with smart guides, resize, rotate, group, frame, reorder; auto layout that maps 1:1 to CSS flexbox; fills, strokes, shadows and blur; pages and a layers tree
+- A real-time multiplayer editor: frames, rectangles, ellipses, lines, text, images and vector paths; move with smart guides, resize, rotate, group, frame, reorder; auto layout that maps 1:1 to CSS flexbox; constraints; fills, strokes, shadows and blur; pages and a layers tree
+- A full color picker (solid, gradient, image, eyedropper, contrast ratio), per-corner radius, frame presets for current phones, tablets and desktops, align, distribute, tidy up and flip
+- Right-click menus on the canvas, layers and pages; copy and paste properties; a keyboard shortcuts sheet (`⌘/`)
 - The pen tool, vector editing, flatten and boolean operations
 - Components with instances and overrides, and variants with properties you can swap
 - Design tokens as variables, with modes, aliases and DTCG import and export
 - Prototyping: interactions on any layer (tap, hover, drag, key, delay), navigate, overlays, back and links, transitions with eases, béziers and springs, flows and devices
 - Present mode, and prototype links that anyone can open without an account, turned off or reset at any time
-- Inspect with CSS, Tailwind and JSX; image export; comments with threads, mentions and live updates
+- Inspect with CSS, Tailwind and JSX; image export; comments with threads, mentions, live updates and pins you can drag
 - The command bar (`⌘K`) that runs actions, jumps to layers, and sets values with a short syntax: `w 320`, `gap 16`, `fill #ff5a1f`, `p 8 16`
 - The Selection Lens, Layout X-ray (hold `Alt`), focus mode, and collaborators' cursors and selections
 - Undo and redo for your own changes, and edits that survive a dropped connection
