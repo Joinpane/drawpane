@@ -7,6 +7,7 @@ export * from "./dtcg";
 export * from "./editor";
 export * from "./export";
 export * from "./geometry";
+export * from "./grids";
 export * from "./history";
 export * from "./hit";
 export * from "./images";
