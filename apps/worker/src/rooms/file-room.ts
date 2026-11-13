@@ -15,18 +15,24 @@ import {
   type CommentEvent,
   keyBetween,
   MAX_CLIENT_MESSAGE_BYTES,
+  MemoryStore,
   ModelError,
   type NodeRecord,
   newId,
   type Op,
   type Peer,
   type Presence,
+  type RestoredVersion,
   ROOT_ID,
+  restoreOps,
   type ServerMessage,
   SNAPSHOT_CHUNK_SIZE,
+  summarizeEdits,
+  type VersionReason,
 } from "@drawpane/model";
 import type { Env, Role } from "../env";
 import { verifyPayload } from "../lib/crypto";
+import { AUTOSAVE_RETENTION_MS, readSnapshot, snapshotKey, writeSnapshot } from "./snapshots";
 import { NODE_SCHEMA, SqlNodeStore } from "./sql-store";
 
 /** What the Worker vouches for when it hands a socket to the room. */
@@ -81,7 +87,51 @@ const LOG_SCHEMA = `
 /** Transactions kept for reconnect catch-up. Older history lives in R2 snapshots. */
 const LOG_RETENTION = 10_000;
 const ALARM_DELAY_MS = 30_000;
+/** While someone keeps editing, a version is saved at least this often. */
 const SNAPSHOT_INTERVAL_MS = 60 * 60_000;
+/** A version is saved once editing pauses for this long. */
+const IDLE_SNAPSHOT_MS = 10 * 60_000;
+/** Expired autosaves are swept at most this often. */
+const SWEEP_INTERVAL_MS = 24 * 60 * 60_000;
+/** A reconnecting client that missed more than this (in JSON bytes) loads a snapshot instead. */
+const MAX_CATCHUP_BYTES = 1 << 20;
+/** A change bigger than this is not broadcast; clients are told to load the file again. */
+const MAX_BROADCAST_BYTES = 1 << 20;
+
+/** Who a change is logged as. */
+interface Author {
+  readonly clientId: string;
+  readonly seq: number;
+  readonly userId: string;
+  readonly sessionId: string;
+}
+
+/** What `saveVersion` and `restoreVersion` are told about the person asking. */
+export interface Requester {
+  readonly userId: string;
+  readonly name: string;
+}
+
+export interface SavedVersion {
+  readonly id: string;
+  readonly revn: number;
+}
+
+export type RestoreResult =
+  | ({ readonly ok: true } & RestoredChange)
+  /** The version's snapshot isn't in R2 (deleted by hand, or a failed write). */
+  | { readonly ok: false; readonly reason: "missing" };
+
+export interface RestoredChange {
+  /** The revision the restore created, or the current one when nothing changed. */
+  readonly revn: number;
+  /** The version saved just before restoring, to undo it with. */
+  readonly restorePoint: string;
+  /** Operations the restore applied; 0 when the file already matched. */
+  readonly changed: number;
+  /** Values the current schema refused and the restore left out. */
+  readonly dropped: number;
+}
 
 export class FileRoom extends DurableObject<Env> {
   readonly #sql: SqlStorage;
@@ -194,21 +244,35 @@ export class FileRoom extends DurableObject<Env> {
         .run();
       this.#setMeta("touched", "0");
     }
-    const lastSnapshotAt = Number(this.#meta("snapshot_at") ?? 0);
-    const lastSnapshotRevn = Number(this.#meta("snapshot_revn") ?? 0);
-    if (
-      fileId &&
-      this.#revn > lastSnapshotRevn &&
-      Date.now() - lastSnapshotAt >= SNAPSHOT_INTERVAL_MS
-    ) {
-      await this.#snapshot(fileId);
+    const due = this.#autosaveDue();
+    if (fileId && due !== null && due <= Date.now()) {
+      await this.#saveVersion(fileId, { reason: "auto" });
     }
+    if (fileId) await this.#sweepVersions(fileId);
     this.#sql.exec("DELETE FROM log WHERE revn <= ?", this.#revn - LOG_RETENTION);
-    // Keep the snapshot cadence going while there are unsnapshotted edits.
-    if (this.#revn > Number(this.#meta("snapshot_revn") ?? 0)) {
-      const due = Math.max(lastSnapshotAt + SNAPSHOT_INTERVAL_MS, Date.now() + ALARM_DELAY_MS);
-      await this.ctx.storage.setAlarm(due);
+    // Keep going while there are edits no version holds yet.
+    const next = this.#autosaveDue();
+    if (next !== null) {
+      await this.ctx.storage.setAlarm(Math.max(next, Date.now() + ALARM_DELAY_MS));
     }
+  }
+
+  /**
+   * When the next autosave is due: an hour into a run of edits, or once
+   * editing has paused for a while, whichever comes first. Null when every
+   * edit is already in a version.
+   */
+  #autosaveDue(): number | null {
+    const saved = Number(this.#meta("snapshot_revn") ?? 0);
+    if (this.#revn <= saved) return null;
+    const run = this.#sql
+      .exec<{ first: number | null; last: number | null }>(
+        "SELECT MIN(at) AS first, MAX(at) AS last FROM log WHERE revn > ? AND client_id != 'system'",
+        saved,
+      )
+      .one();
+    if (run.first === null || run.last === null) return Date.now();
+    return Math.min(run.first + SNAPSHOT_INTERVAL_MS, run.last + IDLE_SNAPSHOT_MS);
   }
 
   /** Deletes everything this room stores. Called when a file is deleted for good. */
@@ -248,6 +312,70 @@ export class FileRoom extends DurableObject<Env> {
     return closed;
   }
 
+  /**
+   * Saves the current state as a named version, or names the version that
+   * already holds it. Returns that version.
+   */
+  async saveVersion(
+    by: Requester,
+    name: string,
+    description: string | null,
+  ): Promise<SavedVersion> {
+    const fileId = this.#requireFileId();
+    return this.#saveVersion(fileId, { reason: "named", by: by.userId, name, description });
+  }
+
+  /**
+   * Restores the whole file to a saved version. The current state is saved
+   * first, so the restore can be undone by restoring that. The restore is one
+   * ordinary transaction: everyone sees it, it is logged, and pending edits
+   * from other people rebase on top of it.
+   */
+  async restoreVersion(
+    by: Requester,
+    version: RestoredVersion & { readonly revn: number },
+    /** The restorer's own socket, which shows its own confirmation instead of the "restored" notice. */
+    sessionId: string | null,
+  ): Promise<RestoreResult> {
+    const fileId = this.#requireFileId();
+    const nodes = await readSnapshot(this.env.FILES, snapshotKey(fileId, version.revn));
+    if (!nodes) return { ok: false, reason: "missing" };
+    const restorePoint = await this.#saveVersion(fileId, {
+      reason: "restore",
+      by: by.userId,
+      restoredId: version.id,
+    });
+    // From here to the commit nothing awaits, so the diff and the store agree.
+    const now: NodeRecord[] = [];
+    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) now.push(...page);
+    const plan = restoreOps(new MemoryStore(now), nodes);
+    if (plan.ops.length === 0) {
+      return {
+        ok: true,
+        revn: this.#revn,
+        restorePoint: restorePoint.id,
+        changed: 0,
+        dropped: plan.dropped,
+      };
+    }
+    const author = { clientId: "restore", seq: 0, userId: by.userId, sessionId: "restore" };
+    const revn = this.#commit(plan.ops, author);
+    const except = this.#attachments().find(({ me }) => me.sessionId === sessionId)?.ws;
+    this.#broadcastChange(revn, plan.ops, author);
+    this.#broadcast(
+      { t: "restored", by, version: { id: version.id, name: version.name, at: version.at } },
+      except,
+    );
+    void this.#scheduleAlarm();
+    return {
+      ok: true,
+      revn,
+      restorePoint: restorePoint.id,
+      changed: plan.ops.length,
+      dropped: plan.dropped,
+    };
+  }
+
   /** Current revision and node count, for tests and the health page. */
   async stats(): Promise<{ revn: number; nodes: number; sockets: number }> {
     return {
@@ -273,7 +401,15 @@ export class FileRoom extends DurableObject<Env> {
     const canCatchUp =
       revn !== null &&
       revn <= this.#revn &&
-      (revn === this.#revn || (oldest !== null && oldest <= revn + 1));
+      (revn === this.#revn ||
+        (oldest !== null &&
+          oldest <= revn + 1 &&
+          this.#sql
+            .exec<{ bytes: number }>(
+              "SELECT COALESCE(SUM(LENGTH(ops)), 0) AS bytes FROM log WHERE revn > ?",
+              revn,
+            )
+            .one().bytes <= MAX_CATCHUP_BYTES));
 
     const peers = me.guest ? [] : this.#peers().filter((p) => p.sessionId !== me.sessionId);
     this.#send(ws, {
@@ -335,36 +471,11 @@ export class FileRoom extends DurableObject<Env> {
       return;
     }
 
+    const author = { clientId, seq, userId: me.userId, sessionId: me.sessionId };
     let revn: number;
     try {
-      revn = this.ctx.storage.transactionSync(() => {
-        applyTransaction(this.#store, ops, { rollback: false });
-        const next = this.#revn + 1;
-        const now = Date.now();
-        this.#sql.exec(
-          "INSERT INTO log (revn, client_id, seq, user_id, session_id, ops, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          next,
-          clientId,
-          seq,
-          me.userId,
-          me.sessionId,
-          JSON.stringify(ops),
-          now,
-        );
-        this.#sql.exec(
-          `INSERT INTO clients (client_id, last_seq, last_revn, at) VALUES (?, ?, ?, ?)
-           ON CONFLICT (client_id) DO UPDATE SET last_seq = excluded.last_seq, last_revn = excluded.last_revn, at = excluded.at`,
-          clientId,
-          seq,
-          next,
-          now,
-        );
-        this.#setMeta("revn", String(next));
-        this.#setMeta("touched", "1");
-        return next;
-      });
+      revn = this.#commit(ops, author);
     } catch (error) {
-      this.#store.clearCache();
       if (error instanceof ModelError) {
         this.#reject(ws, seq, ops, error.code, error.message);
         return;
@@ -373,14 +484,62 @@ export class FileRoom extends DurableObject<Env> {
       this.#reject(ws, seq, ops, "internal", "The room couldn't save that change. Try again.");
       return;
     }
-    this.#store.clearCache();
-    this.#revn = revn;
     this.#send(ws, { t: "ack", seq, revn });
-    this.#broadcast(
-      { t: "txn", revn, ops, author: { userId: me.userId, sessionId: me.sessionId } },
-      ws,
-    );
+    this.#broadcastChange(revn, ops, author, ws);
     void this.#scheduleAlarm();
+  }
+
+  /**
+   * Applies and logs one transaction in a single storage transaction and
+   * returns its revision. Throws (changing nothing) when it doesn't apply.
+   */
+  #commit(ops: readonly Op[], author: Author): number {
+    try {
+      const revn = this.ctx.storage.transactionSync(() => {
+        applyTransaction(this.#store, ops, { rollback: false });
+        const next = this.#revn + 1;
+        const now = Date.now();
+        this.#sql.exec(
+          "INSERT INTO log (revn, client_id, seq, user_id, session_id, ops, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          next,
+          author.clientId,
+          author.seq,
+          author.userId,
+          author.sessionId,
+          JSON.stringify(ops),
+          now,
+        );
+        if (author.seq > 0) {
+          this.#sql.exec(
+            `INSERT INTO clients (client_id, last_seq, last_revn, at) VALUES (?, ?, ?, ?)
+             ON CONFLICT (client_id) DO UPDATE SET last_seq = excluded.last_seq, last_revn = excluded.last_revn, at = excluded.at`,
+            author.clientId,
+            author.seq,
+            next,
+            now,
+          );
+        }
+        this.#setMeta("revn", String(next));
+        this.#setMeta("touched", "1");
+        return next;
+      });
+      this.#revn = revn;
+      return revn;
+    } finally {
+      this.#store.clearCache();
+    }
+  }
+
+  /** Sends a committed change to everyone but `except`, or asks them to reload when it's huge. */
+  #broadcastChange(revn: number, ops: readonly Op[], author: Author, except?: WebSocket): void {
+    const message: ServerMessage = {
+      t: "txn",
+      revn,
+      ops,
+      author: { userId: author.userId, sessionId: author.sessionId },
+    };
+    if (JSON.stringify(ops).length > MAX_BROADCAST_BYTES) this.#broadcast({ t: "resync" }, except);
+    else this.#broadcast(message, except);
   }
 
   #reject(ws: WebSocket, seq: number, ops: readonly Op[], code: string, message: string): void {
@@ -403,53 +562,165 @@ export class FileRoom extends DurableObject<Env> {
   // Helpers
 
   #seed(): void {
-    const ops: Op[] = [
-      {
-        op: "create",
-        id: newId(),
-        type: "page",
-        parent: ROOT_ID,
-        key: keyBetween(null, null),
-        props: { name: "Page 1" },
-      },
-    ];
-    this.ctx.storage.transactionSync(() => {
-      applyTransaction(this.#store, ops, { rollback: false });
-      this.#revn += 1;
-      this.#sql.exec(
-        "INSERT INTO log (revn, client_id, seq, user_id, session_id, ops, at) VALUES (?, 'system', 0, 'system', 'system', ?, ?)",
-        this.#revn,
-        JSON.stringify(ops),
-        Date.now(),
-      );
-      this.#setMeta("revn", String(this.#revn));
-    });
-    this.#store.clearCache();
-  }
-
-  async #scheduleAlarm(): Promise<void> {
-    if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + ALARM_DELAY_MS);
-    }
-  }
-
-  async #snapshot(fileId: string): Promise<void> {
-    const parts: string[] = [];
-    for (const nodes of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) {
-      for (const node of nodes) parts.push(JSON.stringify(node));
-    }
-    const body = `{"format":"drawpane.snapshot","version":1,"fileId":${JSON.stringify(fileId)},"revn":${this.#revn},"at":${Date.now()},"nodes":[${parts.join(",")}]}`;
-    const gz = new Response(new Blob([body]).stream().pipeThrough(new CompressionStream("gzip")));
-    await this.env.FILES.put(
-      `files/${fileId}/snapshots/${String(this.#revn).padStart(12, "0")}.json.gz`,
-      await gz.arrayBuffer(),
-      {
-        httpMetadata: { contentType: "application/json", contentEncoding: "gzip" },
-        customMetadata: { revn: String(this.#revn) },
-      },
+    this.#commit(
+      [
+        {
+          op: "create",
+          id: newId(),
+          type: "page",
+          parent: ROOT_ID,
+          key: keyBetween(null, null),
+          props: { name: "Page 1" },
+        },
+      ],
+      { clientId: "system", seq: 0, userId: "system", sessionId: "system" },
     );
-    this.#setMeta("snapshot_revn", String(this.#revn));
-    this.#setMeta("snapshot_at", String(Date.now()));
+  }
+
+  /** Brings the alarm forward to soon (it keeps the file's "edited" time fresh), never later. */
+  async #scheduleAlarm(): Promise<void> {
+    const soon = Date.now() + ALARM_DELAY_MS;
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > soon) await this.ctx.storage.setAlarm(soon);
+  }
+
+  /**
+   * Saves the current state as a version: a gzip snapshot in R2 and a row in
+   * D1 with who edited since the last version and what they changed. When a
+   * version already holds this revision, it is reused (and named, if a name
+   * is given).
+   */
+  async #saveVersion(
+    fileId: string,
+    options: {
+      readonly reason: VersionReason;
+      readonly by?: string;
+      readonly name?: string;
+      readonly description?: string | null;
+      readonly restoredId?: string;
+    },
+  ): Promise<SavedVersion> {
+    // Read everything first, without awaiting, so the snapshot is one consistent revision.
+    const revn = this.#revn;
+    const previous = Number(this.#meta("snapshot_revn") ?? 0);
+    const existing = await this.env.DB.prepare(
+      "SELECT id FROM versions WHERE file_id = ? AND revn = ?",
+    )
+      .bind(fileId, revn)
+      .first<{ id: string }>();
+    if (existing) {
+      if (options.name !== undefined) {
+        await this.env.DB.prepare(
+          "UPDATE versions SET name = ?, description = ?, created_by = COALESCE(created_by, ?) WHERE id = ?",
+        )
+          .bind(options.name, options.description ?? null, options.by ?? null, existing.id)
+          .run();
+      }
+      return { id: existing.id, revn };
+    }
+
+    if (revn !== this.#revn) return this.#saveVersion(fileId, options);
+    const nodes: NodeRecord[] = [];
+    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) nodes.push(...page);
+    const rows = this.#sql
+      .exec<{ ops: string; user_id: string; at: number }>(
+        "SELECT ops, user_id, at FROM log WHERE revn > ? AND revn <= ? AND client_id != 'system' ORDER BY revn",
+        previous,
+        revn,
+      )
+      .toArray();
+    const summary = summarizeEdits(rows.map((row) => JSON.parse(row.ops) as Op[]));
+    const authors = [...new Set(rows.map((row) => row.user_id))].filter(
+      (id) => !id.startsWith("guest:"),
+    );
+    const now = Date.now();
+    const size = await writeSnapshot(this.env.FILES, fileId, revn, now, nodes);
+    const id = newId();
+    await this.env.DB.prepare(
+      `INSERT INTO versions (id, file_id, revn, reason, name, description, restored_id, created_by, created_at, authors, summary, started_at, size)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (file_id, revn) DO UPDATE SET
+         name = COALESCE(excluded.name, versions.name),
+         description = COALESCE(excluded.description, versions.description)`,
+    )
+      .bind(
+        id,
+        fileId,
+        revn,
+        options.reason,
+        options.name ?? null,
+        options.description ?? null,
+        options.restoredId ?? null,
+        options.by ?? null,
+        now,
+        JSON.stringify(authors),
+        JSON.stringify(summary),
+        rows[0]?.at ?? null,
+        size,
+      )
+      .run();
+    if (revn > Number(this.#meta("snapshot_revn") ?? 0)) {
+      this.#setMeta("snapshot_revn", String(revn));
+      this.#setMeta("snapshot_at", String(now));
+    }
+    // Another save of the same revision may have won the race; return the row that exists.
+    const saved = await this.env.DB.prepare(
+      "SELECT id FROM versions WHERE file_id = ? AND revn = ?",
+    )
+      .bind(fileId, revn)
+      .first<{ id: string }>();
+    return { id: saved?.id ?? id, revn };
+  }
+
+  /**
+   * Once a day: deletes unnamed versions past retention, and gives snapshots
+   * saved before versions existed a row, so they show in history.
+   */
+  async #sweepVersions(fileId: string): Promise<void> {
+    const last = Number(this.#meta("swept_at") ?? 0);
+    if (Date.now() - last < SWEEP_INTERVAL_MS) return;
+    this.#setMeta("swept_at", String(Date.now()));
+
+    if (this.#meta("versions_indexed") !== "1") {
+      const listed = await this.env.FILES.list({ prefix: `files/${fileId}/snapshots/` });
+      for (const object of listed.objects) {
+        const revn = Number(object.key.match(/(\d+)\.json\.gz$/)?.[1]);
+        if (!Number.isSafeInteger(revn)) continue;
+        await this.env.DB.prepare(
+          `INSERT INTO versions (id, file_id, revn, reason, created_at, size)
+           VALUES (?, ?, ?, 'auto', ?, ?) ON CONFLICT (file_id, revn) DO NOTHING`,
+        )
+          .bind(newId(), fileId, revn, object.uploaded.getTime(), object.size)
+          .run();
+      }
+      this.#setMeta("versions_indexed", "1");
+    }
+
+    const cutoff = Date.now() - AUTOSAVE_RETENTION_MS;
+    const { results } = await this.env.DB.prepare(
+      "SELECT id, revn FROM versions WHERE file_id = ? AND name IS NULL AND created_at < ?",
+    )
+      .bind(fileId, cutoff)
+      .all<{ id: string; revn: number }>();
+    if (results.length === 0) return;
+    // Keep the newest snapshot even when it's old: it is where an idle file's history starts.
+    const newest = await this.env.DB.prepare(
+      "SELECT MAX(revn) AS revn FROM versions WHERE file_id = ?",
+    )
+      .bind(fileId)
+      .first<{ revn: number }>();
+    const expired = results.filter((v) => v.revn !== newest?.revn);
+    if (expired.length === 0) return;
+    await this.env.FILES.delete(expired.map((v) => snapshotKey(fileId, v.revn)));
+    await this.env.DB.batch(
+      expired.map((v) => this.env.DB.prepare("DELETE FROM versions WHERE id = ?").bind(v.id)),
+    );
+  }
+
+  #requireFileId(): string {
+    const fileId = this.#meta("file_id");
+    if (!fileId) throw new ModelError("not_found", "This file has never been opened.");
+    return fileId;
   }
 
   #meta(k: string): string | null {
@@ -514,7 +785,11 @@ export class FileRoom extends DurableObject<Env> {
     const data = JSON.stringify(message);
     // Guests get document changes only, without who made them.
     const guestData =
-      message.t === "txn" ? JSON.stringify({ ...message, author: ANONYMOUS }) : null;
+      message.t === "txn"
+        ? JSON.stringify({ ...message, author: ANONYMOUS })
+        : message.t === "resync"
+          ? data
+          : null;
     let sent = 0;
     for (const ws of this.ctx.getWebSockets()) {
       if (ws === except) continue;
