@@ -115,11 +115,26 @@ export const GradientPaint = z.object({
   stops: z.array(GradientStop).min(2).max(32),
   ...paintBase,
 });
+/** The part of an image a cropped fill shows, in the image's unit square (0,0 top-left to 1,1). */
+export const ImageCrop = z
+  .object({
+    x: unit,
+    y: unit,
+    width: finite.refine((n) => n > 0 && n <= 1, "must be more than 0 and at most 1"),
+    height: finite.refine((n) => n > 0 && n <= 1, "must be more than 0 and at most 1"),
+  })
+  .refine((c) => c.x + c.width <= 1.0001 && c.y + c.height <= 1.0001, {
+    message: "The crop has to stay inside the image.",
+  });
+export type ImageCrop = z.infer<typeof ImageCrop>;
+
 export const ImagePaint = z.object({
   type: z.literal("image"),
   /** Content hash of the image blob in R2. */
   ref: z.string().regex(/^[0-9a-f]{64}$/),
-  scaleMode: z.enum(["fill", "fit", "tile", "stretch"]),
+  /** "crop" shows `crop` (the whole image when missing) stretched to the box. */
+  scaleMode: z.enum(["fill", "fit", "tile", "stretch", "crop"]),
+  crop: ImageCrop.optional(),
   ...paintBase,
 });
 export const Paint = z.discriminatedUnion("type", [SolidPaint, GradientPaint, ImagePaint]);

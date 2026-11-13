@@ -5,9 +5,12 @@
  * so it stays cheap: no shadows, no text layout beyond labels.
  */
 import { getProp } from "@drawpane/model";
+import { imageRect } from "./crop";
+import { croppingTarget } from "./crop-session";
 import type { Editor } from "./editor";
 import { apply, type Point, type Rect } from "./geometry";
 import { gridLines, gridTracks, placedGuides, visibleGrids } from "./grids";
+import type { ImageCache } from "./images";
 import type { Interaction } from "./interaction";
 import { drawPrototypeOverlay, flowStartScreens } from "./prototype/overlay";
 import { drawVectorOverlay } from "./tools/overlay";
@@ -43,6 +46,8 @@ export function drawOverlay(
   interaction: Interaction,
   theme: OverlayTheme,
   dpr: number,
+  /** The app's image cache, for the image shown around a crop. */
+  images?: ImageCache,
 ): void {
   const {
     camera,
@@ -58,6 +63,7 @@ export function drawOverlay(
     gesture,
     vectorEdit,
     prototyping,
+    cropping,
   } = editor.s;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -170,14 +176,17 @@ export function drawOverlay(
     if (corners) quad(corners, isComponentish ? theme.component : theme.signal, 1);
   }
 
+  // Cropping draws its own box, handles and size instead of the selection's.
+  if (cropping) drawCrop(ctx, editor, theme, dpr, images);
+
   // Selection: each layer's outline, then one set of handles.
-  if ((!editingText || selection.length > 1) && !vectorEdit) {
+  if ((!editingText || selection.length > 1) && !vectorEdit && !cropping) {
     for (const id of selection) {
       const corners = scene.corners(id);
       if (corners) quad(corners, theme.signal, 1.5);
     }
   }
-  const frame = interaction.selectionFrame();
+  const frame = cropping ? null : interaction.selectionFrame();
   if (frame && selection.length > 0 && !vectorEdit) {
     const corners = [
       { x: 0, y: 0 },
@@ -682,4 +691,124 @@ function drawGuides(ctx: CanvasRenderingContext2D, editor: Editor, theme: Overla
 
 function formatOffset(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+/**
+ * Cropping: the whole image dimmed around the box (so you see what you can
+ * bring back), the box with a rule-of-thirds grid, square handles, and the
+ * crop's size against the image's own.
+ */
+function drawCrop(
+  ctx: CanvasRenderingContext2D,
+  editor: Editor,
+  theme: OverlayTheme,
+  dpr: number,
+  images: ImageCache | undefined,
+): void {
+  const target = croppingTarget(editor);
+  if (!target) return;
+  const { node, paint } = target;
+  const { camera } = editor.s;
+  ctx.save();
+  const w = getProp(node.props, "width");
+  const h = getProp(node.props, "height");
+  const image = imageRect(paint, { width: w, height: h }, { width: 1, height: 1 });
+  const m = editor.scene.worldMatrix(node.id);
+  const z = camera.zoom * dpr;
+  ctx.save();
+  ctx.setTransform(
+    m[0] * z,
+    m[1] * z,
+    m[2] * z,
+    m[3] * z,
+    (m[4] * camera.zoom + camera.x) * dpr,
+    (m[5] * camera.zoom + camera.y) * dpr,
+  );
+  // The image outside the box, dimmed; the box itself shows the layer as it is.
+  const ring = new Path2D();
+  ring.rect(image.x, image.y, image.width, image.height);
+  ring.rect(0, 0, w, h);
+  ctx.save();
+  ctx.clip(ring, "evenodd");
+  const view = images?.get(paint.ref, image.width * Math.hypot(m[0], m[1]) * z);
+  if (view) {
+    ctx.globalAlpha = 0.4;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(view.bitmap, image.x, image.y, image.width, image.height);
+  } else {
+    ctx.fillStyle = withAlpha(theme.inkMuted, 0.15);
+    ctx.fillRect(image.x, image.y, image.width, image.height);
+  }
+  ctx.restore();
+  // Lines one screen pixel wide whatever the zoom.
+  const px = 1 / (Math.hypot(m[0], m[1]) * camera.zoom);
+  ctx.setLineDash([4 * px, 4 * px]);
+  ctx.strokeStyle = withAlpha(theme.inkMuted, 0.8);
+  ctx.lineWidth = px;
+  ctx.strokeRect(image.x, image.y, image.width, image.height);
+  ctx.setLineDash([]);
+  // Rule of thirds inside the box.
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
+  ctx.beginPath();
+  for (const k of [1 / 3, 2 / 3]) {
+    ctx.moveTo(w * k, 0);
+    ctx.lineTo(w * k, h);
+    ctx.moveTo(0, h * k);
+    ctx.lineTo(w, h * k);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = theme.signal;
+  ctx.lineWidth = 1.5 * px;
+  ctx.strokeRect(0, 0, w, h);
+  ctx.restore();
+
+  // Handles and the size pill, in screen space.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const at = (x: number, y: number) => camera.toScreen(apply(m, { x, y }));
+  const points = [
+    [0, 0],
+    [w / 2, 0],
+    [w, 0],
+    [w, h / 2],
+    [w, h],
+    [w / 2, h],
+    [0, h],
+    [0, h / 2],
+  ].map(([x, y]) => at(x as number, y as number));
+  for (const p of points) {
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = theme.signal;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.rect(
+      Math.round(p.x - HANDLE / 2) + 0.5,
+      Math.round(p.y - HANDLE / 2) + 0.5,
+      HANDLE - 1,
+      HANDLE - 1,
+    );
+    ctx.fill();
+    ctx.stroke();
+  }
+  const natural = editor.imageSize(paint.ref);
+  const label = natural
+    ? `${fmt(w)} × ${fmt(h)} of ${fmt(natural.width)} × ${fmt(natural.height)}`
+    : `${fmt(w)} × ${fmt(h)}`;
+  const bounds = editor.scene.bounds(node.id);
+  if (!bounds) {
+    ctx.restore();
+    return;
+  }
+  const bottom = camera.toScreen({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height });
+  ctx.font = `600 11px ${theme.fontUi}`;
+  const lw = ctx.measureText(label).width + 10;
+  ctx.fillStyle = theme.signal;
+  ctx.beginPath();
+  ctx.roundRect(bottom.x - lw / 2, bottom.y + 8, lw, 18, 3);
+  ctx.fill();
+  ctx.fillStyle = theme.onSignal;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  ctx.fillText(label, bottom.x, bottom.y + 17.5);
+  ctx.textAlign = "left";
+  ctx.restore();
 }

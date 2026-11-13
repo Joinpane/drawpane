@@ -1610,3 +1610,20 @@
 .rulers__side[data-can-edit] {
   cursor: col-resize;
 }
+
+/* The crop bar: aspect presets and Done, under the image being cropped. */
+.crop-bar {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  padding: var(--space-100);
+  transform: translateX(-50%);
+  animation: lens-in 160ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .crop-bar {
+    animation: none;
+  }
+}
