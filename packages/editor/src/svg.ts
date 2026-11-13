@@ -1,12 +1,12 @@
 /**
  * SVG export for simple layers.
  *
- * Covered: rectangles (with one or four corner radii), ellipses, lines, paths
- * (with their winding rule), text as `<text>` with one `<tspan>` per line,
+ * Covered: rectangles (with one or four corner radii), ellipses, polygons and
+ * stars, lines and paths (with their winding rule and end markers), text as `<text>` with one `<tspan>` per line,
  * frames as `<g>` (clipped with a `<clipPath>` when they clip content) and
  * groups. Each layer keeps its rotation and flips (as a transform matrix),
  * its opacity and blend mode, solid and gradient fills (one element per
- * paint, bottom first), and solid or gradient strokes with weight, position
+ * paint, bottom first; angular gradients as a pattern of fine wedges), and solid or gradient strokes with weight, position
  * (inside and outside are emulated with a clip path or mask), dashes, joins
  * and caps.
  *
@@ -21,8 +21,11 @@
  */
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { type Matrix, type Rect, round2 } from "./geometry";
+import { markersOf, trimmedStroke } from "./markers";
 import type { Scene } from "./scene";
 import { layoutText, type TextMeasurer } from "./text";
+import { nodePath } from "./vector/shapes";
+import { serializePath } from "./vector/svg";
 
 const BLEND_CSS = new Set([
   "multiply",
@@ -76,6 +79,36 @@ function splitColor(hex: string): { color: string; alpha: number } {
 const attr = (name: string, value: string | number) =>
   ` ${name}="${typeof value === "number" ? svgNumber(value) : escapeXml(value)}"`;
 
+/** Wedges in an exported angular gradient: two per degree. */
+const ANGULAR_WEDGES = 180;
+
+/** The colour at `t` (0–1) along gradient stops, interpolated in sRGB with alpha. */
+export function stopColorAt(
+  stops: ReadonlyArray<{ position: number; color: string }>,
+  t: number,
+): string {
+  const sorted = [...stops].sort((a, b) => a.position - b.position);
+  const first = sorted[0];
+  if (!first) return "#000000";
+  const rgba = (hex: string) => {
+    const n = (i: number) => Number.parseInt(hex.slice(i, i + 2), 16);
+    return [n(1), n(3), n(5), hex.length === 9 ? n(7) : 255];
+  };
+  if (t <= first.position) return first.color;
+  for (let i = 1; i < sorted.length; i++) {
+    const a = sorted[i - 1] as (typeof sorted)[number];
+    const b = sorted[i] as (typeof sorted)[number];
+    if (t > b.position) continue;
+    const k = b.position === a.position ? 0 : (t - a.position) / (b.position - a.position);
+    const ca = rgba(a.color);
+    const cb = rgba(b.color);
+    const mix = ca.map((v, j) => Math.round(v + ((cb[j] as number) - v) * k));
+    const hex = (v: number) => v.toString(16).padStart(2, "0");
+    return `#${hex(mix[0] as number)}${hex(mix[1] as number)}${hex(mix[2] as number)}${mix[3] === 255 ? "" : hex(mix[3] as number)}`;
+  }
+  return (sorted.at(-1) as (typeof sorted)[number]).color;
+}
+
 class SvgWriter {
   readonly defs: string[] = [];
   readonly body: string[] = [];
@@ -92,6 +125,38 @@ class SvgWriter {
       const { color, alpha } = splitColor(paint.color);
       const a = alpha * opacity;
       return `${attr(kind, color)}${a < 1 ? attr(`${kind}-opacity`, a) : ""}`;
+    }
+    if (paint.type === "angular") {
+      // SVG has no conic gradient: a pattern of thin wedges, each the colour
+      // at its middle, reads the same at any size people export.
+      const id = this.id("angular");
+      const cx = paint.from.x * w;
+      const cy = paint.from.y * h;
+      const start = Math.atan2(paint.to.y * h - cy, paint.to.x * w - cx);
+      const r = Math.max(
+        Math.hypot(cx, cy),
+        Math.hypot(w - cx, cy),
+        Math.hypot(cx, h - cy),
+        Math.hypot(w - cx, h - cy),
+        1,
+      );
+      const wedges: string[] = [];
+      const n = ANGULAR_WEDGES;
+      // Each wedge overlaps the next by a hair so no seams show.
+      const overlap = (Math.PI * 2) / n / 4;
+      for (let i = 0; i < n; i++) {
+        const a0 = start + (i / n) * Math.PI * 2;
+        const a1 = start + ((i + 1) / n) * Math.PI * 2 + overlap;
+        const { color, alpha } = splitColor(stopColorAt(paint.stops, (i + 0.5) / n));
+        const d = `M${svgNumber(cx)} ${svgNumber(cy)}L${svgNumber(cx + Math.cos(a0) * r)} ${svgNumber(cy + Math.sin(a0) * r)}L${svgNumber(cx + Math.cos(a1) * r)} ${svgNumber(cy + Math.sin(a1) * r)}Z`;
+        wedges.push(
+          `<path d="${d}"${attr("fill", color)}${alpha < 1 ? attr("fill-opacity", alpha) : ""}/>`,
+        );
+      }
+      this.defs.push(
+        `<pattern id="${id}" patternUnits="userSpaceOnUse"${attr("width", Math.max(w, 1))}${attr("height", Math.max(h, 1))}>${wedges.join("")}</pattern>`,
+      );
+      return ` ${kind}="url(#${id})"${opacity < 1 ? attr(`${kind}-opacity`, opacity) : ""}`;
     }
     if (paint.type === "linear" || paint.type === "radial") {
       const id = this.id("gradient");
@@ -129,6 +194,11 @@ function shapeOf(node: NodeRecord, w: number, h: number): { tag: string; attrs: 
         tag: "line",
         attrs: `${attr("x1", 0)}${attr("y1", h / 2)}${attr("x2", w)}${attr("y2", h / 2)}`,
       };
+    case "polygon":
+    case "star": {
+      const outline = nodePath(node);
+      return outline ? { tag: "path", attrs: attr("d", serializePath(outline)) } : null;
+    }
     case "path": {
       const rule = getProp(node.props, "windingRule");
       return {
@@ -285,11 +355,27 @@ export function exportSvg(
       );
       wrap = (s) => `<g mask="url(#${mask})">${s}</g>`;
     }
+    // End markers: the line stops short under filled ones; markers are solid, never dashed.
+    const markers = markersOf(node);
+    const trimmed = markers ? trimmedStroke(node, markers.start.inset, markers.end.inset) : null;
+    const line = trimmed ? { tag: "path", attrs: attr("d", serializePath(trimmed)) } : shape;
     const elements: string[] = [];
     for (const paint of paints) {
       const stroke = out.paint("stroke", paint, w, h);
       if (stroke)
-        elements.push(`<${shape.tag}${transform}${shape.attrs} fill="none"${stroke}${style}/>`);
+        elements.push(`<${line.tag}${transform}${line.attrs} fill="none"${stroke}${style}/>`);
+      if (!markers) continue;
+      for (const marker of [markers.start, markers.end]) {
+        if (marker.fill) {
+          const fill = out.paint("fill", paint, w, h);
+          if (fill)
+            elements.push(`<path${transform}${attr("d", serializePath(marker.fill))}${fill}/>`);
+        }
+        if (marker.stroke && stroke)
+          elements.push(
+            `<path${transform}${attr("d", serializePath(marker.stroke))} fill="none"${stroke}${attr("stroke-width", weight)} stroke-linecap="round" stroke-linejoin="round"/>`,
+          );
+      }
     }
     if (elements.length > 0) parts.push(wrap(elements.join("")));
   };

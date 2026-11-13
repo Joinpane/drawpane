@@ -10,9 +10,12 @@ import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
 import type { Rect } from "./geometry";
 import { ImageCache, imagePlacement } from "./images";
+import { markerLength, markersOf, trimmedStroke } from "./markers";
 import type { Scene } from "./scene";
 import { layoutText, type TextMeasurer } from "./text";
 import { isClosedPath } from "./vector/cache";
+import { nodePath } from "./vector/shapes";
+import { serializePath } from "./vector/svg";
 
 /** On screen it's a canvas element; exports and thumbnails draw into an OffscreenCanvas. */
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -217,6 +220,11 @@ export class CanvasRenderer {
         reach = Math.max(reach, Math.abs(e.x) + Math.abs(e.y) + e.blur * 2 + Math.max(0, e.spread));
       if (e.type === "layer-blur") reach = Math.max(reach, e.radius * 2);
     }
+    if (
+      (node.type === "line" || node.type === "path") &&
+      (getProp(node.props, "markerStart") !== "none" || getProp(node.props, "markerEnd") !== "none")
+    )
+      reach = Math.max(reach, markerLength(getProp(node.props, "strokeWeight")));
     return reach;
   }
 
@@ -241,6 +249,17 @@ export class CanvasRenderer {
           p = new Path2D();
         }
         this.#paths.set(node.id, { d, path: p });
+        return p;
+      }
+      case "polygon":
+      case "star": {
+        // Built from the same outline flatten and booleans use, cached per shape.
+        const key = `${node.type}:${w}:${h}:${getProp(node.props, "pointCount")}:${node.type === "star" ? getProp(node.props, "innerRadius") : ""}:${getProp(node.props, "cornerRadius")}`;
+        const cached = this.#paths.get(node.id);
+        if (cached?.d === key) return cached.path;
+        const outline = nodePath(node);
+        const p = new Path2D(outline ? serializePath(outline) : "");
+        this.#paths.set(node.id, { d: key, path: p });
         return p;
       }
       case "frame":
@@ -268,7 +287,7 @@ export class CanvasRenderer {
 
   #paintStyle(ctx: Ctx, paint: Paint, w: number, h: number): string | CanvasGradient | null {
     if (paint.type === "solid") return hexToRgba(paint.color, paint.opacity ?? 1);
-    if (paint.type === "linear" || paint.type === "radial") {
+    if (paint.type === "linear" || paint.type === "radial" || paint.type === "angular") {
       const fx = paint.from.x * w;
       const fy = paint.from.y * h;
       const tx = paint.to.x * w;
@@ -276,7 +295,10 @@ export class CanvasRenderer {
       const gradient =
         paint.type === "linear"
           ? ctx.createLinearGradient(fx, fy, tx, ty)
-          : ctx.createRadialGradient(fx, fy, 0, fx, fy, Math.hypot(tx - fx, ty - fy));
+          : paint.type === "radial"
+            ? ctx.createRadialGradient(fx, fy, 0, fx, fy, Math.hypot(tx - fx, ty - fy))
+            : // Conic gradients start at 3 o'clock and turn clockwise: start toward `to`.
+              ctx.createConicGradient(Math.atan2(ty - fy, tx - fx), fx, fy);
       for (const stop of paint.stops)
         gradient.addColorStop(stop.position, hexToRgba(stop.color, paint.opacity ?? 1));
       return gradient;
@@ -394,11 +416,27 @@ export class CanvasRenderer {
       outside.addPath(shape);
       ctx.clip(outside, "evenodd");
     }
+    // End markers: the stroke stops short under filled ones, then each marker
+    // is drawn in every stroke paint, solid (never dashed).
+    const markers = markersOf(node);
+    const trimmed = markers ? trimmedStroke(node, markers.start.inset, markers.end.inset) : null;
+    const line = trimmed ? new Path2D(serializePath(trimmed)) : shape;
     for (const paint of strokes) {
       const style = this.#paintStyle(ctx, paint, w, h);
       if (!style) continue;
       ctx.strokeStyle = style;
-      ctx.stroke(shape);
+      ctx.stroke(line);
+      if (!markers) continue;
+      ctx.save();
+      ctx.setLineDash([]);
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.fillStyle = style;
+      for (const marker of [markers.start, markers.end]) {
+        if (marker.fill) ctx.fill(new Path2D(serializePath(marker.fill)));
+        if (marker.stroke) ctx.stroke(new Path2D(serializePath(marker.stroke)));
+      }
+      ctx.restore();
     }
     ctx.restore();
   }
