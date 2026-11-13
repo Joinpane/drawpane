@@ -7,6 +7,7 @@
  * Plain DOM rather than React because transitions need two live copies of a
  * screen at once, with exact control over when each appears and goes.
  */
+
 import {
   type CanvasRenderer,
   chainAt,
@@ -29,6 +30,7 @@ import {
   SafeUrl,
   type Transition,
 } from "@drawpane/model";
+import { watchDocumentFonts } from "../fonts/document-fonts";
 
 /** Tap slop: a pointer that moves further than this is a drag. */
 const DRAG_PX = 8;
@@ -135,6 +137,7 @@ export class PlayerStage {
     this.#cleanup.push(() => resize.disconnect());
     this.#cleanup.push(this.#editor.doc.subscribe(() => this.invalidate()));
     this.#cleanup.push(this.#renderer.images.subscribe(() => this.invalidate()));
+    this.#cleanup.push(watchDocumentFonts(this.#editor.doc));
     const fonts = () => this.invalidate();
     document.fonts?.addEventListener?.("loadingdone", fonts);
     this.#cleanup.push(() => document.fonts?.removeEventListener?.("loadingdone", fonts));

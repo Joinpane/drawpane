@@ -57,6 +57,18 @@ export class History {
     this.#push({ label: open.label, undo: open.undo.reverse().flat(), selection: open.selection });
   }
 
+  /**
+   * Closes the open group and reverts what it did, leaving no undo or redo
+   * entry: a preview you backed out of. Returns false when no group is open.
+   */
+  discard(commit: Commit): boolean {
+    const open = this.#open;
+    if (!open) return false;
+    this.#open = null;
+    if (open.undo.length > 0) applyBestEffort(commit, open.undo.reverse().flat());
+    return true;
+  }
+
   /** Records the inverse of a commit, either into the open group or as its own entry. */
   record(label: string, inverse: readonly Op[], selection: readonly string[]): void {
     if (inverse.length === 0) return;
