@@ -20,6 +20,7 @@ import {
   type Props,
   propAllowed,
   ROOT_ID,
+  type RulerGuide,
   type VariableValue,
 } from "@drawpane/model";
 import { Camera, type Insets, NO_INSETS } from "./camera";
@@ -57,6 +58,7 @@ import {
   round2,
   unionRects,
 } from "./geometry";
+import { withGuide } from "./grids";
 import { applyBestEffort, History } from "./history";
 import { hitAll } from "./hit";
 import { layoutImageRow } from "./images";
@@ -131,6 +133,26 @@ export interface EditorState {
   readonly prototyping: boolean;
   /** A connection being dragged from a layer's handle, or null. */
   readonly connecting: ConnectionDrag | null;
+  /** Rulers along the canvas edges (⇧R). Guides show either way. */
+  readonly rulers: boolean;
+  /** Frames' layout grids on the canvas (⇧G). */
+  readonly layoutGrids: boolean;
+  /** A guide being dragged (from a ruler, or an existing one), drawn live and committed on drop. */
+  readonly guideDraft: GuideDraft | null;
+  /** The guide under the pointer, highlighted so it reads as grabbable. */
+  readonly hoverGuide: { readonly owner: string; readonly index: number } | null;
+}
+
+export interface GuideDraft {
+  readonly axis: "x" | "y";
+  /** Page coordinate of the line. */
+  readonly at: number;
+  /** The guide being moved, or null for a new one. */
+  readonly from: { readonly owner: string; readonly index: number } | null;
+  /** Where it lands in its owner's coordinates (a frame's, or the page's): the label shows this. */
+  readonly offset: number;
+  /** True while the pointer is back over the ruler: dropping removes the guide. */
+  readonly removing: boolean;
 }
 
 export interface Notice {
@@ -221,6 +243,10 @@ export class Editor {
     vectorPointer: null,
     prototyping: false,
     connecting: null,
+    rulers: false,
+    layoutGrids: true,
+    guideDraft: null,
+    hoverGuide: null,
   });
   #noticeId = 0;
   readonly #cameras = new Map<string, Camera>();
@@ -1825,6 +1851,47 @@ export class Editor {
     const node = this.doc.get(id);
     if (node) move(node);
     return ops;
+  }
+
+  // -------------------------------------------------------------------------
+  // Guides and layout grids
+
+  /**
+   * Adds, moves or removes a ruler guide on a page or frame: `index` null
+   * adds `guide`; `guide` null removes the guide at `index`.
+   */
+  setGuide(owner: string, index: number | null, guide: RulerGuide | null): boolean {
+    const node = this.doc.get(owner);
+    if (!node || (node.type !== "page" && node.type !== "frame")) return false;
+    const next = withGuide(getProp(node.props, "rulerGuides"), index, guide);
+    const label = guide === null ? "Remove guide" : index === null ? "Add guide" : "Move guide";
+    return this.commit(
+      [{ op: "set", id: owner, prop: "rulerGuides", value: next.length > 0 ? next : null }],
+      label,
+    );
+  }
+
+  /** Removes every guide on the current page and its frames. */
+  clearGuides(): boolean {
+    const pageId = this.s.pageId;
+    if (!pageId) return false;
+    const ops: Op[] = [];
+    for (const id of [pageId, ...this.doc.childIds(pageId)]) {
+      const node = this.doc.get(id);
+      if (node && getProp(node.props, "rulerGuides").length > 0)
+        ops.push({ op: "set", id, prop: "rulerGuides", value: null });
+    }
+    return ops.length > 0 && this.commit(ops, "Remove guides");
+  }
+
+  /** How many guides the current page and its frames have. */
+  guideCount(): number {
+    const pageId = this.s.pageId;
+    if (!pageId) return 0;
+    return [pageId, ...this.doc.childIds(pageId)].reduce(
+      (n, id) => n + getProp(this.doc.get(id)?.props ?? {}, "rulerGuides").length,
+      0,
+    );
   }
 
   toggleVisible(): void {

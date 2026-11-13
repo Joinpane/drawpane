@@ -21,12 +21,24 @@ function stops(r: Rect, axis: "x" | "y"): number[] {
     : [r.y, r.y + r.height / 2, r.y + r.height];
 }
 
+/** A line to snap to on one axis: a ruler guide or a layout grid edge, in page coordinates. */
+export interface SnapLine {
+  readonly axis: "x" | "y";
+  readonly at: number;
+}
+
 /**
  * Snaps a moving rectangle's edges and centre to the edges and centres of
- * `targets`, independently per axis, within `threshold` page units. Returns
- * the correction to add and the guides to draw.
+ * `targets`, and its edges to `lines` (guides, grid columns), independently
+ * per axis, within `threshold` page units. Returns the correction to add and
+ * the guides to draw.
  */
-export function snapRect(moving: Rect, targets: readonly Rect[], threshold: number): SnapResult {
+export function snapRect(
+  moving: Rect,
+  targets: readonly Rect[],
+  threshold: number,
+  lines: readonly SnapLine[] = [],
+): SnapResult {
   const best = { x: { d: threshold + 1, at: 0 }, y: { d: threshold + 1, at: 0 } };
   for (const axis of ["x", "y"] as const) {
     const mine = stops(moving, axis);
@@ -36,6 +48,15 @@ export function snapRect(moving: Rect, targets: readonly Rect[], threshold: numb
           const d = target - m;
           if (Math.abs(d) < Math.abs(best[axis].d)) best[axis] = { d, at: target };
         }
+      }
+    }
+    // Guides and grid edges take the moving edges (not the centre), like Figma.
+    const edges = [mine[0] as number, mine[2] as number];
+    for (const line of lines) {
+      if (line.axis !== axis) continue;
+      for (const m of edges) {
+        const d = line.at - m;
+        if (Math.abs(d) < Math.abs(best[axis].d)) best[axis] = { d, at: line.at };
       }
     }
   }

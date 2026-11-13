@@ -41,11 +41,13 @@ import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
 import { filesFrom, importImageFiles, pasteFromClipboard } from "./media";
 import { PrototypePanel } from "./prototype/PrototypePanel";
+import { RULER, RULER_GAP, Rulers } from "./Rulers";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { Toolbar } from "./Toolbar";
 import { useThumbnailPublisher } from "./thumbnail";
 import { TokensWorkspace } from "./tokens/TokensWorkspace";
 import { uiFor } from "./ui-state";
+import { useViewPreferences } from "./view-preferences";
 import "./editor.css";
 
 const CLIPBOARD_MIME = "application/x-drawpane+json";
@@ -125,6 +127,9 @@ function FileEditor({ fileId }: { fileId: string }) {
   useEffect(() => {
     editor.state.set({ prototyping });
   }, [editor, prototyping]);
+  // View preferences, remembered per browser: rulers (⇧R) and layout grids (⇧G).
+  useViewPreferences(editor);
+  const rulersOn = useEditorStateOutside(editor, (s) => s.rulers) && view === "design" && !viewing;
   // Room for the floating panes (12px margin + pane width), so comment popovers open over the canvas.
   const insets = useMemo(
     () => ({
@@ -133,20 +138,25 @@ function FileEditor({ fileId }: { fileId: string }) {
     }),
     [leftOpen, rightOpen, commentsOpen, view],
   );
+  // Rulers sit beside the panes, 12px in from the window when a pane is closed.
+  const rulerLeft = insets.left > 0 ? insets.left + 12 : 12;
+  const rulerRight = insets.right > 0 ? insets.right + 12 : 12;
 
   // Fitting and revealing aim for the part of the canvas the panes don't cover:
   // 12px margins, 264px panes, the top bar and the zoom controls.
   // The timeline replaces the zoom controls while history is open.
   useEffect(() => {
+    // Rulers take 20px plus a 4px gap, along the top and the left.
+    const ruler = rulersOn ? RULER + RULER_GAP : 0;
     const next = {
-      top: viewing ? 104 : 60,
+      top: (viewing ? 104 : 60) + ruler,
       bottom: historyOpen ? 128 : 56,
-      left: insets.left,
+      left: rulersOn ? rulerLeft + ruler : insets.left,
       right: insets.right,
     };
     editor.state.set({ insets: next });
     history.view.preview.state.set({ insets: next });
-  }, [editor, history.view, insets, historyOpen, viewing]);
+  }, [editor, history.view, insets, historyOpen, viewing, rulersOn, rulerLeft]);
 
   useEffect(
     () => connectFile(editor, fileId, setFatal, (message) => comments.store.receive(message)),
@@ -434,6 +444,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         <EditorContext.Provider value={active}>
           <Canvas key={viewing ? "version" : "live"} interaction={activeInteraction} />
         </EditorContext.Provider>
+        {rulersOn ? <Rulers interaction={interaction} left={rulerLeft} right={rulerRight} /> : null}
         {view === "design" && !viewing ? (
           <CommentsLayer
             store={comments.store}

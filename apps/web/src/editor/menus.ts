@@ -174,12 +174,17 @@ export function canvasMenu(host: MenuHost, request: MenuRequest): ContextMenuEnt
   const a = (id: string, label?: string) => action(host, id, label);
   const comments = action(host, "view.comments", "Show comments");
   const focus = action(host, "view.focus", "Hide other people's cursors");
+  const rulers = action(host, "view.rulers", "Show rulers");
+  const grids = action(host, "view.layoutGrids", "Show layout grids");
   return sections(
     [pasteHere(host, request), a("edit.selectAll")],
     [
+      rulers ? { ...rulers, checked: editor.s.rulers } : null,
+      grids ? { ...grids, checked: editor.s.layoutGrids } : null,
       comments ? { ...comments, checked: host.commentsShown } : null,
       focus ? { ...focus, checked: editor.s.focusMode } : null,
     ],
+    [a("view.clearGuides")],
     [a("view.zoomFit"), a("view.zoom100"), a("view.zoomIn"), a("view.zoomOut")],
     [a("file.history"), a("help.shortcuts")],
   );
@@ -218,8 +223,32 @@ export function pageMenu(host: MenuHost, request: MenuRequest): ContextMenuEntry
   );
 }
 
+/** The menu for a right-click on a ruler guide. */
+export function guideMenu(host: MenuHost, request: MenuRequest): ContextMenuEntry[] {
+  const editor = host.ctx.editor;
+  const guide = request.guide;
+  if (!guide || !editor.canEdit) return [];
+  return sections(
+    [
+      {
+        id: "guide.delete",
+        label: "Remove guide",
+        onSelect: () => editor.setGuide(guide.owner, guide.index, null),
+      },
+      action(host, "view.clearGuides"),
+    ],
+    [
+      (() => {
+        const rulers = action(host, "view.rulers", "Show rulers");
+        return rulers ? { ...rulers, checked: editor.s.rulers } : null;
+      })(),
+    ],
+  );
+}
+
 /** The menu for a request. */
 export function menuFor(host: MenuHost, request: MenuRequest): ContextMenuEntry[] {
   if (request.kind === "page") return pageMenu(host, request);
+  if (request.kind === "guide") return guideMenu(host, request);
   return selectionMenu(host, request);
 }

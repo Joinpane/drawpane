@@ -7,6 +7,7 @@
 import { getProp } from "@drawpane/model";
 import type { Editor } from "./editor";
 import { apply, type Point, type Rect } from "./geometry";
+import { gridLines, gridTracks, placedGuides, visibleGrids } from "./grids";
 import type { Interaction } from "./interaction";
 import { drawPrototypeOverlay, flowStartScreens } from "./prototype/overlay";
 import { drawVectorOverlay } from "./tools/overlay";
@@ -79,6 +80,10 @@ export function drawOverlay(
     ctx.stroke();
     ctx.setLineDash([]);
   };
+
+  // Layout grids and guides sit under everything else the overlay draws.
+  if (editor.s.layoutGrids) drawLayoutGrids(ctx, editor, dpr);
+  drawGuides(ctx, editor, theme);
 
   // Component sets: a dashed outline in the component colour, like Figma.
   const sets: string[] = [];
@@ -532,4 +537,149 @@ export function withAlpha(color: string, alpha: number): string {
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
   }
   return c;
+}
+
+/** Frames on a page that have layout grids, cached per document version. */
+let gridFrames: { version: number; pageId: string; ids: string[] } | null = null;
+
+function framesWithGrids(editor: Editor, pageId: string): string[] {
+  const doc = editor.doc;
+  if (gridFrames && gridFrames.version === doc.version && gridFrames.pageId === pageId)
+    return gridFrames.ids;
+  const ids: string[] = [];
+  const walk = (id: string) => {
+    for (const child of doc.childIds(id)) {
+      const node = doc.get(child);
+      if (!node || node.props.visible === false) continue;
+      if (node.type === "frame" && visibleGrids(node).length > 0) ids.push(child);
+      if (node.type === "frame" || node.type === "group") walk(child);
+    }
+  };
+  walk(pageId);
+  gridFrames = { version: doc.version, pageId, ids };
+  return ids;
+}
+
+/** A `#rrggbbaa` color as CSS. */
+function cssHex(hex: string): string {
+  if (hex.length !== 9) return hex;
+  const n = (i: number) => Number.parseInt(hex.slice(i, i + 2), 16);
+  return `rgba(${n(1)}, ${n(3)}, ${n(5)}, ${Math.round((n(7) / 255) * 1000) / 1000})`;
+}
+
+/** Each frame's columns, rows and square grids, clipped to the frame, in its own rotation. */
+function drawLayoutGrids(ctx: CanvasRenderingContext2D, editor: Editor, dpr: number): void {
+  const { camera, viewport, pageId } = editor.s;
+  if (!pageId) return;
+  const view = camera.visibleRect(viewport);
+  for (const id of framesWithGrids(editor, pageId)) {
+    const node = editor.doc.get(id);
+    const b = editor.scene.bounds(id);
+    if (!node || !b) continue;
+    if (b.x > view.x + view.width || b.y > view.y + view.height) continue;
+    if (b.x + b.width < view.x || b.y + b.height < view.y) continue;
+    const w = getProp(node.props, "width");
+    const h = getProp(node.props, "height");
+    const m = editor.scene.worldMatrix(id);
+    ctx.save();
+    ctx.setTransform(
+      m[0] * camera.zoom * dpr,
+      m[1] * camera.zoom * dpr,
+      m[2] * camera.zoom * dpr,
+      m[3] * camera.zoom * dpr,
+      (m[4] * camera.zoom + camera.x) * dpr,
+      (m[5] * camera.zoom + camera.y) * dpr,
+    );
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.clip();
+    for (const grid of visibleGrids(node)) {
+      const color = cssHex(grid.color);
+      if (grid.type === "grid") {
+        // Too dense to read below 4 screen pixels a cell: leave it out.
+        if (grid.size * camera.zoom < 4) continue;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1 / camera.zoom;
+        ctx.beginPath();
+        for (const x of gridLines(grid.size, w)) {
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, h);
+        }
+        for (const y of gridLines(grid.size, h)) {
+          ctx.moveTo(0, y);
+          ctx.lineTo(w, y);
+        }
+        ctx.stroke();
+        continue;
+      }
+      ctx.fillStyle = color;
+      for (const t of gridTracks(grid, grid.type === "columns" ? w : h)) {
+        if (grid.type === "columns") ctx.fillRect(t.start, 0, t.size, h);
+        else ctx.fillRect(0, t.start, w, t.size);
+      }
+    }
+    ctx.restore();
+  }
+}
+
+/**
+ * Ruler guides: page guides cross the whole view, frame guides their frame.
+ * The hovered guide is bolder; one being dragged shows with its position,
+ * dashed when letting go would remove it.
+ */
+function drawGuides(ctx: CanvasRenderingContext2D, editor: Editor, theme: OverlayTheme): void {
+  const { camera, viewport, pageId, guideDraft, hoverGuide } = editor.s;
+  if (!pageId) return;
+  const line = (axis: "x" | "y", at: number, span: { from: number; to: number } | null) => {
+    ctx.beginPath();
+    if (axis === "x") {
+      const x = Math.round(camera.toScreen({ x: at, y: 0 }).x) + 0.5;
+      const from = span ? camera.toScreen({ x: 0, y: span.from }).y : 0;
+      const to = span ? camera.toScreen({ x: 0, y: span.to }).y : viewport.height;
+      ctx.moveTo(x, from);
+      ctx.lineTo(x, to);
+    } else {
+      const y = Math.round(camera.toScreen({ x: 0, y: at }).y) + 0.5;
+      const from = span ? camera.toScreen({ x: span.from, y: 0 }).x : 0;
+      const to = span ? camera.toScreen({ x: span.to, y: 0 }).x : viewport.width;
+      ctx.moveTo(from, y);
+      ctx.lineTo(to, y);
+    }
+    ctx.stroke();
+  };
+  ctx.strokeStyle = theme.guide;
+  for (const g of placedGuides(editor.scene, pageId)) {
+    const moving = guideDraft?.from?.owner === g.owner && guideDraft.from.index === g.index;
+    if (moving) continue;
+    const hovered = hoverGuide?.owner === g.owner && hoverGuide.index === g.index;
+    ctx.lineWidth = hovered ? 2 : 1;
+    line(g.axis, g.at, g.span);
+  }
+  if (!guideDraft) return;
+  ctx.lineWidth = 1;
+  ctx.setLineDash(guideDraft.removing ? [4, 4] : []);
+  ctx.globalAlpha = guideDraft.removing ? 0.5 : 1;
+  line(guideDraft.axis, guideDraft.at, null);
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+  if (guideDraft.removing) return;
+  // The position, in its owner's coordinates, in a chip beside the line.
+  const label = `${guideDraft.axis} ${formatOffset(guideDraft.offset)}`;
+  ctx.font = `600 11px ${theme.fontMono ?? theme.fontUi}`;
+  const w = ctx.measureText(label).width + 10;
+  const { insets } = editor.s;
+  const p = camera.toScreen({ x: guideDraft.at, y: guideDraft.at });
+  const x = guideDraft.axis === "x" ? Math.round(p.x) + 6 : insets.left + 8;
+  const y = guideDraft.axis === "x" ? insets.top + 8 : Math.round(p.y) - 22;
+  ctx.fillStyle = theme.guide;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, 18, 4);
+  ctx.fill();
+  ctx.fillStyle = theme.surfaceRaised;
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, x + 5, y + 9.5);
+}
+
+function formatOffset(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 }
