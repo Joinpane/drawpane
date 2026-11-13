@@ -300,6 +300,9 @@ importers:
       '@drawpane/model':
         specifier: workspace:*
         version: link:../model
+      pathkit-wasm:
+        specifier: 1.0.0
+        version: 1.0.0
     devDependencies:
       fast-check:
         specifier: 'catalog:'
@@ -1610,6 +1613,9 @@ packages:
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
 
+  pathkit-wasm@1.0.0:
+    resolution: {integrity: sha512-oREIcGpwnBBto6PfB3C20aIw9jBPLcSNVF1AlL5tGlXsoL2zqWVuD0mi8WMJQHHNemm6aR1hHH2lz+TO551Fgw==}
+
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
 
@@ -2890,6 +2896,8 @@ snapshots:
   path-to-regexp@6.3.0: {}
 
   pathe@2.0.3: {}
+
+  pathkit-wasm@1.0.0: {}
 
   picocolors@1.1.1: {}
 

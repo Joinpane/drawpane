@@ -18,6 +18,10 @@ import {
 } from "./geometry";
 import { hitTest, marqueeHits, selectionTarget } from "./hit";
 import { snapRect } from "./snap";
+import { PenTool } from "./tools/pen";
+import type { KeyInput, ToolHandler } from "./tools/types";
+import { VectorEditTool } from "./tools/vector-edit";
+import { scaledPathData } from "./vector/node";
 
 export interface PointerInput {
   readonly screen: Point;
@@ -82,13 +86,44 @@ export class Interaction {
   #mode: Mode = { kind: "idle" };
   #spaceHeld = false;
   cursor = "default";
+  /** Tools in their own files; they see pointer and key events first while active. */
+  readonly pen: PenTool;
+  readonly vectorEdit: VectorEditTool;
 
   constructor(editor: Editor) {
     this.#editor = editor;
+    this.pen = new PenTool(editor);
+    this.vectorEdit = new VectorEditTool(editor);
   }
 
   get busy(): boolean {
-    return this.#mode.kind !== "idle";
+    return this.#mode.kind !== "idle" || this.pen.busy || this.vectorEdit.busy;
+  }
+
+  /** The tool handler that takes events now, if any. Built-in gestures run otherwise. */
+  #delegate(): ToolHandler | null {
+    if (this.#mode.kind !== "idle" || this.#spaceHeld) return null;
+    const { tool, vectorEdit } = this.#editor.s;
+    if (tool === "pen") return this.pen;
+    if (tool === "select" && vectorEdit) return this.vectorEdit;
+    return null;
+  }
+
+  /**
+   * Keyboard input for tools: the pen (Enter, Escape, Backspace), vector edit
+   * (Escape, Enter, Backspace, arrows) and Enter on a selected path to edit it.
+   * Returns true when the key was used; the app's shortcuts run otherwise.
+   */
+  key(input: KeyInput): boolean {
+    const delegate = this.#delegate();
+    if (delegate?.key(input)) return true;
+    const editor = this.#editor;
+    const { selection, tool, vectorEdit } = editor.s;
+    if (input.key === "Enter" && tool === "select" && !vectorEdit && selection.length === 1) {
+      const node = editor.doc.get(selection[0] as string);
+      if (node?.type === "path") return editor.enterVectorEdit(node.id);
+    }
+    return false;
   }
 
   #page(screen: Point): Point {
@@ -170,8 +205,14 @@ export class Interaction {
     }
     if (input.button !== 0) return;
 
+    const delegate = this.#delegate();
+    if (delegate?.down(input)) {
+      this.cursor = delegate.cursor;
+      return;
+    }
+
     if (tool !== "select") {
-      if (!editor.canEdit) return;
+      if (!editor.canEdit || tool === "pen") return;
       const parent = editor.dropTarget(page) ?? pageId;
       if (tool === "text") {
         const id = editor.createLayer(
@@ -227,6 +268,7 @@ export class Interaction {
         editor.startTextEdit(target);
         return;
       }
+      if (node?.type === "path" && editor.enterVectorEdit(target)) return;
       if (leaf && leaf !== target) {
         // Enter the group or frame: select the next level down.
         editor.select([selectionTarget(editor.scene, pageId, leaf, [target], false)]);
@@ -269,6 +311,11 @@ export class Interaction {
     const editor = this.#editor;
     const page = this.#page(input.screen);
     const mode = this.#mode;
+    const delegate = this.#delegate();
+    if (delegate?.move(input)) {
+      this.cursor = delegate.cursor;
+      return;
+    }
 
     switch (mode.kind) {
       case "idle":
@@ -343,6 +390,11 @@ export class Interaction {
 
   up(input: PointerInput): void {
     const editor = this.#editor;
+    const delegate = this.#delegate();
+    if (delegate?.up(input)) {
+      this.cursor = delegate.cursor;
+      return;
+    }
     const mode = this.#mode;
     this.#mode = { kind: "idle" };
     switch (mode.kind) {
@@ -392,6 +444,8 @@ export class Interaction {
 
   cancel(): void {
     const editor = this.#editor;
+    this.pen.cancel();
+    this.vectorEdit.cancel();
     const mode = this.#mode;
     this.#mode = { kind: "idle" };
     if (
@@ -718,6 +772,11 @@ export class Interaction {
       set("y", newBox.y);
       set("width", newBox.width);
       set("height", newBox.height);
+      if (node.type === "path") {
+        // Scale from the shape at drag start, so passing through zero size never loses it.
+        const d = scaledPathData(node, round2(newBox.width), round2(newBox.height));
+        if (d !== null) ops.push({ op: "set", id: node.id, prop: "pathData", value: d });
+      }
       // Resizing by hand makes that axis fixed (from Hug or Fill), like CSS with an explicit size.
       if (movesX && getProp(node.props, "sizingH") !== "fixed")
         ops.push({ op: "set", id: node.id, prop: "sizingH", value: "fixed" });
