@@ -11,7 +11,7 @@ import type { Editor } from "../editor";
 import { apply, boxOf, localMatrix, type Matrix, multiply, type Point } from "../geometry";
 import type { Interaction } from "../interaction";
 import type { OverlayTheme } from "../overlay";
-import { type Anchor, anchorKey, anchorKind, type VectorPath } from "../vector/path";
+import { type Anchor, anchorKind, parseAnchorKey, type VectorPath } from "../vector/path";
 import { visibleHandles } from "./vector-edit";
 
 const ANCHOR = 7;
@@ -31,7 +31,15 @@ export function drawVectorOverlay(
     const path = editor.pathOf(vectorEdit.id);
     if (!node || !path) return;
     const m = multiply(view, editor.scene.worldMatrix(node.id));
-    const selected = new Set(vectorEdit.anchors);
+    // Selected anchor indices per subpath, so drawing 500 anchors allocates nothing.
+    const selected = new Map<number, Set<number>>();
+    for (const key of vectorEdit.anchors) {
+      const ref = parseAnchorKey(key);
+      if (!ref) continue;
+      const set = selected.get(ref.s) ?? new Set<number>();
+      set.add(ref.i);
+      selected.set(ref.s, set);
+    }
     outline(ctx, path, m, theme.signal);
     const marks = visibleHandles(path, vectorEdit.anchors).map((h) => {
       const a = path[h.ref.s]?.anchors[h.ref.i] as Anchor;
@@ -39,8 +47,9 @@ export function drawVectorOverlay(
     });
     handles(ctx, marks, theme.signal);
     path.forEach((sub, s) => {
+      const picked = selected.get(s);
       sub.anchors.forEach((a, i) => {
-        anchorMark(ctx, apply(m, a), selected.has(anchorKey({ s, i })), theme.signal);
+        anchorMark(ctx, apply(m, a), picked?.has(i) === true, theme.signal);
       });
     });
     if (vectorEdit.anchors.length === 1) {

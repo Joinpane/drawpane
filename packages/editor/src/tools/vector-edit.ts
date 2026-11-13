@@ -22,7 +22,7 @@ import type { PointerInput } from "../interaction";
 import { insertAnchor, moveAnchors, setHandle, snap45 } from "../vector/edit";
 import { hitPathData, nearestOnPath } from "../vector/hit";
 import { fitToNode, fittedOps } from "../vector/node";
-import { type AnchorRef, anchorKey, type VectorPath } from "../vector/path";
+import { type AnchorRef, anchorKey, parseAnchorKey, type VectorPath } from "../vector/path";
 import { DRAG_PX, type KeyInput, PICK_PX, SEGMENT_PX, type ToolHandler } from "./types";
 
 type Drag =
@@ -37,6 +37,8 @@ type Drag =
       keys: ReadonlySet<string>;
       primary: AnchorRef;
       moved: boolean;
+      /** Screen positions of the anchors that stay put, computed once per drag. */
+      targets: Point[] | null;
     }
   | {
       kind: "handle";
@@ -65,27 +67,28 @@ export interface VisibleHandle {
 
 /** Handles shown for a selection: those of selected anchors and of their neighbours. */
 export function visibleHandles(path: VectorPath, selected: readonly string[]): VisibleHandle[] {
-  const keys = new Set(selected);
+  // Walks the selection, not the whole path, so it costs nothing on big paths.
   const out: VisibleHandle[] = [];
   const seen = new Set<string>();
-  path.forEach((sub, s) => {
+  for (const key of selected) {
+    const ref = parseAnchorKey(key);
+    const sub = ref && path[ref.s];
+    if (!ref || !sub?.anchors[ref.i]) continue;
+    const { s, i } = ref;
     const n = sub.anchors.length;
-    sub.anchors.forEach((_, i) => {
-      if (!keys.has(anchorKey({ s, i }))) return;
-      const near = [i];
-      if (i > 0 || sub.closed) near.push((i - 1 + n) % n);
-      if (i < n - 1 || sub.closed) near.push((i + 1) % n);
-      for (const j of near) {
-        const key = anchorKey({ s, i: j });
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const a = sub.anchors[j];
-        if (!a) continue;
-        if (a.in) out.push({ ref: { s, i: j }, side: "in", at: a.in });
-        if (a.out) out.push({ ref: { s, i: j }, side: "out", at: a.out });
-      }
-    });
-  });
+    const near = [i];
+    if (i > 0 || sub.closed) near.push((i - 1 + n) % n);
+    if (i < n - 1 || sub.closed) near.push((i + 1) % n);
+    for (const j of near) {
+      const k = anchorKey({ s, i: j });
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const a = sub.anchors[j];
+      if (!a) continue;
+      if (a.in) out.push({ ref: { s, i: j }, side: "in", at: a.in });
+      if (a.out) out.push({ ref: { s, i: j }, side: "out", at: a.out });
+    }
+  }
   return out;
 }
 
@@ -208,6 +211,7 @@ export class VectorEditTool implements ToolHandler {
         keys: new Set(selected),
         primary: hit,
         moved: false,
+        targets: null,
       };
       return true;
     }
@@ -233,6 +237,7 @@ export class VectorEditTool implements ToolHandler {
         keys: new Set([key]),
         primary: ref,
         moved: false,
+        targets: null,
       };
       return true;
     }
@@ -326,20 +331,27 @@ export class VectorEditTool implements ToolHandler {
 
   /** The nearest other anchor within pick range of `p` (local), in start-of-drag coordinates. */
   #snapToAnchor(drag: Extract<Drag, { kind: "anchors" }>, p: Point): Point | null {
+    if (!drag.targets) {
+      // The world matrix, camera and unselected anchors don't change during a drag.
+      const targets: Point[] = [];
+      drag.path.forEach((sub, s) => {
+        sub.anchors.forEach((a, i) => {
+          if (!drag.keys.has(anchorKey({ s, i }))) targets.push(a);
+        });
+      });
+      drag.targets = targets;
+    }
     const screen = this.#screen(drag.world, p);
     let best: Point | null = null;
     let bestD = PICK_PX;
-    drag.path.forEach((sub, s) => {
-      sub.anchors.forEach((a, i) => {
-        if (drag.keys.has(anchorKey({ s, i }))) return;
-        const q = this.#screen(drag.world, a);
-        const d = Math.hypot(q.x - screen.x, q.y - screen.y);
-        if (d <= bestD) {
-          bestD = d;
-          best = { x: a.x, y: a.y };
-        }
-      });
-    });
+    for (const a of drag.targets) {
+      const q = this.#screen(drag.world, a);
+      const d = Math.hypot(q.x - screen.x, q.y - screen.y);
+      if (d <= bestD) {
+        bestD = d;
+        best = { x: a.x, y: a.y };
+      }
+    }
     return best;
   }
 

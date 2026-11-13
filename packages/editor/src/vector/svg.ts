@@ -18,7 +18,6 @@ interface MutableAnchor {
   out: Point | null;
 }
 
-const NUMBER = /[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/y;
 const PARAMS: Record<string, number> = {
   m: 2,
   l: 2,
@@ -57,13 +56,42 @@ export function parsePath(d: string): VectorPath {
       else break;
     }
   };
+  const isDigit = (ch: number) => ch >= 48 && ch <= 57;
+  // A hand-rolled scanner for [+-]digits[.digits][e[+-]digits]: the hot loop of
+  // every parse, several times faster than a sticky regex on long paths.
   const readNumber = (): number | null => {
     skipSep();
-    NUMBER.lastIndex = pos;
-    const m = NUMBER.exec(d);
-    if (!m) return null;
-    pos = NUMBER.lastIndex;
-    const n = Number(m[0]);
+    const start = pos;
+    let ch = d.charCodeAt(pos);
+    if (ch === 43 || ch === 45) ch = d.charCodeAt(++pos); // + -
+    let digits = 0;
+    while (isDigit(ch)) {
+      digits++;
+      ch = d.charCodeAt(++pos);
+    }
+    if (ch === 46) {
+      // .
+      ch = d.charCodeAt(++pos);
+      while (isDigit(ch)) {
+        digits++;
+        ch = d.charCodeAt(++pos);
+      }
+    }
+    if (digits === 0) {
+      pos = start;
+      return null;
+    }
+    if (ch === 101 || ch === 69) {
+      // e E: only an exponent when digits follow.
+      let q = pos + 1;
+      let c = d.charCodeAt(q);
+      if (c === 43 || c === 45) c = d.charCodeAt(++q);
+      if (isDigit(c)) {
+        while (isDigit(c)) c = d.charCodeAt(++q);
+        pos = q;
+      }
+    }
+    const n = Number(d.slice(start, pos));
     return Number.isFinite(n) ? n : null;
   };
   const readFlag = (): number | null => {
