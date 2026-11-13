@@ -1,4 +1,5 @@
 import { CanvasTextMeasurer, Editor, Interaction, liveFlows, screenOf } from "@drawpane/editor";
+import type { VersionInfo } from "@drawpane/model";
 import {
   Button,
   Icon,
@@ -10,7 +11,7 @@ import {
 } from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { isMac, modKey } from "../app/format";
 import { ShareDialog } from "../prototype/ShareDialog";
@@ -22,6 +23,15 @@ import { CommandPalette } from "./CommandPalette";
 import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
 import { connectFile } from "./connection";
 import { ExportPanel } from "./ExportSection";
+import {
+  HistoryPanel,
+  NameVersionDialog,
+  RestoreDialog,
+  Scrubber,
+  useVersionHistory,
+  VersionBanner,
+  VersionDetails,
+} from "./history";
 import { EditorContext, useEditor, useEditorState, useEditorStateOutside } from "./hooks";
 import { ImageDrop, UploadTray } from "./ImageDrop";
 import { Inspector } from "./Inspector";
@@ -67,7 +77,7 @@ function FileEditor({ fileId }: { fileId: string }) {
   const interaction = useMemo(() => new Interaction(editor), [editor]);
   const [commandOpen, setCommandOpen] = useState(false);
   const [leftOpen, setLeftOpen] = useState(true);
-  const [leftTab, setLeftTab] = useState<"layers" | "assets">("layers");
+  const [leftTab, setLeftTab] = useState<LeftTab>("layers");
   const [view, setView] = useState<"design" | "tokens">("design");
   const [rightTab, setRightTab] = useState<RightTab>("design");
   // Viewers can't edit, so open them straight into Inspect (free for everyone).
@@ -80,8 +90,34 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [fatal, setFatal] = useState<string | null>(null);
   const comments = useCommentStore(editor, fileId);
   const commentsOpen = useComments(comments.store, (s) => s.panelOpen);
+  // Version history: the History tab lists versions; picking one puts it on the canvas, read-only.
+  const history = useVersionHistory(
+    editor,
+    fileId,
+    view === "design" && leftOpen && leftTab === "history",
+  );
+  const viewing = history.viewing;
+  const historyOpen = view === "design" && history.open;
+  const active = history.active;
+  const activeInteraction = viewing ? history.view.interaction : interaction;
+  const [versionTab, setVersionTab] = useState<"version" | "inspect">("version");
+  const [naming, setNaming] = useState<{ version: VersionInfo | null } | null>(null);
+  const [confirmRestore, setConfirmRestore] = useState<VersionInfo | null>(null);
+  const showVersion = (version: VersionInfo | null) => {
+    if (version) {
+      // The details pane sits where the inspector does.
+      comments.store.setPanel(false);
+      setRightOpen(true);
+    }
+    history.show(version);
+  };
+  // Tokens take over the screen; a version on the canvas would be hidden behind them.
+  useEffect(() => {
+    if (view === "tokens") history.leave();
+  }, [view, history.leave]);
   // The canvas shows connections while the Prototype tab is on screen.
-  const prototyping = view === "design" && rightOpen && !commentsOpen && rightTab === "prototype";
+  const prototyping =
+    view === "design" && rightOpen && !commentsOpen && rightTab === "prototype" && !viewing;
   useEffect(() => {
     editor.state.set({ prototyping });
   }, [editor, prototyping]);
@@ -96,11 +132,17 @@ function FileEditor({ fileId }: { fileId: string }) {
 
   // Fitting and revealing aim for the part of the canvas the panes don't cover:
   // 12px margins, 264px panes, the top bar and the zoom controls.
+  // The timeline replaces the zoom controls while history is open.
   useEffect(() => {
-    editor.state.set({
-      insets: { top: 60, bottom: 56, left: insets.left, right: insets.right },
-    });
-  }, [editor, insets]);
+    const next = {
+      top: viewing ? 104 : 60,
+      bottom: historyOpen ? 128 : 56,
+      left: insets.left,
+      right: insets.right,
+    };
+    editor.state.set({ insets: next });
+    history.view.preview.state.set({ insets: next });
+  }, [editor, history.view, insets, historyOpen, viewing]);
 
   useEffect(
     () => connectFile(editor, fileId, setFatal, (message) => comments.store.receive(message)),
@@ -165,6 +207,14 @@ function FileEditor({ fileId }: { fileId: string }) {
       },
       toggleComments: () => comments.store.setPanel(!comments.store.s.panelOpen),
       present: () => navigate(presentTarget(editor, fileId)),
+      showHistory: () => {
+        setView("design");
+        setLeftOpen(true);
+        setLeftTab("history");
+      },
+      saveVersion: () => {
+        if (editor.canEdit) setNaming({ version: null });
+      },
       showTab: (tab) => {
         setView("design");
         comments.store.setPanel(false);
@@ -191,8 +241,30 @@ function FileEditor({ fileId }: { fileId: string }) {
 
   // Keyboard: shortcuts from the action registry, plus held keys (space to pan, Alt for X-ray) and arrows.
   useEffect(() => {
+    const versionView = history.view;
+    const liveInteraction = interaction;
+    const liveCtx = ctx;
+    const both = [
+      [editor, interaction],
+      [versionView.preview, versionView.interaction],
+    ] as const;
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTyping(e.target) || e.isComposing) return;
+      // While a version is on screen, keys act on it (read-only) instead of the live file.
+      const viewingNow = versionView.s.viewing !== null;
+      const editor = versionView.active;
+      const interaction = viewingNow ? versionView.interaction : liveInteraction;
+      const ctx = viewingNow ? { ...liveCtx, editor } : liveCtx;
+      if (
+        viewingNow &&
+        e.key === "Escape" &&
+        editor.s.selection.length === 0 &&
+        !interaction.busy
+      ) {
+        versionView.leave();
+        e.preventDefault();
+        return;
+      }
       if (e.key === " " && !e.repeat) {
         interaction.setSpace(true);
         e.preventDefault();
@@ -262,28 +334,32 @@ function FileEditor({ fileId }: { fileId: string }) {
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === " ") interaction.setSpace(false);
-      if (e.key === "Alt") editor.state.set({ xray: false });
+      for (const [ed, ia] of both) {
+        if (e.key === " ") ia.setSpace(false);
+        if (e.key === "Alt") ed.state.set({ xray: false });
+      }
     };
     const onBlur = () => {
-      interaction.setSpace(false);
-      editor.state.set({ xray: false });
+      for (const [ed, ia] of both) {
+        ia.setSpace(false);
+        ed.state.set({ xray: false });
+      }
     };
     const onCopy = (e: ClipboardEvent) => {
       if (isTyping(e.target)) return;
-      const data = editor.copy();
+      const data = versionView.active.copy();
       if (!data || !e.clipboardData) return;
       e.clipboardData.setData(CLIPBOARD_MIME, data);
       e.clipboardData.setData("text/plain", data);
       e.preventDefault();
     };
     const onCut = (e: ClipboardEvent) => {
-      if (isTyping(e.target) || !editor.canEdit) return;
+      if (isTyping(e.target) || !editor.canEdit || versionView.s.viewing) return;
       onCopy(e);
       editor.deleteSelection();
     };
     const onPaste = (e: ClipboardEvent) => {
-      if (isTyping(e.target) || !editor.canEdit) return;
+      if (isTyping(e.target) || !editor.canEdit || versionView.s.viewing) return;
       // Drawpane layers first, then image files, then layers sent as plain text.
       const layers = e.clipboardData?.getData(CLIPBOARD_MIME) ?? "";
       if (layers && editor.paste(layers)) {
@@ -312,7 +388,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       document.removeEventListener("cut", onCut);
       document.removeEventListener("paste", onPaste);
     };
-  }, [editor, interaction, ctx, fileId]);
+  }, [editor, interaction, ctx, fileId, history.view]);
 
   if (meta.isError) {
     return (
@@ -326,11 +402,25 @@ function FileEditor({ fileId }: { fileId: string }) {
     );
   }
 
+  const fileName = meta.data?.file.name ?? "";
+  const canEdit = editor.canEdit;
   return (
     <EditorContext.Provider value={editor}>
-      <div className="editor">
-        <Canvas interaction={interaction} />
-        {view === "design" ? (
+      <div
+        className="editor"
+        data-history={historyOpen || undefined}
+        style={
+          {
+            "--scrubber-left": leftOpen ? "288px" : "12px",
+            "--scrubber-right": rightOpen || commentsOpen ? "288px" : "12px",
+          } as CSSProperties
+        }
+      >
+        {/* Canvas, toolbar and layers show whichever document is on screen: now, or a version. */}
+        <EditorContext.Provider value={active}>
+          <Canvas key={viewing ? "version" : "live"} interaction={activeInteraction} />
+        </EditorContext.Provider>
+        {view === "design" && !viewing ? (
           <CommentsLayer
             store={comments.store}
             interaction={interaction}
@@ -343,11 +433,13 @@ function FileEditor({ fileId }: { fileId: string }) {
           onToggleTokens={() => setView((v) => (v === "tokens" ? "design" : "tokens"))}
           fileId={fileId}
           teamId={meta.data?.file.teamId ?? null}
-          name={meta.data?.file.name ?? ""}
+          name={fileName}
           project={meta.data?.project?.name ?? ""}
         />
-        <Toolbar onSearch={() => setCommandOpen(true)} />
-        <TopRight fileId={fileId} fileName={meta.data?.file.name ?? ""} onPresent={ctx.present} />
+        <EditorContext.Provider value={active}>
+          <Toolbar onSearch={() => setCommandOpen(true)} />
+        </EditorContext.Provider>
+        <TopRight fileId={fileId} fileName={fileName} onPresent={ctx.present} />
         {view === "tokens" ? (
           <TokensWorkspace
             onShowLayer={(id) => {
@@ -360,30 +452,44 @@ function FileEditor({ fileId }: { fileId: string }) {
           />
         ) : null}
         {leftOpen && view === "design" ? (
-          <aside className="pane pane--left" aria-label="Pages, layers and assets">
-            <div className="pane__tabs">
-              <SegmentedControl
-                label="Left pane"
-                options={[
-                  { value: "layers", label: "Layers" },
-                  { value: "assets", label: "Assets" },
-                ]}
-                value={leftTab}
-                onChange={(tab) => setLeftTab(tab as "layers" | "assets")}
-              />
-            </div>
-            {leftTab === "layers" ? (
-              <>
-                <PagesList />
-                <div className="pane__head pane__head--layers">
-                  <span className="pane__label">Layers</span>
-                </div>
-                <LayersPanel />
-              </>
-            ) : (
-              <AssetsPanel />
-            )}
-          </aside>
+          <EditorContext.Provider value={active}>
+            <aside className="pane pane--left" aria-label="Pages, layers, assets and history">
+              <div className="pane__tabs">
+                <SegmentedControl
+                  label="Left pane"
+                  options={[
+                    { value: "layers", label: "Layers" },
+                    { value: "assets", label: "Assets" },
+                    { value: "history", label: "History" },
+                  ]}
+                  value={leftTab}
+                  onChange={(tab) => setLeftTab(tab as LeftTab)}
+                />
+              </div>
+              {leftTab === "layers" ? (
+                <>
+                  <PagesList />
+                  <div className="pane__head pane__head--layers">
+                    <span className="pane__label">Layers</span>
+                  </div>
+                  <LayersPanel />
+                </>
+              ) : leftTab === "assets" ? (
+                <AssetsPanel />
+              ) : (
+                <HistoryPanel
+                  versions={history.versions}
+                  error={history.error}
+                  viewing={viewing}
+                  loading={history.state.loading}
+                  revn={editor.sync.revn}
+                  canEdit={canEdit}
+                  onView={showVersion}
+                  onSave={() => setNaming({ version: null })}
+                />
+              )}
+            </aside>
+          </EditorContext.Provider>
         ) : null}
         {commentsOpen && view === "design" ? (
           <CommentsPanel
@@ -391,6 +497,38 @@ function FileEditor({ fileId }: { fileId: string }) {
             insets={insets}
             onClose={() => comments.store.setPanel(false)}
           />
+        ) : rightOpen && view === "design" && viewing ? (
+          <EditorContext.Provider value={active}>
+            <aside className="pane pane--right" aria-label="Version">
+              <div className="pane__tabs version-tabs">
+                <SegmentedControl
+                  label="Right pane"
+                  options={[
+                    { value: "version", label: "Version" },
+                    { value: "inspect", label: "Inspect" },
+                  ]}
+                  value={versionTab}
+                  onChange={(tab) => setVersionTab(tab as "version" | "inspect")}
+                />
+              </div>
+              {versionTab === "version" ? (
+                <VersionDetails
+                  version={viewing}
+                  byId={history.byId}
+                  preview={history.view.preview}
+                  canEdit={canEdit}
+                  restoring={history.restoreFile.isPending}
+                  onRestoreFile={() => setConfirmRestore(viewing)}
+                  onRestoreLayers={history.restoreLayers}
+                  onCopyLayers={history.copyLayers}
+                  onName={() => setNaming({ version: viewing })}
+                  onUnname={() => history.unname.mutate(viewing)}
+                />
+              ) : (
+                <InspectPanel />
+              )}
+            </aside>
+          </EditorContext.Provider>
         ) : rightOpen && view === "design" ? (
           <aside className="pane pane--right" aria-label="Inspector">
             <div className="pane__tabs">
@@ -417,7 +555,7 @@ function FileEditor({ fileId }: { fileId: string }) {
             )}
           </aside>
         ) : null}
-        {view === "design" ? (
+        {view === "design" && !viewing ? (
           <Lens
             onOpenInspector={() => {
               comments.store.setPanel(false);
@@ -425,12 +563,68 @@ function FileEditor({ fileId }: { fileId: string }) {
             }}
           />
         ) : null}
-        {view === "design" ? <ZoomControls /> : null}
-        <SyncStatus />
+        {view === "design" ? (
+          <VersionBanner
+            viewing={viewing}
+            loading={history.state.loading}
+            error={history.state.error}
+            byId={history.byId}
+            onBack={history.leave}
+          />
+        ) : null}
+        {historyOpen ? (
+          <Scrubber
+            versions={history.versions ?? []}
+            byId={history.byId}
+            selected={history.state.loading ?? viewing}
+            onPick={showVersion}
+          />
+        ) : view === "design" ? (
+          <>
+            <EditorContext.Provider value={active}>
+              <ZoomControls />
+            </EditorContext.Provider>
+            <SyncStatus />
+          </>
+        ) : (
+          <SyncStatus />
+        )}
         <Notice />
-        <ImageDrop fileId={fileId} />
+        {viewing ? null : <ImageDrop fileId={fileId} />}
         <UploadTray />
         {commandOpen ? <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} /> : null}
+        <NameVersionDialog
+          open={naming !== null}
+          fileId={fileId}
+          version={naming?.version ?? null}
+          onClose={() => setNaming(null)}
+          onSaved={(saved) => {
+            void history.refresh();
+            editor.notify(
+              naming?.version ? `Named the version “${saved.name}”.` : `Saved “${saved.name}”.`,
+              naming?.version
+                ? undefined
+                : {
+                    label: "Show",
+                    run: () => {
+                      setLeftOpen(true);
+                      setLeftTab("history");
+                    },
+                  },
+            );
+          }}
+        />
+        <RestoreDialog
+          version={confirmRestore}
+          busy={history.restoreFile.isPending}
+          onCancel={() => setConfirmRestore(null)}
+          onConfirm={() => {
+            if (!confirmRestore) return;
+            history.restoreFile.mutate(confirmRestore, {
+              onSettled: () => setConfirmRestore(null),
+            });
+          }}
+        />
         {fatal ? (
           <div className="editor__fatal" role="alert">
             <p>{fatal}</p>
@@ -525,6 +719,7 @@ function FileTitle({
 }
 
 type RightTab = "design" | "prototype" | "inspect";
+type LeftTab = "layers" | "assets" | "history";
 
 /** Where Play goes: the selected screen's flow if it starts one, else from that screen. */
 function presentTarget(editor: Editor, fileId: string) {
@@ -636,19 +831,47 @@ function SyncStatus() {
   );
 }
 
+/**
+ * The editor's toast: one message at a time, with at most one action. It
+ * stays while the pointer or focus is on it, and longer when it has an action.
+ */
 function Notice() {
   const notice = useEditorState((s) => s.notice);
   const [visible, setVisible] = useState<number | null>(null);
+  const [held, setHeld] = useState(false);
   useEffect(() => {
     if (!notice) return;
     setVisible(notice.id);
-    const t = setTimeout(() => setVisible(null), 4000);
-    return () => clearTimeout(t);
   }, [notice]);
+  useEffect(() => {
+    if (!notice || visible !== notice.id || held) return;
+    const t = setTimeout(() => setVisible(null), notice.action ? 8000 : 4000);
+    return () => clearTimeout(t);
+  }, [notice, visible, held]);
   if (!notice || visible !== notice.id) return null;
   return (
-    <div className="notice" role="alert">
-      {notice.text}
+    <div
+      className="notice"
+      role="alert"
+      onPointerEnter={() => setHeld(true)}
+      onPointerLeave={() => setHeld(false)}
+      onFocus={() => setHeld(true)}
+      onBlur={() => setHeld(false)}
+    >
+      <span>{notice.text}</span>
+      {notice.action ? (
+        <button
+          type="button"
+          className="notice__action"
+          onClick={() => {
+            setVisible(null);
+            setHeld(false);
+            notice.action?.run();
+          }}
+        >
+          {notice.action.label}
+        </button>
+      ) : null}
     </div>
   );
 }

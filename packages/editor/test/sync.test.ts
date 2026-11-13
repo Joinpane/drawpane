@@ -336,3 +336,51 @@ describe("compactOps", () => {
     expect(compactOps(ops)).toEqual([ops[1], ops[2], ops[3], ops[4]]);
   });
 });
+
+describe("SyncEngine room requests", () => {
+  function live() {
+    const doc = new Doc();
+    const engine = new SyncEngine(doc, { clientId: "c1", setTimer: () => 0 });
+    const sent: ClientMessage[] = [];
+    engine.connected((m) => sent.push(m));
+    engine.receive({
+      t: "welcome",
+      sessionId: "s1",
+      revn: 1,
+      role: "editor",
+      peers: [],
+      mode: "snapshot",
+      lastSeq: 0,
+    });
+    engine.receive({ t: "snapshot", nodes: [], done: true });
+    return { doc, engine, sent };
+  }
+
+  it("reloads quietly when the room asks, keeping pending edits", () => {
+    const { engine, sent } = live();
+    const desyncs: string[] = [];
+    engine.on("desync", (reason) => desyncs.push(reason));
+    engine.commit(seed);
+    sent.length = 0;
+    engine.receive({ t: "resync" });
+    expect(engine.status).toBe("syncing");
+    expect(sent).toEqual([{ t: "hello", protocol: 1, clientId: "c1", revn: null }]);
+    expect(engine.pendingCount).toBe(1);
+    expect(desyncs).toEqual([]);
+  });
+
+  it("tells listeners who restored which version", () => {
+    const { engine } = live();
+    const heard: unknown[] = [];
+    engine.on("restored", (by, version) => heard.push({ by, version }));
+    const message: ServerMessage = {
+      t: "restored",
+      by: { userId: "u1", name: "Ana" },
+      version: { id: "v1", name: "Kickoff", at: 5 },
+    };
+    engine.receive(message);
+    expect(heard).toEqual([
+      { by: { userId: "u1", name: "Ana" }, version: { id: "v1", name: "Kickoff", at: 5 } },
+    ]);
+  });
+});
