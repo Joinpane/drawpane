@@ -74,6 +74,104 @@ export function linePath(w: number, h: number): VectorPath {
   ];
 }
 
+/**
+ * The corners of a regular polygon (`count` points) or a star (`count` outer
+ * points, with inner points at `inner` × the outer radius), inscribed in the
+ * ellipse that fills a `w` × `h` box, starting at the top and going clockwise.
+ */
+export function shapeVertices(
+  w: number,
+  h: number,
+  count: number,
+  inner: number | null = null,
+): Point[] {
+  const n = Math.max(3, Math.round(count));
+  const total = inner === null ? n : n * 2;
+  const out: Point[] = [];
+  for (let i = 0; i < total; i++) {
+    const angle = -Math.PI / 2 + (i * 2 * Math.PI) / total;
+    const r = inner !== null && i % 2 === 1 ? inner : 1;
+    out.push({
+      x: w / 2 + (Math.cos(angle) * r * w) / 2,
+      y: h / 2 + (Math.sin(angle) * r * h) / 2,
+    });
+  }
+  return out;
+}
+
+/**
+ * A closed path through `vertices` with each corner rounded by `radius`: a
+ * circular arc tangent to both edges (as a cubic), shrunk where the edges
+ * are too short for it, like Figma's rounded polygons.
+ */
+export function roundedPolygonPath(vertices: readonly Point[], radius: number): VectorPath {
+  const n = vertices.length;
+  if (radius <= 0 || n < 3) {
+    return [
+      { closed: true, anchors: vertices.map((v) => ({ x: v.x, y: v.y, in: null, out: null })) },
+    ];
+  }
+  const at = (i: number) => vertices[((i % n) + n) % n] as Point;
+  const anchors: Anchor[] = [];
+  for (let i = 0; i < n; i++) {
+    const v = at(i);
+    const prev = at(i - 1);
+    const next = at(i + 1);
+    const toPrev = { x: prev.x - v.x, y: prev.y - v.y };
+    const toNext = { x: next.x - v.x, y: next.y - v.y };
+    const lp = Math.hypot(toPrev.x, toPrev.y);
+    const ln = Math.hypot(toNext.x, toNext.y);
+    if (lp < 1e-9 || ln < 1e-9) {
+      anchors.push({ x: v.x, y: v.y, in: null, out: null });
+      continue;
+    }
+    const up = { x: toPrev.x / lp, y: toPrev.y / lp };
+    const un = { x: toNext.x / ln, y: toNext.y / ln };
+    // The corner's interior angle, and how far along each edge the arc starts.
+    const cos = Math.max(-1, Math.min(1, up.x * un.x + up.y * un.y));
+    const angle = Math.acos(cos);
+    if (angle < 1e-6 || Math.PI - angle < 1e-6) {
+      anchors.push({ x: v.x, y: v.y, in: null, out: null });
+      continue;
+    }
+    const tan = Math.tan(angle / 2);
+    // Each edge gives at most half its length to each of its two corners.
+    const reach = Math.min(radius / tan, lp / 2, ln / 2);
+    const r = reach * tan;
+    const a = { x: v.x + up.x * reach, y: v.y + up.y * reach };
+    const b = { x: v.x + un.x * reach, y: v.y + un.y * reach };
+    // A circular arc turning through (π - angle): handles of 4/3·tan(turn/4)·r.
+    const handle = (4 / 3) * Math.tan((Math.PI - angle) / 4) * r;
+    anchors.push({
+      x: a.x,
+      y: a.y,
+      in: null,
+      out: { x: a.x - up.x * handle, y: a.y - up.y * handle },
+    });
+    anchors.push({
+      x: b.x,
+      y: b.y,
+      in: { x: b.x - un.x * handle, y: b.y - un.y * handle },
+      out: null,
+    });
+  }
+  return [{ closed: true, anchors: mergeCoincident(anchors, true) }];
+}
+
+export function polygonPath(w: number, h: number, count: number, radius = 0): VectorPath {
+  return roundedPolygonPath(shapeVertices(w, h, count), radius);
+}
+
+export function starPath(
+  w: number,
+  h: number,
+  count: number,
+  inner: number,
+  radius = 0,
+): VectorPath {
+  return roundedPolygonPath(shapeVertices(w, h, count, inner), radius);
+}
+
 /** Joins consecutive anchors at the same spot (a pill's straight edge of length 0). */
 function mergeCoincident(anchors: Anchor[], closed: boolean): Anchor[] {
   const out: Anchor[] = [];
@@ -96,7 +194,7 @@ function mergeCoincident(anchors: Anchor[], closed: boolean): Anchor[] {
 
 /** Node types that convert to an equivalent path. */
 export function isConvertible(node: NodeRecord, hasChildren: boolean): boolean {
-  if (node.type === "rect" || node.type === "ellipse" || node.type === "line") return true;
+  if (["rect", "ellipse", "polygon", "star", "line"].includes(node.type)) return true;
   if (node.type === "path") return true;
   return node.type === "frame" && !hasChildren;
 }
@@ -114,6 +212,21 @@ export function nodePath(node: NodeRecord): VectorPath | null {
     }
     case "ellipse":
       return ellipsePath(w, h);
+    case "polygon":
+      return polygonPath(
+        w,
+        h,
+        getProp(node.props, "pointCount"),
+        getProp(node.props, "cornerRadius"),
+      );
+    case "star":
+      return starPath(
+        w,
+        h,
+        getProp(node.props, "pointCount"),
+        getProp(node.props, "innerRadius"),
+        getProp(node.props, "cornerRadius"),
+      );
     case "line":
       return linePath(w, h);
     case "path":

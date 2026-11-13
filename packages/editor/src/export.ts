@@ -6,6 +6,7 @@
 import { getProp, type NodeRecord } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { type Rect, unionRects } from "./geometry";
+import { markerLength } from "./markers";
 import type { CanvasRenderer } from "./render";
 import type { Scene } from "./scene";
 
@@ -55,6 +56,15 @@ export function paintOutset(node: NodeRecord): {
       const align = centred ? "center" : getProp(node.props, "strokeAlign");
       const reach = align === "outside" ? weight : align === "center" ? weight / 2 : 0;
       grow(reach, reach, reach, reach);
+      // End markers stick out past the ends of a line or path.
+      if (
+        centred &&
+        (getProp(node.props, "markerStart") !== "none" ||
+          getProp(node.props, "markerEnd") !== "none")
+      ) {
+        const m = markerLength(weight) + weight;
+        grow(m, m, m, m);
+      }
     }
   }
   for (const e of getProp(node.props, "effects")) {
