@@ -17,6 +17,7 @@ import type { Editor } from "./editor";
 import {
   apply,
   boxOf,
+  invert,
   localMatrix,
   type Matrix,
   normalizeRect,
@@ -27,6 +28,7 @@ import {
 } from "./geometry";
 import { gridSnapLines, guideAt, guideOwnerAt, placedGuides } from "./grids";
 import { hitTest, marqueeHits, selectionTarget } from "./hit";
+import { gridCellAt, gridGeometry } from "./layout";
 import { type SnapLine, snapRect } from "./snap";
 import { ConnectTool } from "./tools/connect";
 import { CropTool } from "./tools/crop";
@@ -814,6 +816,7 @@ export class Interaction {
     )
       return [];
     if (getProp(node.props, "positioning") === "absolute") return [];
+    if (getProp(parent.props, "layoutMode") === "grid") return this.#gridMove(node, parent, page);
     const row = getProp(parent.props, "layoutMode") === "row";
     const siblings = editor.doc.childIds(parent.id).filter((id) => id !== node.id);
     let index = siblings.length;
@@ -835,6 +838,34 @@ export class Interaction {
       after ? (editor.doc.get(after)?.key ?? null) : null,
     );
     return [{ op: "move", id: node.id, parent: parent.id, key }];
+  }
+
+  /** For a grid item: move it to the cell under the pointer, keeping its span. */
+  #gridMove(node: NodeRecord, parent: NodeRecord, page: Point): Op[] {
+    const editor = this.#editor;
+    const grid = gridGeometry(editor.doc, parent.id);
+    const cell = grid?.cells.get(node.id);
+    if (!grid || !cell) return [];
+    // The item starts at the cell under the pointer (in the frame's own
+    // space), shifted left if its span would run past the last column.
+    const local = apply(invert(editor.scene.worldMatrix(parent.id)), page);
+    const at = gridCellAt(grid, local.x, local.y);
+    const column = Math.max(0, Math.min(at.column, grid.columns.length - cell.columnSpan));
+    const row = Math.max(0, at.row);
+    if (column === cell.column && row === cell.row) return [];
+    return [
+      {
+        op: "set",
+        id: node.id,
+        prop: "gridArea",
+        value: {
+          column: column + 1,
+          row: row + 1,
+          columnSpan: cell.columnSpan,
+          rowSpan: cell.rowSpan,
+        },
+      },
+    ];
   }
 
   /** On drop, move layers into the frame under the pointer, keeping them in place on screen. */

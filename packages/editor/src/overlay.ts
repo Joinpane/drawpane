@@ -4,7 +4,7 @@
  * labels, Layout X-ray and collaborators. It repaints on every pointer move,
  * so it stays cheap: no shadows, no text layout beyond labels.
  */
-import { getProp } from "@drawpane/model";
+import { getProp, type NodeRecord } from "@drawpane/model";
 import { imageRect } from "./crop";
 import { croppingTarget } from "./crop-session";
 import type { Editor } from "./editor";
@@ -12,6 +12,7 @@ import { apply, type Point, type Rect } from "./geometry";
 import { gridLines, gridTracks, placedGuides, visibleGrids } from "./grids";
 import type { ImageCache } from "./images";
 import type { Interaction } from "./interaction";
+import { type GridGeometry, gridGeometry, trackLabel } from "./layout";
 import { drawPrototypeOverlay, flowStartScreens } from "./prototype/overlay";
 import { drawVectorOverlay } from "./tools/overlay";
 
@@ -131,6 +132,28 @@ export function drawOverlay(
         ? theme.componentInk
         : theme.inkMuted;
     ctx.fillText(getProp(node.props, "name") || "Frame", x, p.y - 4);
+  }
+
+  // Grid layout: the cells of a selected grid, or of the grid a selected or
+  // hovered layer sits in, with track sizes along the edges when selected.
+  if (!prototyping && !focusMode) {
+    const grids = new Map<string, Set<string>>();
+    const consider = (id: string, headers: boolean) => {
+      const node = doc.get(id);
+      if (!node) return;
+      const frameId = isGridFrame(node)
+        ? id
+        : isGridFrame(doc.get(node.parent))
+          ? node.parent
+          : null;
+      if (!frameId) return;
+      const picked = grids.get(frameId) ?? new Set<string>();
+      if (headers) picked.add(id);
+      grids.set(frameId, picked);
+    };
+    for (const id of selection) consider(id, true);
+    if (hover && !gesture) consider(hover, false);
+    for (const [frameId, picked] of grids) drawGridLayout(ctx, editor, frameId, picked, theme);
   }
 
   // Layout X-ray: padding and gaps of the selected or hovered auto-layout frame.
@@ -470,25 +493,186 @@ function drawXray(
   fillLocal(0, h - bottom, w, bottom, padding);
   fillLocal(0, top, left, h - top - bottom, padding);
   fillLocal(w - right, top, right, h - top - bottom, padding);
-  // Gaps between consecutive children along the main axis.
+  const gapColor = withAlpha(theme.xrayGap, 0.35);
+  if (getProp(p, "layoutMode") === "grid") {
+    // Gaps between tracks, across the whole content box.
+    const grid = solvedGrid(editor, frameId);
+    if (!grid) return;
+    const between = (tracks: readonly { start: number; size: number }[]) =>
+      tracks.slice(1).map((t, i) => {
+        const prev = tracks[i] as { start: number; size: number };
+        return { at: prev.start + prev.size, size: t.start - prev.start - prev.size };
+      });
+    for (const g of between(grid.columns)) fillLocal(g.at, top, g.size, h - top - bottom, gapColor);
+    for (const g of between(grid.rows)) fillLocal(left, g.at, w - left - right, g.size, gapColor);
+    return;
+  }
+  // Gaps between consecutive children along the main axis, across the band
+  // the two share (wrapped lines each have their own).
   const row = getProp(p, "layoutMode") === "row";
   const children = doc
     .childIds(frameId)
     .map((id) => doc.get(id))
     .filter((c) => c && c.props.visible !== false && getProp(c.props, "positioning") === "auto");
-  const gapColor = withAlpha(theme.xrayGap, 0.35);
   for (let i = 0; i < children.length - 1; i++) {
-    const a = children[i];
-    const b = children[i + 1];
+    const a = children[i]?.props;
+    const b = children[i + 1]?.props;
     if (!a || !b) continue;
+    const [ax, ay, aw, ah] = [
+      getProp(a, "x"),
+      getProp(a, "y"),
+      getProp(a, "width"),
+      getProp(a, "height"),
+    ];
+    const [bx, by, bw, bh] = [
+      getProp(b, "x"),
+      getProp(b, "y"),
+      getProp(b, "width"),
+      getProp(b, "height"),
+    ];
+    const wrapped = getProp(p, "layoutWrap");
     if (row) {
-      const x = getProp(a.props, "x") + getProp(a.props, "width");
-      fillLocal(x, top, getProp(b.props, "x") - x, h - top - bottom, gapColor);
+      const y0 = wrapped ? Math.min(ay, by) : top;
+      const y1 = wrapped ? Math.max(ay + ah, by + bh) : h - bottom;
+      fillLocal(ax + aw, y0, bx - ax - aw, y1 - y0, gapColor);
     } else {
-      const y = getProp(a.props, "y") + getProp(a.props, "height");
-      fillLocal(left, y, w - left - right, getProp(b.props, "y") - y, gapColor);
+      const x0 = wrapped ? Math.min(ax, bx) : left;
+      const x1 = wrapped ? Math.max(ax + aw, bx + bw) : w - right;
+      fillLocal(x0, ay + ah, x1 - x0, by - ay - ah, gapColor);
     }
   }
+}
+
+/** Solved grids, per document and version: the overlay repaints on every pointer move. */
+const solvedGrids = new WeakMap<
+  object,
+  { version: number; grids: Map<string, GridGeometry | null> }
+>();
+
+function solvedGrid(editor: Editor, frameId: string): GridGeometry | null {
+  let entry = solvedGrids.get(editor.doc);
+  if (!entry || entry.version !== editor.doc.version) {
+    entry = { version: editor.doc.version, grids: new Map() };
+    solvedGrids.set(editor.doc, entry);
+  }
+  if (!entry.grids.has(frameId)) entry.grids.set(frameId, gridGeometry(editor.doc, frameId));
+  return entry.grids.get(frameId) ?? null;
+}
+
+function isGridFrame(node: NodeRecord | undefined): boolean {
+  return node?.type === "frame" && getProp(node.props, "layoutMode") === "grid";
+}
+
+/**
+ * A grid frame's cells, dashed, and (for the picked layers) the tracks they
+ * occupy, highlighted. With the frame or one of its items selected, track
+ * sizes sit along the top and left edges, like column and row headers.
+ */
+function drawGridLayout(
+  ctx: CanvasRenderingContext2D,
+  editor: Editor,
+  frameId: string,
+  picked: ReadonlySet<string>,
+  theme: OverlayTheme,
+): void {
+  const grid = solvedGrid(editor, frameId);
+  if (!grid) return;
+  const m = editor.scene.worldMatrix(frameId);
+  const camera = editor.s.camera;
+  const screen = (x: number, y: number) => camera.toScreen(apply(m, { x, y }));
+  const columnEnd = grid.columns.at(-1);
+  const rowEnd = grid.rows.at(-1);
+  if (!columnEnd || !rowEnd) return;
+
+  // Every cell, dashed and hairline: the structure without the noise.
+  ctx.save();
+  ctx.setLineDash([3, 3]);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = withAlpha(theme.signal, 0.35);
+  ctx.beginPath();
+  for (const c of grid.columns) {
+    for (const r of grid.rows) {
+      const pts = [
+        screen(c.start, r.start),
+        screen(c.start + c.size, r.start),
+        screen(c.start + c.size, r.start + r.size),
+        screen(c.start, r.start + r.size),
+      ];
+      ctx.moveTo((pts[0] as Point).x, (pts[0] as Point).y);
+      for (const pt of pts.slice(1)) ctx.lineTo(pt.x, pt.y);
+      ctx.closePath();
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  const showHeaders = picked.size > 0;
+  // Headers need an upright frame to line up with screen-space chips.
+  if (!showHeaders || Math.abs(m[1]) > 1e-6 || Math.abs(m[2]) > 1e-6) return;
+  const busyColumns = new Set<number>();
+  const busyRows = new Set<number>();
+  for (const id of picked) {
+    const cell = grid.cells.get(id);
+    if (!cell) continue;
+    for (let i = 0; i < cell.columnSpan; i++) busyColumns.add(cell.column + i);
+    for (let i = 0; i < cell.rowSpan; i++) busyRows.add(cell.row + i);
+  }
+  const frame = editor.doc.get(frameId);
+  // Top-level frames carry their name above them: headers sit above that.
+  const titled = frame && editor.doc.get(frame.parent)?.type === "page";
+  const origin = screen(0, 0);
+  const SIZE = 16;
+  const GAP = 4;
+  const headerY = origin.y - GAP - SIZE - (titled ? 18 : 0);
+  const headerX = origin.x - GAP - SIZE;
+  ctx.save();
+  ctx.font = `500 10px ${theme.fontMono ?? theme.fontUi}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const chip = (
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    label: string,
+    busy: boolean,
+    vertical: boolean,
+  ) => {
+    // Skip tracks too thin to label.
+    if ((vertical ? h : w) < 14) return;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 4);
+    ctx.fillStyle = busy ? withAlpha(theme.signal, 0.16) : theme.surfaceRaised;
+    ctx.fill();
+    if (theme.border && !busy) {
+      ctx.strokeStyle = theme.border;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    const fits = ctx.measureText(label).width + 8 <= (vertical ? h : w);
+    if (!fits) return;
+    ctx.fillStyle = busy ? theme.signal : (theme.ink ?? theme.inkMuted);
+    if (vertical) {
+      ctx.save();
+      ctx.translate(x + w / 2, y + h / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText(label, 0, 0.5);
+      ctx.restore();
+    } else ctx.fillText(label, x + w / 2, y + h / 2 + 0.5);
+  };
+  grid.columns.forEach((c, i) => {
+    const a = screen(c.start, 0);
+    const b = screen(c.start + c.size, 0);
+    const track = grid.columnTracks[i];
+    if (track) chip(a.x, headerY, b.x - a.x, SIZE, trackLabel(track), busyColumns.has(i), false);
+  });
+  grid.rows.forEach((r, i) => {
+    const a = screen(0, r.start);
+    const b = screen(0, r.start + r.size);
+    const track = grid.rowTracks[i];
+    if (track) chip(headerX, a.y, SIZE, b.y - a.y, trackLabel(track), busyRows.has(i), true);
+  });
+  ctx.restore();
 }
 
 function drawCursor(
