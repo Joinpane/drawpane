@@ -11,6 +11,10 @@ export type LayerKind =
   | "group"
   | "rect"
   | "ellipse"
+  | "polygon"
+  | "star"
+  | "line"
+  | "arrow"
   | "text"
   | "path"
   | "image"
@@ -23,6 +27,10 @@ const KIND_ICONS: Record<LayerKind, IconName> = {
   group: "group",
   rect: "rectangle",
   ellipse: "ellipse",
+  polygon: "polygon",
+  star: "star",
+  line: "minus",
+  arrow: "arrow",
   text: "text",
   path: "pen",
   image: "image",

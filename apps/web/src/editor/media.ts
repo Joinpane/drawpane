@@ -295,6 +295,19 @@ export async function uploadImageForFill(
 }
 
 /** Opens the system file chooser for one image. */
+/** Asks for one or more image files; resolves with none if the person cancels. */
+export function chooseImageFiles(): Promise<File[]> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.accept = "image/png,image/jpeg,image/webp,image/gif";
+    input.addEventListener("change", () => resolve([...(input.files ?? [])]), { once: true });
+    input.addEventListener("cancel", () => resolve([]), { once: true });
+    input.click();
+  });
+}
+
 export function chooseImageFile(): Promise<File | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");

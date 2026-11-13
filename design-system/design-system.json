@@ -123,7 +123,10 @@
     "dash.svg",
     "portrait.svg",
     "landscape.svg",
-    "italic.svg"
+    "italic.svg",
+    "polygon.svg",
+    "star.svg",
+    "arrow.svg"
    ],
    "files": {
     "pointer.svg": {

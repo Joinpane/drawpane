@@ -3,8 +3,8 @@
  * swatch that opens the paint picker, its hex or kind, opacity, visibility
  * and remove. Strokes add weight, position, dashes, caps and joins.
  */
-import type { Editor } from "@drawpane/editor";
-import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import { type Editor, isClosedPath } from "@drawpane/editor";
+import { getProp, type NodeRecord, type Paint, type StrokeMarker } from "@drawpane/model";
 import {
   Icon,
   IconButton,
@@ -102,7 +102,11 @@ export function PaintSection({
                 <ImageChip editor={editor} paint={paint} />
               ) : (
                 <span className="paint-row__kind">
-                  {paint.type === "linear" ? `Linear ${gradientAngle(paint)}°` : "Radial"}
+                  {paint.type === "linear"
+                    ? `Linear ${gradientAngle(paint)}°`
+                    : paint.type === "angular"
+                      ? `Angular ${gradientAngle(paint)}°`
+                      : "Radial"}
                 </span>
               )}
               <NumberField
@@ -245,6 +249,10 @@ function StrokeOptions({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
   const ids = nodes.map((n) => n.id);
   const dashes = common(nodes, "strokeDashes");
   const capped = nodes.filter((n) => n.type === "line" || n.type === "path");
+  // Open strokes (lines, unclosed paths) run along their centre and can have end markers.
+  const open = capped.filter(
+    (n) => n.type === "line" || !isClosedPath(getProp(n.props, "pathData")),
+  );
   const joined = nodes.filter((n) => n.type !== "line" && n.type !== "ellipse");
   const cap = common(capped, "strokeCap");
   const join = common(joined, "strokeJoin");
@@ -263,12 +271,17 @@ function StrokeOptions({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
           ariaLabel="Stroke weight"
           min={0}
         />
-        <Select
-          label="Stroke position"
-          value={common(nodes, "strokeAlign")}
-          options={ALIGN_OPTIONS}
-          onChange={(v) => editor.setProp(ids, "strokeAlign", v, "Stroke position")}
-        />
+        {/* Lines and open paths always stroke along their centre. */}
+        {open.length === nodes.length ? (
+          <span />
+        ) : (
+          <Select
+            label="Stroke position"
+            value={common(nodes, "strokeAlign")}
+            options={ALIGN_OPTIONS}
+            onChange={(v) => editor.setProp(ids, "strokeAlign", v, "Stroke position")}
+          />
+        )}
       </PropertyRow>
       <PropertyRow columns="label">
         <span className="inspector__label">Dash</span>
@@ -282,7 +295,7 @@ function StrokeOptions({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
             onChange={(d) => setDashes(d, gap || d)}
           />
           <NumberField
-            label="Gap"
+            icon="gap-horizontal"
             ariaLabel="Gap between dashes"
             min={0}
             placeholder={dashes === null ? "Mixed" : "0"}
@@ -306,6 +319,7 @@ function StrokeOptions({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
           />
         </PropertyRow>
       ) : null}
+      {open.length === nodes.length ? <StrokeEnds editor={editor} nodes={open} /> : null}
       {joined.length === nodes.length ? (
         <PropertyRow columns="label">
           <span className="inspector__label">Joins</span>
@@ -322,5 +336,57 @@ function StrokeOptions({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
         </PropertyRow>
       ) : null}
     </>
+  );
+}
+
+const MARKERS: ReadonlyArray<{ value: StrokeMarker; label: string }> = [
+  { value: "none", label: "None" },
+  { value: "arrow", label: "Arrow" },
+  { value: "triangle", label: "Triangle" },
+  { value: "circle", label: "Circle" },
+  { value: "diamond", label: "Diamond" },
+  { value: "bar", label: "Bar" },
+];
+
+/** Start and end markers on lines and open paths, and a button that swaps them. */
+function StrokeEnds({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
+  const ids = nodes.map((n) => n.id);
+  const start = common(nodes, "markerStart");
+  const end = common(nodes, "markerEnd");
+  const set = (prop: "markerStart" | "markerEnd", value: StrokeMarker, label: string) =>
+    editor.setProp(ids, prop, value === "none" ? null : value, label);
+  return (
+    <div className="stroke-ends-block">
+      <span className="inspector__label">Ends</span>
+      <span className="stroke-ends">
+        <Select
+          label="Start of the stroke"
+          value={start}
+          options={MARKERS}
+          onChange={(v) => set("markerStart", v, "Stroke start")}
+        />
+        <IconButton
+          icon="flip-horizontal"
+          label="Swap ends"
+          disabled={start === end}
+          onClick={() => {
+            editor.beginGesture("Swap stroke ends");
+            for (const n of nodes) {
+              const s0 = getProp(n.props, "markerStart");
+              const e0 = getProp(n.props, "markerEnd");
+              editor.setProp([n.id], "markerStart", e0 === "none" ? null : e0);
+              editor.setProp([n.id], "markerEnd", s0 === "none" ? null : s0);
+            }
+            editor.endGesture();
+          }}
+        />
+        <Select
+          label="End of the stroke"
+          value={end}
+          options={MARKERS}
+          onChange={(v) => set("markerEnd", v, "Stroke end")}
+        />
+      </span>
+    </div>
   );
 }

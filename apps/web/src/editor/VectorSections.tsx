@@ -42,6 +42,8 @@ export function PathSection({ editor, nodes }: { editor: Editor; nodes: readonly
     (n) =>
       n.type === "rect" ||
       n.type === "ellipse" ||
+      n.type === "polygon" ||
+      n.type === "star" ||
       n.type === "line" ||
       (n.type === "frame" && editor.doc.childIds(n.id).length === 0),
   );
