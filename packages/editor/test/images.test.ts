@@ -171,6 +171,20 @@ describe("ImageCache", () => {
     now = 3000;
     cache.get("a");
     expect(calls).toHaveLength(3);
+    // After eight failures it stops asking.
+    for (let i = 2; i < 8; i++) {
+      calls[i]?.reject(new Error("404"));
+      await flush();
+      now += 120_000;
+      cache.get("a");
+    }
+    expect(calls).toHaveLength(8);
+    calls[7]?.reject(new Error("404"));
+    await flush();
+    now += 3_600_000;
+    cache.get("a");
+    expect(calls).toHaveLength(8);
+    expect(cache.status("a")).toBe("error");
   });
 
   it("evicts the least recently drawn images past its budget, never the current frame's", async () => {

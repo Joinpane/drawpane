@@ -98,7 +98,7 @@ function useImagePreview(
   return loaded;
 }
 
-/** The left slot of an image paint's row: a tiny preview and the scale mode. */
+/** The left slot of an image paint's row: a tiny preview (the scale mode is right below). */
 export function ImageChip({ editor, paint }: { editor: Editor; paint: ImagePaint }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useImagePreview(editor, canvas, paint.ref, "fill");
@@ -107,7 +107,12 @@ export function ImageChip({ editor, paint }: { editor: Editor; paint: ImagePaint
       <span className="image-chip__thumb" aria-hidden="true">
         <canvas ref={canvas} />
       </span>
-      <span className="image-chip__label">Image · {MODE_LABEL[paint.scaleMode]}</span>
+      <span
+        className="image-chip__label"
+        title={`Image, ${MODE_LABEL[paint.scaleMode].toLowerCase()}`}
+      >
+        Image
+      </span>
     </span>
   );
 }
