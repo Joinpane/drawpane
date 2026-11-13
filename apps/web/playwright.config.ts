@@ -32,9 +32,22 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
+      testIgnore: /tour\//,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1440, height: 900 },
+        ...(process.env.CHROMIUM_PATH
+          ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
+          : {}),
+      },
+    },
+    {
+      name: "tour",
+      testMatch: /tour\/.*\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1440, height: 900 },
+        deviceScaleFactor: 1,
         ...(process.env.CHROMIUM_PATH
           ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
           : {}),
