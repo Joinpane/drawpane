@@ -50,6 +50,17 @@
 .dp-layer.is-hidden .dp-layer__icon {
   color: var(--ink-muted);
 }
+/* Context rows (the ancestors of search results) step back. */
+.dp-layer.is-context .dp-layer__name,
+.dp-layer.is-context .dp-layer__icon {
+  color: var(--ink-muted);
+}
+.dp-layer__match {
+  border-radius: 2px;
+  background: var(--signal-soft);
+  color: var(--signal-ink);
+  font-weight: 600;
+}
 .dp-layer__rename {
   flex: 1;
   min-width: 0;
@@ -97,6 +108,14 @@
 }
 .dp-layer__toggle:hover {
   color: var(--ink);
+}
+/* Locking is offered on hover; a locked layer's lock stays pinned. */
+.dp-layer__actions.is-pinned .dp-layer__toggle.is-offer {
+  visibility: hidden;
+}
+.dp-layer:hover .dp-layer__actions.is-pinned .dp-layer__toggle.is-offer,
+.dp-layer:focus-within .dp-layer__actions.is-pinned .dp-layer__toggle.is-offer {
+  visibility: visible;
 }
 .dp-layer__actions > .dp-icon {
   margin: 2px;
