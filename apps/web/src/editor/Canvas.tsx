@@ -53,7 +53,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const octx = overlayCanvas.getContext("2d");
     if (!cctx || !octx) return;
 
+    const canvasToken = () =>
+      getComputedStyle(document.documentElement).getPropertyValue("--canvas").trim() || "#ebeae6";
     let theme = readTheme();
+    renderer.canvasColor = canvasToken();
     let dpr = window.devicePixelRatio || 1;
     let contentDirty = true;
     let overlayDirty = true;
@@ -124,6 +127,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
 
     const themeObserver = new MutationObserver(() => {
       theme = readTheme();
+      renderer.canvasColor = canvasToken();
       contentDirty = overlayDirty = true;
       schedule();
     });

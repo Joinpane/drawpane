@@ -26,12 +26,14 @@ export interface TextLayout {
   readonly letterSpacing: number;
 }
 
-const FALLBACKS = '"Instrument Sans", system-ui, sans-serif';
+const FALLBACKS = '"Instrument Sans Variable", system-ui, sans-serif';
 
 export function fontString(props: Props): string {
   const family = getProp(props, "fontFamily");
   const style = getProp(props, "fontStyle") === "italic" ? "italic " : "";
-  return `${style}${getProp(props, "fontWeight")} ${getProp(props, "fontSize")}px "${family.replace(/"/g, "")}", ${FALLBACKS}`;
+  const name = family.replace(/"/g, "");
+  // Self-hosted variable fonts register as "<Family> Variable"; list both so either resolves.
+  return `${style}${getProp(props, "fontWeight")} ${getProp(props, "fontSize")}px "${name}", "${name} Variable", ${FALLBACKS}`;
 }
 
 export function lineHeightPx(props: Props): number {
