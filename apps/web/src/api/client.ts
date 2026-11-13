@@ -1,4 +1,5 @@
 /** Typed client for the Worker's REST API. Errors carry the server's sentence. */
+import type { NodeRecord, VersionInfo } from "@drawpane/model";
 
 export type Role = "owner" | "editor" | "viewer";
 
@@ -121,4 +122,40 @@ export const api = {
   /** What a prototype link opens. Works signed out. */
   resolveShare: (token: string) =>
     request<{ file: { id: string; name: string } }>("GET", `/share/${encodeURIComponent(token)}`),
+
+  /** Saved versions, newest first. */
+  versions: (fileId: string) =>
+    request<{ versions: VersionInfo[] }>("GET", `/files/${fileId}/versions`),
+  /** Saves the file as it is now under a name (or names the version that already holds it). */
+  saveVersion: (fileId: string, body: { name: string; description?: string }) =>
+    request<{ version: VersionInfo }>("POST", `/files/${fileId}/versions`, body),
+  /** Renames a version, or un-names it with `name: null`. */
+  updateVersion: (
+    fileId: string,
+    versionId: string,
+    body: { name?: string | null; description?: string | null },
+  ) => request<{ version: VersionInfo }>("PATCH", `/files/${fileId}/versions/${versionId}`, body),
+  /** The file's nodes as they were in a version. */
+  versionNodes: async (fileId: string, versionId: string) =>
+    (
+      await request<{ revn: number; nodes: NodeRecord[] }>(
+        "GET",
+        `/files/${fileId}/versions/${versionId}/snapshot`,
+      )
+    ).nodes,
+  /** Restores the whole file. `sessionId` is this tab's, so the room doesn't also notify it. */
+  restoreVersion: (fileId: string, versionId: string, sessionId: string | null) =>
+    request<RestoreResult>("POST", `/files/${fileId}/versions/${versionId}/restore`, {
+      sessionId,
+    }),
 };
+
+export interface RestoreResult {
+  readonly revn: number;
+  /** The version saved just before restoring: restore it to undo. */
+  readonly restorePoint: string;
+  /** Operations applied; 0 when the file already matched. */
+  readonly changed: number;
+  /** Values the current schema refused and the restore left out. */
+  readonly dropped: number;
+}

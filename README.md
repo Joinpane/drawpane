@@ -17,6 +17,7 @@ The open design tool you own. Drawpane is a real-time design and prototyping too
 - The command bar (`⌘K`) that runs actions, jumps to layers, and sets values with a short syntax: `w 320`, `gap 16`, `fill #ff5a1f`, `p 8 16`
 - The Selection Lens, Layout X-ray (hold `Alt`), focus mode, and collaborators' cursors and selections
 - Undo and redo for your own changes, and edits that survive a dropped connection
+- Version history: automatic and named versions, a timeline to scrub through them, and restoring a single layer or the whole file, which anyone can undo
 
 See the [PRD](docs/PRD.md) for where it's going.
 
