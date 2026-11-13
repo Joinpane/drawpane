@@ -21,6 +21,7 @@ import { loadBooleanEngine } from "./boolean-engine";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
 import { ContextMenus } from "./ContextMenus";
+import { CropBar } from "./CropBar";
 import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
 import { connectFile } from "./connection";
 import { ExportPanel } from "./ExportSection";
@@ -592,6 +593,7 @@ function FileEditor({ fileId }: { fileId: string }) {
             )}
           </aside>
         ) : null}
+        {view === "design" && !viewing ? <CropBar /> : null}
         {view === "design" && !viewing ? (
           <Lens
             onOpenInspector={() => {

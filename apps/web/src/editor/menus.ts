@@ -150,6 +150,7 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
       a("component.detach"),
     ],
     [
+      a("layer.crop"),
       a("vector.edit"),
       a("vector.flatten"),
       submenu("Boolean", [

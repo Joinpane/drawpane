@@ -10,7 +10,17 @@
  */
 import type { Point, Rect } from "./geometry";
 
-export type ScaleMode = "fill" | "fit" | "tile" | "stretch";
+export type ScaleMode = "fill" | "fit" | "tile" | "stretch" | "crop";
+
+/** The part of an image a cropped fill shows, in the image's unit square. */
+export interface CropRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export const FULL_CROP: CropRect = { x: 0, y: 0, width: 1, height: 1 };
 
 export interface Size {
   readonly width: number;
@@ -30,10 +40,23 @@ export interface ImagePlacement extends Rect {
  * - fit: fit inside the box, keeping the aspect ratio, centred
  * - stretch: match the box exactly, distorting if needed
  * - tile: repeat at natural size from the top-left corner
+ * - crop: the part of the image in `crop`, stretched to the box (the crop tool
+ *   keeps its proportions)
  */
-export function imagePlacement(mode: ScaleMode, box: Size, image: Size): ImagePlacement {
+export function imagePlacement(
+  mode: ScaleMode,
+  box: Size,
+  image: Size,
+  crop: CropRect = FULL_CROP,
+): ImagePlacement {
   const iw = Math.max(1e-9, image.width);
   const ih = Math.max(1e-9, image.height);
+  if (mode === "crop") {
+    // The crop fills the box; the rest of the image lies outside it, clipped.
+    const width = box.width / Math.max(1e-9, crop.width);
+    const height = box.height / Math.max(1e-9, crop.height);
+    return { x: -crop.x * width, y: -crop.y * height, width, height, tile: false };
+  }
   if (mode === "stretch") return { x: 0, y: 0, width: box.width, height: box.height, tile: false };
   if (mode === "tile") return { x: 0, y: 0, width: iw, height: ih, tile: true };
   const sx = box.width / iw;

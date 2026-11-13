@@ -12,6 +12,7 @@ import {
   type Props,
 } from "@drawpane/model";
 import { isInsideInstance } from "./components";
+import { croppableImage } from "./crop-session";
 import type { Editor } from "./editor";
 import {
   apply,
@@ -28,6 +29,7 @@ import { gridSnapLines, guideAt, guideOwnerAt, placedGuides } from "./grids";
 import { hitTest, marqueeHits, selectionTarget } from "./hit";
 import { type SnapLine, snapRect } from "./snap";
 import { ConnectTool } from "./tools/connect";
+import { CropTool } from "./tools/crop";
 import { PenTool } from "./tools/pen";
 import type { KeyInput, ToolHandler } from "./tools/types";
 import { VectorEditTool } from "./tools/vector-edit";
@@ -109,23 +111,32 @@ export class Interaction {
   readonly pen: PenTool;
   readonly vectorEdit: VectorEditTool;
   readonly connect: ConnectTool;
+  readonly crop: CropTool;
 
   constructor(editor: Editor) {
     this.#editor = editor;
     this.pen = new PenTool(editor);
     this.vectorEdit = new VectorEditTool(editor);
     this.connect = new ConnectTool(editor);
+    this.crop = new CropTool(editor);
   }
 
   get busy(): boolean {
-    return this.#mode.kind !== "idle" || this.pen.busy || this.vectorEdit.busy || this.connect.busy;
+    return (
+      this.#mode.kind !== "idle" ||
+      this.pen.busy ||
+      this.vectorEdit.busy ||
+      this.connect.busy ||
+      this.crop.busy
+    );
   }
 
   /** The tool handler that takes events now, if any. Built-in gestures run otherwise. */
   #delegate(): ToolHandler | null {
     if (this.#mode.kind !== "idle" || this.#spaceHeld) return null;
-    const { tool, vectorEdit, prototyping } = this.#editor.s;
+    const { tool, vectorEdit, prototyping, cropping } = this.#editor.s;
     if (tool === "pen") return this.pen;
+    if (tool === "select" && cropping) return this.crop;
     if (tool === "select" && vectorEdit) return this.vectorEdit;
     if (tool === "select" && prototyping) return this.connect;
     return null;
@@ -144,6 +155,9 @@ export class Interaction {
     if (input.key === "Enter" && tool === "select" && !vectorEdit && selection.length === 1) {
       const node = editor.doc.get(selection[0] as string);
       if (node?.type === "path") return editor.enterVectorEdit(node.id);
+      // ↵ on an image layer crops it (a frame with children selects them instead).
+      if (node && croppableImage(node) && editor.doc.childIds(node.id).length === 0)
+        return editor.enterCrop(node.id);
     }
     return false;
   }
@@ -311,6 +325,14 @@ export class Interaction {
         return;
       }
       if (node?.type === "path" && editor.enterVectorEdit(target)) return;
+      // Double-click an image to crop it, unless the click was meant for a layer inside.
+      if (
+        node &&
+        (leaf === target || editor.doc.childIds(target).length === 0) &&
+        croppableImage(node) &&
+        editor.enterCrop(target)
+      )
+        return;
       if (leaf && leaf !== target) {
         // Enter the group or frame: select the next level down.
         editor.select([selectionTarget(editor.scene, pageId, leaf, [target], false)]);
@@ -602,6 +624,7 @@ export class Interaction {
     this.pen.cancel();
     this.vectorEdit.cancel();
     this.connect.cancel();
+    this.crop.cancel();
     const mode = this.#mode;
     this.#mode = { kind: "idle" };
     if (
@@ -1078,7 +1101,7 @@ export class Interaction {
 }
 
 /** A resize cursor that matches the handle's on-screen direction, rotation included. */
-function resizeCursor(handle: HandleId, frame: Frame | null): string {
+export function resizeCursor(handle: HandleId, frame: { readonly matrix: Matrix } | null): string {
   const base: Record<HandleId, number> = {
     n: 90,
     ne: 45,
