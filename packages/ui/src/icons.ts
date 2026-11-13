@@ -5,41 +5,19 @@ export type IconNode = readonly [tag: string, attributes: Readonly<Record<string
 
 /** Drawpane's 43 icons on a 16px grid; strokes and fills inherit currentColor. */
 export const iconData = {
-  agent: [
-    [
-      "rect",
-      {
-        x: "2.75",
-        y: "4",
-        width: "10.5",
-        height: "8.5",
-        rx: "2.5",
-      },
-    ],
+  pointer: [
     [
       "path",
       {
-        d: "M8 4V2.25",
+        d: "M3.5 2.5l9.5 4.6-4.1 1.2-1.6 4.2z",
       },
     ],
+  ],
+  hand: [
     [
-      "circle",
+      "path",
       {
-        cx: "6",
-        cy: "8.25",
-        r: "0.9",
-        fill: "currentColor",
-        stroke: "none",
-      },
-    ],
-    [
-      "circle",
-      {
-        cx: "10",
-        cy: "8.25",
-        r: "0.9",
-        fill: "currentColor",
-        stroke: "none",
+        d: "M5.5 8.5V4a1 1 0 0 1 2 0v3.5M7.5 7V3a1 1 0 0 1 2 0v4M9.5 7.5V4a1 1 0 0 1 2 0v5.5a4 4 0 0 1-4 4h-.6a4 4 0 0 1-3.2-1.6L2.4 9.9a1 1 0 0 1 1.5-1.3l1.6 1.4",
       },
     ],
   ],
@@ -51,97 +29,55 @@ export const iconData = {
       },
     ],
   ],
-  bolt: [
+  rectangle: [
     [
-      "path",
+      "rect",
       {
-        d: "M9 1.75L3.75 9H8l-1 5.25L12.25 7H8z",
+        x: "3",
+        y: "3",
+        width: "10",
+        height: "10",
+        rx: "1.5",
       },
     ],
   ],
-  book: [
+  ellipse: [
     [
-      "path",
+      "circle",
       {
-        d: "M3 3.25A1.25 1.25 0 0 1 4.25 2H13v10.5H4.25A1.25 1.25 0 0 0 3 13.75z",
-      },
-    ],
-    [
-      "path",
-      {
-        d: "M3 13.75A1.25 1.25 0 0 0 4.25 15H13",
+        cx: "8",
+        cy: "8",
+        r: "5.25",
       },
     ],
   ],
-  branch: [
+  pen: [
     [
-      "circle",
+      "path",
       {
-        cx: "5",
-        cy: "3.75",
-        r: "1.5",
+        d: "M8 2.5l4 5.2L8 13.5 4 7.7z",
       },
     ],
     [
-      "circle",
+      "path",
       {
-        cx: "5",
-        cy: "12.25",
-        r: "1.5",
+        d: "M8 13.5V9",
       },
     ],
     [
       "circle",
       {
-        cx: "11",
-        cy: "5.5",
-        r: "1.5",
-      },
-    ],
-    [
-      "path",
-      {
-        d: "M5 5.25v5.5M11 7c0 2.6-6 1.6-6 3.75",
+        cx: "8",
+        cy: "7.9",
+        r: "1.1",
       },
     ],
   ],
-  check: [
+  text: [
     [
       "path",
       {
-        d: "M3.25 8.5l3 3 6.5-7",
-      },
-    ],
-  ],
-  "chevron-down": [
-    [
-      "path",
-      {
-        d: "M4.5 6.25L8 9.75l3.5-3.5",
-      },
-    ],
-  ],
-  "chevron-right": [
-    [
-      "path",
-      {
-        d: "M6.25 4.5L9.75 8l-3.5 3.5",
-      },
-    ],
-  ],
-  close: [
-    [
-      "path",
-      {
-        d: "M4 4l8 8M12 4l-8 8",
-      },
-    ],
-  ],
-  code: [
-    [
-      "path",
-      {
-        d: "M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5",
+        d: "M3.5 4.5V3h9v1.5M8 3v10M6 13h4",
       },
     ],
   ],
@@ -169,21 +105,50 @@ export const iconData = {
       },
     ],
   ],
-  ellipse: [
-    [
-      "circle",
-      {
-        cx: "8",
-        cy: "8",
-        r: "5.25",
-      },
-    ],
-  ],
-  export: [
+  instance: [
     [
       "path",
       {
-        d: "M8 10V2.75M5.25 5.5L8 2.75l2.75 2.75M3 9.5v3a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-3",
+        d: "M8 1.8l6.2 6.2L8 14.2 1.8 8z",
+      },
+    ],
+  ],
+  group: [
+    [
+      "rect",
+      {
+        x: "2.75",
+        y: "2.75",
+        width: "10.5",
+        height: "10.5",
+        rx: "1.5",
+        strokeDasharray: "2 2",
+      },
+    ],
+  ],
+  image: [
+    [
+      "rect",
+      {
+        x: "2.5",
+        y: "3",
+        width: "11",
+        height: "10",
+        rx: "1.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.5 11l3.2-3.2 2.8 2.7 1.8-1.8 3.2 3.1",
+      },
+    ],
+    [
+      "circle",
+      {
+        cx: "10.5",
+        cy: "6",
+        r: "1",
       },
     ],
   ],
@@ -217,132 +182,91 @@ export const iconData = {
       },
     ],
   ],
-  group: [
+  lock: [
     [
       "rect",
       {
-        x: "2.75",
-        y: "2.75",
-        width: "10.5",
-        height: "10.5",
+        x: "3.5",
+        y: "7",
+        width: "9",
+        height: "6.5",
         rx: "1.5",
-        strokeDasharray: "2 2",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5.5 7V5.5a2.5 2.5 0 0 1 5 0V7",
       },
     ],
   ],
-  hand: [
+  plus: [
     [
       "path",
       {
-        d: "M5.5 8.5V4a1 1 0 0 1 2 0v3.5M7.5 7V3a1 1 0 0 1 2 0v4M9.5 7.5V4a1 1 0 0 1 2 0v5.5a4 4 0 0 1-4 4h-.6a4 4 0 0 1-3.2-1.6L2.4 9.9a1 1 0 0 1 1.5-1.3l1.6 1.4",
+        d: "M8 3v10M3 8h10",
       },
     ],
   ],
-  history: [
+  minus: [
     [
       "path",
       {
-        d: "M2.6 8a5.4 5.4 0 1 0 1.7-3.9",
-      },
-    ],
-    [
-      "path",
-      {
-        d: "M2.5 2.5v2.75h2.75",
-      },
-    ],
-    [
-      "path",
-      {
-        d: "M8 5.25V8l2 1.25",
+        d: "M3 8h10",
       },
     ],
   ],
-  image: [
+  search: [
+    [
+      "circle",
+      {
+        cx: "7",
+        cy: "7",
+        r: "4.25",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M10.2 10.2l3.3 3.3",
+      },
+    ],
+  ],
+  "chevron-down": [
+    [
+      "path",
+      {
+        d: "M4.5 6.25L8 9.75l3.5-3.5",
+      },
+    ],
+  ],
+  "chevron-right": [
+    [
+      "path",
+      {
+        d: "M6.25 4.5L9.75 8l-3.5 3.5",
+      },
+    ],
+  ],
+  "layout-row": [
     [
       "rect",
       {
         x: "2.5",
-        y: "3",
-        width: "11",
-        height: "10",
-        rx: "1.5",
+        y: "4",
+        width: "4.5",
+        height: "8",
+        rx: "1",
       },
     ],
-    [
-      "path",
-      {
-        d: "M2.5 11l3.2-3.2 2.8 2.7 1.8-1.8 3.2 3.1",
-      },
-    ],
-    [
-      "circle",
-      {
-        cx: "10.5",
-        cy: "6",
-        r: "1",
-      },
-    ],
-  ],
-  inspector: [
     [
       "rect",
       {
-        x: "2.5",
-        y: "2.5",
-        width: "11",
-        height: "11",
-        rx: "1.5",
-      },
-    ],
-    [
-      "path",
-      {
-        d: "M9.5 2.5v11M11 5.5h.5M11 8h.5",
-      },
-    ],
-  ],
-  instance: [
-    [
-      "path",
-      {
-        d: "M8 1.8l6.2 6.2L8 14.2 1.8 8z",
-      },
-    ],
-  ],
-  key: [
-    [
-      "circle",
-      {
-        cx: "5.5",
-        cy: "10.5",
-        r: "2.75",
-      },
-    ],
-    [
-      "path",
-      {
-        d: "M7.5 8.5l5.5-5.5M11 5l1.75 1.75M9.5 6.5l1.25 1.25",
-      },
-    ],
-  ],
-  layers: [
-    [
-      "path",
-      {
-        d: "M8 2.5l5.5 3L8 8.5l-5.5-3z",
-      },
-    ],
-    [
-      "path",
-      {
-        d: "M2.5 8.25L8 11.25l5.5-3",
-      },
-    ],
-    [
-      "path",
-      {
-        d: "M2.5 11L8 14l5.5-3",
+        x: "9",
+        y: "4",
+        width: "4.5",
+        height: "8",
+        rx: "1",
       },
     ],
   ],
@@ -410,51 +334,106 @@ export const iconData = {
       },
     ],
   ],
-  "layout-row": [
+  branch: [
     [
-      "rect",
+      "circle",
       {
-        x: "2.5",
-        y: "4",
-        width: "4.5",
-        height: "8",
-        rx: "1",
+        cx: "5",
+        cy: "3.75",
+        r: "1.5",
       },
     ],
     [
-      "rect",
+      "circle",
       {
-        x: "9",
-        y: "4",
-        width: "4.5",
-        height: "8",
-        rx: "1",
+        cx: "5",
+        cy: "12.25",
+        r: "1.5",
       },
     ],
-  ],
-  lock: [
     [
-      "rect",
+      "circle",
       {
-        x: "3.5",
-        y: "7",
-        width: "9",
-        height: "6.5",
-        rx: "1.5",
+        cx: "11",
+        cy: "5.5",
+        r: "1.5",
       },
     ],
     [
       "path",
       {
-        d: "M5.5 7V5.5a2.5 2.5 0 0 1 5 0V7",
+        d: "M5 5.25v5.5M11 7c0 2.6-6 1.6-6 3.75",
       },
     ],
   ],
-  minus: [
+  history: [
     [
       "path",
       {
-        d: "M3 8h10",
+        d: "M2.6 8a5.4 5.4 0 1 0 1.7-3.9",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.5 2.5v2.75h2.75",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M8 5.25V8l2 1.25",
+      },
+    ],
+  ],
+  token: [
+    [
+      "path",
+      {
+        d: "M8 2.25l5 2.9v5.7l-5 2.9-5-2.9V5.15z",
+      },
+    ],
+    [
+      "circle",
+      {
+        cx: "8",
+        cy: "8",
+        r: "1.6",
+      },
+    ],
+  ],
+  xray: [
+    [
+      "path",
+      {
+        d: "M2.5 5V2.5H5M11 2.5h2.5V5M13.5 11v2.5H11M5 13.5H2.5V11",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5.5",
+        y: "5.5",
+        width: "5",
+        height: "5",
+        rx: "0.75",
+        strokeDasharray: "1.5 1.5",
+      },
+    ],
+  ],
+  play: [
+    [
+      "path",
+      {
+        d: "M5 3.5v9l7.25-4.5z",
+      },
+    ],
+  ],
+  export: [
+    [
+      "path",
+      {
+        d: "M8 10V2.75M5.25 5.5L8 2.75l2.75 2.75M3 9.5v3a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-3",
       },
     ],
   ],
@@ -490,131 +469,57 @@ export const iconData = {
       },
     ],
   ],
-  pen: [
+  check: [
     [
       "path",
       {
-        d: "M8 2.5l4 5.2L8 13.5 4 7.7z",
-      },
-    ],
-    [
-      "path",
-      {
-        d: "M8 13.5V9",
-      },
-    ],
-    [
-      "circle",
-      {
-        cx: "8",
-        cy: "7.9",
-        r: "1.1",
+        d: "M3.25 8.5l3 3 6.5-7",
       },
     ],
   ],
-  play: [
+  close: [
     [
       "path",
       {
-        d: "M5 3.5v9l7.25-4.5z",
+        d: "M4 4l8 8M12 4l-8 8",
       },
     ],
   ],
-  plug: [
-    [
-      "path",
-      {
-        d: "M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3",
-      },
-    ],
-  ],
-  plus: [
-    [
-      "path",
-      {
-        d: "M8 3v10M3 8h10",
-      },
-    ],
-  ],
-  pointer: [
-    [
-      "path",
-      {
-        d: "M3.5 2.5l9.5 4.6-4.1 1.2-1.6 4.2z",
-      },
-    ],
-  ],
-  rectangle: [
+  inspector: [
     [
       "rect",
       {
-        x: "3",
-        y: "3",
-        width: "10",
-        height: "10",
+        x: "2.5",
+        y: "2.5",
+        width: "11",
+        height: "11",
         rx: "1.5",
       },
     ],
-  ],
-  search: [
     [
-      "circle",
+      "path",
       {
-        cx: "7",
-        cy: "7",
-        r: "4.25",
+        d: "M9.5 2.5v11M11 5.5h.5M11 8h.5",
+      },
+    ],
+  ],
+  layers: [
+    [
+      "path",
+      {
+        d: "M8 2.5l5.5 3L8 8.5l-5.5-3z",
       },
     ],
     [
       "path",
       {
-        d: "M10.2 10.2l3.3 3.3",
+        d: "M2.5 8.25L8 11.25l5.5-3",
       },
     ],
-  ],
-  send: [
     [
       "path",
       {
-        d: "M8 13V3.5M4.25 7.25L8 3.5l3.75 3.75",
-      },
-    ],
-  ],
-  stop: [
-    [
-      "rect",
-      {
-        x: "4",
-        y: "4",
-        width: "8",
-        height: "8",
-        rx: "1.5",
-        fill: "currentColor",
-        stroke: "none",
-      },
-    ],
-  ],
-  text: [
-    [
-      "path",
-      {
-        d: "M3.5 4.5V3h9v1.5M8 3v10M6 13h4",
-      },
-    ],
-  ],
-  token: [
-    [
-      "path",
-      {
-        d: "M8 2.25l5 2.9v5.7l-5 2.9-5-2.9V5.15z",
-      },
-    ],
-    [
-      "circle",
-      {
-        cx: "8",
-        cy: "8",
-        r: "1.6",
+        d: "M2.5 11L8 14l5.5-3",
       },
     ],
   ],
@@ -642,22 +547,117 @@ export const iconData = {
       },
     ],
   ],
-  xray: [
-    [
-      "path",
-      {
-        d: "M2.5 5V2.5H5M11 2.5h2.5V5M13.5 11v2.5H11M5 13.5H2.5V11",
-      },
-    ],
+  agent: [
     [
       "rect",
       {
-        x: "5.5",
-        y: "5.5",
-        width: "5",
-        height: "5",
-        rx: "0.75",
-        strokeDasharray: "1.5 1.5",
+        x: "2.75",
+        y: "4",
+        width: "10.5",
+        height: "8.5",
+        rx: "2.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M8 4V2.25",
+      },
+    ],
+    [
+      "circle",
+      {
+        cx: "6",
+        cy: "8.25",
+        r: "0.9",
+        fill: "currentColor",
+        stroke: "none",
+      },
+    ],
+    [
+      "circle",
+      {
+        cx: "10",
+        cy: "8.25",
+        r: "0.9",
+        fill: "currentColor",
+        stroke: "none",
+      },
+    ],
+  ],
+  stop: [
+    [
+      "rect",
+      {
+        x: "4",
+        y: "4",
+        width: "8",
+        height: "8",
+        rx: "1.5",
+        fill: "currentColor",
+        stroke: "none",
+      },
+    ],
+  ],
+  send: [
+    [
+      "path",
+      {
+        d: "M8 13V3.5M4.25 7.25L8 3.5l3.75 3.75",
+      },
+    ],
+  ],
+  code: [
+    [
+      "path",
+      {
+        d: "M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5",
+      },
+    ],
+  ],
+  key: [
+    [
+      "circle",
+      {
+        cx: "5.5",
+        cy: "10.5",
+        r: "2.75",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7.5 8.5l5.5-5.5M11 5l1.75 1.75M9.5 6.5l1.25 1.25",
+      },
+    ],
+  ],
+  bolt: [
+    [
+      "path",
+      {
+        d: "M9 1.75L3.75 9H8l-1 5.25L12.25 7H8z",
+      },
+    ],
+  ],
+  book: [
+    [
+      "path",
+      {
+        d: "M3 3.25A1.25 1.25 0 0 1 4.25 2H13v10.5H4.25A1.25 1.25 0 0 0 3 13.75z",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M3 13.75A1.25 1.25 0 0 0 4.25 15H13",
+      },
+    ],
+  ],
+  plug: [
+    [
+      "path",
+      {
+        d: "M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3",
       },
     ],
   ],
@@ -665,5 +665,5 @@ export const iconData = {
 
 export type IconName = keyof typeof iconData;
 
-/** Every icon name, in alphabetical order. */
+/** Every icon name, in the design system's order. */
 export const iconNames = Object.keys(iconData) as IconName[];

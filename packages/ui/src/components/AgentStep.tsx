@@ -13,7 +13,7 @@ const STATUS: Record<AgentStepStatus, { word: string; icon?: IconName }> = {
   review: { word: "Waiting for review", icon: "branch" },
 };
 
-export interface AgentStepProps extends Omit<ComponentPropsWithRef<"div">, "children"> {
+export interface AgentStepProps extends Omit<ComponentPropsWithRef<"li">, "children"> {
   /** What the agent is doing, present tense: "Adding empty state to Upcoming". */
   label: string;
   /** done, running (one at a time), queued, failed, or review (waiting for a person). */
@@ -25,7 +25,7 @@ export interface AgentStepProps extends Omit<ComponentPropsWithRef<"div">, "chil
   meta?: string;
 }
 
-/** One step in an agent's plan. Render steps inside an element with role="list". */
+/** One step in an agent's plan, as a list item: render steps inside an AgentPlan. */
 export function AgentStep({
   label,
   status = "queued",
@@ -37,10 +37,8 @@ export function AgentStep({
 }: AgentStepProps) {
   const { word, icon } = STATUS[status];
   return (
-    // biome-ignore lint/a11y/useSemanticElements: steps render in any list container, as in the agent pane
-    <div
+    <li
       {...rest}
-      role="listitem"
       aria-current={status === "running" ? "step" : undefined}
       className={cx("dp-step", `dp-step--${status}`, className)}
     >
@@ -56,6 +54,13 @@ export function AgentStep({
         {ops && <code className="dp-step__ops">{ops}</code>}
       </span>
       {meta && <span className="dp-step__meta">{meta}</span>}
-    </div>
+    </li>
   );
+}
+
+export type AgentPlanProps = ComponentPropsWithRef<"ol">;
+
+/** The ordered list of an agent's steps. */
+export function AgentPlan({ className, ...rest }: AgentPlanProps) {
+  return <ol {...rest} className={cx("dp-plan", className)} />;
 }

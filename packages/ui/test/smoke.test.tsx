@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import {
+  AgentPlan,
   AgentStep,
   AgentTag,
   Badge,
@@ -200,11 +201,11 @@ describe("render smoke tests", () => {
 
   it("AgentStep", () => {
     render(
-      // biome-ignore lint/a11y/useSemanticElements: the agent pane renders steps in a div list
-      <div role="list">
+      <AgentPlan aria-label="Plan">
         <AgentStep status="running" label="Adding empty state" ops="insert EmptyState" />
-      </div>,
+      </AgentPlan>,
     );
+    expect(screen.getByRole("list", { name: "Plan" }).className).toBe("dp-plan");
     const step = screen.getByRole("listitem");
     expect(step.getAttribute("aria-current")).toBe("step");
     expect(step.textContent).toContain("Running: Adding empty state");
