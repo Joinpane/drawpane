@@ -115,7 +115,8 @@ export function collectSubtree(store: NodeStore, id: string): NodeRecord[] {
 
 function applyDelete(store: NodeStore, op: DeleteOp, force: boolean): Op[] {
   const node = requireNode(store, op.id);
-  if (!force && node.type === "page" && store.childIds(ROOT_ID).length <= 1) {
+  const pages = () => store.childIds(ROOT_ID).filter((id) => store.get(id)?.type === "page").length;
+  if (!force && node.type === "page" && pages() <= 1) {
     throw new ModelError("last_page", "A file needs at least one page.");
   }
   const subtree = collectSubtree(store, op.id);

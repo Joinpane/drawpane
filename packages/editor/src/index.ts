@@ -1,6 +1,7 @@
 export * from "./camera";
 export * from "./components";
 export * from "./doc";
+export * from "./dtcg";
 export * from "./editor";
 export * from "./geometry";
 export * from "./history";
@@ -14,3 +15,4 @@ export * from "./snap";
 export * from "./store";
 export * from "./sync";
 export * from "./text";
+export * from "./variables";
