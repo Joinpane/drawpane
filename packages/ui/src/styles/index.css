@@ -15,6 +15,8 @@
 @import "./components/property-section.css";
 @import "./components/layer-row.css";
 @import "./components/menu.css";
+@import "./components/popover.css";
+@import "./components/color-picker.css";
 @import "./components/command-bar.css";
 @import "./components/selection-lens.css";
 @import "./components/presence-stack.css";
