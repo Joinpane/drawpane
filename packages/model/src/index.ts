@@ -5,5 +5,6 @@ export * from "./media";
 export * from "./ops";
 export * from "./order-key";
 export * from "./protocol";
+export * from "./prototype";
 export * from "./schema";
 export * from "./store";

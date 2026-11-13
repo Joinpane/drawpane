@@ -20,7 +20,7 @@ import {
   ROOT_ID,
   type VariableValue,
 } from "@drawpane/model";
-import { Camera } from "./camera";
+import { Camera, type Insets, NO_INSETS } from "./camera";
 import {
   componentSetOf,
   detachOps,
@@ -88,6 +88,8 @@ export interface EditorState {
   readonly tool: ToolId;
   readonly camera: Camera;
   readonly viewport: { readonly width: number; readonly height: number };
+  /** Parts of the viewport covered by floating panels; fitting and revealing avoid them. */
+  readonly insets: Insets;
   readonly editingText: string | null;
   readonly marquee: Rect | null;
   readonly guides: readonly Guide[];
@@ -108,6 +110,18 @@ export interface EditorState {
   readonly vectorEdit: VectorEditState | null;
   /** The pointer in page coordinates while the pen or vector edit draws live feedback. */
   readonly vectorPointer: Point | null;
+  /** The Prototype tab is open: the canvas shows connections and connection handles. */
+  readonly prototyping: boolean;
+  /** A connection being dragged from a layer's handle, or null. */
+  readonly connecting: ConnectionDrag | null;
+}
+
+export interface ConnectionDrag {
+  readonly from: string;
+  /** The pointer in page coordinates. */
+  readonly pointer: Point;
+  /** The screen it would connect to if dropped now. */
+  readonly target: string | null;
 }
 
 export interface CommitOptions {
@@ -161,6 +175,7 @@ export class Editor {
     tool: "select",
     camera: new Camera(),
     viewport: { width: 0, height: 0 },
+    insets: NO_INSETS,
     editingText: null,
     marquee: null,
     guides: [],
@@ -175,6 +190,8 @@ export class Editor {
     notice: null,
     vectorEdit: null,
     vectorPointer: null,
+    prototyping: false,
+    connecting: null,
   });
   #noticeId = 0;
   readonly #cameras = new Map<string, Camera>();
@@ -406,46 +423,50 @@ export class Editor {
   }
 
   zoomTo(zoom: number): void {
-    const { camera, viewport } = this.s;
-    this.setCamera(camera.zoomAt({ x: viewport.width / 2, y: viewport.height / 2 }, zoom));
+    const { camera, viewport, insets } = this.s;
+    const centre = {
+      x: insets.left + (viewport.width - insets.left - insets.right) / 2,
+      y: insets.top + (viewport.height - insets.top - insets.bottom) / 2,
+    };
+    this.setCamera(camera.zoomAt(centre, zoom));
   }
 
   zoomToFit(): void {
-    const { pageId, viewport } = this.s;
+    const { pageId, viewport, insets } = this.s;
     if (!pageId) return;
     const bounds = this.scene.unionBounds(this.doc.childIds(pageId));
-    if (bounds) this.setCamera(this.s.camera.fit(bounds, viewport, 80, 1));
+    if (bounds) this.setCamera(this.s.camera.fit(bounds, viewport, 64, 1, insets));
   }
 
-  /**
-   * Brings the selection into view without a jarring zoom: pans when it fits
-   * at the current zoom, otherwise zooms out just enough.
-   */
+  /** Pans (or zooms out) just enough to bring the selection into the visible part of the canvas. */
   revealSelection(): void {
     const bounds = this.scene.unionBounds(this.s.selection);
     if (!bounds) return;
-    const { camera, viewport } = this.s;
-    const margin = 120;
+    const { camera, viewport, insets } = this.s;
+    const margin = 96;
+    const areaW = viewport.width - insets.left - insets.right;
+    const areaH = viewport.height - insets.top - insets.bottom;
     const fits =
-      bounds.width * camera.zoom <= viewport.width - margin * 2 &&
-      bounds.height * camera.zoom <= viewport.height - margin * 2;
+      bounds.width * camera.zoom <= areaW - margin * 2 &&
+      bounds.height * camera.zoom <= areaH - margin * 2;
     if (fits) {
       const centre = camera.toScreen({
         x: bounds.x + bounds.width / 2,
         y: bounds.y + bounds.height / 2,
       });
-      this.setCamera(camera.pan(viewport.width / 2 - centre.x, viewport.height / 2 - centre.y));
+      this.setCamera(
+        camera.pan(insets.left + areaW / 2 - centre.x, insets.top + areaH / 2 - centre.y),
+      );
     } else {
-      this.setCamera(camera.fit(bounds, viewport, margin, camera.zoom));
+      this.setCamera(camera.fit(bounds, viewport, margin, camera.zoom, insets));
     }
   }
 
   zoomToSelection(): void {
     const bounds = this.scene.unionBounds(this.s.selection);
-    if (bounds) this.setCamera(this.s.camera.fit(bounds, this.s.viewport, 80, 8));
+    if (bounds) this.setCamera(this.s.camera.fit(bounds, this.s.viewport, 64, 8, this.s.insets));
   }
 
-  /** Where new layers go: inside the selected frame, else beside the selection, else on the page. */
   insertionParent(): string | null {
     const { selection, pageId } = this.s;
     const first = selection.length === 1 ? this.doc.get(selection[0] as string) : undefined;
