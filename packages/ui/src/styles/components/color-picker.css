@@ -1,0 +1,166 @@
+/* ColorPicker: area, hue and alpha strips, and value fields. The spectra, the
+   checkerboard and the knob ring are fixed colors, not theme colors: the component
+   sets them as --dp-picker-* properties. */
+.dp-color-picker {
+  display: grid;
+  gap: var(--space-300);
+}
+.dp-color-picker__area {
+  position: relative;
+  height: 168px;
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(to top, var(--dp-picker-black), transparent),
+    linear-gradient(to right, var(--dp-picker-white), var(--dp-hue));
+  box-shadow: inset 0 0 0 1px var(--line);
+  cursor: crosshair;
+  touch-action: none;
+  outline: none;
+}
+.dp-color-picker__area:focus-visible {
+  box-shadow:
+    inset 0 0 0 1px var(--line),
+    var(--shadow-focus);
+}
+.dp-color-picker__thumb {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--dp-picker-white);
+  box-shadow: var(--dp-picker-ring);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.dp-color-picker__strips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+}
+.dp-color-picker__dropper {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: var(--size-control-md);
+  height: var(--size-control-md);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--icon);
+  cursor: pointer;
+  transition: background var(--duration-hover) ease-out;
+}
+.dp-color-picker__dropper:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+.dp-color-picker__dropper:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.dp-color-picker__sliders {
+  display: grid;
+  flex: 1;
+  gap: var(--space-200);
+}
+.dp-color-picker__slider {
+  position: relative;
+  height: 12px;
+  border-radius: var(--radius-full);
+  box-shadow: inset 0 0 0 1px var(--line);
+  cursor: pointer;
+  touch-action: none;
+  outline: none;
+}
+.dp-color-picker__slider:focus-visible {
+  box-shadow:
+    inset 0 0 0 1px var(--line),
+    var(--shadow-focus);
+}
+.dp-color-picker__hue {
+  background: var(--dp-picker-spectrum);
+}
+.dp-color-picker__alpha {
+  background:
+    linear-gradient(to right, var(--dp-alpha-from), var(--dp-alpha-to)), var(--dp-picker-checker);
+}
+.dp-color-picker__knob {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 2px solid var(--dp-picker-white);
+  box-shadow: var(--dp-picker-ring);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.dp-color-picker__fields {
+  display: grid;
+  grid-template-columns: 64px 1fr 56px;
+  gap: var(--space-100);
+  align-items: center;
+}
+.dp-color-picker__format {
+  height: var(--size-control-sm);
+  padding: 0 var(--space-100);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font: var(--type-ui-body);
+  cursor: pointer;
+}
+.dp-color-picker__format:hover {
+  border-color: var(--line-strong);
+}
+.dp-color-picker__format:focus-visible {
+  outline: none;
+  border-color: var(--signal);
+}
+.dp-color-picker__hex {
+  display: flex;
+  align-items: center;
+  gap: var(--space-100);
+  box-sizing: border-box;
+  height: var(--size-control-sm);
+  min-width: 0;
+  padding: 0 var(--space-200);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--ink-muted);
+  font: var(--type-code);
+}
+.dp-color-picker__hex:hover {
+  border-color: var(--line-strong);
+}
+.dp-color-picker__hex:focus-within {
+  border-color: var(--signal);
+}
+.dp-color-picker__hex input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font: var(--type-code);
+  text-transform: uppercase;
+  caret-color: var(--signal);
+}
+.dp-color-picker__channels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-100);
+  min-width: 0;
+}
+.dp-color-picker__channels .dp-field__label {
+  width: 16px;
+}
+.dp-color-picker__channels .dp-field__unit {
+  display: none;
+}
