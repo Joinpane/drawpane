@@ -58,8 +58,18 @@ export function parseIcon(file: IconFile): Data {
   return nodes;
 }
 
-export function renderIconsTs(files: IconFile[]): string {
-  const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name));
+/**
+ * `order` is the set's canonical order (design-system.json lists it, grouped by use: tools,
+ * layers, layout, collaboration, agents). Icons missing from it follow alphabetically.
+ */
+export function renderIconsTs(files: IconFile[], order: readonly string[] = []): string {
+  const rank = (name: string) => {
+    const i = order.indexOf(name);
+    return i === -1 ? order.length : i;
+  };
+  const sorted = [...files].sort(
+    (a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name),
+  );
   const data = Object.fromEntries(sorted.map((f) => [f.name, parseIcon(f)]));
   return `// ${GENERATED_NOTE} Source: design-system/assets/Icons/*.svg.
 
@@ -71,7 +81,7 @@ export const iconData = ${emit(data)} as const satisfies Record<string, readonly
 
 export type IconName = keyof typeof iconData;
 
-/** Every icon name, in alphabetical order. */
+/** Every icon name, in the design system's order. */
 export const iconNames = Object.keys(iconData) as IconName[];
 `;
 }
