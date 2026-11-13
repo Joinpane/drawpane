@@ -232,6 +232,14 @@ function FileEditor({ fileId }: { fileId: string }) {
         setLeftTab("layers");
         uiFor(editor).set({ renaming: id });
       },
+      findLayers: () => {
+        // The search lives in the layers panel: make sure it's showing.
+        setView("design");
+        setLeftOpen(true);
+        setLeftTab("layers");
+        const ui = uiFor(editor);
+        ui.set({ findLayers: ui.get().findLayers + 1 });
+      },
       showShortcuts: () => setShortcutsOpen(true),
       placeImage: () => {
         void chooseImageFiles().then((files) => {
@@ -507,9 +515,6 @@ function FileEditor({ fileId }: { fileId: string }) {
               {leftTab === "layers" ? (
                 <>
                   <PagesList />
-                  <div className="pane__head pane__head--layers">
-                    <span className="pane__label">Layers</span>
-                  </div>
                   <LayersPanel />
                 </>
               ) : leftTab === "assets" ? (
