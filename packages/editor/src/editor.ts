@@ -38,9 +38,23 @@ import {
   variantsOf,
   wouldCycle,
 } from "./components";
+import { constraintOps } from "./constraints";
 import { Doc } from "./doc";
 import { dependsOn, parseDtcg } from "./dtcg";
-import { apply, invert, multiply, type Point, type Rect, rotationOf, round2 } from "./geometry";
+import {
+  apply,
+  boxOf,
+  invert,
+  multiply,
+  normalizeDegrees,
+  normalizeRect,
+  type Point,
+  type Rect,
+  rectsIntersect,
+  rotationOf,
+  round2,
+  unionRects,
+} from "./geometry";
 import { applyBestEffort, History } from "./history";
 import { layoutImageRow } from "./images";
 import { layoutOps } from "./layout";
@@ -137,6 +151,11 @@ export interface CommitOptions {
    * anything a person does). Off for writes derived from the main component.
    */
   readonly overrides?: boolean;
+  /**
+   * Move and size the children of resized frames by their constraints (the
+   * default). Off while ⌘ is held during a resize, like Figma.
+   */
+  readonly constraints?: boolean;
 }
 
 export interface EditorOptions {
@@ -272,7 +291,7 @@ export class Editor {
     if (!this.canEdit || ops.length === 0) return false;
     let inverse: Op[];
     try {
-      inverse = this.#commitWithFixups(ops, options.overrides ?? true);
+      inverse = this.#commitWithFixups(ops, options.overrides ?? true, options.constraints ?? true);
     } catch (error) {
       if (error instanceof Error && error.name === "ModelError") {
         this.notify(error.message);
@@ -284,7 +303,7 @@ export class Editor {
     return true;
   }
 
-  #commitWithFixups(ops: readonly Op[], recordOverrides = true): Op[] {
+  #commitWithFixups(ops: readonly Op[], recordOverrides = true, constrain = true): Op[] {
     return this.doc.batch(() => {
       // A person's edit inside an instance records an override, and setting a
       // bound property by hand detaches its variable; both before the derived
@@ -292,9 +311,12 @@ export class Editor {
       const marks = recordOverrides
         ? [...overrideOps(this.doc, ops), ...unbindOps(this.doc, ops)]
         : [];
-      // Resizing a path (handles, inspector) scales its path data with its box.
-      const pathOps = pathResizeOps(this.doc, ops);
-      const first = marks.length > 0 || pathOps.length > 0 ? [...ops, ...marks, ...pathOps] : ops;
+      // Resizing a frame moves its children by their constraints; resizing a
+      // path (handles, inspector, constraints) scales its path data with its box.
+      const constrained = constrain ? constraintOps(this.doc, ops) : [];
+      const pathOps = pathResizeOps(this.doc, [...ops, ...constrained]);
+      const extra = [...marks, ...constrained, ...pathOps];
+      const first = extra.length > 0 ? [...ops, ...extra] : ops;
       let inverse = this.sync.commit(first);
       let touched = this.#touchedBy(ops, inverse);
       let lastOps: readonly Op[] = first;
@@ -317,6 +339,7 @@ export class Editor {
           this.doc.has(id),
         );
         const layout = layoutOps(this.doc, layoutTargets);
+        layout.push(...constraintOps(this.doc, layout));
         layout.push(...pathResizeOps(this.doc, layout));
         const layoutInverse = layout.length > 0 ? this.sync.commit(layout) : [];
         inverse = [...layoutInverse, ...roundInverse, ...inverse];
@@ -570,6 +593,41 @@ export class Editor {
     }
   }
 
+  /**
+   * Adds a frame of a preset size, named after the preset: centred in view,
+   * or beside the page's top-level layers when that spot is taken, so it never
+   * lands on top of work. Selects it, shows it and goes back to Move.
+   */
+  insertFramePreset(preset: { name: string; width: number; height: number }): string | null {
+    const { pageId, viewport, insets, camera } = this.s;
+    if (!pageId) return null;
+    const centre = camera.toPage({
+      x: insets.left + (viewport.width - insets.left - insets.right) / 2,
+      y: insets.top + (viewport.height - insets.top - insets.bottom) / 2,
+    });
+    let rect: Rect = {
+      x: round2(centre.x - preset.width / 2),
+      y: round2(centre.y - preset.height / 2),
+      width: preset.width,
+      height: preset.height,
+    };
+    const taken = this.doc
+      .childIds(pageId)
+      .filter((id) => this.doc.get(id)?.props.visible !== false)
+      .map((id) => this.scene.bounds(id))
+      .filter((b): b is Rect => b !== null);
+    if (taken.some((b) => rectsIntersect(b, rect))) {
+      const all = unionRects(taken) as Rect;
+      rect = { ...rect, x: round2(all.x + all.width + 100), y: round2(all.y) };
+    }
+    const id = this.createLayer("frame", rect, pageId, { name: preset.name });
+    if (!id) return null;
+    this.select([id]);
+    this.setTool("select");
+    this.revealSelection();
+    return id;
+  }
+
   /** Creates a layer from a rectangle in page coordinates. Returns its id. */
   createLayer(type: LayerType, rect: Rect, parent: string, props: Props = {}): string | null {
     const id = newId();
@@ -654,6 +712,32 @@ export class Editor {
       if (!node) continue;
       if (JSON.stringify(node.props[prop] ?? null) === JSON.stringify(value ?? null)) continue;
       ops.push({ op: "set", id, prop, value });
+    }
+    if (ops.length > 0) this.commit(ops, label);
+  }
+
+  /**
+   * Sets width or height on several layers. Layers with a locked aspect ratio
+   * change the other side too, and typing a size makes that axis fixed.
+   */
+  resize(ids: readonly string[], prop: "width" | "height", value: number, label = "Resize"): void {
+    const ops: Op[] = [];
+    const other = prop === "width" ? "height" : "width";
+    for (const id of ids) {
+      const node = this.doc.get(id);
+      if (!node || node.type === "group" || node.type === "page") continue;
+      const now = getProp(node.props, prop);
+      const v = round2(Math.max(0, value));
+      if (v === round2(now)) continue;
+      ops.push({ op: "set", id, prop, value: v });
+      if (getProp(node.props, "lockAspect") && now > 0) {
+        const o = round2((getProp(node.props, other) * v) / now);
+        if (o !== round2(getProp(node.props, other)))
+          ops.push({ op: "set", id, prop: other, value: o });
+      }
+      const sizing = prop === "width" ? "sizingH" : "sizingV";
+      if (getProp(node.props, sizing) !== "fixed")
+        ops.push({ op: "set", id, prop: sizing, value: "fixed" });
     }
     if (ops.length > 0) this.commit(ops, label);
   }
@@ -1542,30 +1626,8 @@ export class Editor {
   /** Moves selected layers by a page-space delta (arrow keys). */
   nudge(dx: number, dy: number): void {
     const ops: Op[] = [];
-    const move = (n: NodeRecord) => {
-      if (n.type === "group") {
-        for (const c of this.doc.childIds(n.id)) {
-          const child = this.doc.get(c);
-          if (child) move(child);
-        }
-        return;
-      }
-      const inLayout =
-        getProp(this.doc.get(n.parent)?.props ?? {}, "layoutMode") !== "none" &&
-        getProp(n.props, "positioning") === "auto";
-      if (inLayout) return;
-      // Convert the page delta into the node's parent space (frames may be rotated).
-      const space = this.scene.spaceMatrix(this.scene.spaceOwner(n.parent));
-      const inv = invert(space);
-      const d = { x: inv[0] * dx + inv[2] * dy, y: inv[1] * dx + inv[3] * dy };
-      ops.push(
-        { op: "set", id: n.id, prop: "x", value: round2(getProp(n.props, "x") + d.x) },
-        { op: "set", id: n.id, prop: "y", value: round2(getProp(n.props, "y") + d.y) },
-      );
-    };
     for (const id of this.#topmost(this.s.selection)) {
-      const node = this.doc.get(id);
-      if (node && !this.scene.isLocked(id)) move(node);
+      if (this.doc.has(id) && !this.scene.isLocked(id)) ops.push(...this.#moveOps(id, dx, dy));
     }
     if (ops.length > 0) this.commit(ops, "Nudge");
   }
@@ -1600,6 +1662,165 @@ export class Editor {
       this.state.set({ selection: saved });
     }
     this.endGesture();
+  }
+
+  /**
+   * Spaces three or more selected layers evenly between the outermost two,
+   * along one axis (Figma's "Distribute horizontal spacing").
+   */
+  distribute(axis: "horizontal" | "vertical"): void {
+    const ids = this.#topmost(this.s.selection).filter((id) => !this.scene.isLocked(id));
+    const items = ids
+      .map((id) => ({ id, b: this.scene.bounds(id) }))
+      .filter((i): i is { id: string; b: Rect } => i.b !== null);
+    if (items.length < 3) return;
+    const h = axis === "horizontal";
+    const start = (r: Rect) => (h ? r.x : r.y);
+    const size = (r: Rect) => (h ? r.width : r.height);
+    items.sort((a, b) => start(a.b) - start(b.b) || a.id.localeCompare(b.id));
+    const first = items[0] as (typeof items)[number];
+    const last = items.at(-1) as (typeof items)[number];
+    const span = start(last.b) + size(last.b) - start(first.b);
+    const total = items.reduce((sum, i) => sum + size(i.b), 0);
+    const gap = (span - total) / (items.length - 1);
+    const ops: Op[] = [];
+    let at = start(first.b);
+    for (const item of items) {
+      const d = at - start(item.b);
+      if (Math.abs(d) > 0.005) ops.push(...this.#moveOps(item.id, h ? d : 0, h ? 0 : d));
+      at += size(item.b) + gap;
+    }
+    if (ops.length > 0) this.commit(ops, "Distribute");
+  }
+
+  /**
+   * Mirrors the selection across its centre (⇧H, ⇧V): each layer's position
+   * mirrors inside the selection's bounds and its box flips, so groups and
+   * several layers flip as one picture.
+   */
+  flip(axis: "horizontal" | "vertical"): void {
+    const ids = this.#topmost(this.s.selection).filter((id) => !this.scene.isLocked(id));
+    const pivot = this.scene.unionBounds(ids);
+    if (!pivot) return;
+    const h = axis === "horizontal";
+    const cx = pivot.x + pivot.width / 2;
+    const cy = pivot.y + pivot.height / 2;
+    const ops: Op[] = [];
+    const flipNode = (node: NodeRecord) => {
+      if (node.type === "group") {
+        for (const c of this.doc.childIds(node.id)) {
+          const child = this.doc.get(c);
+          if (child) flipNode(child);
+        }
+        return;
+      }
+      if (node.type === "page") return;
+      const box = boxOf(node);
+      const world = this.scene.worldMatrix(node.id);
+      const centre = apply(world, { x: box.width / 2, y: box.height / 2 });
+      const mirrored = h
+        ? { x: 2 * cx - centre.x, y: centre.y }
+        : { x: centre.x, y: 2 * cy - centre.y };
+      const local = this.scene.toSpace(node.parent, mirrored);
+      // A mirror turns rotation the other way: S·R(θ) = R(−θ)·S, in page space.
+      const parentRotation = rotationOf(this.scene.spaceMatrix(this.scene.spaceOwner(node.parent)));
+      const rotation = round2(-(box.rotation + parentRotation) - parentRotation);
+      const inLayout =
+        getProp(this.doc.get(node.parent)?.props ?? {}, "layoutMode") !== "none" &&
+        getProp(node.props, "positioning") === "auto";
+      if (!inLayout) {
+        ops.push(
+          { op: "set", id: node.id, prop: "x", value: round2(local.x - box.width / 2) },
+          { op: "set", id: node.id, prop: "y", value: round2(local.y - box.height / 2) },
+        );
+      }
+      const flipProp = h ? "flipX" : "flipY";
+      ops.push({ op: "set", id: node.id, prop: flipProp, value: !getProp(node.props, flipProp) });
+      if (rotation !== round2(box.rotation))
+        ops.push({ op: "set", id: node.id, prop: "rotation", value: normalizeDegrees(rotation) });
+    };
+    for (const id of ids) {
+      const node = this.doc.get(id);
+      if (node) flipNode(node);
+    }
+    if (ops.length > 0) this.commit(ops, h ? "Flip horizontal" : "Flip vertical");
+  }
+
+  /**
+   * Shrinks or grows frames to wrap their content exactly, leaving every
+   * child where it is on the canvas (Figma's "Resize to fit"). Auto layout
+   * frames hug instead, so they're skipped.
+   */
+  fitToContent(ids: readonly string[] = this.s.selection): void {
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const frame = this.doc.get(id);
+      if (frame?.type !== "frame" || getProp(frame.props, "layoutMode") !== "none") continue;
+      const children = this.doc.childIds(id);
+      // Children live in the frame's own space: their union is the content box there.
+      const local = unionRects(
+        children
+          .map((c) => this.scene.bounds(c))
+          .filter((b): b is Rect => b !== null)
+          .map((b) => {
+            const a = this.scene.toSpace(id, { x: b.x, y: b.y });
+            const z = this.scene.toSpace(id, { x: b.x + b.width, y: b.y + b.height });
+            return normalizeRect(a, z);
+          }),
+      );
+      if (!local || local.width <= 0 || local.height <= 0) continue;
+      const dx = round2(local.x);
+      const dy = round2(local.y);
+      for (const childId of children) ops.push(...this.#shiftInSpace(childId, -dx, -dy));
+      const origin = apply(this.scene.worldMatrix(id), { x: local.x, y: local.y });
+      const inParent = this.scene.toSpace(frame.parent, origin);
+      ops.push(
+        { op: "set", id, prop: "x", value: round2(inParent.x) },
+        { op: "set", id, prop: "y", value: round2(inParent.y) },
+        { op: "set", id, prop: "width", value: round2(local.width) },
+        { op: "set", id, prop: "height", value: round2(local.height) },
+      );
+    }
+    if (ops.length > 0) this.commit(ops, "Resize to fit", { constraints: false });
+  }
+
+  /** Moves a layer (or a group's members) by a delta in its own coordinate space. */
+  #shiftInSpace(id: string, dx: number, dy: number): Op[] {
+    const node = this.doc.get(id);
+    if (!node) return [];
+    if (node.type === "group")
+      return this.doc.childIds(id).flatMap((c) => this.#shiftInSpace(c, dx, dy));
+    return [
+      { op: "set", id, prop: "x", value: round2(getProp(node.props, "x") + dx) },
+      { op: "set", id, prop: "y", value: round2(getProp(node.props, "y") + dy) },
+    ];
+  }
+
+  /** Operations that move one layer (or a group's members) by a page-space delta. */
+  #moveOps(id: string, dx: number, dy: number): Op[] {
+    const ops: Op[] = [];
+    const move = (n: NodeRecord) => {
+      if (n.type === "group") {
+        for (const c of this.doc.childIds(n.id)) {
+          const child = this.doc.get(c);
+          if (child) move(child);
+        }
+        return;
+      }
+      const inLayout =
+        getProp(this.doc.get(n.parent)?.props ?? {}, "layoutMode") !== "none" &&
+        getProp(n.props, "positioning") === "auto";
+      if (inLayout) return;
+      const inv = invert(this.scene.spaceMatrix(this.scene.spaceOwner(n.parent)));
+      const d = { x: inv[0] * dx + inv[2] * dy, y: inv[1] * dx + inv[3] * dy };
+      ops.push(
+        { op: "set", id: n.id, prop: "x", value: round2(getProp(n.props, "x") + d.x) },
+        { op: "set", id: n.id, prop: "y", value: round2(getProp(n.props, "y") + d.y) },
+      );
+    };
+    const node = this.doc.get(id);
+    if (node) move(node);
+    return ops;
   }
 
   toggleVisible(): void {
