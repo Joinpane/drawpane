@@ -19,10 +19,12 @@
     {
       "binding": "DB",
       "database_name": "drawpane",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "82cecbce-29d8-4a51-8b09-4ee3d72e5296",
       "migrations_dir": "migrations"
     }
   ],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "drawpane-files" }],
-  "vars": { "RP_NAME": "Drawpane" }
+  "vars": { "RP_NAME": "Drawpane" },
+  // The dogfooding instance. Self-hosters change this to their own domain.
+  "routes": [{ "pattern": "design.dizy.cc", "custom_domain": true }]
 }
