@@ -19,6 +19,7 @@ import {
 } from "./geometry";
 import { hitTest, marqueeHits, selectionTarget } from "./hit";
 import { snapRect } from "./snap";
+import { ConnectTool } from "./tools/connect";
 import { PenTool } from "./tools/pen";
 import type { KeyInput, ToolHandler } from "./tools/types";
 import { VectorEditTool } from "./tools/vector-edit";
@@ -90,23 +91,26 @@ export class Interaction {
   /** Tools in their own files; they see pointer and key events first while active. */
   readonly pen: PenTool;
   readonly vectorEdit: VectorEditTool;
+  readonly connect: ConnectTool;
 
   constructor(editor: Editor) {
     this.#editor = editor;
     this.pen = new PenTool(editor);
     this.vectorEdit = new VectorEditTool(editor);
+    this.connect = new ConnectTool(editor);
   }
 
   get busy(): boolean {
-    return this.#mode.kind !== "idle" || this.pen.busy || this.vectorEdit.busy;
+    return this.#mode.kind !== "idle" || this.pen.busy || this.vectorEdit.busy || this.connect.busy;
   }
 
   /** The tool handler that takes events now, if any. Built-in gestures run otherwise. */
   #delegate(): ToolHandler | null {
     if (this.#mode.kind !== "idle" || this.#spaceHeld) return null;
-    const { tool, vectorEdit } = this.#editor.s;
+    const { tool, vectorEdit, prototyping } = this.#editor.s;
     if (tool === "pen") return this.pen;
     if (tool === "select" && vectorEdit) return this.vectorEdit;
+    if (tool === "select" && prototyping) return this.connect;
     return null;
   }
 
@@ -153,7 +157,8 @@ export class Interaction {
   /** Which handle (or rotation zone) is under a screen point. */
   handleAt(screen: Point): { handle: HandleId; rotate: boolean } | null {
     const frame = this.selectionFrame();
-    if (!frame || this.#editor.s.editingText) return null;
+    // The Prototype tab trades resize handles for the connection handle.
+    if (!frame || this.#editor.s.editingText || this.#editor.s.prototyping) return null;
     const camera = this.#editor.s.camera;
     // Tiny selections only get corner handles, so they stay draggable.
     const screenW = frame.width * camera.zoom;
@@ -449,6 +454,7 @@ export class Interaction {
     const editor = this.#editor;
     this.pen.cancel();
     this.vectorEdit.cancel();
+    this.connect.cancel();
     const mode = this.#mode;
     this.#mode = { kind: "idle" };
     if (

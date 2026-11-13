@@ -9,6 +9,7 @@
  */
 import { z } from "zod";
 import { ID_PATTERN } from "./ids";
+import { DEVICE_IDS, Flows, Reactions } from "./prototype";
 
 export const NODE_TYPES = [
   "page",
@@ -302,6 +303,13 @@ export const PROPS = {
 
   // Pages. Null follows the viewer's theme (the `canvas` token).
   backgroundColor: prop(Color.nullable(), null, ["page"]),
+
+  // Prototyping. Reactions say what a layer does when tapped, hovered, dragged
+  // or keyed; flows are the starting screens a page offers; the device frames
+  // the prototype when it plays.
+  reactions: prop(Reactions, [], LAYERS),
+  flows: prop(Flows, [], ["page"]),
+  prototypeDevice: prop(z.enum(DEVICE_IDS), "none", ["page"]),
 
   // Variables (design tokens). A collection holds variables and names the
   // modes (light, dark, compact…); each variable has one value per mode.
