@@ -108,6 +108,18 @@ export interface EditorState {
   readonly vectorEdit: VectorEditState | null;
   /** The pointer in page coordinates while the pen or vector edit draws live feedback. */
   readonly vectorPointer: Point | null;
+  /** The Prototype tab is open: the canvas shows connections and connection handles. */
+  readonly prototyping: boolean;
+  /** A connection being dragged from a layer's handle, or null. */
+  readonly connecting: ConnectionDrag | null;
+}
+
+export interface ConnectionDrag {
+  readonly from: string;
+  /** The pointer in page coordinates. */
+  readonly pointer: Point;
+  /** The screen it would connect to if dropped now. */
+  readonly target: string | null;
 }
 
 export interface CommitOptions {
@@ -175,6 +187,8 @@ export class Editor {
     notice: null,
     vectorEdit: null,
     vectorPointer: null,
+    prototyping: false,
+    connecting: null,
   });
   #noticeId = 0;
   readonly #cameras = new Map<string, Camera>();
