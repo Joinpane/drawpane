@@ -1,6 +1,7 @@
 import {
   type ComponentPropsWithRef,
   type KeyboardEvent,
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -95,6 +96,7 @@ export function CommandBar({
   const baseId = useId();
   const listboxId = `${baseId}-listbox`;
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const [query, setQuery] = useControllableState(queryProp, defaultQuery, onQueryChange);
   const visible = groups.filter((g) => g.items.length > 0);
   const results: Result[] = visible.flatMap((group) =>
@@ -109,19 +111,23 @@ export function CommandBar({
     setActive(initialActive(results));
   }
   const activeIndex = Math.min(active, results.length - 1);
-  const optionId = (index: number) => `${baseId}-option-${index}`;
+  const optionId = useCallback((index: number) => `${baseId}-option-${index}`, [baseId]);
 
   useEffect(() => {
     if (autoFocus) inputRef.current?.focus();
   }, [autoFocus]);
 
+  // Keep the active option visible inside the results, without scrolling the page.
   useEffect(() => {
-    if (activeIndex < 0) return;
-    const option = document.getElementById(optionId(activeIndex));
-    if (option && typeof option.scrollIntoView === "function") {
-      option.scrollIntoView({ block: "nearest" });
-    }
-  });
+    const list = listRef.current;
+    const option = activeIndex >= 0 ? document.getElementById(optionId(activeIndex)) : null;
+    if (!list || !option || !list.contains(option)) return;
+    const top = option.offsetTop - list.offsetTop;
+    const bottom = top + option.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight)
+      list.scrollTop = bottom - list.clientHeight;
+  }, [activeIndex, optionId]);
 
   const run = (index: number) => {
     const result = results[index];
@@ -172,7 +178,13 @@ export function CommandBar({
         />
         <Kbd keys={["esc"]} />
       </div>
-      <div id={listboxId} role="listbox" aria-label="Results" className="dp-cmd__results">
+      <div
+        ref={listRef}
+        id={listboxId}
+        role="listbox"
+        aria-label="Results"
+        className="dp-cmd__results"
+      >
         {results.length === 0 && <div className="dp-cmd__empty">{emptyLabel}</div>}
         {visible.map((group, gi) => {
           const titleId = `${baseId}-group-${gi}`;
