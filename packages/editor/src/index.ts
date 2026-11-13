@@ -2,6 +2,8 @@ export * from "./camera";
 export * from "./code";
 export * from "./components";
 export * from "./constraints";
+export * from "./crop";
+export * from "./crop-session";
 export * from "./doc";
 export * from "./dtcg";
 export * from "./editor";

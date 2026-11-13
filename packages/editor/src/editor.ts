@@ -42,6 +42,7 @@ import {
   wouldCycle,
 } from "./components";
 import { constraintOps } from "./constraints";
+import * as crop from "./crop-session";
 import { Doc } from "./doc";
 import { dependsOn, parseDtcg } from "./dtcg";
 import {
@@ -143,6 +144,8 @@ export interface EditorState {
   readonly layoutGrids: boolean;
   /** A guide being dragged (from a ruler, or an existing one), drawn live and committed on drop. */
   readonly guideDraft: GuideDraft | null;
+  /** An image fill being cropped: the layer and the fill's index. */
+  readonly cropping: { readonly id: string; readonly index: number } | null;
   /** The guide under the pointer, highlighted so it reads as grabbable. */
   readonly hoverGuide: { readonly owner: string; readonly index: number } | null;
 }
@@ -251,8 +254,14 @@ export class Editor {
     layoutGrids: true,
     guideDraft: null,
     hoverGuide: null,
+    cropping: null,
   });
   #noticeId = 0;
+  /**
+   * An image's own size by its content hash, when loaded: set by the app from
+   * its image cache, so cropping can start from what a fill shows now.
+   */
+  imageSize: (ref: string) => { width: number; height: number } | null = () => null;
   readonly #cameras = new Map<string, Camera>();
   #booleanLoader: BooleanEngineLoader;
   #booleanEngine: Promise<BooleanEngine> | null = null;
@@ -272,9 +281,11 @@ export class Editor {
       this.state.set({ canUndo: this.history.canUndo, canRedo: this.history.canRedo }),
     );
     this.doc.subscribe(() => this.#reconcile());
-    // Leave vector edit when its path goes away or the selection or tool moves on.
+    // Leave vector edit or cropping when the layer goes away or the selection or tool moves on.
     this.state.subscribe(() => vector.reconcileVectorEdit(this));
     this.doc.subscribe(() => vector.reconcileVectorEdit(this));
+    this.state.subscribe(() => crop.reconcileCrop(this));
+    this.doc.subscribe(() => crop.reconcileCrop(this));
   }
 
   get s(): EditorState {
@@ -291,7 +302,13 @@ export class Editor {
    * where the new document still has them.
    */
   loadStatic(nodes: Iterable<NodeRecord>): void {
-    this.state.set({ status: "live", role: "viewer", editingText: null, vectorEdit: null });
+    this.state.set({
+      status: "live",
+      role: "viewer",
+      editingText: null,
+      vectorEdit: null,
+      cropping: null,
+    });
     this.doc.reset(nodes);
   }
 
@@ -1899,6 +1916,24 @@ export class Editor {
     const node = this.doc.get(id);
     if (node) move(node);
     return ops;
+  }
+
+  // -------------------------------------------------------------------------
+  // Cropping image fills (implemented in ./crop-session)
+
+  /** Starts cropping a layer's image fill; `natural` is the image's own size, if loaded. */
+  enterCrop(id: string, natural?: { width: number; height: number } | null): boolean {
+    const image = crop.croppableImage(this.doc.get(id));
+    return crop.enterCrop(this, id, natural ?? (image ? this.imageSize(image.paint.ref) : null));
+  }
+
+  exitCrop(): void {
+    crop.exitCrop(this);
+  }
+
+  /** Reshapes the crop to an aspect ratio (width / height). */
+  setCropAspect(ratio: number | null): void {
+    crop.setCropAspect(this, ratio);
   }
 
   // -------------------------------------------------------------------------

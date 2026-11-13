@@ -380,7 +380,7 @@ export class CanvasRenderer {
     // Device pixels per layer unit, to pick a bitmap no bigger than needed.
     const deviceScale = Math.hypot(t.a, t.b);
     const place = natural
-      ? imagePlacement(paint.scaleMode, { width: w, height: h }, natural)
+      ? imagePlacement(paint.scaleMode, { width: w, height: h }, natural, paint.crop)
       : null;
     const view = place ? this.images.get(paint.ref, place.width * deviceScale) : null;
     if (!place || !view) {
