@@ -27,9 +27,10 @@ import {
   round2,
 } from "./geometry";
 import { gridSnapLines, guideAt, guideOwnerAt, placedGuides } from "./grids";
-import { hitTest, marqueeHits, selectionTarget } from "./hit";
+import { childToward, hitTest, marqueeHits, selectionTarget } from "./hit";
+import { frameLabelAt, isArtboard } from "./labels";
 import { gridCellAt, gridGeometry } from "./layout";
-import { type SnapLine, snapRect } from "./snap";
+import { type Guide, type SnapLine, snapEdges, snapGuide, snapRect } from "./snap";
 import { ConnectTool } from "./tools/connect";
 import { CropTool } from "./tools/crop";
 import { PenTool } from "./tools/pen";
@@ -272,7 +273,7 @@ export class Interaction {
       return;
     }
 
-    const handle = editor.canEdit ? this.handleAt(input.screen) : null;
+    const handle = editor.canEdit ? this.#handleAt(input.screen) : null;
     if (handle) {
       const nodes = this.#snapshot(editor.s.selection);
       editor.beginGesture(handle.rotate ? "Rotate" : "Resize");
@@ -311,10 +312,20 @@ export class Interaction {
       return;
     }
 
-    const leaf = hitTest(editor.scene, pageId, page, 4 / editor.s.camera.zoom);
-    let target = leaf
-      ? selectionTarget(editor.scene, pageId, leaf, editor.s.selection, input.mod)
-      : null;
+    // A frame's name label picks the frame (and drags it); double-click renames it.
+    const label = frameLabelAt(editor, input.screen);
+    if (label && input.clicks >= 2 && editor.canEdit) {
+      editor.select([label.id]);
+      editor.state.set({ renamingFrame: label.id });
+      return;
+    }
+
+    const leaf = label ? label.id : this.#pick(page);
+    let target = label
+      ? label.id
+      : leaf
+        ? selectionTarget(editor.scene, pageId, leaf, editor.s.selection, input.mod)
+        : null;
     // Clicking inside the current selection's box drags it, even on empty space between layers.
     const frame = this.selectionFrame();
     if (!target && frame && this.#insideFrame(frame, input.screen) && editor.s.selection.length > 0)
@@ -335,9 +346,10 @@ export class Interaction {
         editor.enterCrop(target)
       )
         return;
-      if (leaf && leaf !== target) {
-        // Enter the group or frame: select the next level down.
-        editor.select([selectionTarget(editor.scene, pageId, leaf, [target], false)]);
+      const inner = leaf && leaf !== target ? childToward(editor.scene, target, leaf) : null;
+      if (inner) {
+        // Enter the group or frame: select the next level down toward what you clicked.
+        editor.select([inner]);
         return;
       }
     }
@@ -675,7 +687,7 @@ export class Interaction {
       editor.state.set({ hover: null });
       return;
     }
-    const handle = editor.canEdit ? this.handleAt(input.screen) : null;
+    const handle = editor.canEdit ? this.#handleAt(input.screen) : null;
     if (handle) {
       this.cursor = handle.rotate ? "alias" : resizeCursor(handle.handle, this.selectionFrame());
       editor.state.set({ hover: null });
@@ -690,11 +702,39 @@ export class Interaction {
     }
     if (editor.s.hoverGuide) editor.state.set({ hoverGuide: null });
     this.cursor = "default";
-    const leaf = hitTest(editor.scene, pageId, page, 4 / editor.s.camera.zoom);
+    const label = frameLabelAt(editor, input.screen);
+    if (label) {
+      editor.state.set({ hover: label.id });
+      return;
+    }
+    const leaf = this.#pick(page);
     const target = leaf
       ? selectionTarget(editor.scene, pageId, leaf, editor.s.selection, input.mod)
       : null;
     editor.state.set({ hover: target });
+  }
+
+  /**
+   * The handle under a screen point, except a rotation zone where a frame's
+   * name label sits: the label sits just outside the top-left corner, right
+   * where you'd rotate, and naming or picking the frame wins there.
+   */
+  #handleAt(screen: Point): ReturnType<Interaction["handleAt"]> {
+    const handle = this.handleAt(screen);
+    return handle?.rotate && frameLabelAt(this.#editor, screen) ? null : handle;
+  }
+
+  /**
+   * The deepest layer under a page point that a click may pick. An
+   * artboard's own empty area doesn't count (its label picks it), so a
+   * press there starts a marquee among its layers, like Figma and Penpot.
+   */
+  #pick(page: Point): string | null {
+    const editor = this.#editor;
+    const pageId = editor.s.pageId;
+    if (!pageId) return null;
+    const leaf = hitTest(editor.scene, pageId, page, 4 / editor.s.camera.zoom);
+    return leaf && isArtboard(editor, leaf) ? null : leaf;
   }
 
   #marqueeContainer(start: Point): string {
@@ -739,24 +779,7 @@ export class Interaction {
     const moving = { ...mode.bounds, x: mode.bounds.x + dx, y: mode.bounds.y + dy };
     const roots = editor.s.selection;
     const first = editor.doc.get(roots[0] ?? "");
-    const targets: Rect[] = [];
-    if (first && !input.mod) {
-      const view = editor.s.camera.visibleRect(editor.s.viewport);
-      for (const sibling of editor.doc.childIds(first.parent)) {
-        if (mode.nodes.has(sibling)) continue;
-        const b = editor.scene.bounds(sibling);
-        if (
-          b &&
-          b.x < view.x + view.width &&
-          b.x + b.width > view.x &&
-          b.y < view.y + view.height &&
-          b.y + b.height > view.y
-        )
-          targets.push(b);
-      }
-      const parentBounds = editor.scene.bounds(first.parent);
-      if (parentBounds) targets.push(parentBounds);
-    }
+    const targets = first && !input.mod ? this.#snapTargets(first.parent, mode.nodes) : [];
     const lines = first && !input.mod ? this.#snapLines(first.parent) : [];
     const snap = snapRect(moving, targets, SNAP_PX / editor.s.camera.zoom, lines);
     dx += snap.dx;
@@ -783,6 +806,31 @@ export class Interaction {
     // Inside auto layout, dragging reorders instead of moving.
     ops.push(...this.#layoutReorder(page));
     if (ops.length > 0) editor.commit(ops, "Move");
+  }
+
+  /**
+   * What a moving or resizing selection snaps to: its siblings in view (not
+   * the layers being changed) and the frame they sit in.
+   */
+  #snapTargets(parent: string, changing: ReadonlyMap<string, unknown>): Rect[] {
+    const editor = this.#editor;
+    const targets: Rect[] = [];
+    const view = editor.s.camera.visibleRect(editor.s.viewport);
+    for (const sibling of editor.doc.childIds(parent)) {
+      if (changing.has(sibling)) continue;
+      const b = editor.scene.bounds(sibling);
+      if (
+        b &&
+        b.x < view.x + view.width &&
+        b.x + b.width > view.x &&
+        b.y < view.y + view.height &&
+        b.y + b.height > view.y
+      )
+        targets.push(b);
+    }
+    const parentBounds = editor.scene.bounds(parent);
+    if (parentBounds) targets.push(parentBounds);
+    return targets;
   }
 
   /** Guides on the page, and the layout grid edges of the frame a layer moves inside. */
@@ -916,6 +964,36 @@ export class Interaction {
       if (hv === 0) y0 = local.y;
       else y1 = local.y;
     }
+    // Smart guides: the dragged edges snap to siblings, the parent frame,
+    // guides and grid edges, like moving does. Upright selections only: a
+    // rotated box's edges don't run along the page axes.
+    const upright = Math.abs(m[1]) < 1e-9 && Math.abs(m[2]) < 1e-9 && m[0] > 0 && m[3] > 0;
+    const first = editor.doc.get(editor.s.selection[0] ?? "");
+    const snapped: { x: number | null; y: number | null } = { x: null, y: null };
+    let targets: Rect[] = [];
+    if (upright && first) {
+      targets = this.#snapTargets(first.parent, mode.nodes);
+      const lines = this.#snapLines(first.parent);
+      const threshold = SNAP_PX / editor.s.camera.zoom;
+      if (movesX) {
+        const edge = hu === 0 ? x0 : x1;
+        const hit = snapEdges([m[4] + m[0] * edge], "x", targets, threshold, lines);
+        if (hit) {
+          if (hu === 0) x0 += hit.d / m[0];
+          else x1 += hit.d / m[0];
+          snapped.x = hit.at;
+        }
+      }
+      if (movesY) {
+        const edge = hv === 0 ? y0 : y1;
+        const hit = snapEdges([m[5] + m[3] * edge], "y", targets, threshold, lines);
+        if (hit) {
+          if (hv === 0) y0 += hit.d / m[3];
+          else y1 += hit.d / m[3];
+          snapped.y = hit.at;
+        }
+      }
+    }
     if (input.alt) {
       // Resize from the centre: mirror the moved edge.
       if (movesX) {
@@ -964,6 +1042,22 @@ export class Interaction {
     const nh = Math.abs(y1 - y0);
     const sx = frame.width > 0 ? nw / frame.width : 1;
     const sy = frame.height > 0 ? nh / frame.height : 1;
+    // Guides where the final box (after aspect locking) still meets a snapped line.
+    const guides: Guide[] = [];
+    if (upright) {
+      const rect = {
+        x: m[4] + m[0] * nx,
+        y: m[5] + m[3] * ny,
+        width: m[0] * nw,
+        height: m[3] * nh,
+      };
+      for (const axis of ["x", "y"] as const) {
+        const at = snapped[axis];
+        const guide = at === null ? null : snapGuide(rect, targets, axis, at);
+        if (guide) guides.push(guide);
+      }
+    }
+    editor.state.set({ guides });
 
     const ops: Op[] = [];
     const single = roots.length === 1 && mode.nodes.get(roots[0] as string)?.type !== "group";
