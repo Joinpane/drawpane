@@ -1,0 +1,24 @@
+{
+  "name": "@drawpane/editor",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "Drawpane editor engine: document store, sync client, history, geometry, layout, rendering and tools. Framework-agnostic.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@drawpane/model": "workspace:*"
+  },
+  "devDependencies": {
+    "fast-check": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
