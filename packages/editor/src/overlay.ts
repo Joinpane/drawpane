@@ -8,6 +8,7 @@ import { getProp } from "@drawpane/model";
 import type { Editor } from "./editor";
 import { apply, type Point, type Rect } from "./geometry";
 import type { Interaction } from "./interaction";
+import { drawVectorOverlay } from "./tools/overlay";
 
 export interface OverlayTheme {
   signal: string;
@@ -24,6 +25,8 @@ export interface OverlayTheme {
   agent: string;
   onAgent: string;
   fontUi: string;
+  /** Coordinate tags in vector edit (defaults to fontUi). */
+  fontMono?: string;
 }
 
 const HANDLE = 7;
@@ -47,6 +50,7 @@ export function drawOverlay(
     focusMode,
     peers,
     gesture,
+    vectorEdit,
   } = editor.s;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -155,14 +159,14 @@ export function drawOverlay(
   }
 
   // Selection: each layer's outline, then one set of handles.
-  if (!editingText || selection.length > 1) {
+  if ((!editingText || selection.length > 1) && !vectorEdit) {
     for (const id of selection) {
       const corners = scene.corners(id);
       if (corners) quad(corners, theme.signal, 1.5);
     }
   }
   const frame = interaction.selectionFrame();
-  if (frame && selection.length > 0) {
+  if (frame && selection.length > 0 && !vectorEdit) {
     const corners = [
       { x: 0, y: 0 },
       { x: frame.width, y: 0 },
@@ -222,6 +226,8 @@ export function drawOverlay(
     const b = scene.bounds(hover);
     if (a && b) drawMeasurements(ctx, a, b, (p) => toScreen(p), theme);
   }
+  // Pen and vector edit: anchors, handles and the pen's rubber band.
+  drawVectorOverlay(ctx, editor, interaction, theme);
 
   // Smart guides.
   if (guides.length > 0) {

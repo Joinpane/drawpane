@@ -1,0 +1,37 @@
+/* Pen and vector edit: inspector sections and the canvas hint strip. */
+.vector-combine {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+}
+.vector-combine .dp-seg__option {
+  flex: 1;
+}
+.vector-path-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-200);
+}
+
+.vector-hints {
+  position: absolute;
+  z-index: 5;
+  bottom: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  padding: 6px var(--space-300);
+  border-radius: var(--radius-md);
+  color: var(--ink-muted);
+  font: 400 11px / 14px var(--font-ui);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.vector-hints__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
