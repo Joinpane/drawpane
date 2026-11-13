@@ -3,7 +3,13 @@
  * corner on its own), and whether a frame clips its content.
  */
 import type { Editor } from "@drawpane/editor";
-import { BLEND_MODES, type BlendMode, getProp, type NodeRecord } from "@drawpane/model";
+import {
+  BLEND_MODES,
+  type BlendMode,
+  getProp,
+  type NodeRecord,
+  propAllowed,
+} from "@drawpane/model";
 import { IconButton, NumberField, PropertyRow, PropertySection, Switch } from "@drawpane/ui";
 import { useState } from "react";
 import { common, Num, Select } from "./fields";
@@ -41,6 +47,10 @@ export function AppearanceSection({
 }) {
   const ids = nodes.map((n) => n.id);
   const clip = common(frames, "clipContent");
+  // Masks are shapes inside a group or frame (on the page they'd clip everything above).
+  const maskable = nodes.filter(
+    (n) => propAllowed(n.type, "isMask") && editor.doc.get(n.parent)?.type !== "page",
+  );
   const rounded = nodes.filter(
     (n) => n.type === "polygon" || n.type === "star" || n.type === "frame" || n.type === "rect",
   );
@@ -80,6 +90,23 @@ export function AppearanceSection({
           ariaLabel="Corner radius"
           min={0}
         />
+      ) : null}
+      {maskable.length === nodes.length ? (
+        <PropertyRow columns="label">
+          <span className="inspector__label">Mask</span>
+          <Switch
+            label="Clips the layers above"
+            checked={common(maskable, "isMask") ?? false}
+            onChange={(checked) =>
+              editor.setProp(
+                ids,
+                "isMask",
+                checked ? true : null,
+                checked ? "Use as mask" : "Remove mask",
+              )
+            }
+          />
+        </PropertyRow>
       ) : null}
       {frames.length === nodes.length ? (
         <PropertyRow columns="label">

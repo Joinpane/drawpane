@@ -1,3 +1,4 @@
+import { hasMask, maskScopes } from "@drawpane/editor";
 import { getProp, keyBetween, type NodeRecord } from "@drawpane/model";
 import { IconButton, type LayerKind, LayerRow, type PresenceSlot } from "@drawpane/ui";
 import { type KeyboardEvent, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -41,6 +42,8 @@ interface Row {
   readonly node: NodeRecord;
   readonly depth: number;
   readonly hasChildren: boolean;
+  /** "mask" for masks, "clipped" for the layers a mask clips. */
+  readonly note?: string;
 }
 
 export function LayersPanel() {
@@ -84,11 +87,16 @@ export function LayersPanel() {
     if (!pageId) return out;
     const walk = (parent: string, depth: number) => {
       const ids = editor.doc.childIds(parent);
+      const scopes = hasMask(editor.doc, parent)
+        ? new Map(maskScopes(editor.doc, parent).map((s) => [s.id, s]))
+        : null;
       for (let i = ids.length - 1; i >= 0; i--) {
         const node = editor.doc.get(ids[i] as string);
         if (!node) continue;
         const children = editor.doc.childIds(node.id);
-        out.push({ node, depth, hasChildren: children.length > 0 });
+        const scope = scopes?.get(node.id);
+        const note = scope?.isMask ? "mask" : scope?.mask ? "clipped" : undefined;
+        out.push({ node, depth, hasChildren: children.length > 0, ...(note ? { note } : {}) });
         if (children.length > 0 && !collapsed.has(node.id)) walk(node.id, depth + 1);
       }
     };
@@ -292,6 +300,7 @@ export function LayersPanel() {
                   className={dropClass}
                   style={{ position: "absolute", top: (start + i) * ROW_HEIGHT, left: 0, right: 0 }}
                   name={getProp(node.props, "name") || node.type}
+                  {...(row.note ? { note: row.note } : {})}
                   kind={kindOf(node)}
                   depth={row.depth}
                   selected={selection.includes(node.id)}
