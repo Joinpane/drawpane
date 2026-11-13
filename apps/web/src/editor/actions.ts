@@ -14,6 +14,7 @@ import {
   isMainComponent,
   type ToolId,
 } from "@drawpane/editor";
+import type { IconName } from "@drawpane/ui";
 import { isMac } from "../app/format";
 import { copySelectionAs, exportSelection } from "./exporting";
 
@@ -55,7 +56,7 @@ export interface Action {
   readonly id: string;
   readonly label: string;
   readonly group: "Tools" | "Edit" | "Arrange" | "Layer" | "View" | "File" | "Help";
-  readonly icon?: string;
+  readonly icon?: IconName;
   readonly shortcut?: Shortcut;
   readonly keywords?: string;
   /** Hidden from the command bar and disabled when false. */
@@ -74,7 +75,7 @@ const BOOLEAN_KEYS: Record<BooleanOp, string> = {
 const canEditSelection = (e: Editor) => e.canEdit && e.s.selection.length > 0;
 const canEdit = (e: Editor) => e.canEdit;
 
-function tool(id: ToolId, label: string, key: string, icon: string): Action {
+function tool(id: ToolId, label: string, key: string, icon: IconName): Action {
   return {
     id: `tool.${id}`,
     label,
@@ -165,6 +166,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.copy",
     label: "Copy",
     group: "Edit",
+    icon: "copy",
     shortcut: { key: "c", mod: true },
     enabled: hasSelection,
     run: ({ copy }) => copy(),
@@ -173,6 +175,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.cut",
     label: "Cut",
     group: "Edit",
+    icon: "cut",
     shortcut: { key: "x", mod: true },
     enabled: canEditSelection,
     run: ({ cut }) => cut(),
@@ -181,6 +184,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.paste",
     label: "Paste",
     group: "Edit",
+    icon: "paste",
     shortcut: { key: "v", mod: true },
     enabled: canEdit,
     run: ({ paste }) => paste(),
@@ -189,6 +193,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.duplicate",
     label: "Duplicate",
     group: "Edit",
+    icon: "duplicate",
     shortcut: { key: "d", mod: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.duplicate(),
@@ -197,6 +202,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.delete",
     label: "Delete",
     group: "Edit",
+    icon: "trash",
     shortcut: { key: "backspace" },
     keywords: "remove",
     enabled: canEditSelection,
@@ -206,6 +212,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.copyAsPng",
     label: "Copy as PNG",
     group: "Edit",
+    icon: "image",
     shortcut: { key: "c", mod: true, shift: true },
     keywords: "image clipboard screenshot",
     enabled: hasSelection,
@@ -215,6 +222,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.copyAsSvg",
     label: "Copy as SVG",
     group: "Edit",
+    icon: "code",
     keywords: "vector markup clipboard",
     enabled: hasSelection,
     run: ({ editor }) => void copySelectionAs(editor, "svg"),
@@ -223,6 +231,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.copyAsCss",
     label: "Copy as CSS",
     group: "Edit",
+    icon: "code",
     keywords: "code style clipboard",
     enabled: hasSelection,
     run: ({ editor }) => void copySelectionAs(editor, "css"),
@@ -231,6 +240,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.copyProperties",
     label: "Copy properties",
     group: "Edit",
+    icon: "eyedropper",
     shortcut: { key: "c", mod: true, alt: true },
     keywords: "style fill stroke effects",
     enabled: (e) => e.s.selection.length === 1,
@@ -242,6 +252,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.pasteProperties",
     label: "Paste properties",
     group: "Edit",
+    icon: "paste",
     shortcut: { key: "v", mod: true, alt: true },
     keywords: "style fill stroke effects apply",
     enabled: (e) => e.canEdit && e.s.selection.length > 0 && e.hasCopiedProperties,
@@ -251,6 +262,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.selectAll",
     label: "Select all",
     group: "Edit",
+    icon: "select-all",
     shortcut: { key: "a", mod: true },
     run: ({ editor }) => editor.selectAll(),
   },
@@ -301,6 +313,7 @@ export const ACTIONS: readonly Action[] = [
     id: "layer.ungroup",
     label: "Ungroup",
     group: "Layer",
+    icon: "ungroup",
     shortcut: { key: "g", mod: true, shift: true },
     // Groups, and frames with something inside (ungrouping a frame removes it).
     enabled: (e) =>
@@ -344,6 +357,7 @@ export const ACTIONS: readonly Action[] = [
     id: "layer.rename",
     label: "Rename",
     group: "Layer",
+    icon: "rename",
     shortcut: { key: "r", mod: true },
     keywords: "name label",
     enabled: (e) => e.canEdit && e.s.selection.length === 1,
@@ -449,6 +463,7 @@ export const ACTIONS: readonly Action[] = [
       id: `vector.${op}`,
       label: `${BOOLEAN_LABELS[op]} selection`,
       group: "Layer",
+      icon: op,
       shortcut: { key: BOOLEAN_KEYS[op], alt: true, shift: true },
       keywords: "boolean combine shapes",
       enabled: (e) => e.canBoolean(),
@@ -460,6 +475,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.forward",
     label: "Bring forward",
     group: "Arrange",
+    icon: "arrow-up",
     shortcut: { key: "]", mod: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.reorder("forward"),
@@ -468,6 +484,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.backward",
     label: "Send backward",
     group: "Arrange",
+    icon: "arrow-down",
     shortcut: { key: "[", mod: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.reorder("backward"),
@@ -476,6 +493,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.front",
     label: "Bring to front",
     group: "Arrange",
+    icon: "bring-front",
     shortcut: { key: "]" },
     enabled: canEditSelection,
     run: ({ editor }) => editor.reorder("front"),
@@ -484,6 +502,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.back",
     label: "Send to back",
     group: "Arrange",
+    icon: "send-back",
     shortcut: { key: "[" },
     enabled: canEditSelection,
     run: ({ editor }) => editor.reorder("back"),
@@ -492,6 +511,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.alignLeft",
     label: "Align left",
     group: "Arrange",
+    icon: "align-left",
     shortcut: { key: "a", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("left"),
@@ -500,6 +520,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.alignCenter",
     label: "Align horizontal centers",
     group: "Arrange",
+    icon: "align-center",
     shortcut: { key: "h", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("center"),
@@ -508,6 +529,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.alignRight",
     label: "Align right",
     group: "Arrange",
+    icon: "align-right",
     shortcut: { key: "d", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("right"),
@@ -516,6 +538,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.alignTop",
     label: "Align top",
     group: "Arrange",
+    icon: "align-top",
     shortcut: { key: "w", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("top"),
@@ -524,6 +547,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.alignMiddle",
     label: "Align vertical centers",
     group: "Arrange",
+    icon: "align-middle",
     shortcut: { key: "v", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("middle"),
@@ -532,6 +556,7 @@ export const ACTIONS: readonly Action[] = [
     id: "arrange.alignBottom",
     label: "Align bottom",
     group: "Arrange",
+    icon: "align-bottom",
     shortcut: { key: "s", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("bottom"),
@@ -658,6 +683,7 @@ export const ACTIONS: readonly Action[] = [
     id: "view.zoom100",
     label: "Zoom to 100%",
     group: "View",
+    icon: "actual-size",
     shortcut: { key: "0", shift: true },
     run: ({ editor }) => editor.zoomTo(1),
   },
@@ -665,6 +691,7 @@ export const ACTIONS: readonly Action[] = [
     id: "view.zoomFit",
     label: "Zoom to fit",
     group: "View",
+    icon: "fit",
     shortcut: { key: "1", shift: true },
     run: ({ editor }) => editor.zoomToFit(),
   },
@@ -672,6 +699,7 @@ export const ACTIONS: readonly Action[] = [
     id: "view.zoomSelection",
     label: "Zoom to selection",
     group: "View",
+    icon: "search",
     shortcut: { key: "2", shift: true },
     enabled: hasSelection,
     run: ({ editor }) => editor.zoomToSelection(),
@@ -688,6 +716,7 @@ export const ACTIONS: readonly Action[] = [
     id: "view.rulers",
     label: "Rulers",
     group: "View",
+    icon: "ruler",
     shortcut: { key: "r", shift: true },
     keywords: "ruler guides measure",
     run: ({ editor }) => editor.state.set({ rulers: !editor.s.rulers }),
@@ -705,6 +734,7 @@ export const ACTIONS: readonly Action[] = [
     id: "view.clearGuides",
     label: "Remove all guides",
     group: "View",
+    icon: "close",
     keywords: "ruler guides delete clear",
     enabled: (e) => e.canEdit && e.guideCount() > 0,
     run: ({ editor }) => void editor.clearGuides(),

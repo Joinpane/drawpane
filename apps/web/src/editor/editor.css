@@ -1627,3 +1627,22 @@
     animation: none;
   }
 }
+
+/* Renaming a frame on its canvas label */
+.frame-name-input {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid var(--signal);
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: 500 11px / 18px var(--font-ui);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--signal-soft);
+}
+.frame-name-input::selection {
+  background: var(--signal-soft);
+}

@@ -12,8 +12,9 @@ import { apply, type Point, type Rect } from "./geometry";
 import { gridLines, gridTracks, placedGuides, visibleGrids } from "./grids";
 import type { ImageCache } from "./images";
 import type { Interaction } from "./interaction";
+import { frameLabels, LABEL_FONT } from "./labels";
 import { type GridGeometry, gridGeometry, trackLabel } from "./layout";
-import { drawPrototypeOverlay, flowStartScreens } from "./prototype/overlay";
+import { drawPrototypeOverlay } from "./prototype/overlay";
 import { drawVectorOverlay } from "./tools/overlay";
 
 export interface OverlayTheme {
@@ -107,31 +108,27 @@ export function drawOverlay(
     if (corners) quad(corners, theme.component, 1, [4, 3]);
   }
 
-  // Artboard labels: names above top-level frames.
-  ctx.font = `500 11px ${theme.fontUi}`;
-  ctx.textBaseline = "bottom";
-  const flowStarts = flowStartScreens(editor);
-  for (const id of doc.childIds(pageId)) {
-    const node = doc.get(id);
-    if (node?.type !== "frame" || node.props.visible === false || flowStarts.has(id)) continue;
-    const corners = scene.corners(id);
-    if (!corners) continue;
-    const p = toScreen(corners[0] as Point);
-    const selected = selection.includes(id);
-    const isComponent = getProp(node.props, "isComponent") || getProp(node.props, "isComponentSet");
-    const isInstance = getProp(node.props, "instanceOf") !== null;
-    let x = p.x;
-    if (isComponent || isInstance) {
+  // Artboard labels: names above top-level frames (the one being renamed is an input instead).
+  ctx.font = LABEL_FONT;
+  ctx.textBaseline = "alphabetic";
+  for (const label of frameLabels(editor)) {
+    if (label.id === editor.s.renamingFrame) continue;
+    const selected = selection.includes(label.id);
+    const hovered = hover === label.id;
+    const isComponentish = label.kind !== "frame";
+    if (isComponentish) {
       // Components and instances wear the component colour, with a small diamond.
-      drawDiamond(ctx, x + 4, p.y - 9.5, isComponent, theme.component);
-      x += 12;
+      drawDiamond(
+        ctx,
+        label.box.x + 4,
+        label.baseline - 3.5,
+        label.kind === "component",
+        theme.component,
+      );
     }
-    ctx.fillStyle = selected
-      ? theme.signal
-      : isComponent || isInstance
-        ? theme.componentInk
-        : theme.inkMuted;
-    ctx.fillText(getProp(node.props, "name") || "Frame", x, p.y - 4);
+    ctx.fillStyle =
+      selected || hovered ? theme.signal : isComponentish ? theme.componentInk : theme.inkMuted;
+    if (label.text) ctx.fillText(label.text, label.textX, label.baseline);
   }
 
   // Grid layout: the cells of a selected grid, or of the grid a selected or
