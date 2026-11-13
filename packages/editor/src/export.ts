@@ -10,14 +10,20 @@ import { markerLength } from "./markers";
 import type { CanvasRenderer } from "./render";
 import type { Scene } from "./scene";
 
-export type ExportFormat = "png" | "jpeg" | "webp" | "svg";
-export type RasterFormat = Exclude<ExportFormat, "svg">;
+export type ExportFormat = "png" | "jpeg" | "webp" | "svg" | "pdf";
+/** Formats drawn into pixels; SVG and PDF stay vector, at 1×. */
+export type RasterFormat = Exclude<ExportFormat, "svg" | "pdf">;
+
+/** Whether a format is vector (scale doesn't apply). */
+export const isVectorFormat = (format: ExportFormat): format is "svg" | "pdf" =>
+  format === "svg" || format === "pdf";
 
 export const EXPORT_MIME: Record<ExportFormat, string> = {
   png: "image/png",
   jpeg: "image/jpeg",
   webp: "image/webp",
   svg: "image/svg+xml",
+  pdf: "application/pdf",
 };
 
 export const EXPORT_EXTENSION: Record<ExportFormat, string> = {
@@ -25,6 +31,7 @@ export const EXPORT_EXTENSION: Record<ExportFormat, string> = {
   jpeg: "jpg",
   webp: "webp",
   svg: "svg",
+  pdf: "pdf",
 };
 
 /** Browsers refuse canvases past about 16k on a side or 268M pixels; stay well inside. */
@@ -257,6 +264,6 @@ export function exportFileName(name: string, format: ExportFormat, scale = 1): s
       .replace(/[^\x20-\uffff]+/gu, "-")
       .replace(/^[\s.]+|[\s.]+$/g, "")
       .slice(0, 120) || "Export";
-  const suffix = format !== "svg" && scale !== 1 ? `@${scale}x` : "";
+  const suffix = !isVectorFormat(format) && scale !== 1 ? `@${scale}x` : "";
   return `${base}${suffix}.${EXPORT_EXTENSION[format]}`;
 }

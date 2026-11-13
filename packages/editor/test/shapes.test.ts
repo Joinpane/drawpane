@@ -167,6 +167,42 @@ describe("export", () => {
     ).toBe("#808080");
   });
 
+  it("draws image fills placed by their scale mode, clipped to the shape", () => {
+    const ref = "a".repeat(64);
+    const editor = editorWith([
+      {
+        id: "i",
+        type: "rect",
+        width: 200,
+        height: 100,
+        cornerRadius: 12,
+        fills: [{ type: "image", ref, scaleMode: "fill", opacity: 0.5 }],
+      },
+      {
+        id: "t",
+        type: "rect",
+        width: 100,
+        height: 100,
+        fills: [{ type: "image", ref, scaleMode: "tile" }],
+      },
+    ]);
+    const images = (r: string) =>
+      r === ref ? { href: "data:image/png;base64,AAAA", width: 100, height: 100 } : null;
+    const bounds = { x: -50, y: -50, width: 300, height: 300 };
+    const out = exportSvg(editor.scene, editor.measurer, ["i"], bounds, { images });
+    // Fill covers 200 × 100 with a square image: 200 × 200, centred vertically.
+    expect(out).toContain(
+      '<image x="0" y="-50" width="200" height="200" href="data:image/png;base64,AAAA"',
+    );
+    expect(out).toMatch(/<clipPath id="[^"]+"><rect[^>]*rx="12"/);
+    expect(out).toContain('opacity="0.5"');
+    const tiled = exportSvg(editor.scene, editor.measurer, ["t"], bounds, { images });
+    expect(tiled).toContain('<pattern id="');
+    expect(tiled).toContain('patternUnits="userSpaceOnUse" width="100" height="100"');
+    // Without the image, the fill is left out rather than drawn wrong.
+    expect(exportSvg(editor.scene, editor.measurer, ["i"], bounds)).not.toContain("<image");
+  });
+
   it("draws markers in the stroke's paint", () => {
     const editor = editorWith([
       {

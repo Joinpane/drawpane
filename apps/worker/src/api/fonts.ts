@@ -13,6 +13,9 @@
  * R2 holds each once. A preview stylesheet may only subset a family to its
  * own name, which keeps the number of distinct files bounded by the catalog.
  *
+ * Browsers get woff2. `format=ttf` asks for TrueType instead, one static
+ * file per weight, for embedding in exported PDFs.
+ *
  * Self-hosters who don't want any traffic to Google set `GOOGLE_FONTS=off`.
  */
 import { Hono } from "hono";
@@ -23,14 +26,17 @@ const GOOGLE_CSS = "https://fonts.googleapis.com/css2";
 const GSTATIC = "https://fonts.gstatic.com/";
 /** Where rewritten stylesheets point font URLs: this router's `/gstatic/` route. */
 export const GSTATIC_PROXY = "/api/fonts/gstatic/";
-/** Google serves woff2 with unicode-range subsets only to browsers it recognises. */
+/** Google serves woff2 with unicode-range subsets only to browsers it recognises… */
 const BROWSER_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
+
+/** …and static TrueType files, one per weight, to anything else. */
+const PLAIN_UA = "Drawpane-Fonts/1.0";
 
 const FAMILY = /^[A-Za-z0-9][A-Za-z0-9 ]{0,63}$/;
 const VARIANT = /^([1-9]00)(i?)$/;
 /** A versioned font file. */
-const STATIC_FILE = /^s\/[a-z0-9]+\/v\d+\/[A-Za-z0-9_-]+\.woff2$/;
+const STATIC_FILE = /^s\/[a-z0-9]+\/v\d+\/[A-Za-z0-9_-]+\.(woff2|ttf)$/;
 /** The parts of a kit Google builds for a `text=` subset. */
 const KIT = /^[A-Za-z0-9_-]{1,1024}$/;
 const SKEY = /^[a-f0-9]{1,64}$/;
@@ -92,8 +98,15 @@ function requireEnabled(env: { GOOGLE_FONTS?: string }): void {
     throw new HttpError(404, "not_found", "Google Fonts are turned off on this server.");
 }
 
-const isWoff2 = (bytes: Uint8Array) =>
-  bytes[0] === 0x77 && bytes[1] === 0x4f && bytes[2] === 0x46 && bytes[3] === 0x32;
+/** The font format a file's first bytes declare, or null when it isn't a font we serve. */
+function fontFormat(bytes: Uint8Array): "woff2" | "ttf" | null {
+  const tag = String.fromCharCode(...bytes.subarray(0, 4));
+  if (tag === "wOF2") return "woff2";
+  if (tag === "\x00\x01\x00\x00" || tag === "true" || tag === "OTTO") return "ttf";
+  return null;
+}
+
+const MIME = { woff2: "font/woff2", ttf: "font/ttf" } as const;
 
 export const fonts = new Hono<AppContext>()
   /** What the font picker may offer on this server. */
@@ -113,6 +126,8 @@ export const fonts = new Hono<AppContext>()
       throw badRequest("Variants are weights like 400, or 400i for italic.");
     const text = c.req.query("text") ?? null;
     if (text !== null && text !== family) throw badRequest("Previews show the family's name.");
+    const format = c.req.query("format") ?? "woff2";
+    if (format !== "woff2" && format !== "ttf") throw badRequest("Formats are woff2 and ttf.");
     const upstream = googleStylesheetUrl(family, variants, text);
 
     const cache = caches.default;
@@ -122,7 +137,9 @@ export const fonts = new Hono<AppContext>()
     const hit = await cache.match(cacheKey);
     if (hit) return hit;
 
-    const response = await fetch(upstream, { headers: { "user-agent": BROWSER_UA } });
+    const response = await fetch(upstream, {
+      headers: { "user-agent": format === "ttf" ? PLAIN_UA : BROWSER_UA },
+    });
     if (!response.ok) throw notFound(`Google Fonts has no family called ${family}.`);
     const out = new Response(rewriteStylesheet(await response.text()), {
       headers: { "content-type": "text/css; charset=utf-8", "cache-control": STYLESHEET_CACHE },
@@ -137,7 +154,8 @@ export const fonts = new Hono<AppContext>()
     const path = url.pathname.slice(GSTATIC_PROXY.length);
     const key = fontFileKey(path, url.searchParams);
     if (!key) throw notFound("That isn't a font file.");
-    const headers = { "content-type": "font/woff2", "cache-control": IMMUTABLE };
+    const expected = path.endsWith(".ttf") ? "ttf" : "woff2";
+    const headers = { "content-type": MIME[expected], "cache-control": IMMUTABLE };
 
     const stored = await c.env.FILES.get(key);
     if (stored) return new Response(stored.body, { headers });
@@ -147,8 +165,8 @@ export const fonts = new Hono<AppContext>()
     });
     if (!response.ok) throw notFound("Google Fonts doesn't have that file.");
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (!isWoff2(bytes) || bytes.byteLength > FONT_MAX_BYTES)
+    if (fontFormat(bytes) !== expected || bytes.byteLength > FONT_MAX_BYTES)
       throw notFound("That isn't a font file.");
-    await c.env.FILES.put(key, bytes, { httpMetadata: { contentType: "font/woff2" } });
+    await c.env.FILES.put(key, bytes, { httpMetadata: { contentType: MIME[expected] } });
     return new Response(bytes, { headers });
   });
