@@ -13,6 +13,7 @@ import {
 import { getProp } from "@drawpane/model";
 import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
+import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { useEditor, useEditorState } from "./hooks";
 import { imagesFor } from "./media";
@@ -135,14 +136,20 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       schedule();
     });
 
-    // Web fonts arrive after first paint: re-measure and repaint when they do.
-    const onFonts = () => {
+    // Web fonts arrive after first paint: re-measure and repaint when they do,
+    // and fix the stored size of text that was measured with a fallback.
+    const offFonts = watchDocumentFonts(editor.doc);
+    const onFonts = (event?: FontFaceSetLoadEvent) => {
       measurer.invalidate();
+      if (event) {
+        const families = loadedFamilies(event.fontfaces);
+        if (families.size > 0) editor.refitText(families);
+      }
       contentDirty = overlayDirty = true;
       schedule();
     };
     document.fonts.addEventListener("loadingdone", onFonts);
-    void document.fonts.load(fontString({})).then(onFonts);
+    void document.fonts.load(fontString({})).then(() => onFonts());
 
     const themeObserver = new MutationObserver(() => {
       theme = readTheme();
@@ -162,6 +169,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       offImages();
       offState();
       document.fonts.removeEventListener("loadingdone", onFonts);
+      offFonts();
       if (frame) cancelAnimationFrame(frame);
     };
   }, [editor, interaction, renderer, measurer]);

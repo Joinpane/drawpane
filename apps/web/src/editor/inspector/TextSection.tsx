@@ -14,32 +14,30 @@ import {
   Tooltip,
 } from "@drawpane/ui";
 import { useState } from "react";
+import { type FontFamily, fonts, WEIGHT_NAMES } from "../../fonts/fonts";
+import { FontPicker, useFonts } from "./FontPicker";
 import { common, Num, Select } from "./fields";
 
-const FONTS = [
-  "Instrument Sans",
-  "Instrument Serif",
-  "JetBrains Mono",
-  "system-ui",
-  "Arial",
-  "Georgia",
-  "Helvetica",
-  "Times New Roman",
-  "Courier New",
-  "Verdana",
-];
-
-const WEIGHTS = [
-  { value: 100, label: "Thin" },
-  { value: 200, label: "Extra light" },
-  { value: 300, label: "Light" },
-  { value: 400, label: "Regular" },
-  { value: 500, label: "Medium" },
-  { value: 600, label: "Semibold" },
-  { value: 700, label: "Bold" },
-  { value: 800, label: "Extra bold" },
-  { value: 900, label: "Black" },
-] as const;
+/**
+ * The weights a family offers (every hundred across a variable font's
+ * range), plus the current one if the family lacks it, so it still shows.
+ */
+function weightOptions(info: FontFamily | null, current: number | null) {
+  let weights: number[] = info
+    ? info.variable
+      ? [100, 200, 300, 400, 500, 600, 700, 800, 900].filter(
+          (w) => w >= (info.weights[0] ?? 100) && w <= (info.weights.at(-1) ?? 900),
+        )
+      : [...new Set([...info.weights, ...info.italics])].sort((a, b) => a - b)
+    : [100, 200, 300, 400, 500, 600, 700, 800, 900];
+  if (weights.length === 0) weights = [100, 200, 300, 400, 500, 600, 700, 800, 900];
+  if (current !== null && !weights.includes(current))
+    weights = [...weights, current].sort((a, b) => a - b);
+  return weights.map((value) => ({
+    value,
+    label: `${WEIGHT_NAMES[value] ?? value}${info && !info.variable && !info.weights.includes(value) && !info.italics.includes(value) ? " (missing)" : ""}`,
+  }));
+}
 
 type LineHeight = PropValues["lineHeight"];
 type LetterSpacing = PropValues["letterSpacing"];
@@ -128,6 +126,8 @@ export function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeReco
   const ids = nodes.map((n) => n.id);
   const family = common(nodes, "fontFamily");
   const italic = common(nodes, "fontStyle") === "italic";
+  useFonts();
+  const info = family ? fonts.get(family) : null;
   const set = <
     K extends
       | "fontFamily"
@@ -148,20 +148,12 @@ export function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeReco
 
   return (
     <PropertySection title="Text">
-      <Select
-        label="Font"
-        value={family}
-        options={[...new Set([...(family ? [family] : []), ...FONTS])].map((f) => ({
-          value: f,
-          label: f,
-        }))}
-        onChange={(v) => set("fontFamily", v, "Font")}
-      />
+      <FontPicker editor={editor} nodes={nodes} />
       <div className="inspector__weight">
         <Select
           label="Weight"
           value={common(nodes, "fontWeight")}
-          options={WEIGHTS}
+          options={weightOptions(info, common(nodes, "fontWeight"))}
           onChange={(v) => set("fontWeight", v, "Font weight")}
         />
         <Tooltip label="Italic" describe={false}>
@@ -170,6 +162,13 @@ export function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeReco
             className="inspector__italic"
             aria-label="Italic"
             aria-pressed={italic}
+            disabled={
+              !italic &&
+              info !== null &&
+              info.italics.length === 0 &&
+              !info.variable &&
+              info.source !== "system"
+            }
             onClick={() =>
               set("fontStyle", italic ? null : "italic", italic ? "Upright" : "Italic")
             }
