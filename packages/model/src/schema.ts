@@ -19,6 +19,8 @@ export const NODE_TYPES = [
   "group",
   "rect",
   "ellipse",
+  "polygon",
+  "star",
   "line",
   "path",
   "text",
@@ -31,6 +33,8 @@ export const LAYER_TYPES = [
   "group",
   "rect",
   "ellipse",
+  "polygon",
+  "star",
   "line",
   "path",
   "text",
@@ -47,6 +51,8 @@ export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]
   group: LAYER_TYPES,
   rect: [],
   ellipse: [],
+  polygon: [],
+  star: [],
   line: [],
   path: [],
   text: [],
@@ -97,7 +103,12 @@ const paintBase = {
 export const SolidPaint = z.object({ type: z.literal("solid"), color: Color, ...paintBase });
 export const GradientStop = z.object({ position: unit, color: Color });
 export const GradientPaint = z.object({
-  type: z.enum(["linear", "radial"]),
+  /**
+   * Linear runs from `from` to `to`; radial spreads from `from` out to the
+   * distance of `to`; angular sweeps clockwise around `from`, starting in the
+   * direction of `to`.
+   */
+  type: z.enum(["linear", "radial", "angular"]),
   /** Start and end handles in the node's unit square (0,0 top-left to 1,1 bottom-right). */
   from: Point,
   to: Point,
@@ -239,9 +250,18 @@ function prop<S extends z.ZodType>(
 const ALL = NODE_TYPES;
 const LAYERS = LAYER_TYPES;
 /** Types with their own geometry. Groups derive theirs from their children. */
-const GEOMETRY = ["frame", "rect", "ellipse", "line", "path", "text"] as const;
-const SHAPES = ["frame", "rect", "ellipse", "line", "path", "text"] as const;
+const GEOMETRY = ["frame", "rect", "ellipse", "polygon", "star", "line", "path", "text"] as const;
+const SHAPES = ["frame", "rect", "ellipse", "polygon", "star", "line", "path", "text"] as const;
+/** Shapes whose corners round with one radius. */
+const ROUNDED = ["frame", "rect", "polygon", "star"] as const;
+/** Shapes with four corners that can each have their own radius. */
 const CORNERS = ["frame", "rect"] as const;
+/** Shapes with open ends: line caps and end markers apply. */
+const OPEN_ENDS = ["line", "path"] as const;
+
+/** What an open stroke's end looks like (Figma's arrow and marker ends). */
+export const STROKE_MARKERS = ["none", "arrow", "triangle", "circle", "diamond", "bar"] as const;
+export type StrokeMarker = (typeof STROKE_MARKERS)[number];
 const CONTAINERS = ["frame"] as const;
 
 export const PROPS = {
@@ -267,12 +287,31 @@ export const PROPS = {
   strokes: prop(z.array(Paint).max(32), [], SHAPES),
   strokeWeight: prop(nonNegative, 1, SHAPES),
   strokeAlign: prop(z.enum(["inside", "center", "outside"]), "inside", SHAPES),
-  strokeCap: prop(z.enum(["none", "round", "square"]), "none", ["line", "path"]),
+  strokeCap: prop(z.enum(["none", "round", "square"]), "none", OPEN_ENDS),
+  /** Markers at the start and end of a line or open path: arrows, dots, bars. */
+  markerStart: prop(z.enum(STROKE_MARKERS), "none", OPEN_ENDS),
+  markerEnd: prop(z.enum(STROKE_MARKERS), "none", OPEN_ENDS),
   strokeJoin: prop(z.enum(["miter", "round", "bevel"]), "miter", SHAPES),
   strokeDashes: prop(z.array(nonNegative).max(16), [], SHAPES),
   effects: prop(z.array(Effect).max(32), [], LAYERS),
 
-  cornerRadius: prop(nonNegative, 0, CORNERS),
+  cornerRadius: prop(nonNegative, 0, ROUNDED),
+
+  // Polygons and stars: points around an ellipse that fills the box.
+  pointCount: prop(
+    z
+      .number()
+      .int()
+      .refine((n) => n >= 3 && n <= 60, "must be between 3 and 60"),
+    3,
+    ["polygon", "star"],
+  ),
+  /** A star's inner points as a fraction of its outer radius. */
+  innerRadius: prop(
+    finite.refine((n) => n > 0 && n <= 1, "must be more than 0 and at most 1"),
+    0.382,
+    ["star"],
+  ),
   /** Per-corner radii (top-left, top-right, bottom-right, bottom-left); overrides cornerRadius. */
   cornerRadii: prop(
     z.tuple([nonNegative, nonNegative, nonNegative, nonNegative]).nullable(),

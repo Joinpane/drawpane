@@ -164,6 +164,34 @@
   padding: 0 var(--space-100);
   box-sizing: border-box;
 }
+/* The shape tool and its menu of shapes. */
+.toolbar__group {
+  display: inline-flex;
+  align-items: center;
+}
+.toolbar__more {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: var(--size-control-md);
+  margin-left: -2px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--icon);
+  cursor: pointer;
+  transition: background var(--duration-hover) ease-out;
+}
+.toolbar__more:hover,
+.toolbar__more[aria-expanded="true"] {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+.toolbar__more:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
 .toolbar__sep {
   width: 1px;
   height: 20px;

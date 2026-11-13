@@ -722,3 +722,16 @@
   height: 16px;
   color: var(--icon);
 }
+
+/* Stroke ends: a label, then start, swap, end across the full width. */
+.stroke-ends-block {
+  display: grid;
+  gap: var(--space-100);
+}
+.stroke-ends {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-100);
+  min-width: 0;
+}
