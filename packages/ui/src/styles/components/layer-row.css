@@ -1,0 +1,101 @@
+.dp-layer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-100);
+  box-sizing: border-box;
+  height: var(--size-control-md);
+  padding-right: 6px;
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font: var(--type-ui-body);
+  cursor: default;
+}
+.dp-layer:hover {
+  background: var(--surface-hover);
+}
+.dp-layer.is-selected {
+  background: var(--signal-soft);
+  font-weight: 600;
+}
+.dp-layer__caret {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 12px;
+  color: var(--ink-muted);
+}
+.dp-layer__icon {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--icon);
+}
+.dp-layer__name {
+  color: var(--component-ink);
+}
+.dp-layer.is-component .dp-layer__icon {
+  color: var(--component);
+}
+.dp-layer.is-component .dp-layer__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dp-layer.is-hidden .dp-layer__name,
+.dp-layer.is-hidden .dp-layer__icon {
+  color: var(--ink-muted);
+}
+.dp-layer__rename {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 20px;
+  margin: 0 0 0 -3px;
+  padding: 0 2px;
+  border: 1px solid var(--signal);
+  border-radius: var(--radius-xs);
+  outline: none;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: inherit;
+  caret-color: var(--signal);
+}
+.dp-layer__presence {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+}
+.dp-layer__actions {
+  display: inline-flex;
+  gap: var(--space-100);
+  color: var(--icon);
+  opacity: 0;
+}
+.dp-layer:hover .dp-layer__actions,
+.dp-layer:focus-within .dp-layer__actions,
+.dp-layer__actions.is-pinned {
+  opacity: 1;
+}
+.dp-layer__toggle {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.dp-layer__toggle:hover {
+  color: var(--ink);
+}
+.dp-layer__actions > .dp-icon {
+  margin: 2px;
+}

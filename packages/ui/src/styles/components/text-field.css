@@ -1,0 +1,48 @@
+/* TextField: forms outside the editor */
+.dp-tf {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+}
+.dp-tf__label {
+  font: var(--type-ui-strong);
+  color: var(--ink);
+}
+.dp-tf__input {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--size-control-lg);
+  padding: 0 var(--space-300);
+  border: 1px solid var(--line-control);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: var(--type-page-body);
+  caret-color: var(--signal);
+}
+.dp-tf__input::placeholder {
+  color: var(--ink-muted);
+}
+.dp-tf__input:focus-visible {
+  border-color: var(--signal);
+}
+.dp-tf__input:disabled {
+  background: var(--surface-sunken);
+  border-color: var(--line-strong);
+  color: var(--ink-disabled);
+  cursor: not-allowed;
+}
+.dp-tf--error .dp-tf__input {
+  border-color: var(--danger);
+}
+.dp-tf__msg {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-100);
+  font: var(--type-ui-body);
+  color: var(--ink-muted);
+}
+.dp-tf__msg--error {
+  color: var(--danger);
+}
