@@ -7,6 +7,8 @@ import { defineConfig, devices } from "@playwright/test";
  * instead, with E2E_SETUP_TOKEN for its first-run setup.
  */
 const external = process.env.E2E_BASE_URL;
+// e2e/server.mjs reads the same variable, so checkouts can run side by side.
+const port = process.env.E2E_PORT ?? "8788";
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
@@ -14,7 +16,7 @@ export default defineConfig({
   timeout: 60_000,
   reporter: [["list"]],
   use: {
-    baseURL: external ?? "http://localhost:8788",
+    baseURL: external ?? `http://localhost:${port}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 900 },
@@ -24,7 +26,7 @@ export default defineConfig({
     : {
         webServer: {
           command: "node e2e/server.mjs",
-          url: "http://localhost:8788/api/health",
+          url: `http://localhost:${port}/api/health`,
           reuseExistingServer: false,
           timeout: 120_000,
         },
