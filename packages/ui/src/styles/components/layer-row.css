@@ -101,3 +101,10 @@
 .dp-layer__actions > .dp-icon {
   margin: 2px;
 }
+
+.dp-layer__note {
+  flex: none;
+  margin-left: var(--space-100);
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+}

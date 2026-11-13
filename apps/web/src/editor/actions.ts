@@ -272,6 +272,16 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.group(),
   },
   {
+    id: "layer.mask",
+    label: "Use as mask",
+    group: "Layer",
+    icon: "ellipse",
+    shortcut: { key: "m", mod: true, alt: true },
+    keywords: "clip crop shape avatar",
+    enabled: canEditSelection,
+    run: ({ editor }) => editor.toggleMask(),
+  },
+  {
     id: "layer.ungroup",
     label: "Ungroup",
     group: "Layer",
