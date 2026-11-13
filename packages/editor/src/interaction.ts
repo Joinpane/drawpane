@@ -763,6 +763,11 @@ export class Interaction {
         const h = box.height * sy;
         newBox = { x: lc.x - w / 2, y: lc.y - h / 2, width: w, height: h };
       }
+      if (node.type === "path") {
+        // Never collapse a path to zero: its shape couldn't be scaled back.
+        if (box.width > 0 && newBox.width < 0.01) newBox = { ...newBox, width: 0.01 };
+        if (box.height > 0 && newBox.height < 0.01) newBox = { ...newBox, height: 0.01 };
+      }
       const set = (prop: "x" | "y" | "width" | "height", value: number) => {
         const v = round2(value);
         if (v !== round2(getProp(node.props, prop)))

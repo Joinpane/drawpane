@@ -554,14 +554,16 @@ export class Editor {
 
   /**
    * Moves a node to a new parent and order key without moving it on screen:
-   * its geometry converts into the new coordinate space.
+   * its geometry converts into the new coordinate space. When the new parent
+   * is created in the same commit (a new group), pass the existing node whose
+   * coordinate space it will share as `spaceParent`.
    */
-  reparentOps(id: string, parent: string, key: string): Op[] {
+  reparentOps(id: string, parent: string, key: string, spaceParent = parent): Op[] {
     const node = this.doc.get(id);
     if (!node) return [];
     const ops: Op[] = [{ op: "move", id, parent, key }];
     const fromSpace = this.scene.spaceMatrix(this.scene.spaceOwner(node.parent));
-    const toSpace = this.scene.spaceMatrix(this.scene.spaceOwner(parent));
+    const toSpace = this.scene.spaceMatrix(this.scene.spaceOwner(spaceParent));
     const sameSpace = fromSpace.every((v, i) => Math.abs(v - (toSpace[i] as number)) < 1e-9);
     if (sameSpace) return ops;
     const convert = (n: NodeRecord) => {
@@ -611,7 +613,7 @@ export class Editor {
     ];
     const keys = keysBetween(null, null, ids.length);
     for (const [i, id] of ids.entries())
-      ops.push(...this.reparentOps(id, groupId, keys[i] as string));
+      ops.push(...this.reparentOps(id, groupId, keys[i] as string, parent));
     if (this.commit(ops, "Group")) this.select([groupId]);
   }
 
