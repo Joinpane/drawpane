@@ -11,6 +11,7 @@ import {
   type ToolId,
 } from "@drawpane/editor";
 import { isMac } from "../app/format";
+import { exportSelection } from "./exporting";
 
 export interface Shortcut {
   /** `KeyboardEvent.key`, lowercased. */
@@ -425,6 +426,16 @@ export const ACTIONS: readonly Action[] = [
     icon: "inspector",
     shortcut: { key: "i", mod: true, alt: true },
     run: ({ toggleRightPane }) => toggleRightPane(),
+  },
+  {
+    id: "file.export",
+    label: "Export selection",
+    group: "File",
+    icon: "export",
+    shortcut: { key: "e", mod: true, shift: true },
+    keywords: "png jpeg webp svg download image",
+    enabled: hasSelection,
+    run: ({ editor }) => void exportSelection(editor),
   },
   {
     id: "file.addPage",

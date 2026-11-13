@@ -19,12 +19,16 @@ import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
 import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
 import { connectFile } from "./connection";
+import { ExportPanel } from "./ExportSection";
 import { EditorContext, useEditor, useEditorState, useEditorStateOutside } from "./hooks";
+import { ImageDrop, UploadTray } from "./ImageDrop";
 import { Inspector } from "./Inspector";
 import { InspectPanel } from "./InspectPanel";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
+import { filesFrom, importImageFiles, pasteFromClipboard } from "./media";
 import { Toolbar } from "./Toolbar";
+import { useThumbnailPublisher } from "./thumbnail";
 import { TokensWorkspace } from "./tokens/TokensWorkspace";
 import "./editor.css";
 
@@ -81,6 +85,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     () => connectFile(editor, fileId, setFatal, (message) => comments.store.receive(message)),
     [editor, fileId, comments.store],
   );
+  useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt);
 
   // A handle for debugging and end-to-end tests: `localStorage.setItem("drawpane:debug", "1")`.
   useEffect(() => {
@@ -148,12 +153,12 @@ function FileEditor({ fileId }: { fileId: string }) {
         if (data) void navigator.clipboard.writeText(data);
       },
       paste: () => {
-        void navigator.clipboard.readText().then((text) => {
-          if (!editor.paste(text)) editor.notify("The clipboard doesn't hold Drawpane layers.");
+        void pasteFromClipboard(editor, fileId).then((pasted) => {
+          if (!pasted) editor.notify("The clipboard doesn't hold Drawpane layers or images.");
         });
       },
     }),
-    [editor, comments.store],
+    [editor, fileId, comments.store],
   );
 
   // Keyboard: shortcuts from the action registry, plus held keys (space to pan, Alt for X-ray) and arrows.
@@ -239,9 +244,19 @@ function FileEditor({ fileId }: { fileId: string }) {
     };
     const onPaste = (e: ClipboardEvent) => {
       if (isTyping(e.target) || !editor.canEdit) return;
-      const data =
-        e.clipboardData?.getData(CLIPBOARD_MIME) || e.clipboardData?.getData("text/plain") || "";
-      if (editor.paste(data)) e.preventDefault();
+      // Drawpane layers first, then image files, then layers sent as plain text.
+      const layers = e.clipboardData?.getData(CLIPBOARD_MIME) ?? "";
+      if (layers && editor.paste(layers)) {
+        e.preventDefault();
+        return;
+      }
+      const files = filesFrom(e.clipboardData);
+      if (files.length > 0) {
+        e.preventDefault();
+        void importImageFiles(editor, fileId, files);
+        return;
+      }
+      if (editor.paste(e.clipboardData?.getData("text/plain") ?? "")) e.preventDefault();
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -257,7 +272,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       document.removeEventListener("cut", onCut);
       document.removeEventListener("paste", onPaste);
     };
-  }, [editor, interaction, ctx]);
+  }, [editor, interaction, ctx, fileId]);
 
   if (meta.isError) {
     return (
@@ -349,7 +364,14 @@ function FileEditor({ fileId }: { fileId: string }) {
                 onChange={(tab) => setRightTab(tab as "design" | "inspect")}
               />
             </div>
-            {rightTab === "design" ? <Inspector /> : <InspectPanel />}
+            {rightTab === "design" ? (
+              <>
+                <Inspector />
+                <ExportPanel />
+              </>
+            ) : (
+              <InspectPanel />
+            )}
           </aside>
         ) : null}
         {view === "design" ? (
@@ -363,6 +385,8 @@ function FileEditor({ fileId }: { fileId: string }) {
         {view === "design" ? <ZoomControls /> : null}
         <SyncStatus />
         <Notice />
+        <ImageDrop fileId={fileId} />
+        <UploadTray />
         {commandOpen ? <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} /> : null}
         {fatal ? (
           <div className="editor__fatal" role="alert">
