@@ -8,6 +8,7 @@ import { randomToken, sha256Hex } from "../lib/crypto";
 import { badRequest, conflict, notFound } from "../lib/http";
 import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
 import { comments } from "./comments";
+import { fonts } from "./fonts";
 import { media, thumbnailKey } from "./media";
 import { share } from "./share";
 import { versions } from "./versions";
@@ -331,7 +332,9 @@ export const api = new Hono<AppContext>()
   // Images and thumbnails (./media.ts) ---------------------------------------
   .route("/", media)
   .route("/", share)
-  .route("/", versions);
+  .route("/", versions)
+  // Google Fonts, copied to this server on first use (./fonts.ts) ------------
+  .route("/fonts", fonts);
 
 async function projectTeam(db: D1Database, projectId: string) {
   const row = await db

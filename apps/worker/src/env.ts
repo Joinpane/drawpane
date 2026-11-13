@@ -19,6 +19,8 @@ export interface Env {
    * request host to the production route. Unset in production.
    */
   readonly PUBLIC_ORIGIN?: string;
+  /** `off` stops the Worker from fetching Google Fonts (see api/fonts.ts). */
+  readonly GOOGLE_FONTS?: string;
 }
 
 export type Role = "owner" | "editor" | "viewer";
