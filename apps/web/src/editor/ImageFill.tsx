@@ -4,7 +4,7 @@
  * (preview, replace, scale mode), after the image tab of the fill picker
  * design.
  */
-import { type Editor, imagePlacement, type ScaleMode } from "@drawpane/editor";
+import { type CropRect, type Editor, imagePlacement, type ScaleMode } from "@drawpane/editor";
 import type { Paint } from "@drawpane/model";
 import { Button, IconButton, SegmentedControl, type SegmentedOption } from "@drawpane/ui";
 import { useQuery } from "@tanstack/react-query";
@@ -25,6 +25,7 @@ type ImagePaint = Extract<Paint, { type: "image" }>;
 const SCALE_MODES: readonly SegmentedOption<ScaleMode>[] = [
   { value: "fill", label: "Fill" },
   { value: "fit", label: "Fit" },
+  { value: "crop", label: "Crop" },
   { value: "tile", label: "Tile" },
   { value: "stretch", label: "Stretch" },
 ];
@@ -32,6 +33,7 @@ const SCALE_MODES: readonly SegmentedOption<ScaleMode>[] = [
 const MODE_LABEL: Record<ScaleMode, string> = {
   fill: "Fill",
   fit: "Fit",
+  crop: "Crop",
   tile: "Tile",
   stretch: "Stretch",
 };
@@ -55,6 +57,8 @@ function useImagePreview(
   canvas: React.RefObject<HTMLCanvasElement | null>,
   sha: string,
   mode: ScaleMode,
+  /** For cropped fills: the whole image is shown, the crop bright and the rest dimmed. */
+  crop?: CropRect,
 ): boolean {
   const cache = imagesFor(editor);
   const [loaded, setLoaded] = useState(false);
@@ -71,7 +75,9 @@ function useImagePreview(
       if (!ctx) return;
       ctx.clearRect(0, 0, el.width, el.height);
       const natural = cache.natural(sha);
-      const place = natural ? imagePlacement(mode, { width: w, height: h }, natural) : null;
+      const place = natural
+        ? imagePlacement(mode === "crop" ? "fit" : mode, { width: w, height: h }, natural)
+        : null;
       const view = place ? cache.get(sha, place.width * dpr) : null;
       setLoaded(!!view);
       if (!place || !view) return;
@@ -90,11 +96,28 @@ function useImagePreview(
         ctx.fillRect(0, 0, w, h);
       } else {
         ctx.drawImage(view.bitmap, place.x, place.y, place.width, place.height);
+        if (mode === "crop" && crop) {
+          // Dim what's cropped away; outline what shows.
+          const c = {
+            x: place.x + crop.x * place.width,
+            y: place.y + crop.y * place.height,
+            width: crop.width * place.width,
+            height: crop.height * place.height,
+          };
+          const outside = new Path2D();
+          outside.rect(place.x, place.y, place.width, place.height);
+          outside.rect(c.x, c.y, c.width, c.height);
+          ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+          ctx.fill(outside, "evenodd");
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(c.x + 0.5, c.y + 0.5, c.width - 1, c.height - 1);
+        }
       }
     };
     draw();
     return cache.subscribe(draw);
-  }, [cache, canvas, sha, mode]);
+  }, [cache, canvas, sha, mode, crop?.x, crop?.y, crop?.width, crop?.height]);
   return loaded;
 }
 
@@ -165,7 +188,11 @@ export function ImageFillEditor({
 }) {
   const fileId = useFileId();
   const canvas = useRef<HTMLCanvasElement>(null);
-  const loaded = useImagePreview(editor, canvas, paint.ref, paint.scaleMode);
+  const startCrop = () => {
+    const id = editor.s.selection[0];
+    if (id) editor.enterCrop(id);
+  };
+  const loaded = useImagePreview(editor, canvas, paint.ref, paint.scaleMode, paint.crop);
   const queue = uploadsFor(editor);
   const upload = useSyncExternalStore(queue.subscribe, () =>
     queue.items.findLast((i) => i.sha === paint.ref),
@@ -205,12 +232,19 @@ export function ImageFillEditor({
         >
           Replace
         </Button>
+        <Button size="sm" className="image-fill__crop" onClick={() => startCrop()}>
+          Crop
+        </Button>
       </div>
       <SegmentedControl
         label="Image scale mode"
         options={SCALE_MODES}
         value={paint.scaleMode}
-        onChange={(scaleMode) => onChange({ ...paint, scaleMode }, "Image scale mode")}
+        onChange={(scaleMode) => {
+          // Crop is a mode you set by cropping: start the crop tool on the canvas.
+          if (scaleMode === "crop") startCrop();
+          else onChange({ ...paint, scaleMode }, "Image scale mode");
+        }}
       />
       {meta ? <p className="image-fill__meta">{meta}</p> : null}
     </div>
