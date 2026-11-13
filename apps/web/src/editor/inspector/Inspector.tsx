@@ -18,6 +18,7 @@ import {
 import { useRef, useState } from "react";
 import { ComponentSection } from "../ComponentSection";
 import { useDocVersion, useEditor, useEditorState } from "../hooks";
+import { layerKind } from "../layer-kinds";
 import { ModesSection } from "../tokens/ModesSection";
 import { CombineSection, PathSection } from "../VectorSections";
 import { AlignSection } from "./AlignSection";
@@ -30,18 +31,9 @@ import { GeometrySection } from "./GeometrySection";
 import { LayoutGridsSection } from "./LayoutGridsSection";
 import { HexField, PaintSection } from "./PaintSection";
 import { SelectionColors } from "./SelectionColors";
+import { ShapeSection } from "./ShapeSection";
 import { TextSection } from "./TextSection";
 import "./inspector.css";
-
-const TYPE_LABEL: Record<string, string> = {
-  frame: "Frame",
-  group: "Group",
-  rect: "Rectangle",
-  ellipse: "Ellipse",
-  line: "Line",
-  path: "Vector",
-  text: "Text",
-};
 
 export function Inspector() {
   const editor = useEditor();
@@ -65,7 +57,7 @@ export function Inspector() {
           ? "Component"
           : getProp(first.props, "instanceOf") !== null
             ? "Instance"
-            : (TYPE_LABEL[only ?? ""] ?? "Layer")
+            : layerKind(only ?? "").label
       : `${nodes.length} layers`;
   const geometry = nodes.filter((n) => n.type !== "group");
   const frames = nodes.filter((n) => n.type === "frame");
@@ -105,6 +97,7 @@ export function Inspector() {
         <LayoutGridsSection editor={editor} nodes={frames} />
       ) : null}
       {only === "frame" && first ? <ModesSection node={first} /> : null}
+      <ShapeSection editor={editor} nodes={nodes} />
       <AppearanceSection editor={editor} nodes={nodes} corners={corners} frames={frames} />
       {texts.length > 0 && texts.length === nodes.length ? (
         <TextSection editor={editor} nodes={texts} />

@@ -12,7 +12,9 @@ const KIND: Record<string, LayerKind> = {
   group: "group",
   rect: "rect",
   ellipse: "ellipse",
-  line: "path",
+  polygon: "polygon",
+  star: "star",
+  line: "line",
   path: "path",
   text: "text",
 };
@@ -23,6 +25,12 @@ function kindOf(node: NodeRecord): LayerKind {
       return "component";
     if (getProp(node.props, "instanceOf") !== null) return "instance";
   }
+  // A line with an end marker reads as an arrow.
+  if (
+    node.type === "line" &&
+    (getProp(node.props, "markerEnd") !== "none" || getProp(node.props, "markerStart") !== "none")
+  )
+    return "arrow";
   // A rectangle filled with an image reads as an image layer.
   if (node.type === "rect" && getProp(node.props, "fills").some((f) => f.type === "image"))
     return "image";
