@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { useEditor, useEditorState } from "./hooks";
+import { imagesFor } from "./media";
 import { TextEditor } from "./TextEditor";
 
 function readTheme(): OverlayTheme {
@@ -42,7 +43,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const overlay = useRef<HTMLCanvasElement>(null);
   const editingText = useEditorState((s) => s.editingText);
   const measurer = editor.measurer as CanvasTextMeasurer;
-  const renderer = useMemo(() => new CanvasRenderer(editor.scene, measurer), [editor, measurer]);
+  const renderer = useMemo(
+    () => new CanvasRenderer(editor.scene, measurer, { images: imagesFor(editor) }),
+    [editor, measurer],
+  );
 
   // Render loop: repaint content when the document, page or camera changes;
   // repaint the overlay on any state change. Never more than once per frame.
@@ -103,6 +107,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       contentDirty = overlayDirty = true;
       schedule();
     });
+    // An image finished decoding (or a sharper copy is ready): repaint the content.
+    const offImages = renderer.images.subscribe(() => {
+      contentDirty = true;
+      schedule();
+    });
     const offState = editor.state.subscribe(() => {
       const s = editor.s;
       if (
@@ -142,6 +151,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       observer.disconnect();
       themeObserver.disconnect();
       offDoc();
+      offImages();
       offState();
       document.fonts.removeEventListener("loadingdone", onFonts);
       if (frame) cancelAnimationFrame(frame);

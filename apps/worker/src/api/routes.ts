@@ -8,6 +8,7 @@ import { randomToken, sha256Hex } from "../lib/crypto";
 import { badRequest, conflict, notFound } from "../lib/http";
 import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
 import { comments } from "./comments";
+import { media, thumbnailKey } from "./media";
 
 const Name = z.string().trim().min(1, "Enter a name.").max(120, "Keep names under 120 characters.");
 const RoleSchema = z.enum(["owner", "editor", "viewer"]);
@@ -304,6 +305,7 @@ export const api = new Hono<AppContext>()
       if (file.deleted_at === null)
         throw conflict("Move the file to trash before deleting it for good.");
       await c.env.FILE_ROOM.get(c.env.FILE_ROOM.idFromName(file.id)).destroy();
+      await c.env.FILES.delete(thumbnailKey(file.id));
       await c.env.DB.prepare("DELETE FROM files WHERE id = ?").bind(file.id).run();
     } else {
       await c.env.DB.prepare("UPDATE files SET deleted_at = ? WHERE id = ?")
@@ -323,7 +325,9 @@ export const api = new Hono<AppContext>()
   })
 
   // Comments ----------------------------------------------------------------
-  .route("/", comments);
+  .route("/", comments)
+  // Images and thumbnails (./media.ts) ---------------------------------------
+  .route("/", media);
 
 async function projectTeam(db: D1Database, projectId: string) {
   const row = await db
