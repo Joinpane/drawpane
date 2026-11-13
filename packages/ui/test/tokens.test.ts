@@ -19,7 +19,7 @@ describe("generated files", () => {
     const files = readdirSync(dir)
       .filter((f) => f.endsWith(".svg"))
       .map((f) => f.replace(/\.svg$/, ""));
-    expect(files).toHaveLength(86);
+    expect(files).toHaveLength(88);
     expect([...iconNames].sort()).toEqual(files.sort());
   });
 });
