@@ -4,6 +4,7 @@
  * labels, Layout X-ray and collaborators. It repaints on every pointer move,
  * so it stays cheap: no shadows, no text layout beyond labels.
  */
+
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { imageRect } from "./crop";
 import { croppingTarget } from "./crop-session";
@@ -15,6 +16,7 @@ import type { Interaction } from "./interaction";
 import { frameLabels, LABEL_FONT } from "./labels";
 import { trackLabel } from "./layout";
 import { drawPrototypeOverlay } from "./prototype/overlay";
+import { readingOrderOf } from "./reading-order";
 import { PILL_FONT, PILL_MODE_FONT, sizePill } from "./size-pill";
 import { drawVectorOverlay } from "./tools/overlay";
 import { explainedFrame, solvedGrid, xrayFrames, xrayRegions } from "./xray";
@@ -258,6 +260,8 @@ export function drawOverlay(
   // Pen and vector edit: anchors, handles and the pen's rubber band.
   drawVectorOverlay(ctx, editor, interaction, theme);
 
+  if (editor.s.showReadingOrder && !gesture) drawReadingOrder(ctx, editor, toScreen, theme);
+
   // Smart guides.
   if (guides.length > 0) {
     ctx.strokeStyle = theme.guide;
@@ -314,6 +318,53 @@ export function drawOverlay(
     }
     editor.cursors.keepOnly(shown);
   }
+}
+
+/**
+ * The reading order of the board you're working in: a numbered badge at each
+ * stop, joined in order by a dashed line (the design's reading-order overlay).
+ */
+function drawReadingOrder(
+  ctx: CanvasRenderingContext2D,
+  editor: Editor,
+  toScreen: (p: { x: number; y: number }) => { x: number; y: number },
+  theme: OverlayTheme,
+): void {
+  const board = editor.boardOfSelection();
+  if (!board) return;
+  const points: { x: number; y: number }[] = [];
+  for (const item of readingOrderOf(editor, board).items) {
+    const b = editor.scene.bounds(item.id);
+    if (!b) continue;
+    // Beside the stop's top-left, level with its first line.
+    const p = toScreen({ x: b.x, y: b.y });
+    const h = Math.min(b.height * editor.s.camera.zoom, 24);
+    points.push({ x: Math.round(p.x - 12), y: Math.round(p.y + h / 2) });
+  }
+  if (points.length === 0) return;
+  ctx.save();
+  ctx.strokeStyle = theme.signal;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  for (const [i, p] of points.entries()) {
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = `600 10px ${theme.fontUi}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  points.forEach((p, i) => {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
+    ctx.fillStyle = theme.signal;
+    ctx.fill();
+    ctx.fillStyle = theme.onSignal;
+    ctx.fillText(String(i + 1), p.x, p.y + 0.5);
+  });
+  ctx.restore();
 }
 
 /**

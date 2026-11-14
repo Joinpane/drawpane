@@ -50,6 +50,7 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   isMask: "arranged",
   rulerGuides: "other",
   layoutGrids: "layout",
+  readingOrder: "other",
   fills: "style",
   strokes: "style",
   strokeWeight: "style",

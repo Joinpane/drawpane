@@ -479,6 +479,12 @@ export const PROPS = {
   // Guides and grids: aids while designing, never drawn in exports.
   rulerGuides: prop(z.array(RulerGuide).max(200), [], ["page", "frame"]),
   layoutGrids: prop(z.array(LayoutGrid).max(16), [], CONTAINERS),
+  /**
+   * The order a screen reader (and keyboard focus) moves through a board, as
+   * layer ids. Null until someone sets it: the order then comes from the
+   * layout (see the editor's reading-order.ts).
+   */
+  readingOrder: prop(z.array(z.string().regex(ID_PATTERN)).max(500).nullable(), null, CONTAINERS),
 
   // Pages. Null follows the viewer's theme (the `canvas` token).
   backgroundColor: prop(Color.nullable(), null, ["page"]),

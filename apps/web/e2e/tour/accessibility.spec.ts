@@ -1,6 +1,7 @@
 /**
  * Screenshots of accessibility at selection for design review, in both themes:
- * a tapped icon on a phone board, too small, with its warning in the inspector.
+ * a tapped icon on a phone board, too small, with its warning in the inspector,
+ * and a board's reading order on the canvas and in the inspector.
  * Run with `pnpm --filter @drawpane/web tour`.
  */
 import { expect } from "@playwright/test";
@@ -65,5 +66,54 @@ test("accessibility tour", async ({ browser }) => {
   await expect(page.getByRole("region", { name: "Accessibility" })).toBeVisible();
   await shot(page, "162-tap-target");
   await shot(page, "163-tap-target-close", page.getByRole("group", { name: "Properties" }));
+
+  // The board's reading order, on the canvas and in the inspector.
+  await page.evaluate(() => {
+    const e = (
+      window as unknown as {
+        drawpane: W["drawpane"] & {
+          doc: { childIds(id: string): string[] };
+          state: { set(p: object): void };
+        };
+      }
+    ).drawpane;
+    const home = e.doc.childIds(e.s.pageId)[0] as string;
+    const text = (characters: string, y: number, fontSize: number) =>
+      e.createLayer("text", { x: 24, y, width: 320, height: fontSize + 6 }, home, {
+        characters,
+        fontSize,
+        fills: [{ type: "solid", color: "#1c1b19" }],
+      });
+    text("Good morning, Ana", 72, 26);
+    text("Three things on today", 110, 15);
+    const card = (label: string, y: number) =>
+      e.createLayer("frame", { x: 24, y, width: 345, height: 64 }, home, {
+        name: label,
+        fills: [{ type: "solid", color: "#f2f0ec" }],
+        cornerRadius: 12,
+        reactions: [
+          {
+            id: `tap${label.replace(/\W/g, "").slice(0, 13).padEnd(13, "0")}`,
+            trigger: { type: "tap" },
+            action: { type: "back" },
+            transition: {
+              type: "dissolve",
+              direction: "left",
+              duration: 240,
+              easing: { type: "ease-out" },
+            },
+          },
+        ],
+      });
+    card("Ship onboarding v2", 156);
+    card("Token audit", 232);
+    card("Icon review", 308);
+    e.select([home]);
+    e.state.set({ showReadingOrder: true });
+    e.zoomToFit();
+  });
+  await expect(page.getByRole("list", { name: /Reading order of/ })).toBeVisible();
+  await shot(page, "164-reading-order");
+  await shot(page, "165-reading-order-close", page.getByRole("region", { name: "Accessibility" }));
   await context.close();
 });

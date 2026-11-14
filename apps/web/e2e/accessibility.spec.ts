@@ -1,7 +1,8 @@
 /**
  * Accessibility at selection, in a real browser: a tapped icon on a phone
  * board that's smaller than 44 × 44 says so in the inspector, and "Grow"
- * fixes it around its centre (one undo puts it back).
+ * fixes it around its centre (one undo puts it back); a board's reading
+ * order can be reordered, from the keyboard too, reset and shown.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -16,7 +17,7 @@ type Debug = {
 type W = { drawpane: Debug };
 
 test.describe
-  .serial("Tap targets", () => {
+  .serial("Accessibility", () => {
     test.skip(!!process.env.E2E_BASE_URL, "Needs its own local instance.");
 
     let instance: Instance;
@@ -61,7 +62,53 @@ test.describe
     });
     test.afterAll(() => instance?.stop());
 
+    test("a board shows its reading order: reorder it, from the keyboard too, and reset it", async () => {
+      await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const b = e.createLayer("frame", { x: 500, y: 0, width: 393, height: 852 }, e.s.pageId, {
+          name: "Settings",
+        });
+        e.createLayer("text", { x: 20, y: 60, width: 300, height: 30 }, b, {
+          characters: "Settings",
+          fontSize: 24,
+        });
+        e.createLayer("text", { x: 20, y: 100, width: 300, height: 18 }, b, {
+          characters: "Notifications",
+          fontSize: 14,
+        });
+        e.select([b]);
+      });
+      const list = page.getByRole("list", { name: "Reading order of Settings" });
+      await expect(list.getByRole("listitem")).toHaveText([
+        /Settings\s*heading/,
+        /Notifications\s*text/,
+      ]);
+      const section = page.getByRole("region", { name: "Accessibility" });
+      await expect(section).toContainText("From the layout");
+
+      // From the keyboard alone: the move button is reachable, and shows when focused.
+      const later = list.getByRole("button", { name: "Move Settings later" });
+      await later.focus();
+      await expect(later).toBeVisible();
+      await page.keyboard.press("Enter");
+      await expect(list.getByRole("listitem")).toHaveText([/Notifications/, /Settings/]);
+      await expect(section).toContainText("Set by hand");
+
+      await section.getByRole("button", { name: "Use layout order" }).click();
+      await expect(list.getByRole("listitem")).toHaveText([/Settings/, /Notifications/]);
+
+      await section.getByRole("switch", { name: "Show on canvas" }).click();
+      expect(
+        await page.evaluate(
+          () =>
+            (window as unknown as { drawpane: { s: { showReadingOrder: boolean } } }).drawpane.s
+              .showReadingOrder,
+        ),
+      ).toBe(true);
+    });
+
     test("warns about a tapped icon smaller than 44 × 44, and grows it around its centre", async () => {
+      await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), icon);
       const section = page.getByRole("region", { name: "Accessibility" });
       await expect(section).toContainText("Tapped, but 22 × 22");
       await section.getByRole("button", { name: "Grow to 44 × 44" }).click();

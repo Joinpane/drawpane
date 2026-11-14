@@ -840,6 +840,14 @@ export const ACTIONS: readonly Action[] = [
     },
   },
   {
+    id: "view.readingOrder",
+    label: "Reading order",
+    group: "View",
+    icon: "flow",
+    keywords: "accessibility screen reader focus order tab order a11y",
+    run: ({ editor }) => editor.state.set({ showReadingOrder: !editor.s.showReadingOrder }),
+  },
+  {
     id: "view.minimap",
     label: "Minimap",
     group: "View",
