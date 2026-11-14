@@ -111,6 +111,23 @@ describe("design to code", () => {
     expect(jsx).toMatch(/<p>First \*\*one\*\*<\/p>\n\s*<p>Second<\/p>/);
   });
 
+  it("writes OpenType features and variable axes as their CSS", () => {
+    const editor = setup();
+    const id = editor.createLayer("text", { x: 0, y: 0, width: 0, height: 0 }, "p", {
+      characters: "1,010",
+      fontFeatures: { tnum: true },
+      fontVariations: { wdth: 85, opsz: 24 },
+    }) as string;
+    const node = () => editor.doc.get(id) as never;
+    expect(decl(cssFor(editor.doc, node()))).toMatchObject({
+      "font-feature-settings": "'tnum' 1",
+      "font-variation-settings": "'opsz' 24, 'wdth' 85",
+    });
+    expect(tailwindFor(editor.doc, node())).toContain(
+      "[font-variation-settings:'opsz'_24,_'wdth'_85]",
+    );
+  });
+
   it("writes text styles and absolute children of plain frames", () => {
     const editor = setup();
     const frame = editor.createLayer(

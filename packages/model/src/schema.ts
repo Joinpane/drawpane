@@ -330,6 +330,21 @@ export const FontFeatures = z
 export type FontFeatures = z.infer<typeof FontFeatures>;
 
 /**
+ * A variable font's axes a run sets, by tag (docs/decisions/0009-variable-fonts.md):
+ * `{ wdth: 85, GRAD: 50 }`. Weight is `fontWeight` and italic `fontStyle`, so
+ * `wght` and `ital` aren't here. An axis left out is at the font's default,
+ * except optical size, which follows the font size; values are clamped to
+ * what the font covers when drawn.
+ */
+export const FontVariations = z
+  .record(z.string().regex(/^[A-Za-z0-9]{4}$/, "must be a four-letter axis tag"), finite)
+  .refine((m) => !("wght" in m) && !("ital" in m), {
+    message: "weight and italic are fontWeight and fontStyle, not axes here",
+  })
+  .refine((m) => Object.keys(m).length <= 32, "at most 32 axes");
+export type FontVariations = z.infer<typeof FontVariations>;
+
+/**
  * Styling on part of a text layer's characters: [start, end) in UTF-16 code
  * units of `characters`, overriding some of the layer's own typography and
  * fill. A layer's runs are sorted and don't overlap; characters outside every
@@ -347,6 +362,7 @@ export const TextRun = z
     textCase: z.enum(["none", "upper", "lower", "title"]).optional(),
     textDecoration: z.enum(["none", "underline", "strikethrough"]).optional(),
     fontFeatures: FontFeatures.optional(),
+    fontVariations: FontVariations.optional(),
     fills: z.array(Paint).max(8).optional(),
   })
   .refine((run) => run.end > run.start, "a run must end after it starts");
@@ -560,6 +576,7 @@ export const PROPS = {
   textDecoration: prop(z.enum(["none", "underline", "strikethrough"]), "none", TYPOGRAPHY),
   /** OpenType features (tabular figures, ligatures, stylistic sets…); see `FontFeatures`. */
   fontFeatures: prop(FontFeatures, {}, TYPOGRAPHY),
+  fontVariations: prop(FontVariations, {}, TYPOGRAPHY),
   /** Extra space after each paragraph (each hard line break), in px. */
   paragraphSpacing: prop(ranged(z.number().min(0).max(1000), { min: 0, max: 1000 }), 0, TYPOGRAPHY),
   /** Show at most this many lines, the last ending in "…"; null shows them all. */

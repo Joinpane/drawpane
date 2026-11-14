@@ -108,3 +108,35 @@ export async function faceFileUrl(
   const offered = await facesOffered(face.family, info, [face], formats);
   return pickFace(offered, face)?.url ?? null;
 }
+
+/**
+ * The URL of a family's variable file for a face's style (decision 0009), or
+ * null when it has none we can read: a static Google family, a system or
+ * local font. Google's come from its download manifest, through this
+ * server; a team font is its uploaded variable TrueType or OpenType file
+ * (else its file nearest the face: whether that has axes is the font's to say).
+ * An italic face without a variable italic file gets the upright one.
+ */
+export async function variableFileUrl(face: Face): Promise<string | null> {
+  const info = await fonts.resolve(face.family);
+  if (!info) return null;
+  if (info.source === "team") {
+    const teamId = fonts.teamId;
+    const readable = (info.faces ?? []).filter((f) => f.format === "ttf" || f.format === "otf");
+    const variable = readable.filter((f) => f.weightMax !== null);
+    const pick =
+      variable.find((f) => f.italic === face.italic) ?? variable[0] ?? pickFace(readable, face);
+    return teamId && pick
+      ? `/api/teams/${encodeURIComponent(teamId)}/fonts/file/${pick.sha}`
+      : null;
+  }
+  if ((info.source !== "google" && info.source !== "bundled") || !info.variable) return null;
+  const response = await fetch(
+    `/api/fonts/google-variable?family=${encodeURIComponent(face.family)}`,
+  );
+  if (!response.ok) throw new Error(String(response.status));
+  const { files } = (await response.json()) as {
+    files: ReadonlyArray<{ italic: boolean; url: string }>;
+  };
+  return (files.find((f) => f.italic === face.italic) ?? files.find((f) => !f.italic))?.url ?? null;
+}

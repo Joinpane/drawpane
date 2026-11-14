@@ -1,6 +1,11 @@
 import { env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fontFileKey, googleStylesheetUrl, rewriteStylesheet } from "../src/api/fonts";
+import {
+  fontFileKey,
+  googleStylesheetUrl,
+  rewriteStylesheet,
+  variableFiles,
+} from "../src/api/fonts";
 import { Browser } from "./helpers";
 
 const WOFF2 = new Uint8Array([0x77, 0x4f, 0x46, 0x32, 1, 2, 3, 4]);
@@ -10,6 +15,30 @@ const CSS = `@font-face {
   src: url(https://fonts.gstatic.com/s/fraunces/v38/abc_DEF-1.woff2) format('woff2');
 }
 @import url(https://evil.example/x.css);`;
+
+/** Google's download manifest, as fonts.google.com serves it: an XSSI guard, then JSON. */
+const MANIFEST = `)]}'
+${JSON.stringify({
+  zipName: "Roboto_Flex.zip",
+  manifest: {
+    files: [{ filename: "OFL.txt", contents: "…" }],
+    fileRefs: [
+      {
+        filename: "RobotoFlex-VariableFont_GRAD,opsz,wdth,wght.ttf",
+        url: "https://fonts.gstatic.com/s/robotoflex/v31/AbC-1.ttf",
+      },
+      {
+        filename: "RobotoFlex-Italic-VariableFont_GRAD,opsz,wdth,wght.ttf",
+        url: "https://fonts.gstatic.com/s/robotoflex/v31/AbC-2.ttf",
+      },
+      {
+        filename: "static/RobotoFlex-Bold.ttf",
+        url: "https://fonts.gstatic.com/s/robotoflex/v31/AbC-3.ttf",
+      },
+      { filename: "Evil-VariableFont_wght.ttf", url: "https://evil.example/x.ttf" },
+    ],
+  },
+})}`;
 
 /** Stands in for Google: stylesheets and font files, counting requests. */
 const agents: string[] = [];
@@ -26,6 +55,13 @@ function stubGoogle() {
       return url.includes("family=Nope")
         ? new Response("no", { status: 400 })
         : new Response(CSS, { headers: { "content-type": "text/css" } });
+    }
+    if (url.startsWith("https://fonts.google.com/download/list")) {
+      calls.push(url);
+      agents.push(new Headers(init?.headers).get("user-agent") ?? "");
+      return url.includes("family=Nope")
+        ? new Response("no", { status: 400 })
+        : new Response(MANIFEST, { headers: { "content-type": "application/json" } });
     }
     if (url.startsWith("https://fonts.gstatic.com/")) {
       calls.push(url);
@@ -55,6 +91,18 @@ describe("Google Fonts URLs", () => {
     const css = rewriteStylesheet(CSS);
     expect(css).toContain("url(/api/fonts/gstatic/s/fraunces/v38/abc_DEF-1.woff2)");
     expect(css).not.toContain("evil.example");
+  });
+
+  it("finds a family's variable files in its download manifest, and nothing in anything else", () => {
+    expect(variableFiles(MANIFEST)).toEqual([
+      { italic: false, url: "/api/fonts/gstatic/s/robotoflex/v31/AbC-1.ttf" },
+      { italic: true, url: "/api/fonts/gstatic/s/robotoflex/v31/AbC-2.ttf" },
+    ]);
+    // A static family lists only static files; a changed or broken manifest means none.
+    expect(variableFiles(MANIFEST.replace(/VariableFont_[A-Za-z,]+/g, "Regular"))).toEqual([]);
+    expect(variableFiles(')]}\'\n{"manifest":{}}')).toEqual([]);
+    expect(variableFiles("<html>")).toEqual([]);
+    expect(variableFiles(")]}'\nnull")).toEqual([]);
   });
 
   it("serves only real gstatic paths", () => {
@@ -126,5 +174,22 @@ describe("/api/fonts", () => {
     expect(new Uint8Array(await font.arrayBuffer())).toEqual(TTF);
     expect(calls.some((u) => u.endsWith(".ttf"))).toBe(true);
     expect((await browser.fetch("/api/fonts/google.css?family=Inter&format=otf")).status).toBe(400);
+  });
+
+  it("names a family's variable files, cached, for text that sets its axes", async () => {
+    const calls = stubGoogle();
+    const browser = new Browser();
+    const res = await browser.fetch("/api/fonts/google-variable?family=Roboto%20Flex");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      files: [
+        { italic: false, url: "/api/fonts/gstatic/s/robotoflex/v31/AbC-1.ttf" },
+        { italic: true, url: "/api/fonts/gstatic/s/robotoflex/v31/AbC-2.ttf" },
+      ],
+    });
+    expect(calls[0]).toBe("https://fonts.google.com/download/list?family=Roboto%20Flex");
+    expect(agents.at(-1)).not.toMatch(/Chrome/);
+    expect((await browser.fetch("/api/fonts/google-variable?family=<x>")).status).toBe(400);
+    expect((await browser.fetch("/api/fonts/google-variable?family=Nope")).status).toBe(404);
   });
 });

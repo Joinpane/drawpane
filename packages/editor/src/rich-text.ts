@@ -32,6 +32,7 @@ export const RUN_PROPS = [
   "textCase",
   "textDecoration",
   "fontFeatures",
+  "fontVariations",
   "fills",
 ] as const satisfies readonly (keyof TextRun & PropName)[];
 export type RunProp = (typeof RUN_PROPS)[number];

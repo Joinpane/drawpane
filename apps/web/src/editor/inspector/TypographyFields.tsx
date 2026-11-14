@@ -8,6 +8,7 @@ import type { NodeRecord, PropValues } from "@drawpane/model";
 import { evaluateNumericInput, Icon, PropertyRow, Tooltip } from "@drawpane/ui";
 import { useState } from "react";
 import { type FontFamily, fonts, WEIGHT_NAMES } from "../../fonts/fonts";
+import { FontAxesField } from "./FontAxes";
 import { FontFeaturesField } from "./FontFeatures";
 import { FontPicker, useFonts } from "./FontPicker";
 import { common, Num, Select } from "./fields";
@@ -246,6 +247,7 @@ export function TypographyFields({ editor, nodes }: { editor: Editor; nodes: Nod
         />
       </PropertyRow>
       <FontFeaturesField editor={editor} nodes={nodes} />
+      <FontAxesField editor={editor} nodes={nodes} />
     </>
   );
 }

@@ -27,6 +27,7 @@ export const TEXT_STYLE_PROPS = [
   "textCase",
   "textDecoration",
   "fontFeatures",
+  "fontVariations",
   "paragraphSpacing",
 ] as const satisfies readonly PropName[];
 export type TextStyleProp = (typeof TEXT_STYLE_PROPS)[number];
