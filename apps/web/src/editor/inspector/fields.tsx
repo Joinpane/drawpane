@@ -9,7 +9,26 @@ import {
   type PropValues,
 } from "@drawpane/model";
 import { type IconName, NumberField } from "@drawpane/ui";
+import { useState } from "react";
 import { Bindable } from "../tokens/Bindable";
+
+/**
+ * Open state for a trigger and its popover that also tells the host when it
+ * opens and closes (the Selection Lens stays put while one of its popovers is
+ * open).
+ */
+export function useDisclosure(
+  onOpenChange?: (open: boolean) => void,
+): [open: boolean, setOpen: (open: boolean) => void] {
+  const [open, setOpen] = useState(false);
+  return [
+    open,
+    (next: boolean) => {
+      setOpen(next);
+      onOpenChange?.(next);
+    },
+  ];
+}
 
 /** The value every node shares, or null when they differ (shown as "Mixed"). */
 export function common<K extends PropName>(

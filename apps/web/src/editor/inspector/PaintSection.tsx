@@ -9,6 +9,7 @@ import {
   Icon,
   IconButton,
   NumberField,
+  type PopoverSide,
   PropertyRow,
   PropertySection,
   parseColor,
@@ -19,7 +20,7 @@ import {
 import { useRef, useState } from "react";
 import { ImageChip } from "../ImageFill";
 import { Bindable } from "../tokens/Bindable";
-import { common, Num, Select } from "./fields";
+import { common, Num, Select, useDisclosure } from "./fields";
 import { PaintPicker } from "./PaintPicker";
 import { gradientAngle, rgbaOf, swatchCss } from "./paint";
 
@@ -170,14 +171,16 @@ function ContrastNote({ editor, id }: { editor: Editor; id: string }) {
   );
 }
 
-/** The paint's swatch: opens the picker beside the inspector. */
-function PaintSwatch({
+/** The paint's swatch: opens the picker beside the inspector (or on `side`). */
+export function PaintSwatch({
   editor,
   nodes,
   title,
   paint,
   bindKey,
   onChange,
+  side,
+  onOpenChange,
 }: {
   editor: Editor;
   nodes: NodeRecord[];
@@ -185,9 +188,11 @@ function PaintSwatch({
   paint: Paint;
   bindKey: "fill" | "stroke" | undefined;
   onChange: (next: Paint, label: string) => void;
+  side?: PopoverSide;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosure(onOpenChange);
   return (
     <>
       <button
@@ -198,7 +203,7 @@ function PaintSwatch({
         aria-haspopup="dialog"
         aria-expanded={open}
         style={{ background: swatchCss(paint) }}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setOpen(!open)}
       >
         {paint.type === "image" ? <Icon name="image" size={12} /> : null}
       </button>
@@ -213,6 +218,7 @@ function PaintSwatch({
           kinds={title === "Fill" ? ["solid", "gradient", "image"] : ["solid", "gradient"]}
           onChange={onChange}
           onClose={() => setOpen(false)}
+          {...(side ? { side } : {})}
         />
       ) : null}
     </>
