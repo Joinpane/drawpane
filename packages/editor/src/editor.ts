@@ -23,6 +23,7 @@ import {
   type RulerGuide,
   type VariableValue,
 } from "@drawpane/model";
+import { MIN_TAP_TARGET } from "./accessibility";
 import { Camera, type Insets, MAX_ZOOM, NO_INSETS } from "./camera";
 import {
   componentSetOf,
@@ -67,7 +68,14 @@ import { withGuide } from "./grids";
 import { applyBestEffort, History } from "./history";
 import { hitAll } from "./hit";
 import { layoutImageRow } from "./images";
-import { flowChildren, inferFlow, inferPadding, layoutBox, layoutOps } from "./layout";
+import {
+  flowChildren,
+  inferFlow,
+  inferPadding,
+  layoutBox,
+  layoutOps,
+  placedByLayout,
+} from "./layout";
 import {
   isRunProp,
   type RunPatch,
@@ -716,6 +724,37 @@ export class Editor {
       y: Math.max(insets.top + 1, viewport.height - insets.bottom),
     });
     return { x: tl.x, y: tl.y, width: br.x - tl.x, height: br.y - tl.y };
+  }
+
+  /**
+   * Grows a layer to the smallest comfortable tap target (accessibility.ts),
+   * around its centre so it stays where it was; in auto layout, just its size.
+   * One undo step.
+   */
+  growTapTarget(id: string): void {
+    const node = this.doc.get(id);
+    if (!node || node.type === "text" || node.type === "group" || !this.canEdit) return;
+    const p = node.props;
+    const width = getProp(p, "width");
+    const height = getProp(p, "height");
+    const w = Math.max(width, MIN_TAP_TARGET);
+    const h = Math.max(height, MIN_TAP_TARGET);
+    if (w === width && h === height) return;
+    const ops: Op[] = [
+      { op: "set", id, prop: "width", value: w },
+      { op: "set", id, prop: "height", value: h },
+    ];
+    if (!placedByLayout(this.doc, id))
+      ops.push(
+        { op: "set", id, prop: "x", value: round2(getProp(p, "x") - (w - width) / 2) },
+        { op: "set", id, prop: "y", value: round2(getProp(p, "y") - (h - height) / 2) },
+      );
+    // A fixed size, so auto layout (or Hug) doesn't shrink it back.
+    if (getProp(p, "sizingH") !== "fixed")
+      ops.push({ op: "set", id, prop: "sizingH", value: "fixed" });
+    if (getProp(p, "sizingV") !== "fixed")
+      ops.push({ op: "set", id, prop: "sizingV", value: "fixed" });
+    this.commit(ops, "Grow tap target");
   }
 
   /** Pans so a page point sits in the middle of the visible area, keeping the zoom. */
