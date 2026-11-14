@@ -1,0 +1,30 @@
+name: Fuzz
+
+# The editor driven at random, and the layers panel's drag and drop on random
+# trees, with fresh seeds and far more runs than the fixed-seed sweep on every
+# push. A failure prints the seed and the steps that break, to replay with
+# `FUZZ_SEED=<seed> pnpm fuzz`.
+on:
+  schedule:
+    - cron: "17 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz the editor and the layers panel
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm fuzz
+        env:
+          FUZZ_RUNS: "20000"

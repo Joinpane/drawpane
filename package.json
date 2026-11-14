@@ -15,7 +15,8 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "check": "pnpm lint && pnpm typecheck && pnpm test",
-    "deploy": "turbo run build --filter=@drawpane/worker... && pnpm --filter @drawpane/worker run deploy"
+    "deploy": "turbo run build --filter=@drawpane/worker... && pnpm --filter @drawpane/worker run deploy",
+    "fuzz": "FUZZ_SEED=${FUZZ_SEED:-random} FUZZ_RUNS=${FUZZ_RUNS:-5000} FUZZ_LENGTH=${FUZZ_LENGTH:-150} turbo run fuzz --concurrency=1"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.7",
