@@ -16,6 +16,23 @@ describe("placeLens", () => {
     expect(place({ target: wide, order })?.side).toBe("below");
   });
 
+  it("never covers floating UI like the minimap while another side fits", () => {
+    // A small layer near the canvas's bottom left, the minimap right under it.
+    const target = { x: 400, y: 680, width: 22, height: 22 };
+    const minimap = { x: 300, y: 720, width: 168, height: 108 };
+    expect(place({ target })?.side).toBe("below");
+    const placed = place({ target, chrome: [minimap] });
+    expect(placed?.side).not.toBe("below");
+    if (!placed) throw new Error("not placed");
+    const lens = { x: placed.x, y: placed.y, ...size };
+    const covers =
+      lens.x < minimap.x + minimap.width &&
+      lens.x + lens.width > minimap.x &&
+      lens.y < minimap.y + minimap.height &&
+      lens.y + lens.height > minimap.y;
+    expect(covers).toBe(false);
+  });
+
   it("goes under the selection, centred, clear of the size pill", () => {
     const target = { x: 600, y: 300, width: 200, height: 40 };
     expect(place({ target })).toEqual({ side: "below", x: 580, y: 376 });

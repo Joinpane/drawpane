@@ -19,6 +19,7 @@ import {
 import { getProp } from "@drawpane/model";
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { useEditor, useEditorState } from "./hooks";
+import type { Box } from "./lens-placement";
 import { useUi } from "./ui-state";
 
 /** The card's width, and the map's height inside it (the design's 168 × 72). */
@@ -29,6 +30,28 @@ const MAP_WIDTH = CARD_WIDTH - PADDING * 2;
 /** Half the zoom controls' width, plus breathing room: the minimap mustn't reach them. */
 const ZOOM_HALF = 84;
 const GUTTER = 12;
+/** The card's height: its padding, the 14px heading and 6px under it, and the map. */
+const CARD_HEIGHT = PADDING * 2 + 14 + 6 + MAP_HEIGHT;
+
+/**
+ * Where the minimap sits on the canvas, or null while it's hidden (switched
+ * off, or no room beside the zoom controls). The Selection Lens keeps clear of it.
+ */
+export function minimapBox(
+  shown: boolean,
+  insetLeft: number,
+  viewport: { readonly width: number; readonly height: number },
+): Box | null {
+  const left = insetLeft + GUTTER;
+  const roomy = left + CARD_WIDTH + GUTTER <= viewport.width / 2 - ZOOM_HALF;
+  if (!shown || !roomy) return null;
+  return {
+    x: left,
+    y: viewport.height - GUTTER - CARD_HEIGHT,
+    width: CARD_WIDTH,
+    height: CARD_HEIGHT,
+  };
+}
 
 interface Colors {
   readonly canvas: string;
@@ -137,7 +160,7 @@ export function Minimap() {
   const editor = useEditor();
   const shown = useUi(editor, (s) => s.minimap);
   const insetLeft = useEditorState((s) => s.insets.left);
-  const viewportWidth = useEditorState((s) => s.viewport.width);
+  const viewport = useEditorState((s) => s.viewport);
   const pageId = useEditorState((s) => s.pageId);
   const canvas = useRef<HTMLCanvasElement>(null);
   // While dragging, the map holds still: the view moves inside it.
@@ -148,9 +171,9 @@ export function Minimap() {
   /** Redraws on the next frame. */
   const redraw = useRef(() => {});
 
-  const left = insetLeft + GUTTER;
-  const roomy = left + CARD_WIDTH + GUTTER <= viewportWidth / 2 - ZOOM_HALF;
-  const visible = shown && roomy && pageId !== null;
+  const box = minimapBox(shown, insetLeft, viewport);
+  const visible = box !== null && pageId !== null;
+  const left = box?.x ?? 0;
 
   useEffect(() => {
     if (!visible) return;

@@ -34,6 +34,11 @@ export interface LensPlacementInput {
   readonly area: Box;
   /** Layers the Lens shouldn't cover. */
   readonly obstacles: readonly Box[];
+  /**
+   * Floating UI on the canvas (the minimap): never covered while any other side
+   * fits, unlike layers, which it may overlap a little when that's best.
+   */
+  readonly chrome?: readonly Box[];
   /** A name label sits above the selection (top-level frames). */
   readonly labelAbove?: boolean;
   /** Where it was last time: staying put beats a small gain, so it doesn't hop as you pan. */
@@ -50,6 +55,8 @@ const GAP = 12;
 const GAP_ABOVE_LABEL = 28;
 /** Earlier sides win unless a later one covers this much less (a share of the Lens's area). */
 const PREFERENCE = 0.04;
+/** Covering the app's own UI costs more than any choice of side or layer overlap. */
+const CHROME_WEIGHT = 50;
 const STICKINESS = 0.1;
 /** Sitting right against a layer crowds it as much as covering its edge does. */
 const CLEARANCE = 8;
@@ -123,6 +130,7 @@ export function placeLens(input: LensPlacementInput): LensPlacement | null {
     if (!box) return;
     let score = rank * PREFERENCE * area;
     for (const o of input.obstacles) score += overlap(box, o);
+    for (const c of input.chrome ?? []) score += overlap(box, c) * CHROME_WEIGHT;
     if (side === input.previous) score -= STICKINESS * area;
     // Floating inside covers the selection itself: only when nothing else fits.
     if (side === "inside") score += area * 10;

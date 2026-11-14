@@ -19,6 +19,7 @@ import { WeightSelect } from "./inspector/TypographyFields";
 import { layerKind } from "./layer-kinds";
 import { kindOf } from "./layer-tree";
 import { type Box, hasLabelAbove, type LensSide, lensObstacles, placeLens } from "./lens-placement";
+import { minimapBox } from "./Minimap";
 import { textViews } from "./text-views";
 import { useUi } from "./ui-state";
 
@@ -41,6 +42,8 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const editor = useEditor();
   useDocVersion();
   const enabled = useUi(editor, (ui) => ui.lens);
+  const minimapShown = useUi(editor, (ui) => ui.minimap);
+  const insetLeft = useEditorState((s) => s.insets.left);
   const selection = useEditorState((s) => s.selection);
   const camera = useEditorState((s) => s.camera);
   const viewport = useEditorState((s) => s.viewport);
@@ -135,12 +138,14 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
     width: right - MARGIN - (bounds.left + MARGIN),
     height: viewport.height - BOTTOM - TOP,
   };
+  const minimap = minimapBox(minimapShown, insetLeft, viewport);
   // While a popover or a scrub is in use, keep to the same side so nothing jumps under the pointer.
   const placement = placeLens({
     target: toScreen(world),
     size,
     area,
     obstacles: lensObstacles(editor.doc, editor.scene, node.id).map(toScreen),
+    chrome: minimap ? [minimap] : [],
     labelAbove: hasLabelAbove(editor.doc, node.id),
     previous: previous.current,
     ...(held && previous.current ? { sides: [previous.current] } : {}),

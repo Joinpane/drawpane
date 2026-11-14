@@ -27,6 +27,7 @@ import { ShapeSection } from "./ShapeSection";
 import { TextSection } from "./TextSection";
 import "./inspector.css";
 import { shortcutFor } from "../actions";
+import { AccessibilitySection } from "./AccessibilitySection";
 
 export function Inspector() {
   const editor = useEditor();
@@ -85,6 +86,7 @@ export function Inspector() {
       <ComponentSection nodes={nodes} />
       {nodes.length > 1 ? <CombineSection editor={editor} /> : null}
       {geometry.length > 0 ? <GeometrySection editor={editor} nodes={geometry} /> : null}
+      <AccessibilitySection nodes={nodes} />
       {constrained ? <ConstraintsSection editor={editor} nodes={nodes} /> : null}
       {inLayout.length > 0 || layoutFrames.length > 0 ? (
         <SizingSection
