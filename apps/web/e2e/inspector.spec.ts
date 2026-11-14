@@ -113,6 +113,7 @@ test.describe
         "Inner shadow",
         "Layer blur",
         "Background blur",
+        "Glass",
       ]);
       await kinds.getByRole("menuitem", { name: "Drop shadow" }).click();
       // Its editor opens at once, every value labelled.

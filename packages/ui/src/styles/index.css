@@ -9,6 +9,7 @@
 @import "./components/badge.css";
 @import "./components/text-field.css";
 @import "./components/number-field.css";
+@import "./components/slider.css";
 @import "./components/token-chip.css";
 @import "./components/segmented-control.css";
 @import "./components/switch.css";

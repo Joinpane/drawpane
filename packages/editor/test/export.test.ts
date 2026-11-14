@@ -1,4 +1,4 @@
-import { type Op, ROOT_ID } from "@drawpane/model";
+import { DEFAULT_GLASS, type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
 import {
@@ -450,6 +450,36 @@ describe("exportSvg", () => {
     const plain = exportSvg(editor.scene, shaping, ["t"], bounds);
     expect(plain).not.toContain("<path");
     expect(plain).toContain("font-feature-settings: 'tnum' 1");
+  });
+
+  it("gives glass its lit rim, under the fills (SVG can't see the backdrop)", () => {
+    const editor = makeEditor([
+      {
+        op: "create",
+        id: "g",
+        type: "rect",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 60,
+          cornerRadius: 16,
+          fills: [{ type: "solid", color: "#ffffff33" }],
+          effects: [{ ...DEFAULT_GLASS, angle: 0 }],
+        },
+      },
+    ]);
+    const svg = svgOf(editor, ["g"]);
+    // Lit from the top: the gradient runs top to bottom, white fading out.
+    expect(svg).toMatch(
+      /<linearGradient id="light\d+" x1="0.5" y1="0" x2="0.5" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.56"\/>/,
+    );
+    const rim = svg.indexOf('stroke="url(#light');
+    const fill = svg.indexOf('fill="#ffffff"');
+    expect(rim).toBeGreaterThan(-1);
+    expect(rim).toBeLessThan(fill);
   });
 
   it("strokes text around its glyphs: centred, or inside or outside them", () => {

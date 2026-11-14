@@ -182,7 +182,55 @@ export const Blur = z.object({
   radius: nonNegative,
   visible: z.boolean().optional(),
 });
-export const Effect = z.discriminatedUnion("type", [Shadow, Blur]);
+/** 0–100: how much of a glass property (refraction, dispersion, light…). */
+const amount = ranged(
+  finite.refine((n) => n >= 0 && n <= 100, "must be between 0 and 100"),
+  { min: 0, max: 100 },
+);
+/**
+ * Glass (decision 0007): what's behind the layer, seen through it as
+ * through a lens with a curved rim. Light catches the rim from `angle`
+ * (degrees: 0 is from the top, turning clockwise; −45 the top left) by `intensity`;
+ * `refraction` bends the backdrop over a rim `depth` px wide; `dispersion`
+ * splits its colours; `frost` blurs it (px); `splay` fans the bend outward.
+ */
+export const Glass = z.object({
+  type: z.literal("glass"),
+  angle: finite,
+  intensity: amount,
+  refraction: amount,
+  depth: ranged(
+    finite.refine((n) => n >= 0 && n <= 200, "must be between 0 and 200"),
+    { min: 0, max: 200 },
+  ),
+  dispersion: amount,
+  frost: ranged(
+    finite.refine((n) => n >= 0 && n <= 100, "must be between 0 and 100"),
+    { min: 0, max: 100 },
+  ),
+  splay: amount,
+  visible: z.boolean().optional(),
+});
+export type Glass = z.infer<typeof Glass>;
+
+/** Figma's defaults for a new glass effect. */
+export const DEFAULT_GLASS: Glass = {
+  type: "glass",
+  angle: -45,
+  intensity: 80,
+  refraction: 80,
+  depth: 20,
+  dispersion: 50,
+  frost: 4,
+  splay: 0,
+};
+
+/** The range of a glass property, for fields and sliders. */
+export function glassBounds(key: Exclude<keyof Glass, "type" | "visible" | "angle">): Bounds {
+  return BOUNDS.get(Glass.shape[key]) ?? {};
+}
+
+export const Effect = z.discriminatedUnion("type", [Shadow, Blur, Glass]);
 export type Effect = z.infer<typeof Effect>;
 
 /** A ruler guide: a line across its page, or across its frame, at an offset on one axis. */

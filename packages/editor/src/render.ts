@@ -6,10 +6,12 @@
  * draws those on a separate canvas so hover and drag feedback never repaint
  * the design.
  */
+
 import { type Effect, getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
 import { exportBounds } from "./export";
 import type { Rect } from "./geometry";
+import { GlassPainter } from "./glass";
 import { ImageCache, imagePlacement } from "./images";
 import { markerLength, markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
@@ -200,6 +202,8 @@ export class CanvasRenderer {
   readonly #isolated = new Set<string>();
   /** Those canvases, one per nesting depth of blurred layers. */
   readonly #blurCanvases: Array<OffscreenCanvas | HTMLCanvasElement> = [];
+  /** Draws glass effects, with its own canvases and (made on first use) WebGL context. */
+  readonly #glass = new GlassPainter();
   /** Where a text stroke inside or outside its glyphs is drawn, then cut to one side (#textStrokes). */
   #strokeCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
 
@@ -498,7 +502,10 @@ export class CanvasRenderer {
 
     this.#shadows(ctx, node, shape, "drop-shadow", camera.zoom * dpr);
     // Isolated for a layer blur, there's nothing behind it here: its background blur was drawn already.
-    if (!isolated) this.#backgroundBlur(ctx, node, shape, camera.zoom * dpr);
+    if (!isolated) {
+      this.#backgroundBlur(ctx, node, shape, camera.zoom * dpr);
+      this.#glassEffect(ctx, node, shape, width, height, camera.zoom * dpr);
+    }
     if (node.type === "text") this.#text(ctx, node, width, undefined, camera.zoom * dpr);
     else
       for (const paint of getProp(node.props, "fills"))
@@ -1007,6 +1014,15 @@ export class CanvasRenderer {
     ctx.filter = `blur(${blur.radius * scale}px)`;
     ctx.drawImage(ctx.canvas, 0, 0);
     ctx.restore();
+  }
+
+  /** Glass (decision 0007): the backdrop through a curved rim, under the layer's fills. */
+  #glassEffect(ctx: Ctx, node: NodeRecord, shape: Path2D, w: number, h: number, scale: number) {
+    const glass = getProp(node.props, "effects").find(
+      (e) => e.type === "glass" && e.visible !== false,
+    );
+    if (glass?.type !== "glass") return;
+    this.#glass.paint(ctx, shape, w, h, glass, scale);
   }
 
   /** Text too small to read: a bar per line, the last one shorter, in the text's colour. */

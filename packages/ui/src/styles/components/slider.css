@@ -1,0 +1,107 @@
+/* SliderField: a track and its number. */
+.dp-slider {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  align-items: center;
+  gap: var(--space-200);
+}
+.dp-slider__track {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.dp-slider__track::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(
+    to right,
+    var(--signal) 0 var(--dp-slider-fill, 0%),
+    var(--surface-sunken) var(--dp-slider-fill, 0%) 100%
+  );
+}
+.dp-slider__track::-moz-range-track {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--surface-sunken);
+}
+.dp-slider__track::-moz-range-progress {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--signal);
+}
+.dp-slider__track::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--on-signal);
+  box-shadow:
+    0 0 0 1px var(--line-strong),
+    0 1px 3px color-mix(in srgb, var(--ink) 30%, transparent);
+}
+.dp-slider__track::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--on-signal);
+  box-shadow:
+    0 0 0 1px var(--line-strong),
+    0 1px 3px color-mix(in srgb, var(--ink) 30%, transparent);
+}
+.dp-slider__track:focus-visible {
+  outline: none;
+}
+.dp-slider__track:focus-visible::-webkit-slider-thumb {
+  box-shadow: var(--shadow-focus);
+}
+.dp-slider__track:focus-visible::-moz-range-thumb {
+  box-shadow: var(--shadow-focus);
+}
+
+/* LightDial: a lit shape, its light on a ring. */
+.dp-light-dial {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  flex: none;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  cursor: grab;
+  touch-action: none;
+}
+.dp-light-dial:active {
+  cursor: grabbing;
+}
+.dp-light-dial:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.dp-light-dial__shape {
+  position: absolute;
+  inset: 22%;
+  border-radius: 28%;
+  /* Lit from the light's side. */
+  background: radial-gradient(
+    circle at var(--dp-light-x) var(--dp-light-y),
+    color-mix(in srgb, var(--ink) 55%, transparent),
+    color-mix(in srgb, var(--ink) 12%, transparent) 75%
+  );
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+.dp-light-dial__light {
+  position: absolute;
+  left: var(--dp-light-x);
+  top: var(--dp-light-y);
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: var(--signal);
+  box-shadow: 0 0 0 2px var(--surface);
+}

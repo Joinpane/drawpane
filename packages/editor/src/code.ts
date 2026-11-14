@@ -328,6 +328,12 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
       out.push({ property: "filter", value: `blur(${px(e.radius)})` });
     else if (e.type === "background-blur")
       out.push({ property: "backdrop-filter", value: `blur(${px(e.radius)})` });
+    // Glass, as near as CSS gets: its frost, with the backdrop's colour lifted.
+    else if (e.type === "glass")
+      out.push({
+        property: "backdrop-filter",
+        value: `blur(${px(Math.max(e.frost, 1))}) saturate(1.6)`,
+      });
   }
   if (shadows.length > 0) out.push({ property: "box-shadow", value: shadows.join(", ") });
 
