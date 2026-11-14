@@ -217,7 +217,7 @@ export function drawOverlay(
       { x: 0, y: frame.height },
     ].map((p) => apply(frame.matrix, p));
     if (selection.length > 1) quad(corners, theme.signal, 1);
-    if (editor.canEdit && !editingText && !prototyping) {
+    if (editor.canEdit && !editingText && !prototyping && !editor.selectionLocked) {
       const screenW = frame.width * camera.zoom;
       const screenH = frame.height * camera.zoom;
       const small = screenW < 24 || screenH < 24;

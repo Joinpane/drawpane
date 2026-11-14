@@ -98,6 +98,8 @@ export function NumberField({
   const value = controlled ? valueProp : internal;
   const [draft, setDraft] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  /** Set while Escape blurs the field: what was typed is thrown away, not committed. */
+  const reverting = useRef(false);
   const selectAfterRender = useRef(false);
   const scrub = useRef<Scrub | null>(null);
   const name = ariaLabel ?? rest["aria-label"] ?? label;
@@ -148,9 +150,13 @@ export function NumberField({
       commitDraft();
       finishEditing(true);
     } else if (event.key === "Escape") {
-      // Only swallow Escape when it reverts something; otherwise let it close the host.
+      // Revert what's typed and hand the keyboard back (to the canvas, say), like
+      // Figma; with nothing typed, let Escape go on to close the host.
       if (draft !== null) event.stopPropagation();
       finishEditing(true);
+      reverting.current = true;
+      event.currentTarget.blur();
+      reverting.current = false;
     } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
       const typed = draft === null ? null : evaluate(draft);
@@ -248,7 +254,7 @@ export function NumberField({
           }}
           onBlur={(event) => {
             onBlur?.(event);
-            commitDraft();
+            if (!reverting.current) commitDraft();
             finishEditing(false);
           }}
           onKeyDown={handleKeyDown}

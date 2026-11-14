@@ -135,6 +135,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         canvas.style.width = `${width}px`;
         canvas.style.height = `${height}px`;
       }
+      // Sizing a canvas clears it, even to the same size: the last frame is
+      // gone, so the renderer mustn't reuse it (a pan would move black).
+      renderer.invalidate();
       editor.setViewport(width, height);
       contentDirty = overlayDirty = true;
       schedule();

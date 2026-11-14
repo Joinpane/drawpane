@@ -274,6 +274,8 @@ describe("NumberField", () => {
     await user.clear(input);
     await user.type(input, "999{Escape}");
     expect(input.value).toBe("300");
+    // And hands the keyboard back, like Figma.
+    expect(document.activeElement).not.toBe(input);
     await user.tab();
     expect(input.value).toBe("300");
     expect(onChange).not.toHaveBeenCalled();

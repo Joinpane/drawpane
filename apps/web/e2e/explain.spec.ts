@@ -205,4 +205,47 @@ test.describe
       await expect(card(page).getByText("12 + 52 + 112 + 8 + 12")).toBeVisible();
       await page.keyboard.press("Escape");
     });
+    test("Tab runs field to field, and Enter in a field never acts on the canvas", async () => {
+      await select(page, [upcoming]);
+      const panel = page.getByRole("complementary", { name: "Inspector" });
+      await panel.getByLabel("Left padding").click();
+      await page.keyboard.press("ControlOrMeta+a");
+      await page.keyboard.type("4");
+      await page.keyboard.press("Tab");
+      // Straight to the next padding, not the hidden "Use a variable" button.
+      await expect(panel.getByLabel("Right padding")).toBeFocused();
+      await page.keyboard.press("ControlOrMeta+a");
+      await page.keyboard.type("16");
+      await page.keyboard.press("Enter");
+      expect((await props(page, upcoming)).paddingLeft).toBe(4);
+      expect((await props(page, upcoming)).paddingRight).toBe(16);
+      // The selection didn't jump to the frame's children.
+      expect(await page.evaluate(() => (window as unknown as W).drawpane.s.selection)).toEqual([
+        upcoming,
+      ]);
+    });
+
+    test("Escape in a field reverts it and gives the keyboard back to the canvas", async () => {
+      await select(page, [upcoming]);
+      const panel = page.getByRole("complementary", { name: "Inspector" });
+      const x = panel.getByLabel("X position");
+      const before = await x.inputValue();
+      await x.click();
+      await page.keyboard.press("ControlOrMeta+a");
+      await page.keyboard.type("-100");
+      await page.keyboard.press("Escape");
+      await expect(x).not.toBeFocused();
+      await expect(x).toHaveValue(before);
+      // R is the rectangle tool again, not a letter typed into X.
+      await page.keyboard.press("r");
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => (window as unknown as { drawpane: { s: { tool: string } } }).drawpane.s.tool,
+          ),
+        )
+        .toBe("rect");
+      await page.keyboard.press("v");
+      await expect(x).toHaveValue(before);
+    });
   });

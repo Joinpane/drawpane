@@ -276,8 +276,17 @@ export const ACTIONS: readonly Action[] = [
     label: "Deselect",
     group: "Edit",
     shortcut: { key: "escape" },
-    enabled: hasSelection,
-    run: ({ editor }) => editor.select([]),
+    enabled: (e) => hasSelection(e) || e.s.editingText !== null,
+    run: ({ editor }) => {
+      // Editing text: Escape finishes the edit and keeps the layer selected, like Figma.
+      const editing = editor.s.editingText;
+      if (editing) {
+        editor.endTextEdit();
+        if (editor.doc.has(editing)) editor.select([editing]);
+        return;
+      }
+      editor.select([]);
+    },
   },
 
   {

@@ -31,6 +31,27 @@ const fillOf = (page: Page, id: string) =>
     { id, debug },
   );
 
+/** The read-only editor showing a version (a debug handle, like `drawpane`). */
+type VersionDebug = {
+  scene: { bounds(id: string): { x: number; y: number; width: number; height: number } | null };
+  s: { camera: { toScreen(p: { x: number; y: number }): { x: number; y: number } } };
+};
+
+/** The colour the canvas shows at the middle of `id` in the version on screen. */
+const versionPixel = (page: Page, id: string) =>
+  page.evaluate((id) => {
+    const v = (window as unknown as { drawpaneVersion: VersionDebug }).drawpaneVersion;
+    const b = v.scene.bounds(id);
+    if (!b) return null;
+    const at = v.s.camera.toScreen({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+    const canvas = document.querySelector(".canvas canvas") as HTMLCanvasElement;
+    const dpr = canvas.width / canvas.getBoundingClientRect().width;
+    const pixel = canvas
+      .getContext("2d")
+      ?.getImageData(Math.round(at.x * dpr), Math.round(at.y * dpr), 1, 1).data;
+    return pixel ? [...pixel].slice(0, 3) : null;
+  }, id);
+
 const settled = (page: Page) =>
   expect
     .poll(() =>
@@ -99,6 +120,8 @@ test.describe
       await expect(page.getByRole("status").filter({ hasText: "read-only" })).toContainText(
         "Viewing Red card",
       );
+      // The canvas draws the version: the card in its red, not a black void.
+      await expect.poll(() => versionPixel(page, card)).toEqual([229, 72, 77]);
       // The layers tab shows the version's layers.
       await page.getByRole("radio", { name: "Layers" }).click();
       await page.getByRole("treeitem", { name: /^Card/ }).click();
@@ -148,5 +171,19 @@ test.describe
         "aria-selected",
         "true",
       );
+    });
+    test("draws a version opened right after naming it", async () => {
+      // The file as it is: nothing changed since, so the version matches now.
+      await page.getByRole("button", { name: "Name this version" }).click();
+      await page.getByLabel("Name", { exact: true }).fill("Just now");
+      await page.keyboard.press("Enter");
+      await page.getByRole("option", { name: /^Just now/ }).click();
+      await expect(page.getByRole("status").filter({ hasText: "read-only" })).toContainText(
+        "Viewing Just now",
+      );
+      const now = await fillOf(page, card);
+      const rgb = [1, 3, 5].map((i) => Number.parseInt(String(now).slice(i, i + 2), 16));
+      await expect.poll(() => versionPixel(page, card)).toEqual(rgb);
+      await page.keyboard.press("Escape");
     });
   });

@@ -20,6 +20,10 @@ import { useDocVersion, useEditor, useEditorState } from "./hooks";
  * come from the canvas's own layout, so they line up with what's drawn.
  * Each change commits live, so collaborators watch the text appear.
  */
+/** Presses this close in time and place count as one double or triple click. */
+const MULTI_CLICK_MS = 500;
+const MULTI_CLICK_PX = 4;
+
 export function TextEditor({ nodeId }: { nodeId: string }) {
   const editor = useEditor();
   useDocVersion();
@@ -32,6 +36,8 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
   // Where ↑ and ↓ aim, kept across presses so a short line doesn't pull the caret left.
   const goal = useRef<number | null>(null);
   const dragging = useRef<number | null>(null);
+  // Double and triple clicks, counted here: pointer events don't carry a click count everywhere.
+  const lastPress = useRef<{ x: number; y: number; at: number; count: number } | null>(null);
   // The caret shows while typing; styling the selection from the inspector keeps it selected.
   const [focused, setFocused] = useState(true);
 
@@ -120,12 +126,20 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
         const t = ref.current;
         if (!t) return;
         const at = indexAt(e);
-        if (e.detail === 2) {
+        const prev = lastPress.current;
+        const count =
+          prev &&
+          e.timeStamp - prev.at < MULTI_CLICK_MS &&
+          Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < MULTI_CLICK_PX
+            ? prev.count + 1
+            : 1;
+        lastPress.current = { x: e.clientX, y: e.clientY, at: e.timeStamp, count };
+        if (count === 2) {
           const [a, b] = wordAt(text, at);
           select(a, b);
           return;
         }
-        if (e.detail >= 3) {
+        if (count >= 3) {
           const a = text.lastIndexOf("\n", at - 1) + 1;
           const nl = text.indexOf("\n", at);
           select(a, nl === -1 ? text.length : nl);

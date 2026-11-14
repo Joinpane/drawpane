@@ -357,6 +357,13 @@ export class Editor {
     };
     this.state.subscribe(reconcileExplain);
     this.doc.subscribe(reconcileExplain);
+    // Text is edited only while its layer is the selection: selecting
+    // anything else (or nothing) finishes the edit, so it can't get stuck.
+    this.state.subscribe(() => {
+      const { editingText, selection } = this.s;
+      if (editingText && (selection.length !== 1 || selection[0] !== editingText))
+        this.endTextEdit();
+    });
   }
 
   get s(): EditorState {
@@ -1161,7 +1168,12 @@ export class Editor {
     }
   }
 
-  duplicate(): void {
+  /**
+   * Copies the selection beside itself (16px over, or a component's instance
+   * a width away), or exactly in place with `inPlace`: an Alt-drag copies
+   * in place, then the drag moves the copy to where it's dropped.
+   */
+  duplicate({ inPlace = false }: { inPlace?: boolean } = {}): void {
     const ids = this.#topmost(this.s.selection);
     if (ids.length === 0) return;
     const ops: Op[] = [];
@@ -1174,7 +1186,7 @@ export class Editor {
       const key = keyBetween(node.key, next ? (this.doc.get(next)?.key ?? null) : null);
       const inLayout = getProp(this.doc.get(node.parent)?.props ?? {}, "layoutMode") !== "none";
       if (isMainComponent(node)) {
-        const offset = inLayout ? 0 : getProp(node.props, "width") + 40;
+        const offset = inLayout || inPlace ? 0 : getProp(node.props, "width") + 40;
         const made = instantiateOps(this.doc, id, node.parent, key, {
           x: round2(getProp(node.props, "x") + offset),
           y: getProp(node.props, "y"),
@@ -1190,7 +1202,7 @@ export class Editor {
         id,
         node.parent,
         key,
-        inLayout ? { x: 0, y: 0 } : { x: 16, y: 16 },
+        inLayout || inPlace ? { x: 0, y: 0 } : { x: 16, y: 16 },
       );
       ops.push(...cloned);
       created.push(rootId);
@@ -2504,8 +2516,14 @@ export class Editor {
   toggleLocked(): void {
     const ids = this.s.selection;
     const anyUnlocked = ids.some((id) => this.doc.get(id)?.props.locked !== true);
+    // The selection stays, like Figma's: the same shortcut unlocks, and the
+    // canvas offers no handles to move it (see `selectionLocked`).
     this.setProp(ids, "locked", anyUnlocked ? true : null, anyUnlocked ? "Lock" : "Unlock");
-    if (anyUnlocked) this.select([]);
+  }
+
+  /** Whether anything selected is locked (in itself or by a locked parent): no resizing on the canvas. */
+  get selectionLocked(): boolean {
+    return this.s.selection.some((id) => this.scene.isLocked(id));
   }
 
   addPage(): void {
@@ -3031,8 +3049,9 @@ export class Editor {
   endTextEdit(): void {
     const id = this.s.editingText;
     if (!id) return;
-    this.endGesture();
+    // Out of editing first, so anything that hears the gesture end sees it finished.
     this.state.set({ editingText: null, textSelection: null, textPending: null });
+    this.endGesture();
     const node = this.doc.get(id);
     // An empty text layer has nothing to show: remove it, like every design tool.
     if (node && getProp(node.props, "characters").trim() === "") {

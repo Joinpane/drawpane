@@ -56,6 +56,14 @@ export function EditorPage() {
   return <FileEditor key={fileId} fileId={fileId} />;
 }
 
+/** A control that Enter or Space activates by itself. */
+function isControl(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return !!el?.closest?.(
+    'button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="radio"], summary',
+  );
+}
+
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   return (
@@ -179,14 +187,21 @@ function FileEditor({ fileId }: { fileId: string }) {
       // Storage blocked.
     }
     if (!debug) return;
-    const w = window as unknown as { drawpane?: Editor; drawpaneFrames?: FrameStats };
+    const w = window as unknown as {
+      drawpane?: Editor;
+      drawpaneFrames?: FrameStats;
+      /** The read-only editor showing a version, while one is open. */
+      drawpaneVersion?: Editor;
+    };
     w.drawpane = editor;
     w.drawpaneFrames = frameStatsFor(editor);
+    w.drawpaneVersion = history.view.preview;
     return () => {
       delete w.drawpane;
       delete w.drawpaneFrames;
+      delete w.drawpaneVersion;
     };
-  }, [editor]);
+  }, [editor, history.view]);
 
   // The first time a page shows with content, fit it to the screen.
   useEffect(() => {
@@ -302,6 +317,8 @@ function FileEditor({ fileId }: { fileId: string }) {
     ] as const;
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTyping(e.target) || e.isComposing) return;
+      // Enter and Space press the focused button, menu item or link: never also a shortcut.
+      if ((e.key === "Enter" || e.key === " ") && isControl(e.target)) return;
       // While a version is on screen, keys act on it (read-only) instead of the live file.
       const viewingNow = versionView.s.viewing !== null;
       const editor = versionView.active;
