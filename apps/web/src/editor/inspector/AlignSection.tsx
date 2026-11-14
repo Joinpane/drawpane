@@ -2,15 +2,26 @@
 import type { AlignEdge, Editor } from "@drawpane/editor";
 import type { NodeRecord } from "@drawpane/model";
 import { IconButton, type IconName } from "@drawpane/ui";
-import { formatShortcut } from "../actions";
+import { shortcutFor } from "../actions";
 
-const ALIGN: ReadonlyArray<{ edge: AlignEdge; icon: IconName; label: string; key: string }> = [
-  { edge: "left", icon: "align-left", label: "Align left", key: "a" },
-  { edge: "center", icon: "align-center", label: "Align horizontal centers", key: "h" },
-  { edge: "right", icon: "align-right", label: "Align right", key: "d" },
-  { edge: "top", icon: "align-top", label: "Align top", key: "w" },
-  { edge: "middle", icon: "align-middle", label: "Align vertical centers", key: "v" },
-  { edge: "bottom", icon: "align-bottom", label: "Align bottom", key: "s" },
+/** Each button with the action whose shortcut its tooltip shows (the person's own, if changed). */
+const ALIGN: ReadonlyArray<{ edge: AlignEdge; icon: IconName; label: string; action: string }> = [
+  { edge: "left", icon: "align-left", label: "Align left", action: "arrange.alignLeft" },
+  {
+    edge: "center",
+    icon: "align-center",
+    label: "Align horizontal centers",
+    action: "arrange.alignCenter",
+  },
+  { edge: "right", icon: "align-right", label: "Align right", action: "arrange.alignRight" },
+  { edge: "top", icon: "align-top", label: "Align top", action: "arrange.alignTop" },
+  {
+    edge: "middle",
+    icon: "align-middle",
+    label: "Align vertical centers",
+    action: "arrange.alignMiddle",
+  },
+  { edge: "bottom", icon: "align-bottom", label: "Align bottom", action: "arrange.alignBottom" },
 ];
 
 export function AlignSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
@@ -26,7 +37,7 @@ export function AlignSection({ editor, nodes }: { editor: Editor; nodes: NodeRec
           key={a.edge}
           icon={a.icon}
           label={single ? `${a.label} to frame` : a.label}
-          shortcut={formatShortcut({ key: a.key, alt: true })}
+          shortcut={shortcutFor(a.action)}
           disabled={!canAlign}
           onClick={() => editor.align(a.edge)}
         />
@@ -35,14 +46,14 @@ export function AlignSection({ editor, nodes }: { editor: Editor; nodes: NodeRec
       <IconButton
         icon="distribute-horizontal"
         label="Distribute horizontal spacing"
-        shortcut={formatShortcut({ key: "h", alt: true, shift: true })}
+        shortcut={shortcutFor("arrange.distributeHorizontal")}
         disabled={!canDistribute}
         onClick={() => editor.distribute("horizontal")}
       />
       <IconButton
         icon="distribute-vertical"
         label="Distribute vertical spacing"
-        shortcut={formatShortcut({ key: "v", alt: true, shift: true })}
+        shortcut={shortcutFor("arrange.distributeVertical")}
         disabled={!canDistribute}
         onClick={() => editor.distribute("vertical")}
       />

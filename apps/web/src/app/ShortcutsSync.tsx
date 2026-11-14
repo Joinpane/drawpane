@@ -21,7 +21,7 @@ export function ShortcutsSync() {
     queryKey: SHORTCUTS_QUERY,
     queryFn: fetchShortcuts,
     enabled: signedIn,
-    staleTime: Number.POSITIVE_INFINITY,
+    // The app's default: changed in another browser, they arrive when this tab is next focused.
   });
   // Read both on every render: React Query re-renders for the fields a render reads, so
   // reading the shortcuts only once signed in could miss their later changes.

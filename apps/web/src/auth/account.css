@@ -324,7 +324,10 @@
   cursor: pointer;
   transition: background var(--duration-hover) ease-out;
 }
-.keyprefs__keys:hover {
+.keyprefs__keys--fixed {
+  cursor: default;
+}
+.keyprefs__keys:not(.keyprefs__keys--fixed):hover {
   background: var(--surface-hover);
 }
 .keyprefs__keys:focus-visible {
