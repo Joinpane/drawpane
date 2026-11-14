@@ -1,7 +1,7 @@
 import { Doc } from "@drawpane/editor";
 import { type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { containersWithin, kindOf, layerRows } from "./layer-tree";
+import { containersWithin, dropTarget, kindOf, layerRows } from "./layer-tree";
 
 /**
  * Home (frame, auto layout)
@@ -96,5 +96,61 @@ describe("layer tree", () => {
 
   it("collects every container inside one, for an Alt-click", () => {
     expect(containersWithin(setup(), "home")).toEqual(["home", "cards"]);
+  });
+});
+
+describe("dropTarget", () => {
+  // iPhone 18 Pro > Frame 1 > (Text 1, Image), then Other at the top level, as the panel lists them.
+  const node = (id: string, type = "rect") =>
+    ({ id, type, parent: "", key: "a0", props: {} }) as never;
+  const rows = [
+    { node: node("phone", "frame"), depth: 0, hasChildren: true },
+    { node: node("frame1", "frame"), depth: 1, hasChildren: true },
+    { node: node("text1", "text"), depth: 2, hasChildren: false },
+    { node: node("image"), depth: 2, hasChildren: false },
+  ];
+  const parents: Record<string, string> = { frame1: "phone", text1: "frame1", image: "frame1" };
+  const parentOf = (id: string) => parents[id] ?? null;
+
+  it("drops below the last row at the level the pointer is at", () => {
+    expect(dropTarget(rows, 3, 0.8, 2, parentOf)).toMatchObject({
+      id: "image",
+      where: "after",
+      depth: 2,
+    });
+    // Out one level: below Frame 1, still inside the phone.
+    expect(dropTarget(rows, 3, 0.8, 1, parentOf)).toMatchObject({
+      id: "frame1",
+      where: "after",
+      depth: 1,
+    });
+    // All the way out: below the phone, on the page.
+    expect(dropTarget(rows, 3, 0.8, -3, parentOf)).toMatchObject({
+      id: "phone",
+      where: "after",
+      depth: 0,
+    });
+    // Further right than the row's own level is just below the row.
+    expect(dropTarget(rows, 3, 0.8, 9, parentOf)).toMatchObject({ id: "image", depth: 2 });
+  });
+
+  it("can't go further out than the next row allows", () => {
+    // Text 1 is followed by Image at the same level: only below Text 1.
+    expect(dropTarget(rows, 2, 0.8, 0, parentOf)).toMatchObject({ id: "text1", where: "after" });
+  });
+
+  it("drops inside a group from its middle, and at the top of an open group's list from below its row", () => {
+    expect(dropTarget(rows, 1, 0.5, 1, parentOf)).toMatchObject({
+      id: "frame1",
+      where: "inside",
+      show: "box",
+    });
+    expect(dropTarget(rows, 1, 0.9, 1, parentOf)).toMatchObject({
+      id: "frame1",
+      where: "inside",
+      show: "line-after",
+      depth: 2,
+    });
+    expect(dropTarget(rows, 1, 0.1, 1, parentOf)).toMatchObject({ id: "frame1", where: "before" });
   });
 });

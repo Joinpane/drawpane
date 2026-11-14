@@ -17,6 +17,8 @@ import {
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import {
   containersWithin,
+  type DropTarget,
+  dropTarget,
   kindOf,
   LAYER_FILTERS,
   type LayerFilter,
@@ -29,15 +31,17 @@ import { openMenu, uiFor, useUi } from "./ui-state";
 const ROW_HEIGHT = 28;
 const OVERSCAN = 8;
 
-type Where = "before" | "after" | "inside";
-
 interface DragState {
   readonly id: string;
-  readonly over: string | null;
-  readonly where: Where;
+  /** Where it drops, and the row showing it (see `dropTarget`). */
+  readonly target: DropTarget | null;
   /** ⌥ held: the drop duplicates instead of moving. */
   readonly copy: boolean;
 }
+
+/** Each nesting level indents a row this much (the LayerRow's 12px), from its 4px start. */
+const INDENT = 12;
+const INDENT_START = 4;
 
 export function LayersPanel() {
   const editor = useEditor();
@@ -221,24 +225,37 @@ export function LayersPanel() {
     }
   };
 
-  // Drag to reorder: before or after a row, or inside a frame or group.
-  const onDragOver = (row: Row, e: React.DragEvent<HTMLDivElement>) => {
-    if (!drag || drag.id === row.node.id) return;
+  // Drag to reorder: above or below a row, inside a frame or group, or (below
+  // the last row of nested groups) out to the level the pointer is at.
+  const onDragOver = (index: number, e: React.DragEvent<HTMLDivElement>) => {
+    const row = rows[index];
+    if (!drag || !row || drag.id === row.node.id) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = e.altKey ? "copy" : "move";
     const rect = e.currentTarget.getBoundingClientRect();
     const y = (e.clientY - rect.top) / rect.height;
-    const container = row.node.type === "frame" || row.node.type === "group";
-    const where: Where = container && y > 0.3 && y < 0.7 ? "inside" : y < 0.5 ? "before" : "after";
-    if (drag.over !== row.node.id || drag.where !== where || drag.copy !== e.altKey)
-      setDrag({ ...drag, over: row.node.id, where, copy: e.altKey });
+    // The pointer's level: where it is across the row, against the rows' indents.
+    const depth = (e.clientX - rect.left - INDENT_START - INDENT / 2) / INDENT;
+    const target = dropTarget(rows, index, y, active ? row.depth : depth, (id) => {
+      const parent = editor.doc.get(id)?.parent;
+      return parent && parent !== pageId ? parent : null;
+    });
+    const same =
+      drag.copy === e.altKey &&
+      drag.target?.id === target?.id &&
+      drag.target?.where === target?.where &&
+      drag.target?.row === target?.row &&
+      drag.target?.show === target?.show &&
+      drag.target?.depth === target?.depth;
+    if (!same) setDrag({ ...drag, target, copy: e.altKey });
   };
 
   const onDrop = () => {
-    if (!drag?.over) return setDrag(null);
-    const target = editor.doc.get(drag.over);
+    if (!drag?.target) return setDrag(null);
+    const target = editor.doc.get(drag.target.id);
     const dragged = selection.includes(drag.id) ? selection : [drag.id];
-    const { where, copy } = drag;
+    const { copy } = drag;
+    const { where } = drag.target;
     setDrag(null);
     if (!target) return;
     // Refuse to drop a layer into itself.
@@ -387,13 +404,20 @@ export function LayersPanel() {
             {rows.slice(start, end).map((row, i) => {
               const { node } = row;
               const presence = presenceBy.get(node.id);
-              const dropClass =
-                drag?.over === node.id ? `layers__row--drop-${drag.where}` : undefined;
+              const drop = drag?.target?.row === node.id ? drag.target : null;
               return (
                 <LayerRow
                   key={node.id}
-                  className={dropClass}
-                  style={{ position: "absolute", top: (start + i) * ROW_HEIGHT, left: 0, right: 0 }}
+                  className={drop ? `layers__row--drop-${drop.show}` : undefined}
+                  style={
+                    {
+                      position: "absolute",
+                      top: (start + i) * ROW_HEIGHT,
+                      left: 0,
+                      right: 0,
+                      ...(drop ? { "--drop-depth": drop.depth } : {}),
+                    } as React.CSSProperties
+                  }
                   name={layerName(node)}
                   {...(row.note ? { note: row.note } : {})}
                   {...(active && query.trim() ? { highlight: query } : {})}
@@ -437,9 +461,10 @@ export function LayersPanel() {
                         draggable: true,
                         onDragStart: (e: React.DragEvent) => {
                           e.dataTransfer.effectAllowed = "copyMove";
-                          setDrag({ id: node.id, over: null, where: "before", copy: e.altKey });
+                          setDrag({ id: node.id, target: null, copy: e.altKey });
                         },
-                        onDragOver: (e: React.DragEvent<HTMLDivElement>) => onDragOver(row, e),
+                        onDragOver: (e: React.DragEvent<HTMLDivElement>) =>
+                          onDragOver(start + i, e),
                         onDrop,
                         onDragEnd: () => setDrag(null),
                       }
@@ -459,7 +484,7 @@ export function LayersPanel() {
           </div>
         )}
       </div>
-      {drag?.over ? <DragStatus editor={editor} drag={drag} selection={selection} /> : null}
+      {drag?.target ? <DragStatus editor={editor} drag={drag} selection={selection} /> : null}
     </div>
   );
 }
@@ -582,15 +607,17 @@ function DragStatus({
 }) {
   const moving = selection.includes(drag.id) ? selection.length : 1;
   const node = editor.doc.get(drag.id);
-  const target = drag.over ? editor.doc.get(drag.over) : undefined;
-  if (!node || !target) return null;
+  const target = drag.target ? editor.doc.get(drag.target.id) : undefined;
+  if (!node || !target || !drag.target) return null;
   const what = moving > 1 ? `${moving} layers` : layerName(node);
+  const parent = editor.doc.get(target.parent);
+  const within = parent && parent.type !== "page" ? ` in ${layerName(parent)}` : "";
   const where =
-    drag.where === "inside"
+    drag.target.where === "inside"
       ? `into ${layerName(target)}`
-      : drag.where === "before"
-        ? `above ${layerName(target)}`
-        : `below ${layerName(target)}`;
+      : drag.target.where === "before"
+        ? `above ${layerName(target)}${within}`
+        : `below ${layerName(target)}${within}`;
   return (
     <div className="layers__status" role="status">
       <Icon name={drag.copy ? "duplicate" : "layers"} size={12} />

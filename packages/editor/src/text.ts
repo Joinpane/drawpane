@@ -10,6 +10,8 @@ import { type TextSpan, textSpans } from "./rich-text";
 export interface TextMeasurer {
   /** Width of `text` in CSS pixels for a canvas `font` string. */
   width(font: string, text: string): number;
+  /** Bumped whenever earlier widths stop being right (a web font arrived), so cached layouts go too. */
+  readonly generation?: number;
 }
 
 /** A stretch of a line in one style. */
@@ -177,12 +179,44 @@ class RangeMeasure {
   }
 }
 
+interface CachedLayout {
+  readonly measurer: TextMeasurer;
+  readonly generation: number;
+  readonly maxWidth: number | null;
+  readonly layout: TextLayout;
+}
+/**
+ * Layouts by the props they were made from. A node's props object is
+ * replaced on every change, so a hit is always current; the canvas draws
+ * every text layer every frame, and this makes all but the first free.
+ */
+const layoutCache = new WeakMap<object, CachedLayout>();
+
 /**
  * Breaks text into lines. With `maxWidth` null, only hard line breaks wrap
  * (auto-width text); otherwise words wrap at `maxWidth`, and a word longer
  * than a line breaks between characters.
  */
 export function layoutText(
+  node: NodeRecord,
+  measurer: TextMeasurer,
+  maxWidth: number | null,
+): TextLayout {
+  const generation = measurer.generation ?? 0;
+  const hit = layoutCache.get(node.props);
+  if (
+    hit &&
+    hit.measurer === measurer &&
+    hit.generation === generation &&
+    hit.maxWidth === maxWidth
+  )
+    return hit.layout;
+  const layout = computeLayout(node, measurer, maxWidth);
+  layoutCache.set(node.props, { measurer, generation, maxWidth, layout });
+  return layout;
+}
+
+function computeLayout(
   node: NodeRecord,
   measurer: TextMeasurer,
   maxWidth: number | null,
@@ -207,28 +241,39 @@ export function layoutText(
     } else {
       let start = paragraph;
       let end = paragraph;
+      // The line's width so far, as the sum of its words' and spaces' widths:
+      // each is measured once (and repeats across a file, so the measurer's
+      // cache answers most), instead of measuring the growing line each time.
+      let lineWidth = 0;
       const tokens = /\s+|\S+/g;
       tokens.lastIndex = 0;
       const slice = text.slice(paragraph, pEnd);
       for (let match = tokens.exec(slice); match; match = tokens.exec(slice)) {
         const a = paragraph + match.index;
         const b = a + match[0].length;
-        if (end === start || m.width(start, trimEnd(start, b)) <= maxWidth) {
+        const space = /\s/.test(match[0]);
+        const tokenWidth = m.width(a, b);
+        // Spaces never push a line over: trailing spaces don't count.
+        if (end === start || space || lineWidth + tokenWidth <= maxWidth) {
           end = b;
+          lineWidth += tokenWidth;
           continue;
         }
         breaks.push({ start, end: trimEnd(start, end), next: a });
         // A line never starts with the spaces that ended the one before.
-        const space = /\s/.test(match[0]);
         start = space ? b : a;
         end = b;
+        lineWidth = space ? 0 : tokenWidth;
         // Break words that don't fit on a line of their own.
-        while (end > start && m.width(start, end) > maxWidth) {
-          let cut = end - 1;
-          while (cut > start + 1 && m.width(start, cut) > maxWidth) cut--;
-          if (cut > start + 1 && isLow(text.charCodeAt(cut))) cut--;
-          breaks.push({ start, end: cut, next: cut });
-          start = cut;
+        if (lineWidth > maxWidth) {
+          while (end > start && m.width(start, end) > maxWidth) {
+            let cut = end - 1;
+            while (cut > start + 1 && m.width(start, cut) > maxWidth) cut--;
+            if (cut > start + 1 && isLow(text.charCodeAt(cut))) cut--;
+            breaks.push({ start, end: cut, next: cut });
+            start = cut;
+          }
+          lineWidth = m.width(start, end);
         }
       }
       breaks.push({ start, end: trimEnd(start, end), next: after });
@@ -454,6 +499,7 @@ export function selectionBoxes(
 export class CanvasTextMeasurer implements TextMeasurer {
   readonly #ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   readonly #cache = new Map<string, number>();
+  #generation = 0;
 
   constructor() {
     const canvas =
@@ -477,8 +523,13 @@ export class CanvasTextMeasurer implements TextMeasurer {
     return w;
   }
 
+  get generation(): number {
+    return this.#generation;
+  }
+
   /** Call after web fonts load: earlier measurements used fallback fonts. */
   invalidate(): void {
     this.#cache.clear();
+    this.#generation++;
   }
 }

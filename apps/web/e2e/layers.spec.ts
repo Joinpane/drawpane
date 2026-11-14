@@ -1,7 +1,8 @@
 /**
  * The layers panel in a real browser, on a throwaway instance: finding
  * layers with ⌘F and filters, selecting what was found, folding the tree
- * with ⌥-click and ⌥L, locking from a row, and duplicating with ⌥-drag.
+ * with ⌥-click and ⌥L, locking from a row, duplicating with ⌥-drag, and
+ * dragging a layer out of its groups to the level the pointer is at.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -164,5 +165,39 @@ test.describe
           page.evaluate((id) => (window as unknown as W).drawpane.doc.get(id)?.parent, ids.title),
         )
         .toBe(ids.other);
+    });
+
+    test("drags a layer out below the last row, to the level the pointer is at", async () => {
+      const source = row(page, "Title");
+      // The last row in the panel: the bottom Event row, two levels into Home.
+      const last = row(page, "Event row").last();
+      const box = await last.boundingBox();
+      if (!box) throw new Error("no row");
+      const below = box.y + box.height * 0.85;
+      await source.hover();
+      await page.mouse.down();
+      // One level in: below Event list, still inside Home.
+      await page.mouse.move(box.x + 4 + 12 + 8, below, { steps: 4 });
+      await page.mouse.move(box.x + 4 + 12 + 9, below);
+      await expect(
+        page.getByRole("status").filter({ hasText: "moving below Event list in Home" }),
+      ).toBeVisible();
+      // All the way left: below Home, on the page.
+      await page.mouse.move(box.x + 2, below, { steps: 4 });
+      await page.mouse.move(box.x + 3, below);
+      await expect(page.getByRole("status").filter({ hasText: "moving below Home" })).toBeVisible();
+      await expect(last).toHaveClass(/layers__row--drop-line-after/);
+      await page.mouse.up();
+      await expect
+        .poll(() =>
+          page.evaluate((id) => (window as unknown as W).drawpane.doc.get(id)?.parent, ids.title),
+        )
+        .toBe(await page.evaluate(() => (window as unknown as W).drawpane.s.pageId));
+      // Below Home in the list: under it in the page's stack.
+      const order = await page.evaluate(
+        (p) => (window as unknown as W).drawpane.doc.childIds(p),
+        await page.evaluate(() => (window as unknown as W).drawpane.s.pageId),
+      );
+      expect(order.indexOf(ids.title)).toBe(order.indexOf(ids.home) - 1);
     });
   });
