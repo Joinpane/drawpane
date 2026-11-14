@@ -14,9 +14,13 @@
  * a URL, such as a data: URL for a self-contained file, and its natural
  * size), placed by their scale mode and clipped to the layer's shape.
  *
+ * Drop and inner shadows (with spread, as the canvas casts them) and layer
+ * blur are SVG filters in page space, so a rotated layer's shadow still
+ * falls the way it does on the canvas.
+ *
  * Not covered yet:
  * - image fills without a supplied image, and image strokes (left out)
- * - shadows, layer blur and background blur
+ * - background blur (SVG can't blur what's behind an element)
  * - per-paint blend modes on strokes
  * - text that depends on fonts the viewer lacks: text stays live, so it
  *   renders in whatever font the viewing app has (outlining comes later)
@@ -218,28 +222,9 @@ function shapeOf(node: NodeRecord, w: number, h: number): { tag: string; attrs: 
       const max = Math.min(w, h) / 2;
       const radii = getProp(node.props, "cornerRadii");
       if (radii?.some((r) => r > 0)) {
-        const [tl, tr, br, bl] = radii.map((r) => Math.min(r, max)) as [
-          number,
-          number,
-          number,
-          number,
-        ];
-        const n = svgNumber;
-        const d = [
-          `M${n(tl)} 0`,
-          `H${n(w - tr)}`,
-          tr ? `A${n(tr)} ${n(tr)} 0 0 1 ${n(w)} ${n(tr)}` : "",
-          `V${n(h - br)}`,
-          br ? `A${n(br)} ${n(br)} 0 0 1 ${n(w - br)} ${n(h)}` : "",
-          `H${n(bl)}`,
-          bl ? `A${n(bl)} ${n(bl)} 0 0 1 0 ${n(h - bl)}` : "",
-          `V${n(tl)}`,
-          tl ? `A${n(tl)} ${n(tl)} 0 0 1 ${n(tl)} 0` : "",
-          "Z",
-        ]
-          .filter(Boolean)
-          .join("");
-        return { tag: "path", attrs: attr("d", d) };
+        const [tl = 0, tr = 0, br = 0, bl = 0] = radii.map((r) => Math.min(r, max));
+        const corners: Corners = [tl, tr, br, bl];
+        return { tag: "path", attrs: attr("d", roundedRectPath(0, 0, w, h, corners)) };
       }
       const r = Math.min(getProp(node.props, "cornerRadius"), max);
       return {
@@ -250,6 +235,87 @@ function shapeOf(node: NodeRecord, w: number, h: number): { tag: string; attrs: 
     default:
       return null;
   }
+}
+
+type Corners = readonly [tl: number, tr: number, br: number, bl: number];
+
+/** A rectangle at (x, y) with its own radius per corner, as path data. */
+function roundedRectPath(x: number, y: number, w: number, h: number, corners: Corners): string {
+  const [tl, tr, br, bl] = corners;
+  const n = svgNumber;
+  return [
+    `M${n(x + tl)} ${n(y)}`,
+    `H${n(x + w - tr)}`,
+    tr ? `A${n(tr)} ${n(tr)} 0 0 1 ${n(x + w)} ${n(y + tr)}` : "",
+    `V${n(y + h - br)}`,
+    br ? `A${n(br)} ${n(br)} 0 0 1 ${n(x + w - br)} ${n(y + h)}` : "",
+    `H${n(x + bl)}`,
+    bl ? `A${n(bl)} ${n(bl)} 0 0 1 ${n(x)} ${n(y + h - bl)}` : "",
+    `V${n(y + tl)}`,
+    tl ? `A${n(tl)} ${n(tl)} 0 0 1 ${n(x + tl)} ${n(y)}` : "",
+    "Z",
+  ]
+    .filter(Boolean)
+    .join("");
+}
+
+/**
+ * The shape grown (or shrunk, for negative spread) by `spread` on every
+ * side, as the canvas renderer casts shadows: exact for rectangles, frames
+ * and ellipses; other shapes keep their outline, as Figma does.
+ */
+function spreadShapeOf(
+  node: NodeRecord,
+  w: number,
+  h: number,
+  spread: number,
+): { tag: string; attrs: string } | null {
+  if (spread === 0) return shapeOf(node, w, h);
+  const gw = Math.max(0, w + spread * 2);
+  const gh = Math.max(0, h + spread * 2);
+  if (node.type === "ellipse") {
+    return {
+      tag: "ellipse",
+      attrs: `${attr("cx", w / 2)}${attr("cy", h / 2)}${attr("rx", gw / 2)}${attr("ry", gh / 2)}`,
+    };
+  }
+  if (node.type === "rect" || node.type === "frame") {
+    const max = Math.min(w, h) / 2;
+    const grow = (v: number) => (v > 0 ? Math.max(0, Math.min(v, max) + spread) : 0);
+    const r = getProp(node.props, "cornerRadius");
+    const limit = Math.min(gw, gh) / 2;
+    const [tl = 0, tr = 0, br = 0, bl = 0] = (
+      getProp(node.props, "cornerRadii") ?? [r, r, r, r]
+    ).map((v) => Math.min(grow(v), limit));
+    const corners: Corners = [tl, tr, br, bl];
+    return { tag: "path", attrs: attr("d", roundedRectPath(-spread, -spread, gw, gh, corners)) };
+  }
+  return shapeOf(node, w, h);
+}
+
+/** Page-space bounds of a box in a layer's own space, grown by `pad`: a filter's region. */
+function regionAttrs(
+  m: Matrix,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  pad: number,
+): string {
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const [x, y] of [
+    [x0, y0],
+    [x1, y0],
+    [x1, y1],
+    [x0, y1],
+  ] as const) {
+    xs.push(m[0] * x + m[2] * y + m[4]);
+    ys.push(m[1] * x + m[3] * y + m[5]);
+  }
+  const left = Math.min(...xs) - pad;
+  const top = Math.min(...ys) - pad;
+  return `${attr("x", left)}${attr("y", top)}${attr("width", Math.max(...xs) + pad - left)}${attr("height", Math.max(...ys) + pad - top)}`;
 }
 
 /**
@@ -313,6 +379,116 @@ export function exportSvg(
     return `<g clip-path="url(#${clip})"${opacity}${blendStyle}><g${transform}>${body}</g></g>`;
   };
 
+  /** An offset and a Gaussian blur in page space, as a canvas shadow is cast; `region` in page space. */
+  const shadowFilter = (
+    s: { x: number; y: number; blur: number },
+    region: string,
+    fromAlpha: boolean,
+  ) => {
+    const id = out.id("shadow");
+    // A canvas shadow's blur is twice the Gaussian's standard deviation.
+    const sd = s.blur / 2;
+    const offset = `<feOffset${fromAlpha ? ' in="SourceAlpha"' : ""}${attr("dx", s.x)}${attr("dy", s.y)} result="moved"/>`;
+    const blurred =
+      sd > 0 ? `<feGaussianBlur in="moved"${attr("stdDeviation", sd)} result="soft"/>` : "";
+    out.defs.push(
+      `<filter id="${id}" filterUnits="userSpaceOnUse"${region} color-interpolation-filters="sRGB">${offset}${blurred}</filter>`,
+    );
+    return id;
+  };
+
+  /** How far a shadow can reach past its shape: its offset, blur and spread. */
+  const reach = (s: { x: number; y: number; blur: number; spread: number }) =>
+    Math.abs(s.x) + Math.abs(s.y) + s.blur * 1.5 + Math.abs(s.spread) + 1;
+
+  /**
+   * Drop shadows, under the layer: its shape grown by the spread (or its
+   * glyphs, for text) in the shadow's colour, offset and blurred. Whatever
+   * the fill's opacity, as on the canvas.
+   */
+  const dropShadows = (
+    node: NodeRecord,
+    w: number,
+    h: number,
+    matrix: Matrix,
+    shape: { tag: string; attrs: string } | null,
+    into: string[],
+  ) => {
+    for (const s of getProp(node.props, "effects")) {
+      if (s.type !== "drop-shadow" || s.visible === false) continue;
+      const region = regionAttrs(matrix, 0, 0, w, h, reach(s));
+      const { color, alpha } = splitColor(s.color);
+      const ink = `${attr("fill", color)}${alpha < 1 ? attr("fill-opacity", alpha) : ""}`;
+      if (shape) {
+        const grown = spreadShapeOf(node, w, h, s.spread);
+        if (!grown) continue;
+        const filter = shadowFilter(s, region, false);
+        into.push(
+          `<g filter="url(#${filter})"><${grown.tag}${transformAttr(matrix)}${grown.attrs}${ink}/></g>`,
+        );
+      } else {
+        // Text: the glyphs' silhouette, filled with the shadow's colour.
+        const glyphs: string[] = [];
+        text(node, w, h, transformAttr(matrix), glyphs);
+        const filter = shadowFilter(s, region, true);
+        const tint = out.id("tint");
+        out.defs.push(
+          `<filter id="${tint}" filterUnits="userSpaceOnUse"${region} color-interpolation-filters="sRGB"><feFlood${attr("flood-color", color)}${alpha < 1 ? attr("flood-opacity", alpha) : ""}/><feComposite in2="SourceGraphic" operator="in"/></filter>`,
+        );
+        into.push(
+          `<g filter="url(#${tint})"><g filter="url(#${filter})">${glyphs.join("")}</g></g>`,
+        );
+      }
+    }
+  };
+
+  /**
+   * Inner shadows, over the fills: everything outside the shape shrunk by
+   * the spread, in the shadow's colour, offset, blurred and clipped to the shape.
+   */
+  const innerShadows = (
+    node: NodeRecord,
+    w: number,
+    h: number,
+    matrix: Matrix,
+    shape: { tag: string; attrs: string },
+    into: string[],
+  ) => {
+    const transform = transformAttr(matrix);
+    for (const s of getProp(node.props, "effects")) {
+      if (s.type !== "inner-shadow" || s.visible === false) continue;
+      const shrunk = spreadShapeOf(node, w, h, -s.spread);
+      if (!shrunk) continue;
+      const pad = reach(s);
+      const region = regionAttrs(matrix, 0, 0, w, h, pad);
+      const clip = out.id("clip");
+      out.defs.push(`<clipPath id="${clip}"><${shape.tag}${transform}${shape.attrs}/></clipPath>`);
+      const ring = out.id("ring");
+      out.defs.push(
+        `<mask id="${ring}" maskUnits="userSpaceOnUse"${region}><rect${region} fill="#fff"/><${shrunk.tag}${transform}${shrunk.attrs} fill="#000"/></mask>`,
+      );
+      const filter = shadowFilter(s, region, false);
+      const { color, alpha } = splitColor(s.color);
+      into.push(
+        `<g clip-path="url(#${clip})"><g filter="url(#${filter})"><rect${region}${attr("fill", color)}${alpha < 1 ? attr("fill-opacity", alpha) : ""} mask="url(#${ring})"/></g></g>`,
+      );
+    }
+  };
+
+  /** A layer blur's filter id, or null: CSS-style blur(radius) on the layer's own drawing. */
+  const layerBlur = (node: NodeRecord, w: number, h: number, matrix: Matrix): string | null => {
+    const blur = getProp(node.props, "effects").find(
+      (e) => e.type === "layer-blur" && e.visible !== false,
+    );
+    if (blur?.type !== "layer-blur" || blur.radius <= 0) return null;
+    const id = out.id("blur");
+    const region = regionAttrs(matrix, 0, 0, w, h, blur.radius * 3);
+    out.defs.push(
+      `<filter id="${id}" filterUnits="userSpaceOnUse"${region} color-interpolation-filters="sRGB"><feGaussianBlur${attr("stdDeviation", blur.radius)}/></filter>`,
+    );
+    return id;
+  };
+
   const visit = (id: string, into: string[]) => {
     const node = scene.doc.get(id);
     if (!node || node.props.visible === false || node.type === "page") return;
@@ -332,13 +508,20 @@ export function exportSvg(
 
     const w = getProp(node.props, "width");
     const h = getProp(node.props, "height");
-    const transform = transformAttr(scene.worldMatrix(id));
+    const matrix = scene.worldMatrix(id);
+    const transform = transformAttr(matrix);
+    // The layer's own drawing, which its layer blur blurs, apart from its children, which it doesn't.
+    const below: string[] = [];
+    const children: string[] = [];
+    const above: string[] = [];
 
     if (node.type === "text") {
-      text(node, w, h, transform, parts);
+      dropShadows(node, w, h, matrix, null, below);
+      text(node, w, h, transform, below);
     } else {
       const shape = shapeOf(node, w, h);
       if (shape) {
+        dropShadows(node, w, h, matrix, shape, below);
         if (node.type !== "line")
           for (const paint of getProp(node.props, "fills")) {
             if (paint.visible === false) continue;
@@ -348,31 +531,36 @@ export function exportSvg(
                 : "";
             if (paint.type === "image") {
               const image = imageFill(paint, shape, w, h, transform, blendStyle);
-              if (image) parts.push(image);
+              if (image) below.push(image);
               continue;
             }
             const fill = out.paint("fill", paint, w, h);
             if (!fill) continue;
-            parts.push(`<${shape.tag}${transform}${shape.attrs}${fill}${blendStyle}/>`);
+            below.push(`<${shape.tag}${transform}${shape.attrs}${fill}${blendStyle}/>`);
           }
+        if (node.type !== "line") innerShadows(node, w, h, matrix, shape, below);
         if (node.type === "frame") {
-          const children: string[] = [];
-          visitChildren(id, children);
-          if (children.length > 0) {
+          const inside: string[] = [];
+          visitChildren(id, inside);
+          if (inside.length > 0) {
             if (getProp(node.props, "clipContent")) {
               const clip = out.id("clip");
               out.defs.push(
                 `<clipPath id="${clip}"><${shape.tag}${transform}${shape.attrs}/></clipPath>`,
               );
-              parts.push(`<g clip-path="url(#${clip})">${children.join("")}</g>`);
+              children.push(`<g clip-path="url(#${clip})">${inside.join("")}</g>`);
             } else {
-              parts.push(...children);
+              children.push(...inside);
             }
           }
         }
-        strokes(node, shape, w, h, transform, parts);
+        strokes(node, shape, w, h, transform, above);
       }
     }
+    const blur = layerBlur(node, w, h, matrix);
+    const own = (list: string[]) =>
+      blur && list.length > 0 ? [`<g filter="url(#${blur})">${list.join("")}</g>`] : list;
+    parts.push(...own(below), ...children, ...own(above));
     if (parts.length === 0) return;
     if (wrapperAttrs || name) into.push(`<g${name}${wrapperAttrs}>${parts.join("")}</g>`);
     else into.push(...parts);
@@ -557,4 +745,60 @@ export function exportSvg(
   const viewBox = [x, y, width, height].map(svgNumber).join(" ");
   const defs = out.defs.length > 0 ? `<defs>${out.defs.join("")}</defs>` : "";
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${svgNumber(width)}" height="${svgNumber(height)}" viewBox="${viewBox}">${defs}${out.body.join("")}</svg>\n`;
+}
+
+/**
+ * The same SVG for reading (Inspect): one element per line, indented, and a
+ * tag longer than `width` with each attribute on a line of its own. A
+ * `<text>` stays on one line with its tspans, since its whitespace is
+ * preserved and a line break inside it would show as a space. Collapsing the
+ * whitespace between and inside tags gives back the original.
+ */
+export function formatSvg(svg: string, { width = Number.POSITIVE_INFINITY } = {}): string {
+  const tokens = svg.trim().match(/<[^>]+>|[^<]+/g) ?? [];
+  const lines: string[] = [];
+  const indent = (depth: number) => "  ".repeat(Math.max(0, depth));
+  /** A tag at `depth`, its attributes one per line when it's too long for one. */
+  const tag = (token: string, depth: number) => {
+    const line = indent(depth) + token;
+    const parts = /^<([\w:-]+)((?:\s+[\w:-]+="[^"]*")+)\s*(\/?)>$/.exec(token);
+    if (line.length <= width || !parts) return line;
+    const [, name, attrs = "", close] = parts;
+    const each = attrs.match(/[\w:-]+="[^"]*"/g) ?? [];
+    return [
+      `${indent(depth)}<${name}`,
+      ...each.map((a, i) => `${indent(depth + 1)}${a}${i === each.length - 1 ? `${close}>` : ""}`),
+    ].join("\n");
+  };
+  let depth = 0;
+  // A <text> element being kept on one line, and how deep inside it we are.
+  let inline: string | null = null;
+  let inside = 0;
+  for (const token of tokens) {
+    if (inline !== null) {
+      inline += token;
+      if (token.startsWith("</")) inside--;
+      else if (token.startsWith("<") && !token.endsWith("/>")) inside++;
+      if (inside === 0) {
+        lines.push(indent(depth) + inline);
+        inline = null;
+      }
+      continue;
+    }
+    if (!token.startsWith("<")) {
+      if (token.trim()) lines.push(indent(depth) + token.trim());
+    } else if (token.startsWith("</")) {
+      depth--;
+      lines.push(indent(depth) + token);
+    } else if (token.endsWith("/>")) {
+      lines.push(tag(token, depth));
+    } else if (/^<text[\s>]/.test(token)) {
+      inline = token;
+      inside = 1;
+    } else {
+      lines.push(tag(token, depth));
+      depth++;
+    }
+  }
+  return `${lines.join("\n")}\n`;
 }

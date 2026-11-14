@@ -1985,6 +1985,11 @@
 .inspect__sep {
   color: var(--ink-muted);
 }
+.inspect__note {
+  margin: var(--space-200) 0 0;
+  color: var(--ink-muted);
+  font: 400 11px / 16px var(--font-ui);
+}
 .inspect__code {
   margin: 0;
   padding: var(--space-300);
@@ -1997,6 +2002,11 @@
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
+}
+/* Markup keeps its indentation: long lines scroll sideways instead of wrapping. */
+.inspect__code--markup {
+  white-space: pre;
+  word-break: normal;
 }
 .inspector__hint kbd {
   font: 500 11px / 14px var(--font-mono);

@@ -9,7 +9,7 @@ import {
   outputSize,
   snapToPixels,
 } from "../src/export";
-import { exportSvg } from "../src/svg";
+import { exportSvg, formatSvg } from "../src/svg";
 import type { TextMeasurer } from "../src/text";
 
 /** Every character is half the font size wide; deterministic in Node. */
@@ -375,6 +375,119 @@ describe("exportSvg", () => {
     expect(svg).toContain(
       `<text font-family="'Instrument Sans', sans-serif" font-size="16" font-weight="600" text-anchor="middle" fill="#1c1b1a" xml:space="preserve"><tspan x="50" y="14.8">Fish &amp; &lt;chips&gt;</tspan><tspan x="50" y="34.8">Now</tspan></text>`,
     );
+  });
+
+  it("casts drop shadows from the shape grown by its spread, and inner shadows inside it", () => {
+    const editor = makeEditor([
+      rect("r", {
+        cornerRadius: 8,
+        fills: [{ type: "solid", color: "#ffffff" }],
+        effects: [
+          { type: "drop-shadow", color: "#00000040", x: 0, y: 4, blur: 12, spread: 2 },
+          { type: "inner-shadow", color: "#ff000080", x: 2, y: 2, blur: 4, spread: 0 },
+          { type: "drop-shadow", color: "#000000", x: 9, y: 9, blur: 0, spread: 0, visible: false },
+        ],
+      }),
+    ]);
+    const svg = svgOf(editor, ["r"]);
+    // A canvas shadow's blur is twice the Gaussian's deviation; the region covers its reach.
+    expect(svg).toContain(
+      '<filter id="shadow1" filterUnits="userSpaceOnUse" x="-15" y="-5" width="150" height="100" color-interpolation-filters="sRGB"><feOffset dx="0" dy="4" result="moved"/><feGaussianBlur in="moved" stdDeviation="6" result="soft"/></filter>',
+    );
+    // Spread grows the box and its corners alike, under the fill.
+    expect(svg).toContain(
+      '<g filter="url(#shadow1)"><path transform="translate(10 20)" d="M8 -2H92A10 10 0 0 1 102 8V42A10 10 0 0 1 92 52H8A10 10 0 0 1 -2 42V8A10 10 0 0 1 8 -2Z" fill="#000000" fill-opacity="0.251"/></g><rect transform="translate(10 20)" width="100" height="50" rx="8" fill="#ffffff"/>',
+    );
+    // The inner shadow: a ring outside the shape, offset and blurred, clipped to the shape, over the fill.
+    expect(svg).toMatch(
+      /fill="#ffffff"\/><g clip-path="url\(#clip2\)"><g filter="url\(#shadow4\)"><rect x="-1" y="9" width="122" height="72" fill="#ff0000" fill-opacity="0.502" mask="url\(#ring3\)"\/><\/g><\/g>/,
+    );
+    // Hidden effects stay out.
+    expect(svg.match(/<filter /g)).toHaveLength(2);
+  });
+
+  it("blurs a layer's own drawing, not its children", () => {
+    const editor = makeEditor([
+      {
+        op: "create",
+        id: "f",
+        type: "frame",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 200,
+          height: 100,
+          fills: [{ type: "solid", color: "#eeeeee" }],
+          effects: [{ type: "layer-blur", radius: 4 }],
+        },
+      },
+      rect(
+        "c",
+        { x: 10, y: 10, width: 20, height: 20, fills: [{ type: "solid", color: "#000000" }] },
+        "f",
+      ),
+    ]);
+    const svg = svgOf(editor, ["f"]);
+    expect(svg).toContain('<feGaussianBlur stdDeviation="4"/>');
+    expect(svg).toContain(
+      '<g filter="url(#blur2)"><rect width="200" height="100" fill="#eeeeee"/></g><g clip-path="url(#clip1)"><rect transform="translate(10 10)"',
+    );
+  });
+
+  it("casts a rotated layer's shadow in page space, as the canvas does", () => {
+    const editor = makeEditor([
+      rect("r", {
+        rotation: 90,
+        fills: [{ type: "solid", color: "#2b4fd6" }],
+        effects: [{ type: "drop-shadow", color: "#000000", x: 0, y: 12, blur: 0, spread: 0 }],
+      }),
+    ]);
+    const svg = svgOf(editor, ["r"]);
+    // The offset is on a group in page space, outside the shape's own rotation.
+    expect(svg).toMatch(/<feOffset dx="0" dy="12" result="moved"\/>/);
+    expect(svg).toMatch(/<g filter="url\(#shadow1\)"><rect transform="matrix\(/);
+  });
+
+  it("formats for reading without changing a thing", () => {
+    const editor = makeEditor([
+      rect("r", {
+        name: "Card",
+        opacity: 0.5,
+        fills: [{ type: "solid", color: "#ffffff" }],
+        effects: [{ type: "drop-shadow", color: "#00000040", x: 0, y: 4, blur: 12, spread: 0 }],
+      }),
+      {
+        op: "create",
+        id: "t",
+        type: "text",
+        parent: "p",
+        key: "a1",
+        props: { x: 0, y: 100, width: 40, height: 40, characters: "One two three" },
+      },
+    ]);
+    const svg = svgOf(editor, ["r", "t"]);
+    const pretty = formatSvg(svg);
+    expect(pretty.replace(/>\s+</g, "><").trim()).toBe(svg.trim());
+    expect(pretty.split("\n")[1]).toBe("  <defs>");
+    // Text stays on one line: its whitespace is significant.
+    expect(pretty).toMatch(/\n {2}<text [^\n]*<\/text>\n/);
+
+    // Narrow: a long tag's attributes go one per line, and still read back the same.
+    const narrow = formatSvg(svg, { width: 40 });
+    expect(
+      narrow
+        .replace(/\n\s+(?=[\w:-]+=)/g, " ")
+        .replace(/>\s+</g, "><")
+        .trim(),
+    ).toBe(svg.trim());
+    expect(narrow.split("\n").slice(0, 3)).toEqual([
+      "<svg",
+      '  xmlns="http://www.w3.org/2000/svg"',
+      expect.stringMatching(/^ {2}width="\d+"$/),
+    ]);
+    expect(narrow).toMatch(/\n +fill-opacity="0\.251"\/>\n/);
   });
 
   it("leaves out image fills and hidden layers", () => {

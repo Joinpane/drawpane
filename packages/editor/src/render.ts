@@ -819,6 +819,13 @@ export class CanvasRenderer {
         }
       } else {
         ctx.clip(shape);
+        // As above: paint only the ring's shadow. The ring itself overlaps the
+        // inside of the shape when there's spread, and would show as a solid band.
+        const t = ctx.getTransform();
+        const far = 1e5 / Math.max(1e-9, Math.hypot(t.a, t.b));
+        ctx.shadowOffsetX = s.x * scale - t.a * far;
+        ctx.shadowOffsetY = s.y * scale - t.b * far;
+        ctx.translate(far, 0);
         const ring = new Path2D();
         ring.rect(-1e4, -1e4, 2e4, 2e4);
         ring.addPath(this.#spreadShape(node, shape, width, height, -s.spread));
