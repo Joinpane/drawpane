@@ -11,6 +11,7 @@ import { comments } from "./comments";
 import { fonts } from "./fonts";
 import { imports } from "./imports";
 import { media, thumbnailKey } from "./media";
+import { notifications } from "./notifications";
 import { share } from "./share";
 import { teamFonts } from "./team-fonts";
 import { versions } from "./versions";
@@ -492,6 +493,7 @@ export const api = new Hono<AppContext>()
 
   // Comments ----------------------------------------------------------------
   .route("/", comments)
+  .route("/", notifications)
   // Images and thumbnails (./media.ts) ---------------------------------------
   .route("/", media)
   .route("/", share)

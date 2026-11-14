@@ -14,6 +14,7 @@ import {
 import { api } from "../api/client";
 import { isMac } from "../app/format";
 import { fonts } from "../fonts/fonts";
+import { refreshInbox } from "../inbox/inbox";
 import { ShareDialog } from "../prototype/ShareDialog";
 import { AssetsPanel } from "./AssetsPanel";
 import { ACTIONS, type ActionContext, shortcutFor, triggers } from "./actions";
@@ -22,7 +23,13 @@ import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
 import { ContextMenus } from "./ContextMenus";
 import { CropBar } from "./CropBar";
-import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
+import {
+  CommentsLayer,
+  CommentsPanel,
+  useCommentStore,
+  useComments,
+  useThreadLink,
+} from "./comments";
 import { connectFile } from "./connection";
 import { ExplainCard } from "./ExplainCard";
 import { ExportPanel } from "./ExportSection";
@@ -116,6 +123,7 @@ function FileEditor({ fileId }: { fileId: string }) {
   }, [isViewer]);
   const [rightOpen, setRightOpen] = useState(true);
   const [fatal, setFatal] = useState<string | null>(null);
+  const queryClient = useQueryClient();
   const comments = useCommentStore(editor, fileId);
   const commentsOpen = useComments(comments.store, (s) => s.panelOpen);
   // An open thread or new comment sits by its pin, often where the Lens would.
@@ -188,10 +196,13 @@ function FileEditor({ fileId }: { fileId: string }) {
     () =>
       connectFile(editor, fileId, setFatal, (message) => {
         comments.store.receive(message);
+        // Someone commented: it may be for you.
+        if (message.t === "comments") refreshInbox(queryClient);
         if (message.t === "role") editor.notify(roleChangeNotice(message.role, message.by.name));
       }),
-    [editor, fileId, comments.store, navigate],
+    [editor, fileId, comments.store, queryClient],
   );
+  useThreadLink(editor, comments.store, fileId, insets);
   useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt, meta.data?.file.updatedAt);
 
   // The file's team fonts: the picker lists them, and text set in them loads them.

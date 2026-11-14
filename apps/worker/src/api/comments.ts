@@ -7,6 +7,8 @@
  * (which reopens a resolved thread), resolve and reopen (commenting is collaboration, not editing). Only a
  * message's author can edit it. Authors can delete their own messages and
  * threads; team owners can delete anything.
+ *
+ * Writes notify the people concerned in the same batch (see notifications.ts).
  */
 import {
   CommentEdit,
@@ -24,6 +26,7 @@ import { requireUser } from "../auth/session";
 import type { AppContext, Env, Role, User } from "../env";
 import { badRequest, conflict, forbidden, notFound } from "../lib/http";
 import { type FileRow, readBody, requireFileRole } from "./access";
+import { commentNotifications, editNotifications, resolveNotifications } from "./notifications";
 
 /** Threads returned by one list call. Files with more are rare; the oldest drop off. */
 const LIST_LIMIT = 500;
@@ -291,6 +294,15 @@ export const comments = new Hono<AppContext>()
         "INSERT INTO comments (id, thread_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)",
       ).bind(commentId, threadId, user.id, body.body, now),
       ...mentionInserts(c.env.DB, commentId, file.id, mentions, now),
+      ...(await commentNotifications(c.env.DB, {
+        fileId: file.id,
+        threadId,
+        commentId,
+        actorId: user.id,
+        mentions,
+        reply: false,
+        now,
+      })),
     ]);
     const thread = await loadThread(c.env.DB, file.id, threadId);
     await relay(c.env, file.id, { kind: "thread", thread });
@@ -320,6 +332,15 @@ export const comments = new Hono<AppContext>()
         "UPDATE comment_threads SET updated_at = ?, resolved_at = NULL, resolved_by = NULL WHERE id = ?",
       ).bind(now, threadId),
       ...mentionInserts(c.env.DB, commentId, file.id, mentions, now),
+      ...(await commentNotifications(c.env.DB, {
+        fileId: file.id,
+        threadId,
+        commentId,
+        actorId: user.id,
+        mentions,
+        reply: true,
+        now,
+      })),
     ]);
     const thread = await loadThread(c.env.DB, file.id, threadId);
     await relay(c.env, file.id, { kind: "thread", thread });
@@ -348,6 +369,14 @@ export const comments = new Hono<AppContext>()
           `UPDATE comment_threads SET resolved_at = ?, resolved_by = ?, updated_at = ?
             WHERE id = ? AND file_id = ?`,
         ).bind(resolved ? now : null, resolved ? user.id : null, now, threadId, file.id),
+        ...resolveNotifications(c.env.DB, {
+          fileId: file.id,
+          threadId,
+          starterId: row.created_by,
+          actorId: user.id,
+          resolved,
+          now,
+        }),
       );
     }
     if (anchor) {
@@ -410,6 +439,14 @@ export const comments = new Hono<AppContext>()
       ),
       c.env.DB.prepare("DELETE FROM comment_mentions WHERE comment_id = ?").bind(commentId),
       ...mentionInserts(c.env.DB, commentId, file.id, mentions, now),
+      ...editNotifications(c.env.DB, {
+        fileId: file.id,
+        threadId,
+        commentId,
+        actorId: user.id,
+        mentions,
+        now,
+      }),
     ]);
     const thread = await loadThread(c.env.DB, file.id, threadId);
     await relay(c.env, file.id, { kind: "thread", thread });
