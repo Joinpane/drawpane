@@ -1,4 +1,13 @@
-import { Badge, Button, Icon, IconButton, type IconName, TextField } from "@drawpane/ui";
+import {
+  Badge,
+  Button,
+  Icon,
+  IconButton,
+  type IconName,
+  Menu,
+  type MenuItem,
+  TextField,
+} from "@drawpane/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -53,6 +62,19 @@ export function DashboardPage() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         searchRef.current?.focus();
+        return;
+      }
+      // N: a blank file, straight away (outside fields and dialogs).
+      const target = e.target as HTMLElement | null;
+      if (
+        e.key.toLowerCase() === "n" &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !target?.closest("input, textarea, select, [contenteditable], dialog")
+      ) {
+        e.preventDefault();
+        newBlank.current();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -64,6 +86,8 @@ export function DashboardPage() {
     void queryClient.invalidateQueries({ queryKey: ["projects", teamId] });
   };
 
+  // Read by the key handler, which is set up once.
+  const newBlank = useRef(() => {});
   const createFile = useMutation({
     mutationFn: (target: Project) =>
       api.post<{ file: FileMeta }>(`/projects/${target.id}/files`, { name: "Untitled" }),
@@ -81,7 +105,17 @@ export function DashboardPage() {
 
   const heading = view === "trash" ? "Trash" : project ? project.name : "Recent files";
   const target = project ?? drafts;
+  newBlank.current = () => {
+    if (canEdit && target && view !== "trash" && !createFile.isPending) createFile.mutate(target);
+  };
   const canImport = canEdit && !!target && view !== "trash" && view !== "fonts";
+  /** The New file page: frame sizes and templates. (New file and N make a blank file directly.) */
+  const openNewFile = () =>
+    void navigate({
+      to: "/t/$teamId/new",
+      params: { teamId },
+      search: target ? { project: target.id } : {},
+    });
   const openImport = (file: File | null = null) => {
     setImportFile(file);
     setImportOpen(true);
@@ -174,6 +208,11 @@ export function DashboardPage() {
               </Button>
             ) : null}
             {canImport ? (
+              <Button size="lg" icon="board" onClick={openNewFile}>
+                Templates
+              </Button>
+            ) : null}
+            {canImport ? (
               <Button size="lg" icon="import" onClick={() => openImport()}>
                 Import
               </Button>
@@ -209,6 +248,7 @@ export function DashboardPage() {
               searching={query.trim() !== ""}
               canCreate={canEdit && !!target}
               onCreate={() => target && createFile.mutate(target)}
+              onTemplates={canEdit && target ? openNewFile : null}
               onImport={canImport ? () => openImport() : null}
             />
           ) : (
@@ -381,6 +421,52 @@ function FileCard({
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(file.name);
   const [error, setError] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuWrap = useRef<HTMLDivElement>(null);
+  const menuButton = useRef<HTMLButtonElement>(null);
+
+  // A click anywhere else closes the menu.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (!menuWrap.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    return () => window.removeEventListener("pointerdown", onDown, true);
+  }, [menuOpen]);
+
+  const menuItems: MenuItem[] = [
+    { label: "Rename", icon: "rename", onSelect: () => setRenaming(true) },
+    {
+      label: "Duplicate",
+      icon: "duplicate",
+      onSelect: () =>
+        void act(() =>
+          api.post(`/projects/${file.projectId}/files`, {
+            name: `${file.name} (copy)`.slice(0, 120),
+            from: file.id,
+          }),
+        ),
+    },
+    file.isTemplate
+      ? {
+          label: "Remove from templates",
+          icon: "close",
+          onSelect: () => void act(() => api.patch(`/files/${file.id}`, { isTemplate: false })),
+        }
+      : {
+          label: "Make a template",
+          icon: "component",
+          onSelect: () => void act(() => api.patch(`/files/${file.id}`, { isTemplate: true })),
+        },
+    { separator: true },
+    {
+      label: "Move to trash",
+      icon: "trash",
+      danger: true,
+      onSelect: () => void act(() => api.delete(`/files/${file.id}`)),
+    },
+  ];
 
   async function act(fn: () => Promise<unknown>) {
     setError(null);
@@ -445,6 +531,12 @@ function FileCard({
           </button>
         )}
         <span className="dash__card-sub">
+          {file.isTemplate && !trash ? (
+            <span className="dash__template-tag">
+              <Icon name="component" size={12} />
+              Template
+            </span>
+          ) : null}
           {trash
             ? `Deleted ${timeAgo(file.deletedAt ?? file.updatedAt)}`
             : `Edited ${timeAgo(file.updatedAt)}`}
@@ -473,14 +565,28 @@ function FileCard({
               ) : null}
             </>
           ) : (
-            <>
-              <IconButton icon="text" label="Rename" onClick={() => setRenaming(true)} />
+            <div className="dash__card-menu" ref={menuWrap}>
               <IconButton
-                icon="trash"
-                label="Move to trash"
-                onClick={() => act(() => api.delete(`/files/${file.id}`))}
+                ref={menuButton}
+                icon="more"
+                label={`Options for ${file.name}`}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                onClick={() => setMenuOpen((v) => !v)}
               />
-            </>
+              {menuOpen ? (
+                <Menu
+                  className="dash__card-dropdown"
+                  label={`Options for ${file.name}`}
+                  items={menuItems}
+                  autoFocus
+                  onClose={() => {
+                    setMenuOpen(false);
+                    menuButton.current?.focus();
+                  }}
+                />
+              ) : null}
+            </div>
           )}
         </div>
       ) : null}
@@ -499,12 +605,14 @@ function EmptyState({
   canCreate,
   onCreate,
   onImport,
+  onTemplates,
 }: {
   trash: boolean;
   searching: boolean;
   canCreate: boolean;
   onCreate: () => void;
   onImport: (() => void) | null;
+  onTemplates: (() => void) | null;
 }) {
   if (searching) {
     return (
@@ -535,6 +643,11 @@ function EmptyState({
           <Button variant="primary" size="lg" icon="plus" onClick={onCreate}>
             New file
           </Button>
+          {onTemplates ? (
+            <Button size="lg" icon="board" onClick={onTemplates}>
+              Start from a template
+            </Button>
+          ) : null}
           {onImport ? (
             <Button size="lg" icon="import" onClick={onImport}>
               Import from Penpot
