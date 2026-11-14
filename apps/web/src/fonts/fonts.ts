@@ -8,12 +8,16 @@
  *   on first use), served from this server's /api/fonts, never from Google.
  * - Local: families installed on this computer, when the browser lets us
  *   list them (Chrome's Local Font Access). Only you see these.
+ * - Team: fonts the file's team uploaded, served from this server to the
+ *   team's members. A team font wins over any other family of its name.
  *
  * Anything else a file names is missing: it renders in the fallback until
  * someone installs or swaps it.
  */
 
-export type FontSource = "bundled" | "system" | "google" | "local";
+import type { TeamFontFace } from "@drawpane/model";
+
+export type FontSource = "bundled" | "system" | "google" | "local" | "team";
 
 export interface FontFamily {
   readonly family: string;
@@ -26,6 +30,35 @@ export interface FontFamily {
   readonly italics: readonly number[];
   /** Has a weight axis: any weight between the ends renders. */
   readonly variable: boolean;
+  /** A team font's uploaded faces (its files). */
+  readonly faces?: readonly TeamFontFace[];
+}
+
+/** A team's faces as families: weights from static faces and every hundred a variable one spans. */
+export function teamFamilies(faces: readonly TeamFontFace[]): FontFamily[] {
+  const byFamily = new Map<string, TeamFontFace[]>();
+  for (const face of faces) byFamily.set(face.family, [...(byFamily.get(face.family) ?? []), face]);
+  return [...byFamily]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, list]) => {
+      const weightsOf = (italic: boolean) =>
+        [
+          ...new Set(
+            list
+              .filter((f) => f.italic === italic)
+              .flatMap((f) => (f.weightMax ? span(f.weight, f.weightMax) : [f.weight])),
+          ),
+        ].sort((a, b) => a - b);
+      return {
+        family: name,
+        source: "team" as const,
+        category: null,
+        weights: weightsOf(false),
+        italics: weightsOf(true),
+        variable: list.some((f) => f.weightMax !== null),
+        faces: list,
+      };
+    });
 }
 
 const ALL_WEIGHTS = [100, 200, 300, 400, 500, 600, 700, 800, 900] as const;
@@ -91,6 +124,7 @@ export function describeFamily(f: FontFamily): string {
     system: "System",
     google: "Google",
     local: "On this computer · not shared",
+    team: "Team",
   }[f.source];
   if (f.source === "local") return where;
   const count = new Set([...f.weights, ...f.italics]).size;
@@ -149,6 +183,15 @@ class FontRegistry {
   readonly #previews = new Map<string, Promise<string>>();
   readonly #listeners = new Set<Listener>();
   #version = 0;
+  #teamId: string | null = null;
+  #team: readonly FontFamily[] | null = null;
+  /** Team families, checked before anything else: a team font wins over others of its name. */
+  readonly #teamKnown = new Map<string, FontFamily>();
+  #teamSheet: {
+    readonly signature: string;
+    readonly link: HTMLLinkElement;
+    readonly loaded: Promise<void>;
+  } | null = null;
 
   constructor() {
     for (const f of [...BUNDLED, ...SYSTEM]) this.#known.set(f.family, f);
@@ -191,7 +234,73 @@ class FontRegistry {
 
   /** What we know about a family now (null if unknown, or the catalog hasn't loaded). */
   get(name: string): FontFamily | null {
-    return this.#known.get(name) ?? null;
+    return this.#teamKnown.get(name) ?? this.#known.get(name) ?? null;
+  }
+
+  /** The open file's team, once `loadTeam` has been called. */
+  get teamId(): string | null {
+    return this.#teamId;
+  }
+
+  /** The team's families once loaded, by name. */
+  get team(): readonly FontFamily[] | null {
+    return this.#team;
+  }
+
+  /**
+   * Uses a team's fonts (the open file's team): lists them, and reloads
+   * their stylesheet when the files changed. Call again to pick up uploads.
+   */
+  async loadTeam(teamId: string): Promise<readonly FontFamily[]> {
+    this.#teamId = teamId;
+    let faces: TeamFontFace[] = [];
+    try {
+      const response = await fetch(`/api/teams/${encodeURIComponent(teamId)}/fonts`, {
+        credentials: "same-origin",
+      });
+      if (response.ok) faces = ((await response.json()) as { faces: TeamFontFace[] }).faces;
+    } catch {
+      // Offline or signed out: the team's fonts show as missing until the next load.
+    }
+    if (this.#teamId !== teamId) return [];
+    const list = teamFamilies(faces);
+    this.#teamKnown.clear();
+    for (const f of list) this.#teamKnown.set(f.family, f);
+    this.#team = list;
+    const signature = faces
+      .map((f) => f.sha)
+      .sort()
+      .join(",");
+    if (this.#teamSheet && this.#teamSheet.signature !== signature) {
+      this.#teamSheet.link.remove();
+      this.#teamSheet = null;
+    }
+    this.#changed();
+    return list;
+  }
+
+  /** The team's stylesheet, added once per set of files. */
+  #teamStylesheet(): Promise<void> {
+    const teamId = this.#teamId;
+    if (!teamId) return Promise.resolve();
+    if (!this.#teamSheet) {
+      const signature = (this.#team ?? [])
+        .flatMap((f) => f.faces ?? [])
+        .map((f) => f.sha)
+        .sort()
+        .join(",");
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      // The version busts the browser's cache when the team's files change.
+      link.href = `/api/teams/${encodeURIComponent(teamId)}/fonts.css?v=${hash(signature)}`;
+      link.dataset.teamFonts = teamId;
+      const loaded = new Promise<void>((resolve) => {
+        link.onload = link.onerror = () => resolve();
+      });
+      document.head.append(link);
+      this.#teamSheet = { signature, link, loaded };
+    }
+    return this.#teamSheet.loaded;
   }
 
   /** Whether this server serves Google Fonts (null until asked). */
@@ -267,24 +376,27 @@ class FontRegistry {
    * Null means missing.
    */
   async resolve(name: string): Promise<FontFamily | null> {
-    const known = this.#known.get(name);
+    const known = this.get(name);
     if (known) return known;
     await this.loadGoogle();
-    return this.#known.get(name) ?? null;
+    return this.get(name);
   }
 
   /**
    * Makes a family's faces available to the page and the canvas. Google
    * families get their stylesheet (every face, from this server; the browser
-   * downloads only what text uses), then the given faces load.
+   * downloads only what text uses), team families the team's, then the
+   * given faces load. False when nothing provides the family (yet).
    */
   async ensure(
     name: string,
     faces: ReadonlyArray<{ weight: number; italic: boolean }> = [],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const f = await this.resolve(name);
-    if (f?.source !== "google") return;
-    if (!this.#stylesheets.has(name)) {
+    if (!f) return false;
+    if (f.source === "team") await this.#teamStylesheet();
+    else if (f.source !== "google") return true;
+    else if (!this.#stylesheets.has(name)) {
       this.#stylesheets.add(name);
       const variants = [...f.weights.map(String), ...f.italics.map((w) => `${w}i`)];
       const link = document.createElement("link");
@@ -304,6 +416,7 @@ class FontRegistry {
           .catch(() => []),
       ),
     );
+    return true;
   }
 
   /**
@@ -312,6 +425,13 @@ class FontRegistry {
    * under a separate family so it never stands in for the real font.
    */
   preview(f: FontFamily): Promise<string> {
+    if (f.source === "team")
+      return this.#teamStylesheet()
+        .then(() => document.fonts.load(`16px "${f.family}"`, f.family))
+        .then(
+          () => `"${f.family}"`,
+          () => `"${f.family}"`,
+        );
     if (f.source !== "google") return Promise.resolve(`"${f.family}"`);
     let pending = this.#previews.get(f.family);
     if (!pending) {
@@ -333,6 +453,16 @@ class FontRegistry {
     }
     return pending;
   }
+}
+
+/** A short, stable hash of a string (FNV-1a), for cache-busting URLs. */
+function hash(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
 }
 
 /** The app's one font registry. */

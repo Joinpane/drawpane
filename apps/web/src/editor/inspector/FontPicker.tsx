@@ -18,7 +18,7 @@ import {
 } from "react";
 import { describeFamily, type FontFamily, fonts, nearestWeight } from "../../fonts/fonts";
 
-type Tab = "all" | "file" | "google" | "local";
+type Tab = "all" | "file" | "team" | "google" | "local";
 
 const ROW = 44;
 const VISIBLE_ROWS = 8;
@@ -152,6 +152,8 @@ function FontList({
 
   useEffect(() => {
     void fonts.loadGoogle();
+    // Pick up fonts the team uploaded since the file opened.
+    if (fonts.teamId) void fonts.loadTeam(fonts.teamId);
     // Leaving mid-preview (a click elsewhere) goes back to what was there.
     return () => {
       if (previewingRef.current) editor.cancelGesture();
@@ -171,18 +173,21 @@ function FontList({
 
   const google = fonts.google;
   const local = fonts.local;
+  const team = fonts.team;
   const items = useMemo(() => {
     let source: FontFamily[];
     if (tab === "file")
       source = [...inFile]
         .sort((a, b) => b[1] - a[1])
         .map(([name]) => fonts.get(name) ?? missing(name));
+    else if (tab === "team") source = [...(team ?? [])];
     else if (tab === "google") source = [...(google ?? [])];
     else if (tab === "local") source = [...(local ?? [])];
     else {
-      // Each family once, the first source winning (built in over Google over local).
+      // Each family once, the first source winning: the team's own fonts, then
+      // built in, Google and local.
       const byName = new Map<string, FontFamily>();
-      for (const f of [...fonts.builtIn, ...(google ?? []), ...(local ?? [])])
+      for (const f of [...(team ?? []), ...fonts.builtIn, ...(google ?? []), ...(local ?? [])])
         if (!byName.has(f.family)) byName.set(f.family, f);
       source = [...byName.values()];
     }
@@ -192,7 +197,7 @@ function FontList({
       .filter((x) => x.rank >= 0)
       .sort((a, b) => a.rank - b.rank || a.i - b.i)
       .map((x) => x.f);
-  }, [tab, query, inFile, google, local]);
+  }, [tab, query, inFile, team, google, local]);
 
   // Start on the current family when it's in the list; otherwise the top.
   useEffect(() => {
@@ -281,7 +286,8 @@ function FontList({
 
   const tabs = [
     { value: "all" as const, label: "All" },
-    { value: "file" as const, label: "In this file" },
+    { value: "file" as const, label: "This file" },
+    ...(fonts.teamId ? [{ value: "team" as const, label: "Team" }] : []),
     ...(fonts.googleEnabled === false ? [] : [{ value: "google" as const, label: "Google" }]),
     ...(fonts.canListLocal ? [{ value: "local" as const, label: "Local" }] : []),
   ];
@@ -338,14 +344,28 @@ function FontList({
           </button>
           {localError ? <p className="font-picker__error">{localError}</p> : null}
         </div>
+      ) : tab === "team" && team?.length === 0 && !query ? (
+        <div className="font-picker__empty">
+          <p>Fonts your team uploads show here for everyone on it, served from this server.</p>
+          <a
+            className="font-picker__cta"
+            href={`/t/${fonts.teamId}?view=fonts`}
+            target="_blank"
+            rel="noopener"
+          >
+            Upload team fonts
+          </a>
+        </div>
       ) : items.length === 0 ? (
         <div className="font-picker__empty">
           <p>
-            {tab === "google" && !google
-              ? "Loading Google Fonts…"
-              : query
-                ? `No fonts match “${query}”.`
-                : "No fonts here yet."}
+            {tab === "team" && !team
+              ? "Loading team fonts…"
+              : tab === "google" && !google
+                ? "Loading Google Fonts…"
+                : query
+                  ? `No fonts match “${query}”.`
+                  : "No fonts here yet."}
           </p>
         </div>
       ) : (
@@ -397,7 +417,8 @@ const CHIPS: Record<FontFamily["source"], { label: string; tone: BadgeTone }> = 
   bundled: { label: "Built in", tone: "neutral" },
   system: { label: "System", tone: "neutral" },
   google: { label: "Google", tone: "neutral" },
-  local: { label: "Local", tone: "component" },
+  local: { label: "Local", tone: "neutral" },
+  team: { label: "Team", tone: "component" },
 };
 
 function FontRow({

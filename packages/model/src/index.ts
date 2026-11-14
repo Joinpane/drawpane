@@ -1,5 +1,6 @@
 export * from "./apply";
 export * from "./comments";
+export * from "./fonts";
 export * from "./history";
 export * from "./ids";
 export * from "./media";
