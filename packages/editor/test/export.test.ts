@@ -377,6 +377,30 @@ describe("exportSvg", () => {
     );
   });
 
+  it("keeps OpenType features as CSS, on the layer and on a range that differs", () => {
+    const editor = makeEditor([
+      {
+        op: "create",
+        id: "t",
+        type: "text",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 20,
+          characters: "Total 1,010",
+          fontFeatures: { tnum: true, liga: false },
+          textRuns: [{ start: 6, end: 11, fontFeatures: { zero: true } }],
+        },
+      },
+    ]);
+    const svg = svgOf(editor, ["t"]);
+    expect(svg).toMatch(/<text [^>]*style="font-feature-settings: 'liga' 0, 'tnum' 1"/);
+    expect(svg).toContain(`<tspan style="font-feature-settings: 'zero' 1">1,010</tspan>`);
+  });
+
   it("casts drop shadows from the shape grown by its spread, and inner shadows inside it", () => {
     const editor = makeEditor([
       rect("r", {

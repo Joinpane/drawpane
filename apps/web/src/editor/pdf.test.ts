@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { parseFontFaces, pickFace } from "../fonts/font-files";
 import { readingOrder } from "./export-assets";
-import { parseFontFaces, pickFace } from "./pdf";
 
 describe("PDF export", () => {
   it("reads the faces a TrueType stylesheet offers", () => {

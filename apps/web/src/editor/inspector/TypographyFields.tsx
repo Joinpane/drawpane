@@ -1,13 +1,14 @@
 /**
  * Typography fields: family, weight and italic, size, line height and
- * letter spacing (px, % or Auto, typed the way Figma takes them), decoration
- * and case. Shared by text layers and the text styles they follow.
+ * letter spacing (px, % or Auto, typed the way Figma takes them), decoration,
+ * case and OpenType features. Shared by text layers and the text styles they follow.
  */
 import type { Editor } from "@drawpane/editor";
 import type { NodeRecord, PropValues } from "@drawpane/model";
 import { evaluateNumericInput, Icon, PropertyRow, Tooltip } from "@drawpane/ui";
 import { useState } from "react";
 import { type FontFamily, fonts, WEIGHT_NAMES } from "../../fonts/fonts";
+import { FontFeaturesField } from "./FontFeatures";
 import { FontPicker, useFonts } from "./FontPicker";
 import { common, Num, Select } from "./fields";
 
@@ -244,6 +245,7 @@ export function TypographyFields({ editor, nodes }: { editor: Editor; nodes: Nod
           onChange={(v) => set("textCase", v === "none" ? null : v, "Text case")}
         />
       </PropertyRow>
+      <FontFeaturesField editor={editor} nodes={nodes} />
     </>
   );
 }

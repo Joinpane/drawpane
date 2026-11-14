@@ -20,17 +20,9 @@ import {
   textFaces,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
-import { type FontFamily, fonts, nearestWeight } from "../fonts/fonts";
+import { type Face, faceKey, facesOffered, pickFace } from "../fonts/font-files";
+import { fonts } from "../fonts/fonts";
 import { embeddedImages, readingOrder } from "./export-assets";
-
-/** A face text is set in: family, weight and style. */
-interface Face {
-  readonly family: string;
-  readonly weight: number;
-  readonly italic: boolean;
-}
-
-const faceKey = (f: Face) => `${f.family}\u0000${f.weight}\u0000${f.italic}`;
 
 /** What a face becomes in the PDF: an embedded font's name, or a standard one with its style. */
 interface PdfFont {
@@ -57,38 +49,6 @@ const standard = (family: "helvetica" | "times" | "courier", face: Face): PdfFon
   weight: face.weight >= 600 ? "bold" : "normal",
   style: face.italic ? "italic" : "normal",
 });
-
-/** The faces a stylesheet offers, with where to get each. */
-export function parseFontFaces(
-  css: string,
-): Array<{ weight: number; italic: boolean; url: string }> {
-  const out: Array<{ weight: number; italic: boolean; url: string }> = [];
-  for (const [, body = ""] of css.matchAll(/@font-face\s*\{([^}]*)\}/g)) {
-    const url = /src:\s*url\(([^)]+)\)/.exec(body)?.[1]?.replace(/^['"]|['"]$/g, "");
-    if (!url) continue;
-    out.push({
-      weight: Number(/font-weight:\s*(\d+)/.exec(body)?.[1] ?? 400),
-      italic: /font-style:\s*italic/.test(body),
-      url,
-    });
-  }
-  return out;
-}
-
-/** The face nearest to what text asks for: same style if there is one, then the nearest weight. */
-export function pickFace<T extends { weight: number; italic: boolean }>(
-  faces: readonly T[],
-  want: { weight: number; italic: boolean },
-): T | null {
-  const styled = faces.filter((f) => f.italic === want.italic);
-  const pool = styled.length > 0 ? styled : faces;
-  if (pool.length === 0) return null;
-  const weight = nearestWeight(
-    pool.map((f) => f.weight),
-    want.weight,
-  );
-  return pool.find((f) => f.weight === weight) ?? null;
-}
 
 /** Every face the text inside some layers is set in. */
 function facesIn(editor: Editor, ids: readonly string[]): Face[] {
@@ -138,7 +98,8 @@ async function embedFonts(
       }
       try {
         if (!info) throw new Error("missing");
-        const offered = await facesOffered(family, info, wanted);
+        // TrueType only: PDFs can't take WOFF, and jsPDF can't take CFF-based OpenType.
+        const offered = await facesOffered(family, info, wanted, ["ttf"]);
         if (offered.length === 0) throw new Error("not embeddable");
         const files = new Map<string, Promise<string>>();
         for (const face of wanted) {
@@ -165,44 +126,6 @@ async function embedFonts(
     }),
   );
   return { fontFor, missing };
-}
-
-/**
- * The TrueType faces a family offers for embedding, with where to fetch each.
- * Team fonts embed their own files (TrueType only: PDFs can't take WOFF, and
- * jsPDF can't take CFF-based OpenType). Google and built-in families come as
- * static TrueType through this server's font proxy.
- */
-async function facesOffered(
-  family: string,
-  info: FontFamily,
-  wanted: readonly Face[],
-): Promise<Array<{ weight: number; italic: boolean; url: string }>> {
-  if (info.source === "team") {
-    const teamId = fonts.teamId;
-    if (!teamId) return [];
-    return (info.faces ?? [])
-      .filter((f) => f.format === "ttf")
-      .map((f) => ({
-        weight: f.weight,
-        italic: f.italic,
-        url: `/api/teams/${encodeURIComponent(teamId)}/fonts/file/${f.sha}`,
-      }));
-  }
-  // Bundled families are Google fonts too, so both come through the proxy.
-  if (info.source !== "google" && info.source !== "bundled") return [];
-  const variants = new Set(
-    wanted.map((face) => {
-      const available = face.italic && info.italics.length > 0 ? info.italics : info.weights;
-      const weight = info.variable ? face.weight : nearestWeight(available, face.weight);
-      return `${weight}${face.italic && info.italics.length > 0 ? "i" : ""}`;
-    }),
-  );
-  const response = await fetch(
-    `/api/fonts/google.css?family=${encodeURIComponent(family)}&variants=${[...variants].join(",")}&format=ttf`,
-  );
-  if (!response.ok) throw new Error(String(response.status));
-  return parseFontFaces(await response.text());
 }
 
 /** Points text at the embedded fonts: one PDF font per face, so weight and style live in it. */

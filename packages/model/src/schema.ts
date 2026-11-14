@@ -272,6 +272,16 @@ const FontSize = ranged(
 );
 
 /**
+ * OpenType features a run turns on or off, by tag: `{ tnum: true, liga: false,
+ * ss01: true }` (docs/decisions/0005-opentype-features.md). A tag left out is the
+ * font's default; an empty map draws the font as it comes.
+ */
+export const FontFeatures = z
+  .record(z.string().regex(/^[A-Za-z0-9]{4}$/, "must be a four-letter OpenType tag"), z.boolean())
+  .refine((m) => Object.keys(m).length <= 64, "at most 64 features");
+export type FontFeatures = z.infer<typeof FontFeatures>;
+
+/**
  * Styling on part of a text layer's characters: [start, end) in UTF-16 code
  * units of `characters`, overriding some of the layer's own typography and
  * fill. A layer's runs are sorted and don't overlap; characters outside every
@@ -288,6 +298,7 @@ export const TextRun = z
     letterSpacing: LetterSpacing.optional(),
     textCase: z.enum(["none", "upper", "lower", "title"]).optional(),
     textDecoration: z.enum(["none", "underline", "strikethrough"]).optional(),
+    fontFeatures: FontFeatures.optional(),
     fills: z.array(Paint).max(8).optional(),
   })
   .refine((run) => run.end > run.start, "a run must end after it starts");
@@ -499,6 +510,8 @@ export const PROPS = {
   textAutoResize: prop(z.enum(["none", "width", "height"]), "width", ["text"]),
   textCase: prop(z.enum(["none", "upper", "lower", "title"]), "none", TYPOGRAPHY),
   textDecoration: prop(z.enum(["none", "underline", "strikethrough"]), "none", TYPOGRAPHY),
+  /** OpenType features (tabular figures, ligatures, stylistic sets…); see `FontFeatures`. */
+  fontFeatures: prop(FontFeatures, {}, TYPOGRAPHY),
   /** Extra space after each paragraph (each hard line break), in px. */
   paragraphSpacing: prop(ranged(z.number().min(0).max(1000), { min: 0, max: 1000 }), 0, TYPOGRAPHY),
   /** Show at most this many lines, the last ending in "…"; null shows them all. */

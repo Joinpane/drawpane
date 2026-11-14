@@ -14,7 +14,14 @@ import { ImageCache, imagePlacement } from "./images";
 import { markerLength, markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
 import type { Scene } from "./scene";
-import { layoutText, lineHeightPx, lineOffset, type TextMeasurer, textBlockOffset } from "./text";
+import {
+  layoutText,
+  lineHeightPx,
+  lineOffset,
+  type ShapedText,
+  type TextMeasurer,
+  textBlockOffset,
+} from "./text";
 import { isClosedPath } from "./vector/cache";
 import { nodePath } from "./vector/shapes";
 import { serializePath } from "./vector/svg";
@@ -158,6 +165,8 @@ export class CanvasRenderer {
   readonly #measurer: TextMeasurer;
   readonly #paths = new Map<string, { d: string; path: Path2D }>();
   readonly #shapes = new WeakMap<object, { w: number; h: number; path: Path2D }>();
+  /** Shaped text as one outline at its origin, by letter spacing (see #shapedOutline). */
+  readonly #shapedRuns = new WeakMap<ShapedText, Map<number, Path2D>>();
   /** What the last screen frame showed, to move it on a pan instead of redrawing. */
   #last: LastFrame | null = null;
   /** The last frame drew every layer (not a scaled stand-in). */
@@ -1018,6 +1027,37 @@ export class CanvasRenderer {
   }
 
   /**
+   * A shaped run's glyphs as one outline, from its start on the baseline, in
+   * px (y down), with `spacing` after each character like the canvas's
+   * letterSpacing. Kept per run, so a frame only places it.
+   */
+  #shapedOutline(shaped: ShapedText, text: string, spacing: number): Path2D {
+    let bySpacing = this.#shapedRuns.get(shaped);
+    if (!bySpacing) {
+      bySpacing = new Map();
+      this.#shapedRuns.set(shaped, bySpacing);
+    }
+    const cached = bySpacing.get(spacing);
+    if (cached) return cached;
+    // Characters (code points) before each UTF-16 index: letter spacing follows each one.
+    const before = new Uint32Array(text.length + 1);
+    for (let i = 0, n = 0; i < text.length; i++) {
+      before[i] = n;
+      if (!isLowSurrogate(text.charCodeAt(i))) n++;
+      before[i + 1] = n;
+    }
+    const s = shaped.scale;
+    const outline = new Path2D();
+    for (const g of shaped.glyphs) {
+      if (!g.path) continue;
+      const shift = spacing * (before[g.cluster] ?? 0);
+      outline.addPath(g.path, new DOMMatrix([s, 0, 0, -s, g.x + shift, -g.y]));
+    }
+    bySpacing.set(spacing, outline);
+    return outline;
+  }
+
+  /**
    * Draws a text layer's glyphs, fragment by fragment (rich text mixes fonts,
    * sizes and fills in a line), in each one's fills or the layer's, or all in
    * `override` (shadows).
@@ -1077,7 +1117,16 @@ export class CanvasRenderer {
             ctx.globalAlpha = alpha;
             continue;
           }
-          ctx.fillText(frag.text, x, baseline);
+          // OpenType features: the shaped glyphs, when the shaper has them (else as the canvas sets it).
+          const shaped = frag.run ? (this.#measurer.shape?.(frag.text, frag.run) ?? null) : null;
+          if (shaped) {
+            const at = new Path2D();
+            at.addPath(
+              this.#shapedOutline(shaped, frag.text, frag.letterSpacing),
+              new DOMMatrix([1, 0, 0, 1, x, baseline]),
+            );
+            ctx.fill(at);
+          } else ctx.fillText(frag.text, x, baseline);
           if (frag.decoration !== "none") {
             const size = frag.fontSize;
             const y =
@@ -1089,3 +1138,5 @@ export class CanvasRenderer {
     }
   }
 }
+
+const isLowSurrogate = (c: number) => c >= 0xdc00 && c <= 0xdfff;

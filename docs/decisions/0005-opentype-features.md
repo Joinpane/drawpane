@@ -35,4 +35,13 @@ Text editing keeps working on characters: HarfBuzz reports which characters each
 - One new dependency (HarfBuzz WebAssembly), loaded only when a file uses features.
 - Two text paths to keep in step: measurement, wrapping, the caret and export each need to handle shaped runs. The fast path stays the default.
 - Rendering performance for feature-heavy text depends on caching shaped runs and glyph paths (by font, size, features and text), which the renderer's existing per-node caches can carry.
-- Penpot files that use features (its text model has `font-variant-id` and feature settings) can keep them on import.
+- Penpot's text model has no OpenType features to bring over on import (its `font-variant-id` is the weight and style).
+
+## Implementation (November 2026)
+
+- Model: `fontFeatures` on text, text styles and rich-text runs (a run's map replaces the layer's, like its other properties).
+- `packages/editor/src/shaping.ts`: `Shaper` (HarfBuzz via `harfbuzzjs`, a separate chunk and a 444 KB `.wasm`, imported on first use) and `ShapingMeasurer`. Layout passes each span's `FeatureRun` to the measurer, so line breaking, auto-size, the caret and hit-testing use shaped widths; the renderer fills the shaped glyphs' outlines as one path per run (so gradient and image fills line up with the box).
+- Font bytes: `apps/web/src/fonts/font-files.ts`, shared with PDF export (Google and built-in fonts as TrueType through the proxy; team fonts' TrueType and OpenType files).
+- Inspector: an "OpenType" row under decoration and case, opening the features the font offers; reading them loads HarfBuzz and the font only when the panel opens.
+- SVG export writes `font-feature-settings`, which SVG text honours.
+- Not yet: PDF export (svg2pdf sets text without features; shaped runs need to go in as outlines).

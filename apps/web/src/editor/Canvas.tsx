@@ -1,6 +1,5 @@
 import {
   CanvasRenderer,
-  type CanvasTextMeasurer,
   drawOverlay,
   fontString,
   frameLabelAt,
@@ -11,6 +10,7 @@ import {
   type PointerInput,
   placedGuides,
   selectionTarget,
+  type TextMeasurer,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import { useEffect, useMemo, useRef } from "react";
@@ -21,6 +21,7 @@ import { FrameNameEditor } from "./FrameNameEditor";
 import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
 import { imagesFor } from "./media";
+import { shaper } from "./shaping";
 import { TextEditor } from "./TextEditor";
 import { openMenu } from "./ui-state";
 import { VectorHints } from "./VectorHints";
@@ -56,7 +57,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const content = useRef<HTMLCanvasElement>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
   const editingText = useEditorState((s) => s.editingText);
-  const measurer = editor.measurer as CanvasTextMeasurer;
+  // The editor's measurer re-measures after web fonts load (EditorPage gives it one that does).
+  const measurer = editor.measurer as TextMeasurer & { invalidate(): void };
   const renderer = useMemo(
     () => new CanvasRenderer(editor.scene, measurer, { images: imagesFor(editor) }),
     [editor, measurer],
@@ -196,6 +198,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       schedule();
     };
     document.fonts.addEventListener("loadingdone", onFonts);
+    // A face for OpenType features became ready: its text is shaped now, so measure and draw it again.
+    const offShaper = shaper.subscribe((family) => {
+      editor.refitText(new Set([family]));
+      contentDirty = overlayDirty = true;
+      schedule();
+    });
     void document.fonts.load(fontString({})).then(() => onFonts());
 
     const themeObserver = new MutationObserver(() => {
@@ -216,6 +224,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       offImages();
       offState();
       document.fonts.removeEventListener("loadingdone", onFonts);
+      offShaper();
       offFonts();
       if (frame) cancelAnimationFrame(frame);
       clearTimeout(settle);
