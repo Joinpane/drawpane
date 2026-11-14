@@ -60,6 +60,8 @@ const UPGRADE_COMMAND = "npm create drawpane@latest upgrade";
 export async function install(options: InstallOptions, deps: Deps): Promise<void> {
   const { ui, release } = deps;
   ui.intro(`Drawpane ${release.version}`);
+  // A mistyped flag is said before anything else: before a sign-in or a question.
+  checkFlags(options);
   const asking = ui.interactive && !options.yes;
 
   const dir = resolve(
@@ -253,17 +255,25 @@ async function chooseAccount(
   });
 }
 
+/** Rejects a `--name` or `--domain` that won't do. */
+function checkFlags(options: InstallOptions): void {
+  if (options.name !== undefined) {
+    const problem = nameProblem(options.name);
+    if (problem) throw new Problem(`--name ${options.name}: ${problem}`);
+  }
+  if (options.domain !== undefined) {
+    const problem = domainProblem(options.domain);
+    if (problem) throw new Problem(`--domain ${options.domain}: ${problem}`);
+  }
+}
+
 async function chooseName(
   dir: string,
   options: InstallOptions,
   ui: Ui,
   asking: boolean,
 ): Promise<string> {
-  if (options.name !== undefined) {
-    const problem = nameProblem(options.name);
-    if (problem) throw new Problem(`--name: ${problem}`);
-    return options.name;
-  }
+  if (options.name !== undefined) return options.name;
   const suggested = suggestName(basename(dir));
   if (!asking) return suggested;
   return ui.text({
@@ -278,11 +288,8 @@ async function chooseDomain(
   ui: Ui,
   asking: boolean,
 ): Promise<string | null> {
-  if (options.domain !== undefined) {
-    const problem = domainProblem(options.domain);
-    if (problem) throw new Problem(`--domain: ${problem}`);
-    return options.domain || null;
-  }
+  // Hostnames aren't case-sensitive; the config keeps one spelling (as the prompt does).
+  if (options.domain !== undefined) return options.domain.toLowerCase() || null;
   if (!asking) return null;
   const domain = await ui.text({
     message:

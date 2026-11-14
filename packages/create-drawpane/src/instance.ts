@@ -76,11 +76,15 @@ export async function writeConfig(dir: string, config: InstanceConfig): Promise<
 }
 
 /**
- * A Worker name from a folder name: "My Design Team" → "my-design-team".
+ * A Worker name from a folder name: "My Design Team" → "my-design-team",
+ * "Über Studio" → "uber-studio".
  * Falls back to "drawpane" when nothing usable is left.
  */
 export function suggestName(folder: string): string {
   const name = folder
+    // Accented letters keep their base letter: "über" → "uber", not "ber".
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")

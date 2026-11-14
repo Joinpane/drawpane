@@ -289,14 +289,28 @@ describe("install", () => {
     expect((await readConfig(join(cwd, "c")))?.accountId).toBe("acc-1");
   });
 
-  it("rejects a bad name or domain before creating anything", async () => {
+  it("rejects a bad name or domain first: before asking anything, even before a sign-in", async () => {
+    // Nobody signed in: a flag problem must still come first, not "Not signed in".
+    cloudflare.signedIn = false;
     await expect(
       install({ dir: "x", yes: true, name: "Bad Name" }, await deps(new ScriptedUi(false))),
-    ).rejects.toBeInstanceOf(Problem);
+    ).rejects.toThrow(/--name Bad Name: /);
     await expect(
       install({ dir: "x", yes: true, domain: "https://x.com" }, await deps(new ScriptedUi(false))),
-    ).rejects.toThrow(/without https/);
+    ).rejects.toThrow(/--domain https:\/\/x\.com: .*without https/);
+    // Interactively too: no question is asked first.
+    await expect(
+      install({ name: "Bad Name" }, await deps(new ScriptedUi(true))),
+    ).rejects.toBeInstanceOf(Problem);
     expect(cloudflare.calls).toEqual([]);
+  });
+
+  it("keeps a domain given in capitals in lower case, as the prompt does", async () => {
+    await install(
+      { dir: "team", yes: true, domain: "Design.Example.COM" },
+      await deps(new ScriptedUi(false)),
+    );
+    expect((await readConfig(join(cwd, "team")))?.domain).toBe("design.example.com");
   });
 });
 

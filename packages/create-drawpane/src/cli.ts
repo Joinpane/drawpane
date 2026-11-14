@@ -5,7 +5,7 @@
  * version. See docs/decisions/0004-installer.md.
  */
 import { spawn } from "node:child_process";
-import { parseArgs } from "node:util";
+import { parseCli } from "./args.js";
 import { WranglerError, wrangler } from "./cloudflare.js";
 import { type Deps, install, Problem, upgrade } from "./flows.js";
 import { bundledRelease } from "./release.js";
@@ -48,19 +48,7 @@ function openBrowser(url: string): void {
 }
 
 async function main(argv: readonly string[]): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args: [...argv],
-    allowPositionals: true,
-    options: {
-      account: { type: "string" },
-      name: { type: "string" },
-      domain: { type: "string" },
-      yes: { type: "boolean", short: "y", default: false },
-      force: { type: "boolean", default: false },
-      help: { type: "boolean", short: "h", default: false },
-      version: { type: "boolean", short: "v", default: false },
-    },
-  });
+  const { values, positionals } = parseCli(argv);
   if (values.help) {
     process.stdout.write(HELP);
     return 0;
@@ -108,8 +96,8 @@ main(process.argv.slice(2)).then(
       process.stderr.write("\nCancelled. Running the same command again continues from here.\n");
       process.exit(130);
     }
-    if (error instanceof Problem || (error instanceof TypeError && "code" in error)) {
-      // A problem to fix, or a mistyped option: the message is the whole story.
+    if (error instanceof Problem) {
+      // A problem to fix (a mistyped option is one too): the message is the whole story.
       process.stderr.write(`\n${error.message}\n`);
       process.exit(1);
     }
