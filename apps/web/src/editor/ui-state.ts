@@ -21,6 +21,12 @@ export interface MenuRequest {
   readonly guide?: { readonly owner: string; readonly index: number };
 }
 
+/**
+ * When the minimap shows: while you move around the canvas (and only when
+ * there's more page than fits), all the time, or never.
+ */
+export type MinimapMode = "auto" | "always" | "off";
+
 export interface EditorUi {
   /** The layer being renamed in place, if any. */
   readonly renaming: string | null;
@@ -34,8 +40,8 @@ export interface EditorUi {
   readonly textStyles: number;
   /** The Selection Lens shows beside the selection (a view preference). */
   readonly lens: boolean;
-  /** The minimap shows at the canvas's bottom left (a view preference, ⌥M). */
-  readonly minimap: boolean;
+  /** When the minimap shows at the canvas's bottom left (a view preference; ⌥M pins it). */
+  readonly minimap: MinimapMode;
   /** Layout X-ray stays on without holding Alt (the inspector's X-ray button). */
   readonly xrayPinned: boolean;
 }
@@ -52,12 +58,18 @@ export function uiFor(editor: Editor): Store<EditorUi> {
       collapseLayers: 0,
       textStyles: 0,
       lens: true,
-      minimap: true,
+      minimap: "auto",
       xrayPinned: false,
     });
     stores.set(editor, store);
   }
   return store;
+}
+
+/** ⌥M: pins the minimap on screen, or back to showing while you move around. */
+export function toggleMinimap(editor: Editor): void {
+  const ui = uiFor(editor);
+  ui.set({ minimap: ui.get().minimap === "always" ? "auto" : "always" });
 }
 
 /** Keeps Layout X-ray on without holding Alt, or turns it back off. */
