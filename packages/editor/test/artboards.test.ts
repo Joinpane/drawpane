@@ -1,4 +1,5 @@
 import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
 import { Interaction, type PointerInput } from "../src/interaction";
@@ -138,6 +139,97 @@ describe("resize snapping", () => {
     interaction.up(at(857, 150));
     expect(editor.s.guides).toEqual([]);
     void other;
+  });
+
+  it("lands on the starting edge when a drag comes back to it", () => {
+    // The drag works from where it started, so coming back must put the layer back,
+    // not leave it where the previous pointer move had it.
+    const { editor, loose, interaction } = setup();
+    editor.select([loose]);
+    const width = () => getProp((editor.doc.get(loose) as NodeRecord).props, "width");
+    interaction.down(at(800, 150));
+    interaction.move(at(840, 150));
+    expect(width()).toBe(140);
+    interaction.move(at(800, 150));
+    expect(width()).toBe(100);
+    interaction.up(at(800, 150));
+  });
+
+  it("snaps a dragged edge back onto its parent's edge (the edge it started on)", () => {
+    const { editor, phone, interaction } = setup();
+    // A bar along the phone's top, flush with its left edge.
+    const bar = editor.createLayer(
+      "rect",
+      { x: 100, y: 100, width: 400, height: 80 },
+      phone,
+    ) as string;
+    editor.select([bar]);
+    const p = () => (editor.doc.get(bar) as NodeRecord).props;
+    // The left-middle handle sits at (100, 140): pull it in, then back to just inside the edge.
+    interaction.down(at(100, 140));
+    interaction.move(at(130, 140));
+    expect(getProp(p(), "x")).toBe(30);
+    interaction.move(at(104, 140));
+    expect(getProp(p(), "x")).toBe(0);
+    expect(getProp(p(), "width")).toBe(400);
+    expect(editor.s.guides).toContainEqual(expect.objectContaining({ axis: "x", at: 100 }));
+    interaction.up(at(104, 140));
+  });
+
+  it("unflips when a handle dragged past the opposite edge comes back", () => {
+    const { editor, loose, interaction } = setup();
+    editor.select([loose]);
+    const p = () => (editor.doc.get(loose) as NodeRecord).props;
+    // Right handle at (800, 150), dragged left past the left edge (700), then back.
+    interaction.down(at(800, 150));
+    interaction.move(at(650, 150));
+    expect(getProp(p(), "flipX")).toBe(true);
+    interaction.move(at(820, 150));
+    expect(getProp(p(), "flipX")).toBe(false);
+    expect(getProp(p(), "x")).toBe(700);
+    expect(getProp(p(), "width")).toBe(120);
+    interaction.up(at(820, 150));
+  });
+
+  it("puts a layer back exactly when any drag of any handle ends where it began", () => {
+    const handles = {
+      nw: [700, 100],
+      n: [750, 100],
+      ne: [800, 100],
+      e: [800, 150],
+      se: [800, 200],
+      s: [750, 200],
+      sw: [700, 200],
+      w: [700, 150],
+    } as const;
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...(Object.keys(handles) as (keyof typeof handles)[])),
+        // Anywhere from far past the opposite edge (a flip) to well outside.
+        fc.array(
+          fc.tuple(fc.integer({ min: -250, max: 250 }), fc.integer({ min: -250, max: 250 })),
+          {
+            minLength: 1,
+            maxLength: 8,
+          },
+        ),
+        fc.boolean(),
+        (handle, path, shift) => {
+          const { editor, loose, interaction } = setup();
+          editor.select([loose]);
+          const before = { ...(editor.doc.get(loose) as NodeRecord).props };
+          const [hx, hy] = handles[handle];
+          const with_ = (x: number, y: number) => at(x, y, 1, { shift });
+          interaction.down(with_(hx, hy));
+          for (const [dx, dy] of path) interaction.move(with_(hx + dx, hy + dy));
+          interaction.move(with_(hx, hy));
+          const after = (editor.doc.get(loose) as NodeRecord).props;
+          for (const prop of ["x", "y", "width", "height", "flipX", "flipY"] as const)
+            expect(getProp(after, prop), prop).toEqual(getProp(before, prop));
+          interaction.up(with_(hx, hy));
+        },
+      ),
+    );
   });
 
   it("doesn't snap when nothing is near", () => {

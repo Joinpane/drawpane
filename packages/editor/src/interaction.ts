@@ -10,6 +10,7 @@ import {
   type NodeRecord,
   type Op,
   type Props,
+  type PropValues,
 } from "@drawpane/model";
 import { canMoveInto, isInsideInstance } from "./components";
 import { croppableImage } from "./crop-session";
@@ -1123,16 +1124,25 @@ export class Interaction {
     const single = roots.length === 1 && mode.nodes.get(roots[0] as string)?.type !== "group";
     for (const node of this.#geometryNodes(mode.nodes)) {
       const box = boxOf(node);
+      // The new geometry comes from the drag's start (so it never drifts), but what to
+      // write is decided against the document as the last move left it: a drag that
+      // comes back to where it started has to put the layer back there.
+      const live = editor.doc.get(node.id)?.props ?? node.props;
+      const setIfChanged = <K extends "flipX" | "flipY" | "sizingH" | "sizingV" | "textAutoResize">(
+        prop: K,
+        value: PropValues[K],
+      ) => {
+        if (getProp(live, prop) !== value) ops.push({ op: "set", id: node.id, prop, value } as Op);
+      };
       let newBox: { x: number; y: number; width: number; height: number };
       if (single) {
         // The node's own box: new local rect, mapped back through its original local matrix.
         const L = localMatrix(box);
         const centre = apply(L, { x: nx + nw / 2, y: ny + nh / 2 });
         newBox = { x: centre.x - nw / 2, y: centre.y - nh / 2, width: nw, height: nh };
-        if (flipX !== false || flipY !== false) {
-          if (flipX) ops.push({ op: "set", id: node.id, prop: "flipX", value: !box.flipX });
-          if (flipY) ops.push({ op: "set", id: node.id, prop: "flipY", value: !box.flipY });
-        }
+        // Past the opposite edge flips it; back again unflips it.
+        setIfChanged("flipX", flipX ? !box.flipX : box.flipX);
+        setIfChanged("flipY", flipY ? !box.flipY : box.flipY);
       } else {
         // Scale positions and sizes inside the selection bounds (page space, unrotated).
         // Use the starting geometry, not the live document, so the drag never drifts.
@@ -1161,8 +1171,7 @@ export class Interaction {
       }
       const set = (prop: "x" | "y" | "width" | "height", value: number) => {
         const v = round2(value);
-        if (v !== round2(getProp(node.props, prop)))
-          ops.push({ op: "set", id: node.id, prop, value: v });
+        if (v !== round2(getProp(live, prop))) ops.push({ op: "set", id: node.id, prop, value: v });
       };
       set("x", newBox.x);
       set("y", newBox.y);
@@ -1174,15 +1183,14 @@ export class Interaction {
         if (d !== null) ops.push({ op: "set", id: node.id, prop: "pathData", value: d });
       }
       // Resizing by hand makes that axis fixed (from Hug or Fill), like CSS with an explicit size.
-      if (movesX && getProp(node.props, "sizingH") !== "fixed")
-        ops.push({ op: "set", id: node.id, prop: "sizingH", value: "fixed" });
-      if (movesY && getProp(node.props, "sizingV") !== "fixed")
-        ops.push({ op: "set", id: node.id, prop: "sizingV", value: "fixed" });
+      if (movesX) setIfChanged("sizingH", "fixed");
+      if (movesY) setIfChanged("sizingV", "fixed");
       if (node.type === "text") {
         const mode2 = getProp(node.props, "textAutoResize");
-        const next = movesY ? "none" : movesX && mode2 === "width" ? "height" : mode2;
-        if (next !== mode2)
-          ops.push({ op: "set", id: node.id, prop: "textAutoResize", value: next });
+        setIfChanged(
+          "textAutoResize",
+          movesY ? "none" : movesX && mode2 === "width" ? "height" : mode2,
+        );
       }
     }
     // ⌘ resizes a frame without moving its children by their constraints.
