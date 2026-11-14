@@ -79,6 +79,41 @@ describe("minimap model", () => {
       ["agent", { x: 120, y: 340 }, true],
     ]);
   });
+
+  it("keeps people on the map far from the content, and where they look when their pointer is off the canvas", () => {
+    const { editor } = setup();
+    const peer = (sessionId: string, cursor: { x: number; y: number } | null) => [
+      sessionId,
+      {
+        sessionId,
+        userId: sessionId,
+        name: sessionId,
+        color: 2,
+        kind: "person",
+        presence: {
+          cursor,
+          pageId: "p",
+          selection: [],
+          viewport: { x: 1000, y: 2000, width: 400, height: 200 },
+          following: null,
+          spotlight: false,
+        },
+      },
+    ];
+    editor.state.set({
+      // biome-ignore lint/suspicious/noExplicitAny: a test's hand-made peers.
+      peers: new Map([peer("far", { x: 5880, y: 3948 }), peer("panel", null)] as any),
+    });
+    const model = minimapModel(editor);
+    if (!model) throw new Error("no model");
+    expect(model.peers.map((p) => [p.sessionId, p.at, p.pointing])).toEqual([
+      ["far", { x: 5880, y: 3948 }, true],
+      ["panel", { x: 1200, y: 2100 }, false],
+    ]);
+    const b = model.bounds;
+    expect(b.x + b.width).toBeGreaterThanOrEqual(5880);
+    expect(b.y + b.height).toBeGreaterThanOrEqual(3948);
+  });
 });
 
 describe("minimap fit", () => {

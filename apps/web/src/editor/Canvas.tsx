@@ -250,13 +250,21 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let lastDown = 0;
     let lastPos = { x: 0, y: 0 };
 
-    /** Last pointer on the canvas (page coordinates), resent with view changes. */
+    /**
+     * Where the pointer is on the canvas: on screen, and on the page. Scrolling or zooming
+     * moves the page under a still pointer, so the page point is worked out again then.
+     */
+    let pointerAt: { x: number; y: number } | null = null;
     let cursor: { x: number; y: number } | null = null;
     const sendPresence = (e: PointerEvent | null) => {
       if (e) {
         const rect = el.getBoundingClientRect();
-        cursor = editor.s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-      } else cursor = null;
+        pointerAt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        cursor = editor.s.camera.toPage(pointerAt);
+      } else {
+        pointerAt = null;
+        cursor = null;
+      }
       editor.sync.setPresence(editor.presence(cursor));
     };
 
@@ -406,7 +414,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         s.insets !== last.insets ||
         s.following !== last.following ||
         s.spotlight !== last.spotlight;
-      if (s.pageId !== last.pageId) cursor = null;
+      if (s.pageId !== last.pageId) {
+        pointerAt = null;
+        cursor = null;
+      } else if (s.camera !== last.camera && pointerAt) {
+        cursor = s.camera.toPage(pointerAt);
+      }
       last = s;
       if (moved) editor.sync.setPresence(editor.presence(cursor));
     });
