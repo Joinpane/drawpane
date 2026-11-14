@@ -24,11 +24,13 @@ describe("first-run setup with a passkey", () => {
     expect(options.rp.id).toBe(new URL(ORIGIN).hostname);
 
     const passkey = new SoftPasskey(ORIGIN);
-    const { user } = await browser.json<{ user: { name: string } }>("/api/auth/register/verify", {
-      method: "POST",
-      json: await passkey.create(options),
-    });
+    const { user } = await browser.json<{ user: { name: string; isAdmin: boolean } }>(
+      "/api/auth/register/verify",
+      { method: "POST", json: await passkey.create(options) },
+    );
     expect(user.name).toBe("Ana Lima");
+    // The same user the session reports: the app shows the admin's link straight away.
+    expect(user.isAdmin).toBe(true);
 
     const session = await browser.json<{ user: { email: string; isAdmin: boolean } }>(
       "/api/session",
@@ -58,11 +60,15 @@ describe("first-run setup with a passkey", () => {
       },
     );
     const assertion = await passkey.get(loginOptions);
-    const signedIn = await browser.json<{ user: { email: string } }>("/api/auth/login/verify", {
-      method: "POST",
-      json: assertion,
-    });
+    const signedIn = await browser.json<{ user: { email: string; isAdmin: boolean } }>(
+      "/api/auth/login/verify",
+      {
+        method: "POST",
+        json: assertion,
+      },
+    );
     expect(signedIn.user.email).toBe("ana@example.com");
+    expect(signedIn.user.isAdmin).toBe(true);
 
     // The challenge cookie is single-use, so replaying the assertion fails.
     const replay = await browser.fetch("/api/auth/login/verify", {

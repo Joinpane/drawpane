@@ -153,6 +153,12 @@ test.describe
     test("moves focus with the selection from the keyboard", async () => {
       const rows = tree(page).getByRole("treeitem");
       await rows.first().click();
+      const where = () =>
+        page.evaluate((all) => {
+          const doc = (window as unknown as W).drawpane.doc;
+          return all.map((id) => [doc.get(id)?.props.x, doc.get(id)?.props.y]);
+        }, Object.values(ids));
+      const before = await where();
       await page.keyboard.press("ArrowDown");
       await page.keyboard.press("ArrowDown");
       const focused = await page.evaluate(() =>
@@ -160,6 +166,8 @@ test.describe
       );
       const selected = await selection(page);
       expect(focused).toBe(selected[0]);
+      // The arrows walk the list; they don't also nudge layers on the canvas.
+      expect(await where()).toEqual(before);
       // And End lands focus on the last row.
       await page.keyboard.press("End");
       await expect(rows.last()).toBeFocused();

@@ -2,6 +2,7 @@ import {
   componentSetOf,
   type Editor,
   instanceRootOf,
+  isComponentSet,
   isMainComponent,
   variantProperties,
 } from "@drawpane/editor";
@@ -221,6 +222,12 @@ function lensContents(
   const size = [prop("width", "Width", { label: "W" }), prop("height", "Height", { label: "H" })];
   const fill = <FillControl key="fill" editor={editor} node={node} ctx={ctx} />;
   const base = layerKind(node.type);
+  // What it is to the designer: a component or a set of variants before "frame".
+  const label = isComponentSet(node)
+    ? "Component set"
+    : isMainComponent(node)
+      ? "Component"
+      : base.label;
   // The same glyph as the layers panel: auto layout direction, component, image…
   const icon = KIND_ICONS[kindOf(node)];
 
@@ -301,7 +308,7 @@ function lensContents(
     ];
     const uniform = paddings.every((v) => v === paddings[0]) ? (paddings[0] ?? 0) : null;
     return {
-      kind: `${base.label} · ${getProp(p, "layoutMode") === "grid" ? "Grid" : "Auto layout"}`,
+      kind: `${label} · ${getProp(p, "layoutMode") === "grid" ? "Grid" : "Auto layout"}`,
       icon,
       controls: [
         ...size,
@@ -326,7 +333,7 @@ function lensContents(
   // Shapes and frames: W, H, fill, radius. A line has no fill.
   const rounded = node.type === "frame" || node.type === "rect";
   return {
-    kind: isMainComponent(node) ? "Component" : base.label,
+    kind: label,
     icon,
     controls: [
       ...size,

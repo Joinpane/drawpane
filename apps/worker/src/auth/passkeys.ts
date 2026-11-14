@@ -261,7 +261,15 @@ export const passkeys = new Hono<AppContext>()
       throw error;
     }
     await createSession(c, pending.userId);
-    return c.json({ user: { id: pending.userId, email: pending.email, name: pending.name } });
+    // The same user the session route reports, so the app needn't ask again.
+    return c.json({
+      user: {
+        id: pending.userId,
+        email: pending.email,
+        name: pending.name,
+        isAdmin: pending.invite === null,
+      },
+    });
   })
 
   .post("/login/options", async (c) => {
@@ -282,7 +290,7 @@ export const passkeys = new Hono<AppContext>()
     if (!response || typeof response.id !== "string") throw badRequest("Invalid request.");
 
     const row = await c.env.DB.prepare(
-      `SELECT p.id, p.public_key, p.counter, p.transports, u.id AS user_id, u.email, u.name
+      `SELECT p.id, p.public_key, p.counter, p.transports, u.id AS user_id, u.email, u.name, u.is_admin
          FROM passkeys p JOIN users u ON u.id = p.user_id WHERE p.id = ?`,
     )
       .bind(response.id)
@@ -294,6 +302,7 @@ export const passkeys = new Hono<AppContext>()
         user_id: string;
         email: string;
         name: string;
+        is_admin: number;
       }>();
     if (!row)
       throw unauthorized("This passkey isn't registered here. Use another, or ask for an invite.");
@@ -316,7 +325,9 @@ export const passkeys = new Hono<AppContext>()
       .bind(result.authenticationInfo.newCounter, Date.now(), row.id)
       .run();
     await createSession(c, row.user_id);
-    return c.json({ user: { id: row.user_id, email: row.email, name: row.name } });
+    return c.json({
+      user: { id: row.user_id, email: row.email, name: row.name, isAdmin: row.is_admin === 1 },
+    });
   })
 
   /** Adding a passkey to the signed-in account (say, after joining with GitHub). */

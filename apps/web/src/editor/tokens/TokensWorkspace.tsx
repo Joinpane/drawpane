@@ -28,6 +28,8 @@ export function TokensWorkspace({ onShowLayer }: { onShowLayer: (id: string) => 
   }, [editor, version]);
   const [collectionId, setCollectionId] = useState<string | null>(null);
   const [variableId, setVariableId] = useState<string | null>(null);
+  // A token just added: its name opens for typing, like Figma's.
+  const [naming, setNaming] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const collection = collections.find((c) => c.id === collectionId) ?? collections[0];
   const variables = collection ? variablesIn(editor.doc, collection.id) : [];
@@ -152,7 +154,13 @@ export function TokensWorkspace({ onShowLayer }: { onShowLayer: (id: string) => 
                 />
               </label>
               {editor.canEdit ? (
-                <NewVariable collection={collection} onCreated={setVariableId} />
+                <NewVariable
+                  collection={collection}
+                  onCreated={(id) => {
+                    setVariableId(id);
+                    setNaming(id);
+                  }}
+                />
               ) : null}
             </header>
             <VariableTable
@@ -160,6 +168,8 @@ export function TokensWorkspace({ onShowLayer }: { onShowLayer: (id: string) => 
               variables={shown}
               selected={selected?.id ?? null}
               onSelect={setVariableId}
+              naming={naming}
+              onNamed={() => setNaming(null)}
             />
           </>
         ) : (
@@ -301,11 +311,16 @@ function VariableTable({
   variables,
   selected,
   onSelect,
+  naming,
+  onNamed,
 }: {
   collection: NodeRecord;
   variables: NodeRecord[];
   selected: string | null;
   onSelect: (id: string) => void;
+  /** A token whose name opens for typing (it was just added). */
+  naming: string | null;
+  onNamed: () => void;
 }) {
   const editor = useEditor();
   const modes = getProp(collection.props, "modes");
@@ -379,6 +394,8 @@ function VariableTable({
                   value={getProp(variable.props, "name")}
                   label="Variable name"
                   onCommit={(name) => editor.rename(variable.id, name)}
+                  startEditing={variable.id === naming}
+                  onDone={onNamed}
                 />
               </th>
               {modes.map((mode) => (
@@ -649,14 +666,24 @@ function EditableText({
   label,
   onCommit,
   className,
+  startEditing = false,
+  onDone,
 }: {
   value: string;
   label: string;
   onCommit: (value: string) => void;
   className?: string;
+  /** Open for typing straight away (a token just added). */
+  startEditing?: boolean;
+  /** Editing ended, committed or not. */
+  onDone?: () => void;
 }) {
   const editor = useEditor();
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditingState] = useState(startEditing && editor.canEdit);
+  const setEditing = (on: boolean) => {
+    setEditingState(on);
+    if (!on) onDone?.();
+  };
   if (editing) {
     return (
       <input

@@ -212,13 +212,25 @@ export function DashboardPage() {
               </Button>
             ) : null}
             {canImport ? (
-              <Button size="lg" icon="board" onClick={openNewFile}>
-                Templates
+              <Button
+                size="lg"
+                icon="board"
+                onClick={openNewFile}
+                aria-label="Templates"
+                title="Templates"
+              >
+                <span className="dash__btn-label">Templates</span>
               </Button>
             ) : null}
             {canImport ? (
-              <Button size="lg" icon="import" onClick={() => openImport()}>
-                Import
+              <Button
+                size="lg"
+                icon="import"
+                onClick={() => openImport()}
+                aria-label="Import"
+                title="Import a Penpot file"
+              >
+                <span className="dash__btn-label">Import</span>
               </Button>
             ) : null}
             {canEdit && view !== "trash" ? (

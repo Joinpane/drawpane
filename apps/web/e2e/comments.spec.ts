@@ -104,7 +104,8 @@ test("comments: pin, reply with a mention, live updates, resolve, find again", a
   await ana.mouse.click(680, 360);
   await expect(draft.getByRole("combobox", { name: "Comment" })).toBeFocused();
   await ana.keyboard.type("Should the hero follow the brand blue?");
-  await ana.keyboard.press("ControlOrMeta+Enter");
+  // Enter posts, as in chat.
+  await ana.keyboard.press("Enter");
 
   const anaThread = ana.getByRole("dialog", { name: "Thread on Rectangle 1 · Page 1" });
   await expect(anaThread.getByText("Should the hero follow the brand blue?")).toBeVisible();
@@ -193,7 +194,12 @@ test("comments: pin, reply with a mention, live updates, resolve, find again", a
   await bo.keyboard.press("Enter");
   await expect(people).toBeHidden();
   await bo.keyboard.type("check the contrast?");
-  await expect(boReply).toHaveValue("Looks good. Can @Ana Lima check the contrast?");
+  // Shift+Enter breaks the line rather than posting.
+  await bo.keyboard.press("Shift+Enter");
+  await bo.keyboard.type("Before Friday?");
+  await expect(boReply).toHaveValue(
+    "Looks good. Can @Ana Lima check the contrast?\nBefore Friday?",
+  );
   await bo.keyboard.press("ControlOrMeta+Enter");
   await expect(boReply).toHaveValue("");
 
@@ -208,10 +214,10 @@ test("comments: pin, reply with a mention, live updates, resolve, find again", a
   await boThread.getByRole("button", { name: "Options for Bo Chen's comment" }).click();
   await bo.getByRole("menuitem", { name: "Edit" }).click();
   const edit = boThread.getByRole("combobox", { name: "Edit comment" });
-  await edit.press("End");
+  await edit.press("ControlOrMeta+End");
   await edit.pressSequentially(" Thanks.");
   await boThread.getByRole("button", { name: /^Save/ }).click();
-  await expect(anaThread.getByText(/check the contrast\? Thanks\./)).toBeVisible({
+  await expect(anaThread.getByText(/Before Friday\? Thanks\./)).toBeVisible({
     timeout: 10_000,
   });
   await expect(anaThread.getByText("· edited")).toBeVisible();

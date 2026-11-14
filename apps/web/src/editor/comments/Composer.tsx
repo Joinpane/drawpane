@@ -9,7 +9,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { isMac } from "../../app/format";
 import { mentionsIn } from "./people";
 
 /** People shown in the @ list at once. */
@@ -60,7 +59,8 @@ export interface ComposerProps {
 }
 
 /**
- * A comment field: grows with its text, submits with ⌘↵ (Ctrl+Enter), and
+ * A comment field: grows with its text, posts with Enter (Shift+Enter for a
+ * new line; ⌘↵ and Ctrl+Enter post too), and
  * suggests teammates after `@`. The field keeps focus while the list is open
  * (a combobox): arrows move, Enter or Tab picks, Escape closes the list.
  */
@@ -154,7 +154,8 @@ export function Composer({
         return;
       }
     }
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    // Enter posts, as in chat; Shift+Enter breaks the line. Not mid-composition (an IME's Enter confirms).
+    if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       submit();
       return;
@@ -237,7 +238,7 @@ export function Composer({
             size="sm"
             variant="primary"
             disabled={empty || busy}
-            shortcut={isMac() ? "⌘↵" : "Ctrl ↵"}
+            shortcut="↵"
             onClick={submit}
           >
             {submitLabel}

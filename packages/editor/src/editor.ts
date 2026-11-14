@@ -1620,14 +1620,22 @@ export class Editor {
     const pageId = this.s.pageId;
     if (!pageId) return null;
     const { camera, viewport } = this.s;
-    const centre = at ?? camera.toPage({ x: viewport.width / 2, y: viewport.height / 2 });
-    const parent = at ? (this.dropTarget(centre) ?? pageId) : (this.insertionParent() ?? pageId);
+    let centre = at ?? camera.toPage({ x: viewport.width / 2, y: viewport.height / 2 });
+    let parent = at ? (this.dropTarget(centre) ?? pageId) : (this.insertionParent() ?? pageId);
+    const w = getProp(main.props, "width");
+    const h = getProp(main.props, "height");
+    if (!at && wouldCycle(this.doc, componentId, parent)) {
+      // Inserted with the component (or something in it) selected: beside it, not inside
+      // itself, like Figma: out as far as it takes, just right of the main component.
+      while (parent !== pageId && wouldCycle(this.doc, componentId, parent))
+        parent = this.doc.get(parent)?.parent ?? pageId;
+      const b = this.scene.bounds(main.id);
+      if (b) centre = { x: b.x + b.width + 40 + w / 2, y: b.y + h / 2 };
+    }
     if (wouldCycle(this.doc, componentId, parent)) {
       this.notify("A component can't contain an instance of itself.");
       return null;
     }
-    const w = getProp(main.props, "width");
-    const h = getProp(main.props, "height");
     const origin = this.scene.toSpace(parent, { x: centre.x - w / 2, y: centre.y - h / 2 });
     const made = instantiateOps(this.doc, componentId, parent, this.topKey(parent), {
       x: round2(origin.x),

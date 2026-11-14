@@ -337,15 +337,15 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       const hit = label?.id ?? editor.layersAt(point)[0];
       const leaf = hit && !label && isArtboard(editor, hit) ? undefined : hit;
       const { selection } = editor.s;
-      if (!leaf) editor.select([]);
-      else if (label) {
+      // Over something already selected (a selected frame's empty area too): its menu, selection kept.
+      const hitSelected = editor.layersAt(point).some((id) => selection.includes(id));
+      const keep = hitSelected && !label;
+      if (!keep && !leaf) editor.select([]);
+      else if (!keep && label) {
         if (!selection.includes(label.id)) editor.select([label.id]);
-      } else {
-        const hitSelected = editor.layersAt(point).some((id) => selection.includes(id));
-        if (!hitSelected) {
-          const deep = isMac() ? e.metaKey : e.ctrlKey;
-          editor.select([selectionTarget(editor.scene, pageId, leaf, selection, deep)]);
-        }
+      } else if (!keep && leaf) {
+        const deep = isMac() ? e.metaKey : e.ctrlKey;
+        editor.select([selectionTarget(editor.scene, pageId, leaf, selection, deep)]);
       }
       openMenu(editor, { kind: "canvas", x: e.clientX, y: e.clientY, point });
     };

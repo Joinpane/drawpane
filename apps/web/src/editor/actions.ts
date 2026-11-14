@@ -467,7 +467,10 @@ export const ACTIONS: readonly Action[] = [
     icon: "component",
     shortcut: { key: "k", mod: true, alt: true },
     keywords: "symbol main",
-    enabled: canEditSelection,
+    // Not on something that's already a main component.
+    enabled: (e) =>
+      canEditSelection(e) &&
+      !(e.s.selection.length === 1 && isMainComponent(e.doc.get(e.s.selection[0] as string))),
     run: ({ editor }) => editor.createComponent(),
   },
   {

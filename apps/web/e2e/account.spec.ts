@@ -57,6 +57,23 @@ test.describe
       await expect(page.getByRole("link", { name: /Ana Lima-Souza/ })).toBeVisible();
     });
 
+    test("shows the instance's admin its health and cost", async () => {
+      // Whoever ran setup runs the instance.
+      await page.getByRole("link", { name: "Instance health and cost" }).click();
+      await expect(page.getByRole("heading", { name: "Health and cost" })).toBeVisible();
+      const glance = page.getByRole("region", { name: "At a glance" });
+      await expect(glance).toHaveAttribute("aria-busy", "false");
+      await expect(glance).toContainText("$5.00");
+      const services = page.getByRole("list").filter({ hasText: "FileRoom objects" });
+      await expect(services.getByRole("listitem")).toHaveCount(3);
+      await expect(services.getByText("Down")).toHaveCount(0);
+      // Each period asks again.
+      await page.getByRole("radio", { name: "7 days" }).click();
+      await expect(glance).toContainText("edits in 7 days");
+      await page.getByRole("link", { name: "Files" }).click();
+      await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    });
+
     test("explains adding a passkey from a device that already has one", async () => {
       await page.getByRole("link", { name: /Ana Lima-Souza/ }).click();
       await page.getByRole("button", { name: "Add a passkey" }).click();

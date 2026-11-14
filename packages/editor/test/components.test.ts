@@ -1,6 +1,12 @@
 import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { beforeEach, describe, expect, it } from "vitest";
-import { canMoveInto, instancesOf, isInstanceRoot, isMainComponent } from "../src/components";
+import {
+  canMoveInto,
+  instancesOf,
+  isInstanceRoot,
+  isMainComponent,
+  swapTargets,
+} from "../src/components";
 import { Editor } from "../src/editor";
 import type { TextMeasurer } from "../src/text";
 
@@ -191,8 +197,14 @@ describe("components and instances", () => {
   });
 
   it("refuses cycles, deletes inside instances, and restructuring instances", () => {
-    editor.select([button.frame]);
-    expect(editor.insertInstance(button.frame)).toBeNull();
+    // Dropped onto its own component, an instance would nest in itself: refused.
+    const b = editor.scene.bounds(button.frame);
+    expect(
+      editor.insertInstance(button.frame, {
+        x: (b?.x ?? 0) + (b?.width ?? 0) / 2,
+        y: (b?.y ?? 0) + (b?.height ?? 0) / 2,
+      }),
+    ).toBeNull();
     const icon = mirrorOf(editor, instance, button.icon) as NodeRecord;
     editor.select([icon.id]);
     editor.deleteSelection();
@@ -235,6 +247,36 @@ describe("components and instances", () => {
     expect(getProp(copy.props, "name")).toBe(getProp(props(editor, nested), "name"));
     editor.setProp([nested], "opacity", 0.5);
     expect(getProp(props(editor, copy.id), "opacity")).toBe(0.5);
+  });
+
+  it("offers every other component to swap an instance to, but none that would nest in itself", () => {
+    // A second component, with an instance of Button inside it.
+    const card = editor.createLayer("frame", { x: 400, y: 0, width: 200, height: 100 }, "p", {
+      name: "Card",
+    }) as string;
+    editor.select([card]);
+    editor.createComponent();
+    const inCard = editor.insertInstance(button.frame, { x: 450, y: 50 }) as string;
+    expect(editor.doc.get(inCard)?.parent).toBe(card);
+    // The Button instance on the page can become a Card…
+    expect(swapTargets(editor.doc, instance).map((t) => t.id)).toEqual([card]);
+    // …but the one inside Card can't: Card would contain itself.
+    expect(swapTargets(editor.doc, inCard)).toEqual([]);
+    editor.swapInstance(instance, card);
+    expect(getProp(props(editor, instance), "instanceOf")).toBe(card);
+  });
+
+  it("inserts an instance beside its component when the component is selected", () => {
+    editor.select([button.frame]);
+    const made = editor.insertInstance(button.frame) as string;
+    expect(made).not.toBeNull();
+    expect(getProp(props(editor, made), "instanceOf")).toBe(button.frame);
+    expect(editor.doc.get(made)?.parent).toBe(editor.doc.get(button.frame)?.parent);
+    // Just right of the main component, top-aligned with it.
+    const main = editor.scene.bounds(button.frame);
+    const copy = editor.scene.bounds(made);
+    expect(copy?.x).toBeCloseTo((main?.x ?? 0) + (main?.width ?? 0) + 40, 2);
+    expect(copy?.y).toBeCloseTo(main?.y ?? 0, 2);
   });
 
   it("never moves an instance into its own component, or anything into or out of an instance", () => {

@@ -294,6 +294,12 @@
   width: 100%;
   justify-content: center;
 }
+.version__note--fine {
+  margin-top: var(--space-100);
+  font: var(--type-ui-label);
+  font-weight: 400;
+  list-style: none;
+}
 .version__foot .version__note {
   font: var(--type-ui-label);
   font-weight: 400;

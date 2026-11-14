@@ -112,6 +112,23 @@ test.describe
       await expect(page.getByRole("menu")).toHaveCount(0);
     });
 
+    test("right-clicking a layer that's already selected keeps the whole selection", async () => {
+      await page.evaluate(
+        (ids) => (window as unknown as { drawpane: Debug }).drawpane.select(ids),
+        [card, chip],
+      );
+      const at = await centreOf(page, card);
+      await page.mouse.click(at.x, at.y, { button: "right" });
+      await expect(menu(page)).toBeVisible();
+      // What the menu acts on is everything selected, as in Figma.
+      expect(
+        await page.evaluate(() => (window as unknown as { drawpane: Debug }).drawpane.s.selection),
+      ).toEqual([card, chip]);
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await page.evaluate(() => (window as unknown as { drawpane: Debug }).drawpane.select([]));
+    });
+
     test("copies properties from one layer and pastes them on another", async () => {
       const at = await centreOf(page, card);
       await page.mouse.click(at.x, at.y, { button: "right" });
@@ -266,5 +283,43 @@ test.describe
       await page.keyboard.press("Enter");
       await expect(input).toBeHidden();
       await expect.poll(async () => (await props(page, board)).name).toBe("Home screen");
+    });
+
+    test("swaps an instance for another component from its menu", async () => {
+      const { instance, chipMain } = await page.evaluate(() => {
+        const e = (
+          window as unknown as {
+            drawpane: Debug & {
+              createComponent(): void;
+              insertInstance(id: string, at?: { x: number; y: number }): string | null;
+            };
+          }
+        ).drawpane;
+        const p = e.s.pageId;
+        const a = e.createLayer("frame", { x: 0, y: 400, width: 120, height: 48 }, p, {
+          name: "Button",
+        }) as string;
+        e.select([a]);
+        e.createComponent();
+        const b = e.createLayer("frame", { x: 200, y: 400, width: 48, height: 48 }, p, {
+          name: "Avatar",
+        }) as string;
+        e.select([b]);
+        e.createComponent();
+        const instance = e.insertInstance(a, { x: 600, y: 424 }) as string;
+        e.select([instance]);
+        e.zoomToFit();
+        return { instance, chipMain: b };
+      });
+      const at = await centreOf(page, instance);
+      await page.mouse.click(at.x, at.y, { button: "right" });
+      await menu(page)
+        .getByRole("menuitem", { name: /^Swap with/ })
+        .hover();
+      const sub = page.getByRole("menu").last();
+      // Only other components: not the one it already is.
+      await expect(sub.getByRole("menuitem", { name: "Button" })).toHaveCount(0);
+      await sub.getByRole("menuitem", { name: "Avatar" }).click();
+      await expect.poll(async () => (await props(page, instance)).instanceOf).toBe(chipMain);
     });
   });
