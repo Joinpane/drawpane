@@ -64,8 +64,34 @@ export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]
 // Value schemas
 
 const finite = z.number().refine(Number.isFinite, "must be a finite number");
-const nonNegative = finite.refine((n) => n >= 0, "must be zero or more");
-const unit = finite.refine((n) => n >= 0 && n <= 1, "must be between 0 and 1");
+
+/** A number property's range, for the fields that edit it (propBounds). */
+export interface Bounds {
+  readonly min?: number;
+  readonly max?: number;
+}
+
+/** Each ranged schema's bounds: fields clamp to them, so a drag or a typo stops at the edge. */
+const BOUNDS = new WeakMap<z.ZodType, Bounds>();
+
+/**
+ * A number schema with a range that fields know about. The bounds can be
+ * narrower than the schema where its edge is exclusive (a font size above 0
+ * starts at 1 in a field).
+ */
+function ranged<S extends z.ZodType>(schema: S, bounds: Bounds): S {
+  BOUNDS.set(schema, bounds);
+  return schema;
+}
+
+const nonNegative = ranged(
+  finite.refine((n) => n >= 0, "must be zero or more"),
+  { min: 0 },
+);
+const unit = ranged(
+  finite.refine((n) => n >= 0 && n <= 1, "must be between 0 and 1"),
+  { min: 0, max: 1 },
+);
 
 /** `#rrggbb` or `#rrggbbaa`, lowercase. */
 export const Color = z
@@ -239,7 +265,11 @@ export type LineHeight = z.infer<typeof LineHeight>;
 export const LetterSpacing = z.object({ unit: z.enum(["px", "percent"]), value: finite });
 export type LetterSpacing = z.infer<typeof LetterSpacing>;
 
-const FontSize = finite.refine((n) => n > 0 && n <= 4096, "must be between 0 and 4096");
+const FontSize = ranged(
+  finite.refine((n) => n > 0 && n <= 4096, "must be between 0 and 4096"),
+  // Above 0, so a field starts at 1, like Figma.
+  { min: 1, max: 4096 },
+);
 
 /**
  * Styling on part of a text layer's characters: [start, end) in UTF-16 code
@@ -383,16 +413,22 @@ export const PROPS = {
 
   // Polygons and stars: points around an ellipse that fills the box.
   pointCount: prop(
-    z
-      .number()
-      .int()
-      .refine((n) => n >= 3 && n <= 60, "must be between 3 and 60"),
+    ranged(
+      z
+        .number()
+        .int()
+        .refine((n) => n >= 3 && n <= 60, "must be between 3 and 60"),
+      { min: 3, max: 60 },
+    ),
     3,
     ["polygon", "star"],
   ),
   /** A star's inner points as a fraction of its outer radius. */
   innerRadius: prop(
-    finite.refine((n) => n > 0 && n <= 1, "must be more than 0 and at most 1"),
+    ranged(
+      finite.refine((n) => n > 0 && n <= 1, "must be more than 0 and at most 1"),
+      { min: 0.01, max: 1 },
+    ),
     0.382,
     ["star"],
   ),
@@ -464,7 +500,7 @@ export const PROPS = {
   textCase: prop(z.enum(["none", "upper", "lower", "title"]), "none", TYPOGRAPHY),
   textDecoration: prop(z.enum(["none", "underline", "strikethrough"]), "none", TYPOGRAPHY),
   /** Extra space after each paragraph (each hard line break), in px. */
-  paragraphSpacing: prop(z.number().min(0).max(1000), 0, TYPOGRAPHY),
+  paragraphSpacing: prop(ranged(z.number().min(0).max(1000), { min: 0, max: 1000 }), 0, TYPOGRAPHY),
   /** Show at most this many lines, the last ending in "…"; null shows them all. */
   maxLines: prop(z.number().int().min(1).max(1000).nullable(), null, ["text"]),
   /** Styled ranges of the characters (bold words, a coloured phrase); see `TextRun`. */
@@ -542,6 +578,20 @@ export function defaultOf<K extends PropName>(name: K): PropValues[K] {
 }
 
 /** A property's value on a node, falling back to the default. */
+/**
+ * The range a number property takes ({} when it's any number): what fields
+ * clamp typing and scrubbing to, so a fast drag lands exactly on the edge
+ * instead of being refused just short of it.
+ */
+export function propBounds(name: PropName): Bounds {
+  let schema: z.ZodType = PROPS[name].schema;
+  // Through .optional() and .nullable() to the number inside.
+  // (Only those: an array's unwrap is its items, which aren't the property's range.)
+  while (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable)
+    schema = schema.unwrap() as z.ZodType;
+  return BOUNDS.get(schema) ?? {};
+}
+
 export function getProp<K extends PropName>(props: Props, name: K): PropValues[K] {
   const value = props[name];
   return (value === undefined ? PROPS[name].default : value) as PropValues[K];

@@ -6,7 +6,7 @@ import {
   isMainComponent,
   variantProperties,
 } from "@drawpane/editor";
-import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import { getProp, type NodeRecord, type Paint, type PropName, propBounds } from "@drawpane/model";
 import { IconButton, type IconName, KIND_ICONS, NumberField, SelectionLens } from "@drawpane/ui";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { shortcutFor } from "./actions";
@@ -204,10 +204,13 @@ function lensContents(
     aria: string,
     look: { label: string } | { icon: IconName },
     apply: (v: number) => void,
+    /** The property it edits: typing and dragging stop at its range's edges. */
+    bounded?: PropName,
   ) => (
     <NumberField
       key={key}
       {...look}
+      {...(bounded ? propBounds(bounded) : {})}
       ariaLabel={aria}
       value={value === null ? null : Math.round(value * 100) / 100}
       placeholder="Mixed"
@@ -226,7 +229,15 @@ function lensContents(
     name: "width" | "height" | "gap" | "cornerRadius" | "fontSize",
     aria: string,
     look: { label: string } | { icon: IconName },
-  ) => field(name, getProp(p, name), aria, look, (v) => editor.setProp([node.id], name, v, aria));
+  ) =>
+    field(
+      name,
+      getProp(p, name),
+      aria,
+      look,
+      (v) => editor.setProp([node.id], name, v, aria),
+      name,
+    );
   const size = [prop("width", "Width", { label: "W" }), prop("height", "Height", { label: "H" })];
   const fill = <FillControl key="fill" editor={editor} node={node} ctx={ctx} />;
   const base = layerKind(node.type);
@@ -268,8 +279,13 @@ function lensContents(
           />
         ),
         <WeightSelect key="weight" editor={editor} nodes={views} className="lens-select" />,
-        field("fontSize", common(views, "fontSize"), "Font size", { label: "Aa" }, (v) =>
-          editor.setProp([node.id], "fontSize", v, "Font size"),
+        field(
+          "fontSize",
+          common(views, "fontSize"),
+          "Font size",
+          { label: "Aa" },
+          (v) => editor.setProp([node.id], "fontSize", v, "Font size"),
+          "fontSize",
         ),
         fill,
       ],
@@ -323,17 +339,24 @@ function lensContents(
         prop("gap", "Gap", {
           icon: getProp(p, "layoutMode") === "column" ? "gap-vertical" : "gap-horizontal",
         }),
-        field("padding", uniform, "Padding", { icon: "padding" }, (v) => {
-          editor.beginGesture("Padding");
-          for (const side of [
-            "paddingTop",
-            "paddingRight",
-            "paddingBottom",
-            "paddingLeft",
-          ] as const)
-            editor.setProp([node.id], side, v, "Padding");
-          editor.endGesture();
-        }),
+        field(
+          "padding",
+          uniform,
+          "Padding",
+          { icon: "padding" },
+          (v) => {
+            editor.beginGesture("Padding");
+            for (const side of [
+              "paddingTop",
+              "paddingRight",
+              "paddingBottom",
+              "paddingLeft",
+            ] as const)
+              editor.setProp([node.id], side, v, "Padding");
+            editor.endGesture();
+          },
+          "paddingTop",
+        ),
       ],
     };
   }
