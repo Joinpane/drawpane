@@ -220,6 +220,9 @@ importers:
       '@drawpane/model':
         specifier: workspace:*
         version: link:../../packages/model
+      '@drawpane/penpot':
+        specifier: workspace:*
+        version: link:../../packages/penpot
       '@drawpane/ui':
         specifier: workspace:*
         version: link:../../packages/ui
@@ -335,6 +338,25 @@ importers:
       fast-check:
         specifier: 'catalog:'
         version: 4.10.2
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 5.1.0(@types/node@26.6.6)(jsdom@31.0.0)(vite@8.3.8(@types/node@26.6.6)(esbuild@0.28.2))
+
+  packages/penpot:
+    dependencies:
+      '@drawpane/model':
+        specifier: workspace:*
+        version: link:../model
+    devDependencies:
+      '@drawpane/editor':
+        specifier: workspace:*
+        version: link:../editor
+      '@types/node':
+        specifier: 26.6.6
+        version: 26.6.6
       typescript:
         specifier: 'catalog:'
         version: 7.0.2

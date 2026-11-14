@@ -1,0 +1,25 @@
+{
+  "name": "@drawpane/penpot",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "Reads Penpot's .penpot exports (binfile v3) and converts them to Drawpane files. Pure TypeScript: runs in the browser, in Workers and in tests.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@drawpane/model": "workspace:*"
+  },
+  "devDependencies": {
+    "@drawpane/editor": "workspace:*",
+    "@types/node": "26.6.6",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
