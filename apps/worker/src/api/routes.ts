@@ -3,9 +3,11 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { publicOrigins } from "../auth/passkeys";
 import { requireUser } from "../auth/session";
+import { inviteEmail } from "../email/invite";
+import { emailSetup } from "../email/setup";
 import type { AppContext, Env, Role } from "../env";
 import { randomToken, sha256Hex } from "../lib/crypto";
-import { badRequest, conflict, forbidden, notFound } from "../lib/http";
+import { badRequest, conflict, forbidden, notFound, rateLimited } from "../lib/http";
 import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
 import { comments } from "./comments";
 import { fonts } from "./fonts";
@@ -78,7 +80,20 @@ const InviteNote = z
   .max(80)
   .optional()
   .transform((v) => v || null);
+/** Where to email an invite; blank means don't. */
+const InviteAddress = z
+  .string()
+  .trim()
+  .max(254, "That email address is too long.")
+  .optional()
+  .transform((v) => v?.toLowerCase() || null)
+  .refine(
+    (v) => v === null || z.email().safeParse(v).success,
+    "That doesn't look like an email address.",
+  );
 const INVITE_DAYS = 7;
+/** Invite emails a team sends in a day, at most: plenty for a team, little for spam. */
+export const INVITE_EMAILS_PER_DAY = 50;
 
 function room(env: Env, fileId: string) {
   return env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
@@ -199,19 +214,67 @@ export const api = new Hono<AppContext>()
     const user = requireUser(c);
     const teamId = c.req.param("teamId");
     await requireTeamRole(c.env, user.id, teamId, "owner");
-    const { role, note } = await readBody(
+    const { role, note, email } = await readBody(
       c,
-      z.object({ role: RoleSchema.default("editor"), note: InviteNote }),
+      z.object({ role: RoleSchema.default("editor"), note: InviteNote, email: InviteAddress }),
     );
+    const now = Date.now();
+    const { sender } = emailSetup(c.env);
+    if (email) {
+      if (!sender) throw conflict("This instance doesn't send email. Create a link and share it.");
+      const [member, recent] = await c.env.DB.batch<{ n: number }>([
+        c.env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM team_members tm JOIN users u ON u.id = tm.user_id
+            WHERE tm.team_id = ? AND lower(u.email) = ?`,
+        ).bind(teamId, email),
+        c.env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM invites WHERE team_id = ? AND emailed_at > ?",
+        ).bind(teamId, now - 86_400_000),
+      ]);
+      if ((member?.results[0]?.n ?? 0) > 0) throw conflict(`${email} is already on this team.`);
+      if ((recent?.results[0]?.n ?? 0) >= INVITE_EMAILS_PER_DAY)
+        throw rateLimited(
+          `This team has sent ${INVITE_EMAILS_PER_DAY} invite emails today. Create a link and share it, or try again tomorrow.`,
+        );
+    }
     const token = randomToken();
-    const expiresAt = Date.now() + INVITE_DAYS * 86_400_000;
+    const id = await sha256Hex(token);
+    const expiresAt = now + INVITE_DAYS * 86_400_000;
     await c.env.DB.prepare(
-      "INSERT INTO invites (id, team_id, role, created_by, created_at, expires_at, note) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO invites (id, team_id, role, created_by, created_at, expires_at, note, email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
-      .bind(await sha256Hex(token), teamId, role, user.id, Date.now(), expiresAt, note)
+      .bind(id, teamId, role, user.id, now, expiresAt, note, email)
       .run();
     const url = new URL(`/invite/${token}`, publicOrigins(c)[0]).toString();
-    return c.json({ token, url, role, expiresAt }, 201);
+
+    // Sent now, so the owner hears at once whether it went; if it didn't,
+    // the link still works and they can share it themselves.
+    let emailed = false;
+    if (email && sender) {
+      try {
+        const team = await c.env.DB.prepare("SELECT name FROM teams WHERE id = ?")
+          .bind(teamId)
+          .first<{ name: string }>();
+        await sender.send(
+          inviteEmail({
+            to: email,
+            url,
+            teamName: team?.name ?? "a team",
+            role,
+            expiresAt,
+            inviter: { name: user.name, email: user.email },
+          }),
+        );
+        emailed = true;
+        await c.env.DB.prepare("UPDATE invites SET emailed_at = ? WHERE id = ?")
+          .bind(now, id)
+          .run();
+      } catch (error) {
+        // The details are for whoever runs the instance (Admin › Health can test sending).
+        console.error(`couldn't email an invite for team ${teamId}`, error);
+      }
+    }
+    return c.json({ token, url, role, expiresAt, email, emailed }, 201);
   })
 
   // Pending invites: links not used yet and not expired. An invite's id is
@@ -221,15 +284,16 @@ export const api = new Hono<AppContext>()
     const teamId = c.req.param("teamId");
     await requireTeamRole(c.env, user.id, teamId, "owner");
     const { results } = await c.env.DB.prepare(
-      `SELECT i.id, i.role, i.note, i.created_at AS createdAt, i.expires_at AS expiresAt,
-              u.name AS createdBy
+      `SELECT i.id, i.role, i.note, i.email, i.emailed_at AS emailedAt,
+              i.created_at AS createdAt, i.expires_at AS expiresAt, u.name AS createdBy
          FROM invites i LEFT JOIN users u ON u.id = i.created_by
         WHERE i.team_id = ? AND i.used_at IS NULL AND i.expires_at > ?
         ORDER BY i.created_at DESC`,
     )
       .bind(teamId, Date.now())
       .all();
-    return c.json({ invites: results });
+    // Whether the invite dialog can offer to send by email.
+    return c.json({ invites: results, canEmail: emailSetup(c.env).sender !== null });
   })
 
   .delete("/teams/:teamId/invites/:inviteId", async (c) => {

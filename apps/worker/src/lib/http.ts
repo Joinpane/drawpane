@@ -32,5 +32,6 @@ export const notFound = (message = "That doesn't exist, or it was deleted.") =>
   new HttpError(404, "not_found", message);
 export const conflict = (message: string) => new HttpError(409, "conflict", message);
 export const tooLarge = (message: string) => new HttpError(413, "too_large", message);
+export const rateLimited = (message: string) => new HttpError(429, "rate_limited", message);
 export const unsupportedMedia = (message: string) =>
   new HttpError(415, "unsupported_media", message);

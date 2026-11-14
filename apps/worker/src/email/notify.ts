@@ -15,6 +15,15 @@
  */
 import type { Env } from "../env";
 import { signPayload, verifyPayload } from "../lib/crypto";
+import {
+  emailLink,
+  emailPage,
+  emailRow,
+  emailText,
+  escapeHtml,
+  footerLink,
+  oneLine,
+} from "./layout";
 import { EmailError, type EmailMessage } from "./message";
 import { emailSetup } from "./setup";
 
@@ -176,14 +185,6 @@ export async function unsubscribeUser(secret: string, token: string): Promise<st
 // ---------------------------------------------------------------------------
 // The email
 
-const escapeHtml = (text: string) =>
-  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-
-const oneLine = (text: string, max = 200) => {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
-};
-
 function sentence(row: Row): string {
   const who = row.actor_name ?? "Someone";
   switch (row.kind) {
@@ -236,20 +237,35 @@ export async function notificationEmail(
     `Stop these emails: ${unsubscribe}`,
   ].join("\n");
 
-  const item = (row: Row) => `
-    <tr><td style="padding:14px 0;border-top:1px solid #e6e3de">
-      <div style="font:600 14px/20px -apple-system,Segoe UI,sans-serif;color:#1c1b19">${escapeHtml(sentence(row))}</div>
-      ${row.body ? `<div style="margin-top:4px;font:400 14px/20px -apple-system,Segoe UI,sans-serif;color:#57534e">${escapeHtml(oneLine(row.body))}</div>` : ""}
-      <div style="margin-top:8px"><a href="${escapeHtml(link(row))}" style="font:500 13px/18px -apple-system,Segoe UI,sans-serif;color:#c2410c;text-decoration:none">Open the comment →</a></div>
-    </td></tr>`;
-  const html = `<!doctype html><html><body style="margin:0;padding:24px;background:#f6f4f0">
-  <table role="presentation" width="100%" style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:12px;padding:8px 24px 20px" cellpadding="0" cellspacing="0">
-    <tr><td style="padding:16px 0 8px;font:600 16px/22px -apple-system,Segoe UI,sans-serif;color:#1c1b19">${escapeHtml(digest ? "Your digest" : rows.length === 1 ? "New in Drawpane" : `${rows.length} new comments`)}</td></tr>
-    ${listed.map(item).join("")}
-    ${more > 0 ? `<tr><td style="padding:14px 0;border-top:1px solid #e6e3de;font:400 13px/18px -apple-system,Segoe UI,sans-serif;color:#57534e">And ${more} more in <a href="${escapeHtml(origin)}" style="color:#c2410c">your inbox</a>.</td></tr>` : ""}
-  </table>
-  <p style="max-width:560px;margin:16px auto 0;font:400 12px/18px -apple-system,Segoe UI,sans-serif;color:#78716c">${escapeHtml(why)} <a href="${escapeHtml(settings)}" style="color:#78716c">Change how you hear</a> · <a href="${escapeHtml(unsubscribe)}" style="color:#78716c">Stop these emails</a></p>
-</body></html>`;
+  const item = (row: Row) =>
+    emailRow(
+      [
+        emailText(sentence(row), "title"),
+        row.body ? emailText(oneLine(row.body), "body", { gap: 4 }) : "",
+        `<div style="margin-top:8px">${emailLink(link(row), "Open the comment →")}</div>`,
+      ].join(""),
+      { divider: true },
+    );
+  const html = emailPage({
+    heading: digest
+      ? "Your digest"
+      : rows.length === 1
+        ? "New in Drawpane"
+        : `${rows.length} new comments`,
+    preheader: rows[0]?.body ? oneLine(rows[0].body, 120) : undefined,
+    rows: [
+      ...listed.map(item),
+      ...(more > 0
+        ? [
+            emailRow(
+              `${emailText(`And ${more} more in your inbox.`, "note")}<div style="margin-top:8px">${emailLink(origin, "Open your inbox →")}</div>`,
+              { divider: true },
+            ),
+          ]
+        : []),
+    ],
+    footer: `${escapeHtml(why)} ${footerLink(settings, "Change how you hear")} · ${footerLink(unsubscribe, "Stop these emails")}`,
+  });
 
   return {
     to: [person.user_email],

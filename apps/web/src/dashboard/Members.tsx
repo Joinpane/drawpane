@@ -30,6 +30,25 @@ type Confirm =
   | { readonly kind: "leave"; readonly member: Member }
   | { readonly kind: "step-down"; readonly member: Member; readonly role: Role };
 
+/**
+ * Under a pending invite's name: where it went, if anywhere, and who made it
+ * when. "lee@example.com · Emailed by Ana Lima, 2 min ago".
+ */
+function inviteSub(invite: PendingInvite): string {
+  const by = invite.createdBy;
+  const made = invite.emailedAt
+    ? `Emailed${by ? ` by ${by},` : ""} ${timeAgo(invite.emailedAt)}`
+    : `${by ? `From ${by},` : "Created"} ${timeAgo(invite.createdAt)}`;
+  return [
+    // The name shows the note when there is one; the address goes here.
+    invite.note && invite.email ? invite.email : null,
+    invite.email && !invite.emailedAt ? "Email not sent" : null,
+    made,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 export function MembersView({
   teamId,
   teamName,
@@ -200,14 +219,13 @@ export function MembersView({
                 {pending.map((invite) => (
                   <li key={invite.id} className="members__row">
                     <span className="members__avatar members__avatar--invite" aria-hidden="true">
-                      <Icon name="link" size={12} />
+                      <Icon name={invite.emailedAt ? "mail" : "link"} size={12} />
                     </span>
                     <span className="members__who">
-                      <span className="members__name">{invite.note ?? "Invite link"}</span>
-                      <span className="members__sub">
-                        {invite.createdBy ? `From ${invite.createdBy}, ` : "Created "}
-                        {timeAgo(invite.createdAt)}
+                      <span className="members__name">
+                        {invite.note ?? invite.email ?? "Invite link"}
                       </span>
+                      <span className="members__sub">{inviteSub(invite)}</span>
                     </span>
                     <span className="members__meta">
                       <span>Joins as {ROLE_NAMES[invite.role].toLowerCase()}</span>
@@ -222,7 +240,7 @@ export function MembersView({
                           setNotice(null);
                           revoke.mutate(invite);
                         }}
-                        aria-label={`Take back the invite ${invite.note ? `for ${invite.note}` : "link"}`}
+                        aria-label={`Take back the invite ${invite.note || invite.email ? `for ${invite.note ?? invite.email}` : "link"}`}
                       >
                         Take back
                       </Button>
