@@ -16,6 +16,29 @@ import { teamFonts } from "./team-fonts";
 import { versions } from "./versions";
 
 const Name = z.string().trim().min(1, "Enter a name.").max(120, "Keep names under 120 characters.");
+/**
+ * Someone's role on a team changed, or they left it (`null`): the files they
+ * have open hear it now, rather than when they next reconnect. Only rooms
+ * where they're connected are asked (room_connections), never every file.
+ */
+async function accessChanged(
+  env: Env,
+  teamId: string,
+  userId: string,
+  role: Role | null,
+  by: { readonly name: string },
+): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT rc.file_id AS fileId FROM room_connections rc JOIN files f ON f.id = rc.file_id
+      WHERE rc.user_id = ? AND f.team_id = ?`,
+  )
+    .bind(userId, teamId)
+    .all<{ fileId: string }>();
+  await Promise.all(
+    results.map(({ fileId }) => room(env, fileId).accessChanged(userId, role, { name: by.name })),
+  );
+}
+
 const RoleSchema = z.enum(["owner", "editor", "viewer"]);
 /** Who an invite is for, as its owner wrote it; blank means none. */
 const InviteNote = z
@@ -119,6 +142,7 @@ export const api = new Hono<AppContext>()
       .bind(role, teamId, userId)
       .run();
     if (result.meta.changes === 0) throw notFound("That person isn't on this team.");
+    await accessChanged(c.env, teamId, userId, role, user);
     return c.json({ ok: true });
   })
 
@@ -144,6 +168,7 @@ export const api = new Hono<AppContext>()
     await c.env.DB.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ?")
       .bind(teamId, userId)
       .run();
+    await accessChanged(c.env, teamId, userId, null, user);
     return c.json({ ok: true });
   })
 

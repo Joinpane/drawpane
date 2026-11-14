@@ -129,6 +129,16 @@ export type ServerMessage =
    * Pending edits are kept and resent.
    */
   | { readonly t: "resync" }
+  /**
+   * An owner changed your role on the file's team while you had it open:
+   * from now on the room treats you as `role` (a viewer's edits are refused).
+   * Being removed closes the socket with 4401 instead.
+   */
+  | {
+      readonly t: "role";
+      readonly role: "owner" | "editor" | "viewer";
+      readonly by: { readonly name: string };
+    }
   /** Someone restored the whole file to a saved version. Sent after the change itself. */
   | {
       readonly t: "restored";

@@ -145,6 +145,40 @@ describe("FileRoom", () => {
     expect(response.status).toBe(404);
   });
 
+  it("hears a role change at once, and closes when its person is removed from the team", async () => {
+    const { browser, fileId, teamId } = await newFile();
+    const owner = await join(browser, fileId, "clientA");
+    const page = owner.nodes[0] as NodeRecord;
+    const lena = await signedInUser("Lena", "editor", teamId);
+    const l = await join(lena.browser, fileId, "clientL");
+    const connected = () =>
+      env.DB.prepare("SELECT COUNT(*) AS n FROM room_connections WHERE file_id = ? AND user_id = ?")
+        .bind(fileId, lena.userId)
+        .first<{ n: number }>()
+        .then((row) => row?.n ?? 0);
+    await expect.poll(connected).toBe(1);
+
+    // Made a viewer: told so, with who did it, and the next edit is refused.
+    await browser.json(`/api/teams/${teamId}/members/${lena.userId}`, {
+      method: "PATCH",
+      json: { role: "viewer" },
+    });
+    expect(await l.next("role")).toMatchObject({ role: "viewer", by: { name: "Ana" } });
+    l.send({ t: "txn", seq: 1, ops: [rect("r1", page.id)] });
+    expect(await l.next("reject")).toMatchObject({ code: "forbidden" });
+
+    // Removed: the socket closes with 4401, and the room forgets her.
+    const closed = new Promise<number>((resolve) =>
+      l.ws.addEventListener("close", (event) => resolve(event.code)),
+    );
+    await browser.json(`/api/teams/${teamId}/members/${lena.userId}`, { method: "DELETE" });
+    expect(await closed).toBe(4401);
+    await expect.poll(connected).toBe(0);
+    // The owner's own socket is untouched.
+    owner.send({ t: "ping" });
+    await owner.next("pong");
+  });
+
   it("answers malformed messages without dropping the socket", async () => {
     const { browser, fileId } = await newFile();
     const a = await join(browser, fileId, "clientA");

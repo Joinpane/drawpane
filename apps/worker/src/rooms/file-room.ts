@@ -198,6 +198,8 @@ export class FileRoom extends DurableObject<Env> {
     };
     this.ctx.acceptWebSocket(server, [claim.uid]);
     server.serializeAttachment(attachment);
+    // So an access change can find this room (see accessChanged). Not awaited: joining doesn't wait on D1.
+    if (!claim.guest) this.#recordConnection(claim.fid, claim.uid);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -320,6 +322,38 @@ export class FileRoom extends DurableObject<Env> {
    */
   async broadcastComments(event: CommentEvent): Promise<number> {
     return this.#broadcast({ t: "comments", event });
+  }
+
+  /**
+   * Someone's role on the file's team changed, or they were removed (`null`):
+   * their open sockets here get the new role at once (a viewer's next edit
+   * is refused), or are closed with 4401. Returns how many sockets it reached.
+   */
+  async accessChanged(
+    userId: string,
+    role: Role | null,
+    by: { readonly name: string },
+  ): Promise<number> {
+    let reached = 0;
+    for (const ws of this.ctx.getWebSockets(userId)) {
+      const me = ws.deserializeAttachment() as Attachment | null;
+      if (!me || me.guest || me.userId !== userId) continue;
+      reached++;
+      if (role === null) {
+        try {
+          ws.close(4401, "Access removed");
+        } catch {
+          // Already closing.
+        }
+        continue;
+      }
+      if (me.role === role) continue;
+      ws.serializeAttachment({ ...me, role });
+      this.#send(ws, { t: "role", role, by });
+    }
+    const fileId = this.#meta("file_id");
+    if (fileId && (reached === 0 || role === null)) this.#forgetConnection(fileId, userId);
+    return reached;
   }
 
   /** Disconnects everyone playing a shared prototype (the link was turned off). Returns how many. */
@@ -928,6 +962,29 @@ export class FileRoom extends DurableObject<Env> {
     if (!me || me.guest) return;
     this.#presence.delete(me.sessionId);
     this.#broadcast({ t: "peer-left", sessionId: me.sessionId }, ws);
+    // Their last socket here: the room no longer needs to hear about their access.
+    const stillHere = this.ctx
+      .getWebSockets(me.userId)
+      .some((other) => other !== ws && other.readyState === WebSocket.OPEN);
+    const fileId = this.#meta("file_id");
+    if (!stillHere && fileId) this.#forgetConnection(fileId, me.userId);
+  }
+
+  #recordConnection(fileId: string, userId: string): void {
+    this.env.DB.prepare(
+      `INSERT INTO room_connections (file_id, user_id, connected_at) VALUES (?, ?, ?)
+         ON CONFLICT (file_id, user_id) DO UPDATE SET connected_at = excluded.connected_at`,
+    )
+      .bind(fileId, userId, Date.now())
+      .run()
+      .catch((error: unknown) => console.warn("couldn't record a connection", error));
+  }
+
+  #forgetConnection(fileId: string, userId: string): void {
+    this.env.DB.prepare("DELETE FROM room_connections WHERE file_id = ? AND user_id = ?")
+      .bind(fileId, userId)
+      .run()
+      .catch((error: unknown) => console.warn("couldn't forget a connection", error));
   }
 
   #send(ws: WebSocket, message: ServerMessage): void {

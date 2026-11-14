@@ -277,6 +277,10 @@ export class SyncEngine {
       case "restored":
         this.#emit("restored", message.by, message.version);
         return;
+      case "role":
+        this.#role = message.role;
+        this.#emit("role", message.role);
+        return;
       case "pong":
         return;
       case "error":

@@ -69,6 +69,10 @@ export function connectFile(
         onFatal("This prototype link was turned off.");
         return;
       }
+      if (event.code === 4401) {
+        onFatal("You no longer have access to this file: you were removed from its team.");
+        return;
+      }
       schedule();
     });
   }

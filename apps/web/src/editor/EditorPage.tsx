@@ -185,7 +185,11 @@ function FileEditor({ fileId }: { fileId: string }) {
   }, [editor, history.view, insets, historyOpen, viewing, rulersOn, rulerLeft]);
 
   useEffect(
-    () => connectFile(editor, fileId, setFatal, (message) => comments.store.receive(message)),
+    () =>
+      connectFile(editor, fileId, setFatal, (message) => {
+        comments.store.receive(message);
+        if (message.t === "role") editor.notify(roleChangeNotice(message.role, message.by.name));
+      }),
     [editor, fileId, comments.store, navigate],
   );
   useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt, meta.data?.file.updatedAt);
@@ -941,6 +945,18 @@ function SyncStatus() {
       <span>{text}</span>
     </div>
   );
+}
+
+/** Said when an owner changes your role while you have the file open. */
+function roleChangeNotice(role: "owner" | "editor" | "viewer", by: string): string {
+  switch (role) {
+    case "viewer":
+      return `${by} made you a viewer. You can still view, comment and inspect.`;
+    case "editor":
+      return `${by} made you an editor. You can edit this file now.`;
+    case "owner":
+      return `${by} made you an owner of this team.`;
+  }
 }
 
 /**
