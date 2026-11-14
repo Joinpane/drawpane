@@ -436,6 +436,62 @@ describe("exportSvg", () => {
     );
   });
 
+  it("masks an outside stroke where the layer is on the page, not at the origin", () => {
+    const editor = makeEditor([
+      rect("r", {
+        x: 300,
+        y: 200,
+        strokes: [{ type: "solid", color: "#000000" }],
+        strokeWeight: 4,
+        strokeAlign: "outside",
+      }),
+    ]);
+    const svg = svgOf(editor, ["r"]);
+    // The mask's region is in page space: it covers the layer at 300, 200, stroke included.
+    const mask =
+      /<mask id="mask\d+" maskUnits="userSpaceOnUse" x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)">/.exec(
+        svg,
+      );
+    expect(mask).not.toBeNull();
+    const [x, y, width, height] = (mask as RegExpExecArray).slice(1).map(Number) as [
+      number,
+      number,
+      number,
+      number,
+    ];
+    expect(x).toBeLessThanOrEqual(300 - 4);
+    expect(y).toBeLessThanOrEqual(200 - 4);
+    expect(x + width).toBeGreaterThanOrEqual(400 + 4);
+    expect(y + height).toBeGreaterThanOrEqual(250 + 4);
+  });
+
+  it("blurs only the fills of a layer, as the canvas does: not its shadows or strokes", () => {
+    const editor = makeEditor([
+      rect("r", {
+        fills: [{ type: "solid", color: "#2b4fd6" }],
+        strokes: [{ type: "solid", color: "#000000" }],
+        strokeWeight: 20,
+        strokeAlign: "outside",
+        effects: [
+          { type: "layer-blur", radius: 1 },
+          { type: "drop-shadow", color: "#00000080", x: 0, y: 30, blur: 2, spread: 0 },
+          { type: "inner-shadow", color: "#ffffff", x: 2, y: 2, blur: 2, spread: 0 },
+        ],
+      }),
+    ]);
+    const svg = svgOf(editor, ["r"]);
+    const blur = /<filter id="(blur\d+)"/.exec(svg)?.[1];
+    expect(blur).toBeDefined();
+    const blurred = [...svg.matchAll(new RegExp(`<g filter="url\\(#${blur}\\)">(.*?)</g>`, "g"))]
+      .map((m) => m[1])
+      .join("");
+    expect(blurred).toContain('fill="#2b4fd6"');
+    expect(blurred).not.toContain("shadow");
+    expect(blurred).not.toContain('stroke="#000000"');
+    // The stroke is still drawn, outside the blurred group.
+    expect(svg).toContain('stroke="#000000"');
+  });
+
   it("casts a rotated layer's shadow in page space, as the canvas does", () => {
     const editor = makeEditor([
       rect("r", {

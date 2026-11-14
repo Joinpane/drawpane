@@ -482,6 +482,7 @@ export function exportSvg(
     );
     if (blur?.type !== "layer-blur" || blur.radius <= 0) return null;
     const id = out.id("blur");
+    // Covers the fills it blurs, plus the blur's own reach.
     const region = regionAttrs(matrix, 0, 0, w, h, blur.radius * 3);
     out.defs.push(
       `<filter id="${id}" filterUnits="userSpaceOnUse"${region} color-interpolation-filters="sRGB"><feGaussianBlur${attr("stdDeviation", blur.radius)}/></filter>`,
@@ -510,18 +511,21 @@ export function exportSvg(
     const h = getProp(node.props, "height");
     const matrix = scene.worldMatrix(id);
     const transform = transformAttr(matrix);
-    // The layer's own drawing, which its layer blur blurs, apart from its children, which it doesn't.
+    // In the canvas's order: drop shadows, fills, inner shadows, children, strokes. A layer blur
+    // blurs the fills only; shadows, children and strokes are drawn without it, as on the canvas.
+    const shadows: string[] = [];
     const below: string[] = [];
+    const inner: string[] = [];
     const children: string[] = [];
     const above: string[] = [];
 
     if (node.type === "text") {
-      dropShadows(node, w, h, matrix, null, below);
+      dropShadows(node, w, h, matrix, null, shadows);
       text(node, w, h, transform, below);
     } else {
       const shape = shapeOf(node, w, h);
       if (shape) {
-        dropShadows(node, w, h, matrix, shape, below);
+        dropShadows(node, w, h, matrix, shape, shadows);
         if (node.type !== "line")
           for (const paint of getProp(node.props, "fills")) {
             if (paint.visible === false) continue;
@@ -538,7 +542,7 @@ export function exportSvg(
             if (!fill) continue;
             below.push(`<${shape.tag}${transform}${shape.attrs}${fill}${blendStyle}/>`);
           }
-        if (node.type !== "line") innerShadows(node, w, h, matrix, shape, below);
+        if (node.type !== "line") innerShadows(node, w, h, matrix, shape, inner);
         if (node.type === "frame") {
           const inside: string[] = [];
           visitChildren(id, inside);
@@ -560,7 +564,7 @@ export function exportSvg(
     const blur = layerBlur(node, w, h, matrix);
     const own = (list: string[]) =>
       blur && list.length > 0 ? [`<g filter="url(#${blur})">${list.join("")}</g>`] : list;
-    parts.push(...own(below), ...children, ...own(above));
+    parts.push(...shadows, ...own(below), ...inner, ...children, ...above);
     if (parts.length === 0) return;
     if (wrapperAttrs || name) into.push(`<g${name}${wrapperAttrs}>${parts.join("")}</g>`);
     else into.push(...parts);
@@ -632,9 +636,12 @@ export function exportSvg(
     } else if (align === "outside") {
       const mask = out.id("mask");
       const m = weight * 2;
-      const region = `${attr("x", -m)}${attr("y", -m)}${attr("width", w + m * 2)}${attr("height", h + m * 2)}`;
+      // The mask's own region is in page space (userSpaceOnUse, on an untransformed group);
+      // the white rect inside it is in the layer's space, placed by its transform.
+      const local = `${attr("x", -m)}${attr("y", -m)}${attr("width", w + m * 2)}${attr("height", h + m * 2)}`;
+      const page = regionAttrs(scene.worldMatrix(node.id), -m, -m, w + m, h + m, 0);
       out.defs.push(
-        `<mask id="${mask}" maskUnits="userSpaceOnUse"${region}><rect${transform}${region} fill="#fff"/><${shape.tag}${transform}${shape.attrs} fill="#000"/></mask>`,
+        `<mask id="${mask}" maskUnits="userSpaceOnUse"${page}><rect${transform}${local} fill="#fff"/><${shape.tag}${transform}${shape.attrs} fill="#000"/></mask>`,
       );
       wrap = (s) => `<g mask="url(#${mask})">${s}</g>`;
     }

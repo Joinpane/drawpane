@@ -13,7 +13,7 @@ import {
 } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { Badge, IconButton, PropertySection, SegmentedControl } from "@drawpane/ui";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { modKey } from "../app/format";
 import { imageRefs } from "./export-assets";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
@@ -38,10 +38,15 @@ const n = (v: number) => String(Math.round(v * 100) / 100);
  */
 export function InspectPanel() {
   const editor = useEditor();
-  useDocVersion();
+  const version = useDocVersion();
   const selection = useEditorState((s) => s.selection);
   const node = selection.length === 1 ? editor.doc.get(selection[0] as string) : undefined;
   const [format, setFormat] = useState<"css" | "tailwind" | "jsx" | "svg">("css");
+  const svg = useSettledSvg(
+    editor,
+    format === "svg" && node && node.type !== "page" ? node.id : null,
+    version,
+  );
 
   if (!node || node.type === "page") {
     return (
@@ -55,7 +60,6 @@ export function InspectPanel() {
     );
   }
 
-  const svg = format === "svg" ? svgFor(editor, node) : null;
   const code =
     format === "css"
       ? cssRule(editor.doc, node)
@@ -114,6 +118,42 @@ export function InspectPanel() {
       </PropertySection>
     </div>
   );
+}
+
+/** How long the document has to be still before the SVG is written again. */
+const SVG_SETTLE_MS = 200;
+
+/**
+ * The selected layer's SVG, written when it's asked for and again once edits
+ * pause: a whole subtree's markup is too much to rebuild on every change
+ * (each drag step, every collaborator's keystroke). A new layer, or opening
+ * the tab, writes it at once.
+ */
+function useSettledSvg(
+  editor: Editor,
+  id: string | null,
+  version: number,
+): { code: string; notes: string[] } | null {
+  const [state, setState] = useState<{ id: string; svg: { code: string; notes: string[] } } | null>(
+    null,
+  );
+  const current = state && state.id === id ? state.svg : null;
+  useEffect(() => {
+    void version;
+    if (!id) return;
+    const write = () => {
+      const node = editor.doc.get(id);
+      if (node) setState({ id, svg: svgFor(editor, node) });
+    };
+    if (!current) {
+      write();
+      return;
+    }
+    const t = setTimeout(write, SVG_SETTLE_MS);
+    return () => clearTimeout(t);
+    // `current` only says whether there's anything on screen yet; it isn't a reason to rewrite.
+  }, [editor, id, version]);
+  return current;
 }
 
 /**

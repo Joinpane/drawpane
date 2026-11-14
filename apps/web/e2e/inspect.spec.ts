@@ -76,6 +76,18 @@ test.describe
           fills: solid("#0f8a7e"),
           effects: [{ type: "layer-blur", radius: 6 }],
         });
+        // Blurred, with a wide outside stroke and a sharp shadow: the blur covers the
+        // whole stroke, and leaves the shadow alone, as on the canvas.
+        e.createLayer("rect", { x: 220, y: 150, width: 60, height: 30 }, frame, {
+          fills: solid("#f5b400"),
+          strokes: solid("#1c1b1a"),
+          strokeWeight: 8,
+          strokeAlign: "outside",
+          effects: [
+            { type: "layer-blur", radius: 2 },
+            { type: "drop-shadow", color: "#00000066", x: 0, y: 14, blur: 0, spread: 0 },
+          ],
+        });
         e.select([frame]);
         return frame;
       });
