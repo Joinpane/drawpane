@@ -205,6 +205,9 @@ importers:
       '@biomejs/biome':
         specifier: 2.6.7
         version: 2.6.7
+      fast-check:
+        specifier: 'catalog:'
+        version: 4.10.2
       turbo:
         specifier: 2.11.11
         version: 2.11.11

@@ -1,9 +1,10 @@
 name: Fuzz
 
-# The editor driven at random, and the layers panel's drag and drop on random
-# trees, with fresh seeds and far more runs than the fixed-seed sweep on every
-# push. A failure prints the seed and the steps that break, to replay with
-# `FUZZ_SEED=<seed> pnpm fuzz`.
+# Every property test with fresh seeds (the editor driven at random, the
+# layers panel's drag and drop on random trees, sync, history, layout,
+# paths, colours), the long ones with far more runs than the fixed-seed sweep
+# on every push. A failure prints the seed and the steps that break, to
+# replay with `FUZZ_SEED=<seed> pnpm fuzz`.
 on:
   schedule:
     - cron: "17 10 * * *"
@@ -14,7 +15,7 @@ permissions:
 
 jobs:
   fuzz:
-    name: Fuzz the editor and the layers panel
+    name: Fuzz every property test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

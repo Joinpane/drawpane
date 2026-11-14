@@ -12,7 +12,7 @@
   "scripts": {
     "typecheck": "tsc -p .",
     "test": "vitest run",
-    "fuzz": "vitest run test/monkey.test.ts --testTimeout=1800000"
+    "fuzz": "vitest run --testTimeout=1800000"
   },
   "dependencies": {
     "@drawpane/model": "workspace:*",

@@ -15,7 +15,7 @@
     "tour": "playwright test --project=tour",
     "bench": "playwright test --project=bench",
     "fonts:catalog": "node scripts/build-font-catalog.ts",
-    "fuzz": "vitest run src/editor/layer-tree.property.test.ts --testTimeout=1800000"
+    "fuzz": "vitest run --testTimeout=1800000"
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",

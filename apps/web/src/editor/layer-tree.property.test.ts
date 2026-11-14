@@ -11,17 +11,8 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { aimDrop, dropPlacement, layerRows, type Row } from "./layer-tree";
 
-/**
- * How hard to look: a fixed seed by default, so a push never fails on a bug
- * found by chance in someone else's change; `pnpm fuzz` (nightly in CI)
- * sets FUZZ_SEED=random and far more runs. A failure prints its seed to replay.
- */
-function fuzzing(runs: number): { numRuns: number; seed?: number } {
-  const seed = process.env.FUZZ_SEED;
-  const numRuns = Number(process.env.FUZZ_RUNS ?? runs);
-  if (seed === "random") return { numRuns };
-  return { numRuns, seed: seed ? Number(seed) : 20261114 };
-}
+/** More runs when fuzzing (FUZZ_RUNS); the seed is set for every property test in vitest.setup.ts. */
+const runs = (normally: number) => ({ numRuns: Number(process.env.FUZZ_RUNS) || normally });
 
 type Kind = "frame" | "group" | "rect";
 interface Spec {
@@ -133,7 +124,7 @@ describe("dragging in the layers panel", () => {
         const missing = [...everyPlace(doc, moving)].filter((p) => !reached.has(p));
         expect(missing, `can't drag ${moving} to`).toEqual([]);
       }),
-      fuzzing(400),
+      runs(400),
     );
   }, 60_000);
 
@@ -158,7 +149,7 @@ describe("dragging in the layers panel", () => {
           expect(moving).not.toContain(place.above);
         }
       }),
-      fuzzing(300),
+      runs(300),
     );
   }, 60_000);
 });

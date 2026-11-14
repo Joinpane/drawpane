@@ -20,6 +20,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.7",
+    "fast-check": "catalog:",
     "turbo": "2.11.11",
     "typescript": "7.0.2"
   }

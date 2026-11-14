@@ -149,17 +149,8 @@ const action: fc.Arbitrary<Action> = fc.oneof(
   { arbitrary: fc.record({ kind: fc.constantFrom("undo" as const, "redo" as const) }), weight: 3 },
 );
 
-/**
- * How hard to look: a fixed seed by default, so a push never fails on a bug
- * found by chance in someone else's change; `pnpm fuzz` (nightly in CI)
- * sets FUZZ_SEED=random and far more runs. A failure prints its seed to replay.
- */
-function fuzzing(runs: number): { numRuns: number; seed?: number } {
-  const seed = process.env.FUZZ_SEED;
-  const numRuns = Number(process.env.FUZZ_RUNS ?? runs);
-  if (seed === "random") return { numRuns };
-  return { numRuns, seed: seed ? Number(seed) : 20261114 };
-}
+/** More runs when fuzzing (FUZZ_RUNS); the seed is set for every property test in vitest.setup.ts. */
+const runs = (normally: number) => ({ numRuns: Number(process.env.FUZZ_RUNS) || normally });
 
 function setup() {
   const editor = new Editor({ measurer: { width: (_f, t) => t.length * 7 }, clientId: "monkey" });
@@ -418,7 +409,7 @@ describe("the editor, driven at random", () => {
           expect(snapshot(editor), "redo all the way").toEqual(end);
         },
       ),
-      fuzzing(150),
+      runs(150),
     );
   }, 120_000);
 });

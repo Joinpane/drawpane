@@ -17,7 +17,8 @@
     "build:gallery": "vite build",
     "tokens": "node scripts/build-tokens.ts",
     "typecheck": "tsc -p .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "fuzz": "vitest run --testTimeout=1800000"
   },
   "peerDependencies": {
     "react": "^19.0.0",
