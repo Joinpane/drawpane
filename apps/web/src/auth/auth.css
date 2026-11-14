@@ -158,6 +158,21 @@
 .auth__footer a {
   color: inherit;
 }
+.auth__note a {
+  border-radius: var(--radius-xs);
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--line-control);
+  text-underline-offset: 2px;
+}
+.auth__note a:hover {
+  text-decoration-color: currentColor;
+}
+.auth__note a:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
 
 @media (max-width: 900px) {
   .auth {
@@ -166,4 +181,56 @@
   .auth__art {
     display: none;
   }
+}
+
+/* Signing in with GitHub or Google */
+.provider-buttons {
+  display: grid;
+  gap: var(--space-200);
+}
+.provider-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-200);
+  height: var(--size-control-lg);
+  padding: 0 var(--space-400);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink);
+  font: 500 13px / 16px var(--font-ui);
+  text-decoration: none;
+  transition:
+    background var(--duration-hover) ease-out,
+    box-shadow var(--duration-hover) ease-out;
+}
+.provider-button:hover {
+  background: var(--surface-hover);
+  box-shadow: inset 0 0 0 1px var(--line-control);
+}
+.provider-button:focus-visible {
+  outline: none;
+  box-shadow:
+    inset 0 0 0 1px var(--line-control),
+    var(--shadow-focus);
+}
+.provider-mark {
+  flex: none;
+}
+.auth__or {
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  color: var(--ink-muted);
+  font: 400 11px / 14px var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.auth__or::before,
+.auth__or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
 }

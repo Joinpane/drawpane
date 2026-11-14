@@ -60,6 +60,26 @@ Teams can also upload their own fonts (TrueType, OpenType, WOFF or WOFF2) from *
 
 To keep the Worker from contacting Google at all, set `GOOGLE_FONTS` to `off` in the `vars` of `wrangler.jsonc`. The picker then offers only the built-in fonts, system fonts and fonts installed on each person's computer.
 
+## Signing in with GitHub or Google
+
+Passkeys work out of the box. To also offer **Continue with GitHub** and **Continue with Google**, create an OAuth app with each provider and give the Worker its client id and secret. Each button appears only once both values for that provider are set.
+
+| Provider | Where to create it | Callback URL to register |
+| --- | --- | --- |
+| GitHub | GitHub → Settings → Developer settings → OAuth Apps → **New OAuth App** | `https://<your-domain>/api/auth/oauth/github/callback` |
+| Google | Google Cloud console → APIs & Services → Credentials → **Create credentials → OAuth client ID** (type "Web application") | `https://<your-domain>/api/auth/oauth/google/callback` |
+
+Then store the values as secrets:
+
+```sh
+npx wrangler secret put GITHUB_CLIENT_ID
+npx wrangler secret put GITHUB_CLIENT_SECRET
+npx wrangler secret put GOOGLE_CLIENT_ID
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+```
+
+Who gets in stays the same: signing in with a provider finds an existing account by the provider account you connected, or by an email address the provider has verified. A new account still needs an invite link, which can then be accepted with **Join with GitHub** or **Join with Google**. Everyone can connect or disconnect providers and add passkeys under **Account** (click your name in the dashboard). The last way to sign in can't be removed.
+
 ## Backups
 
 Every file keeps its own version history. While a file is being edited, its FileRoom saves a gzip snapshot to R2 (`files/<file-id>/snapshots/`) once editing pauses for 10 minutes, and at least once an hour during long sessions. It also saves one whenever someone names a version, and just before anyone restores one, so a restore can always be undone. Each snapshot has a row in D1's `versions` table that says who edited and what changed.
@@ -70,7 +90,8 @@ D1 also has 30-day point-in-time recovery built in (`wrangler d1 time-travel`).
 
 ## Accounts and security
 
-- Sign-in is passkey-only, so there are no passwords to leak or reset. Every account after the first joins through a single-use invite link that expires after 7 days.
+- There are no passwords to leak or reset: people sign in with passkeys, and with GitHub or Google if you set them up (see above). Every account after the first joins through a single-use invite link that expires after 7 days.
+- Provider sign-in uses the authorization-code flow with PKCE and a signed, 10-minute state cookie. A provider account is matched to an existing account only through an email address the provider has verified.
 - Sessions are random 256-bit tokens in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie; only their SHA-256 hash is stored.
 - The Worker checks your role on every request and hands each file socket to its FileRoom with a signed, 60-second claim that the room verifies.
 - No telemetry. Fonts are bundled, so the app makes no third-party requests.

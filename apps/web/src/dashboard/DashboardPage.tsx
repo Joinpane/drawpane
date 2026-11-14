@@ -335,13 +335,15 @@ function UserMenu({ name, email }: { name: string; email: string }) {
   const next = theme === "system" ? "light" : theme === "light" ? "dark" : "system";
   return (
     <div className="dash__user">
-      <span className="dash__avatar" aria-hidden="true">
-        {initials(name)}
-      </span>
-      <span className="dash__user-text">
-        <strong>{name}</strong>
-        <span>{email}</span>
-      </span>
+      <Link to="/settings" className="dash__account" title="Account settings">
+        <span className="dash__avatar" aria-hidden="true">
+          {initials(name)}
+        </span>
+        <span className="dash__user-text">
+          <strong>{name}</strong>
+          <span>{email}</span>
+        </span>
+      </Link>
       <IconButton
         icon={theme === "dark" ? "moon" : theme === "light" ? "sun" : "fit"}
         label={`Theme: ${theme}. Switch to ${next}`}

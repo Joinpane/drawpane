@@ -10,6 +10,7 @@ import { lazy, Suspense } from "react";
 import { api } from "./api/client";
 import { ErrorPage } from "./app/ErrorPage";
 import { NotFound } from "./app/NotFound";
+import { AccountPage } from "./auth/AccountPage";
 import { InvitePage } from "./auth/InvitePage";
 import { SetupPage } from "./auth/SetupPage";
 import { SignInPage } from "./auth/SignInPage";
@@ -75,8 +76,14 @@ const indexRoute = createRoute({
 const signInRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/signin",
-  validateSearch: (search: Record<string, unknown>): { next?: string } =>
-    typeof search.next === "string" && search.next.startsWith("/") ? { next: search.next } : {},
+  validateSearch: (search: Record<string, unknown>): ProviderSearch & { next?: string } => ({
+    ...(typeof search.next === "string" &&
+    search.next.startsWith("/") &&
+    !search.next.startsWith("//")
+      ? { next: search.next }
+      : {}),
+    ...providerSearch(search),
+  }),
   component: SignInPage,
 });
 
@@ -89,7 +96,28 @@ const setupRoute = createRoute({
 const inviteRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/invite/$token",
+  validateSearch: providerSearch,
   component: InvitePage,
+});
+
+/** A provider sign-in that came back with an error (see auth/providers.tsx). */
+interface ProviderSearch {
+  error?: string;
+  provider?: string;
+}
+function providerSearch(search: Record<string, unknown>): ProviderSearch {
+  return {
+    ...(typeof search.error === "string" ? { error: search.error.slice(0, 32) } : {}),
+    ...(typeof search.provider === "string" ? { provider: search.provider.slice(0, 32) } : {}),
+  };
+}
+
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  beforeLoad: requireUser,
+  validateSearch: providerSearch,
+  component: AccountPage,
 });
 
 const teamRoute = createRoute({
@@ -162,6 +190,7 @@ const routeTree = rootRoute.addChildren([
   signInRoute,
   setupRoute,
   inviteRoute,
+  settingsRoute,
   teamRoute,
   fileRoute,
   presentRoute,

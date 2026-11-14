@@ -24,6 +24,11 @@ const vars = {
   PUBLIC_ORIGIN: `http://localhost:${port}`,
   SESSION_SECRET: "e2e-session-secret-0123456789abcdef",
   SETUP_TOKEN: "e2e-setup-token",
+  // Sign-in buttons for GitHub and Google show; the providers themselves are stubbed in tests.
+  GITHUB_CLIENT_ID: "e2e-github-client",
+  GITHUB_CLIENT_SECRET: "e2e-github-secret",
+  GOOGLE_CLIENT_ID: "e2e-google-client",
+  GOOGLE_CLIENT_SECRET: "e2e-google-secret",
 };
 const child = spawn(
   wrangler,
