@@ -19,6 +19,7 @@ import type { IconName } from "@drawpane/ui";
 import { isMac } from "../app/format";
 import { copySelectionAs, exportPageAsPdf, exportSelection } from "./exporting";
 import { openTextStyles } from "./inspector/TextStyles";
+import { getOverrides } from "./shortcuts-store";
 import { toggleXray, uiFor } from "./ui-state";
 
 export interface Shortcut {
@@ -62,8 +63,12 @@ export interface Action {
   readonly label: string;
   readonly group: "Tools" | "Edit" | "Arrange" | "Layer" | "View" | "File" | "Help";
   readonly icon?: IconName;
-  readonly shortcut?: Shortcut;
-  /** Other keys that do the same (bare + and − zoom too); menus show `shortcut`. */
+  /**
+   * The shortcut it comes with. People can change it (Keyboard shortcuts in
+   * settings), so read it through `shortcutOf`, never directly.
+   */
+  readonly defaultShortcut?: Shortcut;
+  /** Other keys that do the same by default (bare + and − zoom too); menus show the main one. */
   readonly also?: readonly Shortcut[];
   readonly keywords?: string;
   /** Hidden from the command bar and disabled when false. */
@@ -88,7 +93,7 @@ function tool(id: ToolId, label: string, key: string, icon: IconName): Action {
     label,
     group: "Tools",
     icon,
-    shortcut: { key },
+    defaultShortcut: { key },
     ...(id === "select" || id === "hand" ? {} : { enabled: canEdit }),
     run: ({ editor }) => editor.setTool(id),
   };
@@ -105,7 +110,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Arrow",
     group: "Tools",
     icon: "arrow",
-    shortcut: { key: "l", shift: true },
+    defaultShortcut: { key: "l", shift: true },
     keywords: "line arrowhead connector",
     enabled: canEdit,
     run: ({ editor }) => editor.setTool("arrow"),
@@ -133,7 +138,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Place image…",
     group: "Tools",
     icon: "image",
-    shortcut: { key: "k", mod: true, shift: true },
+    defaultShortcut: { key: "k", mod: true, shift: true },
     keywords: "photo picture upload insert",
     enabled: canEdit,
     run: ({ placeImage }) => placeImage(),
@@ -147,7 +152,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Comment",
     group: "Tools",
     icon: "comment",
-    shortcut: { key: "c" },
+    defaultShortcut: { key: "c" },
     keywords: "feedback note pin",
     run: ({ editor }) => editor.setTool("comment"),
   },
@@ -157,7 +162,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Undo",
     group: "Edit",
     icon: "history",
-    shortcut: { key: "z", mod: true },
+    defaultShortcut: { key: "z", mod: true },
     enabled: (e) => e.s.canUndo,
     run: ({ editor }) => editor.undo(),
   },
@@ -165,7 +170,7 @@ export const ACTIONS: readonly Action[] = [
     id: "edit.redo",
     label: "Redo",
     group: "Edit",
-    shortcut: { key: "z", mod: true, shift: true },
+    defaultShortcut: { key: "z", mod: true, shift: true },
     enabled: (e) => e.s.canRedo,
     run: ({ editor }) => editor.redo(),
   },
@@ -174,7 +179,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Copy",
     group: "Edit",
     icon: "copy",
-    shortcut: { key: "c", mod: true },
+    defaultShortcut: { key: "c", mod: true },
     enabled: hasSelection,
     run: ({ copy }) => copy(),
   },
@@ -183,7 +188,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Cut",
     group: "Edit",
     icon: "cut",
-    shortcut: { key: "x", mod: true },
+    defaultShortcut: { key: "x", mod: true },
     enabled: canEditSelection,
     run: ({ cut }) => cut(),
   },
@@ -192,7 +197,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Paste",
     group: "Edit",
     icon: "paste",
-    shortcut: { key: "v", mod: true },
+    defaultShortcut: { key: "v", mod: true },
     enabled: canEdit,
     run: ({ paste }) => paste(),
   },
@@ -201,7 +206,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Duplicate",
     group: "Edit",
     icon: "duplicate",
-    shortcut: { key: "d", mod: true },
+    defaultShortcut: { key: "d", mod: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.duplicate(),
   },
@@ -210,7 +215,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Delete",
     group: "Edit",
     icon: "trash",
-    shortcut: { key: "backspace" },
+    defaultShortcut: { key: "backspace" },
     keywords: "remove",
     enabled: canEditSelection,
     run: ({ editor }) => editor.deleteSelection(),
@@ -220,7 +225,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Copy as PNG",
     group: "Edit",
     icon: "image",
-    shortcut: { key: "c", mod: true, shift: true },
+    defaultShortcut: { key: "c", mod: true, shift: true },
     keywords: "image clipboard screenshot",
     enabled: hasSelection,
     run: ({ editor }) => void copySelectionAs(editor, "png"),
@@ -248,7 +253,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Copy properties",
     group: "Edit",
     icon: "eyedropper",
-    shortcut: { key: "c", mod: true, alt: true },
+    defaultShortcut: { key: "c", mod: true, alt: true },
     keywords: "style fill stroke effects",
     enabled: (e) => e.s.selection.length === 1,
     run: ({ editor }) => {
@@ -261,7 +266,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Paste properties",
     group: "Edit",
     icon: "paste",
-    shortcut: { key: "v", mod: true, alt: true },
+    defaultShortcut: { key: "v", mod: true, alt: true },
     keywords: "style fill stroke effects apply",
     enabled: (e) => e.canEdit && e.s.selection.length > 0 && e.hasCopiedProperties,
     run: ({ editor }) => void editor.pasteProperties(),
@@ -271,14 +276,14 @@ export const ACTIONS: readonly Action[] = [
     label: "Select all",
     group: "Edit",
     icon: "select-all",
-    shortcut: { key: "a", mod: true },
+    defaultShortcut: { key: "a", mod: true },
     run: ({ editor }) => editor.selectAll(),
   },
   {
     id: "edit.deselect",
     label: "Deselect",
     group: "Edit",
-    shortcut: { key: "escape" },
+    defaultShortcut: { key: "escape" },
     enabled: (e) => hasSelection(e) || e.s.editingText !== null,
     run: ({ editor }) => {
       // Editing text: Escape finishes the edit and keeps the layer selected, like Figma.
@@ -297,7 +302,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Group selection",
     group: "Layer",
     icon: "group",
-    shortcut: { key: "g", mod: true },
+    defaultShortcut: { key: "g", mod: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.group(),
   },
@@ -321,7 +326,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Use as mask",
     group: "Layer",
     icon: "ellipse",
-    shortcut: { key: "m", mod: true, alt: true },
+    defaultShortcut: { key: "m", mod: true, alt: true },
     keywords: "clip crop shape avatar",
     enabled: canEditSelection,
     run: ({ editor }) => editor.toggleMask(),
@@ -331,7 +336,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Ungroup",
     group: "Layer",
     icon: "ungroup",
-    shortcut: { key: "g", mod: true, shift: true },
+    defaultShortcut: { key: "g", mod: true, shift: true },
     // Groups, and frames with something inside (ungrouping a frame removes it).
     enabled: (e) =>
       e.canEdit &&
@@ -346,7 +351,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Frame selection",
     group: "Layer",
     icon: "board",
-    shortcut: { key: "g", mod: true, alt: true },
+    defaultShortcut: { key: "g", mod: true, alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.frameSelection(false),
   },
@@ -355,7 +360,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Add auto layout",
     group: "Layer",
     icon: "layout-row",
-    shortcut: { key: "a", shift: true },
+    defaultShortcut: { key: "a", shift: true },
     keywords: "flex stack",
     enabled: canEditSelection,
     run: ({ editor }) => editor.frameSelection(true),
@@ -365,7 +370,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Add grid layout",
     group: "Layer",
     icon: "layout-grid",
-    shortcut: { key: "a", shift: true, alt: true },
+    defaultShortcut: { key: "a", shift: true, alt: true },
     keywords: "css grid columns rows tracks",
     enabled: canEditSelection,
     run: ({ editor }) => editor.addGridLayout(),
@@ -375,7 +380,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Bold",
     group: "Layer",
     icon: "text",
-    shortcut: { key: "b", mod: true },
+    defaultShortcut: { key: "b", mod: true },
     keywords: "weight strong text",
     enabled: hasText,
     run: ({ editor }) => editor.toggleTextStyle("bold"),
@@ -385,7 +390,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Italic",
     group: "Layer",
     icon: "italic",
-    shortcut: { key: "i", mod: true },
+    defaultShortcut: { key: "i", mod: true },
     keywords: "slant oblique text",
     enabled: hasText,
     run: ({ editor }) => editor.toggleTextStyle("italic"),
@@ -395,7 +400,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Underline",
     group: "Layer",
     icon: "text",
-    shortcut: { key: "u", mod: true },
+    defaultShortcut: { key: "u", mod: true },
     keywords: "decoration text",
     enabled: hasText,
     run: ({ editor }) => editor.toggleTextStyle("underline"),
@@ -405,7 +410,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Text styles",
     group: "Layer",
     icon: "text",
-    shortcut: { key: "t", mod: true, alt: true },
+    defaultShortcut: { key: "t", mod: true, alt: true },
     keywords: "typography heading body type scale",
     enabled: hasText,
     run: ({ editor }) => openTextStyles(editor),
@@ -415,7 +420,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Find layers",
     group: "Layer",
     icon: "search",
-    shortcut: { key: "f", mod: true },
+    defaultShortcut: { key: "f", mod: true },
     keywords: "search filter layers panel",
     run: ({ findLayers }) => findLayers(),
   },
@@ -424,7 +429,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Collapse all layers",
     group: "Layer",
     icon: "collapse-all",
-    shortcut: { key: "l", alt: true },
+    defaultShortcut: { key: "l", alt: true },
     keywords: "fold close tree",
     run: ({ editor }) => {
       const ui = uiFor(editor);
@@ -436,7 +441,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Rename",
     group: "Layer",
     icon: "rename",
-    shortcut: { key: "r", mod: true },
+    defaultShortcut: { key: "r", mod: true },
     keywords: "name label",
     enabled: (e) => e.canEdit && e.s.selection.length === 1,
     run: ({ rename }) => rename(),
@@ -446,7 +451,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Show or hide",
     group: "Layer",
     icon: "eye-off",
-    shortcut: { key: "h", mod: true, shift: true },
+    defaultShortcut: { key: "h", mod: true, shift: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.toggleVisible(),
   },
@@ -455,7 +460,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Lock or unlock",
     group: "Layer",
     icon: "lock",
-    shortcut: { key: "l", mod: true, shift: true },
+    defaultShortcut: { key: "l", mod: true, shift: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.toggleLocked(),
   },
@@ -465,7 +470,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Create component",
     group: "Layer",
     icon: "component",
-    shortcut: { key: "k", mod: true, alt: true },
+    defaultShortcut: { key: "k", mod: true, alt: true },
     keywords: "symbol main",
     // Not on something that's already a main component.
     enabled: (e) =>
@@ -490,7 +495,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Detach instance",
     group: "Layer",
     icon: "instance",
-    shortcut: { key: "b", mod: true, alt: true },
+    defaultShortcut: { key: "b", mod: true, alt: true },
     enabled: (e) => e.canEdit && e.s.selection.some((id) => isInstanceRoot(e.doc.get(id))),
     run: ({ editor }) => editor.detachInstances(),
   },
@@ -518,7 +523,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Edit path",
     group: "Layer",
     icon: "pen",
-    shortcut: { key: "enter" },
+    defaultShortcut: { key: "enter" },
     keywords: "vector points anchors",
     enabled: (e) =>
       e.canEdit &&
@@ -534,7 +539,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Flatten",
     group: "Layer",
     icon: "pen",
-    shortcut: { key: "e", mod: true },
+    defaultShortcut: { key: "e", mod: true },
     keywords: "outline convert vector path",
     enabled: canEditSelection,
     run: ({ editor }) => editor.flatten(),
@@ -545,7 +550,7 @@ export const ACTIONS: readonly Action[] = [
       label: `${BOOLEAN_LABELS[op]} selection`,
       group: "Layer",
       icon: op,
-      shortcut: { key: BOOLEAN_KEYS[op], alt: true, shift: true },
+      defaultShortcut: { key: BOOLEAN_KEYS[op], alt: true, shift: true },
       keywords: "boolean combine shapes",
       enabled: (e) => e.canBoolean(),
       run: ({ editor }) => void editor.booleanOp(op),
@@ -557,7 +562,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Bring forward",
     group: "Arrange",
     icon: "arrow-up",
-    shortcut: { key: "]", mod: true },
+    defaultShortcut: { key: "]", mod: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.reorder("forward"),
   },
@@ -566,7 +571,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Send backward",
     group: "Arrange",
     icon: "arrow-down",
-    shortcut: { key: "[", mod: true },
+    defaultShortcut: { key: "[", mod: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.reorder("backward"),
   },
@@ -575,7 +580,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Bring to front",
     group: "Arrange",
     icon: "bring-front",
-    shortcut: { key: "]" },
+    defaultShortcut: { key: "]" },
     enabled: canEditSelection,
     run: ({ editor }) => editor.reorder("front"),
   },
@@ -584,7 +589,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Send to back",
     group: "Arrange",
     icon: "send-back",
-    shortcut: { key: "[" },
+    defaultShortcut: { key: "[" },
     enabled: canEditSelection,
     run: ({ editor }) => editor.reorder("back"),
   },
@@ -593,7 +598,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Align left",
     group: "Arrange",
     icon: "align-left",
-    shortcut: { key: "a", alt: true },
+    defaultShortcut: { key: "a", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("left"),
   },
@@ -602,7 +607,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Align horizontal centers",
     group: "Arrange",
     icon: "align-center",
-    shortcut: { key: "h", alt: true },
+    defaultShortcut: { key: "h", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("center"),
   },
@@ -611,7 +616,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Align right",
     group: "Arrange",
     icon: "align-right",
-    shortcut: { key: "d", alt: true },
+    defaultShortcut: { key: "d", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("right"),
   },
@@ -620,7 +625,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Align top",
     group: "Arrange",
     icon: "align-top",
-    shortcut: { key: "w", alt: true },
+    defaultShortcut: { key: "w", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("top"),
   },
@@ -629,7 +634,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Align vertical centers",
     group: "Arrange",
     icon: "align-middle",
-    shortcut: { key: "v", alt: true },
+    defaultShortcut: { key: "v", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("middle"),
   },
@@ -638,7 +643,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Align bottom",
     group: "Arrange",
     icon: "align-bottom",
-    shortcut: { key: "s", alt: true },
+    defaultShortcut: { key: "s", alt: true },
     enabled: canEditSelection,
     run: ({ editor }) => editor.align("bottom"),
   },
@@ -648,7 +653,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Distribute horizontal spacing",
     group: "Arrange",
     icon: "distribute-horizontal",
-    shortcut: { key: "h", alt: true, shift: true },
+    defaultShortcut: { key: "h", alt: true, shift: true },
     keywords: "space evenly spread",
     enabled: (e) => e.canEdit && e.s.selection.length > 2,
     run: ({ editor }) => editor.distribute("horizontal"),
@@ -658,7 +663,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Distribute vertical spacing",
     group: "Arrange",
     icon: "distribute-vertical",
-    shortcut: { key: "v", alt: true, shift: true },
+    defaultShortcut: { key: "v", alt: true, shift: true },
     keywords: "space evenly spread",
     enabled: (e) => e.canEdit && e.s.selection.length > 2,
     run: ({ editor }) => editor.distribute("vertical"),
@@ -668,7 +673,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Tidy up",
     group: "Arrange",
     icon: "tidy",
-    shortcut: { key: "t", alt: true, shift: true },
+    defaultShortcut: { key: "t", alt: true, shift: true },
     keywords: "grid arrange spacing even clean",
     enabled: (e) => e.canEdit && e.s.selection.length > 1,
     run: ({ editor }) => editor.tidyUp(),
@@ -678,7 +683,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Flip horizontal",
     group: "Arrange",
     icon: "flip-horizontal",
-    shortcut: { key: "h", shift: true },
+    defaultShortcut: { key: "h", shift: true },
     keywords: "mirror",
     enabled: canEditSelection,
     run: ({ editor }) => editor.flip("horizontal"),
@@ -688,7 +693,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Flip vertical",
     group: "Arrange",
     icon: "flip-vertical",
-    shortcut: { key: "v", shift: true },
+    defaultShortcut: { key: "v", shift: true },
     keywords: "mirror",
     enabled: canEditSelection,
     run: ({ editor }) => editor.flip("vertical"),
@@ -698,7 +703,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Resize to fit",
     group: "Layer",
     icon: "fit",
-    shortcut: { key: "r", alt: true, shift: true, mod: true },
+    defaultShortcut: { key: "r", alt: true, shift: true, mod: true },
     keywords: "frame shrink wrap content hug",
     enabled: (e) =>
       e.canEdit &&
@@ -714,7 +719,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Play prototype",
     group: "View",
     icon: "play",
-    shortcut: { key: "enter", mod: true, alt: true },
+    defaultShortcut: { key: "enter", mod: true, alt: true },
     keywords: "present prototype preview play flow",
     run: ({ present }) => present(),
   },
@@ -723,7 +728,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Prototype tab",
     group: "View",
     icon: "flow",
-    shortcut: { key: "p", alt: true },
+    defaultShortcut: { key: "p", alt: true },
     keywords: "interactions connections flows",
     run: ({ showTab }) => showTab("prototype"),
   },
@@ -732,7 +737,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Tokens and variables",
     group: "View",
     icon: "token",
-    shortcut: { key: "t", alt: true },
+    defaultShortcut: { key: "t", alt: true },
     keywords: "variables design tokens modes",
     run: ({ toggleTokens }) => toggleTokens(),
   },
@@ -741,7 +746,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Search or set a value",
     group: "View",
     icon: "search",
-    shortcut: { key: "k", mod: true },
+    defaultShortcut: { key: "k", mod: true },
     run: ({ openCommandBar }) => openCommandBar(),
   },
   {
@@ -749,7 +754,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Zoom in",
     group: "View",
     icon: "plus",
-    shortcut: { key: "=", mod: true },
+    defaultShortcut: { key: "=", mod: true },
     // + on its own, typed with Shift or on the number pad, like Figma.
     also: [{ key: "=" }, { key: "=", shift: true }],
     run: ({ editor }) => editor.zoomBy(1.5),
@@ -759,7 +764,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Zoom out",
     group: "View",
     icon: "minus",
-    shortcut: { key: "-", mod: true },
+    defaultShortcut: { key: "-", mod: true },
     also: [{ key: "-" }],
     run: ({ editor }) => editor.zoomBy(1 / 1.5),
   },
@@ -768,7 +773,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Zoom to 100%",
     group: "View",
     icon: "actual-size",
-    shortcut: { key: "0", shift: true },
+    defaultShortcut: { key: "0", shift: true },
     run: ({ editor }) => editor.zoomTo(1),
   },
   {
@@ -776,7 +781,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Zoom to fit",
     group: "View",
     icon: "fit",
-    shortcut: { key: "1", shift: true },
+    defaultShortcut: { key: "1", shift: true },
     run: ({ editor }) => editor.zoomToFit(),
   },
   {
@@ -784,7 +789,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Zoom to selection",
     group: "View",
     icon: "search",
-    shortcut: { key: "2", shift: true },
+    defaultShortcut: { key: "2", shift: true },
     enabled: hasSelection,
     run: ({ editor }) => editor.zoomToSelection(),
   },
@@ -793,7 +798,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Focus mode: hide others' cursors",
     group: "View",
     icon: "eye-off",
-    shortcut: { key: "f", shift: true },
+    defaultShortcut: { key: "f", shift: true },
     run: ({ editor }) => editor.state.set({ focusMode: !editor.s.focusMode }),
   },
   {
@@ -801,7 +806,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Rulers",
     group: "View",
     icon: "ruler",
-    shortcut: { key: "r", shift: true },
+    defaultShortcut: { key: "r", shift: true },
     keywords: "ruler guides measure",
     run: ({ editor }) => editor.state.set({ rulers: !editor.s.rulers }),
   },
@@ -810,7 +815,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Layout grids",
     group: "View",
     icon: "layout-grid",
-    shortcut: { key: "g", shift: true },
+    defaultShortcut: { key: "g", shift: true },
     keywords: "columns rows grid",
     run: ({ editor }) => editor.state.set({ layoutGrids: !editor.s.layoutGrids }),
   },
@@ -819,7 +824,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Snap to pixel grid",
     group: "View",
     icon: "pixel-grid",
-    shortcut: { key: "'", mod: true, shift: true },
+    defaultShortcut: { key: "'", mod: true, shift: true },
     keywords: "pixel grid round whole integer snapping",
     run: ({ editor }) => editor.state.set({ pixelSnap: !editor.s.pixelSnap }),
   },
@@ -839,7 +844,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Minimap",
     group: "View",
     icon: "minimap",
-    shortcut: { key: "m", alt: true },
+    defaultShortcut: { key: "m", alt: true },
     keywords: "overview map navigator where people",
     run: ({ editor }) => {
       const ui = uiFor(editor);
@@ -859,7 +864,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Explain size",
     group: "Layer",
     icon: "help",
-    shortcut: { key: "e", alt: true },
+    defaultShortcut: { key: "e", alt: true },
     keywords: "why width height hug fill fixed auto layout size calculate",
     enabled: (e) => {
       const node = e.s.selection.length === 1 ? e.doc.get(e.s.selection[0] as string) : null;
@@ -894,7 +899,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Show or hide comments",
     group: "View",
     icon: "comment",
-    shortcut: { key: "c", shift: true },
+    defaultShortcut: { key: "c", shift: true },
     run: ({ toggleComments }) => toggleComments(),
   },
   {
@@ -902,7 +907,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Show or hide layers",
     group: "View",
     icon: "layers",
-    shortcut: { key: "\\", mod: true },
+    defaultShortcut: { key: "\\", mod: true },
     run: ({ toggleLeftPane }) => toggleLeftPane(),
   },
   {
@@ -910,7 +915,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Show or hide inspector",
     group: "View",
     icon: "inspector",
-    shortcut: { key: "i", mod: true, alt: true },
+    defaultShortcut: { key: "i", mod: true, alt: true },
     run: ({ toggleRightPane }) => toggleRightPane(),
   },
   {
@@ -918,7 +923,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Keyboard shortcuts",
     group: "Help",
     icon: "key",
-    shortcut: { key: "/", mod: true },
+    defaultShortcut: { key: "/", mod: true },
     keywords: "keys hotkeys help cheat sheet",
     run: ({ showShortcuts }) => showShortcuts(),
   },
@@ -927,7 +932,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Export selection",
     group: "File",
     icon: "export",
-    shortcut: { key: "e", mod: true, shift: true },
+    defaultShortcut: { key: "e", mod: true, shift: true },
     keywords: "png jpeg webp svg download image",
     enabled: hasSelection,
     run: ({ editor }) => void exportSelection(editor),
@@ -953,7 +958,7 @@ export const ACTIONS: readonly Action[] = [
     label: "Save a named version…",
     group: "File",
     icon: "history",
-    shortcut: { key: "s", mod: true, alt: true },
+    defaultShortcut: { key: "s", mod: true, alt: true },
     keywords: "version name milestone checkpoint history",
     enabled: canEdit,
     run: ({ saveVersion }) => saveVersion(),
@@ -978,9 +983,24 @@ function hasText(editor: Editor): boolean {
   return editor.s.selection.some(visit);
 }
 
+/**
+ * An action's shortcut: the person's own if they changed it (none if they
+ * removed it), else the one it comes with.
+ */
+export function shortcutOf(action: Action): Shortcut | undefined {
+  const overrides = getOverrides();
+  if (Object.hasOwn(overrides, action.id)) return overrides[action.id] ?? undefined;
+  return action.defaultShortcut;
+}
+
+/** An action's other keys: only while its shortcut is the default (a changed one replaces them). */
+export function alsoOf(action: Action): readonly Shortcut[] {
+  return Object.hasOwn(getOverrides(), action.id) ? [] : (action.also ?? []);
+}
+
 /** Whether a key press runs `action`, by its shortcut or any of its others. */
 export function triggers(action: Action, e: KeyboardEvent): boolean {
-  return [action.shortcut, ...(action.also ?? [])].some((s) => s !== undefined && matches(s, e));
+  return [shortcutOf(action), ...alsoOf(action)].some((s) => s !== undefined && matches(s, e));
 }
 
 export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
@@ -1023,14 +1043,22 @@ export function formatShortcut(s: Shortcut): string {
   return shortcutCaps(s).join(isMac() ? "" : "+");
 }
 
-/** An action's shortcut as text, from the one place it's defined: for tooltips and hints. */
+/** An action's shortcut as text, as the person has it: for tooltips and hints. */
 export function shortcutFor(id: string): string | undefined {
   const action = ACTIONS.find((a) => a.id === id);
-  return action?.shortcut ? formatShortcut(action.shortcut) : undefined;
+  const shortcut = action ? shortcutOf(action) : undefined;
+  return shortcut ? formatShortcut(shortcut) : undefined;
+}
+
+/** `{ shortcut: "⌘K" }` for a menu or command item, or nothing when the action has none. */
+export function shortcutProp(action: Action): { shortcut?: string } {
+  const shortcut = shortcutOf(action);
+  return shortcut ? { shortcut: formatShortcut(shortcut) } : {};
 }
 
 /** An action's shortcut as key caps, for a `Kbd`. */
 export function capsFor(id: string): string[] {
   const action = ACTIONS.find((a) => a.id === id);
-  return action?.shortcut ? shortcutCaps(action.shortcut) : [];
+  const shortcut = action ? shortcutOf(action) : undefined;
+  return shortcut ? shortcutCaps(shortcut) : [];
 }

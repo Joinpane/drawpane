@@ -18,6 +18,7 @@ import {
   providerStartUrl,
 } from "./providers";
 import "./account.css";
+import { SettingsNav } from "./SettingsNav";
 
 interface Account {
   user: User;
@@ -84,6 +85,7 @@ export function AccountPage() {
         <Logo size={20} />
       </header>
       <main className="account__main">
+        <SettingsNav />
         <h1 className="account__title">Account</h1>
         {notice ? (
           <p
