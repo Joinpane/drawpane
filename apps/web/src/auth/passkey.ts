@@ -55,6 +55,27 @@ export async function registerWithPasskey(input: {
   }
 }
 
+/** Adds a passkey to the signed-in account (from account settings). */
+export async function addPasskey(): Promise<void> {
+  try {
+    const options =
+      await api.post<Parameters<typeof startRegistration>[0]["optionsJSON"]>(
+        "/auth/passkeys/options",
+      );
+    const response = await startRegistration({ optionsJSON: options });
+    await api.post("/auth/passkeys/verify", response);
+  } catch (error) {
+    if (
+      (error instanceof WebAuthnError || error instanceof DOMException) &&
+      error.name === "InvalidStateError"
+    )
+      throw new Error(
+        "This device already has a passkey for your account. Add one from another device or password manager.",
+      );
+    throw explain(error);
+  }
+}
+
 export async function signOut(): Promise<void> {
   await api.post("/auth/logout");
 }
