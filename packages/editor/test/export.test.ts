@@ -452,6 +452,49 @@ describe("exportSvg", () => {
     expect(plain).toContain("font-feature-settings: 'tnum' 1");
   });
 
+  it("strokes text around its glyphs: centred, or inside or outside them", () => {
+    const textWith = (strokeAlign: "center" | "inside" | "outside") =>
+      makeEditor([
+        {
+          op: "create",
+          id: "t",
+          type: "text",
+          parent: "p",
+          key: "a0",
+          props: {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 20,
+            characters: "Menubar",
+            strokes: [{ type: "solid", color: "#ff0000" }],
+            strokeWeight: 1,
+            strokeAlign,
+          },
+        },
+      ]);
+    const svg = (align: "center" | "inside" | "outside") => {
+      const editor = textWith(align);
+      return svgOf(editor, ["t"]);
+    };
+    // Centred: the text itself, stroked and unfilled.
+    expect(svg("center")).toMatch(
+      /<text [^>]*fill="none" stroke="#ff0000" stroke-width="1"[^>]*><tspan[^>]*>Menubar<\/tspan><\/text>/,
+    );
+    // Inside: twice as wide, clipped to the glyphs.
+    const inside = svg("inside");
+    expect(inside).toMatch(
+      /<clipPath id="(clip\d+)"><text [^>]*><tspan[^>]*>Menubar<\/tspan><\/text><\/clipPath>/,
+    );
+    expect(inside).toMatch(/<g clip-path="url\(#clip\d+\)"><text [^>]*stroke-width="2"/);
+    // Outside: twice as wide, with the glyphs masked out.
+    const outside = svg("outside");
+    expect(outside).toMatch(/<mask [^>]*><rect [^>]*fill="#fff"\/><text [^>]*fill="#000"/);
+    expect(outside).toMatch(/<g mask="url\(#mask\d+\)"><text [^>]*stroke-width="2"/);
+    // Never the text's box.
+    expect(svg("center")).not.toContain("<rect");
+  });
+
   it("casts drop shadows from the shape grown by its spread, and inner shadows inside it", () => {
     const editor = makeEditor([
       rect("r", {
