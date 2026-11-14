@@ -19,6 +19,7 @@ import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./co
 import { connectFile } from "./connection";
 import { ExportPanel } from "./ExportSection";
 import { FollowOverlay, People } from "./follow";
+import { type FrameStats, frameStatsFor } from "./frame-stats";
 import {
   HistoryPanel,
   NameVersionDialog,
@@ -157,7 +158,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     () => connectFile(editor, fileId, setFatal, (message) => comments.store.receive(message)),
     [editor, fileId, comments.store, navigate],
   );
-  useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt);
+  useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt, meta.data?.file.updatedAt);
 
   // The file's team fonts: the picker lists them, and text set in them loads them.
   const teamId = meta.data?.file.teamId;
@@ -174,10 +175,12 @@ function FileEditor({ fileId }: { fileId: string }) {
       // Storage blocked.
     }
     if (!debug) return;
-    const w = window as unknown as { drawpane?: Editor };
+    const w = window as unknown as { drawpane?: Editor; drawpaneFrames?: FrameStats };
     w.drawpane = editor;
+    w.drawpaneFrames = frameStatsFor(editor);
     return () => {
       delete w.drawpane;
+      delete w.drawpaneFrames;
     };
   }, [editor]);
 

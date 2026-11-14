@@ -240,8 +240,9 @@ export class FileRoom extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const fileId = this.#meta("file_id");
     if (fileId && this.#meta("touched") === "1") {
+      const editedAt = Number(this.#meta("touched_at")) || Date.now();
       await this.env.DB.prepare("UPDATE files SET updated_at = ? WHERE id = ?")
-        .bind(Date.now(), fileId)
+        .bind(editedAt, fileId)
         .run();
       this.#setMeta("touched", "0");
     }
@@ -556,6 +557,8 @@ export class FileRoom extends DurableObject<Env> {
         }
         this.#setMeta("revn", String(next));
         this.#setMeta("touched", "1");
+        // When the file was last edited (not when the alarm gets round to saying so).
+        this.#setMeta("touched_at", String(now));
         return next;
       });
       this.#revn = revn;
