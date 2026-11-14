@@ -1,10 +1,9 @@
 /**
  * Loads the fonts a document uses, as it opens and as people edit: every
- * text layer's family, weight and style. Only new faces cost anything, so
+ * text layer's family, weight and style, including styled runs within it. Only new faces cost anything, so
  * typing in an already-loaded font does nothing here.
  */
-import type { Doc } from "@drawpane/editor";
-import { getProp } from "@drawpane/model";
+import { type Doc, textFaces } from "@drawpane/editor";
 import { fonts } from "./fonts";
 
 export function watchDocumentFonts(doc: Doc): () => void {
@@ -15,13 +14,13 @@ export function watchDocumentFonts(doc: Doc): () => void {
     for (const id of ids) {
       const node = doc.get(id);
       if (node?.type !== "text") continue;
-      const family = getProp(node.props, "fontFamily");
-      const weight = getProp(node.props, "fontWeight");
-      const italic = getProp(node.props, "fontStyle") === "italic";
-      const key = `${family}\u0000${weight}\u0000${italic}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      load(family, weight, italic, key);
+      // Its own face and its runs' (a bold word, a different family).
+      for (const { family, weight, italic } of textFaces(node)) {
+        const key = `${family}\u0000${weight}\u0000${italic}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        load(family, weight, italic, key);
+      }
     }
   };
 

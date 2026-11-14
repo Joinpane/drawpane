@@ -239,6 +239,30 @@ export type LineHeight = z.infer<typeof LineHeight>;
 export const LetterSpacing = z.object({ unit: z.enum(["px", "percent"]), value: finite });
 export type LetterSpacing = z.infer<typeof LetterSpacing>;
 
+const FontSize = finite.refine((n) => n > 0 && n <= 4096, "must be between 0 and 4096");
+
+/**
+ * Styling on part of a text layer's characters: [start, end) in UTF-16 code
+ * units of `characters`, overriding some of the layer's own typography and
+ * fill. A layer's runs are sorted and don't overlap; characters outside every
+ * run use the layer's props. The editor keeps runs in step as text changes.
+ */
+export const TextRun = z
+  .object({
+    start: z.number().int().min(0),
+    end: z.number().int().min(1),
+    fontFamily: z.string().min(1).max(128).optional(),
+    fontWeight: z.number().int().min(1).max(1000).optional(),
+    fontStyle: z.enum(["normal", "italic"]).optional(),
+    fontSize: FontSize.optional(),
+    letterSpacing: LetterSpacing.optional(),
+    textCase: z.enum(["none", "upper", "lower", "title"]).optional(),
+    textDecoration: z.enum(["none", "underline", "strikethrough"]).optional(),
+    fills: z.array(Paint).max(8).optional(),
+  })
+  .refine((run) => run.end > run.start, "a run must end after it starts");
+export type TextRun = z.infer<typeof TextRun>;
+
 /** Only the characters an SVG path `d` attribute can contain. Parsed and checked by the editor. */
 const PathData = z
   .string()
@@ -431,11 +455,7 @@ export const PROPS = {
   fontFamily: prop(z.string().min(1).max(128), "Instrument Sans", TYPOGRAPHY),
   fontWeight: prop(z.number().int().min(1).max(1000), 400, TYPOGRAPHY),
   fontStyle: prop(z.enum(["normal", "italic"]), "normal", TYPOGRAPHY),
-  fontSize: prop(
-    finite.refine((n) => n > 0 && n <= 4096, "must be between 0 and 4096"),
-    16,
-    TYPOGRAPHY,
-  ),
+  fontSize: prop(FontSize, 16, TYPOGRAPHY),
   lineHeight: prop(LineHeight, { unit: "auto" }, TYPOGRAPHY),
   letterSpacing: prop(LetterSpacing, { unit: "px", value: 0 }, TYPOGRAPHY),
   textAlign: prop(z.enum(["left", "center", "right", "justify"]), "left", ["text"]),
@@ -443,6 +463,8 @@ export const PROPS = {
   textAutoResize: prop(z.enum(["none", "width", "height"]), "width", ["text"]),
   textCase: prop(z.enum(["none", "upper", "lower", "title"]), "none", TYPOGRAPHY),
   textDecoration: prop(z.enum(["none", "underline", "strikethrough"]), "none", TYPOGRAPHY),
+  /** Styled ranges of the characters (bold words, a coloured phrase); see `TextRun`. */
+  textRuns: prop(z.array(TextRun).max(10_000), [], ["text"]),
   /** The text style this layer follows; its typography comes from the style while it does. */
   textStyle: prop(z.string().regex(ID_PATTERN).nullable(), null, ["text"]),
 

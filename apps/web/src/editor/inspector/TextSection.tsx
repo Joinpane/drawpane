@@ -1,4 +1,8 @@
-/** The Text section: the layer's text style, typography, alignment and box sizing. */
+/**
+ * The Text section: the layer's text style, typography, alignment and box
+ * sizing. Typography shows `views` (see `textViews`): the selected
+ * characters while editing, every look in the layer otherwise.
+ */
 import type { Editor } from "@drawpane/editor";
 import type { NodeRecord } from "@drawpane/model";
 import { PropertySection, SegmentedControl } from "@drawpane/ui";
@@ -6,12 +10,20 @@ import { common } from "./fields";
 import { TextStyleRow } from "./TextStyles";
 import { TypographyFields } from "./TypographyFields";
 
-export function TextSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
+export function TextSection({
+  editor,
+  nodes,
+  views = nodes,
+}: {
+  editor: Editor;
+  nodes: NodeRecord[];
+  views?: NodeRecord[];
+}) {
   const ids = nodes.map((n) => n.id);
   return (
     <PropertySection title="Text">
       <TextStyleRow editor={editor} nodes={nodes} />
-      <TypographyFields editor={editor} nodes={nodes} />
+      <TypographyFields editor={editor} nodes={views} />
       <div className="inspector__text-align">
         <SegmentedControl
           label="Text alignment"

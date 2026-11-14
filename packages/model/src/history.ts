@@ -110,6 +110,7 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   textCase: "text",
   textDecoration: "text",
   textStyle: "text",
+  textRuns: "text",
   pathData: "vector",
   windingRule: "vector",
   backgroundColor: "style",
