@@ -41,6 +41,8 @@ export interface FileRow {
   deleted_at: number | null;
   /** When the current thumbnail was uploaded; null until the editor publishes one. */
   thumbnail_at?: number | null;
+  /** 1 when the team starts new files from it. */
+  is_template?: number;
 }
 
 export async function requireFileRole(
@@ -50,7 +52,7 @@ export async function requireFileRole(
   needed: Role,
 ): Promise<{ file: FileRow; role: Role }> {
   const row = await env.DB.prepare(
-    `SELECT f.id, f.project_id, f.team_id, f.name, f.created_at, f.updated_at, f.deleted_at, f.thumbnail_at, m.role
+    `SELECT f.id, f.project_id, f.team_id, f.name, f.created_at, f.updated_at, f.deleted_at, f.thumbnail_at, f.is_template, m.role
        FROM files f JOIN team_members m ON m.team_id = f.team_id AND m.user_id = ?
       WHERE f.id = ?`,
   )
@@ -82,5 +84,6 @@ export function toFile(row: FileRow) {
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
     thumbnailAt: row.thumbnail_at ?? null,
+    isTemplate: row.is_template === 1,
   };
 }

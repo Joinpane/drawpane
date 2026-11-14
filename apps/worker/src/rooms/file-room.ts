@@ -412,6 +412,13 @@ export class FileRoom extends DurableObject<Env> {
     return { ok: true, revn, nodes: nodes.length };
   }
 
+  /** Every node in the file, for copying it into another (a duplicate, a file from a template). */
+  async allNodes(): Promise<NodeRecord[]> {
+    const out: NodeRecord[] = [];
+    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) out.push(...page);
+    return out;
+  }
+
   /** Current revision and node count, for tests and the health page. */
   async stats(): Promise<{ revn: number; nodes: number; sockets: number }> {
     return {
