@@ -22,6 +22,7 @@ import {
   newId,
 } from "@drawpane/model";
 import { type Context, Hono } from "hono";
+import { publicOrigins } from "../auth/passkeys";
 import { requireUser } from "../auth/session";
 import type { AppContext, Env, Role, User } from "../env";
 import { badRequest, conflict, forbidden, notFound } from "../lib/http";
@@ -295,6 +296,7 @@ export const comments = new Hono<AppContext>()
       ).bind(commentId, threadId, user.id, body.body, now),
       ...mentionInserts(c.env.DB, commentId, file.id, mentions, now),
       ...(await commentNotifications(c.env.DB, {
+        origin: publicOrigins(c)[0] ?? null,
         fileId: file.id,
         threadId,
         commentId,
@@ -333,6 +335,7 @@ export const comments = new Hono<AppContext>()
       ).bind(now, threadId),
       ...mentionInserts(c.env.DB, commentId, file.id, mentions, now),
       ...(await commentNotifications(c.env.DB, {
+        origin: publicOrigins(c)[0] ?? null,
         fileId: file.id,
         threadId,
         commentId,
@@ -370,6 +373,7 @@ export const comments = new Hono<AppContext>()
             WHERE id = ? AND file_id = ?`,
         ).bind(resolved ? now : null, resolved ? user.id : null, now, threadId, file.id),
         ...resolveNotifications(c.env.DB, {
+          origin: publicOrigins(c)[0] ?? null,
           fileId: file.id,
           threadId,
           starterId: row.created_by,
@@ -447,6 +451,7 @@ export const comments = new Hono<AppContext>()
       c.env.DB.prepare("DELETE FROM comment_mentions WHERE comment_id = ?").bind(commentId),
       ...mentionInserts(c.env.DB, commentId, file.id, mentions, now),
       ...(await editNotifications(c.env.DB, {
+        origin: publicOrigins(c)[0] ?? null,
         fileId: file.id,
         threadId,
         commentId,

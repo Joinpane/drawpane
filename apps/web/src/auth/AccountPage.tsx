@@ -9,6 +9,7 @@ import { Link, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useState } from "react";
 import { api, type User } from "../api/client";
 import { initials, timeAgo } from "../app/format";
+import { EmailPreferences } from "./EmailPreferences";
 import { addPasskey } from "./passkey";
 import {
   type ProviderId,
@@ -193,6 +194,13 @@ export function AccountPage() {
               ? ` a connected ${data.providers.map((p) => p.name).join(" or ")} account signs you in here too.`
               : " add another on each device you use."}
           </p>
+        </section>
+
+        <section className="account__section" aria-labelledby="email-title">
+          <h2 id="email-title" className="account__heading">
+            Email
+          </h2>
+          <EmailPreferences />
         </section>
       </main>
     </div>

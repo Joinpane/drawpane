@@ -24,7 +24,9 @@
     }
   ],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "drawpane-files" }],
-  "vars": { "RP_NAME": "Drawpane" }
+  "vars": { "RP_NAME": "Drawpane" },
+  // Emails about the inbox, every five minutes (src/email/notify.ts); nothing when email is off.
+  "triggers": { "crons": ["*/5 * * * *"] }
   // No route here: your domain is passed at deploy time (`--domain`, see
   // docs/self-hosting.md), so it never has to be committed.
 }

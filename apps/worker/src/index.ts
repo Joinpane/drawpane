@@ -3,12 +3,14 @@ import { secureHeaders } from "hono/secure-headers";
 import { ZodError } from "zod";
 import { requireFileRole } from "./api/access";
 import { admin } from "./api/admin";
+import { email } from "./api/email";
 import { api } from "./api/routes";
 import { resolveShareToken } from "./api/share";
 import { account } from "./auth/account";
 import { oauth } from "./auth/oauth";
 import { passkeys, publicOrigins } from "./auth/passkeys";
 import { requireUser, session } from "./auth/session";
+import { sendNotificationEmails } from "./email/notify";
 import type { AppContext } from "./env";
 import { signPayload } from "./lib/crypto";
 import { HttpError } from "./lib/http";
@@ -34,6 +36,7 @@ app.route("/api/auth/oauth", oauth);
 app.route("/api/auth", passkeys);
 app.route("/api/account", account);
 app.route("/api/admin", admin);
+app.route("/api/email", email);
 app.route("/api", api);
 
 app.get("/ws/files/:fileId", async (c) => {
@@ -115,4 +118,10 @@ app.onError((error, c) => {
   );
 });
 
-export default app satisfies ExportedHandler<AppContext["Bindings"]>;
+export default {
+  fetch: app.fetch,
+  /** Every few minutes (wrangler.jsonc triggers): emails about the inbox, when email is on. */
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(sendNotificationEmails(env).then(() => undefined));
+  },
+} satisfies ExportedHandler<AppContext["Bindings"]>;
