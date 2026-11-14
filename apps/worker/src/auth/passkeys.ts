@@ -21,7 +21,7 @@ import { z } from "zod";
 import type { AppContext, Role } from "../env";
 import { sha256Hex, signPayload, verifyPayload } from "../lib/crypto";
 import { badRequest, conflict, forbidden, HttpError, unauthorized } from "../lib/http";
-import { createSession, destroySession } from "./session";
+import { createSession, destroySession, requireUser } from "./session";
 
 const CHALLENGE_COOKIE = "__Host-dp_challenge";
 const CHALLENGE_TTL_MS = 5 * 60_000;
@@ -37,7 +37,9 @@ type Challenge =
       /** SHA-256 of the invite token, or null for the first account. */
       invite: string | null;
     }
-  | { purpose: "login"; challenge: string; exp: number };
+  | { purpose: "login"; challenge: string; exp: number }
+  /** A signed-in person adding another passkey to their account. */
+  | { purpose: "add"; challenge: string; exp: number; userId: string };
 
 /**
  * The relying party for this request: the site the passkey belongs to and the
@@ -313,6 +315,71 @@ export const passkeys = new Hono<AppContext>()
       .run();
     await createSession(c, row.user_id);
     return c.json({ user: { id: row.user_id, email: row.email, name: row.name } });
+  })
+
+  /** Adding a passkey to the signed-in account (say, after joining with GitHub). */
+  .post("/passkeys/options", async (c) => {
+    const user = requireUser(c);
+    const { rpID, rpName } = relyingParty(c);
+    const { results } = await c.env.DB.prepare(
+      "SELECT id, transports FROM passkeys WHERE user_id = ?",
+    )
+      .bind(user.id)
+      .all<{ id: string; transports: string | null }>();
+    const options = await generateRegistrationOptions({
+      rpName,
+      rpID,
+      userName: user.email,
+      userDisplayName: user.name,
+      userID: new TextEncoder().encode(user.id) as Uint8Array<ArrayBuffer>,
+      attestationType: "none",
+      authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
+      // Not the same authenticator twice.
+      excludeCredentials: results.map((r) => ({
+        id: r.id,
+        ...(r.transports ? { transports: JSON.parse(r.transports) } : {}),
+      })),
+    });
+    await issueChallenge(c, {
+      purpose: "add",
+      challenge: options.challenge,
+      exp: Date.now() + CHALLENGE_TTL_MS,
+      userId: user.id,
+    });
+    return c.json(options);
+  })
+
+  .post("/passkeys/verify", async (c) => {
+    const user = requireUser(c);
+    const pending = await takeChallenge(c, "add");
+    if (pending.userId !== user.id) throw badRequest("That attempt was for another account.");
+    const { rpID, origin } = relyingParty(c);
+    const response = (await c.req.json().catch(() => null)) as RegistrationResponseJSON | null;
+    if (!response) throw badRequest("Invalid request.");
+    const result = await verifyRegistrationResponse({
+      response,
+      expectedChallenge: pending.challenge,
+      expectedOrigin: origin,
+      expectedRPID: rpID,
+    }).catch(() => null);
+    if (!result?.verified) throw badRequest("Your passkey couldn't be verified. Try again.");
+    const { credential, credentialDeviceType, credentialBackedUp } = result.registrationInfo;
+    await c.env.DB.prepare(
+      `INSERT INTO passkeys (id, user_id, public_key, counter, transports, device_type, backed_up, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        credential.id,
+        user.id,
+        credential.publicKey,
+        credential.counter,
+        credential.transports ? JSON.stringify(credential.transports) : null,
+        credentialDeviceType,
+        credentialBackedUp ? 1 : 0,
+        Date.now(),
+      )
+      .run();
+    return c.json({ ok: true });
   })
 
   .post("/logout", async (c) => {
