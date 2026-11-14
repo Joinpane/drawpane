@@ -28,3 +28,13 @@ Without WebGL2 (a few old browsers, headless contexts), glass degrades to frost 
 - One more drawing path to keep in step, contained in one module (`glass.ts`) with its shader; its parameters are mapped by pure functions that are unit-tested, and its look by a browser test.
 - A glass layer costs a backdrop copy, two small uploads and one draw per frame, only for layers on screen; files without glass pay nothing (the WebGL context is made on first use).
 - SVG and PDF can't read what's behind a layer either, so they get an approximation: the layer's fills with a soft rim highlight. PNG export, drawn by the canvas renderer, has the real effect.
+
+## Revision: a smooth rim (2026-11-14)
+
+The first version took the rim's slope from the shape's mask blurred by the 2D canvas: 8 bits of height, differenced across single pixels. Quantised height made visible terraces and moiré in the bend, and noisy colour fringes, most of all at rounded corners. It now:
+
+- **Finds the edge exactly.** It takes every pixel's distance and direction to the shape's edge from a jump-flooded distance field on the GPU (half floats, seeded at sub-pixel edge points from the anti-aliased mask, and only as far as the rim is deep). Right at the edge, the direction blends into the mask's own slope.
+- **Bends without folding.** The rim is an analytic profile. A pixel a fraction *t* of the depth in sees the backdrop `refraction × (1 − t)³` further in. That eases into the flat middle without a crease, and at most about a third of the depth, so content folds back on itself only in a sliver at the very edge, as thick glass does.
+- **Fringes subtly.** Dispersion parts the colours by up to a quarter of the bend.
+- **Lights the rim.** A fine specular line runs along the edge facing the light, with a softer line opposite (light inside the glass) and a gentle sheen across the lit side of the rim. The flat middle shows the backdrop as it is, frosted.
+
