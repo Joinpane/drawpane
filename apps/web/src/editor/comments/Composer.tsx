@@ -103,6 +103,16 @@ export function Composer({
     el.setSelectionRange(el.value.length, el.value.length);
   }, [autoFocus, field]);
 
+  const caretAfterChange = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const el = field.current;
+    const caret = caretAfterChange.current;
+    if (!el || caret === null) return;
+    caretAfterChange.current = null;
+    el.focus();
+    el.setSelectionRange(caret, caret);
+  }, [value, field]);
+
   const track = (el: HTMLTextAreaElement) => {
     const next =
       el.selectionStart === el.selectionEnd ? mentionAt(el.value, el.selectionStart) : null;
@@ -117,13 +127,12 @@ export function Composer({
     const end = mention.start + 1 + mention.query.length;
     const insert = `@${person.name} `;
     const next = value.slice(0, mention.start) + insert + value.slice(end);
+    // Placed with the commit that writes the new text (below), not a frame
+    // later: a key typed in between would land, then the caret would jump
+    // back before it, and everything typed after would go in front of it.
+    caretAfterChange.current = mention.start + insert.length;
     onChange(next);
     setMention(null);
-    const caret = mention.start + insert.length;
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(caret, caret);
-    });
   };
 
   const submit = () => {

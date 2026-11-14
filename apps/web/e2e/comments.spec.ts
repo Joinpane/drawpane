@@ -191,9 +191,16 @@ test("comments: pin, reply with a mention, live updates, resolve, find again", a
   await bo.keyboard.type("Looks good. Can @An");
   const people = bo.getByRole("listbox", { name: "People" });
   await expect(people.getByRole("option", { name: "Ana Lima" })).toBeVisible();
-  await bo.keyboard.press("Enter");
+  // Enter picks her, and the next letter comes before the browser draws a
+  // frame, as from a fast typist: it, and everything after, lands after the mention.
+  await boReply.evaluate(async (field: HTMLTextAreaElement) => {
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    // React writes the mention in a microtask; the next key arrives after that, before a frame.
+    await Promise.resolve();
+    document.execCommand("insertText", false, "c");
+  });
+  await bo.keyboard.type("heck the contrast?");
   await expect(people).toBeHidden();
-  await bo.keyboard.type("check the contrast?");
   // Shift+Enter breaks the line rather than posting.
   await bo.keyboard.press("Shift+Enter");
   await bo.keyboard.type("Before Friday?");
