@@ -169,6 +169,8 @@ describe("setting up email", () => {
     );
     expect(ui.said.join("\n")).not.toContain("pa%3Ass%40word");
     expect(ui.said.join("\n")).toContain("Removes the old EMAIL_API_KEY.");
+    // Shown readably, its password hidden.
+    expect(ui.said.join("\n")).toContain("smtps://me@example.com:•••@smtp.fastmail.com:465");
   });
 
   it("turns email off, removing every setting it had", async () => {

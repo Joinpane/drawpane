@@ -79,7 +79,28 @@ export function localHour(now: number, timeZone: string | null): number {
   }
 }
 
-/** Whether a person's batch goes out now: as it happens, or their digest hour (once a day). */
+/** The date it is for someone ("2026-11-14"), in their time zone (UTC when unknown or invalid). */
+export function localDate(at: number, timeZone: string | null): string {
+  const format = (zone: string) =>
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(at);
+  try {
+    return format(timeZone ?? "UTC");
+  } catch {
+    return format("UTC");
+  }
+}
+
+/**
+ * Whether a person's batch goes out now: as it happens, or their daily
+ * digest once their hour has come and none has gone out yet that day (in
+ * their time zone). "Has come" rather than "is": an hour a clock skips for
+ * daylight saving, or a missed run, still gets its digest.
+ */
 export function due(
   person: {
     pref: EmailPreference;
@@ -91,60 +112,96 @@ export function due(
 ): boolean {
   if (person.pref === "instant") return true;
   if (person.pref !== "daily") return false;
-  if (localHour(now, person.time_zone) !== person.digest_hour) return false;
-  // Once a day: the hour has a dozen runs.
-  return person.last_digest_at === null || now - person.last_digest_at > 20 * 3_600_000;
+  if (localHour(now, person.time_zone) < person.digest_hour) return false;
+  return (
+    person.last_digest_at === null ||
+    localDate(person.last_digest_at, person.time_zone) !== localDate(now, person.time_zone)
+  );
 }
 
-/** Sends what's due. Does nothing when email is off. */
+/** Notifications worth an email now: unread a while, recent, not yet emailed, for people who want email. */
+const PENDING = `notifications n
+  JOIN users u ON u.id = n.user_id AND u.email_notifications <> 'off'
+  JOIN files f ON f.id = n.file_id AND f.deleted_at IS NULL
+  JOIN team_members tm ON tm.team_id = f.team_id AND tm.user_id = n.user_id
+ WHERE n.emailed_at IS NULL AND n.read_at IS NULL
+   AND n.created_at <= ?1 AND n.created_at >= ?2 AND n.email_attempts < ?3`;
+
+/** People with something to hear about, considered per run at most (each costs a few queries). */
+const PEOPLE_PER_RUN = 200;
+
+type Person = Pick<
+  Row,
+  "user_id" | "user_email" | "user_name" | "pref" | "digest_hour" | "time_zone" | "last_digest_at"
+>;
+
+/**
+ * Sends what's due. Does nothing when email is off.
+ *
+ * People first, one row each (those who want email as it happens before the
+ * daily digests, then oldest waiting first), so one person's backlog can't
+ * crowd anyone else out. Each person's rows are claimed in one statement
+ * that returns exactly what it claimed: a run overlapping this one can't
+ * take the same rows, and no person has too many for a query.
+ */
 export async function sendNotificationEmails(env: Env, now = Date.now()): Promise<EmailRunResult> {
   const { sender } = emailSetup(env);
   if (!sender) return { sent: 0, failed: 0 };
-  const { results } = await env.DB.prepare(
-    `SELECT n.id, n.user_id, n.kind, n.created_at, n.thread_id, n.file_id, f.name AS file_name,
-            n.email_attempts, a.name AS actor_name, u.email AS user_email, u.name AS user_name,
-            u.email_notifications AS pref, u.digest_hour, u.time_zone, u.last_digest_at,
-            COALESCE(n.origin, (SELECT o.origin FROM notifications o WHERE o.origin IS NOT NULL
-                                 ORDER BY o.created_at DESC LIMIT 1)) AS origin,
-            COALESCE(c.body, (SELECT fc.body FROM comments fc WHERE fc.thread_id = n.thread_id
-                               ORDER BY fc.created_at, fc.id LIMIT 1)) AS body
-       FROM notifications n
-       JOIN users u ON u.id = n.user_id AND u.email_notifications <> 'off'
-       JOIN files f ON f.id = n.file_id AND f.deleted_at IS NULL
-       JOIN team_members tm ON tm.team_id = f.team_id AND tm.user_id = n.user_id
-       LEFT JOIN comments c ON c.id = n.comment_id
-       LEFT JOIN users a ON a.id = n.actor_id
-      WHERE n.emailed_at IS NULL AND n.read_at IS NULL
-        AND n.created_at <= ?1 AND n.created_at >= ?2 AND n.email_attempts < ?3
-      ORDER BY n.user_id, n.created_at DESC
-      LIMIT 1000`,
+  const window = [now - EMAIL_GRACE_MS, now - NEWS_MS, MAX_ATTEMPTS] as const;
+  const { results: people } = await env.DB.prepare(
+    `SELECT n.user_id, u.email AS user_email, u.name AS user_name,
+            u.email_notifications AS pref, u.digest_hour, u.time_zone, u.last_digest_at
+       FROM ${PENDING}
+      GROUP BY n.user_id
+      ORDER BY u.email_notifications = 'instant' DESC, MIN(n.created_at)
+      LIMIT ${PEOPLE_PER_RUN}`,
   )
-    .bind(now - EMAIL_GRACE_MS, now - NEWS_MS, MAX_ATTEMPTS)
-    .all<Row>();
-
-  const byPerson = new Map<string, Row[]>();
-  for (const row of results) {
-    const rows = byPerson.get(row.user_id) ?? [];
-    rows.push(row);
-    byPerson.set(row.user_id, rows);
-  }
+    .bind(...window)
+    .all<Person>();
+  // Where links point: each notification's own origin, else this instance's.
+  const fallback = await instanceOrigin(env);
 
   let sent = 0;
   let failed = 0;
-  for (const rows of byPerson.values()) {
+  for (const person of people) {
     if (sent + failed >= EMAILS_PER_RUN) break;
-    const person = rows[0] as Row;
     if (!due(person, now)) continue;
-    const ids = rows.map((r) => r.id);
-    // Claimed first: a run that overlaps this one finds them taken.
-    const claim = await env.DB.prepare(
-      `UPDATE notifications SET emailed_at = ? WHERE emailed_at IS NULL AND id IN (${ids.map(() => "?").join(", ")})`,
+    const claimed = await env.DB.prepare(
+      `UPDATE notifications SET emailed_at = ?4
+        WHERE emailed_at IS NULL AND id IN (SELECT n.id FROM ${PENDING} AND n.user_id = ?5)
+        RETURNING id`,
     )
-      .bind(now, ...ids)
-      .run();
-    if (claim.meta.changes === 0) continue;
+      .bind(...window, now, person.user_id)
+      .all<{ id: string }>();
+    const ids = JSON.stringify(claimed.results.map((r) => r.id));
+    if (claimed.results.length === 0) continue;
+    const { results: rows } = await env.DB.prepare(
+      `SELECT n.id, n.user_id, n.kind, n.created_at, n.thread_id, n.file_id, f.name AS file_name,
+              n.email_attempts, a.name AS actor_name, n.origin,
+              COALESCE(c.body, (SELECT fc.body FROM comments fc WHERE fc.thread_id = n.thread_id
+                                 ORDER BY fc.created_at, fc.id LIMIT 1)) AS body
+         FROM notifications n
+         JOIN files f ON f.id = n.file_id
+         LEFT JOIN comments c ON c.id = n.comment_id
+         LEFT JOIN users a ON a.id = n.actor_id
+        WHERE n.id IN (SELECT value FROM json_each(?1))
+        ORDER BY n.created_at DESC, n.id DESC`,
+    )
+      .bind(ids)
+      .all<Omit<Row, keyof Person> & { user_id: string }>();
+    const origin = rows.find((r) => r.origin)?.origin ?? fallback;
+    if (!origin) {
+      // No address to link to yet (the first comments since an upgrade): wait for one.
+      await env.DB.prepare(
+        "UPDATE notifications SET emailed_at = NULL WHERE id IN (SELECT value FROM json_each(?1))",
+      )
+        .bind(ids)
+        .run();
+      continue;
+    }
+    const full = rows.map((r) => ({ ...person, ...r, origin: r.origin ?? origin }) as Row);
     try {
-      await sender.send(await notificationEmail(env, person, rows));
+      await sender.send(await notificationEmail(env, full[0] as Row, full));
       sent++;
       if (person.pref === "daily")
         await env.DB.prepare("UPDATE users SET last_digest_at = ? WHERE id = ?")
@@ -156,13 +213,23 @@ export async function sendNotificationEmails(env: Env, now = Date.now()): Promis
       console.error(`couldn't email ${person.user_id}`, error);
       await env.DB.prepare(
         `UPDATE notifications SET email_attempts = email_attempts + 1${retry ? ", emailed_at = NULL" : ""}
-          WHERE id IN (${ids.map(() => "?").join(", ")})`,
+          WHERE id IN (SELECT value FROM json_each(?1))`,
       )
-        .bind(...ids)
+        .bind(ids)
         .run();
     }
   }
   return { sent, failed };
+}
+
+/** This instance's address for links: its configured public origin, else the latest one an action came from. */
+async function instanceOrigin(env: Env): Promise<string | null> {
+  const configured = env.PUBLIC_ORIGIN?.split(",")[0]?.trim().replace(/\/$/, "");
+  if (configured) return configured;
+  const row = await env.DB.prepare(
+    "SELECT origin FROM notifications WHERE origin IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+  ).first<{ origin: string }>();
+  return row?.origin ?? null;
 }
 
 // ---------------------------------------------------------------------------

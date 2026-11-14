@@ -110,7 +110,8 @@ export function EmailPreferences() {
                     </option>
                   ))}
                 </select>
-                <span className="account__choice-zone">{zoneLabel(zone)}</span>
+                {/* The zone it's sent in: the one saved (picking a time here saves this browser's). */}
+                <span className="account__choice-zone">{zoneLabel(data.timeZone ?? zone)}</span>
               </span>
             ) : null}
           </label>
