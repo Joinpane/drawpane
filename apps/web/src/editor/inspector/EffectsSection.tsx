@@ -1,5 +1,6 @@
 /**
- * Effects: drop and inner shadows, layer and background blur.
+ * Effects: drop and inner shadows, layer and background blur, glass,
+ * noise and texture.
  *
  * "+" opens a menu of effect types; picking one adds it and opens its
  * editor. Each effect is a row (its kind, a glance at its values, show or
@@ -9,12 +10,26 @@
 import type { Editor } from "@drawpane/editor";
 import {
   DEFAULT_GLASS,
+  DEFAULT_NOISE,
+  DEFAULT_TEXTURE,
+  effectBounds,
   type Glass,
   glassBounds,
   type NodeRecord,
+  type Noise,
+  type NoiseType,
   type PropValues,
+  type Texture,
 } from "@drawpane/model";
-import { type IconName, LightDial, NumberField, PropertySection, SliderField } from "@drawpane/ui";
+import {
+  type IconName,
+  LightDial,
+  NumberField,
+  PropertySection,
+  SegmentedControl,
+  SliderField,
+  Switch,
+} from "@drawpane/ui";
 import { ColorRow } from "./ColorRow";
 import { common } from "./fields";
 import { AddItemButton, ItemEditor, ItemRow, useItemEditor } from "./ItemList";
@@ -29,6 +44,17 @@ export const EFFECT_KINDS: ReadonlyArray<{ type: EffectType; label: string; icon
   { type: "layer-blur", label: "Layer blur", icon: "layer-blur" },
   { type: "background-blur", label: "Background blur", icon: "background-blur" },
   { type: "glass", label: "Glass", icon: "glass" },
+  { type: "noise", label: "Noise", icon: "noise" },
+  { type: "texture", label: "Texture", icon: "texture" },
+];
+
+/** Effects whose editor has sliders, and wants the room. */
+const WIDE: ReadonlySet<EffectType> = new Set(["glass", "noise", "texture"]);
+
+const NOISE_TYPES: ReadonlyArray<{ value: NoiseType; label: string }> = [
+  { value: "mono", label: "Mono" },
+  { value: "duo", label: "Duo" },
+  { value: "multi", label: "Multi" },
 ];
 
 const KIND = Object.fromEntries(EFFECT_KINDS.map((k) => [k.type, k])) as Record<
@@ -38,13 +64,18 @@ const KIND = Object.fromEntries(EFFECT_KINDS.map((k) => [k.type, k])) as Record<
 
 const DEFAULT_SHADOW = { color: "#00000040", x: 0, y: 4, blur: 12, spread: 0 } as const;
 
-/** A fresh effect of `type`, keeping what carries over (visibility, shadow values). */
+const isShadow = (e: Effect | undefined) => e?.type === "drop-shadow" || e?.type === "inner-shadow";
+const isBlur = (e: Effect | undefined) => e?.type === "layer-blur" || e?.type === "background-blur";
+
+/** A fresh effect of `type`, keeping what carries over (visibility; a shadow's or blur's values). */
 export function effectOfType(type: EffectType, from?: Effect): Effect {
   const visible = from?.visible === false ? { visible: false } : {};
   if (type === "glass") return { ...DEFAULT_GLASS, ...visible };
+  if (type === "noise") return { ...DEFAULT_NOISE, ...visible };
+  if (type === "texture") return { ...DEFAULT_TEXTURE, ...visible };
   if (type === "layer-blur" || type === "background-blur")
-    return { type, radius: from && "radius" in from ? from.radius : 8, ...visible };
-  const shadow = from && "color" in from ? from : DEFAULT_SHADOW;
+    return { type, radius: from && isBlur(from) && "radius" in from ? from.radius : 8, ...visible };
+  const shadow = from && isShadow(from) && "x" in from ? from : DEFAULT_SHADOW;
   return {
     type,
     color: shadow.color,
@@ -56,11 +87,24 @@ export function effectOfType(type: EffectType, from?: Effect): Effect {
   };
 }
 
-/** A glance at the values: "0 4 12 0" for a shadow (x, y, blur, spread), the radius for a blur. */
+/**
+ * A glance at the values: "0 4 12 0" for a shadow (x, y, blur, spread), the
+ * radius for a blur, "Mono · 50%" for noise (its kind and density).
+ */
 export function effectSummary(e: Effect): string {
-  if (e.type === "glass") return `${e.refraction} ${e.depth} ${e.frost}`;
-  if ("radius" in e) return `${e.radius}`;
-  return `${e.x} ${e.y} ${e.blur} ${e.spread}`;
+  switch (e.type) {
+    case "glass":
+      return `${e.refraction} ${e.depth} ${e.frost}`;
+    case "noise":
+      return `${NOISE_TYPES.find((t) => t.value === e.noiseType)?.label ?? ""} · ${e.density}%`;
+    case "texture":
+      return `${e.size} ${e.radius}`;
+    case "layer-blur":
+    case "background-blur":
+      return `${e.radius}`;
+    default:
+      return `${e.x} ${e.y} ${e.blur} ${e.spread}`;
+  }
 }
 
 export function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
@@ -122,7 +166,7 @@ export function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeR
           kinds={EFFECT_KINDS}
           current={current.type}
           kindLabel="Effect type"
-          className={current.type === "glass" ? "item-editor--wide" : undefined}
+          className={WIDE.has(current.type) ? "item-editor--wide" : undefined}
           onKind={(type) =>
             replace(items.open as number, effectOfType(type, current), "Effect type")
           }
@@ -155,9 +199,14 @@ function EffectFields({
   });
   if (effect.type === "glass")
     return <GlassFields effect={effect} onChange={onChange} scrub={scrub} />;
+  if (effect.type === "noise")
+    return <NoiseFields editor={editor} effect={effect} onChange={onChange} scrub={scrub} />;
+  if (effect.type === "texture")
+    return <TextureFields effect={effect} onChange={onChange} scrub={scrub} />;
   return (
     <div className="item-editor__fields">
-      {"color" in effect ? (
+      {/* Only shadows and blurs are left: a shadow has an offset. */}
+      {"x" in effect ? (
         <>
           <span className="item-editor__label">Position</span>
           <div className="item-editor__pair">
@@ -291,5 +340,128 @@ function GlassFields({
         {slider("splay", "Splay")}
       </div>
     </>
+  );
+}
+
+type Scrub = (label: string) => { onScrubStart: () => void; onScrubEnd: () => void };
+
+/** A labelled slider for one of an effect's numbers, with its range from the model. */
+function EffectSlider<E extends Noise | Texture>({
+  effect,
+  field,
+  label,
+  unit,
+  curve,
+  onChange,
+  scrub,
+}: {
+  effect: E;
+  field: keyof E & ("size" | "density" | "opacity" | "radius");
+  label: string;
+  unit?: string;
+  curve?: number;
+  onChange: (next: Effect, label: string) => void;
+  scrub: Scrub;
+}) {
+  const { min = 0, max = 100 } = effectBounds(effect.type, field as never);
+  const drag = scrub(label);
+  return (
+    <>
+      <span className="item-editor__label">{label}</span>
+      <SliderField
+        label={label}
+        value={effect[field] as number}
+        min={min}
+        max={max}
+        step={field === "size" ? 0.5 : 1}
+        {...(unit ? { unit } : {})}
+        {...(curve ? { curve } : {})}
+        onChange={(v) => onChange({ ...effect, [field]: v }, label)}
+        onScrubStart={drag.onScrubStart}
+        onScrubEnd={drag.onScrubEnd}
+      />
+    </>
+  );
+}
+
+/**
+ * Noise's values: its kind (mono, duo, multi), the grain's size and how
+ * much of the layer it covers, then its colour, two colours or opacity.
+ */
+function NoiseFields({
+  editor,
+  effect,
+  onChange,
+  scrub,
+}: {
+  editor: Editor;
+  effect: Noise;
+  onChange: (next: Effect, label: string) => void;
+  scrub: Scrub;
+}) {
+  const slider = { effect, onChange, scrub };
+  return (
+    <div className="item-editor__fields">
+      <span className="item-editor__label">Type</span>
+      <SegmentedControl
+        label="Noise type"
+        className="item-editor__segments"
+        options={NOISE_TYPES}
+        value={effect.noiseType}
+        onChange={(noiseType) => onChange({ ...effect, noiseType }, "Noise type")}
+      />
+      <EffectSlider {...slider} field="size" label="Size" curve={2.5} />
+      <EffectSlider {...slider} field="density" label="Density" unit="%" />
+      {effect.noiseType === "multi" ? (
+        <EffectSlider {...slider} field="opacity" label="Opacity" unit="%" />
+      ) : (
+        <>
+          <span className="item-editor__label item-editor__label--top">
+            {effect.noiseType === "duo" ? "Colors" : "Color"}
+          </span>
+          <div className="item-editor__stack">
+            <ColorRow
+              editor={editor}
+              label="Noise"
+              color={effect.color}
+              onChange={(color, label) => onChange({ ...effect, color }, label)}
+            />
+            {effect.noiseType === "duo" ? (
+              <ColorRow
+                editor={editor}
+                label="Second noise"
+                color={effect.secondaryColor}
+                onChange={(secondaryColor, label) => onChange({ ...effect, secondaryColor }, label)}
+              />
+            ) : null}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Texture's values: the grain's size, how far it roughens, and whether it stays inside. */
+function TextureFields({
+  effect,
+  onChange,
+  scrub,
+}: {
+  effect: Texture;
+  onChange: (next: Effect, label: string) => void;
+  scrub: Scrub;
+}) {
+  const slider = { effect, onChange, scrub };
+  return (
+    <div className="item-editor__fields">
+      <EffectSlider {...slider} field="size" label="Size" curve={2.5} />
+      <EffectSlider {...slider} field="radius" label="Radius" curve={2} />
+      <span aria-hidden="true" />
+      <Switch
+        label="Clip to shape"
+        checked={effect.clipToShape}
+        onChange={(clipToShape) => onChange({ ...effect, clipToShape }, "Clip texture to shape")}
+      />
+    </div>
   );
 }

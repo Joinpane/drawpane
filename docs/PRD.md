@@ -222,7 +222,7 @@ Reference key: **Penpot** means Penpot has this capability and its behavior is o
 | --- | --- | --- | --- |
 | Canvas | Boards, shapes, pen and path editing, booleans, masks, images, groups | v0.1 | Penpot |
 | Canvas | WebGL renderer; 10k-layer files pan at 60 fps | v0.1 | Penpot |
-| Canvas | Fills, strokes, gradients, shadows, layer and background blur, glass (decision 0007) | v0.1 | Penpot |
+| Canvas | Fills, strokes, gradients, shadows, layer and background blur, glass (decision 0007), noise and texture (decision 0008) | v0.1 | Penpot |
 | Text | Rich text, OpenType features, variable fonts (decision 0009), Google Fonts and uploaded fonts | v0.1 | Penpot |
 | Text | Text on path | v1.0 | New |
 | Layout | Flex and grid layout, constraints, min/max sizing | v0.1 | Penpot |

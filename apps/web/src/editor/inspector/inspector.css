@@ -572,6 +572,24 @@
   grid-template-columns: 1fr 1fr;
   gap: var(--space-200);
 }
+/* A label for values that come as a column, level with the first (a 24px row). */
+.item-editor__label--top {
+  align-self: start;
+  padding-top: 4px;
+}
+/* Values that come as a column in one row: a duo noise's two colours. */
+.item-editor__stack {
+  display: grid;
+  gap: var(--space-200);
+  min-width: 0;
+}
+/* A segmented control fills its row, its options sharing it evenly. */
+.item-editor__segments {
+  display: flex;
+}
+.item-editor__segments > * {
+  flex: 1;
+}
 .paint-row--color {
   grid-template-columns: 24px minmax(0, 1fr) 56px;
 }
