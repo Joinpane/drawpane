@@ -880,16 +880,6 @@
   outline: none;
   box-shadow: var(--shadow-focus);
 }
-.dash__card-menu {
-  position: relative;
-}
-.dash__card-dropdown {
-  position: absolute;
-  top: calc(100% + var(--space-100));
-  right: 0;
-  z-index: 5;
-  min-width: 196px;
-}
 .dash__template-tag {
   display: inline-flex;
   align-items: center;

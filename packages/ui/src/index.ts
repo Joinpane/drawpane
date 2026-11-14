@@ -11,6 +11,7 @@ export * from "./components/Kbd";
 export * from "./components/LayerRow";
 export * from "./components/Logo";
 export * from "./components/Menu";
+export * from "./components/MenuButton";
 export * from "./components/NumberField";
 export * from "./components/Popover";
 export * from "./components/PresenceStack";

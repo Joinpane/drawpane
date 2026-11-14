@@ -1,5 +1,5 @@
 import type { CommentMessage, CommentPerson, CommentThread } from "@drawpane/model";
-import { Button, Icon, IconButton, Menu, type MenuItem } from "@drawpane/ui";
+import { Button, Icon, IconButton, MenuButton, type MenuItem } from "@drawpane/ui";
 import {
   forwardRef,
   type KeyboardEvent,
@@ -36,10 +36,8 @@ export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(functio
   const [reply, setReply] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const list = useRef<HTMLOListElement>(null);
-  const menuButton = useRef<HTMLButtonElement>(null);
   const resolved = thread.resolvedAt !== null;
   const canDeleteThread = role === "owner" || (me !== null && thread.author?.id === me);
   const count = thread.messages.length;
@@ -110,28 +108,7 @@ export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(functio
           disabled={busy}
           onClick={() => void run(() => store.setResolved(thread.id, !resolved))}
         />
-        <span className="comment-popover__menu">
-          <IconButton
-            ref={menuButton}
-            icon="more"
-            label="Thread options"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((v) => !v)}
-          />
-          {menuOpen ? (
-            <Menu
-              className="comment-popover__dropdown"
-              label="Thread options"
-              items={menuItems}
-              autoFocus
-              onClose={() => {
-                setMenuOpen(false);
-                menuButton.current?.focus();
-              }}
-            />
-          ) : null}
-        </span>
+        <MenuButton label="Thread options" items={menuItems} />
       </header>
       {resolved ? (
         <p className="comment-popover__resolved">
@@ -229,10 +206,8 @@ function MessageItem({
     ? role === "owner" || (me !== null && (thread.author?.id ?? message.author?.id) === me)
     : role === "owner" || mine;
   const [mode, setMode] = useState<"view" | "edit" | "confirm">("view");
-  const [menuOpen, setMenuOpen] = useState(false);
   const [draft, setDraft] = useState(message.body);
   const [busy, setBusy] = useState(false);
-  const menuButton = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (mode === "view") setDraft(message.body);
@@ -270,30 +245,13 @@ function MessageItem({
             </span>
           </span>
           {items.length > 0 && mode === "view" ? (
-            <span className="comment-message__menu">
-              <IconButton
-                ref={menuButton}
-                icon="more"
-                label={`Options for ${displayName(message.author)}'s comment`}
-                className="comment-message__more"
-                aria-haspopup="menu"
-                aria-expanded={menuOpen}
-                tooltip={false}
-                onClick={() => setMenuOpen((v) => !v)}
-              />
-              {menuOpen ? (
-                <Menu
-                  className="comment-popover__dropdown"
-                  label="Comment options"
-                  items={items}
-                  autoFocus
-                  onClose={(reason) => {
-                    setMenuOpen(false);
-                    if (reason !== "select") menuButton.current?.focus();
-                  }}
-                />
-              ) : null}
-            </span>
+            <MenuButton
+              label={`Options for ${displayName(message.author)}'s comment`}
+              menuLabel="Comment options"
+              items={items}
+              className="comment-message__more"
+              tooltip={false}
+            />
           ) : null}
         </div>
         {mode === "edit" ? (
@@ -304,6 +262,7 @@ function MessageItem({
             submitLabel="Save"
             placeholder="Edit your comment"
             label="Edit comment"
+            hint={false}
             busy={busy}
             autoFocus
             onCancel={() => setMode("view")}

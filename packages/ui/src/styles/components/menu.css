@@ -82,3 +82,31 @@
     transform: scale(0.98);
   }
 }
+
+/* A menu dropping from a button (MenuButton, DropdownMenu): above every pane, never clipped. */
+.dp-dropdown {
+  position: fixed;
+  z-index: 70;
+  font: var(--type-ui-body);
+  animation: dp-dropdown-in var(--duration-popover) ease-out;
+}
+.dp-dropdown > .dp-menu {
+  min-width: 176px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+@keyframes dp-dropdown-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+.dp-dropdown[data-side="top"] {
+  animation-name: dp-dropdown-up;
+}
+@keyframes dp-dropdown-up {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
