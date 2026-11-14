@@ -11,7 +11,7 @@ import {
   type Op,
   type Props,
 } from "@drawpane/model";
-import { isInsideInstance } from "./components";
+import { canMoveInto, isInsideInstance } from "./components";
 import { croppableImage } from "./crop-session";
 import type { Editor } from "./editor";
 import {
@@ -991,6 +991,7 @@ export class Interaction {
         if (b && rectContainsPoint(b, page)) continue;
       }
       if (editor.doc.ancestors(target).some((a) => a.id === id) || target === id) continue;
+      if (!canMoveInto(editor.doc, [id], target)) continue;
       ops.push(...editor.reparentOps(id, target, editor.topKey(target)));
     }
     if (ops.length > 0) editor.commit(ops, "Move into frame");

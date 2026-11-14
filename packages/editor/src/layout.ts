@@ -76,6 +76,25 @@ function participates(node: NodeRecord): boolean {
   return getProp(node.props, "visible") && getProp(node.props, "positioning") === "auto";
 }
 
+/**
+ * The layers an auto layout frame places, in order: visible, not absolute,
+ * and not groups (a group keeps its own place for now). The one rule for
+ * layout, X-ray and Explain alike.
+ */
+export function flowChildren(doc: Doc, frameId: string): NodeRecord[] {
+  const out: NodeRecord[] = [];
+  for (const id of doc.childIds(frameId)) {
+    const child = doc.get(id);
+    if (child && inFlow(child)) out.push(child);
+  }
+  return out;
+}
+
+/** Whether auto layout places this layer, in a layout frame (see `flowChildren`). */
+export function inFlow(node: NodeRecord): boolean {
+  return node.type !== "group" && participates(node);
+}
+
 function clamp(value: number, min: number | null, max: number | null): number {
   let v = value;
   if (max !== null && v > max) v = max;
@@ -344,10 +363,15 @@ export class LayoutEngine {
   }
 
   #children(frame: NodeRecord): NodeRecord[] {
+    return flowChildren(this.#doc, frame.id);
+  }
+
+  /** A frame's layout frame children that its flow doesn't place. */
+  #outOfFlow(frame: NodeRecord): NodeRecord[] {
     const out: NodeRecord[] = [];
     for (const id of this.#doc.childIds(frame.id)) {
       const child = this.#doc.get(id);
-      if (child && child.type !== "group" && participates(child)) out.push(child);
+      if (child && isLayoutFrame(child) && !inFlow(child)) out.push(child);
     }
     return out;
   }
@@ -370,6 +394,9 @@ export class LayoutEngine {
   measure(frame: NodeRecord): void {
     const children = this.#children(frame);
     for (const child of children) if (isLayoutFrame(child)) this.measure(child);
+    // Layout frames out of the flow (absolute or hidden) still size themselves
+    // and their contents; the flow just doesn't place them.
+    for (const child of this.#outOfFlow(frame)) this.run(child.id);
     if (isGrid(frame)) this.#measureGrid(frame, children);
     else this.#measureFlex(frame, children);
   }
@@ -438,6 +465,45 @@ export class LayoutEngine {
     );
   }
 
+  /**
+   * Each line's thickness across, once placed. A single unwrapped line spans
+   * the frame. Wrapped lines are as thick as their content; a line whose
+   * layers all stretch has nothing to size it, so those lines share the
+   * frame's free space across (a hugging frame has none to share), the way a
+   * stretched line fills a frame that doesn't wrap.
+   */
+  #thicknesses(frame: NodeRecord, lines: NodeRecord[][], axes: FlexAxes): number[] {
+    if (!axes.wraps) return [axes.innerCross];
+    const { cross } = axes;
+    const thickness = lines.map((line) => this.#lineCross(frame, line, cross));
+    if (sizing(frame, cross) === "hug") return thickness;
+    const unsized = lines.map((line) =>
+      line.every((c) => stretches(c, cross, crossAlign(frame, c))),
+    );
+    const count = unsized.filter(Boolean).length;
+    if (count === 0) return thickness;
+    const sized = thickness.reduce((s, t, i) => s + (unsized[i] ? 0 : t), 0);
+    const share =
+      Math.max(0, axes.innerCross - sized - axes.lineGap * Math.max(0, lines.length - 1)) / count;
+    return thickness.map((t, i) => (unsized[i] ? Math.max(t, share) : t));
+  }
+
+  /** A flex frame's lines as placed: their layers, thickness, and the layer that sets it. */
+  lines(frame: NodeRecord): FlowLine[] {
+    const axes = this.#flexAxes(frame);
+    const lines = this.#lines(this.#children(frame), axes);
+    const thickness = this.#thicknesses(frame, lines, axes);
+    return lines.map((line, i) => {
+      let setBy: NodeRecord | null = null;
+      if (axes.wraps)
+        for (const c of line) {
+          if (stretches(c, axes.cross, crossAlign(frame, c))) continue;
+          if (!setBy || this.#get(c.id, axes.cross) > this.#get(setBy.id, axes.cross)) setBy = c;
+        }
+      return { ids: line.map((c) => c.id), thickness: thickness[i] ?? 0, setBy: setBy?.id ?? null };
+    });
+  }
+
   #measureFlex(frame: NodeRecord, children: NodeRecord[]): void {
     const axes = this.#flexAxes(frame);
     const { main, cross } = axes;
@@ -464,7 +530,7 @@ export class LayoutEngine {
 
   #arrangeFlex(frame: NodeRecord, children: NodeRecord[]): void {
     const axes = this.#flexAxes(frame);
-    const { row, main, cross, gap, innerMain, innerCross, hugsMain, pad } = axes;
+    const { row, main, cross, gap, innerMain, hugsMain, pad } = axes;
     const lines = this.#lines(children, axes);
 
     // Main axis sizes: in each line, Fill children share what is left (a
@@ -495,9 +561,7 @@ export class LayoutEngine {
     }
 
     // Cross axis: a single line spans the frame; wrapped lines are as thick as their content.
-    const thickness = axes.wraps
-      ? lines.map((line) => this.#lineCross(frame, line, cross))
-      : [innerCross];
+    const thickness = this.#thicknesses(frame, lines, axes);
     lines.forEach((line, i) => {
       for (const child of line) {
         if (!stretches(child, cross, crossAlign(frame, child))) continue;
@@ -769,6 +833,21 @@ export function layoutRoots(doc: Doc, ids: Iterable<string>): string[] {
 }
 
 /** Layout fix-up operations to commit alongside an edit that touched `ids`. */
+/** One line of an auto layout frame's flow, across. */
+export interface FlowLine {
+  readonly ids: readonly string[];
+  readonly thickness: number;
+  /** The layer that makes the line that thick; null when nothing in it does (a single unwrapped line, or one that shares the frame's free space). */
+  readonly setBy: string | null;
+}
+
+/** A row or column frame's lines as laid out (one, unless it wraps). */
+export function flowLines(doc: Doc, frameId: string): FlowLine[] {
+  const frame = doc.get(frameId);
+  if (!frame || !isLayoutFrame(frame) || isGrid(frame)) return [];
+  return new LayoutEngine(doc).lines(frame);
+}
+
 export function layoutOps(doc: Doc, ids: Iterable<string>): Op[] {
   const roots = layoutRoots(doc, ids);
   if (roots.length === 0) return [];

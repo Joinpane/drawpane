@@ -1,6 +1,6 @@
 import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { beforeEach, describe, expect, it } from "vitest";
-import { instancesOf, isInstanceRoot, isMainComponent } from "../src/components";
+import { canMoveInto, instancesOf, isInstanceRoot, isMainComponent } from "../src/components";
 import { Editor } from "../src/editor";
 import type { TextMeasurer } from "../src/text";
 
@@ -209,5 +209,45 @@ describe("components and instances", () => {
     const pasted = editor.s.selection[0] as string;
     expect(getProp(props(editor, pasted), "instanceOf")).toBe(button.frame);
     expect(instancesOf(editor.doc, button.frame)).toHaveLength(2);
+  });
+
+  it("pastes beside a component, never inside itself, with the component selected", () => {
+    editor.select([button.frame]);
+    const data = editor.copy() as string;
+    // ⌘C ⌘V with the main still selected: pasting into the selection would nest it in itself.
+    editor.paste(data);
+    const pasted = editor.s.selection[0] as string;
+    expect(getProp(props(editor, pasted), "instanceOf")).toBe(button.frame);
+    expect(editor.doc.get(pasted)?.parent).toBe(editor.doc.get(button.frame)?.parent);
+    // An instance pasted into the component is refused the same way.
+    const inst = editor.copy() as string;
+    editor.select([button.frame]);
+    editor.paste(inst);
+    expect(editor.doc.get(editor.s.selection[0] as string)?.parent).not.toBe(button.frame);
+  });
+
+  it("keeps instances in step with a component nested in their main", () => {
+    // Make the icon inside Button a component of its own; then restyle it.
+    editor.select([button.icon]);
+    editor.createComponent();
+    const nested = editor.s.selection[0] as string;
+    const copy = mirrorOf(editor, instance, nested) as NodeRecord;
+    expect(getProp(copy.props, "name")).toBe(getProp(props(editor, nested), "name"));
+    editor.setProp([nested], "opacity", 0.5);
+    expect(getProp(props(editor, copy.id), "opacity")).toBe(0.5);
+  });
+
+  it("never moves an instance into its own component, or anything into or out of an instance", () => {
+    expect(canMoveInto(editor.doc, [instance], button.frame)).toBe(false);
+    expect(canMoveInto(editor.doc, [button.label], instance)).toBe(false);
+    // Nor out of one: its layers are its main component's.
+    const copy = mirrorOf(editor, instance, button.label) as NodeRecord;
+    expect(canMoveInto(editor.doc, [copy.id], "p")).toBe(false);
+    const other = editor.createLayer(
+      "frame",
+      { x: 500, y: 0, width: 50, height: 50 },
+      "p",
+    ) as string;
+    expect(canMoveInto(editor.doc, [instance], other)).toBe(true);
   });
 });

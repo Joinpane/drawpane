@@ -142,6 +142,45 @@ describe("auto layout", () => {
     expect(box("f")[2]).toBe(70);
   });
 
+  it("lays out a layout frame that's absolute inside another: its size and contents, not its place", () => {
+    const { doc, box } = setup(
+      { layoutMode: "row", gap: 10 },
+      [{}],
+      [
+        {
+          op: "create",
+          id: "badge",
+          type: "frame",
+          parent: "f",
+          key: "a5",
+          props: {
+            x: 200,
+            y: 40,
+            positioning: "absolute",
+            layoutMode: "row",
+            sizingH: "hug",
+            sizingV: "hug",
+            paddingLeft: 4,
+            paddingRight: 4,
+          },
+        },
+        {
+          op: "create",
+          id: "dot",
+          type: "rect",
+          parent: "badge",
+          key: "a0",
+          props: { width: 30, height: 8 },
+        },
+      ],
+    );
+    expect(box("badge")).toEqual([200, 40, 38, 8]);
+    doc.apply([{ op: "set", id: "dot", prop: "width", value: 12 }]);
+    doc.apply(layoutOps(doc, ["dot"]));
+    expect(box("badge")).toEqual([200, 40, 20, 8]);
+    expect(box("dot")).toEqual([4, 0, 12, 8]);
+  });
+
   it("produces no ops when nothing changes", () => {
     const { doc } = setup({ layoutMode: "row", gap: 10 }, [{}, {}]);
     expect(layoutOps(doc, ["f"])).toEqual([]);

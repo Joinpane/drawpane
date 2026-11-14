@@ -8,7 +8,7 @@ import { getProp } from "@drawpane/model";
 import type { Editor } from "./editor";
 import { type ExplainAxis, sizeMode } from "./explain";
 import type { Point, Rect } from "./geometry";
-import { type GridGeometry, gridGeometry } from "./layout";
+import { flowChildren, type GridGeometry, gridGeometry } from "./layout";
 
 export type XrayProp =
   | "paddingTop"
@@ -110,10 +110,7 @@ export function xrayRegions(editor: Editor, frameId: string): XrayRegion[] {
   // two share (wrapped lines each have their own); between lines, the line gap.
   const row = mode === "row";
   const wrapped = getProp(p, "layoutWrap");
-  const children = doc
-    .childIds(frameId)
-    .map((id) => doc.get(id))
-    .filter((c) => c && getProp(c.props, "visible") && getProp(c.props, "positioning") === "auto");
+  const children = flowChildren(doc, frameId);
   const box = (id: number) => {
     const c = children[id]?.props;
     return c

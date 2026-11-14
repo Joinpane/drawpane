@@ -8,6 +8,7 @@
  */
 import { getProp, type NodeRecord } from "@drawpane/model";
 import type { Doc } from "./doc";
+import { type FlowLine, flowChildren, flowLines, inFlow } from "./layout";
 
 export type ExplainAxis = "width" | "height";
 
@@ -62,19 +63,20 @@ function paddings(frame: NodeRecord, axis: ExplainAxis): [number, number, string
     : [getProp(p, "paddingTop"), getProp(p, "paddingBottom"), "top", "bottom"];
 }
 
-/** A frame's children in its flow: visible, laid out (not absolute). */
-function flowChildren(doc: Doc, frame: NodeRecord) {
-  const visible: NodeRecord[] = [];
+/** A frame's children in its flow (the layout engine's own rule), and how many sit out of it. */
+function flowOf(doc: Doc, frame: NodeRecord) {
+  const visible = flowChildren(doc, frame.id);
   let hidden = 0;
   let absolute = 0;
+  let groups = 0;
   for (const id of doc.childIds(frame.id)) {
     const c = doc.get(id);
     if (!c) continue;
     if (!getProp(c.props, "visible")) hidden++;
     else if (getProp(c.props, "positioning") === "absolute") absolute++;
-    else visible.push(c);
+    else if (c.type === "group") groups++;
   }
-  return { visible, hidden, absolute };
+  return { visible, hidden, absolute, groups };
 }
 
 /** Children grouped by name, sizing and size: "3 × Event row · fixed 52". */
@@ -108,6 +110,11 @@ function formulaOf(terms: readonly ExplainTerm[]): string {
     .join(" ");
 }
 
+/** What's left can't be less than nothing: notes the 0 when padding and the rest take more than there is. */
+function floorNote(raw: number): ExplainTerm | null {
+  return raw < 0 ? { label: "Nothing left, so 0", value: -raw, kind: "limit" } : null;
+}
+
 /** Notes a min or max that held the size back. */
 function clampNote(node: NodeRecord, axis: ExplainAxis, raw: number): ExplainTerm | null {
   const [min, max] =
@@ -121,6 +128,90 @@ function clampNote(node: NodeRecord, axis: ExplainAxis, raw: number): ExplainTer
   return null;
 }
 
+/**
+ * A layer stretched across a wrapped line: as thick as the line, which is
+ * as thick as its thickest layer that doesn't stretch, or (when every layer
+ * in it stretches) its share of the frame's free space.
+ */
+function wrappedStretch(
+  doc: Doc,
+  node: NodeRecord,
+  parent: NodeRecord,
+  axis: ExplainAxis,
+  lines: readonly FlowLine[],
+  fill: boolean,
+): Pick<Explanation, "answer" | "terms" | "formula"> | null {
+  const line = lines.find((l) => l.ids.includes(node.id));
+  if (!line) return null;
+  const Axis = axis === "width" ? "Width" : "Height";
+  const how = fill ? "Fill" : "stretched";
+  const thick = axis === "width" ? "wide" : "tall";
+  const setter = line.setBy ? doc.get(line.setBy) : undefined;
+  if (setter) {
+    const terms: ExplainTerm[] = [
+      {
+        label: `${name(setter)}, the ${axis === "width" ? "widest" : "tallest"} in its line`,
+        value: line.thickness,
+        kind: "child",
+        ids: [setter.id],
+      },
+    ];
+    const clamp = clampNote(node, axis, line.thickness);
+    if (clamp) terms.push(clamp);
+    return {
+      answer: `${Axis} is ${how} to its line, which is as ${thick} as ${name(setter)}.`,
+      terms,
+      formula: formulaOf(terms),
+    };
+  }
+  // Every layer in the line stretches: the lines like it share what the others leave.
+  const [startPad, endPad, startName, endName] = paddings(parent, axis);
+  const others = lines.filter((l) => l !== line && l.setBy);
+  const sharing = lines.length - others.length;
+  const gaps = lines.length - 1;
+  const lineGap = getProp(parent.props, "rowGap");
+  const terms: ExplainTerm[] = [
+    {
+      label: `${name(parent)} is ${n(sizeOf(parent, axis))}`,
+      value: sizeOf(parent, axis),
+      kind: "parent",
+      ids: [parent.id],
+    },
+    { label: `Padding ${startName}`, value: -startPad, kind: "padding" },
+    { label: `Padding ${endName}`, value: -endPad, kind: "padding" },
+    ...others.map((l) => ({
+      label: `A line as ${thick} as ${name(doc.get(l.setBy as string) as NodeRecord)}`,
+      value: -l.thickness,
+      kind: "child" as const,
+      ids: [l.setBy as string],
+    })),
+    ...(gaps > 0
+      ? [
+          {
+            label: `${gaps} line ${gaps === 1 ? "gap" : "gaps"} of ${n(lineGap)}`,
+            value: -lineGap * gaps,
+            kind: "gap" as const,
+            times: gaps,
+          },
+        ]
+      : []),
+  ];
+  const share = sharing > 1 ? ` ÷ ${sharing}` : "";
+  const raw = terms.reduce((s, t) => s + t.value, 0) / sharing;
+  const floor = floorNote(raw);
+  if (floor) terms.push(floor);
+  const clamp = clampNote(node, axis, Math.max(0, raw));
+  if (clamp) terms.push(clamp);
+  return {
+    answer:
+      sharing > 1
+        ? `${Axis} is ${how}: its line shares what's left of ${name(parent)} with ${sharing - 1} other ${sharing === 2 ? "line" : "lines"}.`
+        : `${Axis} is ${how}: its line takes what's left of ${name(parent)} after its padding and other lines.`,
+    terms,
+    formula: `(${formulaOf(terms.filter((t) => t.kind !== "limit"))})${share}`,
+  };
+}
+
 /** Whether a layer's size on an axis is set by hand, fills its parent, or hugs what's inside. */
 export function sizeMode(doc: Doc, id: string, axis: ExplainAxis): "fixed" | "fill" | "hug" {
   const node = doc.get(id);
@@ -131,7 +222,7 @@ export function sizeMode(doc: Doc, id: string, axis: ExplainAxis): "fixed" | "fi
   }
   const sizing = sizingOf(node, axis);
   const parent = doc.get(node.parent);
-  if (isLayout(parent) && getProp(node.props, "positioning") === "auto") {
+  if (isLayout(parent) && inFlow(node)) {
     if (sizing === "fill") return "fill";
     if (sizing === "fixed" && along(parent, axis) === "cross" && stretches(node, parent))
       return "fill";
@@ -187,7 +278,7 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
   }
 
   const sizing = sizingOf(node, axis);
-  const inLayout = isLayout(parent) && getProp(node.props, "positioning") === "auto";
+  const inLayout = isLayout(parent) && inFlow(node);
 
   // Fill: what the parent has left.
   if (inLayout && parent) {
@@ -195,6 +286,18 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
     const [startPad, endPad, startName, endName] = paddings(parent, axis);
     const stretched =
       direction === "cross" && sizing !== "hug" && (sizing === "fill" || stretches(node, parent));
+    // Wrapped lines: stretched to its line, not across the whole frame.
+    const lines = stretched ? flowLines(doc, parent.id) : [];
+    const ownLine = lines.find((l) => l.ids.includes(node.id));
+    if (ownLine && (lines.length > 1 || ownLine.setBy)) {
+      const explained = wrappedStretch(doc, node, parent, axis, lines, sizing === "fill");
+      if (explained)
+        return {
+          ...base,
+          ...explained,
+          actions: [fix, { kind: "select", label: `Select ${name(parent)}`, ids: [parent.id] }],
+        };
+    }
     if (stretched) {
       const terms: ExplainTerm[] = [
         {
@@ -206,7 +309,10 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
         { label: `Padding ${startName}`, value: -startPad, kind: "padding" },
         { label: `Padding ${endName}`, value: -endPad, kind: "padding" },
       ];
-      const clamp = clampNote(node, axis, sizeOf(parent, axis) - startPad - endPad);
+      const inner = sizeOf(parent, axis) - startPad - endPad;
+      const floor = floorNote(inner);
+      if (floor) terms.push(floor);
+      const clamp = clampNote(node, axis, Math.max(0, inner));
       if (clamp) terms.push(clamp);
       return {
         ...base,
@@ -217,7 +323,7 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
       };
     }
     if (sizing === "fill" && direction === "main") {
-      const { visible } = flowChildren(doc, parent);
+      const visible = flowChildren(doc, parent.id);
       const fills = visible.filter((c) => sizingOf(c, axis) === "fill");
       const others = visible.filter((c) => sizingOf(c, axis) !== "fill");
       const gap = getProp(parent.props, "gap");
@@ -245,7 +351,9 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
       ];
       const left = terms.reduce((s, t) => s + t.value, 0);
       const share = fills.length > 1 ? ` ÷ ${fills.length}` : "";
-      const clamp = clampNote(node, axis, left / Math.max(1, fills.length));
+      const floor = floorNote(left / Math.max(1, fills.length));
+      if (floor) terms.push(floor);
+      const clamp = clampNote(node, axis, Math.max(0, left) / Math.max(1, fills.length));
       if (clamp) terms.push(clamp);
       return {
         ...base,
@@ -264,7 +372,7 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
   if (sizing === "hug" && isLayout(node)) {
     const direction = along(node, axis);
     const [startPad, endPad, startName, endName] = paddings(node, axis);
-    const { visible, hidden, absolute } = flowChildren(doc, node);
+    const { visible, hidden, absolute, groups } = flowOf(doc, node);
     const terms: ExplainTerm[] = [
       { label: `Padding ${startName}`, value: startPad, kind: "padding" },
     ];
@@ -321,6 +429,12 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
         value: 0,
         kind: "hidden",
       });
+    if (groups > 0)
+      terms.push({
+        label: `${groups} ${groups === 1 ? "group" : "groups"}, not in the auto layout`,
+        value: 0,
+        kind: "hidden",
+      });
     const biggest = terms
       .filter((t) => t.kind === "child" && t.ids?.length)
       .sort((a, b) => b.value - a.value)[0];
@@ -357,9 +471,17 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
         actions,
       };
   }
+  // In an auto layout frame, but left out of it.
+  const why = isLayout(parent)
+    ? !getProp(node.props, "visible")
+      ? ": it's hidden, so auto layout leaves it be."
+      : getProp(node.props, "positioning") === "absolute"
+        ? ": it's absolute, out of the auto layout."
+        : ": set by hand."
+    : ": set by hand.";
   return {
     ...base,
-    answer: `${Axis} is fixed at ${n(size)}: set by hand.`,
+    answer: `${Axis} is fixed at ${n(size)}${why}`,
     terms: [],
     formula: null,
     actions,
