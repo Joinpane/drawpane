@@ -182,3 +182,55 @@ export function containersWithin(doc: Doc, id: string): string[] {
   visit(id);
   return out;
 }
+
+/** Where a drop lands, and how the panel shows it. */
+export interface DropTarget {
+  /** The layer the drop is relative to. */
+  readonly id: string;
+  /** Above or below it in the list, or inside it (at the top of its list). */
+  readonly where: "before" | "after" | "inside";
+  /** The row to draw the indicator on, and how: a line above or below it, or a box around it. */
+  readonly row: string;
+  readonly show: "line-before" | "line-after" | "box";
+  /** How far the line is indented, in nesting levels. */
+  readonly depth: number;
+}
+
+/**
+ * Where a drag over row `index` drops, the way Figma decides it: the middle
+ * of a frame or group drops inside it; the top half goes above the row; the
+ * bottom half goes below it. Below the last row of nested groups, `depth`
+ * (where the pointer is across the panel, in nesting levels) picks how far
+ * out: below the row itself, or below any group that ends there. Just below
+ * an open group's row is inside it, at the top, where the line shows.
+ */
+export function dropTarget(
+  rows: readonly Row[],
+  index: number,
+  y: number,
+  depth: number,
+  parentOf: (id: string) => string | null,
+): DropTarget | null {
+  const row = rows[index];
+  if (!row) return null;
+  const { node } = row;
+  const container = node.type === "frame" || node.type === "group";
+  if (container && y > 0.3 && y < 0.7)
+    return { id: node.id, where: "inside", row: node.id, show: "box", depth: row.depth + 1 };
+  if (y < 0.5)
+    return { id: node.id, where: "before", row: node.id, show: "line-before", depth: row.depth };
+  const next = rows[index + 1];
+  // An open group's children follow it: below its row is the top of its list.
+  if (container && next && next.depth > row.depth)
+    return { id: node.id, where: "inside", row: node.id, show: "line-after", depth: row.depth + 1 };
+  // Below the last row of one or more groups: the pointer picks how far out.
+  const lowest = next?.depth ?? 0;
+  const chosen = Math.max(lowest, Math.min(row.depth, Math.round(depth)));
+  let id = node.id;
+  for (let level = row.depth; level > chosen; level--) {
+    const parent = parentOf(id);
+    if (!parent) break;
+    id = parent;
+  }
+  return { id, where: "after", row: node.id, show: "line-after", depth: chosen };
+}

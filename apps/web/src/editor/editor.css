@@ -506,13 +506,48 @@
   flex: none;
   font: 500 10px / 14px var(--font-mono);
 }
-.layers__row--drop-before {
-  box-shadow: inset 0 2px 0 var(--signal);
+/* Where a dragged layer will land: a line between rows, indented to the
+   level it lands at (with a dot where it starts, as in Figma), or a box
+   around the frame or group it goes into. */
+.layers__row--drop-line-before::after,
+.layers__row--drop-line-after::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  left: calc(4px + var(--drop-depth, 0) * 12px + 14px);
+  right: 4px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--signal);
+  pointer-events: none;
 }
-.layers__row--drop-after {
-  box-shadow: inset 0 -2px 0 var(--signal);
+.layers__row--drop-line-before::before,
+.layers__row--drop-line-after::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  left: calc(4px + var(--drop-depth, 0) * 12px + 8px);
+  width: 6px;
+  height: 6px;
+  box-sizing: border-box;
+  border: 2px solid var(--signal);
+  border-radius: 50%;
+  background: var(--surface);
+  pointer-events: none;
 }
-.layers__row--drop-inside {
+.layers__row--drop-line-before::after {
+  top: -1px;
+}
+.layers__row--drop-line-before::before {
+  top: -3px;
+}
+.layers__row--drop-line-after::after {
+  bottom: -1px;
+}
+.layers__row--drop-line-after::before {
+  bottom: -3px;
+}
+.layers__row--drop-box {
   box-shadow: inset 0 0 0 1.5px var(--signal);
 }
 
