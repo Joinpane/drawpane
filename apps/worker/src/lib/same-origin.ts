@@ -10,8 +10,15 @@ const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
  * modern ones; requests with neither come from non-browser clients, which
  * CSRF can't drive.
  */
+/**
+ * Authenticated by a signed token in the URL, not a session cookie, so CSRF
+ * has nothing to ride on: mail apps post one-click unsubscribes from their
+ * own servers (RFC 8058).
+ */
+const TOKEN_AUTHENTICATED = new Set(["/api/email/unsubscribe"]);
+
 export const sameOrigin = createMiddleware<AppContext>(async (c, next) => {
-  if (!SAFE.has(c.req.method)) {
+  if (!SAFE.has(c.req.method) && !TOKEN_AUTHENTICATED.has(new URL(c.req.url).pathname)) {
     const origin = c.req.header("origin");
     const site = c.req.header("sec-fetch-site");
     const hosts = c.env.PUBLIC_ORIGIN

@@ -6,7 +6,8 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { readBody } from "../api/access";
-import type { AppContext, User } from "../env";
+import { emailSetup } from "../email/setup";
+import type { AppContext, Env, User } from "../env";
 import { conflict, notFound } from "../lib/http";
 import { signInMethods } from "./oauth";
 import { requireUser } from "./session";
@@ -54,6 +55,35 @@ export const account = new Hono<AppContext>()
     await c.env.DB.prepare("UPDATE users SET name = ? WHERE id = ?").bind(name, user.id).run();
     const updated: User = { ...user, name };
     return c.json({ user: updated });
+  })
+
+  /** How you hear about the inbox by email, and whether this instance sends email at all. */
+  .get("/email", async (c) => {
+    const user = requireUser(c);
+    return c.json(await emailPreferences(c.env, user.id));
+  })
+
+  .put("/email", async (c) => {
+    const user = requireUser(c);
+    const body = await readBody(
+      c,
+      z.object({
+        notifications: z.enum(["instant", "daily", "off"]),
+        digestHour: z.number().int().min(0).max(23).optional(),
+        timeZone: z
+          .string()
+          .max(64)
+          .refine((zone) => validTimeZone(zone), "Not a time zone.")
+          .optional(),
+      }),
+    );
+    await c.env.DB.prepare(
+      `UPDATE users SET email_notifications = ?, digest_hour = COALESCE(?, digest_hour),
+         time_zone = COALESCE(?, time_zone) WHERE id = ?`,
+    )
+      .bind(body.notifications, body.digestHour ?? null, body.timeZone ?? null, user.id)
+      .run();
+    return c.json(await emailPreferences(c.env, user.id));
   })
 
   .get("/shortcuts", async (c) => {
@@ -104,3 +134,28 @@ export const account = new Hono<AppContext>()
       .run();
     return c.json({ ok: true });
   });
+
+/** An IANA time zone the runtime knows ("Europe/Lisbon"). */
+function validTimeZone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function emailPreferences(env: Env, userId: string) {
+  const row = await env.DB.prepare(
+    "SELECT email_notifications, digest_hour, time_zone FROM users WHERE id = ?",
+  )
+    .bind(userId)
+    .first<{ email_notifications: string; digest_hour: number; time_zone: string | null }>();
+  return {
+    notifications: row?.email_notifications ?? "instant",
+    digestHour: row?.digest_hour ?? 9,
+    timeZone: row?.time_zone ?? null,
+    // Off on this instance: the choice is kept for when it's turned on.
+    available: emailSetup(env).sender !== null,
+  };
+}

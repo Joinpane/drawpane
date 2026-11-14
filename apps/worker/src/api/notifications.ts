@@ -38,14 +38,16 @@ const insert = (
     commentId: string | null;
     actorId: string;
     now: number;
+    /** Where the action came from, for links in emails (see migration 0015). */
+    origin: string | null;
   },
 ) =>
   db
     .prepare(
-      `INSERT OR IGNORE INTO notifications (id, user_id, kind, file_id, thread_id, comment_id, actor_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO notifications (id, user_id, kind, file_id, thread_id, comment_id, actor_id, created_at, origin)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .bind(newId(), n.userId, n.kind, n.fileId, n.threadId, n.commentId, n.actorId, n.now);
+    .bind(newId(), n.userId, n.kind, n.fileId, n.threadId, n.commentId, n.actorId, n.now, n.origin);
 
 /**
  * A new comment, starting a thread or replying in one: the people it
@@ -58,6 +60,7 @@ export async function commentNotifications(
     threadId: string;
     commentId: string;
     actorId: string;
+    origin: string | null;
     mentions: readonly string[];
     /** Whether the thread already existed: its people hear about a reply. */
     reply: boolean;
@@ -121,6 +124,7 @@ export async function editNotifications(
     threadId: string;
     commentId: string;
     actorId: string;
+    origin: string | null;
     /** Who the comment mentioned before the edit. */
     previous: readonly string[];
     mentions: readonly string[];
@@ -148,12 +152,21 @@ export async function editNotifications(
       .map((userId) =>
         db
           .prepare(
-            `INSERT OR IGNORE INTO notifications (id, user_id, kind, file_id, thread_id, comment_id, actor_id, created_at)
-             SELECT ?1, ?2, 'reply', ?3, ?4, ?5, ?6, ?7
+            `INSERT OR IGNORE INTO notifications (id, user_id, kind, file_id, thread_id, comment_id, actor_id, created_at, origin)
+             SELECT ?1, ?2, 'reply', ?3, ?4, ?5, ?6, ?7, ?8
               WHERE NOT EXISTS (SELECT 1 FROM notifications
                                  WHERE comment_id = ?5 AND user_id = ?2 AND kind = 'mention')`,
           )
-          .bind(newId(), userId, c.fileId, c.threadId, c.commentId, c.actorId, c.writtenAt),
+          .bind(
+            newId(),
+            userId,
+            c.fileId,
+            c.threadId,
+            c.commentId,
+            c.actorId,
+            c.writtenAt,
+            c.origin,
+          ),
       ),
   ];
 }
@@ -166,6 +179,7 @@ export function resolveNotifications(
     threadId: string;
     starterId: string | null;
     actorId: string;
+    origin: string | null;
     resolved: boolean;
     /** Whether it was resolved before: resolving twice (a stale screen) says nothing new. */
     wasResolved: boolean;

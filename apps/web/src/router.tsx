@@ -18,6 +18,7 @@ import { NoTeamPage } from "./auth/NoTeamPage";
 import { SetupPage } from "./auth/SetupPage";
 import { ShortcutsPage } from "./auth/ShortcutsPage";
 import { SignInPage } from "./auth/SignInPage";
+import { UnsubscribePage } from "./auth/UnsubscribePage";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { isTeamView, type TeamView } from "./dashboard/views";
 import { NewFilePage } from "./new-file/NewFilePage";
@@ -97,6 +98,14 @@ const signInRoute = createRoute({
     ...providerSearch(search),
   }),
   component: SignInPage,
+});
+
+const unsubscribeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/unsubscribe",
+  validateSearch: (search: Record<string, unknown>): { token?: string } =>
+    typeof search.token === "string" ? { token: search.token } : {},
+  component: UnsubscribePage,
 });
 
 const setupRoute = createRoute({
@@ -229,6 +238,7 @@ const sharedRoute = createRoute({
 });
 
 const routeTree = rootRoute.addChildren([
+  unsubscribeRoute,
   indexRoute,
   signInRoute,
   setupRoute,
