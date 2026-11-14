@@ -63,6 +63,11 @@ export function EditorPage() {
   return <FileEditor key={fileId} fileId={fileId} />;
 }
 
+/** Shortcuts that still apply while the tokens workspace hides the canvas. */
+const TOKENS_VIEW_ACTIONS = new Set(["edit.undo", "edit.redo", "view.command", "view.tokens"]);
+const inTokensView = (action: { id: string; group: string }) =>
+  TOKENS_VIEW_ACTIONS.has(action.id) || action.group === "File" || action.group === "Help";
+
 /** A control that Enter or Space activates by itself. */
 function isControl(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
@@ -98,6 +103,8 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [leftOpen, setLeftOpen] = useState(true);
   const [leftTab, setLeftTab] = useState<LeftTab>("layers");
   const [view, setView] = useState<"design" | "tokens">("design");
+  const viewRef = useRef(view);
+  viewRef.current = view;
   const [rightTab, setRightTab] = useState<RightTab>("design");
   // Viewers can't edit, so open them straight into Inspect (free for everyone).
   // The role is only known once the room welcomes us ("viewer" until then).
@@ -324,6 +331,10 @@ function FileEditor({ fileId }: { fileId: string }) {
     ] as const;
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTyping(e.target) || e.isComposing) return;
+      // Something closer already handled it (the layers panel's arrow keys, a menu): not a shortcut too.
+      if (e.defaultPrevented) return;
+      // A modal dialog has the keyboard (Escape closes it natively; preventing it wouldn't).
+      if (document.querySelector("dialog[open]:modal")) return;
       // Enter and Space press the focused button, menu item or link: never also a shortcut.
       if ((e.key === "Enter" || e.key === " ") && isControl(e.target)) return;
       // While a version is on screen, keys act on it (read-only) instead of the live file.
@@ -410,6 +421,8 @@ function FileEditor({ fileId }: { fileId: string }) {
         return;
       for (const action of ACTIONS) {
         if (triggers(action, e)) {
+          // The tokens workspace hides the canvas: only what makes sense there runs.
+          if (viewRef.current === "tokens" && !inTokensView(action)) return;
           e.preventDefault();
           if (!action.enabled || action.enabled(editor)) action.run(ctx);
           return;

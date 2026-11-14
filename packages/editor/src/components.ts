@@ -103,6 +103,27 @@ export function instancesOf(doc: Doc, componentId: string): readonly string[] {
   return cached.instances.get(componentId) ?? [];
 }
 
+/**
+ * The components an instance can swap to: every main component but its own,
+ * and none that would put a component inside itself. Variants read
+ * "Set / Variant", in the order they appear in the file.
+ */
+export function swapTargets(
+  doc: Doc,
+  instanceId: string,
+): { readonly id: string; readonly label: string }[] {
+  const instance = doc.get(instanceId);
+  const current = instance ? getProp(instance.props, "instanceOf") : null;
+  if (!instance || current === null) return [];
+  return listComponents(doc)
+    .filter((c) => c.id !== current && !wouldCycle(doc, c.id, instance.parent))
+    .map((c) => {
+      const set = componentSetOf(doc, c.id);
+      const name = getProp(c.props, "name") || "Component";
+      return { id: c.id, label: set ? `${getProp(set.props, "name") || "Set"} / ${name}` : name };
+    });
+}
+
 /** Every main component in the file, in document order. */
 export function listComponents(doc: Doc): NodeRecord[] {
   const out: NodeRecord[] = [];

@@ -4,9 +4,10 @@ import {
   instancesOf,
   isComponentSet,
   isMainComponent,
+  swapTargets,
 } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { Button, Icon, IconButton, PropertySection } from "@drawpane/ui";
+import { Button, DropdownMenu, Icon, IconButton, PropertySection } from "@drawpane/ui";
 import { useEffect, useState } from "react";
 import { useEditor } from "./hooks";
 import {
@@ -104,6 +105,7 @@ export function ComponentSection({ nodes }: { nodes: readonly NodeRecord[] }) {
               {`Reset ${changed} ${changed === 1 ? "change" : "changes"}`}
             </Button>
           ) : null}
+          {isRoot ? <SwapInstance instanceId={only.id} /> : null}
           {isRoot ? (
             <Button size="sm" variant="ghost" onClick={() => editor.detachInstances()}>
               Detach
@@ -112,6 +114,43 @@ export function ComponentSection({ nodes }: { nodes: readonly NodeRecord[] }) {
         </div>
       ) : null}
     </PropertySection>
+  );
+}
+
+/** "Swap…": the components this instance can become, keeping its overrides. */
+function SwapInstance({ instanceId }: { instanceId: string }) {
+  const editor = useEditor();
+  const [button, setButton] = useState<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const targets = swapTargets(editor.doc, instanceId);
+  if (targets.length === 0 || !editor.canEdit) return null;
+  return (
+    <>
+      <Button
+        ref={setButton}
+        size="sm"
+        variant="ghost"
+        icon="instance"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        Swap…
+      </Button>
+      {open && button ? (
+        <DropdownMenu
+          anchor={button}
+          label="Swap instance with"
+          align="start"
+          items={targets.map((t) => ({
+            id: t.id,
+            label: t.label,
+            onSelect: () => editor.swapInstance(instanceId, t.id),
+          }))}
+          onClose={() => setOpen(false)}
+        />
+      ) : null}
+    </>
   );
 }
 

@@ -91,6 +91,12 @@ export function VersionDetails({
                   <span className="version__count">{row.n}</span>
                 </li>
               ))}
+              {rows.reduce((sum, row) => sum + row.n, 0) > version.summary.edits ? (
+                // One edit can restyle and move at once: it counts under each.
+                <li className="version__note version__note--fine">
+                  Some edits made more than one kind of change.
+                </li>
+              ) : null}
             </ul>
           ) : (
             <p className="version__note">

@@ -204,6 +204,16 @@
   padding: 0 var(--space-100);
   box-sizing: border-box;
 }
+/*
+ * Below this width, centred tools would run into the file title: they start a
+ * gutter after it instead (and the people and Share keep to the right).
+ */
+@media (max-width: 1180px) {
+  .toolbar {
+    left: calc(12px + var(--size-pane) + 12px);
+    transform: none;
+  }
+}
 /* The shape tool and its menu of shapes. */
 .toolbar__group {
   display: inline-flex;

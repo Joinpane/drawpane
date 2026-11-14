@@ -159,6 +159,7 @@
 
 /* Main */
 .dash__main {
+  container: dash / inline-size;
   padding: var(--space-600) var(--space-800);
   min-width: 0;
 }
@@ -171,16 +172,39 @@
 }
 
 .dash__title {
+  /* The search gives way first; the title stays whole. */
+  flex: none;
   margin: 0 auto 0 0;
+  white-space: nowrap;
   font: 600 22px / 28px var(--font-ui);
   letter-spacing: -0.01em;
+}
+.dash__header > .dp-btn {
+  flex: none;
+}
+/* Narrow (a 1024px window with the sidebar): secondary buttons go icon-only, named still. */
+@container dash (max-width: 880px) {
+  .dash__header > .dp-btn:has(.dash__btn-label) {
+    position: relative;
+    width: var(--size-control-lg);
+    padding: 0;
+  }
+  .dash__btn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 .dash__search {
   display: flex;
   align-items: center;
   gap: var(--space-200);
-  width: 280px;
+  flex: 0 1 280px;
+  min-width: 160px;
   height: var(--size-control-lg);
   padding: 0 var(--space-300);
   border-radius: var(--radius-sm);

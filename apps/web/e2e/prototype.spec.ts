@@ -209,6 +209,11 @@ test.describe
       await page.getByRole("button", { name: "Share prototype" }).click();
       const dialog = page.getByRole("dialog");
       await expect(dialog.getByText("Turn this on to let anyone play")).toBeVisible();
+      // Escape closes the dialog, and only the dialog: the prototype keeps playing.
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      await expect(page.locator(".present__count")).toBeVisible();
+      await page.getByRole("button", { name: "Share prototype" }).click();
       await dialog
         .getByRole("switch", { name: "Anyone with the link can play the prototype" })
         .click();

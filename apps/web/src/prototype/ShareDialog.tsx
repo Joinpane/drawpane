@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
 import { Dialog } from "../app/Dialog";
+import "./share.css";
 
 /**
  * Sharing a file: a prototype link anyone can open (editors turn it on, off

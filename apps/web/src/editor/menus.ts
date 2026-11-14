@@ -4,7 +4,7 @@
  * the command bar never disagree. Items that can't run right now are left
  * out rather than greyed, so each menu only offers what makes sense.
  */
-import type { Editor } from "@drawpane/editor";
+import { type Editor, isInstanceRoot, swapTargets } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import type { ContextMenuAction, ContextMenuEntry, IconName } from "@drawpane/ui";
 import { ACTIONS, type Action, type ActionContext, formatShortcut } from "./actions";
@@ -160,6 +160,7 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
       ),
       a("component.create"),
       a("component.combine"),
+      swapMenu(host),
       a("component.main"),
       a("component.reset"),
       a("component.detach"),
@@ -183,6 +184,26 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
     [a("view.zoomSelection"), a("file.export", "Export…")],
     [deleteItem(host)],
   );
+}
+
+/** "Swap with" and the components a selected instance can become. */
+function swapMenu(host: MenuHost): Item {
+  const editor = host.ctx.editor;
+  const { selection } = editor.s;
+  const only = selection.length === 1 ? (selection[0] as string) : null;
+  if (!only || !editor.canEdit || !isInstanceRoot(editor.doc.get(only))) return null;
+  const targets = swapTargets(editor.doc, only);
+  if (targets.length === 0) return null;
+  return {
+    id: "component.swap",
+    label: "Swap with",
+    icon: "instance",
+    items: targets.map((t) => ({
+      id: `swap:${t.id}`,
+      label: t.label,
+      onSelect: () => editor.swapInstance(only, t.id),
+    })),
+  };
 }
 
 function deleteItem(host: MenuHost): Item {
