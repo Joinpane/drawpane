@@ -120,6 +120,47 @@ test.describe
       await expect(bo.getByRole("button", { name: /Following Ana Lima/ })).toHaveCount(0);
     });
 
+    test("an idle cursor fades from the other person's screen, and comes back when it moves", async () => {
+      test.setTimeout(30_000);
+      const overlay = bo.locator(".canvas__overlay");
+      const box = await overlay.boundingBox();
+      if (!box) throw new Error("no canvas");
+      /** How opaque Bo's cursor is on Ana's overlay, just inside its arrow. */
+      const boOnAna = () =>
+        ana.evaluate(() => {
+          const e = (
+            window as unknown as {
+              drawpane: {
+                s: {
+                  peers: Map<
+                    string,
+                    { presence: { cursor: { x: number; y: number } | null } | null }
+                  >;
+                  camera: { toScreen(p: { x: number; y: number }): { x: number; y: number } };
+                };
+              };
+            }
+          ).drawpane;
+          const cursor = [...e.s.peers.values()][0]?.presence?.cursor;
+          const canvas = document.querySelector<HTMLCanvasElement>(".canvas__overlay");
+          const ctx = canvas?.getContext("2d");
+          if (!cursor || !canvas || !ctx) return -1;
+          const p = e.s.camera.toScreen(cursor);
+          const k = canvas.width / canvas.getBoundingClientRect().width;
+          return ctx.getImageData((p.x + 2) * k, (p.y + 7) * k, 1, 1).data[3] ?? 0;
+        });
+      await bo.mouse.move(box.x + 400, box.y + 300);
+      await bo.mouse.move(box.x + 420, box.y + 310, { steps: 3 });
+      await expect.poll(boOnAna).toBeGreaterThan(200);
+      const still = Date.now();
+      // Calm: once Bo has been still a few seconds, his cursor is gone from Ana's view.
+      await expect.poll(boOnAna, { timeout: 8_000 }).toBe(0);
+      expect(Date.now() - still).toBeGreaterThan(2_500);
+      // And back the moment he moves.
+      await bo.mouse.move(box.x + 440, box.y + 320, { steps: 3 });
+      await expect.poll(boOnAna).toBeGreaterThan(200);
+    });
+
     test("Ana spotlights; Bo is asked, follows, and is told when she leaves", async () => {
       await ana.getByRole("button", { name: "People in this file" }).click();
       await ana.getByRole("button", { name: "Spotlight me" }).click();

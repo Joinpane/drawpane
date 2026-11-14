@@ -288,13 +288,20 @@ export function drawOverlay(
   }
 
   if (!focusMode) {
+    const shown = new Set<string>();
     for (const peer of peers.values()) {
       const cursor = peer.presence?.cursor;
       if (!cursor || peer.presence?.pageId !== pageId) continue;
+      shown.add(peer.sessionId);
+      // Still for a while, it fades; the person you follow stays, since you're watching them.
+      const faded = editor.cursors.opacity(peer.sessionId, cursor);
+      const opacity = editor.s.following === peer.sessionId ? 1 : faded;
+      if (opacity <= 0) continue;
       const color =
         peer.kind === "agent"
           ? theme.agent
           : (theme.presence[(peer.color - 1) % theme.presence.length] ?? theme.guide);
+      ctx.globalAlpha = opacity;
       drawCursor(
         ctx,
         toScreen(cursor),
@@ -303,7 +310,9 @@ export function drawOverlay(
         peer.name,
         theme.fontUi,
       );
+      ctx.globalAlpha = 1;
     }
+    editor.cursors.keepOnly(shown);
   }
 }
 

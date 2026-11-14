@@ -95,6 +95,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     // A zoom draws quick stand-in frames; once it pauses, one exact frame follows.
     let exact = false;
     let settle = 0;
+    let fadeTimer = 0;
     const draw = () => {
       frame = 0;
       const s = editor.s;
@@ -119,6 +120,18 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       if (overlayDirty) {
         drawOverlay(octx, editor, interaction, theme, dpr, imagesFor(editor));
         overlayDirty = false;
+        // Idle cursors fade: draw every frame while one is fading, else wake when the next starts.
+        clearTimeout(fadeTimer);
+        const wait = editor.cursors.nextChange();
+        if (wait === 0) {
+          overlayDirty = true;
+          schedule();
+        } else if (wait !== null) {
+          fadeTimer = window.setTimeout(() => {
+            overlayDirty = true;
+            schedule();
+          }, wait + 16);
+        }
       }
       timing.record(t1 - t0, performance.now() - t1);
     };
@@ -206,6 +219,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       offFonts();
       if (frame) cancelAnimationFrame(frame);
       clearTimeout(settle);
+      clearTimeout(fadeTimer);
     };
   }, [editor, interaction, renderer, measurer]);
 

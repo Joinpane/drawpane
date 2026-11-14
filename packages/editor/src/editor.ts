@@ -43,6 +43,7 @@ import {
 } from "./components";
 import { constraintOps } from "./constraints";
 import * as crop from "./crop-session";
+import { CursorActivity } from "./cursors";
 import { Doc } from "./doc";
 import { dependsOn, parseDtcg } from "./dtcg";
 import type { ExplainAxis } from "./explain";
@@ -280,6 +281,8 @@ export class Editor {
   readonly doc = new Doc();
   readonly scene = new Scene(this.doc);
   readonly history = new History();
+  /** When each collaborator's cursor last moved: idle ones fade. */
+  readonly cursors = new CursorActivity();
   readonly sync: SyncEngine;
   readonly measurer: TextMeasurer;
   readonly state = new Store<EditorState>({

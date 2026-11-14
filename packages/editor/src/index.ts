@@ -5,6 +5,7 @@ export * from "./constraints";
 export * from "./contrast";
 export * from "./crop";
 export * from "./crop-session";
+export * from "./cursors";
 export * from "./doc";
 export * from "./dtcg";
 export * from "./editor";
