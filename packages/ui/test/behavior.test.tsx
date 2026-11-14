@@ -268,6 +268,43 @@ describe("NumberField", () => {
     expect(onChange).toHaveBeenCalledTimes(1);
   });
 
+  it("clears an optional value when emptied, and reads its absence as None", async () => {
+    const user = userEvent.setup();
+    const onClear = vi.fn();
+    const { input, onChange } = setup({ defaultValue: 120, nullLabel: "None", onClear });
+    await user.clear(input);
+    await user.keyboard("{Enter}");
+    expect(onClear).toHaveBeenCalledTimes(1);
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("None");
+    expect(input.getAttribute("aria-valuetext")).toBe("None");
+    // Emptying it again changes nothing; typing sets it.
+    await user.keyboard("{Enter}");
+    expect(onClear).toHaveBeenCalledTimes(1);
+    await user.type(input, "80{Enter}");
+    expect(onChange).toHaveBeenLastCalledWith(80);
+  });
+
+  it("takes every key typed after Enter on an unchanged value", async () => {
+    const user = userEvent.setup();
+    const { input, onChange } = setup();
+    await user.click(input);
+    await user.keyboard("{Enter}");
+    // Enter selects the value, so typing replaces it, and every key counts.
+    await user.keyboard("80{Enter}");
+    expect(input.value).toBe("80");
+    expect(onChange).toHaveBeenLastCalledWith(80);
+  });
+
+  it("keeps the value when emptied without onClear", async () => {
+    const user = userEvent.setup();
+    const { input, onChange } = setup();
+    await user.clear(input);
+    await user.keyboard("{Enter}");
+    expect(input.value).toBe("300");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("reverts on Escape", async () => {
     const user = userEvent.setup();
     const { input, onChange } = setup();

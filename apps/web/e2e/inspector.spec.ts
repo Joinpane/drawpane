@@ -1,7 +1,8 @@
 /**
  * The inspector in depth, in a real browser: frame presets, the color picker
  * (solid, gradient, alpha), shadow color, per-corner radius, constraints that
- * follow a resize, and selection colors. Runs on its own throwaway instance.
+ * follow a resize, selection colors, and min/max limits on Hug and Fill.
+ * Runs on its own throwaway instance.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -154,5 +155,43 @@ test.describe
         .poll(async () => (await props(page, second)).fills)
         .toEqual([{ type: "solid", color: "#101010" }]);
       expect((await props(page, frame)).fills).toEqual([{ type: "solid", color: "#101010" }]);
+    });
+
+    test("limits how far Fill grows, from the inspector and the command bar", async () => {
+      const item = (await page.evaluate(() => {
+        const e = (window as unknown as { drawpane: Debug }).drawpane;
+        const row = e.createLayer("frame", { x: 600, y: 40, width: 400, height: 80 }, e.s.pageId, {
+          name: "Row",
+          layoutMode: "row",
+          fills: [{ type: "solid", color: "#ffffff" }],
+        }) as string;
+        return e.createLayer("rect", { x: 0, y: 0, width: 100, height: 40 }, row, {
+          name: "Bar",
+          sizingH: "fill",
+          fills: [{ type: "solid", color: "#2b4fd6" }],
+        });
+      })) as string;
+      await select(page, [item]);
+      await expect.poll(async () => (await props(page, item)).width).toBe(400);
+      // Only the axis that fills offers limits; empty means none.
+      const max = panel(page).getByRole("spinbutton", { name: "Max width" });
+      await expect(max).toHaveAttribute("placeholder", "None");
+      await expect(panel(page).getByRole("spinbutton", { name: "Max height" })).toHaveCount(0);
+      await max.fill("120");
+      await max.press("Enter");
+      await expect.poll(async () => (await props(page, item)).width).toBe(120);
+      // Emptied, the limit goes and Fill takes the row again.
+      await max.fill("");
+      await max.press("Enter");
+      await expect.poll(async () => (await props(page, item)).maxWidth ?? null).toBeNull();
+      await expect.poll(async () => (await props(page, item)).width).toBe(400);
+      // The command bar sets one too, and says what it was. Escape hands the keyboard back first.
+      await max.press("Escape");
+      await page.keyboard.press("ControlOrMeta+k");
+      await page.keyboard.type("maxw 240");
+      await expect(page.getByRole("option", { name: /Max width/ })).toContainText("None");
+      await page.keyboard.press("Enter");
+      await expect.poll(async () => (await props(page, item)).width).toBe(240);
+      await expect(max).toHaveValue("240");
     });
   });
