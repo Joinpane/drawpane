@@ -18,6 +18,8 @@ describe("names", () => {
     expect(suggestName("My Design Team")).toBe("my-design-team");
     expect(suggestName("--drawpane__2--")).toBe("drawpane-2");
     expect(suggestName("日本語")).toBe("drawpane");
+    expect(suggestName("über-design")).toBe("uber-design");
+    expect(suggestName("Café Équipe")).toBe("cafe-equipe");
     expect(suggestName("a".repeat(80))).toHaveLength(63);
   });
 

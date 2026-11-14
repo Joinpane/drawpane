@@ -24,7 +24,7 @@
     },
     "@drawpane/worker#build": {
       "dependsOn": ["@drawpane/web#build"],
-      "outputs": []
+      "outputs": ["dist/**"]
     },
     "@drawpane/worker#test": {
       "dependsOn": ["@drawpane/web#build"],

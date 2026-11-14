@@ -58,6 +58,11 @@ function ago(at: number, now = Date.now()): string {
   return RELATIVE.format(Math.round(hours / 24), "day");
 }
 
+/** "1 file", "3 files". */
+function count(n: number, noun: string): string {
+  return `${NUMBER.format(n)} ${noun}${n === 1 ? "" : "s"}`;
+}
+
 const STATUS_LABEL = { healthy: "Healthy", slow: "Slow", down: "Down" } as const;
 
 export function HealthPage() {
@@ -160,7 +165,7 @@ export function HealthPage() {
               counted here: your Cloudflare dashboard has the bill. Idle files sleep and cost
               nothing but storage
               {data
-                ? `: ${NUMBER.format(data.files.total)} files, ${NUMBER.format(data.files.busy)} being edited now.`
+                ? `: ${count(data.files.total, "file")}, ${NUMBER.format(data.files.busy)} being edited now.`
                 : "."}
             </p>
           </section>
@@ -188,7 +193,7 @@ export function HealthPage() {
                 {data?.lastBackupAt
                   ? `Last snapshot to R2: ${ago(data.lastBackupAt)} · ${data.retentionDays}-day restore`
                   : data
-                    ? "No snapshots yet: one is taken once a file has been edited."
+                    ? "No snapshots yet: one is saved once editing pauses for 10 minutes, and hourly during long sessions."
                     : "…"}
               </span>
             </p>
