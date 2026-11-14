@@ -2,15 +2,45 @@
 
 Drawpane runs entirely in your own Cloudflare account: one Worker, one Durable Object class (a FileRoom per file), a D1 database for accounts and file lists, and an R2 bucket for snapshots and media. Nothing runs anywhere else, and an idle instance costs only its storage.
 
-A one-command installer (`npm create drawpane`) is on the roadmap for v0.1. Until then, these steps take about ten minutes.
+## Install
 
-## What you need
+You need a Cloudflare account on the Workers Paid plan (Durable Objects with SQLite storage need it) and Node 22 or newer. Then:
 
-- A Cloudflare account on the Workers Paid plan (Durable Objects with SQLite storage need it), and a domain on Cloudflare.
+```sh
+npm create drawpane my-design
+```
+
+The installer:
+
+1. Signs you in to Cloudflare in your browser (or uses `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` when they're set).
+2. Asks which account to use, what to call the Worker, and whether to serve it on your own domain. Leave the domain empty for a free `<name>.<subdomain>.workers.dev` address; a domain has to be on a zone in the same account.
+3. Creates a D1 database and an R2 bucket, applies the migrations, and deploys, with a generated session secret and a one-time setup token.
+4. Opens the setup page with the token filled in. Create your account there: you own the first team and can invite everyone else.
+
+Until the installer is published to npm, run it from a clone of this repository: `pnpm install && pnpm build && node packages/create-drawpane/dist/cli.js my-design`.
+
+The folder it makes (`my-design/`) is your instance: `drawpane.json` records what was chosen and what's deployed, `wrangler.jsonc` is generated from it, and `server/` holds the release. Keep it; you upgrade from it. It holds no secrets, so it's safe to commit. If an install is interrupted, run the same command again: it picks up where it stopped and never creates anything twice.
+
+For scripts and CI, every question has a flag: `npm create drawpane my-design -- --yes --account <name or id> --domain design.example.com`. See `--help`.
+
+## Upgrading
+
+In the instance's folder:
+
+```sh
+npm create drawpane@latest upgrade
+```
+
+It swaps in the new release, applies new database migrations (additive, so the running version keeps working), and deploys. Secrets and data are left as they are. It won't move an instance to an older version.
+
+## Installing by hand
+
+The installer runs these steps; they're here as a reference, or for setups it doesn't cover. They take about ten minutes. You need:
+
 - Node 26 and pnpm 12. With [mise](https://mise.jdx.dev), `mise install` in the repo sets both up.
 - An API token with **Workers Scripts**, **Workers Routes**, **D1**, **Workers R2 Storage** and **Zone DNS** edit permissions, exported as `CLOUDFLARE_API_TOKEN`, plus `CLOUDFLARE_ACCOUNT_ID`.
 
-## Steps
+Then:
 
 1. **Install dependencies**
 
@@ -48,9 +78,7 @@ A one-command installer (`npm create drawpane`) is on the roadmap for v0.1. Unti
 
 6. **Create your account.** Open your domain. A fresh instance sends you to **Set up this instance**: enter your name, email and the setup token, then create a passkey. You now own the first team and can invite everyone else from the dashboard.
 
-## Upgrading
-
-Pull the new version, then run step 5 again. Migrations are additive and run before the new Worker takes traffic.
+To upgrade an instance installed by hand, pull the new version and run step 5 again. Migrations are additive and run before the new Worker takes traffic.
 
 ## Fonts
 
@@ -58,7 +86,7 @@ The font picker offers the open-source Google Fonts catalog. The first time some
 
 Teams can also upload their own fonts (TrueType, OpenType, WOFF or WOFF2) from **Fonts** in the dashboard. They're kept in your R2 bucket under `fonts/team/`, read on upload for their family, weight and style, and served only to members of the team that uploaded them.
 
-To keep the Worker from contacting Google at all, set `GOOGLE_FONTS` to `off` in the `vars` of `wrangler.jsonc`. The picker then offers only the built-in fonts, system fonts and fonts installed on each person's computer.
+To keep the Worker from contacting Google at all, set `GOOGLE_FONTS` to `off`: in an installed instance, add `"vars": { "GOOGLE_FONTS": "off" }` to `drawpane.json` and run `npm create drawpane@latest upgrade -- --force` in its folder; installed by hand, put it in the `vars` of `wrangler.jsonc`. The picker then offers only the built-in fonts, system fonts and fonts installed on each person's computer.
 
 ## Signing in with GitHub or Google
 
@@ -69,7 +97,7 @@ Passkeys work out of the box. To also offer **Continue with GitHub** and **Conti
 | GitHub | GitHub → Settings → Developer settings → OAuth Apps → **New OAuth App** | `https://<your-domain>/api/auth/oauth/github/callback` |
 | Google | Google Cloud console → APIs & Services → Credentials → **Create credentials → OAuth client ID** (type "Web application") | `https://<your-domain>/api/auth/oauth/google/callback` |
 
-Then store the values as secrets:
+Then store the values as secrets, from the instance's folder (or `apps/worker`, installed by hand):
 
 ```sh
 npx wrangler secret put GITHUB_CLIENT_ID
