@@ -4,7 +4,7 @@ import {
   Icon,
   IconButton,
   type IconName,
-  Menu,
+  MenuButton,
   type MenuItem,
   TextField,
 } from "@drawpane/ui";
@@ -421,20 +421,6 @@ function FileCard({
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(file.name);
   const [error, setError] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuWrap = useRef<HTMLDivElement>(null);
-  const menuButton = useRef<HTMLButtonElement>(null);
-
-  // A click anywhere else closes the menu.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (e: PointerEvent) => {
-      if (!menuWrap.current?.contains(e.target as Node)) setMenuOpen(false);
-    };
-    window.addEventListener("pointerdown", onDown, true);
-    return () => window.removeEventListener("pointerdown", onDown, true);
-  }, [menuOpen]);
-
   const menuItems: MenuItem[] = [
     { label: "Rename", icon: "rename", onSelect: () => setRenaming(true) },
     {
@@ -565,28 +551,7 @@ function FileCard({
               ) : null}
             </>
           ) : (
-            <div className="dash__card-menu" ref={menuWrap}>
-              <IconButton
-                ref={menuButton}
-                icon="more"
-                label={`Options for ${file.name}`}
-                aria-haspopup="menu"
-                aria-expanded={menuOpen}
-                onClick={() => setMenuOpen((v) => !v)}
-              />
-              {menuOpen ? (
-                <Menu
-                  className="dash__card-dropdown"
-                  label={`Options for ${file.name}`}
-                  items={menuItems}
-                  autoFocus
-                  onClose={() => {
-                    setMenuOpen(false);
-                    menuButton.current?.focus();
-                  }}
-                />
-              ) : null}
-            </div>
+            <MenuButton label={`Options for ${file.name}`} items={menuItems} />
           )}
         </div>
       ) : null}

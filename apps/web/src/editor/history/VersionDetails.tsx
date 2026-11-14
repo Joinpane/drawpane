@@ -1,7 +1,6 @@
 import type { Editor } from "@drawpane/editor";
 import type { VersionInfo } from "@drawpane/model";
-import { Button, Icon, IconButton, Menu, type MenuItem } from "@drawpane/ui";
-import { useEffect, useRef, useState } from "react";
+import { Button, Icon, MenuButton, type MenuItem } from "@drawpane/ui";
 import { modKey } from "../../app/format";
 import { Avatar } from "../comments/people";
 import { useEditorStateOutside } from "../hooks";
@@ -48,20 +47,6 @@ export function VersionDetails({
 }: VersionDetailsProps) {
   const selection = useEditorStateOutside(preview, (s) => s.selection);
   const rows = changeRows(version);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuWrap = useRef<HTMLSpanElement>(null);
-  const menuButton = useRef<HTMLButtonElement>(null);
-
-  // A click anywhere else closes the menu.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (e: PointerEvent) => {
-      if (!menuWrap.current?.contains(e.target as Node)) setMenuOpen(false);
-    };
-    window.addEventListener("pointerdown", onDown, true);
-    return () => window.removeEventListener("pointerdown", onDown, true);
-  }, [menuOpen]);
-
   const menuItems: MenuItem[] = [
     {
       id: "name",
@@ -82,28 +67,7 @@ export function VersionDetails({
           <p className="version__byline">{versionByline(version)}</p>
         </div>
         {canEdit ? (
-          <span className="version__menu" ref={menuWrap}>
-            <IconButton
-              ref={menuButton}
-              icon="more"
-              label="Version options"
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              onClick={() => setMenuOpen((v) => !v)}
-            />
-            {menuOpen ? (
-              <Menu
-                className="version__dropdown"
-                label="Version options"
-                items={menuItems}
-                autoFocus
-                onClose={() => {
-                  setMenuOpen(false);
-                  menuButton.current?.focus();
-                }}
-              />
-            ) : null}
-          </span>
+          <MenuButton label="Version options" items={menuItems} className="version__more" />
         ) : null}
       </header>
       {version.description ? <p className="version__description">{version.description}</p> : null}

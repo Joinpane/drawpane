@@ -194,17 +194,9 @@
   font-weight: 400;
   color: var(--ink-muted);
 }
-.version__menu {
-  position: relative;
-  display: inline-flex;
+/* Lines up with the title's first line. */
+.version__more {
   margin-top: -2px;
-}
-.version__dropdown {
-  position: absolute;
-  top: calc(100% + var(--space-100));
-  right: 0;
-  z-index: 3;
-  min-width: 184px;
 }
 .version__description {
   margin: 0;
