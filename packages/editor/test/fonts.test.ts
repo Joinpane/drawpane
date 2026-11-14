@@ -3,11 +3,19 @@ import { describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
 import type { TextMeasurer } from "../src/text";
 
-/** Measures 8px a character, or 12px once "Fraunces" has "loaded". */
+/**
+ * Measures 8px a character, or 12px once "Fraunces" has "loaded". Like the
+ * real measurer, it bumps its generation when a font arrives, so layouts
+ * cached with the fallback are redone.
+ */
 function setup() {
   let loaded = false;
+  let generation = 0;
   const measurer: TextMeasurer = {
     width: (font, text) => text.length * (loaded && font.includes("Fraunces") ? 12 : 8),
+    get generation() {
+      return generation;
+    },
   };
   const editor = new Editor({ measurer, clientId: "t" });
   editor.state.set({ role: "editor" });
@@ -15,7 +23,13 @@ function setup() {
     { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
   ]);
   editor.setPage("p");
-  return { editor, load: () => (loaded = true) };
+  return {
+    editor,
+    load: () => {
+      loaded = true;
+      generation++;
+    },
+  };
 }
 
 const width = (editor: Editor, id: string) =>

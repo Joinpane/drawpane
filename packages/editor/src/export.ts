@@ -248,7 +248,8 @@ export async function renderThumbnail(
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  renderer.renderNodes(ctx, ids, padded, scale, getProp(page.props, "backgroundColor"));
+  // A thumbnail is small: unreadable text draws as bars, as on the canvas.
+  renderer.renderNodes(ctx, ids, padded, scale, getProp(page.props, "backgroundColor"), true);
   return canvas.convertToBlob({
     type: options.type ?? "image/webp",
     quality: options.quality ?? 0.85,

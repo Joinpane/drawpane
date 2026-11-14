@@ -18,11 +18,15 @@ import { isMac } from "../app/format";
 import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { FrameNameEditor } from "./FrameNameEditor";
+import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
 import { imagesFor } from "./media";
 import { TextEditor } from "./TextEditor";
 import { openMenu } from "./ui-state";
 import { VectorHints } from "./VectorHints";
+
+/** How long a zoom rests before its stand-in frames give way to an exact one. */
+const SETTLE_MS = 120;
 
 function readTheme(): OverlayTheme {
   const css = getComputedStyle(document.documentElement);
@@ -81,17 +85,40 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let frame = 0;
     let last = editor.s;
 
+    const timing = frameStatsFor(editor);
+    timing.redraw = () => {
+      renderer.invalidate();
+      exact = true;
+      contentDirty = true;
+      schedule();
+    };
+    // A zoom draws quick stand-in frames; once it pauses, one exact frame follows.
+    let exact = false;
+    let settle = 0;
     const draw = () => {
       frame = 0;
       const s = editor.s;
+      const t0 = performance.now();
       if (contentDirty && s.pageId) {
-        renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr);
+        const done = renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr, { exact });
+        exact = false;
+        clearTimeout(settle);
+        if (!done)
+          settle = window.setTimeout(() => {
+            exact = true;
+            contentDirty = true;
+            schedule();
+          }, SETTLE_MS);
         contentDirty = false;
+        timing.drawn = renderer.stats.drawn;
+        timing.culled = renderer.stats.culled;
       }
+      const t1 = performance.now();
       if (overlayDirty) {
         drawOverlay(octx, editor, interaction, theme, dpr, imagesFor(editor));
         overlayDirty = false;
       }
+      timing.record(t1 - t0, performance.now() - t1);
     };
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(draw);
@@ -168,6 +195,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       document.fonts.removeEventListener("loadingdone", onFonts);
       offFonts();
       if (frame) cancelAnimationFrame(frame);
+      clearTimeout(settle);
     };
   }, [editor, interaction, renderer, measurer]);
 
