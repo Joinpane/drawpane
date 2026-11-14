@@ -10,6 +10,7 @@ import { freshInstance, type Instance } from "./fresh-instance";
 type Debug = {
   s: {
     pageId: string;
+    selection: string[];
     editingText: string | null;
     textSelection: { start: number; end: number } | null;
     camera: { toScreen(p: { x: number; y: number }): { x: number; y: number } };

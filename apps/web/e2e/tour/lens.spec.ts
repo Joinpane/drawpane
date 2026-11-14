@@ -4,9 +4,8 @@
  * an auto layout frame, a frame bigger than the screen, and with its fill
  * picker open. Run with `pnpm --filter @drawpane/web tour`.
  */
-import { type BrowserContext, expect, type Page, test } from "@playwright/test";
-
-const OUT = process.env.TOUR_OUT ?? "tour-shots";
+import { expect } from "@playwright/test";
+import { passkey, shot, test } from "./harness";
 
 type W = {
   drawpane: {
@@ -22,33 +21,6 @@ type W = {
     s: { pageId: string };
   };
 };
-
-async function passkey(context: BrowserContext, page: Page) {
-  const cdp = await context.newCDPSession(page);
-  await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-    },
-  });
-}
-
-async function shot(page: Page, name: string) {
-  for (const theme of ["light", "dark"] as const) {
-    await page.evaluate((t) => {
-      if (t === "dark") document.documentElement.dataset.theme = "dark";
-      else delete document.documentElement.dataset.theme;
-    }, theme);
-    await page.waitForTimeout(250);
-    await page.screenshot({ path: `${OUT}/${name}-${theme}.png` });
-  }
-  await page.evaluate(() => delete document.documentElement.dataset.theme);
-}
 
 test("selection lens tour", async ({ browser }) => {
   test.setTimeout(120_000);

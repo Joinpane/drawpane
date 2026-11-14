@@ -3,37 +3,9 @@
  * version on the canvas, restoring a layer and the whole file, in both themes.
  * Run with `pnpm --filter @drawpane/web tour`.
  */
-import { type BrowserContext, expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { buildMobileApp } from "../prototype-fixture";
-
-const OUT = process.env.TOUR_OUT ?? "tour-shots";
-
-async function passkey(context: BrowserContext, page: Page) {
-  const cdp = await context.newCDPSession(page);
-  await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-    },
-  });
-}
-
-async function shot(page: Page, name: string) {
-  for (const theme of ["light", "dark"] as const) {
-    await page.evaluate((t) => {
-      if (t === "dark") document.documentElement.dataset.theme = "dark";
-      else delete document.documentElement.dataset.theme;
-    }, theme);
-    await page.waitForTimeout(300);
-    await page.screenshot({ path: `${OUT}/${name}-${theme}.png` });
-  }
-  await page.evaluate(() => delete document.documentElement.dataset.theme);
-}
+import { passkey, shot, test } from "./harness";
 
 type Debug = {
   commit(ops: unknown[], label?: string): boolean;

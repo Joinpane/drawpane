@@ -39,7 +39,16 @@ test.describe
 
     let instance: Instance;
     let page: Page;
-    let ids: Record<string, string>;
+    let ids: {
+      home: string;
+      list: string;
+      rowA: string;
+      rowB: string;
+      title: string;
+      other: string;
+      /** Made by the "last layer in a frame" test. */
+      label?: string;
+    };
 
     test.beforeAll(async ({ browser }) => {
       test.setTimeout(180_000);
