@@ -1291,14 +1291,24 @@ export class Editor {
       const w = getProp(n.props, "width");
       const h = getProp(n.props, "height");
       const centre = apply(local, { x: w / 2, y: h / 2 });
-      const flipped = getProp(n.props, "flipX") !== getProp(n.props, "flipY");
-      const rotation = round2(rotationOf(local) + (flipped && getProp(n.props, "flipX") ? 180 : 0));
+      // The layer's transform is translate · rotate · flip. A mirror (leaving a
+      // flipped frame, say) shows as a negative determinant: keep the layer's
+      // own vertical flip, flip it horizontally to match, and read the
+      // rotation from what's left, so it looks exactly as it did.
+      const [a, b, c, d] = local;
+      const mirrored = a * d - b * c < 0;
+      const flipY = getProp(n.props, "flipY");
+      const flipX = mirrored !== flipY;
+      const sx = flipX ? -1 : 1;
+      const rotation = round2(normalizeDegrees((Math.atan2(b * sx, a * sx) * 180) / Math.PI));
       ops.push(
         { op: "set", id: n.id, prop: "x", value: round2(centre.x - w / 2) },
         { op: "set", id: n.id, prop: "y", value: round2(centre.y - h / 2) },
       );
       if (rotation !== round2(getProp(n.props, "rotation")))
         ops.push({ op: "set", id: n.id, prop: "rotation", value: rotation });
+      if (flipX !== getProp(n.props, "flipX"))
+        ops.push({ op: "set", id: n.id, prop: "flipX", value: flipX ? true : null });
     };
     convert(node);
     return ops;

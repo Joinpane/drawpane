@@ -494,6 +494,23 @@ export class LayoutEngine {
     else b.height = value;
   }
 
+  /** Text layers whose width or height auto layout now decides (by Fill or stretch). */
+  readonly #claimed = new Map<string, Set<Axis>>();
+
+  /**
+   * Sizes a child by Fill or stretch. A text layer that sized itself on that
+   * axis gives it up to the layout, like Figma's: auto width becomes auto
+   * height, and with its height taken too, fixed. Otherwise the text and the
+   * layout would both claim the size, and it would jump when either let go.
+   */
+  #claim(child: NodeRecord, axis: Axis, value: number): void {
+    this.#set(child.id, axis, value);
+    if (child.type !== "text") return;
+    const axes = this.#claimed.get(child.id) ?? new Set<Axis>();
+    axes.add(axis);
+    this.#claimed.set(child.id, axes);
+  }
+
   #children(frame: NodeRecord): NodeRecord[] {
     return flowChildren(this.#doc, frame.id);
   }
@@ -685,7 +702,7 @@ export class LayoutEngine {
         for (const child of open) {
           const [min, max] = limits(child, main);
           const value = clamp(share, min, max);
-          this.#set(child.id, main, value);
+          this.#claim(child, main, value);
           if (value !== share) used += value;
           else next.push(child);
         }
@@ -701,7 +718,7 @@ export class LayoutEngine {
       for (const child of line) {
         if (!stretches(child, cross, crossAlign(frame, child))) continue;
         const [min, max] = limits(child, cross);
-        this.#set(child.id, cross, clamp(thickness[i] ?? 0, min, max));
+        this.#claim(child, cross, clamp(thickness[i] ?? 0, min, max));
       }
     });
 
@@ -819,8 +836,8 @@ export class LayoutEngine {
       const cell = cells.get(child.id) as GridCell;
       if (!stretches(child, "h", cellAlign(frame, child, "h"))) continue;
       const [min, max] = limits(child, "h");
-      this.#set(
-        child.id,
+      this.#claim(
+        child,
         "h",
         clamp(span(columns, cell.column, cell.columnSpan, columnGap), min, max),
       );
@@ -839,7 +856,7 @@ export class LayoutEngine {
       const cell = cells.get(child.id) as GridCell;
       if (!stretches(child, "v", cellAlign(frame, child, "v"))) continue;
       const [min, max] = limits(child, "v");
-      this.#set(child.id, "v", clamp(span(rows, cell.row, cell.rowSpan, rowGap), min, max));
+      this.#claim(child, "v", clamp(span(rows, cell.row, cell.rowSpan, rowGap), min, max));
     }
     for (const child of children) if (isLayoutFrame(child)) this.measure(child);
 
@@ -928,6 +945,18 @@ export class LayoutEngine {
       }
     }
     const ops: Op[] = [];
+    for (const [id, axes] of this.#claimed) {
+      const node = this.#doc.get(id);
+      if (!node) continue;
+      const mode = getProp(node.props, "textAutoResize");
+      const next =
+        axes.has("v") && mode !== "none"
+          ? "none"
+          : axes.has("h") && mode === "width"
+            ? "height"
+            : mode;
+      if (next !== mode) ops.push({ op: "set", id, prop: "textAutoResize", value: next });
+    }
     for (const [id, at] of moved) {
       const node = this.#doc.get(id);
       if (!node) continue;

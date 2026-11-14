@@ -154,6 +154,31 @@ describe("Editor", () => {
     }
   });
 
+  it("keeps a layer mirrored when it leaves a flipped frame", () => {
+    // A frame flipped horizontally, holding a layer off to its left side, rotated a little.
+    const frame = editor.createLayer(
+      "frame",
+      { x: 0, y: 0, width: 200, height: 100 },
+      "p",
+    ) as string;
+    const inner = editor.createLayer("rect", { x: 10, y: 20, width: 40, height: 30 }, frame, {
+      rotation: 15,
+    }) as string;
+    editor.select([frame]);
+    editor.flip("horizontal");
+    const before = editor.scene.corners(inner);
+    editor.select([frame]);
+    editor.ungroup();
+    expect(editor.doc.get(inner)?.parent).toBe("p");
+    // Exactly where it was, corner for corner: still mirrored.
+    const after = editor.scene.corners(inner);
+    after?.forEach((p, i) => {
+      expect(p.x).toBeCloseTo(before?.[i]?.x ?? Number.NaN, 2);
+      expect(p.y).toBeCloseTo(before?.[i]?.y ?? Number.NaN, 2);
+    });
+    expect(props(editor, inner).flipX).toBe(true);
+  });
+
   it("wraps a selection in an auto-layout frame that hugs it, keeping the space between", () => {
     const a = editor.createLayer("rect", { x: 100, y: 100, width: 40, height: 20 }, "p") as string;
     const b = editor.createLayer("rect", { x: 200, y: 100, width: 60, height: 20 }, "p") as string;

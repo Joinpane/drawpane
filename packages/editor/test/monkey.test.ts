@@ -19,7 +19,7 @@
 import { type NodeRecord, type PropName, ROOT_ID } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { canMoveInto } from "../src/components";
+import { canMoveInto, componentSetOf, variantProperties } from "../src/components";
 import { Editor } from "../src/editor";
 import { explainSize } from "../src/explain";
 import { layoutOps } from "../src/layout";
@@ -43,7 +43,39 @@ type Action =
   | { kind: "nudge"; dx: number; dy: number }
   | { kind: "copyPaste" }
   | { kind: "gesture"; node: number; props: [PropName, unknown][]; cancel: boolean }
-  | { kind: "undo" | "redo" };
+  | { kind: "undo" | "redo" }
+  /** A named editor command, with two picks for whatever it needs (a layer, a style, an edge). */
+  | { kind: "command"; name: Command; a: number; b: number };
+
+const COMMANDS = [
+  "mask",
+  "align",
+  "distribute",
+  "flip",
+  "tidy",
+  "grid",
+  "variants",
+  "addVariant",
+  "setVariant",
+  "insertInstance",
+  "swap",
+  "detach",
+  "resetInstances",
+  "resetOverride",
+  "copyStyle",
+  "pasteStyle",
+  "text",
+  "fit",
+  "reorder",
+  "textStyle",
+  "applyStyle",
+  "flatten",
+  "addPage",
+  "duplicatePage",
+  "deletePage",
+  "switchPage",
+] as const;
+type Command = (typeof COMMANDS)[number];
 
 const size = fc.integer({ min: 1, max: 320 });
 const PROPS: fc.Arbitrary<[PropName, unknown]> = fc.oneof(
@@ -73,6 +105,15 @@ const PROPS: fc.Arbitrary<[PropName, unknown]> = fc.oneof(
 );
 const pick = fc.nat();
 const action: fc.Arbitrary<Action> = fc.oneof(
+  {
+    arbitrary: fc.record({
+      kind: fc.constant("command" as const),
+      name: fc.constantFrom(...COMMANDS),
+      a: pick,
+      b: pick,
+    }),
+    weight: 6,
+  },
   {
     arbitrary: fc.record({
       kind: fc.constant("create" as const),
@@ -173,7 +214,7 @@ function layers(editor: Editor): NodeRecord[] {
       walk(child);
     }
   };
-  walk("p");
+  walk(editor.s.pageId ?? "p");
   return out;
 }
 const at = <T>(list: readonly T[], i: number): T | undefined => list[i % Math.max(1, list.length)];
@@ -181,7 +222,7 @@ const at = <T>(list: readonly T[], i: number): T | undefined => list[i % Math.ma
 function run(editor: Editor, a: Action): void {
   const all = layers(editor);
   const containers = [
-    "p",
+    editor.s.pageId ?? "p",
     ...all.filter((n) => n.type === "frame" || n.type === "group").map((n) => n.id),
   ];
   switch (a.kind) {
@@ -270,6 +311,134 @@ function run(editor: Editor, a: Action): void {
     case "redo":
       editor.redo();
       return;
+    case "command":
+      command(editor, a, all);
+      return;
+  }
+}
+
+const ALIGN_EDGES = ["left", "center", "right", "top", "middle", "bottom"] as const;
+const WORDS = ["Hi", "Sign in", "", "A longer line\nwith a break", "Plan your week"];
+
+/** Runs one named command the way its menu item or shortcut does. */
+function command(
+  editor: Editor,
+  { name, a, b }: Extract<Action, { kind: "command" }>,
+  all: readonly NodeRecord[],
+): void {
+  const doc = editor.doc;
+  const of = (type: string) => all.filter((n) => n.type === type);
+  const mains = all.filter((n) => n.type === "frame" && n.props.isComponent === true);
+  const instances = all.filter((n) => n.type === "frame" && typeof n.props.instanceOf === "string");
+  const texts = of("text");
+  const styles = doc.childIds(ROOT_ID).filter((id) => doc.get(id)?.type === "textStyle");
+  switch (name) {
+    case "mask":
+      editor.toggleMask();
+      return;
+    case "align":
+      editor.align(ALIGN_EDGES[a % ALIGN_EDGES.length] as (typeof ALIGN_EDGES)[number]);
+      return;
+    case "distribute":
+      editor.distribute(a % 2 ? "horizontal" : "vertical");
+      return;
+    case "flip":
+      editor.flip(a % 2 ? "horizontal" : "vertical");
+      return;
+    case "tidy":
+      editor.tidyUp();
+      return;
+    case "grid":
+      editor.addGridLayout();
+      return;
+    case "variants":
+      editor.combineAsVariants();
+      return;
+    case "addVariant": {
+      const inSet = mains.filter((m) => componentSetOf(doc, m.id));
+      const main = at(inSet, a);
+      if (main) editor.addVariant(main.id);
+      return;
+    }
+    case "setVariant": {
+      const instance = at(instances, a);
+      const main = instance ? doc.get(String(instance.props.instanceOf)) : undefined;
+      const set = main ? componentSetOf(doc, main.id) : undefined;
+      const property = set ? at(variantProperties(doc, set.id), b) : undefined;
+      if (instance && property)
+        editor.setInstanceVariant(instance.id, property.name, at(property.values, a + b) as string);
+      return;
+    }
+    case "insertInstance": {
+      const main = at(mains, a);
+      if (main) editor.insertInstance(main.id, { x: (b % 400) - 50, y: (a % 400) - 50 });
+      return;
+    }
+    case "swap": {
+      const instance = at(instances, a);
+      const main = at(mains, b);
+      if (instance && main) editor.swapInstance(instance.id, main.id);
+      return;
+    }
+    case "detach":
+      editor.detachInstances();
+      return;
+    case "resetInstances":
+      editor.resetInstances();
+      return;
+    case "resetOverride": {
+      const overridden = all.filter(
+        (n) => Array.isArray(n.props.overrides) && n.props.overrides.length > 0,
+      );
+      const node = at(overridden, a);
+      const prop = node ? at(node.props.overrides as string[], b) : undefined;
+      if (node && prop) editor.resetOverride(node.id, prop);
+      return;
+    }
+    case "copyStyle":
+      editor.copyProperties();
+      return;
+    case "pasteStyle":
+      editor.pasteProperties();
+      return;
+    case "text": {
+      const text = at(texts, a);
+      if (text) editor.updateText(text.id, at(WORDS, b) as string);
+      return;
+    }
+    case "fit":
+      editor.fitToContent();
+      return;
+    case "reorder":
+      editor.reorder((["forward", "backward", "front", "back"] as const)[a % 4] ?? "front");
+      return;
+    case "textStyle": {
+      const text = at(texts, a);
+      if (text) editor.createTextStyle(`style ${b % 5}`, text.id);
+      return;
+    }
+    case "applyStyle": {
+      const text = at(texts, a);
+      if (text) editor.applyTextStyle([text.id], b % 3 === 0 ? null : (at(styles, b) ?? null));
+      return;
+    }
+    case "flatten":
+      editor.flatten();
+      return;
+    case "addPage":
+      editor.addPage();
+      return;
+    case "duplicatePage":
+      if (editor.s.pageId) editor.duplicatePage(editor.s.pageId);
+      return;
+    case "deletePage":
+      if (editor.s.pageId && doc.pageIds().length > 1) editor.deletePage(editor.s.pageId);
+      return;
+    case "switchPage": {
+      const page = at(doc.pageIds(), a);
+      if (page) editor.setPage(page);
+      return;
+    }
   }
 }
 
@@ -289,7 +458,8 @@ function check(editor: Editor, history: string): void {
   const doc = editor.doc;
   for (const node of doc.nodes()) {
     if (node.id === ROOT_ID) continue;
-    if (node.type === "page") {
+    // Pages, text styles and variable collections live at the document's root.
+    if (node.type === "page" || node.type === "textStyle" || node.type === "collection") {
       expect(node.parent).toBe(ROOT_ID);
       continue;
     }
@@ -393,7 +563,13 @@ describe("the editor, driven at random", () => {
             const structural = STRUCTURAL.has(a.kind);
             const before = structural ? placed(editor) : null;
             run(editor, a);
-            done.push(a.kind === "set" ? `set ${a.prop}=${JSON.stringify(a.value)}` : a.kind);
+            done.push(
+              a.kind === "set"
+                ? `set ${a.prop}=${JSON.stringify(a.value)}`
+                : a.kind === "command"
+                  ? a.name
+                  : a.kind,
+            );
             check(editor, done.join(", "));
             if (before) stayedPut(editor, before, done.join(", "));
           }
