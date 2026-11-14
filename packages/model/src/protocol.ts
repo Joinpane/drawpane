@@ -137,7 +137,10 @@ export type ServerMessage =
   | {
       readonly t: "role";
       readonly role: "owner" | "editor" | "viewer";
-      readonly by: { readonly name: string };
+      /** The role before, to say what changed. */
+      readonly previous: "owner" | "editor" | "viewer";
+      /** Who changed it: maybe you, in another tab. */
+      readonly by: { readonly id: string; readonly name: string };
     }
   /** Someone restored the whole file to a saved version. Sent after the change itself. */
   | {

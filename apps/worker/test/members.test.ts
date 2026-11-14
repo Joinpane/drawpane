@@ -31,13 +31,24 @@ describe("team members", () => {
         "INSERT INTO oauth_identities (provider, subject, user_id, label, created_at, last_used_at) VALUES ('github', '1', ?, '@lena', ?, ?)",
       ).bind(lena.userId, now, now),
     ]);
-    const { members } = await lena.browser.json<{ members: Member[] }>(
+    const { members } = await owner.browser.json<{ members: Member[] }>(
       `/api/teams/${owner.teamId}/members`,
     );
     expect(members.map((m) => [m.name, m.role])).toEqual([
       ["Ana Lima", "owner"],
       ["Lena Park", "editor"],
     ]);
+    // Account details are for owners: teammates see who's on the team and their roles.
+    const asEditor = await lena.browser.json<{ members: Record<string, unknown>[] }>(
+      `/api/teams/${owner.teamId}/members`,
+    );
+    expect(asEditor.members.map((m) => [m.name, m.role])).toEqual([
+      ["Ana Lima", "owner"],
+      ["Lena Park", "editor"],
+    ]);
+    expect(asEditor.members.every((m) => !("lastSignedInAt" in m) && !("providers" in m))).toBe(
+      true,
+    );
     const shown = members.find((m) => m.id === lena.userId);
     expect(shown).toMatchObject({
       passkeys: 1,
@@ -113,5 +124,34 @@ describe("team members", () => {
       json: { note: "x".repeat(81) },
     });
     expect(note.status).toBe(400);
+  });
+
+  it("keeps an owner when two owners step down or remove each other at once", async () => {
+    const ana = await signedInUser("Ana Lima");
+    const bo = await signedInUser("Bo Chen", "owner", ana.teamId);
+    const owners = () =>
+      env.DB.prepare("SELECT COUNT(*) AS n FROM team_members WHERE team_id = ? AND role = 'owner'")
+        .bind(ana.teamId)
+        .first<{ n: number }>()
+        .then((r) => r?.n ?? 0);
+    const patch = (who: typeof ana, userId: string) =>
+      who.browser.fetch(`/api/teams/${ana.teamId}/members/${userId}`, {
+        method: "PATCH",
+        json: { role: "editor" },
+      });
+    // Each steps down, at the same moment: one goes through, one is refused.
+    const stepDown = await Promise.all([patch(ana, ana.userId), patch(bo, bo.userId)]);
+    expect(stepDown.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(await owners()).toBe(1);
+
+    // Two owners again, each removing the other at once.
+    await env.DB.prepare("UPDATE team_members SET role = 'owner' WHERE team_id = ?")
+      .bind(ana.teamId)
+      .run();
+    const remove = (who: typeof ana, userId: string) =>
+      who.browser.fetch(`/api/teams/${ana.teamId}/members/${userId}`, { method: "DELETE" });
+    const removals = await Promise.all([remove(ana, bo.userId), remove(bo, ana.userId)]);
+    expect(removals.map((r) => r.status)).toContain(200);
+    expect(await owners()).toBe(1);
   });
 });

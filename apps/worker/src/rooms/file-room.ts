@@ -37,6 +37,9 @@ import { verifyPayload } from "../lib/crypto";
 import { AUTOSAVE_RETENTION_MS, readSnapshot, snapshotKey, writeSnapshot } from "./snapshots";
 import { NODE_SCHEMA, SqlNodeStore } from "./sql-store";
 
+/** How long a confirmed membership is trusted before an edit checks it again. */
+const ACCESS_RECHECK_MS = 60_000;
+
 /** What the Worker vouches for when it hands a socket to the room. */
 export interface RoomClaim {
   readonly uid: string;
@@ -65,6 +68,8 @@ interface Attachment {
   /** A shared-prototype guest (see RoomClaim). Missing on sockets from before guests existed. */
   readonly guest?: boolean;
   clientId: string | null;
+  /** When their team membership was last confirmed in D1 (see #checkAccess). */
+  checkedAt?: number;
 }
 
 const LOG_SCHEMA = `
@@ -196,10 +201,18 @@ export class FileRoom extends DurableObject<Env> {
       ...(claim.guest ? { guest: true } : {}),
       clientId: null,
     };
+    // So an access change can find this room (see accessChanged). Written before the socket is
+    // accepted: a change made after this point always reaches it.
+    if (!claim.guest) {
+      try {
+        await this.#recordConnection(claim.fid, claim.uid);
+      } catch (error) {
+        console.error("couldn't record a connection", error);
+        return new Response("Try again", { status: 503 });
+      }
+    }
     this.ctx.acceptWebSocket(server, [claim.uid]);
     server.serializeAttachment(attachment);
-    // So an access change can find this room (see accessChanged). Not awaited: joining doesn't wait on D1.
-    if (!claim.guest) this.#recordConnection(claim.fid, claim.uid);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -228,9 +241,13 @@ export class FileRoom extends DurableObject<Env> {
     const me = ws.deserializeAttachment() as Attachment;
     switch (message.t) {
       case "hello":
-        return this.#hello(ws, me, message.clientId, message.revn);
-      case "txn":
-        return this.#transaction(ws, me, message.seq, message.ops as Op[]);
+        return this.#checkedHello(ws, me, message.clientId, message.revn);
+      case "txn": {
+        // Edits from someone whose access hasn't been confirmed lately wait for a check first.
+        const current = await this.#checkAccess(ws, me);
+        if (!current) return;
+        return this.#transaction(ws, current, message.seq, message.ops as Op[]);
+      }
       case "presence":
         // Guests are invisible: they have no cursor or selection to show.
         if (me.guest) return;
@@ -332,7 +349,7 @@ export class FileRoom extends DurableObject<Env> {
   async accessChanged(
     userId: string,
     role: Role | null,
-    by: { readonly name: string },
+    by: { readonly id: string; readonly name: string },
   ): Promise<number> {
     let reached = 0;
     for (const ws of this.ctx.getWebSockets(userId)) {
@@ -340,19 +357,19 @@ export class FileRoom extends DurableObject<Env> {
       if (!me || me.guest || me.userId !== userId) continue;
       reached++;
       if (role === null) {
-        try {
-          ws.close(4401, "Access removed");
-        } catch {
-          // Already closing.
-        }
+        // The reason tells the client whether they left or were removed.
+        this.#close(ws, 4401, by.id === userId ? "Left the team" : "Access removed");
         continue;
       }
       if (me.role === role) continue;
       ws.serializeAttachment({ ...me, role });
-      this.#send(ws, { t: "role", role, by });
+      this.#send(ws, { t: "role", role, previous: me.role, by });
     }
     const fileId = this.#meta("file_id");
-    if (fileId && (reached === 0 || role === null)) this.#forgetConnection(fileId, userId);
+    if (fileId && (reached === 0 || role === null))
+      void this.#forgetConnection(fileId, userId, Date.now()).catch((error: unknown) =>
+        console.warn("couldn't forget a connection", error),
+      );
     return reached;
   }
 
@@ -488,6 +505,73 @@ export class FileRoom extends DurableObject<Env> {
 
   // -------------------------------------------------------------------------
   // Protocol
+
+  /**
+   * Hello, after checking the person is still on the file's team, as they
+   * were when the Worker let them in: a removal that raced their joining
+   * closes the socket here, and a role changed meanwhile is the one used.
+   * The client id is only set after, so nothing is accepted before.
+   */
+  async #checkedHello(
+    ws: WebSocket,
+    me: Attachment,
+    clientId: string,
+    revn: number | null,
+  ): Promise<void> {
+    const current = await this.#checkAccess(ws, me, true);
+    if (current) this.#hello(ws, current, clientId, revn);
+  }
+
+  /**
+   * Confirms the person is still on the file's team (at hello, and before an
+   * edit once a minute has passed): access changes are pushed to open rooms,
+   * and this bounds what happens if one is ever missed. Returns their
+   * attachment, with the role as it is now, or null after closing the socket.
+   */
+  async #checkAccess(ws: WebSocket, me: Attachment, now = false): Promise<Attachment | null> {
+    if (me.guest) return me;
+    if (!now && Date.now() - (me.checkedAt ?? 0) < ACCESS_RECHECK_MS) return me;
+    const role = await this.#currentRole(me.userId);
+    if (role === null) {
+      this.#close(ws, 4401, "Access removed");
+      return null;
+    }
+    // Re-read: a hello or role change may have updated it while D1 answered.
+    const latest = (ws.deserializeAttachment() as Attachment | null) ?? me;
+    const next: Attachment = {
+      ...latest,
+      ...(role !== undefined ? { role, checkedAt: Date.now() } : {}),
+    };
+    ws.serializeAttachment(next);
+    return next;
+  }
+
+  /** Their role on the file's team now; null when they're not on it, undefined when D1 can't say. */
+  async #currentRole(userId: string): Promise<Role | null | undefined> {
+    const fileId = this.#meta("file_id");
+    if (!fileId) return undefined;
+    try {
+      const row = await this.env.DB.prepare(
+        `SELECT m.role FROM files f JOIN team_members m ON m.team_id = f.team_id AND m.user_id = ?
+          WHERE f.id = ?`,
+      )
+        .bind(userId, fileId)
+        .first<{ role: Role }>();
+      return row?.role ?? null;
+    } catch (error) {
+      // The Worker checked moments ago; a D1 hiccup shouldn't lock everyone out.
+      console.error("couldn't check access", error);
+      return undefined;
+    }
+  }
+
+  #close(ws: WebSocket, code: number, reason: string): void {
+    try {
+      ws.close(code, reason);
+    } catch {
+      // Already closing.
+    }
+  }
 
   #hello(ws: WebSocket, me: Attachment, clientId: string, revn: number | null): void {
     me.clientId = clientId;
@@ -967,24 +1051,32 @@ export class FileRoom extends DurableObject<Env> {
       .getWebSockets(me.userId)
       .some((other) => other !== ws && other.readyState === WebSocket.OPEN);
     const fileId = this.#meta("file_id");
-    if (!stillHere && fileId) this.#forgetConnection(fileId, me.userId);
+    if (!stillHere && fileId)
+      void this.#forgetConnection(fileId, me.userId, Date.now()).catch((error: unknown) =>
+        console.warn("couldn't forget a connection", error),
+      );
   }
 
-  #recordConnection(fileId: string, userId: string): void {
-    this.env.DB.prepare(
+  async #recordConnection(fileId: string, userId: string): Promise<void> {
+    await this.env.DB.prepare(
       `INSERT INTO room_connections (file_id, user_id, connected_at) VALUES (?, ?, ?)
          ON CONFLICT (file_id, user_id) DO UPDATE SET connected_at = excluded.connected_at`,
     )
       .bind(fileId, userId, Date.now())
-      .run()
-      .catch((error: unknown) => console.warn("couldn't record a connection", error));
+      .run();
   }
 
-  #forgetConnection(fileId: string, userId: string): void {
-    this.env.DB.prepare("DELETE FROM room_connections WHERE file_id = ? AND user_id = ?")
-      .bind(fileId, userId)
-      .run()
-      .catch((error: unknown) => console.warn("couldn't forget a connection", error));
+  /**
+   * Forgets a connection made before `before`: a socket that opened since
+   * (a reload, a second tab) wrote a later time, and keeps its row however
+   * the two writes land.
+   */
+  async #forgetConnection(fileId: string, userId: string, before: number): Promise<void> {
+    await this.env.DB.prepare(
+      "DELETE FROM room_connections WHERE file_id = ? AND user_id = ? AND connected_at <= ?",
+    )
+      .bind(fileId, userId, before)
+      .run();
   }
 
   #send(ws: WebSocket, message: ServerMessage): void {

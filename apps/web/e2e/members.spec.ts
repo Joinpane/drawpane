@@ -85,6 +85,9 @@ test.describe
       await expect(people.getByRole("button", { name: /Change role/ })).toHaveCount(0);
       const mine = people.getByRole("listitem").filter({ hasText: "Bo Chen" });
       await expect(mine).toContainText("Viewer");
+      // How people sign in is for owners to see.
+      await expect(people).not.toContainText("Passkey");
+      await expect(people).not.toContainText("Signed in");
       await expect(mine.getByRole("button", { name: "Leave" })).toBeVisible();
       await expect(bo.getByRole("complementary").getByText("What roles can do")).toBeVisible();
     });

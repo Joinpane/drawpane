@@ -5,7 +5,7 @@ import { publicOrigins } from "../auth/passkeys";
 import { requireUser } from "../auth/session";
 import type { AppContext, Env, Role } from "../env";
 import { randomToken, sha256Hex } from "../lib/crypto";
-import { badRequest, conflict, notFound } from "../lib/http";
+import { badRequest, conflict, forbidden, notFound } from "../lib/http";
 import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
 import { comments } from "./comments";
 import { fonts } from "./fonts";
@@ -27,7 +27,7 @@ async function accessChanged(
   teamId: string,
   userId: string,
   role: Role | null,
-  by: { readonly name: string },
+  by: { readonly id: string; readonly name: string },
 ): Promise<void> {
   const { results } = await env.DB.prepare(
     `SELECT rc.file_id AS fileId FROM room_connections rc JOIN files f ON f.id = rc.file_id
@@ -35,9 +35,38 @@ async function accessChanged(
   )
     .bind(userId, teamId)
     .all<{ fileId: string }>();
-  await Promise.all(
-    results.map(({ fileId }) => room(env, fileId).accessChanged(userId, role, { name: by.name })),
+  // The change is already made: a room that can't be reached logs, it doesn't fail the request.
+  const told = await Promise.allSettled(
+    results.map(({ fileId }) =>
+      room(env, fileId).accessChanged(userId, role, { id: by.id, name: by.name }),
+    ),
   );
+  for (const result of told)
+    if (result.status === "rejected") console.error("couldn't tell a room", result.reason);
+}
+
+/**
+ * Conditions for changing a team member (?2 the team, ?3 the member, ?4 the
+ * caller), checked in the same statement as the change: two owners acting
+ * at once can't both pass a check made beforehand.
+ */
+const CALLER_IS_OWNER = `EXISTS (SELECT 1 FROM team_members caller
+  WHERE caller.team_id = ?2 AND caller.user_id = ?4 AND caller.role = 'owner')`;
+const ANOTHER_OWNER = `EXISTS (SELECT 1 FROM team_members other
+  WHERE other.team_id = ?2 AND other.role = 'owner' AND other.user_id <> ?3)`;
+
+/** A member change that changed nothing: says why. */
+async function whyUnchanged(env: Env, teamId: string, userId: string, callerId: string) {
+  const rows = await env.DB.prepare(
+    "SELECT user_id, role FROM team_members WHERE team_id = ? AND user_id IN (?, ?)",
+  )
+    .bind(teamId, userId, callerId)
+    .all<{ user_id: string; role: Role }>();
+  const role = (id: string) => rows.results.find((r) => r.user_id === id)?.role;
+  if (!role(userId)) throw notFound("That person isn't on this team.");
+  if (userId !== callerId && role(callerId) !== "owner")
+    throw forbidden("Only the team's owners can change its members.");
+  throw conflict("A team needs at least one owner. Make someone else an owner first.");
 }
 
 const RoleSchema = z.enum(["owner", "editor", "viewer"]);
@@ -90,8 +119,9 @@ export const api = new Hono<AppContext>()
   .get("/teams/:teamId/members", async (c) => {
     const user = requireUser(c);
     const teamId = c.req.param("teamId");
-    await requireTeamRole(c.env, user.id, teamId, "viewer");
-    // How each person signs in, and when they last did: a session started, or a passkey or provider used.
+    const viewer = await requireTeamRole(c.env, user.id, teamId, "viewer");
+    // How each person signs in, and when they last did: a session started, or a passkey or provider
+    // used. Account details, so only owners see them; everyone sees who's on the team and their role.
     const { results } = await c.env.DB.prepare(
       `SELECT u.id, u.name, u.email, m.role, m.created_at AS joinedAt,
               (SELECT COUNT(*) FROM passkeys p WHERE p.user_id = u.id) AS passkeys,
@@ -115,11 +145,17 @@ export const api = new Hono<AppContext>()
         providers: string | null;
         lastSignedInAt: number;
       }>();
-    const members = results.map(({ providers, lastSignedInAt, ...m }) => ({
-      ...m,
-      providers: providers ? providers.split(",").sort() : [],
-      lastSignedInAt: lastSignedInAt > 0 ? lastSignedInAt : null,
-    }));
+    const owner = viewer === "owner";
+    const members = results.map(({ providers, lastSignedInAt, passkeys, ...m }) =>
+      owner
+        ? {
+            ...m,
+            passkeys,
+            providers: providers ? providers.split(",").sort() : [],
+            lastSignedInAt: lastSignedInAt > 0 ? lastSignedInAt : null,
+          }
+        : m,
+    );
     return c.json({ members });
   })
 
@@ -128,21 +164,14 @@ export const api = new Hono<AppContext>()
     const { teamId, userId } = c.req.param();
     await requireTeamRole(c.env, user.id, teamId, "owner");
     const { role } = await readBody(c, z.object({ role: RoleSchema }));
-    if (userId === user.id && role !== "owner") {
-      const owners = await c.env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM team_members WHERE team_id = ? AND role = 'owner'",
-      )
-        .bind(teamId)
-        .first<{ n: number }>();
-      if ((owners?.n ?? 0) <= 1)
-        throw conflict("A team needs at least one owner. Make someone else an owner first.");
-    }
+    // One statement: the caller still an owner, and another owner left after the change.
     const result = await c.env.DB.prepare(
-      "UPDATE team_members SET role = ? WHERE team_id = ? AND user_id = ?",
+      `UPDATE team_members SET role = ?1 WHERE team_id = ?2 AND user_id = ?3
+         AND ${CALLER_IS_OWNER} AND (role <> 'owner' OR ?1 = 'owner' OR ${ANOTHER_OWNER})`,
     )
-      .bind(role, teamId, userId)
+      .bind(role, teamId, userId, user.id)
       .run();
-    if (result.meta.changes === 0) throw notFound("That person isn't on this team.");
+    if (result.meta.changes === 0) await whyUnchanged(c.env, teamId, userId, user.id);
     await accessChanged(c.env, teamId, userId, role, user);
     return c.json({ ok: true });
   })
@@ -151,24 +180,15 @@ export const api = new Hono<AppContext>()
     const user = requireUser(c);
     const { teamId, userId } = c.req.param();
     if (userId !== user.id) await requireTeamRole(c.env, user.id, teamId, "owner");
-    const target = await c.env.DB.prepare(
-      "SELECT role FROM team_members WHERE team_id = ? AND user_id = ?",
+    // Anyone can leave; removing someone else takes an owner. Never the last owner.
+    const result = await c.env.DB.prepare(
+      `DELETE FROM team_members WHERE team_id = ?2 AND user_id = ?3
+         AND (?3 = ?4 OR ${CALLER_IS_OWNER}) AND (role <> 'owner' OR ${ANOTHER_OWNER})`,
     )
-      .bind(teamId, userId)
-      .first<{ role: Role }>();
-    if (!target) throw notFound("That person isn't on this team.");
-    if (target.role === "owner") {
-      const owners = await c.env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM team_members WHERE team_id = ? AND role = 'owner'",
-      )
-        .bind(teamId)
-        .first<{ n: number }>();
-      if ((owners?.n ?? 0) <= 1)
-        throw conflict("A team needs at least one owner. Make someone else an owner first.");
-    }
-    await c.env.DB.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ?")
-      .bind(teamId, userId)
+      // ?1 unused: the shared conditions number the team, member and caller ?2–?4.
+      .bind(null, teamId, userId, user.id)
       .run();
+    if (result.meta.changes === 0) await whyUnchanged(c.env, teamId, userId, user.id);
     await accessChanged(c.env, teamId, userId, null, user);
     return c.json({ ok: true });
   })
