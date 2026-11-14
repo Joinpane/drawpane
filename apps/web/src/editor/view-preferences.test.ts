@@ -2,14 +2,17 @@ import { describe, expect, it } from "vitest";
 import { readViewPreferences } from "./view-preferences";
 
 describe("readViewPreferences", () => {
-  it("reads the rulers, layout grids, pixel-grid snapping and the Selection Lens", () => {
+  it("reads the rulers, layout grids, pixel-grid snapping, the Selection Lens and the minimap", () => {
     expect(
-      readViewPreferences('{"rulers":true,"layoutGrids":false,"pixelSnap":false,"lens":false}'),
+      readViewPreferences(
+        '{"rulers":true,"layoutGrids":false,"pixelSnap":false,"lens":false,"minimap":false}',
+      ),
     ).toEqual({
       rulers: true,
       layoutGrids: false,
       pixelSnap: false,
       lens: false,
+      minimap: false,
     });
   });
 

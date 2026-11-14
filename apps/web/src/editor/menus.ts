@@ -9,7 +9,7 @@ import { getProp } from "@drawpane/model";
 import type { ContextMenuAction, ContextMenuEntry, IconName } from "@drawpane/ui";
 import { ACTIONS, type Action, type ActionContext, formatShortcut } from "./actions";
 import { layerKind } from "./layer-kinds";
-import type { MenuRequest } from "./ui-state";
+import { type MenuRequest, uiFor } from "./ui-state";
 
 const BY_ID: ReadonlyMap<string, Action> = new Map(ACTIONS.map((a) => [a.id, a]));
 
@@ -220,12 +220,14 @@ export function canvasMenu(host: MenuHost, request: MenuRequest): ContextMenuEnt
   const rulers = action(host, "view.rulers", "Show rulers");
   const grids = action(host, "view.layoutGrids", "Show layout grids");
   const pixels = action(host, "view.pixelSnap");
+  const minimap = action(host, "view.minimap", "Show minimap");
   return sections(
     [pasteHere(host, request), a("edit.selectAll")],
     [
       toggle(rulers, editor.s.rulers),
       toggle(grids, editor.s.layoutGrids),
       toggle(pixels, editor.s.pixelSnap),
+      toggle(minimap, uiFor(editor).get().minimap),
       toggle(comments, host.commentsShown),
       toggle(focus, editor.s.focusMode),
     ],

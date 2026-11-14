@@ -1,6 +1,7 @@
 /**
  * View preferences that follow a person between files, in this browser:
- * rulers, layout grids, pixel-grid snapping and the Selection Lens. Read once when an editor
+ * rulers, layout grids, pixel-grid snapping, the Selection Lens and the
+ * minimap. Read once when an editor
  * opens, written whenever they change.
  */
 import type { Editor } from "@drawpane/editor";
@@ -14,6 +15,7 @@ interface ViewPreferences {
   readonly layoutGrids: boolean;
   readonly pixelSnap: boolean;
   readonly lens: boolean;
+  readonly minimap: boolean;
 }
 
 const NAMES = [
@@ -21,6 +23,7 @@ const NAMES = [
   "layoutGrids",
   "pixelSnap",
   "lens",
+  "minimap",
 ] as const satisfies readonly (keyof ViewPreferences)[];
 
 /** What's stored, keeping only well-formed values. */
@@ -46,14 +49,16 @@ function load(): Partial<ViewPreferences> {
 export function useViewPreferences(editor: Editor): void {
   useEffect(() => {
     const ui = uiFor(editor);
-    const { lens, ...view } = load();
+    const { lens, minimap, ...view } = load();
     editor.state.set(view);
     if (lens !== undefined) ui.set({ lens });
+    if (minimap !== undefined) ui.set({ minimap });
     const current = (): ViewPreferences => ({
       rulers: editor.s.rulers,
       layoutGrids: editor.s.layoutGrids,
       pixelSnap: editor.s.pixelSnap,
       lens: ui.get().lens,
+      minimap: ui.get().minimap,
     });
     let last = current();
     const save = () => {
