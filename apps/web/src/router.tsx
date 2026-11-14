@@ -14,10 +14,12 @@ import { NotFound } from "./app/NotFound";
 import { ShortcutsSync } from "./app/ShortcutsSync";
 import { AccountPage } from "./auth/AccountPage";
 import { InvitePage } from "./auth/InvitePage";
+import { NoTeamPage } from "./auth/NoTeamPage";
 import { SetupPage } from "./auth/SetupPage";
 import { ShortcutsPage } from "./auth/ShortcutsPage";
 import { SignInPage } from "./auth/SignInPage";
 import { DashboardPage } from "./dashboard/DashboardPage";
+import { isTeamView, type TeamView } from "./dashboard/views";
 import { NewFilePage } from "./new-file/NewFilePage";
 import type { PresentSearch } from "./prototype/PresentPage";
 import type { SharedSearch } from "./prototype/SharedPrototypePage";
@@ -79,7 +81,8 @@ const indexRoute = createRoute({
     const first = teams[0];
     if (first) throw redirect({ to: "/t/$teamId", params: { teamId: first.id } });
   },
-  component: NotFound,
+  // Only reached with no team to go to.
+  component: NoTeamPage,
 });
 
 const signInRoute = createRoute({
@@ -154,11 +157,9 @@ const teamRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/t/$teamId",
   beforeLoad: requireUser,
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { project?: string; view?: "trash" | "fonts" } => ({
+  validateSearch: (search: Record<string, unknown>): { project?: string; view?: TeamView } => ({
     ...(typeof search.project === "string" ? { project: search.project } : {}),
-    ...(search.view === "trash" || search.view === "fonts" ? { view: search.view } : {}),
+    ...(isTeamView(search.view) ? { view: search.view } : {}),
   }),
   component: DashboardPage,
 });

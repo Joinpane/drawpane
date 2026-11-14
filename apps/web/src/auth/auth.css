@@ -234,3 +234,9 @@
   height: 1px;
   background: var(--line);
 }
+
+.auth__no-team {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-200);
+}

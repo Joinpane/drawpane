@@ -12,15 +12,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, type FileMeta, type Project, type Role } from "../api/client";
-import { CopyField } from "../app/CopyField";
 import { Dialog } from "../app/Dialog";
 import { initials, modKey, timeAgo } from "../app/format";
 import { setTheme, useThemePreference } from "../app/theme";
 import { signOut } from "../auth/passkey";
 import { FileThumbnail } from "./FileThumbnail";
 import { ImportDialog } from "./ImportDialog";
+import { InviteDialog } from "./InviteDialog";
+import { MembersView } from "./Members";
 import { isPenpotFile } from "./penpot-import";
 import { TeamFontsView } from "./TeamFonts";
+import type { TeamView } from "./views";
 import "./dashboard.css";
 import { forgetCachedData } from "../app/session-cache";
 
@@ -36,9 +38,11 @@ export function DashboardPage() {
     queryKey: ["projects", teamId],
     queryFn: () => api.projects(teamId),
   });
+  // Fonts and Members are team pages of their own, with no files to list.
+  const showsFiles = view !== "fonts" && view !== "members";
   const files = useQuery({
     queryKey: ["files", teamId, projectId ?? null, view ?? "recent"],
-    enabled: view !== "fonts",
+    enabled: showsFiles,
     queryFn: () =>
       projectId
         ? api.projectFiles(projectId)
@@ -46,6 +50,18 @@ export function DashboardPage() {
   });
 
   const team = teams.data?.teams.find((t) => t.id === teamId);
+  // Not (or no longer) on this team, say after being removed: on to another team, or to the page that explains.
+  const notOnTeam = teams.isSuccess && !team;
+  useEffect(() => {
+    if (notOnTeam) void navigate({ to: "/", replace: true });
+  }, [notOnTeam, navigate]);
+  // The Members page's list, when it's loaded, is fresher than the count that came with the teams.
+  const memberList = useQuery({
+    queryKey: ["members", teamId],
+    queryFn: () => api.members(teamId),
+    enabled: false,
+  });
+  const memberCount = memberList.data?.members.length ?? team?.members ?? null;
   const role: Role = team?.role ?? "viewer";
   const canEdit = role !== "viewer";
   const project = projects.data?.projects.find((p) => p.id === projectId);
@@ -110,7 +126,7 @@ export function DashboardPage() {
   newBlank.current = () => {
     if (canEdit && target && view !== "trash" && !createFile.isPending) createFile.mutate(target);
   };
-  const canImport = canEdit && !!target && view !== "trash" && view !== "fonts";
+  const canImport = canEdit && !!target && showsFiles && view !== "trash";
   /** The New file page: frame sizes and templates. (New file and N make a blank file directly.) */
   const openNewFile = () =>
     void navigate({
@@ -145,7 +161,7 @@ export function DashboardPage() {
       }}
     >
       <aside className="dash__side" aria-label="Navigation">
-        <TeamSwitcher teamName={team?.name ?? "…"} members={null} />
+        <TeamSwitcher teamName={team?.name ?? "…"} members={memberCount} />
         <nav className="dash__nav">
           <NavLink active={!projectId && !view} icon="history" to={{ teamId }} label="Recent" />
           <NavLink
@@ -153,6 +169,12 @@ export function DashboardPage() {
             icon="text"
             to={{ teamId, view: "fonts" }}
             label="Fonts"
+          />
+          <NavLink
+            active={view === "members"}
+            icon="people"
+            to={{ teamId, view: "members" }}
+            label="Members"
           />
           <NavLink
             active={view === "trash"}
@@ -191,6 +213,16 @@ export function DashboardPage() {
       {view === "fonts" ? (
         <main className="dash__main">
           <TeamFontsView teamId={teamId} canEdit={canEdit} />
+        </main>
+      ) : view === "members" ? (
+        <main className="dash__main">
+          <MembersView
+            teamId={teamId}
+            teamName={team?.name ?? "this team"}
+            role={role}
+            userId={session.data?.user?.id}
+            onInvite={() => setInviteOpen(true)}
+          />
         </main>
       ) : (
         <main className="dash__main">
@@ -324,13 +356,20 @@ export function DashboardPage() {
   );
 }
 
-function TeamSwitcher({ teamName }: { teamName: string; members: number | null }) {
+function TeamSwitcher({ teamName, members }: { teamName: string; members: number | null }) {
   return (
     <div className="dash__team">
       <span className="dash__team-mark" aria-hidden="true">
         {initials(teamName).slice(0, 1)}
       </span>
-      <span className="dash__team-name">{teamName}</span>
+      <span className="dash__team-text">
+        <span className="dash__team-name">{teamName}</span>
+        {members !== null ? (
+          <span className="dash__team-meta">
+            {members === 1 ? "Just you" : `${members} people`}
+          </span>
+        ) : null}
+      </span>
     </div>
   );
 }
@@ -357,7 +396,7 @@ function NavLink({
   active: boolean;
   icon?: IconName;
   dot?: number;
-  to: { teamId: string; project?: string; view?: "trash" | "fonts" };
+  to: { teamId: string; project?: string; view?: TeamView };
   label: string;
   count?: number;
 }) {
@@ -649,80 +688,6 @@ function EmptyState({
         </div>
       ) : null}
     </div>
-  );
-}
-
-function InviteDialog({
-  open,
-  teamId,
-  onClose,
-}: {
-  open: boolean;
-  teamId: string;
-  onClose: () => void;
-}) {
-  const [role, setRole] = useState<Role>("editor");
-  const [link, setLink] = useState<string | null>(null);
-  const create = useMutation({
-    mutationFn: () => api.post<{ url: string }>(`/teams/${teamId}/invites`, { role }),
-    onSuccess: ({ url }) => setLink(url),
-  });
-  const close = () => {
-    setLink(null);
-    onClose();
-  };
-  return (
-    <Dialog
-      open={open}
-      title="Invite to this team"
-      onClose={close}
-      footer={
-        link ? (
-          <Button variant="primary" onClick={close}>
-            Done
-          </Button>
-        ) : (
-          <>
-            <Button variant="ghost" onClick={close}>
-              Cancel
-            </Button>
-            <Button variant="primary" disabled={create.isPending} onClick={() => create.mutate()}>
-              Create link
-            </Button>
-          </>
-        )
-      }
-    >
-      {link ? (
-        <div className="app-stack">
-          <p className="app-muted">
-            Send this link to one person. It works once and expires in 7 days.
-          </p>
-          <CopyField value={link} />
-        </div>
-      ) : (
-        <div className="app-stack">
-          <p className="app-muted">
-            Create a single-use link. They'll sign up with a passkey and join with this role.
-          </p>
-          <div className="app-radio-row" role="radiogroup" aria-label="Role">
-            {(["viewer", "editor", "owner"] as const).map((r) => (
-              <label key={r} className="app-radio">
-                <input
-                  type="radio"
-                  name="role"
-                  value={r}
-                  checked={role === r}
-                  onChange={() => setRole(r)}
-                />
-                <span>{r === "viewer" ? "Can view" : r === "editor" ? "Can edit" : "Owner"}</span>
-              </label>
-            ))}
-          </div>
-          {create.error ? <p className="auth__error">{create.error.message}</p> : null}
-        </div>
-      )}
-    </Dialog>
   );
 }
 
