@@ -30,6 +30,8 @@ export interface EditorUi {
   readonly findLayers: number;
   /** Bumped to fold every layer on the page (⌥L). */
   readonly collapseLayers: number;
+  /** Bumped to open the text styles picker for the selected text (⌥⌘T). */
+  readonly textStyles: number;
 }
 
 const stores = new WeakMap<Editor, Store<EditorUi>>();
@@ -37,7 +39,13 @@ const stores = new WeakMap<Editor, Store<EditorUi>>();
 export function uiFor(editor: Editor): Store<EditorUi> {
   let store = stores.get(editor);
   if (!store) {
-    store = new Store<EditorUi>({ renaming: null, menu: null, findLayers: 0, collapseLayers: 0 });
+    store = new Store<EditorUi>({
+      renaming: null,
+      menu: null,
+      findLayers: 0,
+      collapseLayers: 0,
+      textStyles: 0,
+    });
     stores.set(editor, store);
   }
   return store;
