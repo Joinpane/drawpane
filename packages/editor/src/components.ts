@@ -144,6 +144,35 @@ export function wouldCycle(doc: Doc, componentId: string, parent: string): boole
   return false;
 }
 
+/** The components a subtree holds instances of. */
+function instancedIn(doc: Doc, id: string): Set<string> {
+  const out = new Set<string>();
+  const stack = [id];
+  while (stack.length > 0) {
+    const node = doc.get(stack.pop() as string);
+    if (!node) continue;
+    const of = node.type === "frame" ? getProp(node.props, "instanceOf") : null;
+    if (of) out.add(of);
+    stack.push(...doc.childIds(node.id));
+  }
+  return out;
+}
+
+/**
+ * Whether layers can go under `parent`: never into or out of an instance
+ * (its layers come from its main component), and never so that a component
+ * would hold an instance of itself, however deep. Moving, dropping and
+ * pasting all ask.
+ */
+export function canMoveInto(doc: Doc, ids: readonly string[], parent: string): boolean {
+  if (instanceRootOf(doc, parent)) return false;
+  if (ids.some((id) => isInsideInstance(doc, id))) return false;
+  for (const id of ids)
+    for (const componentId of instancedIn(doc, id))
+      if (wouldCycle(doc, componentId, parent)) return false;
+  return true;
+}
+
 /**
  * Operations that create an instance of `componentId` under `parent`, with its
  * root's top-left at `origin` (in the parent's coordinate space).
@@ -354,10 +383,11 @@ function dedupeDeletes(doc: Doc, ops: Op[]): Op[] {
 /** Main components whose look may have changed when `ids` changed. */
 export function affectedComponents(doc: Doc, ids: Iterable<string>): Set<string> {
   const out = new Set<string>();
-  for (const id of ids) {
-    const component = componentOf(doc, id);
-    if (component) out.add(component.id);
-  }
+  // Every main component around the layer, not just the nearest: an edit
+  // inside a component nested in another reaches the outer one's instances too.
+  for (const id of ids)
+    for (let node = doc.get(id); node && node.type !== "page"; node = doc.get(node.parent))
+      if (isMainComponent(node)) out.add(node.id);
   return out;
 }
 

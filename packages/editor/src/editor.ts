@@ -50,6 +50,7 @@ import {
   apply,
   boxOf,
   invert,
+  type Matrix,
   multiply,
   normalizeDegrees,
   normalizeRect,
@@ -58,6 +59,7 @@ import {
   rectsIntersect,
   rotationOf,
   round2,
+  translate,
   unionRects,
 } from "./geometry";
 import { withGuide } from "./grids";
@@ -451,7 +453,10 @@ export class Editor {
       const extra = [...marks, ...constrained, ...pathOps];
       const first = extra.length > 0 ? [...ops, ...extra] : ops;
       let inverse = this.sync.commit(first);
-      let touched = this.#touchedBy(ops, inverse);
+      // A group whose last layer left (moved, deleted, cut) goes too, like Figma's.
+      const emptied = this.#emptiedGroupOps(inverse);
+      if (emptied.length > 0) inverse = [...this.sync.commit(emptied), ...inverse];
+      let touched = this.#touchedBy([...ops, ...emptied], inverse);
       let lastOps: readonly Op[] = first;
       // Derived writes until nothing changes: instances follow their main
       // component, bound properties follow their variables, text sizes to its
@@ -484,6 +489,28 @@ export class Editor {
       }
       return inverse;
     });
+  }
+
+  /**
+   * Deletes for the groups a batch left empty (and the groups that leaves
+   * empty in turn): `inverse` names the parents layers left.
+   */
+  #emptiedGroupOps(inverse: readonly Op[]): Op[] {
+    const gone = new Set<string>();
+    const ops: Op[] = [];
+    const queue = inverse.flatMap((op) =>
+      op.op === "create" || op.op === "move" ? [op.parent] : [],
+    );
+    while (queue.length > 0) {
+      const id = queue.shift() as string;
+      const node = this.doc.get(id);
+      if (node?.type !== "group" || gone.has(id)) continue;
+      if (this.doc.childIds(id).some((child) => !gone.has(child))) continue;
+      gone.add(id);
+      ops.push({ op: "delete", id });
+      queue.push(node.parent);
+    }
+    return ops;
   }
 
   /** Node ids an applied batch changed, plus the parents whose children changed. */
@@ -1032,6 +1059,43 @@ export class Editor {
     );
   }
 
+  /** The box around layers, in `parent`'s coordinate space (its own rotation and all). */
+  #boxIn(ids: readonly string[], parent: string): Rect | null {
+    const toParent = invert(this.scene.spaceMatrix(this.scene.spaceOwner(parent)));
+    let x0 = Number.POSITIVE_INFINITY;
+    let y0 = Number.POSITIVE_INFINITY;
+    let x1 = Number.NEGATIVE_INFINITY;
+    let y1 = Number.NEGATIVE_INFINITY;
+    // A group's own corners are world-aligned: use its layers' instead.
+    const leaves = (id: string): string[] =>
+      this.doc.get(id)?.type === "group" ? this.doc.childIds(id).flatMap(leaves) : [id];
+    for (const id of ids.flatMap(leaves))
+      for (const corner of this.scene.corners(id) ?? []) {
+        const p = apply(toParent, corner);
+        x0 = Math.min(x0, p.x);
+        y0 = Math.min(y0, p.y);
+        x1 = Math.max(x1, p.x);
+        y1 = Math.max(y1, p.y);
+      }
+    return Number.isFinite(x0) ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
+  }
+
+  /**
+   * Where a new group or frame around `ids` (in tree order) goes: in the
+   * topmost layer's parent, just above it, like Figma. The layers may come
+   * from different parents; the topmost one decides.
+   */
+  #wrapperSlot(ids: readonly string[]): { parent: string; key: string } | null {
+    const top = ids.length > 0 ? this.doc.get(ids.at(-1) as string) : undefined;
+    if (!top) return null;
+    const siblings = this.doc.childIds(top.parent);
+    const above = siblings[siblings.indexOf(top.id) + 1];
+    return {
+      parent: top.parent,
+      key: keyBetween(top.key, above ? (this.doc.get(above)?.key ?? null) : null),
+    };
+  }
+
   /** Re-creates a subtree under new ids. Returns the create operations, parents first. */
   cloneOps(
     id: string,
@@ -1143,11 +1207,22 @@ export class Editor {
   reparentOps(id: string, parent: string, key: string, spaceParent = parent): Op[] {
     const node = this.doc.get(id);
     if (!node) return [];
-    const ops: Op[] = [{ op: "move", id, parent, key }];
+    return [
+      { op: "move", id, parent, key },
+      ...this.#keepInPlace(node, this.scene.spaceMatrix(this.scene.spaceOwner(spaceParent))),
+    ];
+  }
+
+  /**
+   * The position (and rotation) a layer needs to stay exactly where it is
+   * on the canvas in a new coordinate space; a group's layers, since a group
+   * has no position of its own. None when the space doesn't change.
+   */
+  #keepInPlace(node: NodeRecord, toSpace: Matrix): Op[] {
     const fromSpace = this.scene.spaceMatrix(this.scene.spaceOwner(node.parent));
-    const toSpace = this.scene.spaceMatrix(this.scene.spaceOwner(spaceParent));
     const sameSpace = fromSpace.every((v, i) => Math.abs(v - (toSpace[i] as number)) < 1e-9);
-    if (sameSpace) return ops;
+    if (sameSpace) return [];
+    const ops: Op[] = [];
     const convert = (n: NodeRecord) => {
       if (n.type === "group") {
         for (const child of this.doc.childIds(n.id)) {
@@ -1215,12 +1290,9 @@ export class Editor {
   group(options: { name?: string } = {}): void {
     if (this.#refuseInsideInstance()) return;
     const ids = this.#ordered(this.#topmost(this.s.selection));
-    const first = ids[0] && this.doc.get(ids[0]);
-    if (!first) return;
-    const parent = first.parent;
-    const last = this.doc.get(ids.at(-1) as string);
-    const siblings = this.doc.childIds(parent);
-    const after = siblings[siblings.indexOf(last?.id ?? "") + 1];
+    const slot = this.#wrapperSlot(ids);
+    if (!slot) return;
+    const { parent } = slot;
     const groupId = newId();
     const ops: Op[] = [
       {
@@ -1228,7 +1300,7 @@ export class Editor {
         id: groupId,
         type: "group",
         parent,
-        key: keyBetween(last?.key ?? null, after ? (this.doc.get(after)?.key ?? null) : null),
+        key: slot.key,
         props: { name: options.name ?? this.defaultName("group") },
       },
     ];
@@ -1288,26 +1360,27 @@ export class Editor {
       }
       return;
     }
-    const parent = first.parent;
+    const slot = this.#wrapperSlot(ids);
+    if (!slot) return;
+    const { parent } = slot;
     const frameId = newId();
-    const origin = this.scene.toSpace(parent, { x: bounds.x, y: bounds.y });
-    const last = this.doc.get(ids.at(-1) as string);
-    const siblings = this.doc.childIds(parent);
-    const after = siblings[siblings.indexOf(last?.id ?? "") + 1];
-    const horizontal = bounds.width >= bounds.height;
+    // The selection's box in the parent's space, which may be rotated.
+    const box = this.#boxIn(ids, parent) ?? bounds;
+    const origin = { x: box.x, y: box.y };
+    const horizontal = box.width >= box.height;
     const ops: Op[] = [
       {
         op: "create",
         id: frameId,
         type: "frame",
         parent,
-        key: keyBetween(last?.key ?? null, after ? (this.doc.get(after)?.key ?? null) : null),
+        key: slot.key,
         props: {
           name: this.defaultName("frame"),
           x: round2(origin.x),
           y: round2(origin.y),
-          width: round2(bounds.width),
-          height: round2(bounds.height),
+          width: round2(box.width),
+          height: round2(box.height),
           ...(autoLayout
             ? { layoutMode: horizontal ? "row" : "column", gap: 8, sizingH: "hug", sizingV: "hug" }
             : {}),
@@ -1323,27 +1396,20 @@ export class Editor {
         })
       : ids;
     const keys = keysBetween(null, null, sorted.length);
-    // The frame doesn't exist yet when reparentOps reads the scene, so compute
-    // positions relative to its origin directly.
-    sorted.forEach((id, i) => {
-      ops.push({ op: "move", id, parent: frameId, key: keys[i] as string });
+    // The frame doesn't exist yet for the scene to read, so its space is
+    // worked out here: its parent's, moved to its origin.
+    const frameSpace = multiply(
+      this.scene.spaceMatrix(this.scene.spaceOwner(parent)),
+      translate(origin.x, origin.y),
+    );
+    for (const [i, id] of sorted.entries()) {
       const node = this.doc.get(id);
-      if (!node) return;
-      const shift = (n: NodeRecord) => {
-        if (n.type === "group") {
-          for (const c of this.doc.childIds(n.id)) {
-            const child = this.doc.get(c);
-            if (child) shift(child);
-          }
-          return;
-        }
-        ops.push(
-          { op: "set", id: n.id, prop: "x", value: round2(getProp(n.props, "x") - origin.x) },
-          { op: "set", id: n.id, prop: "y", value: round2(getProp(n.props, "y") - origin.y) },
-        );
-      };
-      shift(node);
-    });
+      if (!node) continue;
+      ops.push(
+        { op: "move", id, parent: frameId, key: keys[i] as string },
+        ...this.#keepInPlace(node, frameSpace),
+      );
+    }
     if (this.commit(ops, autoLayout ? "Add auto layout" : "Frame selection"))
       this.select([frameId]);
   }
@@ -2558,10 +2624,24 @@ export class Editor {
     if (data.format !== "drawpane/nodes" || !Array.isArray(data.nodes)) return false;
     const parent = options.at ? this.dropTarget(options.at) : this.insertionParent();
     if (!parent) return false;
-    const target =
+    let target =
       this.doc.get(parent)?.type === "frame" || this.doc.get(parent)?.type === "page"
         ? parent
         : (this.doc.get(parent)?.parent ?? parent);
+    // Never inside a component the clipboard holds (or holds an instance of):
+    // paste beside it instead, as far out as it takes.
+    const components = new Set<string>();
+    for (const n of data.nodes) {
+      const of = n.type === "frame" ? getProp(n.props, "instanceOf") : null;
+      if (of) components.add(of);
+      if (n.parent === "" && getProp(n.props, "isComponent") && isMainComponent(this.doc.get(n.id)))
+        components.add(n.id);
+    }
+    const fits = (at: string) =>
+      !instanceRootOf(this.doc, at) && ![...components].some((c) => wouldCycle(this.doc, c, at));
+    while (!fits(target) && this.doc.get(target)?.type !== "page")
+      target = this.doc.get(target)?.parent ?? target;
+    if (!fits(target)) return false;
     const space = this.scene.spaceMatrix(this.scene.spaceOwner(target));
     const inv = invert(space);
     const idMap = new Map<string, string>();

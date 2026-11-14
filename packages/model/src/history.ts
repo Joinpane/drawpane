@@ -394,6 +394,8 @@ export function restoreOps(
   const roots = asked.filter(
     (id) => !asked.some((other) => other !== id && target.subtree(other).includes(id)),
   );
+  // Only what actually comes back: a layer with nowhere left to go is skipped.
+  const restored: string[] = [];
   for (const root of roots) {
     const node = target.nodes.get(root) as NodeRecord;
     const now = current.get(root);
@@ -414,6 +416,7 @@ export function restoreOps(
       key = keyOnTop(current, home);
     }
     const ids = target.subtree(root);
+    restored.push(root);
     restoreNode(root, parent, key);
     for (const id of ids.slice(1)) {
       const child = target.nodes.get(id) as NodeRecord;
@@ -421,7 +424,7 @@ export function restoreOps(
     }
     if (now) deleteMissing(currentSubtree(current, root).slice(1), new Set(ids));
   }
-  return { ops: [...placeOps, ...setOps, ...deleteOps], dropped: count.dropped, restored: roots };
+  return { ops: [...placeOps, ...setOps, ...deleteOps], dropped: count.dropped, restored };
 }
 
 // ---------------------------------------------------------------------------

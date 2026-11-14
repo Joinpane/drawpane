@@ -121,6 +121,39 @@ describe("Editor", () => {
     expect(editor.scene.bounds(a)).toEqual(before);
   });
 
+  it("groups or frames layers from different parents in the topmost one's parent, nothing moving", () => {
+    // A layer inside a frame, and one beside the frame on the page, above it.
+    const frame = editor.createLayer(
+      "frame",
+      { x: 100, y: 100, width: 200, height: 200 },
+      "p",
+    ) as string;
+    const inner = editor.createLayer(
+      "rect",
+      { x: 150, y: 150, width: 10, height: 10 },
+      frame,
+    ) as string;
+    const beside = editor.createLayer(
+      "rect",
+      { x: 400, y: 0, width: 20, height: 20 },
+      "p",
+    ) as string;
+    const where = () => [editor.scene.bounds(inner), editor.scene.bounds(beside)];
+    const before = where();
+    for (const wrap of [() => editor.group(), () => editor.frameSelection()]) {
+      editor.select([inner, beside]);
+      wrap();
+      const made = editor.s.selection[0] as string;
+      // On the page, just above `beside` (the topmost), holding both in their order.
+      expect(editor.doc.get(made)?.parent).toBe("p");
+      expect(editor.doc.childIds("p")).toEqual([frame, made]);
+      expect(editor.doc.childIds(made)).toEqual([inner, beside]);
+      expect(where()).toEqual(before);
+      editor.undo();
+      expect(editor.doc.get(inner)?.parent).toBe(frame);
+    }
+  });
+
   it("wraps a selection in an auto-layout frame that hugs its content", () => {
     const a = editor.createLayer("rect", { x: 100, y: 100, width: 40, height: 20 }, "p") as string;
     const b = editor.createLayer("rect", { x: 200, y: 100, width: 60, height: 20 }, "p") as string;

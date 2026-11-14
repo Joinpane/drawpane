@@ -11,7 +11,7 @@ import {
   type Op,
   type Props,
 } from "@drawpane/model";
-import { isInsideInstance } from "./components";
+import { canMoveInto, isInsideInstance } from "./components";
 import { croppableImage } from "./crop-session";
 import type { Editor } from "./editor";
 import {
@@ -29,7 +29,7 @@ import {
 import { gridSnapLines, guideAt, guideOwnerAt, placedGuides } from "./grids";
 import { childToward, hitTest, marqueeHits, selectionTarget } from "./hit";
 import { frameLabelAt, isArtboard } from "./labels";
-import { gridCellAt, gridGeometry } from "./layout";
+import { gridCellAt, gridGeometry, placedByLayout } from "./layout";
 import { sizePillAt } from "./size-pill";
 import { type Guide, type SnapLine, snapEdges, snapGuide, snapRect } from "./snap";
 import { ConnectTool } from "./tools/connect";
@@ -845,12 +845,8 @@ export class Interaction {
 
     const ops: Op[] = [];
     for (const node of this.#geometryNodes(mode.nodes)) {
-      const parent = editor.doc.get(node.parent);
-      const inLayout =
-        parent?.type === "frame" &&
-        getProp(parent.props, "layoutMode") !== "none" &&
-        getProp(node.props, "positioning") === "auto";
-      if (inLayout) continue;
+      // Auto layout places it (or the group it's in): the drag reorders instead.
+      if (placedByLayout(editor.doc, node.id)) continue;
       const space = editor.scene.spaceMatrix(editor.scene.spaceOwner(node.parent));
       const det = space[0] * space[3] - space[1] * space[2] || 1;
       const lx = (space[3] * dx - space[2] * dy) / det;
@@ -991,6 +987,7 @@ export class Interaction {
         if (b && rectContainsPoint(b, page)) continue;
       }
       if (editor.doc.ancestors(target).some((a) => a.id === id) || target === id) continue;
+      if (!canMoveInto(editor.doc, [id], target)) continue;
       ops.push(...editor.reparentOps(id, target, editor.topKey(target)));
     }
     if (ops.length > 0) editor.commit(ops, "Move into frame");

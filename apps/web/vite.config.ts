@@ -16,6 +16,8 @@ export default defineConfig({
   test: {
     // Playwright owns e2e/; Vitest runs unit tests next to the code.
     include: ["src/**/*.test.ts"],
+    // Fixed fast-check seeds unless FUZZ_SEED says otherwise.
+    setupFiles: ["../../vitest.setup.ts"],
   },
   build: {
     target: "es2023",

@@ -14,7 +14,8 @@
     "e2e": "playwright test --project=chromium",
     "tour": "playwright test --project=tour",
     "bench": "playwright test --project=bench",
-    "fonts:catalog": "node scripts/build-font-catalog.ts"
+    "fonts:catalog": "node scripts/build-font-catalog.ts",
+    "fuzz": "vitest run --testTimeout=1800000"
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
@@ -35,6 +36,7 @@
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",
+    "fast-check": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:"

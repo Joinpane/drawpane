@@ -103,6 +103,22 @@ describe("explainSize", () => {
     ]);
   });
 
+  it("counts a group in the stack as the box around its layers", () => {
+    const { editor, upcoming, rows } = setup();
+    // Group the last row with a badge pinned beside it: the group is 52 tall, like a row.
+    const badge = editor.createLayer("rect", { x: 0, y: 0, width: 20, height: 20 }, upcoming, {
+      name: "Badge",
+      positioning: "absolute",
+    }) as string;
+    editor.setProp([badge], "x", 280);
+    editor.setProp([badge], "y", 12 + 52 + 8 + 52 + 8 + 16);
+    editor.select([rows[2] as string, badge]);
+    editor.group();
+    const e = explainSize(editor.doc, upcoming, "height");
+    expect(e?.size).toBe(196);
+    expect(e?.formula).toBe("12 + 2 × 52 + 52 + 2 × 8 + 12");
+  });
+
   it("explains text that sizes itself", () => {
     const { editor } = setup();
     const t = editor.createLayer("text", { x: 0, y: 0, width: 10, height: 10 }, "p", {

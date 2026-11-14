@@ -16,9 +16,10 @@ import {
 } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import {
+  aimDrop,
   containersWithin,
   type DropTarget,
-  dropTarget,
+  dropPlacement,
   kindOf,
   LAYER_FILTERS,
   type LayerFilter,
@@ -239,11 +240,15 @@ export function LayersPanel() {
       const parent = editor.doc.get(id)?.parent;
       return parent && parent !== pageId ? parent : null;
     };
-    const own = drag.id === row.node.id;
-    // Over its own row, a layer can only move out (left, from the bottom of its
-    // groups), the way the last layer in a frame leaves it; anywhere else it stays.
-    let target = dropTarget(rows, index, own ? 1 : y, active ? row.depth : depth, parentOf);
-    if (own && !(target?.where === "after" && target.depth < row.depth)) target = null;
+    const target = aimDrop({
+      doc: editor.doc,
+      rows,
+      index,
+      y,
+      depth: active ? row.depth : depth,
+      moving: selection.includes(drag.id) ? selection : [drag.id],
+      parentOf,
+    });
     const same =
       drag.copy === e.altKey &&
       drag.target?.id === target?.id &&
@@ -271,16 +276,10 @@ export function LayersPanel() {
     const target = editor.doc.get(drag.target.id);
     const dragged = selection.includes(drag.id) ? selection : [drag.id];
     const { copy } = drag;
-    const { where } = drag.target;
     setDrag(null);
     if (!target) return;
-    // Refuse to drop a layer into itself.
-    if (
-      dragged.some(
-        (id) => id === target.id || editor.doc.ancestors(target.id).some((a) => a.id === id),
-      )
-    )
-      return;
+    // A layer never drops inside itself.
+    if (!dropPlacement(editor.doc, drag.target, dragged)) return;
     const keyOf = (id: string | null) => (id ? (editor.doc.get(id)?.key ?? null) : null);
     // Bottom first, so the layers keep their order relative to each other.
     const byKey = (ids: readonly string[]) =>
@@ -309,27 +308,12 @@ export function LayersPanel() {
       editor.commit(ops, "Duplicate layers");
       moving = copies.filter((id) => editor.doc.has(id));
     }
-    let parent: string;
-    let below: string | null;
-    let above: string | null;
-    const siblingsOf = (p: string) => editor.doc.childIds(p).filter((id) => !moving.includes(id));
-    if (where === "inside") {
-      parent = target.id;
-      below = siblingsOf(parent).at(-1) ?? null;
-      above = null;
-    } else {
-      parent = target.parent;
-      const kids = siblingsOf(parent);
-      const index = kids.indexOf(target.id);
-      // The panel lists topmost first, so "before" in the list means above in z-order.
-      if (where === "before") {
-        below = target.id;
-        above = kids[index + 1] ?? null;
-      } else {
-        below = kids[index - 1] ?? null;
-        above = target.id;
-      }
+    const place = dropPlacement(editor.doc, drag.target, moving);
+    if (!place) {
+      editor.endGesture();
+      return;
     }
+    const { parent, below, above } = place;
     let lo = keyOf(below);
     const hi = keyOf(above);
     const ops: Op[] = [];

@@ -13,6 +13,11 @@
       "dependsOn": ["^build"],
       "outputs": []
     },
+    "fuzz": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "passThroughEnv": ["FUZZ_SEED", "FUZZ_RUNS", "FUZZ_LENGTH"]
+    },
     "dev": {
       "cache": false,
       "persistent": true

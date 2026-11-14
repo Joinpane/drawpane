@@ -3,7 +3,7 @@
  * search or filter finds, and the flattened list the panel draws (topmost
  * layer first, like every design tool). Pure, so it's tested without React.
  */
-import { type Doc, hasMask, maskScopes } from "@drawpane/editor";
+import { canMoveInto, type Doc, hasMask, maskScopes } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import type { LayerKind } from "@drawpane/ui";
 
@@ -233,4 +233,72 @@ export function dropTarget(
     id = parent;
   }
   return { id, where: "after", row: node.id, show: "line-after", depth: chosen };
+}
+
+export interface Aim {
+  readonly doc: Doc;
+  readonly rows: readonly Row[];
+  /** The row under the pointer, and where on it: 0 at its top, 1 at its bottom. */
+  readonly index: number;
+  readonly y: number;
+  /** The pointer's nesting level, across the panel. */
+  readonly depth: number;
+  /** The layers being dragged. */
+  readonly moving: readonly string[];
+  /** A layer's parent in the list, or null at the top level. */
+  readonly parentOf: (id: string) => string | null;
+}
+
+/**
+ * Where a drag aims, or null when dropping there would do nothing, so the
+ * panel only ever shows a drop that will happen. Like `dropTarget`, except
+ * over a row that's being dragged, where a layer can only move out (left,
+ * from the bottom of the groups it ends), the way the last layer in a frame
+ * leaves it.
+ */
+export function aimDrop({ doc, rows, index, y, depth, moving, parentOf }: Aim): DropTarget | null {
+  const row = rows[index];
+  if (!row) return null;
+  const own = moving.includes(row.node.id);
+  const target = dropTarget(rows, index, own ? 1 : y, depth, parentOf);
+  if (!target) return null;
+  if (own && !(target.where === "after" && target.depth < row.depth)) return null;
+  return dropPlacement(doc, target, moving) ? target : null;
+}
+
+/** Where a drop puts the layers: under a parent, between two of its children (bottom to top). */
+export interface DropPlacement {
+  readonly parent: string;
+  /** The sibling just under the drop in z-order, or null at the bottom. */
+  readonly below: string | null;
+  /** The sibling just over it, or null at the top. */
+  readonly above: string | null;
+}
+
+/**
+ * Turns a drop target into a place among siblings, leaving out the layers
+ * being moved. Null when the drop would put a layer inside itself or into
+ * an instance (or a component inside itself), or is relative to one of the
+ * layers being moved.
+ */
+export function dropPlacement(
+  doc: Doc,
+  target: Pick<DropTarget, "id" | "where">,
+  moving: readonly string[],
+): DropPlacement | null {
+  const node = doc.get(target.id);
+  // Relative to a layer that's moving too: nowhere to put it.
+  if (!node || moving.includes(node.id)) return null;
+  const into = target.where === "inside" ? node.id : node.parent;
+  if (moving.some((id) => id === into || doc.ancestors(into).some((a) => a.id === id))) return null;
+  // Not into an instance's layers, and never a component into itself.
+  if (!canMoveInto(doc, moving, into)) return null;
+  const siblings = doc.childIds(into).filter((id) => !moving.includes(id));
+  if (target.where === "inside")
+    return { parent: into, below: siblings.at(-1) ?? null, above: null };
+  const index = siblings.indexOf(node.id);
+  // The panel lists topmost first, so "before" in the list means above in z-order.
+  return target.where === "before"
+    ? { parent: into, below: node.id, above: siblings[index + 1] ?? null }
+    : { parent: into, below: siblings[index - 1] ?? null, above: node.id };
 }
