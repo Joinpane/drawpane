@@ -1,6 +1,8 @@
 /**
- * Version snapshots in R2: one gzip JSON object per saved revision at
- * `files/<file-id>/snapshots/<revn padded to 12>.json.gz`.
+ * Snapshots in R2: one gzip JSON object per saved revision at
+ * `files/<file-id>/snapshots/<revn padded to 12>.json.gz`, and a branch's
+ * base (the main file's nodes it was made from) at
+ * `files/<branch-id>/branch-base.json.gz`.
  *
  * ```json
  * {"format":"drawpane.snapshot","version":1,"fileId":"…","revn":42,"at":1731500000000,"nodes":[…]}
@@ -24,6 +26,11 @@ export interface SnapshotFile {
   readonly nodes: readonly NodeRecord[];
 }
 
+/** A branch's base: its main file's nodes at the revision it was made from. */
+export function branchBaseKey(branchId: string): string {
+  return `files/${branchId}/branch-base.json.gz`;
+}
+
 /** Writes a snapshot and returns its compressed size in bytes. */
 export async function writeSnapshot(
   bucket: R2Bucket,
@@ -31,6 +38,8 @@ export async function writeSnapshot(
   revn: number,
   at: number,
   nodes: readonly NodeRecord[],
+  /** Where it goes: the file's version snapshot at `revn` unless given. */
+  key = snapshotKey(fileId, revn),
 ): Promise<number> {
   // Built by hand so a large file is never one giant JSON.stringify call.
   const parts: string[] = [];
@@ -39,7 +48,7 @@ export async function writeSnapshot(
   const gz = await new Response(
     new Blob([body]).stream().pipeThrough(new CompressionStream("gzip")),
   ).arrayBuffer();
-  await bucket.put(snapshotKey(fileId, revn), gz, {
+  await bucket.put(key, gz, {
     httpMetadata: { contentType: "application/json", contentEncoding: "gzip" },
     customMetadata: { revn: String(revn) },
   });

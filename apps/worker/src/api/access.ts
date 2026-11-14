@@ -31,6 +31,16 @@ export async function requireTeamRole(
   return role;
 }
 
+/**
+ * Someone's role on a file, from `files f` joined to their team membership
+ * `m` and the file's branch record `b` (see FILE_ACCESS): their team role,
+ * except that a merged branch is read-only history (decision 0012).
+ */
+export const FILE_ROLE = "CASE WHEN b.merged_at IS NOT NULL THEN 'viewer' ELSE m.role END";
+/** The joins FILE_ROLE reads; binds the user's id. */
+export const FILE_ACCESS = `files f JOIN team_members m ON m.team_id = f.team_id AND m.user_id = ?
+  LEFT JOIN branches b ON b.file_id = f.id`;
+
 export interface FileRow {
   id: string;
   project_id: string;
@@ -43,6 +53,8 @@ export interface FileRow {
   thumbnail_at?: number | null;
   /** 1 when the team starts new files from it. */
   is_template?: number;
+  /** A branch's main file (decision 0012); null for a main file. */
+  branch_of?: string | null;
 }
 
 export async function requireFileRole(
@@ -52,9 +64,9 @@ export async function requireFileRole(
   needed: Role,
 ): Promise<{ file: FileRow; role: Role }> {
   const row = await env.DB.prepare(
-    `SELECT f.id, f.project_id, f.team_id, f.name, f.created_at, f.updated_at, f.deleted_at, f.thumbnail_at, f.is_template, m.role
-       FROM files f JOIN team_members m ON m.team_id = f.team_id AND m.user_id = ?
-      WHERE f.id = ?`,
+    `SELECT f.id, f.project_id, f.team_id, f.name, f.created_at, f.updated_at, f.deleted_at,
+            f.thumbnail_at, f.is_template, f.branch_of, ${FILE_ROLE} AS role
+       FROM ${FILE_ACCESS} WHERE f.id = ?`,
   )
     .bind(userId, fileId)
     .first<FileRow & { role: Role }>();
@@ -85,5 +97,6 @@ export function toFile(row: FileRow) {
     deletedAt: row.deleted_at,
     thumbnailAt: row.thumbnail_at ?? null,
     isTemplate: row.is_template === 1,
+    branchOf: row.branch_of ?? null,
   };
 }

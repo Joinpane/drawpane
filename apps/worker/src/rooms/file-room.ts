@@ -11,19 +11,24 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   applyTransaction,
+  branchChanges,
   ClientMessage,
   type CommentEvent,
+  changeKey,
   keyBetween,
   LATENCY_BUCKETS_MS,
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_OPS_PER_TRANSACTION,
   MemoryStore,
   ModelError,
+  mergeOps,
   type NodeRecord,
   newId,
+  nodeReader,
   type Op,
   type Peer,
   type Presence,
+  type Resolution,
   type RestoredVersion,
   ROOT_ID,
   restoreOps,
@@ -32,6 +37,7 @@ import {
   summarizeEdits,
   type VersionReason,
 } from "@drawpane/model";
+import { FILE_ACCESS, FILE_ROLE } from "../api/access";
 import type { Env, Role } from "../env";
 import { verifyPayload } from "../lib/crypto";
 import { AUTOSAVE_RETENTION_MS, readSnapshot, snapshotKey, writeSnapshot } from "./snapshots";
@@ -322,7 +328,11 @@ export class FileRoom extends DurableObject<Env> {
 
   /** Deletes everything this room stores. Called when a file is deleted for good. */
   async destroy(): Promise<void> {
-    for (const ws of this.ctx.getWebSockets()) ws.close(4404, "File deleted");
+    for (const ws of this.ctx.getWebSockets()) {
+      // Nothing left to tidy when it finishes closing: the storage is about to go.
+      ws.serializeAttachment(null);
+      ws.close(4404, "File deleted");
+    }
     const fileId = this.#meta("file_id");
     if (fileId) {
       const listed = await this.env.FILES.list({ prefix: `files/${fileId}/` });
@@ -371,6 +381,20 @@ export class FileRoom extends DurableObject<Env> {
         console.warn("couldn't forget a connection", error),
       );
     return reached;
+  }
+
+  /**
+   * This file is a branch, just merged into its main file (decision 0012):
+   * everyone here becomes a viewer at once and hears why. The Worker reads
+   * merged branches as read-only from then on, so reconnecting changes nothing.
+   */
+  async merged(by: { readonly id: string; readonly name: string }): Promise<void> {
+    for (const ws of this.ctx.getWebSockets()) {
+      const me = ws.deserializeAttachment() as Attachment | null;
+      if (!me) continue;
+      ws.serializeAttachment({ ...me, role: "viewer" });
+      this.#send(ws, { t: "merged", by });
+    }
   }
 
   /** Disconnects everyone playing a shared prototype (the link was turned off). Returns how many. */
@@ -487,11 +511,101 @@ export class FileRoom extends DurableObject<Env> {
     return { ok: true, revn, nodes: nodes.length };
   }
 
+  /**
+   * Merges a branch into this file, its main file (decision 0012). The
+   * changes are worked out here, against the file as it is at this moment, so
+   * nothing main did since the reviewer looked is overwritten unseen: a
+   * conflict without a decision stops the merge. The file is saved as a named
+   * version first, which undoes the merge from History; then the chosen
+   * changes are one ordinary transaction that everyone here sees arrive.
+   */
+  async mergeBranch(
+    by: Requester,
+    fileId: string,
+    branch: { readonly id: string; readonly name: string },
+    snapshots: { readonly base: readonly NodeRecord[]; readonly branch: readonly NodeRecord[] },
+    choices: {
+      /** Each conflict's side, by change key (see changeKey). */
+      readonly resolutions: Readonly<Record<string, Resolution>>;
+      /** Changes left out, by change key. */
+      readonly skip: readonly string[];
+    },
+  ): Promise<MergeResult> {
+    this.#adopt(fileId);
+    const read = () => {
+      const nodes: NodeRecord[] = [];
+      for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) nodes.push(...page);
+      return nodes;
+    };
+    const resolutions = new Map(Object.entries(choices.resolutions));
+    const skip = new Set(choices.skip);
+    const plan = (nodes: readonly NodeRecord[]) => {
+      const main = nodeReader(nodes);
+      const changes = branchChanges(
+        nodeReader(snapshots.base),
+        nodeReader(snapshots.branch),
+        main,
+      ).filter((c) => !skip.has(changeKey(c)));
+      const undecided = changes.filter((c) => c.conflict && !resolutions.has(changeKey(c)));
+      return { main, changes, undecided };
+    };
+
+    // Checked before the restore point is saved, and again after (that awaits).
+    const first = plan(read());
+    if (first.undecided.length > 0)
+      return { ok: false, reason: "undecided", undecided: first.undecided.length };
+    const restorePoint = await this.#saveVersion(fileId, {
+      reason: "named",
+      by: by.userId,
+      name: `Before merging “${branch.name}”`,
+      description: null,
+      keepName: true,
+    });
+
+    // From here to the commit nothing awaits, so the plan and the store agree.
+    const nodes = read();
+    const { main, changes, undecided } = plan(nodes);
+    if (undecided.length > 0)
+      return { ok: false, reason: "undecided", undecided: undecided.length };
+    const ops = mergeOps(main, nodeReader(snapshots.branch), changes, resolutions);
+    if (ops.length === 0)
+      return { ok: true, revn: this.#revn, restorePoint: restorePoint.id, changes: 0 };
+    try {
+      // A dry run on a copy: the whole merge applies, or none of it.
+      applyTransaction(new MemoryStore(nodes), ops, { rollback: false });
+    } catch (error) {
+      if (error instanceof ModelError)
+        return { ok: false, reason: "invalid", message: error.message };
+      throw error;
+    }
+    const author = { clientId: "merge", seq: 0, userId: by.userId, sessionId: "merge" };
+    const revn = this.#commit(ops, author);
+    this.#broadcastChange(revn, ops, author);
+    this.#broadcast({
+      t: "merged-in",
+      by: { id: by.userId, name: by.name },
+      branch,
+      changes: changes.length,
+    });
+    void this.#scheduleAlarm();
+    return { ok: true, revn, restorePoint: restorePoint.id, changes: changes.length };
+  }
+
   /** Every node in the file, for copying it into another (a duplicate, a file from a template). */
   async allNodes(): Promise<NodeRecord[]> {
     const out: NodeRecord[] = [];
     for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) out.push(...page);
     return out;
+  }
+
+  /**
+   * Every node with the revision they're at, read without awaiting so the two
+   * agree: what a branch is made from, and its base (decision 0012).
+   */
+  async snapshot(): Promise<{ revn: number; nodes: NodeRecord[] }> {
+    const nodes: NodeRecord[] = [];
+    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) nodes.push(...page);
+    return { revn: this.#revn, nodes };
   }
 
   /** Current revision and node count, for tests and the health page. */
@@ -552,8 +666,7 @@ export class FileRoom extends DurableObject<Env> {
     if (!fileId) return undefined;
     try {
       const row = await this.env.DB.prepare(
-        `SELECT m.role FROM files f JOIN team_members m ON m.team_id = f.team_id AND m.user_id = ?
-          WHERE f.id = ?`,
+        `SELECT ${FILE_ROLE} AS role FROM ${FILE_ACCESS} WHERE f.id = ?`,
       )
         .bind(userId, fileId)
         .first<{ role: Role }>();
@@ -873,6 +986,8 @@ export class FileRoom extends DurableObject<Env> {
       readonly name?: string;
       readonly description?: string | null;
       readonly restoredId?: string;
+      /** Name a version that's already there only if it has no name yet. */
+      readonly keepName?: boolean;
     },
   ): Promise<SavedVersion> {
     // Read everything first, without awaiting, so the snapshot is one consistent revision.
@@ -886,7 +1001,9 @@ export class FileRoom extends DurableObject<Env> {
     if (existing) {
       if (options.name !== undefined) {
         await this.env.DB.prepare(
-          "UPDATE versions SET name = ?, description = ?, created_by = COALESCE(created_by, ?) WHERE id = ?",
+          options.keepName
+            ? "UPDATE versions SET name = ?, description = ?, created_by = COALESCE(created_by, ?) WHERE id = ? AND name IS NULL"
+            : "UPDATE versions SET name = ?, description = ?, created_by = COALESCE(created_by, ?) WHERE id = ?",
         )
           .bind(options.name, options.description ?? null, options.by ?? null, existing.id)
           .run();
@@ -992,6 +1109,13 @@ export class FileRoom extends DurableObject<Env> {
     await this.env.DB.batch(
       expired.map((v) => this.env.DB.prepare("DELETE FROM versions WHERE id = ?").bind(v.id)),
     );
+  }
+
+  /** Records which file this room is, for a call that names it before anyone has opened it. */
+  #adopt(fileId: string): void {
+    const known = this.#meta("file_id");
+    if (known === null) this.#setMeta("file_id", fileId);
+    else if (known !== fileId) throw new ModelError("not_found", "This room holds another file.");
   }
 
   #requireFileId(): string {
@@ -1114,6 +1238,20 @@ export class FileRoom extends DurableObject<Env> {
     return sent;
   }
 }
+
+export type MergeResult =
+  | {
+      readonly ok: true;
+      /** The revision the merge landed at (the current one when it changed nothing). */
+      readonly revn: number;
+      /** The version saved just before: restoring it undoes the merge. */
+      readonly restorePoint: string;
+      /** How many changes it took. */
+      readonly changes: number;
+    }
+  /** Main changed since review: conflicts nobody decided. */
+  | { readonly ok: false; readonly reason: "undecided"; readonly undecided: number }
+  | { readonly ok: false; readonly reason: "invalid"; readonly message: string };
 
 export type ImportResult =
   | { readonly ok: true; readonly revn: number; readonly nodes: number }

@@ -109,7 +109,7 @@ export const TOOLS: readonly Tool[] = [
            JOIN team_members m ON m.team_id = f.team_id AND m.user_id = ?
            JOIN projects p ON p.id = f.project_id
            JOIN teams t ON t.id = f.team_id
-          WHERE f.deleted_at IS NULL AND (? IS NULL OR f.name LIKE ? ESCAPE '\\')
+          WHERE f.deleted_at IS NULL AND f.branch_of IS NULL AND (? IS NULL OR f.name LIKE ? ESCAPE '\\')
           ORDER BY f.updated_at DESC LIMIT ?`,
       )
         .bind(user.id, like, like, limit)

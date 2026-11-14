@@ -1,5 +1,11 @@
 /** Typed client for the Worker's REST API. Errors carry the server's sentence. */
-import type { LibraryPublish, NodeRecord, VersionInfo } from "@drawpane/model";
+import type {
+  BranchInfo,
+  LibraryPublish,
+  NodeRecord,
+  Resolution,
+  VersionInfo,
+} from "@drawpane/model";
 
 export type Role = "owner" | "editor" | "viewer";
 
@@ -37,6 +43,8 @@ export interface FileMeta {
   readonly thumbnailAt: number | null;
   /** The team starts new files from it (New file → your team). */
   readonly isTemplate?: boolean;
+  /** A branch's main file (decision 0012); null for a main file. */
+  readonly branchOf?: string | null;
 }
 export interface Member {
   readonly id: string;
@@ -171,10 +179,14 @@ export const api = {
   projectFiles: (projectId: string) =>
     request<{ files: FileMeta[] }>("GET", `/projects/${projectId}/files`),
   file: (fileId: string) =>
-    request<{ file: FileMeta; role: Role; project: { id: string; name: string } | null }>(
-      "GET",
-      `/files/${fileId}`,
-    ),
+    request<{
+      file: FileMeta;
+      role: Role;
+      project: { id: string; name: string } | null;
+      /** Set on a branch: its record, and the file it branches. */
+      branch: BranchInfo | null;
+      main: { id: string; name: string } | null;
+    }>("GET", `/files/${fileId}`),
   members: (teamId: string) => request<{ members: Member[] }>("GET", `/teams/${teamId}/members`),
   inbox: (filter: "unread" | "all", before: string | null) =>
     request<InboxPage>(
@@ -233,12 +245,44 @@ export const api = {
   /** The team libraries a file can use: the latest publish of each. */
   availableLibraries: (fileId: string) =>
     request<{ libraries: LibraryPublish[] }>("GET", `/files/${fileId}/libraries`),
+  /** A file's branches (from a branch, its main file's): open ones first. */
+  branches: (fileId: string) =>
+    request<{ mainId: string; canBranch: boolean; branches: BranchInfo[] }>(
+      "GET",
+      `/files/${fileId}/branches`,
+    ),
+  /** Branches a main file: a copy of it now, which merges back later. */
+  createBranch: (fileId: string, name: string) =>
+    request<{ branch: BranchInfo }>("POST", `/files/${fileId}/branches`, { name }),
+  /** What review compares: the branch's base, the branch now, and main now. */
+  branchReview: (branchId: string) =>
+    request<BranchReview>("GET", `/files/${branchId}/branch/review`),
+  /** Merges a branch into its main file, with a side for each conflict and changes left out. */
+  mergeBranch: (
+    branchId: string,
+    body: { resolutions: Record<string, Resolution>; skip: readonly string[] },
+  ) =>
+    request<{ branch: BranchInfo; revn: number; restorePoint: string }>(
+      "POST",
+      `/files/${branchId}/branch/merge`,
+      body,
+    ),
+  /** Deletes a branch for good. */
+  deleteBranch: (branchId: string) => request<{ ok: true }>("DELETE", `/files/${branchId}/branch`),
   /** Restores the whole file. `sessionId` is this tab's, so the room doesn't also notify it. */
   restoreVersion: (fileId: string, versionId: string, sessionId: string | null) =>
     request<RestoreResult>("POST", `/files/${fileId}/versions/${versionId}/restore`, {
       sessionId,
     }),
 };
+
+export interface BranchReview {
+  readonly base: readonly NodeRecord[];
+  readonly branch: readonly NodeRecord[];
+  readonly main: readonly NodeRecord[];
+  /** Main's revision when read. */
+  readonly mainRevn: number;
+}
 
 export interface RestoreResult {
   readonly revn: number;

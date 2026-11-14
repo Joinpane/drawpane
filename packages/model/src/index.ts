@@ -1,4 +1,5 @@
 export * from "./apply";
+export * from "./branches";
 export * from "./comments";
 export * from "./fonts";
 export * from "./history";

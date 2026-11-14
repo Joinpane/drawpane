@@ -1,8 +1,8 @@
 import { Editor, Interaction, liveFlows, screenOf } from "@drawpane/editor";
-import type { VersionInfo } from "@drawpane/model";
+import type { BranchInfo, VersionInfo } from "@drawpane/model";
 import { Button, Icon, IconButton, Logo, SegmentedControl } from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   type CSSProperties,
   useCallback,
@@ -21,6 +21,7 @@ import { AssetsPanel } from "./AssetsPanel";
 import { roleChangeNotice } from "./access-notices";
 import { ACTIONS, type ActionContext, shortcutFor, triggers } from "./actions";
 import { loadBooleanEngine } from "./boolean-engine";
+import { BranchMenu, MergePane, ReviewPane, type ReviewRow, useBranchReview } from "./branches";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
 import { ContextMenus } from "./ContextMenus";
@@ -47,6 +48,7 @@ import {
   VersionBanner,
   VersionDetails,
 } from "./history";
+import { count } from "./history/labels";
 import { EditorContext, useEditor, useEditorState, useEditorStateOutside } from "./hooks";
 import { ImageDrop, UploadTray } from "./ImageDrop";
 import { InboxMenu } from "./InboxMenu";
@@ -151,6 +153,39 @@ function FileEditor({ fileId }: { fileId: string }) {
   );
   const viewing = history.viewing;
   const historyOpen = view === "design" && history.open;
+  // Branches (decision 0012): on a branch, its record and main file; `?review` opens its review.
+  const branch = meta.data?.branch ?? null;
+  const mainFile =
+    meta.data?.main ?? (meta.data ? { id: fileId, name: meta.data.file.name } : null);
+  const { review: reviewAsked } = useSearch({ from: "/f/$fileId" });
+  const reviewing =
+    reviewAsked === true && view === "design" && !viewing && branch !== null && !branch.merged;
+  const setReviewing = useCallback(
+    (on: boolean) =>
+      void navigate({
+        to: "/f/$fileId",
+        params: { fileId },
+        search: ({ review: _, ...rest }) => (on ? { ...rest, review: true as const } : rest),
+        replace: true,
+      }),
+    [navigate, fileId],
+  );
+  const openMain = useCallback(() => {
+    const id = meta.data?.main?.id;
+    if (id) void navigate({ to: "/f/$fileId", params: { fileId: id } });
+  }, [meta.data, navigate]);
+  const review = useBranchReview(editor, branch, reviewing, () => {
+    setReviewing(false);
+    if (branch && mainFile)
+      editor.notify(`Merged “${branch.name}” into ${mainFile.name}.`, {
+        label: `Open ${mainFile.name}`,
+        run: openMain,
+      });
+  });
+  const canMerge = meta.data?.role !== undefined && meta.data.role !== "viewer";
+  // What the room says about merges, read from the latest of these.
+  const branchRef = useRef({ branch, mainFile, openMain });
+  branchRef.current = { branch, mainFile, openMain };
   const active = history.active;
   const activeInteraction = viewing ? history.view.interaction : interaction;
   // Minimized: the inspector comes while something is selected (or a version is on screen).
@@ -232,9 +267,25 @@ function FileEditor({ fileId }: { fileId: string }) {
         comments.store.receive(message);
         // Someone commented: it may be for you.
         if (message.t === "comments") refreshInbox(queryClient);
-        if (message.t === "role") {
-          const me = queryClient.getQueryData<{ user: { id: string } | null }>(["session"])?.user;
-          editor.notify(roleChangeNotice(message, me?.id ?? null));
+        const me = queryClient.getQueryData<{ user: { id: string } | null }>(["session"])?.user;
+        if (message.t === "role") editor.notify(roleChangeNotice(message, me?.id ?? null));
+        if (message.t === "merged") {
+          // This branch: read-only from now on. The person who merged it has their own notice.
+          void queryClient.invalidateQueries({ queryKey: ["file", fileId] });
+          const { mainFile, openMain } = branchRef.current;
+          if (message.by.id !== me?.id && mainFile)
+            editor.notify(
+              `${message.by.name} merged this branch into ${mainFile.name}. It's read-only now.`,
+              { label: `Open ${mainFile.name}`, run: openMain },
+            );
+        }
+        if (message.t === "merged-in") {
+          void queryClient.invalidateQueries({ queryKey: ["branches", fileId] });
+          const who = message.by.id === me?.id ? "You" : message.by.name;
+          editor.notify(
+            `${who} merged “${message.branch.name}” into this file: ${count(message.changes, "change")}.`,
+            { label: "History", run: () => ctxRef.current?.showHistory() },
+          );
         }
       }),
     [editor, fileId, comments.store, queryClient],
@@ -293,7 +344,10 @@ function FileEditor({ fileId }: { fileId: string }) {
   }, [editor]);
 
   useEffect(() => {
-    if (meta.data) document.title = `${meta.data.file.name} – Drawpane`;
+    if (meta.data)
+      document.title = meta.data.branch
+        ? `${meta.data.branch.name} – ${meta.data.main?.name ?? meta.data.file.name} – Drawpane`
+        : `${meta.data.file.name} – Drawpane`;
     return () => {
       document.title = "Drawpane";
     };
@@ -386,6 +440,24 @@ function FileEditor({ fileId }: { fileId: string }) {
     }),
     [editor, fileId, comments.store, showLeft, showRight],
   );
+  const ctxRef = useRef<ActionContext | null>(null);
+  ctxRef.current = ctx;
+  /** Shows a reviewed change's layer on the canvas. */
+  const showChange = (row: ReviewRow) => {
+    const node = editor.doc.get(row.id);
+    if (!node) {
+      editor.notify(`“${row.layer}” is deleted on this branch.`);
+      return;
+    }
+    if (node.type === "page") {
+      editor.setPage(node.id);
+      return;
+    }
+    const page = editor.doc.pageOf(row.id);
+    if (page && page.id !== editor.s.pageId) editor.setPage(page.id);
+    editor.select([row.id]);
+    requestAnimationFrame(() => editor.revealSelection());
+  };
 
   // Keyboard: shortcuts from the action registry, plus held keys (space to pan, Alt for X-ray) and arrows.
   useEffect(() => {
@@ -616,6 +688,8 @@ function FileEditor({ fileId }: { fileId: string }) {
           teamId={meta.data?.file.teamId ?? null}
           name={fileName}
           project={meta.data?.project?.name ?? ""}
+          main={mainFile}
+          branch={branch}
         />
         <EditorContext.Provider value={active}>
           <Toolbar onSearch={() => setCommandOpen(true)} ctx={ctx} />
@@ -624,6 +698,10 @@ function FileEditor({ fileId }: { fileId: string }) {
           fileId={fileId}
           fileName={fileName}
           teamId={meta.data?.file.teamId ?? null}
+          branchOpen={branch !== null && !branch.merged}
+          onMerge={
+            branch && !branch.merged && !reviewing && canMerge ? () => setReviewing(true) : null
+          }
           onPresent={ctx.present}
           onOpenThread={(threadId) => openThread(editor, comments.store, threadId, insets.left)}
         />
@@ -656,7 +734,16 @@ function FileEditor({ fileId }: { fileId: string }) {
             other={leftRoom ? leftWidth : 0}
           />
         ) : null}
-        {leftShown && view === "design" ? (
+        {reviewing && leftShown && branch && mainFile ? (
+          <ReviewPane
+            branch={branch}
+            main={mainFile}
+            review={review}
+            canMerge={canMerge}
+            onSelect={showChange}
+            onClose={() => setReviewing(false)}
+          />
+        ) : leftShown && view === "design" ? (
           <EditorContext.Provider value={active}>
             <aside className="pane pane--left" aria-label="Pages, layers, assets and history">
               <div className="pane__tabs">
@@ -699,6 +786,8 @@ function FileEditor({ fileId }: { fileId: string }) {
             insets={insets}
             onClose={() => comments.store.setPanel(false)}
           />
+        ) : reviewing && rightShown && mainFile ? (
+          <MergePane main={mainFile} review={review} canMerge={canMerge} />
         ) : rightShown && view === "design" && viewing ? (
           <EditorContext.Provider value={active}>
             <aside className="pane pane--right" aria-label="Version">
@@ -868,6 +957,8 @@ function FileTitle({
   teamId,
   name,
   project,
+  main,
+  branch,
 }: {
   view: "design" | "tokens";
   onToggleTokens: () => void;
@@ -878,6 +969,9 @@ function FileTitle({
   teamId: string | null;
   name: string;
   project: string;
+  /** The main file: this one, or the one this branch branches. Null until known. */
+  main: { readonly id: string; readonly name: string } | null;
+  branch: BranchInfo | null;
 }) {
   const queryClient = useQueryClient();
   const canEdit = useEditorState((s) => s.role !== "viewer");
@@ -905,7 +999,17 @@ function FileTitle({
       ) : (
         <span className="file-title__home" />
       )}
-      {editing ? (
+      {branch && main ? (
+        // On a branch the title is its main file's, which leads back there; the chip names the branch.
+        <Link
+          to="/f/$fileId"
+          params={{ fileId: main.id }}
+          className="file-title__name file-title__main"
+          title={`Open ${main.name}`}
+        >
+          {main.name}
+        </Link>
+      ) : editing ? (
         <input
           ref={input}
           className="file-title__input"
@@ -931,7 +1035,9 @@ function FileTitle({
           {name || "…"}
         </button>
       )}
-      {!canEdit ? <span className="file-title__badge">View only</span> : null}
+      {main ? <BranchMenu fileId={fileId} main={main} branch={branch} /> : null}
+      {/* A merged branch says so in its chip. */}
+      {!canEdit && !branch?.merged ? <span className="file-title__badge">View only</span> : null}
       <IconButton
         icon="token"
         label={view === "tokens" ? "Back to design" : "Tokens"}
@@ -974,12 +1080,18 @@ function TopRight({
   fileId,
   fileName,
   teamId,
+  branchOpen,
+  onMerge,
   onPresent,
   onOpenThread,
 }: {
   fileId: string;
   fileName: string;
   teamId: string | null;
+  /** An open branch: merging, not sharing, is its next step. */
+  branchOpen: boolean;
+  /** On an open branch: starts its review. */
+  onMerge: (() => void) | null;
   onPresent: () => void;
   onOpenThread: (threadId: string) => void;
 }) {
@@ -998,9 +1110,19 @@ function TopRight({
         size="md"
         onClick={onPresent}
       />
-      <Button variant="primary" size="md" onClick={() => setSharing(true)}>
+      {/* On a branch, merging is the next step; sharing steps back. */}
+      <Button
+        variant={branchOpen ? "secondary" : "primary"}
+        size="md"
+        onClick={() => setSharing(true)}
+      >
         Share
       </Button>
+      {onMerge ? (
+        <Button variant="primary" size="md" icon="branch" onClick={onMerge}>
+          Merge
+        </Button>
+      ) : null}
       <ShareDialog
         fileId={fileId}
         fileName={fileName}
