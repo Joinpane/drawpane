@@ -271,6 +271,28 @@ describe("auto layout", () => {
     expect(box("c1")[3]).toBe(20);
   });
 
+  it("hands a text layer's size to the layout when it fills or stretches, like Figma", () => {
+    const { doc, box } = setup(
+      { layoutMode: "column", alignItems: "stretch", width: 200 },
+      [],
+      [
+        {
+          op: "create",
+          id: "t",
+          type: "text",
+          parent: "f",
+          key: "a0",
+          props: { characters: "Hi", width: 20, height: 20, textAutoResize: "width" },
+        },
+      ],
+    );
+    // Stretched across: its width is the layout's now, so it grows in height only.
+    expect(box("t")[2]).toBe(200);
+    expect(doc.get("t")?.props.textAutoResize).toBe("height");
+    // Settled: laying out again changes nothing.
+    expect(layoutOps(doc, ["f"])).toEqual([]);
+  });
+
   it("produces no ops when nothing changes", () => {
     const { doc } = setup({ layoutMode: "row", gap: 10 }, [{}, {}]);
     expect(layoutOps(doc, ["f"])).toEqual([]);
