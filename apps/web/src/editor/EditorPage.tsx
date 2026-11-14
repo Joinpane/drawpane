@@ -27,6 +27,7 @@ import { CropBar } from "./CropBar";
 import {
   CommentsLayer,
   CommentsPanel,
+  openThread,
   useCommentStore,
   useComments,
   useThreadLink,
@@ -47,6 +48,7 @@ import {
 } from "./history";
 import { EditorContext, useEditor, useEditorState, useEditorStateOutside } from "./hooks";
 import { ImageDrop, UploadTray } from "./ImageDrop";
+import { InboxMenu } from "./InboxMenu";
 import { InspectPanel } from "./InspectPanel";
 import { Inspector } from "./inspector/Inspector";
 import { LayersPanel, PagesList } from "./LayersPanel";
@@ -562,7 +564,13 @@ function FileEditor({ fileId }: { fileId: string }) {
         <EditorContext.Provider value={active}>
           <Toolbar onSearch={() => setCommandOpen(true)} ctx={ctx} />
         </EditorContext.Provider>
-        <TopRight fileId={fileId} fileName={fileName} onPresent={ctx.present} />
+        <TopRight
+          fileId={fileId}
+          fileName={fileName}
+          teamId={meta.data?.file.teamId ?? null}
+          onPresent={ctx.present}
+          onOpenThread={(threadId) => openThread(editor, comments.store, threadId, insets.left)}
+        />
         {view === "tokens" ? (
           <TokensWorkspace
             onShowLayer={(id) => {
@@ -868,11 +876,15 @@ function presentTarget(editor: Editor, fileId: string) {
 function TopRight({
   fileId,
   fileName,
+  teamId,
   onPresent,
+  onOpenThread,
 }: {
   fileId: string;
   fileName: string;
+  teamId: string | null;
   onPresent: () => void;
+  onOpenThread: (threadId: string) => void;
 }) {
   const hasPeers = useEditorState((s) => s.peers.size > 0);
   const canEdit = useEditorState((s) => s.role !== "viewer");
@@ -881,6 +893,7 @@ function TopRight({
     <div className="top-right pane">
       <People />
       {hasPeers ? <span className="top-right__divider" aria-hidden="true" /> : null}
+      <InboxMenu fileId={fileId} teamId={teamId} onOpenThread={onOpenThread} />
       <IconButton
         icon="play"
         label="Play prototype"

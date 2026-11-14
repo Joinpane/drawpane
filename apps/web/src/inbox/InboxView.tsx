@@ -4,33 +4,20 @@
  * counts as read; Unread shows only what's new.
  */
 import { Button, Icon, SegmentedControl } from "@drawpane/ui";
-import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, type InboxItem } from "../api/client";
-import { initials, timeAgo } from "../app/format";
-import { dayLabel, inboxSentence, LIST_KEY, markRead, useUnread } from "./inbox";
+import type { InboxItem } from "../api/client";
+import { type InboxFilter, InboxRow, useInboxList } from "./InboxRow";
+import { dayLabel, markRead, useUnread } from "./inbox";
 import "./inbox.css";
 
-type Filter = "unread" | "all";
-
-/** A stable presence colour per person, as their cursor would have. */
-function slotOf(id: string): number {
-  let h = 0;
-  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) | 0;
-  return (Math.abs(h) % 8) + 1;
-}
+type Filter = InboxFilter;
 
 export function InboxView() {
   const queryClient = useQueryClient();
   const unread = useUnread();
   const [filter, setFilter] = useState<Filter>("unread");
-  const list = useInfiniteQuery({
-    queryKey: [...LIST_KEY, filter],
-    queryFn: ({ pageParam }) => api.inbox(filter, pageParam),
-    initialPageParam: null as string | null,
-    getNextPageParam: (page) => page.before,
-  });
+  const list = useInboxList(filter);
   const items = list.data?.pages.flatMap((p) => p.items) ?? [];
   const groups: { label: string; items: InboxItem[] }[] = [];
   for (const item of items) {
@@ -121,51 +108,5 @@ export function InboxView() {
         ) : null}
       </section>
     </div>
-  );
-}
-
-function InboxRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
-  const { who, did } = inboxSentence(item);
-  const unread = item.readAt === null;
-  return (
-    <li>
-      <Link
-        to="/f/$fileId"
-        params={{ fileId: item.file.id }}
-        search={{ thread: item.threadId }}
-        className={`inbox__item${unread ? " inbox__item--unread" : ""}`}
-        onClick={onOpen}
-      >
-        <span
-          className="inbox__avatar"
-          style={{ boxShadow: `inset 0 0 0 2px var(--presence-${slotOf(item.actor?.id ?? "")})` }}
-          aria-hidden="true"
-        >
-          {item.actor ? initials(item.actor.name) : "?"}
-          {item.kind === "resolved" ? (
-            <span className="inbox__kind">
-              <Icon name="check" size={12} />
-            </span>
-          ) : null}
-        </span>
-        <span className="inbox__text">
-          <span className="inbox__sentence">
-            <strong>{who}</strong> {did} <strong>{item.file.name}</strong>
-            {item.resolved && item.kind !== "resolved" ? (
-              <span className="inbox__resolved">Resolved</span>
-            ) : null}
-          </span>
-          {item.excerpt ? <span className="inbox__excerpt">{item.excerpt}</span> : null}
-        </span>
-        <span className="inbox__meta">
-          <time dateTime={new Date(item.createdAt).toISOString()}>{timeAgo(item.createdAt)}</time>
-          {unread ? (
-            <span className="inbox__dot">
-              <span className="dp-visually-hidden">Unread</span>
-            </span>
-          ) : null}
-        </span>
-      </Link>
-    </li>
   );
 }
