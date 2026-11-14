@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appliedMigrations } from "../src/cloudflare";
+import { appliedMigrations, isTransient, WranglerError, withRetries } from "../src/cloudflare";
 import {
   compareVersions,
   domainProblem,
@@ -180,5 +180,45 @@ describe("migrations", () => {
     ].join("\n");
     expect(appliedMigrations(output)).toEqual(["0011_invite_notes", "0012_room_connections"]);
     expect(appliedMigrations("✅ No migrations to apply!")).toEqual([]);
+  });
+});
+
+describe("isTransient", () => {
+  it("tries again on Cloudflare's internal errors, rate limits and dropped connections", () => {
+    expect(
+      isTransient(
+        "✘ [ERROR] A request to the Cloudflare API (/accounts/x/r2/buckets) failed.\n  We encountered an internal error. Please try again. [code: 10001]",
+      ),
+    ).toBe(true);
+    expect(isTransient("429 Too Many Requests")).toBe(true);
+    expect(isTransient("TypeError: fetch failed")).toBe(true);
+  });
+
+  it("tries again after each delay, then gives up; a lasting refusal fails at once", async () => {
+    const waits: number[] = [];
+    const sleep = async (ms: number) => {
+      waits.push(ms);
+    };
+    const flaky = (failures: number, output: string) => {
+      let n = 0;
+      return async () => {
+        if (n++ < failures) throw new WranglerError("r2 bucket", output);
+        return "ok";
+      };
+    };
+    const internal = "We encountered an internal error. Please try again. [code: 10001]";
+    expect(await withRetries(flaky(2, internal), [1, 2], sleep)).toBe("ok");
+    expect(waits).toEqual([1, 2]);
+    await expect(withRetries(flaky(3, internal), [1, 2], sleep)).rejects.toThrow(WranglerError);
+    waits.length = 0;
+    await expect(
+      withRetries(flaky(1, "Authentication error [code: 10000]"), [1, 2], sleep),
+    ).rejects.toThrow();
+    expect(waits).toEqual([]);
+  });
+
+  it("doesn't on a refusal that won't change", () => {
+    expect(isTransient("Authentication error [code: 10000]")).toBe(false);
+    expect(isTransient("A bucket with this name already exists [code: 10004]")).toBe(false);
   });
 });
