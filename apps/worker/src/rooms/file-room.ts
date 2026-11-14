@@ -15,6 +15,7 @@ import {
   type CommentEvent,
   keyBetween,
   MAX_CLIENT_MESSAGE_BYTES,
+  MAX_OPS_PER_TRANSACTION,
   MemoryStore,
   ModelError,
   type NodeRecord,
@@ -374,6 +375,40 @@ export class FileRoom extends DurableObject<Env> {
       changed: plan.ops.length,
       dropped: plan.dropped,
     };
+  }
+
+  /**
+   * Fills a new file with imported content (a converted .penpot, say). Only
+   * a file nobody has touched: its starting page, still empty, which the
+   * import replaces (removed once the imported pages are in). The nodes are checked as a whole first, so a bad one
+   * leaves the file as it was; they're then committed in chunks that keep
+   * each log row well under SQLite's row limit, parents before children.
+   */
+  async importNodes(by: Requester, nodes: readonly NodeRecord[]): Promise<ImportResult> {
+    const roots = this.#store.childIds(ROOT_ID);
+    const seed = roots.length === 1 ? this.#store.get(roots[0] as string) : undefined;
+    if (seed?.type !== "page" || this.#store.childIds(seed.id).length > 0)
+      return { ok: false, reason: "not-empty" };
+    if (!nodes.some((n) => n.parent === ROOT_ID && n.type === "page"))
+      return { ok: false, reason: "invalid", message: "There's nothing to import." };
+    // The starting page goes last: a file always has a page, even between chunks.
+    const ops: Op[] = [...creationOrder(nodes), { op: "delete", id: seed.id }];
+    try {
+      // A dry run on a copy: everything valid, or nothing written.
+      applyTransaction(new MemoryStore([seed]), ops, { rollback: false });
+    } catch (error) {
+      if (error instanceof ModelError)
+        return { ok: false, reason: "invalid", message: error.message };
+      throw error;
+    }
+    const author = { clientId: "import", seq: 0, userId: by.userId, sessionId: "import" };
+    let revn = this.#revn;
+    for (const chunk of chunked(ops, IMPORT_CHUNK_CHARS)) {
+      revn = this.#commit(chunk, author);
+      this.#broadcastChange(revn, chunk, author);
+    }
+    void this.#scheduleAlarm();
+    return { ok: true, revn, nodes: nodes.length };
   }
 
   /** Current revision and node count, for tests and the health page. */
@@ -805,4 +840,72 @@ export class FileRoom extends DurableObject<Env> {
     }
     return sent;
   }
+}
+
+export type ImportResult =
+  | { readonly ok: true; readonly revn: number; readonly nodes: number }
+  | { readonly ok: false; readonly reason: "not-empty" }
+  | { readonly ok: false; readonly reason: "invalid"; readonly message: string };
+
+/** About 1 MB of JSON per commit: one log row each, far below SQLite's 2 MB row cap. */
+const IMPORT_CHUNK_CHARS = 1_000_000;
+
+/** Create ops for `nodes`, each parent before its children (siblings keep their order). */
+function creationOrder(nodes: readonly NodeRecord[]): Op[] {
+  const byParent = new Map<string, NodeRecord[]>();
+  for (const node of nodes) {
+    const list = byParent.get(node.parent) ?? [];
+    list.push(node);
+    byParent.set(node.parent, list);
+  }
+  const ops: Op[] = [];
+  const queue = [...(byParent.get(ROOT_ID) ?? [])];
+  for (let node = queue.shift(); node; node = queue.shift()) {
+    ops.push({
+      op: "create",
+      id: node.id,
+      type: node.type,
+      parent: node.parent,
+      key: node.key,
+      props: node.props,
+    });
+    queue.push(...(byParent.get(node.id) ?? []));
+  }
+  // Nodes whose parent isn't in the set go last, where validation rejects them by name.
+  if (ops.length < nodes.length) {
+    const placed = new Set(ops.map((o) => o.id));
+    for (const node of nodes)
+      if (!placed.has(node.id))
+        ops.push({
+          op: "create",
+          id: node.id,
+          type: node.type,
+          parent: node.parent,
+          key: node.key,
+          props: node.props,
+        });
+  }
+  return ops;
+}
+
+/** `ops` in runs of at most about `limit` characters of JSON (and a transaction's worth of ops). */
+function chunked(ops: readonly Op[], limit: number): Op[][] {
+  const out: Op[][] = [];
+  let current: Op[] = [];
+  let size = 0;
+  for (const op of ops) {
+    const length = JSON.stringify(op).length;
+    if (
+      current.length > 0 &&
+      (size + length > limit || current.length >= MAX_OPS_PER_TRANSACTION)
+    ) {
+      out.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(op);
+    size += length;
+  }
+  if (current.length > 0) out.push(current);
+  return out;
 }
