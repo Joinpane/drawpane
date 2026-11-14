@@ -1,9 +1,23 @@
-import { cssFor, cssRule, jsxFor, layerName, tailwindFor, trackLabel } from "@drawpane/editor";
+import {
+  cssFor,
+  cssRule,
+  type Editor,
+  exportBounds,
+  exportSvg,
+  formatSvg,
+  jsxFor,
+  layerName,
+  mediaUrl,
+  tailwindFor,
+  trackLabel,
+} from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { Badge, IconButton, PropertySection, SegmentedControl } from "@drawpane/ui";
 import { useState } from "react";
 import { modKey } from "../app/format";
+import { imageRefs } from "./export-assets";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { imagesFor } from "./media";
 
 const KIND: Record<string, string> = {
   frame: "Frame",
@@ -19,15 +33,15 @@ const n = (v: number) => String(Math.round(v * 100) / 100);
 
 /**
  * Inspect: the selection as a developer sees it. Measurements, the variables
- * behind each value, and copyable CSS, Tailwind or JSX. Free for everyone who
- * can open the file, viewers included.
+ * behind each value, and copyable CSS, Tailwind, JSX or SVG. Free for everyone
+ * who can open the file, viewers included.
  */
 export function InspectPanel() {
   const editor = useEditor();
   useDocVersion();
   const selection = useEditorState((s) => s.selection);
   const node = selection.length === 1 ? editor.doc.get(selection[0] as string) : undefined;
-  const [format, setFormat] = useState<"css" | "tailwind" | "jsx">("css");
+  const [format, setFormat] = useState<"css" | "tailwind" | "jsx" | "svg">("css");
 
   if (!node || node.type === "page") {
     return (
@@ -41,12 +55,15 @@ export function InspectPanel() {
     );
   }
 
+  const svg = format === "svg" ? svgFor(editor, node) : null;
   const code =
     format === "css"
       ? cssRule(editor.doc, node)
       : format === "tailwind"
         ? tailwindFor(editor.doc, node).join(" ")
-        : jsxFor(editor.doc, node);
+        : format === "jsx"
+          ? jsxFor(editor.doc, node)
+          : (svg?.code ?? "");
 
   return (
     <div className="inspector inspect">
@@ -81,16 +98,59 @@ export function InspectPanel() {
             { value: "css", label: "CSS" },
             { value: "tailwind", label: "Tailwind" },
             { value: "jsx", label: "JSX" },
+            { value: "svg", label: "SVG" },
           ]}
           value={format}
           onChange={(v) => setFormat(v as typeof format)}
         />
-        <pre className="inspect__code">
-          <code>{code}</code>
+        <pre className={`inspect__code${format === "svg" ? " inspect__code--markup" : ""}`}>
+          <code>{code || "Nothing visible to draw."}</code>
         </pre>
+        {svg?.notes.map((note) => (
+          <p key={note} className="inspect__note">
+            {note}
+          </p>
+        ))}
       </PropertySection>
     </div>
   );
+}
+
+/**
+ * The layer as SVG markup, formatted for reading, and what to know about it:
+ * images are linked to this file rather than embedded (exporting as SVG
+ * embeds them), and background blur can't be expressed in SVG.
+ */
+function svgFor(editor: Editor, node: NodeRecord): { code: string; notes: string[] } {
+  const bounds = exportBounds(editor.scene, [node.id]);
+  if (!bounds) return { code: "", notes: [] };
+  const cache = imagesFor(editor);
+  // About as many characters as the panel shows on a line.
+  const code = formatSvg(
+    exportSvg(editor.scene, editor.measurer, [node.id], bounds, {
+      images: (ref) => {
+        const size = cache.natural(ref);
+        return size ? { href: mediaUrl(ref), ...size } : null;
+      },
+    }),
+    { width: 34 },
+  );
+  const notes: string[] = [];
+  if (imageRefs(editor, [node.id]).size > 0)
+    notes.push("Images link to this file. Export as SVG to embed them.");
+  if (hasBackgroundBlur(editor, node.id))
+    notes.push("Background blur isn't part of SVG, so it's left out.");
+  return { code, notes };
+}
+
+function hasBackgroundBlur(editor: Editor, id: string): boolean {
+  const node = editor.doc.get(id);
+  if (!node || getProp(node.props, "visible") === false) return false;
+  if (
+    getProp(node.props, "effects").some((e) => e.type === "background-blur" && e.visible !== false)
+  )
+    return true;
+  return editor.doc.childIds(id).some((child) => hasBackgroundBlur(editor, child));
 }
 
 function Summary({ node }: { node: NodeRecord }) {
