@@ -49,6 +49,13 @@ export interface NumberFieldProps
   onScrubEnd?: () => void;
   /** Makes the bound TokenChip a button. */
   onTokenClick?: () => void;
+  /**
+   * What a null value reads as. "Mixed" (the default) for a multi-selection
+   * whose values differ; "None" for an optional value that isn't set.
+   */
+  nullLabel?: string;
+  /** For an optional value: emptying the field and committing clears it. */
+  onClear?: () => void;
 }
 
 interface Scrub {
@@ -84,6 +91,8 @@ export function NumberField({
   onScrubStart,
   onScrubEnd,
   onTokenClick,
+  nullLabel = "Mixed",
+  onClear,
   className,
   disabled,
   placeholder,
@@ -110,7 +119,9 @@ export function NumberField({
   useLayoutEffect(() => {
     if (selectAfterRender.current) {
       selectAfterRender.current = false;
-      inputRef.current?.select();
+      // Only a finished edit is selected: once typing has started again, the
+      // selection would swallow what's typed next.
+      if (draft === null) inputRef.current?.select();
     }
   });
 
@@ -130,14 +141,28 @@ export function NumberField({
   const evaluate = (text: string) =>
     evaluateNumericInput(text, { ...(unit ? { unit } : {}), ...(units ? { units } : {}) });
 
-  /** Commits the typed text if it evaluates; otherwise the field keeps its last value. */
+  /**
+   * Commits the typed text if it evaluates; otherwise the field keeps its
+   * last value. An emptied field clears an optional value (`onClear`).
+   */
   const commitDraft = () => {
-    if (draft === null || draft.trim() === "") return;
+    if (draft === null) return;
+    if (draft.trim() === "") {
+      if (onClear && latest.current !== null) {
+        latest.current = null;
+        if (!controlled) setInternal(null);
+        onClear();
+      }
+      return;
+    }
     const evaluated = evaluate(draft);
     if (evaluated !== null) commitNumber(evaluated);
   };
 
   const finishEditing = (select: boolean) => {
+    // With nothing typed there may be no render to wait for: select now (and
+    // again after a render, which resets the selection when the value changes).
+    if (select && draft === null) inputRef.current?.select();
     setDraft(null);
     selectAfterRender.current = select;
   };
@@ -242,10 +267,10 @@ export function NumberField({
           disabled={disabled}
           aria-label={name}
           aria-valuenow={value ?? undefined}
-          aria-valuetext={value === null ? "Mixed" : undefined}
+          aria-valuetext={value === null ? nullLabel : undefined}
           aria-valuemin={Number.isFinite(min) ? min : undefined}
           aria-valuemax={Number.isFinite(max) ? max : undefined}
-          placeholder={value === null ? "Mixed" : placeholder}
+          placeholder={value === null ? nullLabel : placeholder}
           value={draft ?? (value === null ? "" : formatNumber(value, precision))}
           onChange={(event) => setDraft(event.target.value)}
           onFocus={(event) => {

@@ -577,6 +577,17 @@
   color: var(--ink-muted);
   font: 400 11px / 14px var(--font-ui);
 }
+/* A detail of the row above it (Width → Limits): set in a step. */
+.inspector__label--sub {
+  padding-left: var(--space-200);
+}
+/* Two fields side by side in a label row's value column. */
+.inspector__pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-200);
+  min-width: 0;
+}
 .inspector__hint,
 .inspector__mixed {
   margin: 0;

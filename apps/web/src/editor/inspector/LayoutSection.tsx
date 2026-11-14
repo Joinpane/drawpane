@@ -457,6 +457,7 @@ export function SizingSection({
               onChange={(value) => editor.setProp(ids, "sizingH", value, "Resizing")}
             />
           </PropertyRow>
+          <Limits editor={editor} nodes={nodes} axis="width" sizing={h} />
           <PropertyRow columns="label">
             <span className="inspector__label">Height</span>
             <SegmentedControl
@@ -466,6 +467,7 @@ export function SizingSection({
               onChange={(value) => editor.setProp(ids, "sizingV", value, "Resizing")}
             />
           </PropertyRow>
+          <Limits editor={editor} nodes={nodes} axis="height" sizing={v} />
           {inFlex ? (
             <PropertyRow columns="label">
               <span className="inspector__label">Align self</span>
@@ -480,6 +482,74 @@ export function SizingSection({
         </>
       )}
     </PropertySection>
+  );
+}
+
+const LIMITS = {
+  width: { min: "minWidth", max: "maxWidth" },
+  height: { min: "minHeight", max: "maxHeight" },
+} as const;
+
+/**
+ * Min and max for one axis, as CSS min-width and max-width: how far Hug and
+ * Fill may shrink or grow. Shown when the axis hugs or fills, or a limit is
+ * already set; an empty field means no limit.
+ */
+function Limits({
+  editor,
+  nodes,
+  axis,
+  sizing,
+}: {
+  editor: Editor;
+  nodes: NodeRecord[];
+  axis: "width" | "height";
+  sizing: unknown;
+}) {
+  const props = LIMITS[axis];
+  const set = nodes.some(
+    (n) => getProp(n.props, props.min) !== null || getProp(n.props, props.max) !== null,
+  );
+  if (sizing !== "hug" && sizing !== "fill" && !set) return null;
+  return (
+    <PropertyRow columns="label">
+      <span className="inspector__label inspector__label--sub">Limits</span>
+      <span className="inspector__pair">
+        <Limit editor={editor} nodes={nodes} prop={props.min} label="Min" name={`Min ${axis}`} />
+        <Limit editor={editor} nodes={nodes} prop={props.max} label="Max" name={`Max ${axis}`} />
+      </span>
+    </PropertyRow>
+  );
+}
+
+function Limit({
+  editor,
+  nodes,
+  prop,
+  label,
+  name,
+}: {
+  editor: Editor;
+  nodes: NodeRecord[];
+  prop: "minWidth" | "maxWidth" | "minHeight" | "maxHeight";
+  label: string;
+  name: string;
+}) {
+  const ids = nodes.map((n) => n.id);
+  const values = nodes.map((n) => getProp(n.props, prop));
+  const same = values.every((v) => v === values[0]);
+  return (
+    <NumberField
+      label={label}
+      ariaLabel={name}
+      min={0}
+      value={same ? (values[0] ?? null) : null}
+      nullLabel={same ? "None" : "Mixed"}
+      onChange={(value) => editor.setProp(ids, prop, value, name)}
+      onClear={() => editor.setProp(ids, prop, null, `Remove ${name.toLowerCase()}`)}
+      onScrubStart={() => editor.beginGesture(name)}
+      onScrubEnd={() => editor.endGesture()}
+    />
   );
 }
 

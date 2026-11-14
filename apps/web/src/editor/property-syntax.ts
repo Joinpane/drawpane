@@ -1,7 +1,8 @@
 /**
  * The command bar's property syntax: `w 320`, `gap 16`, `fill #ff5a1f`,
- * `radius 8`, `opacity 50%`, `x 24*2`, `p 8 16`. Every number accepts math
- * (+ - * / and parentheses) and the units px, rem (16px) and %.
+ * `radius 8`, `opacity 50%`, `x 24*2`, `p 8 16`, `maxw 640` (`none` clears a
+ * limit). Every number accepts math (+ - * / and parentheses) and the units
+ * px, rem (16px) and %.
  */
 import type { BindingKey, PropName } from "@drawpane/model";
 
@@ -19,7 +20,7 @@ const ALIASES: Record<
   {
     props: PropName[];
     label: string;
-    kind: "number" | "percent" | "color" | "text" | "enum";
+    kind: "number" | "limit" | "percent" | "color" | "text" | "enum";
     values?: readonly string[];
   }
 > = {
@@ -34,6 +35,15 @@ const ALIASES: Record<
   rotation: { props: ["rotation"], label: "Rotation", kind: "number" },
   radius: { props: ["cornerRadius"], label: "Corner radius", kind: "number" },
   gap: { props: ["gap"], label: "Gap", kind: "number" },
+  rowgap: { props: ["rowGap"], label: "Row gap", kind: "number" },
+  minw: { props: ["minWidth"], label: "Min width", kind: "limit" },
+  minwidth: { props: ["minWidth"], label: "Min width", kind: "limit" },
+  maxw: { props: ["maxWidth"], label: "Max width", kind: "limit" },
+  maxwidth: { props: ["maxWidth"], label: "Max width", kind: "limit" },
+  minh: { props: ["minHeight"], label: "Min height", kind: "limit" },
+  minheight: { props: ["minHeight"], label: "Min height", kind: "limit" },
+  maxh: { props: ["maxHeight"], label: "Max height", kind: "limit" },
+  maxheight: { props: ["maxHeight"], label: "Max height", kind: "limit" },
   p: {
     props: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
     label: "Padding",
@@ -184,6 +194,23 @@ export function parsePropertyCommand(text: string): PropertyCommand | null {
       }
       const value = evaluate(rest);
       if (value === null) return null;
+      return {
+        label: alias.label,
+        display: String(value),
+        sets: alias.props.map((prop) => ({ prop, value })),
+      };
+    }
+    case "limit": {
+      // A size limit: a length, or none to take it away.
+      if (/^(none|clear|off)$/i.test(rest)) {
+        return {
+          label: alias.label,
+          display: "None",
+          sets: alias.props.map((prop) => ({ prop, value: null })),
+        };
+      }
+      const value = evaluate(rest);
+      if (value === null || value < 0) return null;
       return {
         label: alias.label,
         display: String(value),

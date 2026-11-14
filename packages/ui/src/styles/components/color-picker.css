@@ -159,7 +159,8 @@
   min-width: 0;
 }
 .dp-color-picker__channels .dp-field__label {
-  width: 16px;
+  min-width: 16px;
+  padding-inline: 0;
 }
 .dp-color-picker__channels .dp-field__unit {
   display: none;

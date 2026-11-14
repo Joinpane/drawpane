@@ -24,11 +24,10 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
     const property = parsePropertyCommand(query);
     if (property && selection.length > 0 && editor.canEdit) {
       const first = editor.doc.get(selection[0] as string);
-      const current = first && property.sets[0] ? first.props[property.sets[0].prop] : undefined;
-      const from =
-        current === undefined && first && property.sets[0]
-          ? JSON.stringify(getProp(first.props, property.sets[0].prop))
-          : JSON.stringify(current ?? "");
+      const set = property.sets[0];
+      // Stored, else the default; an unset limit reads as None, like its field.
+      const before = first && set ? getProp(first.props, set.prop) : undefined;
+      const from = before === null ? "None" : prettify(JSON.stringify(before ?? ""));
       out.push({
         id: "set",
         title: `Set on ${selection.length === 1 ? "selection" : `${selection.length} layers`}`,
@@ -36,7 +35,7 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
           {
             id: "set",
             label: property.label,
-            from: prettify(from),
+            from,
             to: property.display,
             icon: "bolt",
           },

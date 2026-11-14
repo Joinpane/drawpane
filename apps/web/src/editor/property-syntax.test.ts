@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluate, parsePropertyCommand } from "./property-syntax";
+import { evaluate, parseBindingCommand, parsePropertyCommand } from "./property-syntax";
 
 describe("evaluate", () => {
   it.each([
@@ -45,8 +45,46 @@ describe("parsePropertyCommand", () => {
     expect(parsePropertyCommand("layout diagonal")).toBeNull();
   });
 
+  it("sets and clears size limits, and row gap", () => {
+    expect(parsePropertyCommand("maxw 640")).toEqual({
+      label: "Max width",
+      display: "640",
+      sets: [{ prop: "maxWidth", value: 640 }],
+    });
+    expect(parsePropertyCommand("minh 2.5rem")?.sets).toEqual([{ prop: "minHeight", value: 40 }]);
+    expect(parsePropertyCommand("minwidth none")).toEqual({
+      label: "Min width",
+      display: "None",
+      sets: [{ prop: "minWidth", value: null }],
+    });
+    expect(parsePropertyCommand("maxh -4")).toBeNull();
+    expect(parsePropertyCommand("rowgap 12")?.sets).toEqual([{ prop: "rowGap", value: 12 }]);
+  });
+
   it("ignores text that isn't a property command", () => {
     expect(parsePropertyCommand("group")).toBeNull();
     expect(parsePropertyCommand("frobnicate 3")).toBeNull();
+  });
+});
+
+describe("parseBindingCommand", () => {
+  it("reads a property and the variable to look for", () => {
+    expect(parseBindingCommand("fill brand/500")).toEqual({
+      keys: ["fill"],
+      label: "Fill",
+      query: "brand/500",
+    });
+    expect(parseBindingCommand("p space/200")?.keys).toEqual([
+      "paddingTop",
+      "paddingRight",
+      "paddingBottom",
+      "paddingLeft",
+    ]);
+  });
+
+  it("accepts a token reference in braces, and nothing else", () => {
+    expect(parseBindingCommand("gap {space/300}")?.query).toBe("space/300");
+    expect(parseBindingCommand("fill")).toBeNull();
+    expect(parseBindingCommand("frobnicate brand")).toBeNull();
   });
 });
