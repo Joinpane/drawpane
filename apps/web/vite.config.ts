@@ -6,6 +6,9 @@ import { defineConfig } from "vitest/config";
 // production.
 export default defineConfig({
   plugins: [react()],
+  // HarfBuzz finds its .wasm next to its module (new URL(…, import.meta.url)):
+  // pre-bundling would move the module away from it.
+  optimizeDeps: { exclude: ["harfbuzzjs"] },
   server: {
     port: 5173,
     proxy: {

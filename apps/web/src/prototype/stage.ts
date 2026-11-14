@@ -30,6 +30,7 @@ import {
   SafeUrl,
   type Transition,
 } from "@drawpane/model";
+import { shaper } from "../editor/shaping";
 import { watchDocumentFonts } from "../fonts/document-fonts";
 
 /** Tap slop: a pointer that moves further than this is a drag. */
@@ -147,6 +148,8 @@ export class PlayerStage {
     const fonts = () => this.invalidate();
     document.fonts?.addEventListener?.("loadingdone", fonts);
     this.#cleanup.push(() => document.fonts?.removeEventListener?.("loadingdone", fonts));
+    // Text with OpenType features draws once its face is shaped.
+    this.#cleanup.push(shaper.subscribe(() => this.invalidate()));
 
     // Size the viewport first: a screen's scale depends on it.
     this.layout();

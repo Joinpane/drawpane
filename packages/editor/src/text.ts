@@ -4,14 +4,81 @@
  * in-place editor's caret all use this, so what you see is exactly what the
  * file stores.
  */
-import { getProp, type NodeRecord, type Paint, type Props } from "@drawpane/model";
+import {
+  type FontFeatures,
+  getProp,
+  type NodeRecord,
+  type Paint,
+  type Props,
+} from "@drawpane/model";
 import { type TextSpan, textSpans } from "./rich-text";
 
 export interface TextMeasurer {
-  /** Width of `text` in CSS pixels for a canvas `font` string. */
-  width(font: string, text: string): number;
+  /**
+   * Width of `text` in CSS pixels for a canvas `font` string; with a feature
+   * `run`, as shaped with its OpenType features when the measurer can (else
+   * as the canvas has it).
+   */
+  width(font: string, text: string, run?: FeatureRun | null): number;
+  /**
+   * The glyphs for `text` with the run's OpenType features, or null when
+   * they can't be shaped (no shaper, the font's bytes aren't at hand or are
+   * still loading): the text then draws without them. See decision 0005.
+   */
+  shape?(text: string, run: FeatureRun): ShapedText | null;
   /** Bumped whenever earlier widths stop being right (a web font arrived), so cached layouts go too. */
   readonly generation?: number;
+}
+
+/** A run's face and OpenType features: what shaping needs besides the text. */
+export interface FeatureRun {
+  readonly family: string;
+  readonly weight: number;
+  readonly italic: boolean;
+  readonly size: number;
+  /** Never empty: a run without features is measured and drawn by the canvas. */
+  readonly features: FontFeatures;
+  /** Everything above as one string, for caches. */
+  readonly key: string;
+}
+
+/** One glyph of shaped text. */
+export interface ShapedGlyph {
+  /** Its outline in font units (y up), null for one with none (a space). */
+  readonly path: Path2D | null;
+  /** Where it's drawn from the run's start, in px: right, and up from the baseline. */
+  readonly x: number;
+  readonly y: number;
+  /** The first character it came from (a UTF-16 index into the run's text). */
+  readonly cluster: number;
+}
+
+export interface ShapedText {
+  readonly glyphs: readonly ShapedGlyph[];
+  /** The advance, in px, without letter spacing. */
+  readonly width: number;
+  /** Px per font unit. */
+  readonly scale: number;
+}
+
+/** A span's feature run, or null when it sets none (the fast path: the canvas draws it). */
+export function featureRun(props: Props): FeatureRun | null {
+  const features = getProp(props, "fontFeatures");
+  const tags = Object.keys(features).sort();
+  if (tags.length === 0) return null;
+  const family = getProp(props, "fontFamily");
+  const weight = getProp(props, "fontWeight");
+  const italic = getProp(props, "fontStyle") === "italic";
+  const size = getProp(props, "fontSize");
+  const list = tags.map((t) => `${t}=${features[t] ? 1 : 0}`).join(",");
+  return {
+    family,
+    weight,
+    italic,
+    size,
+    features,
+    key: `${family}|${weight}|${italic ? "i" : "n"}|${size}|${list}`,
+  };
 }
 
 /** A stretch of a line in one style. */
@@ -30,6 +97,8 @@ export interface TextFragment {
   readonly decoration: "none" | "underline" | "strikethrough";
   /** Its own fills, or null when it uses the layer's. */
   readonly fills: readonly Paint[] | null;
+  /** Its OpenType features, when it sets any: drawn from shaped glyphs. */
+  readonly run: FeatureRun | null;
 }
 
 export interface TextLine {
@@ -118,6 +187,7 @@ interface SpanStyle {
   readonly font: string;
   readonly size: number;
   readonly spacing: number;
+  readonly run: FeatureRun | null;
   /** Half-leading plus ascent, and what's left below the baseline. */
   readonly ascent: number;
   readonly descent: number;
@@ -134,6 +204,7 @@ function spanStyles(node: NodeRecord): SpanStyle[] {
       font: fontString(span.props),
       size,
       spacing: letterSpacingPx(span.props),
+      run: featureRun(span.props),
       ascent,
       descent: lh - ascent,
     };
@@ -173,7 +244,7 @@ class RangeMeasure {
       const y = Math.min(b, s.span.end);
       if (y <= x) continue;
       const drawn = caseSlice(this.text, x, y, s.span.props);
-      total += this.measurer.width(s.font, drawn) + s.spacing * [...drawn].length;
+      total += this.measurer.width(s.font, drawn, s.run) + s.spacing * [...drawn].length;
     }
     return total;
   }
@@ -311,6 +382,7 @@ function computeLayout(
     letterSpacing: s.spacing,
     decoration: getProp(s.span.props, "textDecoration"),
     fills: s.span.own.fills ?? null,
+    run: s.run,
   });
 
   /**
@@ -321,7 +393,7 @@ function computeLayout(
     const room = maxWidth ?? Number.POSITIVE_INFINITY;
     const dots = (at: number) => {
       const s = styles[m.styleAt(Math.max(br.start, at - 1))] as SpanStyle;
-      return { s, width: measurer.width(s.font, "…") + s.spacing };
+      return { s, width: measurer.width(s.font, "…", s.run) + s.spacing };
     };
     let cut = br.end;
     while (cut > br.start && m.width(br.start, cut) + dots(cut).width > room) {
@@ -580,7 +652,7 @@ export class CanvasTextMeasurer implements TextMeasurer {
     this.#ctx = ctx as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   }
 
-  width(font: string, text: string): number {
+  width(font: string, text: string, _run?: FeatureRun | null): number {
     const key = `${font}\u0000${text}`;
     let w = this.#cache.get(key);
     if (w === undefined) {

@@ -30,6 +30,7 @@ export * from "./reading-order";
 export * from "./render";
 export * from "./rich-text";
 export * from "./scene";
+export * from "./shaping";
 export * from "./size-pill";
 export * from "./snap";
 export * from "./store";

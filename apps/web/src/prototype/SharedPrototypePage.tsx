@@ -1,10 +1,11 @@
-import { CanvasTextMeasurer, Editor, ImageCache } from "@drawpane/editor";
+import { Editor, ImageCache } from "@drawpane/editor";
 import { Logo } from "@drawpane/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { connectFile } from "../editor/connection";
+import { textMeasurer } from "../editor/shaping";
 import { Player, resolveTarget, useDoc } from "./Player";
 import { useLoaded } from "./PresentPage";
 
@@ -28,7 +29,7 @@ function Shared({ token }: { token: string }) {
     retry: false,
   });
   const fileId = shared.data?.file.id ?? null;
-  const [editor] = useState(() => new Editor({ measurer: new CanvasTextMeasurer() }));
+  const [editor] = useState(() => new Editor({ measurer: textMeasurer() }));
   const images = useMemo(
     () =>
       new ImageCache({

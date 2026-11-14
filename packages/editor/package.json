@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@drawpane/model": "workspace:*",
+    "harfbuzzjs": "1.6.4",
     "pathkit-wasm": "1.0.0"
   },
   "devDependencies": {

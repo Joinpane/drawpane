@@ -697,6 +697,9 @@ export function exportSvg(
     if (getProp(base, "textDecoration") !== "none")
       style += attr("text-decoration", decorationOf(getProp(base, "textDecoration")));
     if (anchor) style += attr("text-anchor", anchor);
+    // OpenType features as CSS, which SVG text honours (decision 0005).
+    const features = (props: Props) => featureSettings(getProp(props, "fontFeatures"));
+    if (features(base)) style += attr("style", `font-feature-settings: ${features(base)}`);
 
     const spans = textSpans(node);
     const propsAt = (i: number) =>
@@ -715,6 +718,8 @@ export function exportSvg(
         own += attr("letter-spacing", frag.letterSpacing);
       if (frag.decoration !== getProp(base, "textDecoration"))
         own += attr("text-decoration", decorationOf(frag.decoration));
+      if (features(p) !== features(base))
+        own += attr("style", `font-feature-settings: ${features(p) || "normal"}`);
       return own;
     };
     /**
@@ -814,4 +819,12 @@ export function formatSvg(svg: string, { width = Number.POSITIVE_INFINITY } = {}
     }
   }
   return `${lines.join("\n")}\n`;
+}
+
+/** OpenType features as CSS `font-feature-settings` ("'tnum' 1, 'liga' 0"), empty for none. */
+export function featureSettings(features: Readonly<Record<string, boolean>>): string {
+  return Object.keys(features)
+    .sort()
+    .map((tag) => `'${tag}' ${features[tag] ? 1 : 0}`)
+    .join(", ");
 }

@@ -1,4 +1,4 @@
-import { CanvasTextMeasurer, Editor, Interaction, liveFlows, screenOf } from "@drawpane/editor";
+import { Editor, Interaction, liveFlows, screenOf } from "@drawpane/editor";
 import type { VersionInfo } from "@drawpane/model";
 import { Button, Icon, IconButton, Logo, SegmentedControl } from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -61,6 +61,7 @@ import { clampPane, PANE, panelLayout, setPanelLayout, usePanelLayout } from "./
 import { PrototypePanel } from "./prototype/PrototypePanel";
 import { RULER, RULER_GAP, Rulers } from "./Rulers";
 import { ShortcutsDialog } from "./ShortcutsDialog";
+import { textMeasurer } from "./shaping";
 import { Toolbar } from "./Toolbar";
 import { useThumbnailPublisher } from "./thumbnail";
 import { TokensWorkspace } from "./tokens/TokensWorkspace";
@@ -110,7 +111,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     retry: false,
   });
   const [editor] = useState(
-    () => new Editor({ measurer: new CanvasTextMeasurer(), booleanEngine: loadBooleanEngine }),
+    () => new Editor({ measurer: textMeasurer(), booleanEngine: loadBooleanEngine }),
   );
   const interaction = useMemo(() => new Interaction(editor), [editor]);
   const [commandOpen, setCommandOpen] = useState(false);

@@ -1,4 +1,4 @@
-import { CanvasTextMeasurer, Editor } from "@drawpane/editor";
+import { Editor } from "@drawpane/editor";
 import { Button, Icon } from "@drawpane/ui";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -7,6 +7,7 @@ import { api } from "../api/client";
 import { connectFile } from "../editor/connection";
 import { useEditorStateOutside } from "../editor/hooks";
 import { imagesFor } from "../editor/media";
+import { textMeasurer } from "../editor/shaping";
 import { Player, resolveTarget, useDoc } from "./Player";
 import { ShareDialog } from "./ShareDialog";
 
@@ -30,7 +31,7 @@ function Present({ fileId }: { fileId: string }) {
     queryFn: () => api.file(fileId),
     retry: false,
   });
-  const [editor] = useState(() => new Editor({ measurer: new CanvasTextMeasurer() }));
+  const [editor] = useState(() => new Editor({ measurer: textMeasurer() }));
   const [fatal, setFatal] = useState<string | null>(null);
   useEffect(() => connectFile(editor, fileId, setFatal), [editor, fileId]);
   const loaded = useLoaded(editor);
