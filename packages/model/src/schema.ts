@@ -15,6 +15,7 @@ export const NODE_TYPES = [
   "page",
   "collection",
   "variable",
+  "textStyle",
   "frame",
   "group",
   "rect",
@@ -43,10 +44,11 @@ export type LayerType = (typeof LAYER_TYPES)[number];
 
 /** Which child types each parent type accepts. The virtual root holds pages only. */
 export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]>> = {
-  root: ["page", "collection"],
+  root: ["page", "collection", "textStyle"],
   page: LAYER_TYPES,
   collection: ["variable"],
   variable: [],
+  textStyle: [],
   frame: LAYER_TYPES,
   group: LAYER_TYPES,
   rect: [],
@@ -314,6 +316,8 @@ const MASKABLE = ["frame", "rect", "ellipse", "polygon", "star", "path"] as cons
 export const STROKE_MARKERS = ["none", "arrow", "triangle", "circle", "diamond", "bar"] as const;
 export type StrokeMarker = (typeof STROKE_MARKERS)[number];
 const CONTAINERS = ["frame"] as const;
+/** Text layers, and the text styles that set their typography. */
+const TYPOGRAPHY = ["text", "textStyle"] as const;
 
 export const PROPS = {
   name: prop(z.string().max(256), "", ALL),
@@ -424,21 +428,23 @@ export const PROPS = {
 
   // Text
   characters: prop(z.string().max(200_000), "", ["text"]),
-  fontFamily: prop(z.string().min(1).max(128), "Instrument Sans", ["text"]),
-  fontWeight: prop(z.number().int().min(1).max(1000), 400, ["text"]),
-  fontStyle: prop(z.enum(["normal", "italic"]), "normal", ["text"]),
+  fontFamily: prop(z.string().min(1).max(128), "Instrument Sans", TYPOGRAPHY),
+  fontWeight: prop(z.number().int().min(1).max(1000), 400, TYPOGRAPHY),
+  fontStyle: prop(z.enum(["normal", "italic"]), "normal", TYPOGRAPHY),
   fontSize: prop(
     finite.refine((n) => n > 0 && n <= 4096, "must be between 0 and 4096"),
     16,
-    ["text"],
+    TYPOGRAPHY,
   ),
-  lineHeight: prop(LineHeight, { unit: "auto" }, ["text"]),
-  letterSpacing: prop(LetterSpacing, { unit: "px", value: 0 }, ["text"]),
+  lineHeight: prop(LineHeight, { unit: "auto" }, TYPOGRAPHY),
+  letterSpacing: prop(LetterSpacing, { unit: "px", value: 0 }, TYPOGRAPHY),
   textAlign: prop(z.enum(["left", "center", "right", "justify"]), "left", ["text"]),
   textAlignVertical: prop(z.enum(["top", "middle", "bottom"]), "top", ["text"]),
   textAutoResize: prop(z.enum(["none", "width", "height"]), "width", ["text"]),
-  textCase: prop(z.enum(["none", "upper", "lower", "title"]), "none", ["text"]),
-  textDecoration: prop(z.enum(["none", "underline", "strikethrough"]), "none", ["text"]),
+  textCase: prop(z.enum(["none", "upper", "lower", "title"]), "none", TYPOGRAPHY),
+  textDecoration: prop(z.enum(["none", "underline", "strikethrough"]), "none", TYPOGRAPHY),
+  /** The text style this layer follows; its typography comes from the style while it does. */
+  textStyle: prop(z.string().regex(ID_PATTERN).nullable(), null, ["text"]),
 
   // Vectors
   pathData: prop(PathData, "", ["path"]),
@@ -463,7 +469,7 @@ export const PROPS = {
   modes: prop(z.array(Mode).min(1).max(16), [{ id: "m1", name: "Default" }], ["collection"]),
   variableType: prop(z.enum(["color", "number", "string"]), "color", ["variable"]),
   values: prop(z.record(z.string().regex(ID_PATTERN), VariableValue), {}, ["variable"]),
-  description: prop(z.string().max(2000), "", ["variable", "collection"]),
+  description: prop(z.string().max(2000), "", ["variable", "collection", "textStyle"]),
   /** Bound properties: binding key → variable id. The bound property holds the resolved value. */
   bindings: prop(z.partialRecord(z.enum(BINDING_KEYS), z.string().regex(ID_PATTERN)), {}, LAYERS),
   /** Which mode of each collection applies inside this frame or page: collection id → mode id. */
