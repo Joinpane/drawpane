@@ -35,6 +35,37 @@ function weightOptions(info: FontFamily | null, current: number | null) {
 type LineHeight = PropValues["lineHeight"];
 type LetterSpacing = PropValues["letterSpacing"];
 
+/** The weights the text's family offers, by name ("Semibold"). */
+export function WeightSelect({
+  editor,
+  nodes,
+  className,
+}: {
+  editor: Editor;
+  nodes: NodeRecord[];
+  className?: string;
+}) {
+  useFonts();
+  const family = common(nodes, "fontFamily");
+  const weight = common(nodes, "fontWeight");
+  return (
+    <Select
+      label="Weight"
+      value={weight}
+      options={weightOptions(family ? fonts.get(family) : null, weight)}
+      onChange={(v) =>
+        editor.setProp(
+          nodes.map((n) => n.id),
+          "fontWeight",
+          v,
+          "Font weight",
+        )
+      }
+      {...(className ? { className } : {})}
+    />
+  );
+}
+
 /** "Auto", "24", "24px" or "150%" → a line height; null for anything else. */
 export function parseLineHeight(text: string): LineHeight | null {
   const t = text.trim().toLowerCase();
@@ -127,13 +158,7 @@ export function TypographyFields({ editor, nodes }: { editor: Editor; nodes: Nod
   useFonts();
   const info = family ? fonts.get(family) : null;
   const set = <
-    K extends
-      | "fontWeight"
-      | "fontStyle"
-      | "textDecoration"
-      | "textCase"
-      | "lineHeight"
-      | "letterSpacing",
+    K extends "fontStyle" | "textDecoration" | "textCase" | "lineHeight" | "letterSpacing",
   >(
     prop: K,
     value: PropValues[K] | null,
@@ -144,12 +169,7 @@ export function TypographyFields({ editor, nodes }: { editor: Editor; nodes: Nod
     <>
       <FontPicker editor={editor} nodes={nodes} />
       <div className="inspector__weight">
-        <Select
-          label="Weight"
-          value={common(nodes, "fontWeight")}
-          options={weightOptions(info, common(nodes, "fontWeight"))}
-          onChange={(v) => set("fontWeight", v, "Font weight")}
-        />
+        <WeightSelect editor={editor} nodes={nodes} />
         <Tooltip label="Italic" describe={false}>
           <button
             type="button"

@@ -575,8 +575,55 @@
 .lens-anchor {
   position: absolute;
   z-index: 3;
-  transform: translateX(-50%);
-  animation: lens-in 160ms ease-out;
+  animation: lens-rise 160ms ease-out;
+}
+.lens-anchor[data-side="above"] {
+  animation-name: lens-drop;
+}
+.lens-anchor[data-side="right"],
+.lens-anchor[data-side="left"],
+.lens-anchor[data-side="inside"] {
+  animation-name: lens-fade;
+}
+@keyframes lens-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes lens-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@keyframes lens-fade {
+  from {
+    opacity: 0;
+  }
+}
+/* Compact controls in the Lens: a font or text style, a weight, variant properties. */
+.lens-anchor .font-trigger--compact {
+  width: 132px;
+}
+.lens-anchor .text-style-trigger--compact {
+  width: 144px;
+  height: var(--size-control-sm);
+  gap: var(--space-100);
+  padding: 0 var(--space-100) 0 0;
+  border-color: transparent;
+  background: var(--surface-sunken);
+}
+.lens-anchor .text-style-trigger--compact:hover {
+  border-color: var(--line-strong);
+}
+.lens-anchor .text-style-trigger--compact[aria-expanded="true"] {
+  border-color: var(--signal);
+}
+.lens-select {
+  width: auto;
+  max-width: 112px;
+  text-overflow: ellipsis;
 }
 @keyframes lens-in {
   from {
