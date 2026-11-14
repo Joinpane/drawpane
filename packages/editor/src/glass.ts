@@ -66,25 +66,26 @@ export interface GlassTuning {
   readonly shade: number;
 }
 
+/** Fitted to Figma's glass (tools/glass-calibration): mean difference 2.7 of 255 over 22 cells. */
 export const DEFAULT_GLASS_TUNING: GlassTuning = {
-  bend: 0.45,
-  profile: 3,
-  dispersion: 0.25,
-  frost: 1,
-  angleOffset: 0,
+  bend: 0.88,
+  profile: 3.24,
+  dispersion: 0.11,
+  frost: 0.45,
+  angleOffset: -4.9,
   angleTurn: 1,
-  lineWidth: 0.05,
-  lineMin: 1.2,
-  line: 1.1,
-  glowWidth: 0.35,
-  glowMin: 3,
-  glow: 0.3,
-  facing: 1.4,
-  backLine: 0.55,
-  backGlow: 0.1,
-  backFacing: 2,
-  sheen: 0.05,
-  shade: 0.1,
+  lineWidth: 0.005,
+  lineMin: 0.92,
+  line: 1.62,
+  glowWidth: 0.25,
+  glowMin: 2.33,
+  glow: 0,
+  facing: 0.92,
+  backLine: 1.56,
+  backGlow: 0.2,
+  backFacing: 1.12,
+  sheen: 0,
+  shade: 0,
 };
 
 let tuning: GlassTuning = DEFAULT_GLASS_TUNING;
@@ -107,7 +108,11 @@ export interface GlassParams {
    * itself only in a sliver at the edge, as thick glass does.
    */
   readonly refraction: number;
-  /** The rim's width, in px: where the glass curves before it's flat. */
+  /**
+   * The rim's width, in px: where the glass curves before it's flat. Never
+   * more than the shape's inner radius, so the bend fades to nothing where
+   * rims from opposite sides meet, instead of flipping there.
+   */
   readonly depth: number;
   /** Red moves this much further than green, blue this much less (0–0.25). */
   readonly dispersion: number;
@@ -131,10 +136,14 @@ export function glassParams(
   glass: Glass,
   scale: number,
   tune: GlassTuning = glassTuning(),
+  /** The shape's inner radius in px (half its smaller side): how deep a rim can go. */
+  inner = Number.POSITIVE_INFINITY,
 ): GlassParams {
-  const depth = Math.max(0, glass.depth) * scale;
-  // Full refraction bends a ray a share of the rim's width at its edge (never over less than a few pixels).
-  const refraction = (glass.refraction / 100) * tune.bend * Math.max(depth, 4 * scale);
+  const thickness = Math.max(0, glass.depth) * scale;
+  const depth = Math.min(thickness, Math.max(inner, scale));
+  // Full refraction bends a ray a share of the glass's thickness at its edge (never over
+  // less than a few pixels): thicker glass bends more, even once its rim fills the shape.
+  const refraction = (glass.refraction / 100) * tune.bend * Math.max(thickness, 4 * scale);
   // Colours part by a share of the bend: real glass fringes subtly.
   const dispersion = (glass.dispersion / 100) * tune.dispersion;
   const frost = Math.max(0, glass.frost) * scale * tune.frost;
@@ -371,8 +380,10 @@ export class GlassPainter {
    * blending apply to the result.
    */
   paint(ctx: Ctx, shape: Path2D, w: number, h: number, glass: Glass, scale: number): void {
-    const p = glassParams(glass, scale);
     const t = ctx.getTransform();
+    // Half the smaller side, on the device: as deep as a rim can go.
+    const inner = (Math.min(w * Math.hypot(t.a, t.b), h * Math.hypot(t.c, t.d)) / 2) | 0;
+    const p = glassParams(glass, scale, glassTuning(), inner);
     // The layer's reach on the device, with the margin rays bend into, within the canvas.
     const xs: number[] = [];
     const ys: number[] = [];
