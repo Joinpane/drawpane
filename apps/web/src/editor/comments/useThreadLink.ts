@@ -9,12 +9,10 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { markRead } from "../../inbox/inbox";
 import { useEditorStateOutside } from "../hooks";
+import { clampPane, PANE, panelLayout } from "../panel-layout";
 import { useComments } from "./CommentsLayer";
 import { focusThread } from "./CommentsPanel";
 import type { CommentStore } from "./store";
-
-/** The comments panel's width, which takes up the right of the canvas while it's open. */
-const PANEL = 276;
 
 /** Opens a thread of this file at its pin, with the comments panel; says so when it's gone. */
 export function openThread(
@@ -29,7 +27,9 @@ export function openThread(
     return false;
   }
   store.setPanel(true);
-  focusThread(editor, store, thread, { left, right: PANEL });
+  // The comments panel takes up the right of the canvas, at the right panel's width.
+  const right = PANE.gutter + clampPane(panelLayout().right, window.innerWidth, left);
+  focusThread(editor, store, thread, { left, right });
   return true;
 }
 

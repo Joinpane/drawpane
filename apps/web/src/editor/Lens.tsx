@@ -138,7 +138,8 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
     width: right - MARGIN - (bounds.left + MARGIN),
     height: viewport.height - BOTTOM - TOP,
   };
-  const minimap = minimapBox(minimapShown, insetLeft, viewport);
+  // Only a pinned minimap stays put; one showing while you move around comes and goes.
+  const minimap = minimapBox(minimapShown === "always", insetLeft, viewport);
   // While a popover or a scrub is in use, keep to the same side so nothing jumps under the pointer.
   const placement = placeLens({
     target: toScreen(world),

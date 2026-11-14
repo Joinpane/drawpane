@@ -322,7 +322,12 @@
   display: flex;
   align-items: center;
   gap: var(--space-300);
-  max-width: calc(100% - 2 * var(--size-pane) - 72px);
+  max-width: calc(
+    100% -
+    var(--pane-left, var(--size-pane)) -
+    var(--pane-right, var(--size-pane)) -
+    72px
+  );
   height: 36px;
   padding: 0 var(--space-100) 0 var(--space-300);
   box-sizing: border-box;
@@ -375,8 +380,8 @@
 
 .scrubber {
   bottom: 12px;
-  left: calc(var(--scrubber-left, 288px));
-  right: calc(var(--scrubber-right, 288px));
+  left: var(--canvas-left, 288px);
+  right: var(--canvas-right, 288px);
   display: grid;
   gap: var(--space-100);
   padding: var(--space-200) var(--space-400) var(--space-200);

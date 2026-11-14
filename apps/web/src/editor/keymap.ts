@@ -24,6 +24,7 @@ export function shortcutFromEvent(
   if (key === "+") key = "=";
   if (e.shiftKey && /^Digit\d$/.test(e.code)) key = e.code.slice(5);
   if (e.shiftKey && e.code === "Quote") key = "'";
+  if (e.shiftKey && e.code === "Backslash") key = "\\";
   if (e.altKey && /^Key[A-Z]$/.test(e.code)) key = e.code.slice(3).toLowerCase();
   const mod = mac ? e.metaKey : e.ctrlKey;
   return {

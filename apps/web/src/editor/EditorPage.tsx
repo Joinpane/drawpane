@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   type CSSProperties,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -55,6 +56,8 @@ import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
 import { Minimap } from "./Minimap";
 import { chooseImageFiles, filesFrom, importImageFiles, pasteFromClipboard } from "./media";
+import { PaneResizer } from "./PaneResizer";
+import { clampPane, PANE, panelLayout, setPanelLayout, usePanelLayout } from "./panel-layout";
 import { PrototypePanel } from "./prototype/PrototypePanel";
 import { RULER, RULER_GAP, Rulers } from "./Rulers";
 import { ShortcutsDialog } from "./ShortcutsDialog";
@@ -125,6 +128,12 @@ function FileEditor({ fileId }: { fileId: string }) {
     if (isViewer) setRightTab("inspect");
   }, [isViewer]);
   const [rightOpen, setRightOpen] = useState(true);
+  // Panel widths and Minimize UI (⇧⌘\\), remembered in this browser.
+  const layout = usePanelLayout();
+  // Minimized: the layers panel tucks away until it's asked for.
+  const leftShown = leftOpen && !layout.minimized;
+  const hasSelection = useEditorStateOutside(editor, (s) => s.selection.length > 0);
+  const viewportWidth = useEditorStateOutside(editor, (s) => s.viewport.width) || window.innerWidth;
   const [fatal, setFatal] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const comments = useCommentStore(editor, fileId);
@@ -135,12 +144,28 @@ function FileEditor({ fileId }: { fileId: string }) {
   const history = useVersionHistory(
     editor,
     fileId,
-    view === "design" && leftOpen && leftTab === "history",
+    view === "design" && leftShown && leftTab === "history",
   );
   const viewing = history.viewing;
   const historyOpen = view === "design" && history.open;
   const active = history.active;
   const activeInteraction = viewing ? history.view.interaction : interaction;
+  // Minimized: the inspector comes while something is selected (or a version is on screen).
+  const rightShown = rightOpen && (!layout.minimized || hasSelection || viewing !== null);
+  const rightRoom = view === "design" && (commentsOpen || rightShown);
+  const leftRoom = view === "design" && leftShown;
+  const rightWidth = clampPane(layout.right, viewportWidth, leftRoom ? PANE.min : 0);
+  const leftWidth = clampPane(layout.left, viewportWidth, rightRoom ? rightWidth : 0);
+  /** Shows the layers panel (leaving Minimize UI: it was asked for). */
+  const showLeft = useCallback(() => {
+    setLeftOpen(true);
+    if (panelLayout().minimized) setPanelLayout({ minimized: false });
+  }, []);
+  /** Shows the inspector (leaving Minimize UI: it was asked for). */
+  const showRight = useCallback(() => {
+    setRightOpen(true);
+    if (panelLayout().minimized) setPanelLayout({ minimized: false });
+  }, []);
   const [versionTab, setVersionTab] = useState<"version" | "inspect">("version");
   const [naming, setNaming] = useState<{ version: VersionInfo | null } | null>(null);
   const [confirmRestore, setConfirmRestore] = useState<VersionInfo | null>(null);
@@ -148,7 +173,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     if (version) {
       // The details pane sits where the inspector does.
       comments.store.setPanel(false);
-      setRightOpen(true);
+      showRight();
     }
     history.show(version);
   };
@@ -158,7 +183,7 @@ function FileEditor({ fileId }: { fileId: string }) {
   }, [view, history.leave]);
   // The canvas shows connections while the Prototype tab is on screen.
   const prototyping =
-    view === "design" && rightOpen && !commentsOpen && rightTab === "prototype" && !viewing;
+    view === "design" && rightShown && !commentsOpen && rightTab === "prototype" && !viewing;
   useEffect(() => {
     editor.state.set({ prototyping });
   }, [editor, prototyping]);
@@ -170,10 +195,10 @@ function FileEditor({ fileId }: { fileId: string }) {
   // Room for the floating panes (12px margin + pane width), so comment popovers open over the canvas.
   const insets = useMemo(
     () => ({
-      left: leftOpen && view === "design" ? 276 : 0,
-      right: (commentsOpen || rightOpen) && view === "design" ? 276 : 0,
+      left: leftRoom ? PANE.gutter + leftWidth : 0,
+      right: rightRoom ? PANE.gutter + rightWidth : 0,
     }),
-    [leftOpen, rightOpen, commentsOpen, view],
+    [leftRoom, rightRoom, leftWidth, rightWidth],
   );
   // Rulers sit beside the panes, 12px in from the window when a pane is closed.
   const rulerLeft = insets.left > 0 ? insets.left + 12 : 12;
@@ -273,19 +298,26 @@ function FileEditor({ fileId }: { fileId: string }) {
       editor,
       openCommandBar: () => setCommandOpen(true),
       toggleTokens: () => setView((v) => (v === "tokens" ? "design" : "tokens")),
-      toggleLeftPane: () => setLeftOpen((v) => !v),
+      toggleLeftPane: () => {
+        if (panelLayout().minimized) {
+          setPanelLayout({ minimized: false });
+          setLeftOpen(true);
+        } else setLeftOpen((v) => !v);
+      },
       // The comments panel sits where the inspector does; asking for the inspector swaps back.
       toggleRightPane: () => {
-        if (comments.store.s.panelOpen) {
+        if (comments.store.s.panelOpen || panelLayout().minimized) {
           comments.store.setPanel(false);
+          setPanelLayout({ minimized: false });
           setRightOpen(true);
         } else setRightOpen((v) => !v);
       },
+      toggleMinimized: () => setPanelLayout({ minimized: !panelLayout().minimized }),
       toggleComments: () => comments.store.setPanel(!comments.store.s.panelOpen),
       present: () => navigate(presentTarget(editor, fileId)),
       showHistory: () => {
         setView("design");
-        setLeftOpen(true);
+        showLeft();
         setLeftTab("history");
       },
       saveVersion: () => {
@@ -296,14 +328,14 @@ function FileEditor({ fileId }: { fileId: string }) {
         if (!id || !editor.canEdit) return;
         // Renaming happens in the layers panel: make sure it's showing.
         setView("design");
-        setLeftOpen(true);
+        showLeft();
         setLeftTab("layers");
         uiFor(editor).set({ renaming: id });
       },
       findLayers: () => {
         // The search lives in the layers panel: make sure it's showing.
         setView("design");
-        setLeftOpen(true);
+        showLeft();
         setLeftTab("layers");
         const ui = uiFor(editor);
         ui.set({ findLayers: ui.get().findLayers + 1 });
@@ -324,7 +356,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       showTab: (tab) => {
         setView("design");
         comments.store.setPanel(false);
-        setRightOpen(true);
+        showRight();
         setRightTab(tab);
       },
       // Menu and command-bar clipboard actions go through the async API; ⌘C/⌘X/⌘V use native events below.
@@ -342,7 +374,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         });
       },
     }),
-    [editor, fileId, comments.store],
+    [editor, fileId, comments.store, showLeft, showRight],
   );
 
   // Keyboard: shortcuts from the action registry, plus held keys (space to pan, Alt for X-ray) and arrows.
@@ -533,10 +565,14 @@ function FileEditor({ fileId }: { fileId: string }) {
       <div
         className="editor"
         data-history={historyOpen || undefined}
+        data-minimized={layout.minimized || undefined}
         style={
           {
-            "--scrubber-left": leftOpen ? "288px" : "12px",
-            "--scrubber-right": rightOpen || commentsOpen ? "288px" : "12px",
+            "--pane-left": `${leftWidth}px`,
+            "--pane-right": `${rightWidth}px`,
+            // Where the canvas's open area starts and ends, beside the panels (or the window's edges).
+            "--canvas-left": `${leftRoom ? leftWidth + PANE.gutter * 2 : PANE.gutter}px`,
+            "--canvas-right": `${rightRoom ? rightWidth + PANE.gutter * 2 : PANE.gutter}px`,
           } as CSSProperties
         }
       >
@@ -555,6 +591,8 @@ function FileEditor({ fileId }: { fileId: string }) {
         ) : null}
         <FileTitle
           view={view}
+          minimized={layout.minimized}
+          onToggleMinimized={ctx.toggleMinimized}
           onToggleTokens={() => setView((v) => (v === "tokens" ? "design" : "tokens"))}
           fileId={fileId}
           teamId={meta.data?.file.teamId ?? null}
@@ -582,7 +620,25 @@ function FileEditor({ fileId }: { fileId: string }) {
             }}
           />
         ) : null}
-        {leftOpen && view === "design" ? (
+        {leftRoom ? (
+          <PaneResizer
+            side="left"
+            label="layers panel"
+            width={leftWidth}
+            viewportWidth={viewportWidth}
+            other={rightRoom ? rightWidth : 0}
+          />
+        ) : null}
+        {rightRoom ? (
+          <PaneResizer
+            side="right"
+            label={commentsOpen ? "comments panel" : "inspector"}
+            width={rightWidth}
+            viewportWidth={viewportWidth}
+            other={leftRoom ? leftWidth : 0}
+          />
+        ) : null}
+        {leftShown && view === "design" ? (
           <EditorContext.Provider value={active}>
             <aside className="pane pane--left" aria-label="Pages, layers, assets and history">
               <div className="pane__tabs">
@@ -625,7 +681,7 @@ function FileEditor({ fileId }: { fileId: string }) {
             insets={insets}
             onClose={() => comments.store.setPanel(false)}
           />
-        ) : rightOpen && view === "design" && viewing ? (
+        ) : rightShown && view === "design" && viewing ? (
           <EditorContext.Provider value={active}>
             <aside className="pane pane--right" aria-label="Version">
               <div className="pane__tabs version-tabs">
@@ -657,7 +713,7 @@ function FileEditor({ fileId }: { fileId: string }) {
               )}
             </aside>
           </EditorContext.Provider>
-        ) : rightOpen && view === "design" ? (
+        ) : rightShown && view === "design" ? (
           <aside className="pane pane--right" aria-label="Inspector">
             <div className="pane__tabs">
               <SegmentedControl
@@ -691,7 +747,7 @@ function FileEditor({ fileId }: { fileId: string }) {
           <Lens
             onOpenInspector={() => {
               comments.store.setPanel(false);
-              setRightOpen(true);
+              showRight();
             }}
           />
         ) : null}
@@ -744,7 +800,7 @@ function FileEditor({ fileId }: { fileId: string }) {
                 : {
                     label: "Show",
                     run: () => {
-                      setLeftOpen(true);
+                      showLeft();
                       setLeftTab("history");
                     },
                   },
@@ -778,6 +834,8 @@ function FileEditor({ fileId }: { fileId: string }) {
 function FileTitle({
   view,
   onToggleTokens,
+  minimized,
+  onToggleMinimized,
   fileId,
   teamId,
   name,
@@ -785,6 +843,9 @@ function FileTitle({
 }: {
   view: "design" | "tokens";
   onToggleTokens: () => void;
+  /** Minimize UI is on: the button brings the panels back. */
+  minimized: boolean;
+  onToggleMinimized: () => void;
   fileId: string;
   teamId: string | null;
   name: string;
@@ -850,6 +911,14 @@ function FileTitle({
         pressed={view === "tokens"}
         className="file-title__tokens"
         onClick={onToggleTokens}
+      />
+      <IconButton
+        icon="sidebar"
+        label={minimized ? "Show panels" : "Minimize UI"}
+        shortcut={shortcutFor("view.minimizeUi")}
+        pressed={minimized}
+        className="file-title__panels"
+        onClick={onToggleMinimized}
       />
     </div>
   );

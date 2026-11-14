@@ -20,7 +20,7 @@ import { isMac } from "../app/format";
 import { copySelectionAs, exportPageAsPdf, exportSelection } from "./exporting";
 import { openTextStyles } from "./inspector/TextStyles";
 import { getOverrides } from "./shortcuts-store";
-import { toggleXray, uiFor } from "./ui-state";
+import { toggleMinimap, toggleXray, uiFor } from "./ui-state";
 
 export interface Shortcut {
   /** `KeyboardEvent.key`, lowercased. */
@@ -36,6 +36,8 @@ export interface ActionContext {
   readonly toggleTokens: () => void;
   readonly toggleLeftPane: () => void;
   readonly toggleRightPane: () => void;
+  /** Minimize UI (⇧⌘\\): the layers panel tucks away, the inspector shows only for a selection. */
+  readonly toggleMinimized: () => void;
   readonly copy: () => void;
   readonly cut: () => void;
   readonly paste: () => void;
@@ -849,15 +851,28 @@ export const ACTIONS: readonly Action[] = [
   },
   {
     id: "view.minimap",
-    label: "Minimap",
+    label: "Pin minimap",
     group: "View",
     icon: "minimap",
     defaultShortcut: { key: "m", alt: true },
-    keywords: "overview map navigator where people",
-    run: ({ editor }) => {
-      const ui = uiFor(editor);
-      ui.set({ minimap: !ui.get().minimap });
-    },
+    keywords: "overview map navigator where people show always",
+    run: ({ editor }) => toggleMinimap(editor),
+  },
+  {
+    id: "view.minimapAuto",
+    label: "Minimap: show while moving around",
+    group: "View",
+    icon: "minimap",
+    keywords: "overview map navigator auto pan zoom",
+    run: ({ editor }) => uiFor(editor).set({ minimap: "auto" }),
+  },
+  {
+    id: "view.minimapOff",
+    label: "Minimap: never show",
+    group: "View",
+    icon: "minimap",
+    keywords: "overview map navigator hide off",
+    run: ({ editor }) => uiFor(editor).set({ minimap: "off" }),
   },
   {
     id: "view.xray",
@@ -925,6 +940,15 @@ export const ACTIONS: readonly Action[] = [
     icon: "inspector",
     defaultShortcut: { key: "i", mod: true, alt: true },
     run: ({ toggleRightPane }) => toggleRightPane(),
+  },
+  {
+    id: "view.minimizeUi",
+    label: "Minimize UI",
+    group: "View",
+    icon: "sidebar",
+    defaultShortcut: { key: "\\", mod: true, shift: true },
+    keywords: "panels sidebars collapse tuck hide layers inspector focus canvas room",
+    run: ({ toggleMinimized }) => toggleMinimized(),
   },
   {
     id: "help.shortcuts",
@@ -1018,8 +1042,9 @@ export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
   if (key === "+") key = "=";
   // Shift changes some keys (Shift+1 is "!"): fall back to the physical digit.
   if (shortcut.shift && /^digit\d$/i.test(e.code)) key = e.code.slice(5);
-  // And Shift+' is a double quote.
+  // And Shift+' is a double quote, Shift+\ a bar.
   if (shortcut.shift && e.code === "Quote") key = "'";
+  if (shortcut.shift && e.code === "Backslash") key = "\\";
   // Option changes letters on macOS (⌥⇧U is "¨"): fall back to the physical key.
   if (shortcut.alt && /^Key[A-Z]$/.test(e.code)) key = e.code.slice(3).toLowerCase();
   return (
