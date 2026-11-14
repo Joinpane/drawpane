@@ -28,7 +28,7 @@ import {
   round2,
 } from "./geometry";
 import { gridSnapLines, guideAt, guideOwnerAt, placedGuides } from "./grids";
-import { childToward, hitTest, marqueeHits, selectionTarget } from "./hit";
+import { childToward, hitTest, marqueeHits, measureTarget, selectionTarget } from "./hit";
 import { frameLabelAt, isArtboard } from "./labels";
 import { gridCellAt, gridGeometry, placedByLayout } from "./layout";
 import { sizePillAt } from "./size-pill";
@@ -750,8 +750,31 @@ export class Interaction {
 
   // -------------------------------------------------------------------------
 
+  /**
+   * Alt or ⌘ pressed or let go with the pointer still: what's hovered (and
+   * whether it's measured to) follows at once, without waiting for a move.
+   */
+  modifiers(mods: { readonly alt: boolean; readonly mod: boolean }): void {
+    const last = this.#lastHover;
+    if (!last || this.busy) {
+      if (!mods.alt && this.#editor.s.measure) this.#editor.state.set({ measure: false });
+      return;
+    }
+    this.#hover({ ...last, alt: mods.alt, mod: mods.mod });
+  }
+
+  /** The pointer left the canvas: nothing is hovered, or measured to. */
+  leave(): void {
+    this.#lastHover = null;
+    if (!this.busy) this.#editor.state.set({ hover: null, measure: false });
+  }
+
+  #lastHover: PointerInput | null = null;
+
   #hover(input: PointerInput): void {
+    this.#lastHover = input;
     const editor = this.#editor;
+    if (!input.alt && editor.s.measure) editor.state.set({ measure: false });
     const { pageId, tool } = editor.s;
     if (!pageId) return;
     if (this.#spaceHeld || tool === "hand") {
@@ -776,6 +799,18 @@ export class Interaction {
     }
     const page = this.#page(input.screen);
     const region = editor.s.xray && editor.canEdit ? xrayRegionAt(editor, page) : null;
+    // Alt with a selection measures from it to what's under the pointer, at the
+    // selection's level (a padding region still shows it can be dragged).
+    if (input.alt && editor.s.selection.length > 0) {
+      // Top-level frames count here: they're what you measure to from inside one.
+      const leaf = hitTest(editor.scene, pageId, page, 4 / editor.s.camera.zoom);
+      const target = leaf
+        ? measureTarget(editor.scene, pageId, leaf, editor.s.selection, input.mod)
+        : null;
+      editor.state.set({ hover: target, measure: true, hoverGuide: null });
+      this.cursor = region ? (region.axis === "x" ? "ew-resize" : "ns-resize") : "default";
+      return;
+    }
     if (region) {
       this.cursor = region.axis === "x" ? "ew-resize" : "ns-resize";
       return;

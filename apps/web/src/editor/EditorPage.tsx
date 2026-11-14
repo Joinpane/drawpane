@@ -389,8 +389,13 @@ function FileEditor({ fileId }: { fileId: string }) {
         e.preventDefault();
         return;
       }
+      // ⌘ (Ctrl) with Alt measures to the exact layer under the pointer.
+      if ((e.key === "Meta" || e.key === "Control") && e.altKey)
+        interaction.modifiers({ alt: true, mod: true });
       if (e.key === "Alt") {
         editor.state.set({ xray: true });
+        // With the pointer still over the canvas, measuring starts without a move.
+        interaction.modifiers({ alt: true, mod: isMac() ? e.metaKey : e.ctrlKey });
         return;
       }
       // The pen and vector edit take their keys first (Enter, Escape, Backspace, arrows).
@@ -461,12 +466,15 @@ function FileEditor({ fileId }: { fileId: string }) {
       for (const [ed, ia] of both) {
         if (e.key === " ") ia.setSpace(false);
         if (e.key === "Alt") ed.state.set({ xray: uiFor(ed).get().xrayPinned });
+        if (e.key === "Alt" || e.key === "Meta" || e.key === "Control")
+          ia.modifiers({ alt: e.altKey, mod: isMac() ? e.metaKey : e.ctrlKey });
       }
     };
     const onBlur = () => {
       for (const [ed, ia] of both) {
         ia.setSpace(false);
         ed.state.set({ xray: uiFor(ed).get().xrayPinned });
+        ia.modifiers({ alt: false, mod: false });
       }
     };
     const onCopy = (e: ClipboardEvent) => {

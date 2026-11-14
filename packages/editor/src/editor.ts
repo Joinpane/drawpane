@@ -156,6 +156,12 @@ export interface EditorState {
   readonly gesture: boolean;
   /** Layout X-ray: overlay padding and gaps (hold Alt). */
   readonly xray: boolean;
+  /**
+   * Measuring: Alt is held over the canvas with something selected, so the
+   * overlay shows the distances from the selection to `hover` (which the
+   * interaction picks with `measureTarget`).
+   */
+  readonly measure: boolean;
   /** Explain is open: why this layer is the size it is on this axis. */
   readonly explain: { readonly id: string; readonly axis: ExplainAxis } | null;
   /** Hide other people's cursors and selections. */
@@ -312,6 +318,7 @@ export class Editor {
     guides: [],
     gesture: false,
     xray: false,
+    measure: false,
     explain: null,
     focusMode: false,
     status: "connecting",
