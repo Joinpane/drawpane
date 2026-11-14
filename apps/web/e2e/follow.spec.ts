@@ -16,6 +16,17 @@ type Debug = {
   doc: { pageIds(): string[] };
 };
 
+type PresenceDebug = {
+  s: { pageId: string };
+  createLayer(
+    type: string,
+    rect: { x: number; y: number; width: number; height: number },
+    parent: string,
+    props?: Record<string, unknown>,
+  ): string | null;
+  select(ids: string[]): void;
+};
+
 /** The page area a person's screen shows, rounded. */
 const shown = (page: Page) =>
   page.evaluate(() => {
@@ -90,6 +101,30 @@ test.describe
     test.afterAll(async () => {
       await bo?.context().close();
       await instance?.stop();
+    });
+
+    test("Ana's layer tree shows what Bo has selected", async () => {
+      const id = await ana.evaluate(() => {
+        const e = (window as unknown as { drawpane: Debug & PresenceDebug }).drawpane;
+        return e.createLayer("rect", { x: 80, y: 80, width: 160, height: 100 }, e.s.pageId, {
+          name: "Hero card",
+        }) as string;
+      });
+      const row = ana.getByRole("treeitem", { name: /Hero card/ });
+      await expect(row).toBeVisible();
+      await expect(row.getByLabel("Selected by Bo Chen")).toHaveCount(0);
+      // Bo selects it: Ana sees his dot on the row, named for screen readers.
+      await expect(bo.getByRole("treeitem", { name: /Hero card/ })).toBeVisible();
+      await bo.evaluate(
+        (id) => (window as unknown as { drawpane: PresenceDebug }).drawpane.select([id]),
+        id,
+      );
+      await expect(row.getByLabel("Selected by Bo Chen")).toBeVisible();
+      // And it goes when he lets go.
+      await bo.evaluate(() =>
+        (window as unknown as { drawpane: PresenceDebug }).drawpane.select([]),
+      );
+      await expect(row.getByLabel("Selected by Bo Chen")).toHaveCount(0);
     });
 
     test("Bo follows Ana's view, across a pan and a page change", async () => {
