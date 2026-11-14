@@ -13,7 +13,7 @@ import { ImageCache, imagePlacement } from "./images";
 import { markerLength, markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
 import type { Scene } from "./scene";
-import { layoutText, type TextMeasurer } from "./text";
+import { layoutText, lineOffset, type TextMeasurer, textBlockOffset } from "./text";
 import { isClosedPath } from "./vector/cache";
 import { nodePath } from "./vector/shapes";
 import { serializePath } from "./vector/svg";
@@ -571,49 +571,49 @@ export class CanvasRenderer {
     ctx.restore();
   }
 
-  /** Draws a text layer's glyphs in its own fills, or all in `override` (shadows). */
+  /**
+   * Draws a text layer's glyphs, fragment by fragment (rich text mixes fonts,
+   * sizes and fills in a line), in each one's fills or the layer's, or all in
+   * `override` (shadows).
+   */
   #text(ctx: Ctx, node: NodeRecord, width: number, override?: string): void {
     const mode = getProp(node.props, "textAutoResize");
     const layout = layoutText(node, this.#measurer, mode === "width" ? null : width);
-    const align = getProp(node.props, "textAlign");
     const height = getProp(node.props, "height");
-    const vAlign = getProp(node.props, "textAlignVertical");
-    const dy =
-      vAlign === "middle"
-        ? (height - layout.height) / 2
-        : vAlign === "bottom"
-          ? height - layout.height
-          : 0;
-    ctx.font = layout.font;
+    const dy = textBlockOffset(node, layout);
     ctx.textBaseline = "alphabetic";
-    if ("letterSpacing" in ctx)
-      (ctx as Ctx & { letterSpacing: string }).letterSpacing = `${layout.letterSpacing}px`;
-    const decoration = getProp(node.props, "textDecoration");
-    const fills = getProp(node.props, "fills");
-    const paints = override
-      ? [{ type: "solid", color: "#000000" } as Paint]
-      : fills.length > 0
-        ? fills
-        : [{ type: "solid", color: "#000000" } as Paint];
-    for (const paint of paints) {
-      const style = override ?? this.#paintStyle(ctx, paint, width, height);
-      if (!style || paint.visible === false) continue;
-      ctx.fillStyle = style;
-      for (const line of layout.lines) {
-        const x =
-          align === "center"
-            ? (width - line.width) / 2
-            : align === "right"
-              ? width - line.width
-              : 0;
-        ctx.fillText(line.text, x, line.baseline + dy);
-        if (decoration !== "none") {
-          const size = getProp(node.props, "fontSize");
-          const y =
-            decoration === "underline"
-              ? line.baseline + dy + size * 0.1
-              : line.baseline + dy - size * 0.3;
-          ctx.fillRect(x, y, line.width, Math.max(1, size / 16));
+    const spaced = "letterSpacing" in ctx;
+    const layerFills = getProp(node.props, "fills");
+    const black: Paint[] = [{ type: "solid", color: "#000000" }];
+    // Gradients and images span the whole text box, so work them out once each.
+    const styles = new Map<Paint, string | CanvasGradient | CanvasPattern | null>();
+    const styleOf = (paint: Paint) => {
+      if (!styles.has(paint)) styles.set(paint, this.#paintStyle(ctx, paint, width, height));
+      return styles.get(paint) ?? null;
+    };
+    for (const line of layout.lines) {
+      const x0 = lineOffset(line, width, node.props);
+      const baseline = line.baseline + dy;
+      for (const frag of line.fragments) {
+        ctx.font = frag.font;
+        if (spaced)
+          (ctx as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
+        const paints = override
+          ? black
+          : (frag.fills ?? (layerFills.length > 0 ? layerFills : black));
+        for (const paint of paints) {
+          if (paint.visible === false) continue;
+          const style = override ?? styleOf(paint);
+          if (!style) continue;
+          ctx.fillStyle = style;
+          const x = x0 + frag.x;
+          ctx.fillText(frag.text, x, baseline);
+          if (frag.decoration !== "none") {
+            const size = frag.fontSize;
+            const y =
+              frag.decoration === "underline" ? baseline + size * 0.1 : baseline - size * 0.3;
+            ctx.fillRect(x, y, frag.width, Math.max(1, size / 16));
+          }
         }
       }
     }

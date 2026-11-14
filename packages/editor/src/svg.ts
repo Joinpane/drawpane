@@ -23,13 +23,14 @@
  * - auto layout: positions are exported as they are on the canvas, not as
  *   flexbox
  */
-import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import { getProp, type NodeRecord, type Paint, type Props } from "@drawpane/model";
 import { type Matrix, type Rect, round2 } from "./geometry";
 import { FULL_CROP, imagePlacement } from "./images";
 import { markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
+import { textSpans } from "./rich-text";
 import type { Scene } from "./scene";
-import { layoutText, type TextMeasurer } from "./text";
+import { layoutText, type TextFragment, type TextMeasurer, textBlockOffset } from "./text";
 import { nodePath } from "./vector/shapes";
 import { serializePath } from "./vector/svg";
 
@@ -477,38 +478,78 @@ export function exportSvg(
   const text = (node: NodeRecord, w: number, h: number, transform: string, parts: string[]) => {
     const mode = getProp(node.props, "textAutoResize");
     const layout = layoutText(node, measurer, mode === "width" ? null : w);
-    const align = getProp(node.props, "textAlign");
-    const vAlign = getProp(node.props, "textAlignVertical");
-    const dy =
-      vAlign === "middle" ? (h - layout.height) / 2 : vAlign === "bottom" ? h - layout.height : 0;
+    const dy = textBlockOffset(node, layout);
+    const base = node.props;
+    const align = getProp(base, "textAlign");
     const anchor = align === "center" ? "middle" : align === "right" ? "end" : null;
-    const x = align === "center" ? w / 2 : align === "right" ? w : 0;
-    const family = getProp(node.props, "fontFamily").replace(/['"]/g, "");
-    let style = `${attr("font-family", `'${family}', sans-serif`)}${attr("font-size", getProp(node.props, "fontSize"))}`;
-    const weight = getProp(node.props, "fontWeight");
-    if (weight !== 400) style += attr("font-weight", weight);
-    if (getProp(node.props, "fontStyle") === "italic") style += attr("font-style", "italic");
+    const lineX = align === "center" ? w / 2 : align === "right" ? w : 0;
+    const family = (props: Props) =>
+      `'${getProp(props, "fontFamily").replace(/['"]/g, "")}', sans-serif`;
+    const decorationOf = (d: string) =>
+      d === "strikethrough" ? "line-through" : d === "underline" ? "underline" : "none";
+    // The layer's own type on <text>; rich text's fragments state only what differs.
+    let style = `${attr("font-family", family(base))}${attr("font-size", getProp(base, "fontSize"))}`;
+    if (getProp(base, "fontWeight") !== 400)
+      style += attr("font-weight", getProp(base, "fontWeight"));
+    if (getProp(base, "fontStyle") === "italic") style += attr("font-style", "italic");
     if (layout.letterSpacing !== 0) style += attr("letter-spacing", layout.letterSpacing);
-    const decoration = getProp(node.props, "textDecoration");
-    if (decoration !== "none")
-      style += attr(
-        "text-decoration",
-        decoration === "strikethrough" ? "line-through" : "underline",
-      );
+    if (getProp(base, "textDecoration") !== "none")
+      style += attr("text-decoration", decorationOf(getProp(base, "textDecoration")));
     if (anchor) style += attr("text-anchor", anchor);
-    const lines = layout.lines
-      .map(
-        (line) =>
-          `<tspan${attr("x", x)}${attr("y", round2(line.baseline + dy))}>${escapeXml(line.text)}</tspan>`,
-      )
-      .join("");
-    const fills = getProp(node.props, "fills");
+
+    const spans = textSpans(node);
+    const propsAt = (i: number) =>
+      (spans.find((sp) => sp.start <= i && i < sp.end) ?? spans[0])?.props ?? base;
+    const typeOf = (frag: TextFragment) => {
+      const p = propsAt(frag.start);
+      let own = "";
+      if (getProp(p, "fontFamily") !== getProp(base, "fontFamily"))
+        own += attr("font-family", family(p));
+      if (frag.fontSize !== getProp(base, "fontSize")) own += attr("font-size", frag.fontSize);
+      if (getProp(p, "fontWeight") !== getProp(base, "fontWeight"))
+        own += attr("font-weight", getProp(p, "fontWeight"));
+      if (getProp(p, "fontStyle") !== getProp(base, "fontStyle"))
+        own += attr("font-style", getProp(p, "fontStyle"));
+      if (frag.letterSpacing !== layout.letterSpacing)
+        own += attr("letter-spacing", frag.letterSpacing);
+      if (frag.decoration !== getProp(base, "textDecoration"))
+        own += attr("text-decoration", decorationOf(frag.decoration));
+      return own;
+    };
+    /**
+     * The lines, each a text chunk anchored at the layer's alignment, its
+     * fragments flowing inside it. A fragment with its own fill paints in it
+     * on the first pass and stays clear (still taking its room) on the others.
+     */
+    const lines = (pass: number) =>
+      layout.lines
+        .map((line) => {
+          const inner = line.fragments
+            .map((frag) => {
+              let own = typeOf(frag);
+              if (frag.fills) {
+                const top = [...frag.fills].reverse().find((f) => f.visible !== false);
+                const fill = pass === 0 && top ? out.paint("fill", top, w, h) : null;
+                own += fill ?? ' fill="none"';
+              }
+              return own ? `<tspan${own}>${escapeXml(frag.text)}</tspan>` : escapeXml(frag.text);
+            })
+            .join("");
+          return `<tspan${attr("x", round2(lineX))}${attr("y", round2(line.baseline + dy))}>${inner}</tspan>`;
+        })
+        .join("");
+    const fills = getProp(base, "fills");
     const paints: Paint[] = fills.length > 0 ? fills : [{ type: "solid", color: "#000000" }];
+    let pass = 0;
     for (const paint of paints) {
       if (paint.visible === false) continue;
       const fill = out.paint("fill", paint, w, h);
-      if (fill) parts.push(`<text${transform}${style}${fill} xml:space="preserve">${lines}</text>`);
+      if (!fill) continue;
+      parts.push(`<text${transform}${style}${fill} xml:space="preserve">${lines(pass++)}</text>`);
     }
+    // The layer's own fills are all hidden: its own-coloured fragments still show.
+    if (pass === 0 && layout.lines.some((l) => l.fragments.some((f) => f.fills)))
+      parts.push(`<text${transform}${style} fill="none" xml:space="preserve">${lines(0)}</text>`);
   };
 
   for (const id of ids) visit(id, out.body);
