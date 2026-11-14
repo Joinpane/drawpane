@@ -140,6 +140,14 @@ function requireEnabled(env: { GOOGLE_FONTS?: string }): void {
     throw new HttpError(404, "not_found", "Google Fonts are turned off on this server.");
 }
 
+/**
+ * A response from the edge cache, ready to send: its headers are immutable,
+ * and the API's middleware (security headers) still has to add its own.
+ */
+function fromCache(hit: Response): Response {
+  return new Response(hit.body, hit);
+}
+
 /** The font format a file's first bytes declare, or null when it isn't a font we serve. */
 function fontFormat(bytes: Uint8Array): "woff2" | "ttf" | null {
   const tag = String.fromCharCode(...bytes.subarray(0, 4));
@@ -177,7 +185,7 @@ export const fonts = new Hono<AppContext>()
       `https://fonts.drawpane.internal/?${encodeURIComponent(upstream)}`,
     );
     const hit = await cache.match(cacheKey);
-    if (hit) return hit;
+    if (hit) return fromCache(hit);
 
     const response = await fetch(upstream, {
       headers: { "user-agent": format === "ttf" ? PLAIN_UA : BROWSER_UA },
@@ -205,7 +213,7 @@ export const fonts = new Hono<AppContext>()
       `https://fonts.drawpane.internal/variable?${encodeURIComponent(upstream)}`,
     );
     const hit = await cache.match(cacheKey);
-    if (hit) return hit;
+    if (hit) return fromCache(hit);
     const response = await fetch(upstream, { headers: { "user-agent": PLAIN_UA } });
     if (!response.ok) throw notFound(`Google Fonts has no family called ${family}.`);
     const out = Response.json(

@@ -192,4 +192,22 @@ describe("/api/fonts", () => {
     expect((await browser.fetch("/api/fonts/google-variable?family=<x>")).status).toBe(400);
     expect((await browser.fetch("/api/fonts/google-variable?family=Nope")).status).toBe(404);
   });
+
+  it("serves a stylesheet and variable files again from the edge cache", async () => {
+    // A cached response's headers can't change; the API's own headers still have to go on.
+    const calls = stubGoogle();
+    const browser = new Browser();
+    for (const path of [
+      "/api/fonts/google.css?family=Lora&variants=400",
+      "/api/fonts/google-variable?family=Recursive",
+    ]) {
+      const first = await browser.fetch(path);
+      expect(first.status).toBe(200);
+      const again = await browser.fetch(path);
+      expect(again.status).toBe(200);
+      expect(await again.text()).toBe(await first.text());
+      expect(again.headers.get("x-content-type-options")).toBe("nosniff");
+    }
+    expect(calls).toHaveLength(2);
+  });
 });
