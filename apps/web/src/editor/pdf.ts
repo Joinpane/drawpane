@@ -17,6 +17,7 @@ import {
   exportSvg,
   type Rect,
   type SvgImageSource,
+  textFaces,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import { type FontFamily, fonts, nearestWeight } from "../fonts/fonts";
@@ -95,14 +96,7 @@ function facesIn(editor: Editor, ids: readonly string[]): Face[] {
   const visit = (id: string) => {
     const node = editor.doc.get(id);
     if (!node || getProp(node.props, "visible") === false) return;
-    if (node.type === "text") {
-      const face = {
-        family: getProp(node.props, "fontFamily"),
-        weight: getProp(node.props, "fontWeight"),
-        italic: getProp(node.props, "fontStyle") === "italic",
-      };
-      faces.set(faceKey(face), face);
-    }
+    if (node.type === "text") for (const face of textFaces(node)) faces.set(faceKey(face), face);
     for (const child of editor.doc.childIds(id)) visit(child);
   };
   for (const id of ids) visit(id);

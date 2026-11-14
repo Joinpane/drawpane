@@ -22,8 +22,20 @@
   cursor: default;
 }
 
+/* Text editing: the canvas draws the text; this layer adds the caret and
+   selection, and a textarea with invisible glyphs takes the typing. */
+.canvas__text-editing {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  cursor: text;
+  touch-action: none;
+}
 .canvas__text-editor {
   position: absolute;
+  left: 0;
+  top: 0;
   margin: 0;
   padding: 0;
   border: 0;
@@ -32,8 +44,36 @@
   overflow: hidden;
   background: transparent;
   box-sizing: content-box;
+  color: transparent;
+  caret-color: transparent;
+  pointer-events: none;
   user-select: text;
   -webkit-user-select: text;
+}
+.canvas__text-editor::selection {
+  background: transparent;
+  color: transparent;
+}
+.canvas__text-selection {
+  position: absolute;
+  background: color-mix(in srgb, var(--signal) 30%, transparent);
+  pointer-events: none;
+}
+.canvas__caret {
+  position: absolute;
+  background: var(--signal);
+  pointer-events: none;
+  animation: caret-blink 1.06s steps(1) 0.5s infinite;
+}
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .canvas__caret {
+    animation: none;
+  }
 }
 
 /* Floating panes */

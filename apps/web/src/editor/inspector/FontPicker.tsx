@@ -4,7 +4,7 @@
  * families this file uses one tab away. ↑ and ↓ preview a font on the
  * selected text right on the canvas; Enter keeps it, Esc goes back.
  */
-import type { Editor } from "@drawpane/editor";
+import { type Editor, textFaces } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import {
   Badge,
@@ -188,8 +188,9 @@ function FontList({
     const counts = new Map<string, number>();
     for (const node of editor.doc.nodes()) {
       if (node.type !== "text") continue;
-      const name = getProp(node.props, "fontFamily");
-      counts.set(name, (counts.get(name) ?? 0) + 1);
+      // A layer counts once for each family in it, its runs' included.
+      for (const name of new Set(textFaces(node).map((f) => f.family)))
+        counts.set(name, (counts.get(name) ?? 0) + 1);
     }
     return counts;
   }, [editor]);
