@@ -17,6 +17,7 @@ import { ContextMenus } from "./ContextMenus";
 import { CropBar } from "./CropBar";
 import { CommentsLayer, CommentsPanel, useCommentStore, useComments } from "./comments";
 import { connectFile } from "./connection";
+import { ExplainCard } from "./ExplainCard";
 import { ExportPanel } from "./ExportSection";
 import { FollowOverlay, People } from "./follow";
 import { type FrameStats, frameStatsFor } from "./frame-stats";
@@ -44,6 +45,7 @@ import { useThumbnailPublisher } from "./thumbnail";
 import { TokensWorkspace } from "./tokens/TokensWorkspace";
 import { uiFor } from "./ui-state";
 import { useViewPreferences } from "./view-preferences";
+import { XrayLegend } from "./XrayLegend";
 import "./editor.css";
 
 const CLIPBOARD_MIME = "application/x-drawpane+json";
@@ -391,13 +393,13 @@ function FileEditor({ fileId }: { fileId: string }) {
     const onKeyUp = (e: KeyboardEvent) => {
       for (const [ed, ia] of both) {
         if (e.key === " ") ia.setSpace(false);
-        if (e.key === "Alt") ed.state.set({ xray: false });
+        if (e.key === "Alt") ed.state.set({ xray: uiFor(ed).get().xrayPinned });
       }
     };
     const onBlur = () => {
       for (const [ed, ia] of both) {
         ia.setSpace(false);
-        ed.state.set({ xray: false });
+        ed.state.set({ xray: uiFor(ed).get().xrayPinned });
       }
     };
     const onCopy = (e: ClipboardEvent) => {
@@ -610,6 +612,8 @@ function FileEditor({ fileId }: { fileId: string }) {
         ) : null}
         {view === "design" && !viewing ? <CropBar /> : null}
         {view === "design" && !viewing ? <FollowOverlay /> : null}
+        {view === "design" && !viewing ? <ExplainCard /> : null}
+        {view === "design" && !viewing ? <XrayLegend /> : null}
         {view === "design" && !viewing ? (
           <Lens
             onOpenInspector={() => {

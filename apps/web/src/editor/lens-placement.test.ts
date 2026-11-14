@@ -7,6 +7,15 @@ const place = (over: Partial<LensPlacementInput> & { target: Box }) =>
   placeLens({ area, size, obstacles: [], ...over });
 
 describe("placeLens", () => {
+  it("takes another order of preference, like Explain's beside-first", () => {
+    const target = { x: 400, y: 300, width: 200, height: 40 };
+    const order = ["right", "left", "below", "above", "inside"] as const;
+    expect(place({ target, order })).toEqual({ side: "right", x: 612, y: 302 });
+    // No room on the right: the next one along.
+    const wide = { x: 400, y: 300, width: 600, height: 40 };
+    expect(place({ target: wide, order })?.side).toBe("below");
+  });
+
   it("goes under the selection, centred, clear of the size pill", () => {
     const target = { x: 600, y: 300, width: 200, height: 40 };
     expect(place({ target })).toEqual({ side: "below", x: 580, y: 376 });

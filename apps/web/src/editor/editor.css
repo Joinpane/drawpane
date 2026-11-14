@@ -677,6 +677,196 @@
     opacity: 0;
   }
 }
+/* Layout X-ray's key, above the zoom bar while Alt is held. */
+.xray-legend {
+  bottom: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--space-400);
+  padding: 6px var(--space-300);
+  border-radius: var(--radius-md);
+  font: var(--type-ui-label);
+  color: var(--ink-muted);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: lens-fade 120ms ease-out;
+}
+.xray-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.xray-legend__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+.xray-legend__swatch[data-kind="padding"] {
+  background: var(--xray-padding);
+}
+.xray-legend__swatch[data-kind="gap"] {
+  background: var(--xray-gap);
+}
+
+/* Explain: why the selection is the size it is, beside it on the canvas. */
+.explain-anchor {
+  position: absolute;
+  z-index: 4;
+  animation: lens-fade 140ms ease-out;
+}
+.explain {
+  width: 300px;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  overflow: hidden;
+}
+.explain__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-200);
+  padding: var(--space-300) var(--space-200) var(--space-200) var(--space-300);
+}
+.explain__titles {
+  min-width: 0;
+  padding-top: 2px;
+}
+.explain__question {
+  margin: 0;
+  font: var(--type-ui-title);
+  overflow-wrap: anywhere;
+}
+.explain__answer {
+  margin: 2px 0 0;
+  font: var(--type-ui-body);
+  color: var(--ink-muted);
+}
+.explain__terms {
+  margin: 0;
+  padding: 0 var(--space-300);
+  list-style: none;
+  display: grid;
+  gap: 2px;
+}
+.explain__term {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 var(--space-200);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font: var(--type-ui-body);
+  text-align: left;
+}
+.explain__term--layers {
+  cursor: pointer;
+}
+.explain__term--layers:hover {
+  background: color-mix(in srgb, var(--component) 10%, var(--surface-sunken));
+}
+.explain__term--layers:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.explain__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--line-strong);
+}
+.explain__dot[data-kind="padding"] {
+  background: var(--xray-padding);
+}
+.explain__dot[data-kind="gap"] {
+  background: var(--xray-gap);
+}
+.explain__dot[data-kind="child"] {
+  background: var(--component);
+}
+.explain__dot[data-kind="parent"] {
+  background: var(--signal);
+}
+.explain__dot[data-kind="limit"] {
+  background: var(--warning);
+}
+.explain__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.explain__dot[data-kind="hidden"] + .explain__label {
+  color: var(--ink-muted);
+}
+.explain__value {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.explain__sum {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-200);
+  margin: 6px var(--space-300) 0;
+  padding: var(--space-200);
+  border-top: 1px solid var(--line);
+  font: 400 12px / 16px var(--font-mono);
+}
+.explain__formula {
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+.explain__total {
+  flex: none;
+  font-weight: 500;
+  color: var(--signal-ink);
+}
+.explain__other {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-200);
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: var(--space-200) var(--space-300);
+  border: 0;
+  background: none;
+  color: var(--ink-muted);
+  font: var(--type-ui-body);
+  text-align: left;
+  cursor: pointer;
+}
+.explain__other:hover {
+  color: var(--ink);
+}
+.explain__other:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.explain__other > svg {
+  flex: none;
+}
+.explain__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-200);
+  padding: 10px var(--space-300);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
 /* Compact controls in the Lens: a font or text style, a weight, variant properties. */
 .lens-anchor .font-trigger--compact {
   width: 132px;

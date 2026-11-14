@@ -60,6 +60,7 @@ export function LayersPanel() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<LayerFilter>("all");
   const scroller = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const searchField = useRef<HTMLInputElement>(null);
   const [scroll, setScroll] = useState({ top: 0, height: 400 });
 
@@ -227,19 +228,22 @@ export function LayersPanel() {
 
   // Drag to reorder: above or below a row, inside a frame or group, or (below
   // the last row of nested groups) out to the level the pointer is at.
-  const onDragOver = (index: number, e: React.DragEvent<HTMLDivElement>) => {
+  const aim = (index: number, y: number, left: number, e: React.DragEvent) => {
     const row = rows[index];
-    if (!drag || !row || drag.id === row.node.id) return;
+    if (!drag || !row) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = e.altKey ? "copy" : "move";
-    const rect = e.currentTarget.getBoundingClientRect();
-    const y = (e.clientY - rect.top) / rect.height;
     // The pointer's level: where it is across the row, against the rows' indents.
-    const depth = (e.clientX - rect.left - INDENT_START - INDENT / 2) / INDENT;
-    const target = dropTarget(rows, index, y, active ? row.depth : depth, (id) => {
+    const depth = (e.clientX - left - INDENT_START - INDENT / 2) / INDENT;
+    const parentOf = (id: string) => {
       const parent = editor.doc.get(id)?.parent;
       return parent && parent !== pageId ? parent : null;
-    });
+    };
+    const own = drag.id === row.node.id;
+    // Over its own row, a layer can only move out (left, from the bottom of its
+    // groups), the way the last layer in a frame leaves it; anywhere else it stays.
+    let target = dropTarget(rows, index, own ? 1 : y, active ? row.depth : depth, parentOf);
+    if (own && !(target?.where === "after" && target.depth < row.depth)) target = null;
     const same =
       drag.copy === e.altKey &&
       drag.target?.id === target?.id &&
@@ -248,6 +252,18 @@ export function LayersPanel() {
       drag.target?.show === target?.show &&
       drag.target?.depth === target?.depth;
     if (!same) setDrag({ ...drag, target, copy: e.altKey });
+  };
+  const onDragOver = (index: number, e: React.DragEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    aim(index, (e.clientY - rect.top) / rect.height, rect.left, e);
+  };
+  // The empty space under the list is below its last row.
+  const onDragOverEnd = (e: React.DragEvent<HTMLDivElement>) => {
+    const list = listRef.current;
+    if (e.defaultPrevented || !drag || !list || rows.length === 0) return;
+    const rect = list.getBoundingClientRect();
+    if (e.clientY < rect.bottom) return;
+    aim(rows.length - 1, 1, rect.left, e);
   };
 
   const onDrop = () => {
@@ -387,6 +403,12 @@ export function LayersPanel() {
         aria-label="Layers"
         aria-multiselectable="true"
         onKeyDown={onKeyDown}
+        onDragOver={onDragOverEnd}
+        onDrop={(e) => {
+          if (!drag) return;
+          e.preventDefault();
+          onDrop();
+        }}
       >
         {rows.length === 0 ? (
           active ? (
@@ -400,7 +422,7 @@ export function LayersPanel() {
             <p className="layers__empty">Layers you draw appear here.</p>
           )
         ) : (
-          <div style={{ height: rows.length * ROW_HEIGHT, position: "relative" }}>
+          <div ref={listRef} style={{ height: rows.length * ROW_HEIGHT, position: "relative" }}>
             {rows.slice(start, end).map((row, i) => {
               const { node } = row;
               const presence = presenceBy.get(node.id);
@@ -465,7 +487,12 @@ export function LayersPanel() {
                         },
                         onDragOver: (e: React.DragEvent<HTMLDivElement>) =>
                           onDragOver(start + i, e),
-                        onDrop,
+                        onDrop: (e: React.DragEvent) => {
+                          // The list below hears drops on its empty space; this one's handled.
+                          e.stopPropagation();
+                          e.preventDefault();
+                          onDrop();
+                        },
                         onDragEnd: () => setDrag(null),
                       }
                     : {})}

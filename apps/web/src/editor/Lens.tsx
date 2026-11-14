@@ -50,6 +50,8 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const tool = useEditorState((s) => s.tool);
   // The Prototype tab puts connection handles where the Lens would sit.
   const prototyping = useEditorState((s) => s.prototyping);
+  // Explain takes the place beside the selection.
+  const explaining = useEditorState((s) => s.explain !== null);
   const scrubbing = useRef(false);
   // One of the Lens's popovers (font, style, fill) is open: stay put while it's in use.
   const [holding, setHolding] = useState(false);
@@ -111,6 +113,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
     vectorEdit ||
     !canEdit ||
     prototyping ||
+    explaining ||
     tool !== "select";
   if (hidden && holding) setHolding(false);
   if (hidden) return null;

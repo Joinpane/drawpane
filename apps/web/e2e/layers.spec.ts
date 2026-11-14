@@ -2,7 +2,9 @@
  * The layers panel in a real browser, on a throwaway instance: finding
  * layers with ⌘F and filters, selecting what was found, folding the tree
  * with ⌥-click and ⌥L, locking from a row, duplicating with ⌥-drag, and
- * dragging a layer out of its groups to the level the pointer is at.
+ * dragging a layer out of its groups to the level the pointer is at (even
+ * the last layer in a frame, over its own row), and into the empty space
+ * below the list.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -199,5 +201,95 @@ test.describe
         await page.evaluate(() => (window as unknown as W).drawpane.s.pageId),
       );
       expect(order.indexOf(ids.title)).toBe(order.indexOf(ids.home) - 1);
+    });
+    test("drags the last layer in a frame out of it, over its own row", async () => {
+      // A phone screen holding an auto layout row whose last layer is a screenshot.
+      const made = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const phone = e.createLayer(
+          "frame",
+          { x: 600, y: 0, width: 402, height: 874 },
+          e.s.pageId,
+          {
+            name: "Phone",
+          },
+        ) as string;
+        const strip = e.createLayer("frame", { x: 620, y: 40, width: 300, height: 80 }, phone, {
+          name: "Strip",
+          layoutMode: "row",
+        }) as string;
+        const shot = e.createLayer("rect", { x: 0, y: 0, width: 60, height: 60 }, strip, {
+          name: "Shot",
+        }) as string;
+        const label = e.createLayer("text", { x: 0, y: 0, width: 60, height: 20 }, strip, {
+          name: "Label",
+          characters: "Label",
+        }) as string;
+        return { phone, strip, shot, label };
+      });
+      ids.label = made.label;
+      // Label isn't last (Shot is below it): over its own row it has nowhere to go.
+      const label = row(page, "Label");
+      const labelBox = await label.boundingBox();
+      if (!labelBox) throw new Error("no row");
+      await label.hover();
+      await page.mouse.down();
+      await page.mouse.move(labelBox.x + 6, labelBox.y + labelBox.height / 2, { steps: 4 });
+      await page.mouse.move(labelBox.x + 5, labelBox.y + labelBox.height / 2);
+      await expect(page.getByRole("status").filter({ hasText: /moving/ })).toHaveCount(0);
+      await page.mouse.up();
+
+      const shot = row(page, "Shot");
+      const box = await shot.boundingBox();
+      if (!box) throw new Error("no row");
+      await shot.hover();
+      await page.mouse.down();
+      // Left by one level, still over its own row: below Strip, in Phone.
+      await page.mouse.move(box.x + 4 + 12 + 8, box.y + box.height / 2, { steps: 4 });
+      await page.mouse.move(box.x + 4 + 12 + 9, box.y + box.height / 2);
+      await expect(
+        page.getByRole("status").filter({ hasText: "moving below Strip in Phone" }),
+      ).toBeVisible();
+      await expect(shot).toHaveClass(/layers__row--drop-line-after/);
+      await page.mouse.up();
+      await expect
+        .poll(() =>
+          page.evaluate((id) => (window as unknown as W).drawpane.doc.get(id)?.parent, made.shot),
+        )
+        .toBe(made.phone);
+      const order = await page.evaluate(
+        (id) => (window as unknown as W).drawpane.doc.childIds(id),
+        made.phone,
+      );
+      // Below Strip in the list: under it in Phone's stack.
+      expect(order).toEqual([made.shot, made.strip]);
+    });
+
+    test("drops into the empty space below the list, at the level the pointer is at", async () => {
+      const label = row(page, "Label");
+      const scroll = await tree(page).boundingBox();
+      const lastBox = await tree(page).getByRole("treeitem").last().boundingBox();
+      if (!scroll || !lastBox) throw new Error("no tree");
+      const empty = lastBox.y + lastBox.height + 40;
+      expect(empty).toBeLessThan(scroll.y + scroll.height);
+      await label.hover();
+      await page.mouse.down();
+      await page.mouse.move(lastBox.x + 3, empty, { steps: 4 });
+      await page.mouse.move(lastBox.x + 2, empty);
+      await expect(page.getByRole("status").filter({ hasText: /moving below/ })).toBeVisible();
+      await page.mouse.up();
+      const pageId = await page.evaluate(() => (window as unknown as W).drawpane.s.pageId);
+      const labelId = ids.label as string;
+      await expect
+        .poll(() =>
+          page.evaluate((id) => (window as unknown as W).drawpane.doc.get(id)?.parent, labelId),
+        )
+        .toBe(pageId);
+      // At the very bottom of the page's stack.
+      const order = await page.evaluate(
+        (p) => (window as unknown as W).drawpane.doc.childIds(p),
+        pageId,
+      );
+      expect(order[0]).toBe(labelId);
     });
   });

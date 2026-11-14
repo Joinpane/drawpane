@@ -14,6 +14,8 @@ import {
   type SegmentedOption,
   Switch,
 } from "@drawpane/ui";
+import { useEditorStateOutside } from "../hooks";
+import { toggleXray } from "../ui-state";
 import { common, Num, Select } from "./fields";
 
 type LayoutMode = "none" | "row" | "column" | "grid";
@@ -59,12 +61,15 @@ export function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: No
     <PropertySection
       title="Auto layout"
       actions={
-        <IconButton
-          icon={on ? "minus" : "plus"}
-          label={on ? "Remove auto layout" : "Add auto layout"}
-          shortcut="⇧A"
-          onClick={() => editor.setLayoutMode(ids, on ? "none" : "row")}
-        />
+        <>
+          {on ? <XrayToggle editor={editor} /> : null}
+          <IconButton
+            icon={on ? "minus" : "plus"}
+            label={on ? "Remove auto layout" : "Add auto layout"}
+            shortcut="⇧A"
+            onClick={() => editor.setLayoutMode(ids, on ? "none" : "row")}
+          />
+        </>
       }
     >
       {on ? (
@@ -385,6 +390,20 @@ const SELF: ReadonlyArray<{ value: SelfAlign; label: string }> = [
  * frames, plus taking a layer out of its parent's flow (absolute position)
  * and, in a row or column, its own cross-axis alignment.
  */
+/** Layout X-ray: lit while Alt is held, and a click keeps it on without holding Alt. */
+function XrayToggle({ editor }: { editor: Editor }) {
+  const xray = useEditorStateOutside(editor, (s) => s.xray);
+  return (
+    <IconButton
+      icon="xray"
+      label="Layout X-ray"
+      shortcut="Hold Alt"
+      pressed={xray}
+      onClick={() => toggleXray(editor)}
+    />
+  );
+}
+
 export function SizingSection({
   editor,
   nodes,

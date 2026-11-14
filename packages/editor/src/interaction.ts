@@ -30,6 +30,7 @@ import { gridSnapLines, guideAt, guideOwnerAt, placedGuides } from "./grids";
 import { childToward, hitTest, marqueeHits, selectionTarget } from "./hit";
 import { frameLabelAt, isArtboard } from "./labels";
 import { gridCellAt, gridGeometry } from "./layout";
+import { sizePillAt } from "./size-pill";
 import { type Guide, type SnapLine, snapEdges, snapGuide, snapRect } from "./snap";
 import { ConnectTool } from "./tools/connect";
 import { CropTool } from "./tools/crop";
@@ -37,6 +38,7 @@ import { PenTool } from "./tools/pen";
 import type { KeyInput, ToolHandler } from "./tools/types";
 import { VectorEditTool } from "./tools/vector-edit";
 import { scaledPathData } from "./vector/node";
+import { type XrayRegion, xrayLabel, xrayRegionAt } from "./xray";
 
 export interface PointerInput {
   readonly screen: Point;
@@ -103,7 +105,9 @@ type Mode =
       parent: string;
       id: string | null;
     }
-  | { kind: "guide"; axis: "x" | "y"; from: { owner: string; index: number } | null };
+  | { kind: "guide"; axis: "x" | "y"; from: { owner: string; index: number } | null }
+  /** Dragging a padding or gap in X-ray (Alt held). */
+  | { kind: "xray"; region: XrayRegion; start: Point; value: number };
 
 export class Interaction {
   readonly #editor: Editor;
@@ -271,6 +275,35 @@ export class Interaction {
       const extra: Props = tool === "arrow" ? { markerEnd: "arrow" } : {};
       this.#mode = { kind: "draw", type, extra, startPage: page, parent, id: null };
       return;
+    }
+
+    // The size pill: its width or height opens Explain for that number (again closes it).
+    const axis = sizePillAt(editor, input.screen);
+    if (axis) {
+      const id = editor.s.selection[0] as string;
+      const open = editor.s.explain;
+      editor.state.set({
+        explain: open?.id === id && open.axis === axis ? null : { id, axis },
+      });
+      this.cursor = "pointer";
+      return;
+    }
+
+    // X-ray (Alt held): a padding or gap under the pointer drags to change it.
+    const region = editor.s.xray && editor.canEdit ? xrayRegionAt(editor, page) : null;
+    if (region) {
+      const frame = editor.doc.get(region.frameId);
+      if (frame) {
+        editor.beginGesture(xrayLabel(region));
+        this.#mode = {
+          kind: "xray",
+          region,
+          start: input.screen,
+          value: getProp(frame.props, region.prop),
+        };
+        this.cursor = region.axis === "x" ? "ew-resize" : "ns-resize";
+        return;
+      }
     }
 
     const handle = editor.canEdit ? this.#handleAt(input.screen) : null;
@@ -466,6 +499,16 @@ export class Interaction {
       case "guide":
         this.#dragGuide(mode.axis, mode.axis === "x" ? page.x : page.y, input.screen, mode.from);
         return;
+      case "xray": {
+        // Screen pixels to the frame's units; Shift steps by 8.
+        const { region } = mode;
+        const moved =
+          region.axis === "x" ? input.screen.x - mode.start.x : input.screen.y - mode.start.y;
+        const raw = Math.max(0, mode.value + (moved / editor.s.camera.zoom) * region.sign);
+        const next = input.shift ? Math.round(raw / 8) * 8 : Math.round(raw);
+        editor.setProp([region.frameId], region.prop, next, xrayLabel(region));
+        return;
+      }
     }
   }
 
@@ -497,6 +540,10 @@ export class Interaction {
       case "resize":
       case "rotate":
         editor.endGesture();
+        return;
+      case "xray":
+        editor.endGesture();
+        this.cursor = "default";
         return;
       case "draw": {
         if (!mode.id) {
@@ -693,7 +740,17 @@ export class Interaction {
       editor.state.set({ hover: null });
       return;
     }
+    if (sizePillAt(editor, input.screen)) {
+      this.cursor = "pointer";
+      editor.state.set({ hover: null });
+      return;
+    }
     const page = this.#page(input.screen);
+    const region = editor.s.xray && editor.canEdit ? xrayRegionAt(editor, page) : null;
+    if (region) {
+      this.cursor = region.axis === "x" ? "ew-resize" : "ns-resize";
+      return;
+    }
     const guide = editor.canEdit ? this.#guideUnder(page) : null;
     if (guide) {
       this.cursor = guide.axis === "x" ? "ew-resize" : "ns-resize";

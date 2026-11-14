@@ -34,6 +34,8 @@ export interface EditorUi {
   readonly textStyles: number;
   /** The Selection Lens shows beside the selection (a view preference). */
   readonly lens: boolean;
+  /** Layout X-ray stays on without holding Alt (the inspector's X-ray button). */
+  readonly xrayPinned: boolean;
 }
 
 const stores = new WeakMap<Editor, Store<EditorUi>>();
@@ -48,10 +50,19 @@ export function uiFor(editor: Editor): Store<EditorUi> {
       collapseLayers: 0,
       textStyles: 0,
       lens: true,
+      xrayPinned: false,
     });
     stores.set(editor, store);
   }
   return store;
+}
+
+/** Keeps Layout X-ray on without holding Alt, or turns it back off. */
+export function toggleXray(editor: Editor): void {
+  const ui = uiFor(editor);
+  const pinned = !ui.get().xrayPinned;
+  ui.set({ xrayPinned: pinned });
+  editor.state.set({ xray: pinned });
 }
 
 export function useUi<T>(editor: Editor, select: (ui: EditorUi) => T): T {
