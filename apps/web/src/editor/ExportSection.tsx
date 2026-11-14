@@ -11,7 +11,7 @@ import type { NodeRecord } from "@drawpane/model";
 import { Button, PropertySection, SegmentedControl, type SegmentedOption } from "@drawpane/ui";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { isMac } from "../app/format";
-import { formatShortcut } from "./actions";
+import { shortcutFor } from "./actions";
 import { type ExportSettings, exportName, exportSelection, exportSettings } from "./exporting";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import { imagesFor } from "./media";
@@ -126,7 +126,7 @@ export function ExportSection({
           icon="export"
           size="sm"
           className="export-section__button"
-          shortcut={formatShortcut({ key: "e", mod: true, shift: true })}
+          shortcut={shortcutFor("file.export")}
           aria-keyshortcuts={isMac() ? "Shift+Meta+E" : "Shift+Control+E"}
           onClick={() => void exportSelection(editor)}
         >

@@ -7,6 +7,7 @@ import type { Editor } from "@drawpane/editor";
 import { FRAME_PRESETS, framePreset, matchFramePreset } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { IconButton, PropertyRow, PropertySection, SegmentedControl } from "@drawpane/ui";
+import { shortcutFor } from "../actions";
 import { common, Num } from "./fields";
 
 export function GeometrySection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
@@ -80,13 +81,13 @@ export function GeometrySection({ editor, nodes }: { editor: Editor; nodes: Node
           <IconButton
             icon="flip-horizontal"
             label="Flip horizontal"
-            shortcut="⇧H"
+            shortcut={shortcutFor("arrange.flipHorizontal")}
             onClick={() => editor.flip("horizontal")}
           />
           <IconButton
             icon="flip-vertical"
             label="Flip vertical"
-            shortcut="⇧V"
+            shortcut={shortcutFor("arrange.flipVertical")}
             onClick={() => editor.flip("vertical")}
           />
         </span>

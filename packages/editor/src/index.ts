@@ -19,6 +19,7 @@ export * from "./interaction";
 export * from "./labels";
 export * from "./layout";
 export * from "./masks";
+export * from "./names";
 export * from "./overlay";
 export * from "./presets";
 export * from "./prototype";

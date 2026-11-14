@@ -141,6 +141,55 @@ export function placedByLayout(doc: Doc, id: string): boolean {
   return false;
 }
 
+/** Gap for auto layout when there's nothing to read it from. */
+const DEFAULT_GAP = 8;
+
+/**
+ * How layers already sit, as auto layout: the direction they run in (the
+ * axis their centres spread along most, unless given), and the gap, the
+ * median space between neighbours (so one stray doesn't set it). Turning
+ * on auto layout then keeps the spacing people already made.
+ */
+export function inferFlow(
+  boxes: readonly LayoutBox[],
+  direction?: "row" | "column",
+): { direction: "row" | "column"; gap: number } {
+  const spread = (axis: "x" | "y") => {
+    const centres = boxes.map((b) => (axis === "x" ? b.x + b.width / 2 : b.y + b.height / 2));
+    return Math.max(...centres) - Math.min(...centres);
+  };
+  const dir = direction ?? (boxes.length < 2 || spread("x") >= spread("y") ? "row" : "column");
+  if (boxes.length < 2) return { direction: dir, gap: DEFAULT_GAP };
+  const row = dir === "row";
+  const sorted = [...boxes].sort((a, b) => (row ? a.x - b.x : a.y - b.y));
+  const gaps = sorted.slice(1).map((b, i) => {
+    const a = sorted[i] as LayoutBox;
+    return row ? b.x - (a.x + a.width) : b.y - (a.y + a.height);
+  });
+  gaps.sort((a, b) => a - b);
+  const mid = gaps.length / 2;
+  const median =
+    gaps.length % 2 === 1
+      ? (gaps[Math.floor(mid)] as number)
+      : ((gaps[mid - 1] as number) + (gaps[mid] as number)) / 2;
+  return { direction: dir, gap: Math.max(0, Math.round(median)) };
+}
+
+/** The space between a frame's edges and what's in it: auto layout padding that moves nothing. */
+export function inferPadding(
+  frame: { readonly width: number; readonly height: number },
+  boxes: readonly LayoutBox[],
+): { top: number; right: number; bottom: number; left: number } {
+  if (boxes.length === 0) return { top: 0, right: 0, bottom: 0, left: 0 };
+  const inset = (v: number) => Math.max(0, Math.round(v));
+  return {
+    left: inset(Math.min(...boxes.map((b) => b.x))),
+    top: inset(Math.min(...boxes.map((b) => b.y))),
+    right: inset(frame.width - Math.max(...boxes.map((b) => b.x + b.width))),
+    bottom: inset(frame.height - Math.max(...boxes.map((b) => b.y + b.height))),
+  };
+}
+
 /** The layers that hold a position: a group's are its contents', all the way down. */
 function positioned(doc: Doc, id: string): string[] {
   const node = doc.get(id);

@@ -66,7 +66,7 @@ import { withGuide } from "./grids";
 import { applyBestEffort, History } from "./history";
 import { hitAll } from "./hit";
 import { layoutImageRow } from "./images";
-import { layoutOps } from "./layout";
+import { flowChildren, inferFlow, inferPadding, layoutBox, layoutOps } from "./layout";
 import {
   isRunProp,
   type RunPatch,
@@ -924,7 +924,8 @@ export class Editor {
           parent,
           key: this.topKey(parent),
           props: {
-            name: this.defaultName(type),
+            // Text is called by what it says (see `layerName`), until someone names it.
+            ...(type === "text" ? {} : { name: this.defaultName(type) }),
             ...this.defaultProps(type),
             x: round2(origin.x),
             y: round2(origin.y),
@@ -1064,6 +1065,48 @@ export class Editor {
     return ids.filter(
       (id) => this.doc.has(id) && !this.doc.ancestors(id).some((a) => set.has(a.id)),
     );
+  }
+
+  /**
+   * Auto layout for a frame without it, keeping what's there: the direction
+   * the children run in (unless given), the gap between them, the padding
+   * around them, and their order along the direction, so nothing jumps.
+   */
+  #flowOps(frame: NodeRecord, direction?: "row" | "column"): Op[] {
+    const children = flowChildren(this.doc, frame.id);
+    const boxes = children.map((c) => layoutBox(this.doc, c.id));
+    const flow = inferFlow(boxes, direction);
+    const ops: Op[] = [{ op: "set", id: frame.id, prop: "layoutMode", value: flow.direction }];
+    if (getProp(frame.props, "gap") === 0)
+      ops.push({ op: "set", id: frame.id, prop: "gap", value: flow.gap });
+    const sides = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"] as const;
+    if (children.length > 0 && sides.every((side) => getProp(frame.props, side) === 0)) {
+      const pad = inferPadding(
+        { width: getProp(frame.props, "width"), height: getProp(frame.props, "height") },
+        boxes,
+      );
+      const values = [pad.top, pad.right, pad.bottom, pad.left];
+      sides.forEach((side, i) => {
+        if (values[i]) ops.push({ op: "set", id: frame.id, prop: side, value: values[i] });
+      });
+    }
+    // Their order in the flow is the order they're in on screen.
+    const row = flow.direction === "row";
+    const along = (i: number) => {
+      const b = boxes[i] as { x: number; y: number };
+      return row ? b.x : b.y;
+    };
+    const order = children.map((_, i) => i).sort((a, b) => along(a) - along(b));
+    // Only when they're all in the flow: fresh keys mustn't land among hidden or absolute ones.
+    const all = this.doc.childIds(frame.id).length === children.length;
+    if (all && order.some((k, i) => k !== i)) {
+      const keys = keysBetween(null, null, order.length);
+      order.forEach((k, i) => {
+        const child = children[k] as NodeRecord;
+        ops.push({ op: "move", id: child.id, parent: frame.id, key: keys[i] as string });
+      });
+    }
+    return ops;
   }
 
   /** The box around layers, in `parent`'s coordinate space (its own rotation and all). */
@@ -1356,20 +1399,8 @@ export class Editor {
     const first = ids[0] && this.doc.get(ids[0]);
     if (!first || !bounds) return;
     if (autoLayout && ids.length === 1 && first.type === "frame") {
-      if (getProp(first.props, "layoutMode") === "none") {
-        this.commit(
-          [
-            {
-              op: "set",
-              id: first.id,
-              prop: "layoutMode",
-              value: bounds.width >= bounds.height ? "row" : "column",
-            },
-            { op: "set", id: first.id, prop: "gap", value: 8 },
-          ],
-          "Add auto layout",
-        );
-      }
+      if (getProp(first.props, "layoutMode") === "none")
+        this.commit(this.#flowOps(first), "Add auto layout");
       return;
     }
     const slot = this.#wrapperSlot(ids);
@@ -1379,7 +1410,9 @@ export class Editor {
     // The selection's box in the parent's space, which may be rotated.
     const box = this.#boxIn(ids, parent) ?? bounds;
     const origin = { x: box.x, y: box.y };
-    const horizontal = box.width >= box.height;
+    // Auto layout keeps the spacing already there: direction and gap read from the layers.
+    const flow = inferFlow(ids.map((id) => this.#boxIn([id], parent) ?? box));
+    const horizontal = flow.direction === "row";
     const ops: Op[] = [
       {
         op: "create",
@@ -1394,7 +1427,7 @@ export class Editor {
           width: round2(box.width),
           height: round2(box.height),
           ...(autoLayout
-            ? { layoutMode: horizontal ? "row" : "column", gap: 8, sizingH: "hug", sizingV: "hug" }
+            ? { layoutMode: flow.direction, gap: flow.gap, sizingH: "hug", sizingV: "hug" }
             : {}),
         },
       },
@@ -1439,12 +1472,13 @@ export class Editor {
       if (frame?.type !== "frame") continue;
       const from = getProp(frame.props, "layoutMode");
       if (from === mode) continue;
-      ops.push({ op: "set", id, prop: "layoutMode", value: mode === "none" ? null : mode });
       if (mode !== "grid") {
-        if (from === "none" && getProp(frame.props, "gap") === 0)
-          ops.push({ op: "set", id, prop: "gap", value: 8 });
+        // From none, read gap, padding and order from how the layers sit.
+        if (from === "none" && mode !== "none") ops.push(...this.#flowOps(frame, mode));
+        else ops.push({ op: "set", id, prop: "layoutMode", value: mode === "none" ? null : mode });
         continue;
       }
+      ops.push({ op: "set", id, prop: "layoutMode", value: mode });
       const gap = getProp(frame.props, "gap") || 8;
       ops.push({ op: "set", id, prop: "gap", value: gap });
       if (getProp(frame.props, "rowGap") === 0)

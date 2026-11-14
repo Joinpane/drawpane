@@ -10,14 +10,16 @@ describe("actions", () => {
   it("never share a shortcut", () => {
     const seen = new Map<string, string>();
     for (const action of ACTIONS) {
-      if (!action.shortcut) continue;
-      const { key, mod, shift, alt } = action.shortcut;
-      const combo = `${mod ? "mod+" : ""}${alt ? "alt+" : ""}${shift ? "shift+" : ""}${key}`;
-      expect(
-        seen.get(combo),
-        `${action.id} and ${seen.get(combo)} both use ${combo}`,
-      ).toBeUndefined();
-      seen.set(combo, action.id);
+      for (const shortcut of [action.shortcut, ...(action.also ?? [])]) {
+        if (!shortcut) continue;
+        const { key, mod, shift, alt } = shortcut;
+        const combo = `${mod ? "mod+" : ""}${alt ? "alt+" : ""}${shift ? "shift+" : ""}${key}`;
+        expect(
+          seen.get(combo),
+          `${action.id} and ${seen.get(combo)} both use ${combo}`,
+        ).toBeUndefined();
+        seen.set(combo, action.id);
+      }
     }
   });
 });

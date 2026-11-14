@@ -8,6 +8,7 @@ import {
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { IconButton, type IconName, KIND_ICONS, NumberField, SelectionLens } from "@drawpane/ui";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { shortcutFor } from "./actions";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import { FontPicker } from "./inspector/FontPicker";
 import { common } from "./inspector/fields";
@@ -165,7 +166,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
         kind={kind}
         kindIcon={icon}
         onOpenInspector={onOpenInspector}
-        inspectorShortcut="⌥⌘I"
+        inspectorShortcut={shortcutFor("view.rightPane") ?? ""}
       >
         {controls}
       </SelectionLens>

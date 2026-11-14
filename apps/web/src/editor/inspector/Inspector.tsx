@@ -26,6 +26,7 @@ import { SelectionColors } from "./SelectionColors";
 import { ShapeSection } from "./ShapeSection";
 import { TextSection } from "./TextSection";
 import "./inspector.css";
+import { shortcutFor } from "../actions";
 
 export function Inspector() {
   const editor = useEditor();
@@ -169,7 +170,8 @@ function PageInspector() {
         )}
       </PropertySection>
       <p className="inspector__hint">
-        Select a layer to edit it, or press ⌘K to search and set values by name.
+        Select a layer to edit it, or press {shortcutFor("view.command")} to search and set values
+        by name.
       </p>
     </div>
   );

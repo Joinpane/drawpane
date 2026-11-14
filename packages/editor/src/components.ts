@@ -21,6 +21,7 @@ import {
   type Props,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
+import { layerName } from "./names";
 
 /** Never copied from a main component: they link instances or describe the main itself. */
 const LINK_PROPS: ReadonlySet<string> = new Set([
@@ -553,7 +554,7 @@ export function findVariant(
 function namePath(doc: Doc, rootId: string, id: string): string {
   const parts: string[] = [];
   for (let node = doc.get(id); node && node.id !== rootId; node = doc.get(node.parent)) {
-    parts.unshift(getProp(node.props, "name") || node.type);
+    parts.unshift(layerName(node));
   }
   return parts.join("/");
 }

@@ -15,6 +15,8 @@ interface Row {
   readonly group: Group;
   readonly caps: readonly string[];
   readonly shortcut?: Shortcut;
+  /** Other keys that do the same (see `Action.also`). */
+  readonly also?: readonly Shortcut[];
 }
 
 type Group = "Tools" | "Edit" | "Arrange" | "Layer" | "View";
@@ -64,6 +66,7 @@ export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () 
         group: groupOf(a),
         caps: shortcutCaps(a.shortcut as Shortcut),
         shortcut: a.shortcut as Shortcut,
+        also: a.also ?? [],
       })),
       ...gestures(),
     ],
@@ -72,7 +75,10 @@ export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () 
 
   const q = query.trim().toLowerCase();
   const shown = rows.filter((r) => {
-    if (pressed) return r.shortcut ? matches(r.shortcut, pressed) : false;
+    if (pressed)
+      return [r.shortcut, ...(r.also ?? [])].some(
+        (shortcut) => shortcut !== undefined && matches(shortcut, pressed),
+      );
     if (group !== "All" && r.group !== group) return false;
     return !q || r.label.toLowerCase().includes(q) || r.caps.join(" ").toLowerCase().includes(q);
   });

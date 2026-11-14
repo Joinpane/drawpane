@@ -208,6 +208,8 @@ export function drawOverlay(
       if (corners) quad(corners, theme.signal, 1.5);
     }
   }
+  // The size pill under the selection, beneath its handles, so a handle is never covered.
+  drawSizePill(ctx, editor, theme);
   const frame = cropping ? null : interaction.selectionFrame();
   if (frame && selection.length > 0 && !vectorEdit) {
     const corners = [
@@ -245,8 +247,6 @@ export function drawOverlay(
       }
     }
   }
-
-  drawSizePill(ctx, editor, theme);
 
   // Alt + hover: measure from the selection to the hovered layer.
   if (xray && selection.length > 0 && hover && !selection.includes(hover)) {

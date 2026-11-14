@@ -44,6 +44,8 @@ export interface SyncEvents {
   role(role: "owner" | "editor" | "viewer"): void;
   /** Someone restored the whole file to a saved version; the document already shows it. */
   restored(by: { readonly userId: string; readonly name: string }, version: RestoredVersion): void;
+  /** The room's revision or the count of our edits it hasn't confirmed changed ("Saved · revision N"). */
+  progress(revn: number | null, pending: number): void;
 }
 
 export interface SyncOptions {
@@ -151,6 +153,7 @@ export class SyncEngine {
       this.#pending.push({ ops: [...ops], inverse, seq: null });
     }
     this.#scheduleFlush();
+    this.#progress();
     return inverse;
   }
 
@@ -210,6 +213,21 @@ export class SyncEngine {
   }
 
   receive(message: ServerMessage): void {
+    this.#handle(message);
+    this.#progress();
+  }
+
+  /** Tells listeners when the revision or the unconfirmed count moved. */
+  #reported: { revn: number | null; pending: number } = { revn: null, pending: 0 };
+  #progress(): void {
+    const revn = this.#revn;
+    const pending = this.pendingCount;
+    if (revn === this.#reported.revn && pending === this.#reported.pending) return;
+    this.#reported = { revn, pending };
+    this.#emit("progress", revn, pending);
+  }
+
+  #handle(message: ServerMessage): void {
     switch (message.t) {
       case "welcome":
         this.#welcome(message);

@@ -6,7 +6,8 @@
 import { getProp } from "@drawpane/model";
 import type { Editor } from "./editor";
 import { type ExplainAxis, sizeMode } from "./explain";
-import type { Rect } from "./geometry";
+import { apply, type Rect } from "./geometry";
+import { explainedFrame, xrayFrames, xrayRegions } from "./xray";
 
 const FAMILY = '"Instrument Sans Variable", "Instrument Sans", system-ui, sans-serif';
 /** The numbers. */
@@ -80,8 +81,11 @@ export function sizePill(editor: Editor): SizePill | null {
     x: p.x + left + PAD,
     modeX: p.modeX + left + PAD,
   });
+  const box = { x: left, y: top, width: textWidth + PAD * 2, height: HEIGHT };
+  // X-ray is what's being read: the pill steps aside rather than cover a padding or gap.
+  if (coversXray(editor, box)) return null;
   return {
-    box: { x: left, y: top, width: textWidth + PAD * 2, height: HEIGHT },
+    box,
     parts: [shift(w), shift(h)],
     timesX: left + PAD + w.width,
     middle: top + HEIGHT / 2 + 0.5,
@@ -99,4 +103,30 @@ export function sizePillAt(editor: Editor, screen: { x: number; y: number }): Ex
   // The halves split at the middle of " × ".
   const split = (timesX + parts[1].x) / 2;
   return screen.x < split ? "width" : "height";
+}
+
+/** Whether `box` (on screen) would cover a padding or gap X-ray is showing, or Explain is adding up. */
+function coversXray(editor: Editor, box: Rect): boolean {
+  const { xray, explain, camera } = editor.s;
+  const frames = new Set(xray ? xrayFrames(editor) : []);
+  const explained = explain ? explainedFrame(editor, explain.id, explain.axis) : null;
+  if (explained) frames.add(explained);
+  for (const frameId of frames) {
+    const m = editor.scene.worldMatrix(frameId);
+    for (const { rect } of xrayRegions(editor, frameId)) {
+      const pts = [
+        { x: rect.x, y: rect.y },
+        { x: rect.x + rect.width, y: rect.y },
+        { x: rect.x, y: rect.y + rect.height },
+        { x: rect.x + rect.width, y: rect.y + rect.height },
+      ].map((p) => camera.toScreen(apply(m, p)));
+      const x0 = Math.min(...pts.map((p) => p.x));
+      const x1 = Math.max(...pts.map((p) => p.x));
+      const y0 = Math.min(...pts.map((p) => p.y));
+      const y1 = Math.max(...pts.map((p) => p.y));
+      if (x0 < box.x + box.width && x1 > box.x && y0 < box.y + box.height && y1 > box.y)
+        return true;
+    }
+  }
+  return false;
 }
