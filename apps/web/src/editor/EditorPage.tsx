@@ -6,6 +6,7 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { isMac, modKey } from "../app/format";
+import { fonts } from "../fonts/fonts";
 import { ShareDialog } from "../prototype/ShareDialog";
 import { AssetsPanel } from "./AssetsPanel";
 import { ACTIONS, type ActionContext, matches } from "./actions";
@@ -157,6 +158,12 @@ function FileEditor({ fileId }: { fileId: string }) {
     [editor, fileId, comments.store, navigate],
   );
   useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt);
+
+  // The file's team fonts: the picker lists them, and text set in them loads them.
+  const teamId = meta.data?.file.teamId;
+  useEffect(() => {
+    if (teamId) void fonts.loadTeam(teamId);
+  }, [teamId]);
 
   // A handle for debugging and end-to-end tests: `localStorage.setItem("drawpane:debug", "1")`.
   useEffect(() => {
