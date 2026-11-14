@@ -220,14 +220,24 @@ export function canvasMenu(host: MenuHost, request: MenuRequest): ContextMenuEnt
   const rulers = action(host, "view.rulers", "Show rulers");
   const grids = action(host, "view.layoutGrids", "Show layout grids");
   const pixels = action(host, "view.pixelSnap");
-  const minimap = action(host, "view.minimap", "Show minimap");
+  const minimapMode = uiFor(editor).get().minimap;
+  const modeItem = (id: string, label: string, mode: string): ContextMenuAction | null => {
+    const item = toggle(action(host, id, label), minimapMode === mode);
+    return item ? { ...item, id: `minimap-${mode}` } : null;
+  };
+  const minimapItems = [
+    modeItem("view.minimap", "Always", "always"),
+    modeItem("view.minimapAuto", "While moving around", "auto"),
+    modeItem("view.minimapOff", "Never", "off"),
+  ].filter((i): i is ContextMenuAction => i !== null);
+  const minimap: Item = { id: "minimap", label: "Minimap", icon: "minimap", items: minimapItems };
   return sections(
     [pasteHere(host, request), a("edit.selectAll")],
     [
       toggle(rulers, editor.s.rulers),
       toggle(grids, editor.s.layoutGrids),
       toggle(pixels, editor.s.pixelSnap),
-      toggle(minimap, uiFor(editor).get().minimap),
+      minimap,
       toggle(comments, host.commentsShown),
       toggle(focus, editor.s.focusMode),
     ],

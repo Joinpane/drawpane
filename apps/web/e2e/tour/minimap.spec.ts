@@ -123,6 +123,8 @@ test("minimap tour", async ({ browser }) => {
     e.centerOn({ x: 196, y: 300 });
   });
   const minimap = page.getByRole("region", { name: "Minimap" });
+  // Pinned (⌥M), so it holds still for its portrait.
+  await page.keyboard.press("Alt+m");
   await expect(minimap).toContainText("3 boards");
   await shot(page, "155-minimap");
   await shot(page, "156-minimap-close", minimap);

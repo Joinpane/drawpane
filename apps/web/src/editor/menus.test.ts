@@ -45,6 +45,7 @@ function setup(role: "editor" | "viewer" = "editor") {
     toggleTokens: noop,
     toggleLeftPane: noop,
     toggleRightPane: noop,
+    toggleMinimized: noop,
     copy: vi.fn(),
     cut: noop,
     paste: noop,
@@ -83,7 +84,7 @@ describe("context menus", () => {
       "Show rulers",
       "Show layout grids",
       "Snap to pixel grid",
-      "Show minimap",
+      "Minimap",
       "Show comments",
       "Hide other people's cursors",
       "—",
@@ -96,6 +97,18 @@ describe("context menus", () => {
       "—",
       "Version history",
       "Keyboard shortcuts",
+    ]);
+  });
+
+  it("chooses when the minimap shows, with the current choice checked", () => {
+    const { host } = setup();
+    const items = menuFor(host, { kind: "canvas", x: 0, y: 0, point: { x: 900, y: 900 } });
+    const modes = find(items, "Minimap")?.items ?? [];
+    expect(labels(modes)).toEqual(["Always", "While moving around", "Never"]);
+    expect(modes.map((m) => ("checked" in m ? m.checked : undefined))).toEqual([
+      false,
+      true,
+      false,
     ]);
   });
 

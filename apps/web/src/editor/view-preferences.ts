@@ -6,7 +6,7 @@
  */
 import type { Editor } from "@drawpane/editor";
 import { useEffect } from "react";
-import { uiFor } from "./ui-state";
+import { type MinimapMode, uiFor } from "./ui-state";
 
 const KEY = "drawpane:view";
 
@@ -15,23 +15,29 @@ interface ViewPreferences {
   readonly layoutGrids: boolean;
   readonly pixelSnap: boolean;
   readonly lens: boolean;
-  readonly minimap: boolean;
+  readonly minimap: MinimapMode;
 }
 
-const NAMES = [
+const MINIMAP_MODES: readonly MinimapMode[] = ["auto", "always", "off"];
+
+const SWITCHES = [
   "rulers",
   "layoutGrids",
   "pixelSnap",
   "lens",
-  "minimap",
 ] as const satisfies readonly (keyof ViewPreferences)[];
+const NAMES = [...SWITCHES, "minimap"] as const satisfies readonly (keyof ViewPreferences)[];
 
 /** What's stored, keeping only well-formed values. */
 export function readViewPreferences(raw: string | null): Partial<ViewPreferences> {
   try {
     const parsed = JSON.parse(raw ?? "null") as Record<string, unknown> | null;
-    const out: Partial<Record<keyof ViewPreferences, boolean>> = {};
-    for (const name of NAMES) if (typeof parsed?.[name] === "boolean") out[name] = parsed[name];
+    const out: { -readonly [K in keyof ViewPreferences]?: ViewPreferences[K] } = {};
+    for (const name of SWITCHES) if (typeof parsed?.[name] === "boolean") out[name] = parsed[name];
+    const minimap = parsed?.minimap;
+    // Before modes, the minimap was on or off: on is now "while moving around".
+    if (typeof minimap === "boolean") out.minimap = minimap ? "auto" : "off";
+    else if (MINIMAP_MODES.includes(minimap as MinimapMode)) out.minimap = minimap as MinimapMode;
     return out;
   } catch {
     return {};

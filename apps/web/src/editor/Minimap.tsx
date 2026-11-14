@@ -2,8 +2,13 @@
  * The minimap: the page in miniature at the canvas's bottom left, with the
  * part you can see outlined and a dot where each person on the page is
  * pointing. Click or drag in it to move the view; drag the outline to carry
- * it. ⌥M shows or hides it, and it steps aside when the canvas is too narrow
- * to hold it beside the zoom controls.
+ * it. It steps aside when the canvas is too narrow to hold it beside the zoom
+ * controls.
+ *
+ * By default it keeps the canvas clear: it shows while you pan or zoom (and
+ * only when some of the page is out of view), stays while the pointer is on
+ * it, and fades a moment after you stop. ⌥M pins it on screen; the canvas
+ * menu can also turn it off.
  *
  * Drawn on a canvas (crisp at any pixel ratio), at most once a frame, from
  * `minimapModel`: the page's top-level layers, so it stays cheap on big files.
@@ -32,6 +37,22 @@ const ZOOM_HALF = 84;
 const GUTTER = 12;
 /** The card's height: its padding, the 14px heading and 6px under it, and the map. */
 const CARD_HEIGHT = PADDING * 2 + 14 + 6 + MAP_HEIGHT;
+/** How long it stays after the view stops moving (or the pointer leaves it). */
+const LINGER_MS = 1600;
+/** Opening a file or page moves the view on its own: that isn't you moving around. */
+const SETTLE_MS = 700;
+
+/** Whether some of the page is out of view: then the minimap has something to show. */
+export function hasOffscreen(model: MinimapModel): boolean {
+  const v = model.view;
+  return model.layers.some(
+    ({ rect: r }) =>
+      r.x < v.x - 0.5 ||
+      r.y < v.y - 0.5 ||
+      r.x + r.width > v.x + v.width + 0.5 ||
+      r.y + r.height > v.y + v.height + 0.5,
+  );
+}
 
 /**
  * Where the minimap sits on the canvas, or null while it's hidden (switched
@@ -158,7 +179,7 @@ function withAlpha(color: string, alpha: number): string {
 
 export function Minimap() {
   const editor = useEditor();
-  const shown = useUi(editor, (s) => s.minimap);
+  const mode = useUi(editor, (s) => s.minimap);
   const insetLeft = useEditorState((s) => s.insets.left);
   const viewport = useEditorState((s) => s.viewport);
   const pageId = useEditorState((s) => s.pageId);
@@ -171,9 +192,39 @@ export function Minimap() {
   /** Redraws on the next frame. */
   const redraw = useRef(() => {});
 
-  const box = minimapBox(shown, insetLeft, viewport);
-  const visible = box !== null && pageId !== null;
+  const box = minimapBox(mode !== "off", insetLeft, viewport);
+  const mounted = box !== null && pageId !== null;
   const left = box?.x ?? 0;
+  // While moving around: awake while the view moves, and a moment after.
+  const [awake, setAwake] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const sleep = useRef(0);
+  const wake = useRef(() => {});
+  wake.current = () => {
+    setAwake(true);
+    window.clearTimeout(sleep.current);
+    sleep.current = window.setTimeout(() => setAwake(false), LINGER_MS);
+  };
+  useEffect(() => {
+    if (mode !== "auto" || !mounted) {
+      setAwake(false);
+      return;
+    }
+    let camera = editor.s.camera;
+    const quietUntil = performance.now() + SETTLE_MS;
+    const off = editor.state.subscribe(() => {
+      if (editor.s.camera === camera) return;
+      camera = editor.s.camera;
+      if (performance.now() < quietUntil) return;
+      const model = minimapModel(editor);
+      if (model && hasOffscreen(model)) wake.current();
+    });
+    return () => {
+      off();
+      window.clearTimeout(sleep.current);
+    };
+  }, [editor, mode, mounted, pageId]);
+  const visible = mounted && (mode === "always" || awake || hovered || grabbing);
 
   useEffect(() => {
     if (!visible) return;
@@ -213,7 +264,7 @@ export function Minimap() {
     };
   }, [editor, visible]);
 
-  if (!visible) return null;
+  if (!mounted) return null;
 
   const pointAt = (e: ReactPointerEvent<HTMLCanvasElement>, f: MinimapFit) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -258,7 +309,19 @@ export function Minimap() {
 
   const boards = summary.boards === 1 ? "1 board" : `${summary.boards} boards`;
   return (
-    <section className="minimap pane" style={{ left }} aria-label="Minimap">
+    <section
+      className="minimap pane"
+      style={{ left }}
+      aria-label="Minimap"
+      // Asleep, it's out of the way: faded, and not under the pointer or in the accessibility tree.
+      data-asleep={!visible || undefined}
+      aria-hidden={!visible || undefined}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => {
+        setHovered(false);
+        if (mode === "auto") wake.current();
+      }}
+    >
       <div className="minimap__head" title={`${summary.page} · ${boards}`}>
         <span className="minimap__page">{summary.page}</span>
         <span aria-hidden="true">·</span>

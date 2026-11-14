@@ -89,17 +89,74 @@
 .pane--right {
   top: 64px;
   bottom: 12px;
-  width: var(--size-pane);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 .pane--left {
   left: 12px;
+  width: var(--pane-left, var(--size-pane));
 }
 .pane--right {
   right: 12px;
+  width: var(--pane-right, var(--size-pane));
   overflow-y: auto;
+}
+
+/*
+ * The grip on a panel's inner edge (PaneResizer): mostly in the gap beside
+ * the panel, so it never covers the panel's own scrollbar. A line shows where
+ * the edge is while it's pointed at, focused or dragged.
+ */
+.pane-resizer {
+  position: absolute;
+  z-index: 3;
+  top: 64px;
+  bottom: 12px;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.pane-resizer--left {
+  left: calc(12px + var(--pane-left, var(--size-pane)) - 2px);
+}
+.pane-resizer--right {
+  right: calc(12px + var(--pane-right, var(--size-pane)) - 2px);
+}
+.pane-resizer::after {
+  content: "";
+  position: absolute;
+  top: var(--radius-lg);
+  bottom: var(--radius-lg);
+  width: 2px;
+  border-radius: 1px;
+  background: var(--signal);
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.pane-resizer--left::after {
+  left: 1px;
+}
+.pane-resizer--right::after {
+  right: 1px;
+}
+/* A short wait on hover: passing over the edge on the way somewhere doesn't flash it. */
+.pane-resizer:hover::after {
+  opacity: 1;
+  transition-delay: 150ms;
+}
+.pane-resizer[data-dragging]::after,
+.pane-resizer:focus-visible::after {
+  opacity: 1;
+  transition-delay: 0ms;
+}
+.pane-resizer:focus-visible {
+  outline: none;
+}
+.pane-resizer:focus-visible::after {
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 4px var(--signal);
 }
 
 .pane__head {
@@ -123,7 +180,8 @@
 .file-title {
   top: 12px;
   left: 12px;
-  width: var(--size-pane);
+  /* As wide as the layers panel, but never under the centred toolbar. */
+  width: min(var(--pane-left, var(--size-pane)), max(var(--size-pane), calc(50vw - 260px)));
   height: 40px;
   display: flex;
   align-items: center;
@@ -210,7 +268,7 @@
  */
 @media (max-width: 1180px) {
   .toolbar {
-    left: calc(12px + var(--size-pane) + 12px);
+    left: calc(12px + var(--pane-left, var(--size-pane)) + 12px);
     transform: none;
   }
 }
@@ -954,7 +1012,8 @@
 
 .sync {
   bottom: 12px;
-  right: calc(var(--size-pane) + 24px);
+  /* Beside whatever is on the right: the inspector or comments, or the window's edge. */
+  right: var(--canvas-right, calc(var(--size-pane) + 24px));
   display: flex;
   align-items: center;
   gap: var(--space-200);
@@ -1948,6 +2007,14 @@
 .file-title__badge + .file-title__tokens {
   margin-left: var(--space-100);
 }
+.file-title__panels {
+  flex: none;
+}
+/* Minimize UI: the title keeps to its name, like the panels it stands in for. */
+.editor[data-minimized] .file-title {
+  width: auto;
+  max-width: var(--pane-left, var(--size-pane));
+}
 
 /* Inspect */
 .inspect__head {
@@ -2205,6 +2272,23 @@
   width: 168px;
   padding: var(--space-200);
   box-sizing: border-box;
+  transition:
+    opacity 140ms ease-out,
+    transform 140ms ease-out;
+}
+/* Showing while moving around: out of the way between moves. */
+.minimap[data-asleep] {
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition-duration: 320ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  .minimap,
+  .minimap[data-asleep] {
+    transform: none;
+    transition: opacity 120ms linear;
+  }
 }
 .minimap__head {
   display: flex;

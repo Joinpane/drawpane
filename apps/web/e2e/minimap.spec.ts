@@ -1,7 +1,8 @@
 /**
- * The minimap in a real browser: it shows the page's boards, clicking it
- * moves the view there, dragging the outline carries the view, ⌥M hides it
- * (remembered), and it steps aside when the canvas is too narrow.
+ * The minimap in a real browser, pinned with ⌥M: it shows the page's boards,
+ * clicking it moves the view there, dragging the outline carries the view,
+ * ⌥M unpins it (remembered), and it steps aside when the canvas is too narrow.
+ * Showing while moving around has its own test (panels.spec.ts).
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -58,8 +59,10 @@ test.describe
     });
     test.afterAll(() => instance?.stop());
 
-    test("shows the page and its boards", async () => {
+    test("shows the page and its boards, once pinned with ⌥M", async () => {
       const minimap = page.getByRole("region", { name: "Minimap" });
+      await page.locator(".canvas__overlay").click({ position: { x: 600, y: 400 } });
+      await page.keyboard.press("Alt+m");
       await expect(minimap).toBeVisible();
       await expect(minimap).toContainText("Page 1");
       await expect(minimap).toContainText("3 boards");
@@ -88,7 +91,7 @@ test.describe
       expect(dragged.x).toBeLessThan(before.x - 500);
     });
 
-    test("⌥M hides it, and it stays hidden after a reload", async () => {
+    test("⌥M unpins it, out of the way at rest, and that's remembered", async () => {
       const minimap = page.getByRole("region", { name: "Minimap" });
       await page.locator(".canvas__overlay").click({ position: { x: 600, y: 400 } });
       await page.keyboard.press("Alt+m");
