@@ -401,6 +401,55 @@ describe("exportSvg", () => {
     expect(svg).toContain(`<tspan style="font-feature-settings: 'zero' 1">1,010</tspan>`);
   });
 
+  it("draws runs with features as glyph outlines when asked (for PDF), keeping their room", () => {
+    // A shaper's measurer: every glyph a 10-unit square, 600 units wide, 1000 per em.
+    const shaping: TextMeasurer = {
+      width: measurer.width,
+      shape: (text, run) => ({
+        glyphs: [...text].map((_, i) => ({
+          path: null,
+          d: "M0,0L10,0L10,10Z",
+          x: i * run.size * 0.6,
+          y: 0,
+          cluster: i,
+        })),
+        width: text.length * run.size * 0.6,
+        scale: run.size / 1000,
+      }),
+    };
+    const editor = makeEditor([
+      {
+        op: "create",
+        id: "t",
+        type: "text",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 20,
+          characters: "12 ab",
+          fontSize: 10,
+          textRuns: [{ start: 0, end: 2, fontFeatures: { tnum: true } }],
+          fills: [{ type: "solid", color: "#1c1b1a" }],
+        },
+      },
+    ]);
+    const bounds = exportBounds(editor.scene, ["t"]);
+    if (!bounds) throw new Error("no bounds");
+    const pdfSvg = exportSvg(editor.scene, shaping, ["t"], bounds, { outlineFeatures: true });
+    // The run keeps its room in the text, unpainted; the rest stays text.
+    expect(pdfSvg).toContain(`fill="none">12</tspan> ab`);
+    expect(pdfSvg).toContain(
+      `<g fill="#1c1b1a"><path transform="matrix(0.01 0 0 -0.01 0 9.25)" d="M0,0L10,0L10,10Z"/><path transform="matrix(0.01 0 0 -0.01 6 9.25)" d="M0,0L10,0L10,10Z"/></g>`,
+    );
+    // Without the option, features stay CSS.
+    const plain = exportSvg(editor.scene, shaping, ["t"], bounds);
+    expect(plain).not.toContain("<path");
+    expect(plain).toContain("font-feature-settings: 'tnum' 1");
+  });
+
   it("casts drop shadows from the shape grown by its spread, and inner shadows inside it", () => {
     const editor = makeEditor([
       rect("r", {

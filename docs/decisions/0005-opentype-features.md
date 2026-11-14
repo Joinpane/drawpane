@@ -44,4 +44,4 @@ Text editing keeps working on characters: HarfBuzz reports which characters each
 - Font bytes: `apps/web/src/fonts/font-files.ts`, shared with PDF export (Google and built-in fonts as TrueType through the proxy; team fonts' TrueType and OpenType files).
 - Inspector: an "OpenType" row under decoration and case, opening the features the font offers; reading them loads HarfBuzz and the font only when the panel opens.
 - SVG export writes `font-feature-settings`, which SVG text honours.
-- Not yet: PDF export (svg2pdf sets text without features; shaped runs need to go in as outlines).
+- PDF export draws runs with features as their shaped glyphs (`exportSvg`'s `outlineFeatures`): svg2pdf sets real text, which can't take features. Those runs aren't selectable text in the PDF; everything else still is.

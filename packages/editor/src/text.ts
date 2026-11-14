@@ -46,6 +46,8 @@ export interface FeatureRun {
 export interface ShapedGlyph {
   /** Its outline in font units (y up), null for one with none (a space). */
   readonly path: Path2D | null;
+  /** The same outline as SVG path data ("" for none), for export. */
+  readonly d: string;
   /** Where it's drawn from the run's start, in px: right, and up from the baseline. */
   readonly x: number;
   readonly y: number;

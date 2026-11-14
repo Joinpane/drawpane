@@ -36,7 +36,14 @@ import { markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
 import { textSpans } from "./rich-text";
 import type { Scene } from "./scene";
-import { layoutText, type TextFragment, type TextMeasurer, textBlockOffset } from "./text";
+import {
+  layoutText,
+  lineOffset,
+  type ShapedText,
+  type TextFragment,
+  type TextMeasurer,
+  textBlockOffset,
+} from "./text";
 import { nodePath } from "./vector/shapes";
 import { serializePath } from "./vector/svg";
 
@@ -335,6 +342,12 @@ export interface SvgImageSource {
 export interface SvgExportOptions {
   /** Images by content hash; image fills without one are left out. */
   readonly images?: (ref: string) => SvgImageSource | null;
+  /**
+   * Draw text runs with OpenType features as glyph outlines (from the
+   * measurer's shaper) instead of relying on `font-feature-settings`: for
+   * PDF, whose text can't take features. Other text stays text.
+   */
+  readonly outlineFeatures?: boolean;
 }
 
 export function exportSvg(
@@ -701,6 +714,15 @@ export function exportSvg(
     const features = (props: Props) => featureSettings(getProp(props, "fontFeatures"));
     if (features(base)) style += attr("style", `font-feature-settings: ${features(base)}`);
 
+    // Runs drawn as glyph outlines (PDF): what the shaper has for them.
+    const outlined = new Map<TextFragment, ShapedText>();
+    if (options.outlineFeatures && measurer.shape)
+      for (const line of layout.lines)
+        for (const frag of line.fragments) {
+          const shaped = frag.run ? measurer.shape(frag.text, frag.run) : null;
+          if (shaped) outlined.set(frag, shaped);
+        }
+
     const spans = textSpans(node);
     const propsAt = (i: number) =>
       (spans.find((sp) => sp.start <= i && i < sp.end) ?? spans[0])?.props ?? base;
@@ -733,7 +755,9 @@ export function exportSvg(
           const inner = line.fragments
             .map((frag) => {
               let own = typeOf(frag);
-              if (frag.fills) {
+              // Drawn as outlines below: here it only keeps its room.
+              if (outlined.has(frag)) own += ' fill="none"';
+              else if (frag.fills) {
                 const top = [...frag.fills].reverse().find((f) => f.visible !== false);
                 const fill = pass === 0 && top ? out.paint("fill", top, w, h) : null;
                 own += fill ?? ' fill="none"';
@@ -744,6 +768,40 @@ export function exportSvg(
           return `<tspan${attr("x", round2(lineX))}${attr("y", round2(line.baseline + dy))}>${inner}</tspan>`;
         })
         .join("");
+    /** A shaped run's glyphs (and its decoration) in the text box, where the canvas draws them. */
+    const glyphs = (frag: TextFragment, shaped: ShapedText) => {
+      const line = layout.lines.find((l) => l.fragments.includes(frag));
+      if (!line) return "";
+      const x0 = lineOffset(line, w, base) + frag.x;
+      const y0 = line.baseline + dy;
+      // Letter spacing follows each character, as on the canvas.
+      const before: number[] = [];
+      for (let i = 0, n = 0; i <= frag.text.length; i++) {
+        before[i] = n;
+        const c = frag.text.charCodeAt(i);
+        if (!(c >= 0xdc00 && c <= 0xdfff)) n++;
+      }
+      const s = round2(shaped.scale * 10000) / 10000;
+      let svg = "";
+      for (const g of shaped.glyphs) {
+        if (!g.d) continue;
+        const x = round2(x0 + g.x + frag.letterSpacing * (before[g.cluster] ?? 0));
+        const y = round2(y0 - g.y);
+        svg += `<path transform="matrix(${s} 0 0 ${-s} ${x} ${y})"${attr("d", g.d)}/>`;
+      }
+      if (frag.decoration !== "none") {
+        const size = frag.fontSize;
+        const y = frag.decoration === "underline" ? y0 + size * 0.1 : y0 - size * 0.3;
+        svg += `<rect${attr("x", round2(x0))}${attr("y", round2(y))}${attr("width", round2(frag.width))}${attr("height", round2(Math.max(1, size / 16)))}/>`;
+      }
+      return svg;
+    };
+    const ownOutlines = [...outlined].filter(([frag]) => frag.fills);
+    const layerOutlines = [...outlined]
+      .filter(([frag]) => !frag.fills)
+      .map(([frag, shaped]) => glyphs(frag, shaped))
+      .join("");
+
     const fills = getProp(base, "fills");
     const paints: Paint[] = fills.length > 0 ? fills : [{ type: "solid", color: "#000000" }];
     let pass = 0;
@@ -752,6 +810,13 @@ export function exportSvg(
       const fill = out.paint("fill", paint, w, h);
       if (!fill) continue;
       parts.push(`<text${transform}${style}${fill} xml:space="preserve">${lines(pass++)}</text>`);
+      if (layerOutlines) parts.push(`<g${transform}${fill}>${layerOutlines}</g>`);
+    }
+    // Outlined runs with their own fills: drawn once, in their topmost visible fill.
+    for (const [frag, shaped] of ownOutlines) {
+      const top = [...(frag.fills ?? [])].reverse().find((f) => f.visible !== false);
+      const fill = top ? out.paint("fill", top, w, h) : null;
+      if (fill) parts.push(`<g${transform}${fill}>${glyphs(frag, shaped)}</g>`);
     }
     // The layer's own fills are all hidden: its own-coloured fragments still show.
     if (pass === 0 && layout.lines.some((l) => l.fragments.some((f) => f.fills)))
