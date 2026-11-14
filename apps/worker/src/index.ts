@@ -10,11 +10,13 @@ import { account } from "./auth/account";
 import { oauth } from "./auth/oauth";
 import { passkeys, publicOrigins } from "./auth/passkeys";
 import { requireUser, session } from "./auth/session";
+import { tokens } from "./auth/tokens";
 import { sendNotificationEmails } from "./email/notify";
 import type { AppContext } from "./env";
 import { signPayload } from "./lib/crypto";
 import { HttpError } from "./lib/http";
 import { sameOrigin } from "./lib/same-origin";
+import { mcp } from "./mcp/server";
 import { CLAIM_HEADER, type RoomClaim } from "./rooms/file-room";
 
 export { FileRoom } from "./rooms/file-room";
@@ -34,9 +36,13 @@ app.use("/ws/*", session);
 app.get("/api/health", (c) => c.json({ ok: true }));
 app.route("/api/auth/oauth", oauth);
 app.route("/api/auth", passkeys);
+// Personal access tokens (decision 0011), before the rest of the account.
+app.route("/api/account/tokens", tokens);
 app.route("/api/account", account);
 app.route("/api/admin", admin);
 app.route("/api/email", email);
+// The MCP server (decision 0011): bearer tokens, not the session.
+app.route("/api/mcp", mcp);
 app.route("/api", api);
 
 app.get("/ws/files/:fileId", async (c) => {

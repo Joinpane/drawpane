@@ -18,6 +18,7 @@ import { NoTeamPage } from "./auth/NoTeamPage";
 import { SetupPage } from "./auth/SetupPage";
 import { ShortcutsPage } from "./auth/ShortcutsPage";
 import { SignInPage } from "./auth/SignInPage";
+import { TokensPage } from "./auth/TokensPage";
 import { UnsubscribePage } from "./auth/UnsubscribePage";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { isTeamView, type TeamView } from "./dashboard/views";
@@ -155,6 +156,13 @@ const shortcutsRoute = createRoute({
   component: ShortcutsPage,
 });
 
+const tokensRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/tokens",
+  beforeLoad: requireUser,
+  component: TokensPage,
+});
+
 const adminHealthRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/admin/health",
@@ -245,6 +253,7 @@ const routeTree = rootRoute.addChildren([
   inviteRoute,
   settingsRoute,
   shortcutsRoute,
+  tokensRoute,
   adminHealthRoute,
   teamRoute,
   newFileRoute,
