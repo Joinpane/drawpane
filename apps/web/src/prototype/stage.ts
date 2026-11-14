@@ -36,6 +36,12 @@ import { watchDocumentFonts } from "../fonts/document-fonts";
 const DRAG_PX = 8;
 /** The most canvas pixels one screen may use (keeps very tall screens within memory). */
 const MAX_PIXELS = 24_000_000;
+/**
+ * On a phone, fitting the whole screen may shrink it to this much of the
+ * width-filling size (a 393 × 852 design in a 390 × 791 browser fits at 93%);
+ * past that, the design is a long page, so it fills the width and scrolls.
+ */
+const PHONE_MIN_FIT = 0.85;
 /** Bezel and corner sizes by device kind, in device pixels. */
 const CHROME = {
   none: { bezel: 0, radius: 0, inner: 0 },
@@ -194,17 +200,23 @@ export class PlayerStage {
     this.#vw = device.kind === "none" ? start.width : device.width;
     this.#vh = device.kind === "none" ? start.height : device.height;
     const box = this.#host.getBoundingClientRect();
-    // On a phone, the phone is the device: fill the screen, no bezel.
-    if (box.width < 520 && box.width > 0) {
-      this.#scale = box.width / this.#vw;
-      this.#vh = box.height / this.#scale;
+    // On a phone, the phone is the device: no bezel, and the whole screen in
+    // view, so a bar pinned to the bottom of the design isn't cut off by the
+    // browser's own bars. Only a design much taller than the phone (a long
+    // page with no device) fits the width and scrolls instead.
+    if (box.width < 520 && box.width > 0 && box.height > 0) {
+      const byWidth = box.width / this.#vw;
+      const byHeight = box.height / this.#vh;
+      const whole = byHeight >= byWidth * PHONE_MIN_FIT;
+      this.#scale = whole ? Math.min(byWidth, byHeight) : byWidth;
+      if (!whole) this.#vh = box.height / this.#scale;
       this.#deviceEl.dataset.kind = "none";
       const d = this.#deviceEl.style;
       d.setProperty("--bezel", "0px");
       d.setProperty("--radius", "0px");
       d.setProperty("--inner", "0px");
-      this.#viewport.style.width = `${box.width}px`;
-      this.#viewport.style.height = `${box.height}px`;
+      this.#viewport.style.width = `${this.#vw * this.#scale}px`;
+      this.#viewport.style.height = `${this.#vh * this.#scale}px`;
       this.#paintAll();
       return;
     }

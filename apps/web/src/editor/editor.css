@@ -1130,13 +1130,17 @@
 }
 .reading-order__list {
   display: grid;
+  /* Rows never wider than the list: long names end in "…", and it can't scroll sideways. */
+  grid-template-columns: minmax(0, 1fr);
   max-height: 260px;
+  overflow-x: hidden;
   margin: 0;
   padding: 0;
   overflow-y: auto;
   list-style: none;
 }
 .reading-order__item {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--space-200);
@@ -1635,12 +1639,14 @@
 
 .tokens__header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: var(--space-300);
   padding: var(--space-400) var(--space-400) var(--space-300);
 }
+/* On a narrow window the title takes its own line rather than shrinking to nothing. */
 .tokens__title {
-  flex: 1;
+  flex: 1 1 240px;
   min-width: 0;
 }
 .tokens__editable.tokens__title-text,
@@ -1654,9 +1660,10 @@
 }
 .tokens__filter {
   display: flex;
+  flex: 0 1 200px;
   align-items: center;
   gap: var(--space-200);
-  width: 200px;
+  min-width: 140px;
   height: var(--size-control-md);
   padding: 0 var(--space-300);
   border-radius: var(--radius-sm);

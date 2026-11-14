@@ -36,6 +36,8 @@
 .admin__main {
   display: grid;
   gap: var(--space-600);
+  /* One column that may shrink below its content (a long command), so nothing pushes past the edge. */
+  grid-template-columns: minmax(0, 1fr);
   max-width: 960px;
   margin: 0 auto;
   padding: var(--space-800) var(--space-500) var(--space-1200);
@@ -91,14 +93,20 @@
   color: var(--signal-ink);
 }
 .admin__update-text {
-  flex: 1;
-  min-width: 200px;
+  flex: 1 1 200px;
   font: 400 13px / 18px var(--font-ui);
 }
 .admin__update-text b {
   font-weight: 600;
 }
+/* The two buttons stay together; when they wrap under the text, they sit at its right. */
+.admin__update-actions {
+  display: flex;
+  gap: var(--space-200);
+  margin-left: auto;
+}
 .admin__update-how {
+  min-width: 0;
   display: grid;
   gap: var(--space-200);
   /* Under the text, not the icon: 16px icon + 12px gap. */
@@ -275,6 +283,15 @@
 }
 
 @media (max-width: 560px) {
+  .admin__bar {
+    padding: var(--space-400) var(--space-400) 0;
+  }
+  .admin__main {
+    padding: var(--space-600) var(--space-400) var(--space-800);
+  }
+  .admin__update-how {
+    padding-left: 0;
+  }
   .admin__cost {
     grid-template-columns: minmax(0, 1fr) 56px;
   }

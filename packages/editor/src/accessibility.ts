@@ -37,10 +37,14 @@ export function tapTargetIssue(editor: Editor, id: string): TapTargetIssue | nul
   const board = boardOf(editor, id);
   const boardWidth = board ? getProp(editor.doc.get(board)?.props ?? {}, "width") : null;
   if (boardWidth === null || boardWidth > TOUCH_BOARD_MAX_WIDTH) return null;
-  const bounds = editor.scene.bounds(id);
-  if (!bounds) return null;
-  const width = Math.round(bounds.width * 100) / 100;
-  const height = Math.round(bounds.height * 100) / 100;
+  // The layer's own size, not its outer box: rotating a 36 × 36 button doesn't make it easier
+  // to tap. Groups have no size of their own, so theirs is what they hold.
+  const own = node.type !== "group";
+  const bounds = own ? null : editor.scene.bounds(id);
+  if (!own && !bounds) return null;
+  const width = Math.round((own ? getProp(node.props, "width") : (bounds?.width ?? 0)) * 100) / 100;
+  const height =
+    Math.round((own ? getProp(node.props, "height") : (bounds?.height ?? 0)) * 100) / 100;
   if (width >= MIN_TAP_TARGET && height >= MIN_TAP_TARGET) return null;
   return {
     width,

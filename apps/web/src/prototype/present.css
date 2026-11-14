@@ -295,8 +295,24 @@
   .present__divider {
     display: none;
   }
+  /* The screens list floats over the prototype, from the right edge. */
+  .present__body {
+    position: relative;
+  }
   .present__panel {
-    display: none;
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 4;
+    width: min(280px, calc(100% - 2 * var(--space-400)));
+    margin: var(--space-200);
+    box-shadow: var(--shadow-popover);
+  }
+  .present__hint {
+    max-width: calc(100% - 2 * var(--space-400));
+    white-space: normal;
+    text-align: center;
   }
 }
 

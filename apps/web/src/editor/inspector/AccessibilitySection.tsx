@@ -9,6 +9,7 @@
 import { type Editor, readingOrderOf, readingOrderText, tapTargetIssue } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { Button, Icon, IconButton, PropertySection, Switch } from "@drawpane/ui";
+import { useRef } from "react";
 import { useCopy } from "../../app/CopyField";
 import { useDocVersion, useEditor, useEditorState } from "../hooks";
 
@@ -51,6 +52,23 @@ function ReadingOrder({ editor, board }: { editor: Editor; board: NodeRecord }) 
   const order = readingOrderOf(editor, board.id);
   const name = getProp(board.props, "name") || "Board";
   const count = order.items.length;
+  const list = useRef<HTMLOListElement>(null);
+  /**
+   * Moves a stop and keeps keyboard focus with it: on the same button, or on the other
+   * one when it reached an end (a disabled button would drop focus onto the page).
+   */
+  const move = (id: string, delta: number) => {
+    const focused = list.current?.contains(document.activeElement) ?? false;
+    editor.moveInReadingOrder(board.id, id, delta);
+    if (!focused) return;
+    requestAnimationFrame(() => {
+      const row = list.current?.querySelector(`[data-reading-id="${CSS.escape(id)}"]`);
+      const same = row?.querySelector<HTMLButtonElement>(
+        `button[data-move="${delta < 0 ? "earlier" : "later"}"]:not(:disabled)`,
+      );
+      (same ?? row?.querySelector<HTMLButtonElement>("button:not(:disabled)"))?.focus();
+    });
+  };
   return (
     <div className="reading-order">
       <div className="reading-order__head">
@@ -64,10 +82,11 @@ function ReadingOrder({ editor, board }: { editor: Editor; board: NodeRecord }) 
           Nothing to read yet: text, and layers the prototype taps, appear here.
         </p>
       ) : (
-        <ol className="reading-order__list" aria-label={`Reading order of ${name}`}>
+        <ol ref={list} className="reading-order__list" aria-label={`Reading order of ${name}`}>
           {order.items.map((item, i) => (
             <li
               key={item.id}
+              data-reading-id={item.id}
               className="reading-order__item"
               onPointerEnter={() => editor.state.set({ hover: item.id })}
               onPointerLeave={() => editor.state.set({ hover: null })}
@@ -85,15 +104,17 @@ function ReadingOrder({ editor, board }: { editor: Editor; board: NodeRecord }) 
                     icon="arrow-up"
                     size="sm"
                     label={`Move ${item.name} earlier`}
+                    data-move="earlier"
                     disabled={i === 0}
-                    onClick={() => editor.moveInReadingOrder(board.id, item.id, -1)}
+                    onClick={() => move(item.id, -1)}
                   />
                   <IconButton
                     icon="arrow-down"
                     size="sm"
                     label={`Move ${item.name} later`}
+                    data-move="later"
                     disabled={i === count - 1}
-                    onClick={() => editor.moveInReadingOrder(board.id, item.id, 1)}
+                    onClick={() => move(item.id, 1)}
                   />
                 </span>
               ) : null}

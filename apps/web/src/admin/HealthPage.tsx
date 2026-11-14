@@ -226,12 +226,14 @@ function UpdateNotice({
           <b>Drawpane {update.version} is available.</b>
           {running ? ` This instance runs ${running}.` : ""}
         </span>
-        <ButtonLink href={update.notesUrl} variant="ghost" size="sm">
-          Release notes
-        </ButtonLink>
-        <Button size="sm" variant="primary" aria-expanded={how} onClick={() => setHow((v) => !v)}>
-          Upgrade
-        </Button>
+        <span className="admin__update-actions">
+          <ButtonLink href={update.notesUrl} variant="ghost" size="sm">
+            Release notes
+          </ButtonLink>
+          <Button size="sm" variant="primary" aria-expanded={how} onClick={() => setHow((v) => !v)}>
+            Upgrade
+          </Button>
+        </span>
       </div>
       {how ? (
         <div className="admin__update-how">
