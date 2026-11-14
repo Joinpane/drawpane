@@ -296,6 +296,27 @@ describe("NumberField", () => {
     expect(onChange).toHaveBeenLastCalledWith(80);
   });
 
+  it("clears a Mixed optional value when emptied", async () => {
+    const user = userEvent.setup();
+    const onClear = vi.fn();
+    render(<NumberField label="Max" value={null} onClear={onClear} />);
+    const input = screen.getByRole<HTMLInputElement>("spinbutton", { name: "Max" });
+    expect(input.placeholder).toBe("Mixed");
+    await user.type(input, "5");
+    await user.clear(input);
+    await user.keyboard("{Enter}");
+    expect(onClear).toHaveBeenCalledTimes(1);
+  });
+
+  it("scrubs an empty value from where it's told to start", () => {
+    const onChange = vi.fn();
+    render(<NumberField label="Max" value={null} scrubFrom={240} onChange={onChange} />);
+    const label = screen.getByText("Max");
+    fireEvent.pointerDown(label, { button: 0, pointerId: 1, clientX: 100 });
+    fireEvent.pointerMove(label, { pointerId: 1, clientX: 102 });
+    expect(onChange).toHaveBeenLastCalledWith(242);
+  });
+
   it("keeps the value when emptied without onClear", async () => {
     const user = userEvent.setup();
     const { input, onChange } = setup();

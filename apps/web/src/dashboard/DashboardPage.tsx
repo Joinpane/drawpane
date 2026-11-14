@@ -14,6 +14,7 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, type FileMeta, type Project, type Role } from "../api/client";
 import { Dialog } from "../app/Dialog";
 import { initials, modKey, timeAgo } from "../app/format";
+import { useMediaQuery } from "../app/media";
 import { setTheme, useThemePreference } from "../app/theme";
 import { signOut } from "../auth/passkey";
 import { InboxView } from "../inbox/InboxView";
@@ -71,6 +72,27 @@ export function DashboardPage() {
   const project = projects.data?.projects.find((p) => p.id === projectId);
   const drafts = projects.data?.projects[0];
   const [query, setQuery] = useState("");
+  // On a phone the sidebar is a drawer, opened from the top bar.
+  const phone = useMediaQuery(PHONE);
+  const [navOpen, setNavOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const side = useRef<HTMLElement>(null);
+  // Somewhere chosen: the drawer gets out of the way.
+  useEffect(() => setNavOpen(false), [teamId, projectId, view]);
+  useEffect(() => {
+    if (!navOpen) return;
+    // Into the drawer, on the current place (or the first).
+    const links = side.current?.querySelectorAll<HTMLElement>("a, button");
+    const current = side.current?.querySelector<HTMLElement>('[aria-current="page"]');
+    (current ?? links?.[0])?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setNavOpen(false);
+      menuButton.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [navOpen]);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -163,7 +185,7 @@ export function DashboardPage() {
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: dropping a .penpot export anywhere imports it; the Import button is the keyboard way
     <div
-      className="dash"
+      className={`dash${navOpen ? " dash--nav-open" : ""}`}
       onDragOver={(e) => {
         if (!canImport || !e.dataTransfer.types.includes("Files") || importOpen) return;
         e.preventDefault();
@@ -181,7 +203,51 @@ export function DashboardPage() {
         if (file) openImport(file);
       }}
     >
-      <aside className="dash__side" aria-label="Navigation">
+      <header className="dash__topbar">
+        <IconButton
+          ref={menuButton}
+          icon="menu"
+          size="md"
+          label={navOpen ? "Close navigation" : "Open navigation"}
+          aria-expanded={navOpen}
+          aria-controls="dash-nav"
+          onClick={() => setNavOpen((v) => !v)}
+        />
+        <span className="dash__topbar-team">{team?.name ?? ""}</span>
+        {unread > 0 ? (
+          <Link
+            to="/t/$teamId"
+            params={{ teamId }}
+            search={{ view: "inbox" }}
+            className="dash__badge dash__topbar-inbox"
+          >
+            {unread > 99 ? "99+" : unread}
+            <span className="dp-visually-hidden"> unread in your inbox</span>
+          </Link>
+        ) : null}
+      </header>
+      {navOpen ? (
+        <div
+          className="dash__scrim"
+          aria-hidden="true"
+          onClick={() => {
+            setNavOpen(false);
+            menuButton.current?.focus();
+          }}
+        />
+      ) : null}
+      <aside
+        id="dash-nav"
+        ref={side}
+        className="dash__side"
+        aria-label="Navigation"
+        // Off screen on a phone until opened: out of the tab order too.
+        inert={phone && !navOpen}
+        // A destination picked, even the current one: the drawer closes.
+        onClick={(e) => {
+          if (navOpen && (e.target as HTMLElement).closest("a")) setNavOpen(false);
+        }}
+      >
         <TeamSwitcher teamName={team?.name ?? "…"} members={memberCount} />
         <nav className="dash__nav">
           <NavLink active={!projectId && !view} icon="history" to={{ teamId }} label="Recent" />
@@ -388,6 +454,9 @@ export function DashboardPage() {
     </div>
   );
 }
+
+/** Where the sidebar becomes a drawer (dashboard.css). */
+const PHONE = "(max-width: 760px)";
 
 function TeamSwitcher({ teamName, members }: { teamName: string; members: number | null }) {
   return (

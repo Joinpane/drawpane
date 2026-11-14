@@ -129,8 +129,13 @@ export function DropdownMenu({
       ref={el}
       className={cx("dp-dropdown", className)}
       data-side={place?.side}
-      // Hidden until measured, so it never flashes in the wrong place.
-      style={place ? { left: place.left, top: place.top } : { visibility: "hidden" }}
+      // Invisible until measured, so it never flashes in the wrong place. Transparent rather
+      // than hidden: a hidden menu can't take focus, and the menu focuses its first item at once.
+      style={
+        place
+          ? { left: place.left, top: place.top }
+          : { left: 0, top: 0, opacity: 0, pointerEvents: "none" }
+      }
     >
       <Menu
         label={label}

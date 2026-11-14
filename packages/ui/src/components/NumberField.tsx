@@ -56,6 +56,8 @@ export interface NumberFieldProps
   nullLabel?: string;
   /** For an optional value: emptying the field and committing clears it. */
   onClear?: () => void;
+  /** Where scrubbing starts when there's no value (unset, or mixed). Default 0. */
+  scrubFrom?: number;
 }
 
 interface Scrub {
@@ -93,6 +95,7 @@ export function NumberField({
   onTokenClick,
   nullLabel = "Mixed",
   onClear,
+  scrubFrom = 0,
   className,
   disabled,
   placeholder,
@@ -148,7 +151,8 @@ export function NumberField({
   const commitDraft = () => {
     if (draft === null) return;
     if (draft.trim() === "") {
-      if (onClear && latest.current !== null) {
+      // Emptied on purpose (a value, or a Mixed selection): clear it.
+      if (onClear) {
         latest.current = null;
         if (!controlled) setInternal(null);
         onClear();
@@ -227,7 +231,11 @@ export function NumberField({
             commitDraft();
             setDraft(null);
             event.currentTarget.setPointerCapture(event.pointerId);
-            scrub.current = { pointerId: event.pointerId, lastX: event.clientX, exact: value ?? 0 };
+            scrub.current = {
+              pointerId: event.pointerId,
+              lastX: event.clientX,
+              exact: value ?? scrubFrom,
+            };
             document.documentElement.classList.add("dp-scrubbing");
             onScrubStart?.();
           }}
