@@ -32,9 +32,57 @@ jobs:
       - name: The installer's release deploys (Wrangler dry run)
         run: pnpm --filter create-drawpane smoke
 
+  e2e:
+    # The browser suite against a real Worker (wrangler dev, local D1 and R2),
+    # split by spec file: each file brings up its own instance, so shards
+    # share nothing. See apps/web/playwright.config.ts.
+    name: End to end (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Playwright's version, for the browser cache
+        id: playwright
+        run: echo "version=$(pnpm --filter @drawpane/web exec playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: browsers
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - name: Install Chromium
+        if: steps.browsers.outputs.cache-hit != 'true'
+        run: pnpm --filter @drawpane/web exec playwright install --with-deps chromium
+      - name: Install Chromium's system libraries
+        if: steps.browsers.outputs.cache-hit == 'true'
+        run: pnpm --filter @drawpane/web exec playwright install-deps chromium
+      - name: Run the shard
+        run: pnpm --filter @drawpane/web exec playwright test --project=chromium --shard=${{ matrix.shard }}/4
+      - name: Keep the report, traces and screenshots of failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-${{ matrix.shard }}
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          retention-days: 14
+
   deploy:
     name: Deploy to the dogfooding instance
-    needs: check
+    needs: [check, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15

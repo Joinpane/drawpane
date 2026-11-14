@@ -9,12 +9,16 @@ import { defineConfig, devices } from "@playwright/test";
 const external = process.env.E2E_BASE_URL;
 /** Override with E2E_PORT to run several suites side by side. */
 const port = process.env.E2E_PORT ?? "8788";
+/** On CI: a stray `.only` fails the run, a test gets one retry (and is reported as flaky), and failures keep an HTML report. */
+const ci = !!process.env.CI;
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
   workers: 1,
   timeout: 60_000,
-  reporter: [["list"]],
+  forbidOnly: ci,
+  retries: ci ? 1 : 0,
+  reporter: ci ? [["list"], ["github"], ["html", { open: "never" }]] : [["list"]],
   use: {
     baseURL: external ?? `http://localhost:${port}`,
     trace: "retain-on-failure",
