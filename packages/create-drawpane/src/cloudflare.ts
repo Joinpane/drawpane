@@ -25,8 +25,8 @@ export interface Cloudflare {
   ensureBucket(accountId: string, name: string): Promise<void>;
   /** The names of the secrets the instance's Worker has; none when it doesn't exist yet. */
   secretNames(dir: string, accountId: string): Promise<string[]>;
-  /** Applies the instance's pending D1 migrations. */
-  migrate(dir: string, accountId: string, database: string): Promise<void>;
+  /** Applies the instance's pending D1 migrations; returns the ones it applied ("0011_invite_notes"). */
+  migrate(dir: string, accountId: string, database: string): Promise<string[]>;
   /**
    * Deploys the instance's Worker, with secrets from a JSON file when given.
    * Resolves to the workers.dev address when it has one.
@@ -142,10 +142,11 @@ export const wrangler: Cloudflare = {
   },
 
   async migrate(dir, accountId, database) {
-    await run(["d1", "migrations", "apply", database, "--remote"], {
+    const output = await run(["d1", "migrations", "apply", database, "--remote"], {
       cwd: dir,
       accountId,
     });
+    return appliedMigrations(output);
   },
 
   async deploy(dir, accountId, secretsFile) {
@@ -156,3 +157,14 @@ export const wrangler: Cloudflare = {
     return output.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i)?.[0] ?? null;
   },
 };
+
+/**
+ * The migrations Wrangler's output reports as applied: rows of its results
+ * table marked ✅, without ".sql". "No migrations to apply!" gives none.
+ */
+export function appliedMigrations(output: string): string[] {
+  const names = new Set<string>();
+  for (const match of output.matchAll(/│\s*(\d{4}_[\w-]+)\.sql\s*│\s*✅/g))
+    if (match[1]) names.add(match[1]);
+  return [...names];
+}

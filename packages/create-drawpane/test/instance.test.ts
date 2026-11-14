@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { appliedMigrations } from "../src/cloudflare";
 import {
   compareVersions,
   domainProblem,
@@ -159,5 +160,25 @@ describe("wrangler.jsonc", () => {
     const rendered = parse(renderWranglerConfig(template, config, "0.1.0"));
     expect(rendered.workers_dev).toBe(false);
     expect(rendered.routes).toEqual([{ pattern: "design.example.com", custom_domain: true }]);
+  });
+});
+
+describe("migrations", () => {
+  it("reads which ones Wrangler applied from its results table", () => {
+    const output = [
+      "Migrations to be applied:",
+      "┌───────────────────────────┐",
+      "│ name                      │",
+      "│ 0011_invite_notes.sql     │",
+      "│ 0012_room_connections.sql │",
+      "└───────────────────────────┘",
+      "┌───────────────────────────┬────────┐",
+      "│ name                      │ status │",
+      "│ 0011_invite_notes.sql     │ ✅     │",
+      "│ 0012_room_connections.sql │ ✅     │",
+      "└───────────────────────────┴────────┘",
+    ].join("\n");
+    expect(appliedMigrations(output)).toEqual(["0011_invite_notes", "0012_room_connections"]);
+    expect(appliedMigrations("✅ No migrations to apply!")).toEqual([]);
   });
 });
