@@ -85,13 +85,21 @@ function reachable(scene: Scene, parentId: string, p: Point): string[] {
 /**
  * The deepest visible, unlocked node under `p`, topmost first. A frame that
  * clips its content only passes hits to children inside its box, and a mask
- * only to the layers it shows.
+ * only to the layers it shows. `locked: true` counts locked layers too: they
+ * can't be picked, but they can be measured to.
  */
-export function hitTest(scene: Scene, pageId: string, p: Point, tolerance: number): string | null {
+export function hitTest(
+  scene: Scene,
+  pageId: string,
+  p: Point,
+  tolerance: number,
+  { locked = false }: { readonly locked?: boolean } = {},
+): string | null {
   const doc = scene.doc;
   const visit = (id: string): string | null => {
     const node = doc.get(id);
-    if (!node || node.props.visible === false || node.props.locked === true) return null;
+    if (!node || node.props.visible === false || (!locked && node.props.locked === true))
+      return null;
     if (node.type === "frame" && getProp(node.props, "clipContent") && !hitsNode(scene, node, p, 0))
       return null;
     for (const child of reachable(scene, id, p)) {

@@ -450,6 +450,8 @@ export class Interaction {
     const delegate = this.#delegate();
     if (delegate?.move(input)) {
       this.cursor = delegate.cursor;
+      // Its pointer isn't hovering for measuring.
+      this.#lastHover = null;
       return;
     }
 
@@ -756,7 +758,8 @@ export class Interaction {
    */
   modifiers(mods: { readonly alt: boolean; readonly mod: boolean }): void {
     const last = this.#lastHover;
-    if (!last || this.busy) {
+    // A tool that takes the pointer (vector edit, crop) uses Alt for itself: no measuring there.
+    if (!last || this.busy || this.#delegate()) {
       if (!mods.alt && this.#editor.s.measure) this.#editor.state.set({ measure: false });
       return;
     }
@@ -802,8 +805,9 @@ export class Interaction {
     // Alt with a selection measures from it to what's under the pointer, at the
     // selection's level (a padding region still shows it can be dragged).
     if (input.alt && editor.s.selection.length > 0) {
-      // Top-level frames count here: they're what you measure to from inside one.
-      const leaf = hitTest(editor.scene, pageId, page, 4 / editor.s.camera.zoom);
+      // Top-level frames count here (they're what you measure to from inside one), and so do
+      // locked layers: they can't be picked, but they're still there to measure to.
+      const leaf = hitTest(editor.scene, pageId, page, 4 / editor.s.camera.zoom, { locked: true });
       const target = leaf
         ? measureTarget(editor.scene, pageId, leaf, editor.s.selection, input.mod)
         : null;

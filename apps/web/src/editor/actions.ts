@@ -859,6 +859,14 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => toggleMinimap(editor),
   },
   {
+    id: "view.minimapAlways",
+    label: "Minimap: always show",
+    group: "View",
+    icon: "minimap",
+    keywords: "overview map navigator pin show",
+    run: ({ editor }) => uiFor(editor).set({ minimap: "always" }),
+  },
+  {
     id: "view.minimapAuto",
     label: "Minimap: show while moving around",
     group: "View",

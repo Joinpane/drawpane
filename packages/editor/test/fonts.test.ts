@@ -55,6 +55,19 @@ describe("fonts", () => {
     expect(editor.history.canUndo).toBe(undoable);
   });
 
+  it("re-measures text whose styled run is in the font that loaded", () => {
+    const { editor, load } = setup();
+    // "Hello" in the layer's font, " world" in Fraunces.
+    const t = editor.createLayer("text", { x: 0, y: 0, width: 10, height: 10 }, "p", {
+      characters: "Hello world",
+      textRuns: [{ start: 5, end: 11, fontFamily: "Fraunces" }],
+    }) as string;
+    const before = width(editor, t);
+    load();
+    editor.refitText(new Set(["Fraunces"]));
+    expect(width(editor, t)).toBeGreaterThan(before);
+  });
+
   it("cancels a previewing gesture without leaving undo or redo", () => {
     const { editor } = setup();
     const t = editor.createLayer("text", { x: 0, y: 0, width: 10, height: 10 }, "p", {

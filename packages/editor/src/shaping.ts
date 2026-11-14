@@ -52,6 +52,10 @@ type FaceEntry =
   | { readonly status: "unavailable" }
   | ({ readonly status: "ready" } & ReadyFace);
 
+/** Strong right-to-left characters: Hebrew, Arabic, Syriac, Thaana, NKo and their presentation forms. */
+const RIGHT_TO_LEFT =
+  /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]|[\u{10800}-\u{10fff}]|[\u{1e800}-\u{1efff}]/u;
+
 const faceKey = (f: ShapingFace) => `${f.family}\u0000${f.weight}\u0000${f.italic}`;
 
 /** Shaped runs kept, at most: a file's labels repeat, so most frames are all hits. */
@@ -70,7 +74,8 @@ export class Shaper {
   readonly #makePath: (d: string) => Path2D | null;
   #harfBuzz: Promise<HarfBuzz> | null = null;
   readonly #faces = new Map<string, FaceEntry>();
-  readonly #runs = new Map<string, ShapedText>();
+  /** Shaped runs, and null for runs that can't be shaped faithfully (see #shape). */
+  readonly #runs = new Map<string, ShapedText | null>();
   readonly #listeners = new Set<(family: string) => void>();
   #generation = 0;
 
@@ -96,6 +101,14 @@ export class Shaper {
     return this.#faces.get(faceKey(face))?.status ?? "loading";
   }
 
+  /**
+   * Tries an unavailable face again (its file failed to load, say): the next
+   * shape or load starts over.
+   */
+  retry(face: ShapingFace): void {
+    if (this.#faces.get(faceKey(face))?.status === "unavailable") this.#faces.delete(faceKey(face));
+  }
+
   /** Waits for a face: ready, or unavailable. */
   async load(face: ShapingFace): Promise<FaceStatus> {
     const entry = this.#entry(face);
@@ -115,10 +128,16 @@ export class Shaper {
   shape(text: string, run: FeatureRun): ShapedText | null {
     const key = `${run.key}\u0000${text}`;
     const hit = this.#runs.get(key);
-    if (hit) return hit;
+    if (hit !== undefined) return hit;
     const entry = this.#entry(run);
     if (entry.status !== "ready") return null;
-    const shaped = this.#shape(entry, text, run.size, run.features);
+    // HarfBuzz shapes one direction and script at a time, without bidi or font
+    // fallback: right-to-left text, and characters the font lacks, keep the
+    // canvas's drawing (without their features) rather than come out reversed
+    // or as boxes.
+    const shaped = RIGHT_TO_LEFT.test(text)
+      ? null
+      : this.#shape(entry, text, run.size, run.features);
     if (this.#runs.size >= MAX_RUNS) this.#runs.clear();
     this.#runs.set(key, shaped);
     return shaped;
@@ -186,7 +205,7 @@ export class Shaper {
     return { hb, face: hbFace, font, upem: hbFace.upem || 1000, paths: new Map() };
   }
 
-  #shape(entry: ReadyFace, text: string, size: number, features: FontFeatures): ShapedText {
+  #shape(entry: ReadyFace, text: string, size: number, features: FontFeatures): ShapedText | null {
     const { hb, font, upem, paths } = entry;
     const buffer = new hb.Buffer();
     buffer.addText(text);
@@ -222,6 +241,8 @@ export class Shaper {
       pen += p.xAdvance;
       rise += p.yAdvance;
     }
+    // A character the font lacks shapes to glyph 0 (a box).
+    if (infos.some((info) => info.codepoint === 0)) return null;
     return { glyphs, width: pen * scale, scale };
   }
 }

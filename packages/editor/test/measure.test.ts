@@ -114,6 +114,31 @@ describe("what Alt-hover measures to", () => {
     expect(editor.s.hover).toBeNull();
   });
 
+  it("measures to locked layers too: they can't be picked, but they're there", () => {
+    const { editor, ix, toggle, off } = setup();
+    editor.setProp([toggle], "locked", true, "Lock");
+    expect(measuring(editor, ix, 60, 65)).toBe("toggle");
+    // Inside a locked frame, from a child selected in the layers panel.
+    editor.setProp([toggle], "locked", null, "Unlock");
+    editor.setProp([off], "locked", true, "Lock");
+    expect(measuring(editor, ix, 200, 86)).toBe("state=off");
+  });
+
+  it("leaves Alt to a tool that has the pointer, like vector edit", () => {
+    const { editor, ix, other } = setup();
+    const path = editor.createLayer("path", { x: 950, y: 20, width: 100, height: 100 }, other, {
+      pathData: "M0 0L100 0L100 100Z",
+    }) as string;
+    editor.select([path]);
+    ix.move(at(10, 10));
+    expect(editor.enterVectorEdit(path)).toBe(true);
+    ix.modifiers({ alt: true, mod: false });
+    expect(editor.s.measure).toBe(false);
+    ix.move(at(990, 60, { alt: true }));
+    ix.modifiers({ alt: true, mod: false });
+    expect(editor.s.measure).toBe(false);
+  });
+
   it("needs a selection", () => {
     const { editor, ix } = setup();
     editor.select([]);

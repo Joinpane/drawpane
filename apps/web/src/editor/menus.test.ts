@@ -4,6 +4,7 @@ import type { ContextMenuAction, ContextMenuEntry } from "@drawpane/ui";
 import { describe, expect, it, vi } from "vitest";
 import type { ActionContext } from "./actions";
 import { type MenuHost, menuFor } from "./menus";
+import { uiFor } from "./ui-state";
 
 function setup(role: "editor" | "viewer" = "editor") {
   const editor = new Editor({ measurer: { width: (_f, t) => t.length * 8 }, clientId: "t" });
@@ -101,7 +102,7 @@ describe("context menus", () => {
   });
 
   it("chooses when the minimap shows, with the current choice checked", () => {
-    const { host } = setup();
+    const { host, editor } = setup();
     const items = menuFor(host, { kind: "canvas", x: 0, y: 0, point: { x: 900, y: 900 } });
     const modes = find(items, "Minimap")?.items ?? [];
     expect(labels(modes)).toEqual(["Always", "While moving around", "Never"]);
@@ -110,6 +111,12 @@ describe("context menus", () => {
       true,
       false,
     ]);
+
+    // A choice, not a toggle: picking the checked one leaves it on.
+    uiFor(editor).set({ minimap: "always" });
+    const again = find(menuFor(host, { kind: "canvas", x: 0, y: 0 }), "Minimap")?.items ?? [];
+    find(again, "Always")?.onSelect?.();
+    expect(uiFor(editor).get().minimap).toBe("always");
   });
 
   it("offers what fits the selection, and lists the layers under the pointer", () => {

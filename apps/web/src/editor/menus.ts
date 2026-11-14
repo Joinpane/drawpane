@@ -226,7 +226,8 @@ export function canvasMenu(host: MenuHost, request: MenuRequest): ContextMenuEnt
     return item ? { ...item, id: `minimap-${mode}` } : null;
   };
   const minimapItems = [
-    modeItem("view.minimap", "Always", "always"),
+    // A choice, not ⌥M's toggle: picking the checked one leaves it checked.
+    modeItem("view.minimapAlways", "Always", "always"),
     modeItem("view.minimapAuto", "While moving around", "auto"),
     modeItem("view.minimapOff", "Never", "off"),
   ].filter((i): i is ContextMenuAction => i !== null);

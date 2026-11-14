@@ -64,6 +64,35 @@ describe("Shaper", () => {
     expect(shaper.shape(" ", run({ tnum: true }))?.glyphs[0]?.path).toBeNull();
   });
 
+  it("leaves right-to-left text, and characters the font lacks, to the canvas", async () => {
+    const shaper = await ready();
+    // Mixed direction would come out reversed (no bidi in HarfBuzz).
+    expect(shaper.shape("מחיר 12", run({ tnum: true }))).toBeNull();
+    expect(shaper.shape("ab אבג", run({ tnum: true }))).toBeNull();
+    // Glyph 0 (a box) where the canvas would fall back to another font.
+    expect(shaper.shape("1😀", run({ tnum: true }))).toBeNull();
+    expect(shaper.shape("12", run({ tnum: true }))).not.toBeNull();
+    // Measured as the canvas has it, so layout matches what's drawn.
+    const base = { width: vi.fn(() => 42), invalidate: vi.fn() };
+    expect(new ShapingMeasurer(base, shaper).width("f", "1😀", run({ tnum: true }))).toBe(42);
+  });
+
+  it("tries a face again after its file failed to load", async () => {
+    let fail = true;
+    const shaper = new Shaper(
+      async () => {
+        if (fail) throw new Error("offline");
+        return bytes();
+      },
+      { makePath },
+    );
+    const face = { family: "Instrument Sans", weight: 400, italic: false };
+    expect(await shaper.load(face)).toBe("unavailable");
+    fail = false;
+    shaper.retry(face);
+    expect(await shaper.load(face)).toBe("ready");
+  });
+
   it("lists the features a font offers", async () => {
     const shaper = await ready();
     const tags = (
