@@ -973,9 +973,11 @@ export class FileRoom extends DurableObject<Env> {
 
     const cutoff = Date.now() - AUTOSAVE_RETENTION_MS;
     const { results } = await this.env.DB.prepare(
-      "SELECT id, revn FROM versions WHERE file_id = ? AND name IS NULL AND created_at < ?",
+      // A version a library publish points at stays, even un-named: files copy from it (decision 0010).
+      `SELECT id, revn FROM versions WHERE file_id = ? AND name IS NULL AND created_at < ?
+         AND id NOT IN (SELECT version_id FROM library_publishes WHERE file_id = ?)`,
     )
-      .bind(fileId, cutoff)
+      .bind(fileId, cutoff, fileId)
       .all<{ id: string; revn: number }>();
     if (results.length === 0) return;
     // Keep the newest snapshot even when it's old: it is where an idle file's history starts.

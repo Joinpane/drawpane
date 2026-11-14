@@ -20,6 +20,7 @@ import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { FrameNameEditor } from "./FrameNameEditor";
 import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
+import { LIBRARY_DRAG_MIME, type LibraryDrag, loadedSource } from "./libraries/sources";
 import { imagesFor } from "./media";
 import { shaper } from "./shaping";
 import { TextEditor } from "./TextEditor";
@@ -458,18 +459,35 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       aria-label="Design canvas"
       aria-roledescription="canvas"
       onDragOver={(e) => {
-        if (e.dataTransfer.types.includes(COMPONENT_DRAG_MIME)) {
+        if (
+          e.dataTransfer.types.includes(COMPONENT_DRAG_MIME) ||
+          e.dataTransfer.types.includes(LIBRARY_DRAG_MIME)
+        ) {
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
         }
       }}
       onDrop={(e) => {
         const componentId = e.dataTransfer.getData(COMPONENT_DRAG_MIME);
-        if (!componentId) return;
+        const fromLibrary = e.dataTransfer.getData(LIBRARY_DRAG_MIME);
+        if (!componentId && !fromLibrary) return;
         e.preventDefault();
         const rect = e.currentTarget.getBoundingClientRect();
         const page = editor.s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-        editor.insertInstance(componentId, page);
+        if (componentId) {
+          editor.insertInstance(componentId, page);
+          return;
+        }
+        // A team library's component: its tile showed it, so its publish is loaded.
+        const drag = JSON.parse(fromLibrary) as LibraryDrag;
+        const source = loadedSource(drag.publishId);
+        if (source)
+          editor.insertLibraryComponent(
+            source.doc,
+            { fileId: drag.fileId, name: drag.name, publishId: drag.publishId },
+            drag.assetId,
+            page,
+          );
       }}
     >
       <canvas ref={content} className="canvas__layer" />

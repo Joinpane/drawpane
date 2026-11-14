@@ -3,6 +3,7 @@ export * from "./comments";
 export * from "./fonts";
 export * from "./history";
 export * from "./ids";
+export * from "./libraries";
 export * from "./media";
 export * from "./ops";
 export * from "./order-key";

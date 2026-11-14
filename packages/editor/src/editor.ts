@@ -76,6 +76,15 @@ import {
   layoutOps,
   placedByLayout,
 } from "./layout";
+import {
+  assetMain,
+  importOps,
+  type LibraryRef,
+  libraryContainerId,
+  libraryNodeId,
+  libraryUses,
+  updateOps,
+} from "./libraries";
 import { readingOrderOf } from "./reading-order";
 import {
   isRunProp,
@@ -1752,6 +1761,69 @@ export class Editor {
     if (!this.commit(made.ops, "Insert instance")) return null;
     this.select([made.rootId]);
     return made.rootId;
+  }
+
+  /**
+   * Places an instance of a team library's component (decision 0010): its
+   * main and what it needs are copied from `source` (the publish this file
+   * has, or the library's latest for a first use) unless the file has them,
+   * then an instance goes in as for the file's own components. One undo step.
+   */
+  insertLibraryComponent(
+    source: Doc,
+    lib: LibraryRef,
+    assetId: string,
+    at?: { x: number; y: number },
+  ): string | null {
+    const main = assetMain(source, assetId);
+    if (!main || !this.canEdit) return null;
+    this.beginGesture("Insert instance");
+    try {
+      const copy = importOps(this.doc, source, lib, [assetId]);
+      if (copy.length > 0 && !this.commit(copy, "Insert instance", { overrides: false }))
+        return null;
+      return this.insertInstance(libraryNodeId(lib.fileId, main), at);
+    } finally {
+      this.endGesture();
+    }
+  }
+
+  /** Starts using a team library in this file, so its components show in Assets. */
+  useLibrary(lib: LibraryRef): boolean {
+    if (this.doc.has(libraryContainerId(lib.fileId))) return true;
+    return this.commit(importOps(this.doc, new Doc(), lib, []), `Use ${lib.name || "library"}`, {
+      overrides: false,
+    });
+  }
+
+  /**
+   * Stops using a team library. Only once no instance in the file is of its
+   * components (detach them first), so nothing loses its main.
+   */
+  stopUsingLibrary(libraryFileId: string): boolean {
+    const container = libraryContainerId(libraryFileId);
+    if (!this.doc.has(container)) return false;
+    const uses = libraryUses(this.doc, libraryFileId);
+    if (uses > 0) {
+      this.notify(
+        `${uses} ${uses === 1 ? "instance uses" : "instances use"} this library. Detach ${uses === 1 ? "it" : "them"} first.`,
+      );
+      return false;
+    }
+    return this.commit([{ op: "delete", id: container }], "Stop using library");
+  }
+
+  /**
+   * Brings this file's copies of a library's components in line with a newer
+   * publish (`source`, its snapshot); their instances follow, overrides kept.
+   */
+  updateLibrary(source: Doc, lib: LibraryRef): boolean {
+    const ops = updateOps(this.doc, source, lib);
+    if (ops.length === 0) return false;
+    return this.commit(ops, `Update ${lib.name || "library"}`, {
+      overrides: false,
+      constraints: false,
+    });
   }
 
   /** Selects an instance's main component, switching page if needed (⌥⌘G on an instance). */

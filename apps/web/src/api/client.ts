@@ -1,5 +1,5 @@
 /** Typed client for the Worker's REST API. Errors carry the server's sentence. */
-import type { NodeRecord, VersionInfo } from "@drawpane/model";
+import type { LibraryAsset, LibraryPublish, NodeRecord, VersionInfo } from "@drawpane/model";
 
 export type Role = "owner" | "editor" | "viewer";
 
@@ -218,6 +218,17 @@ export const api = {
         `/files/${fileId}/versions/${versionId}/snapshot`,
       )
     ).nodes,
+  /** Publishes the file as a team library (decision 0010): a named version, and what it offers. */
+  publishLibrary: (
+    fileId: string,
+    body: { description?: string; assets: readonly LibraryAsset[] },
+  ) => request<{ publish: LibraryPublish }>("POST", `/files/${fileId}/library/publish`, body),
+  /** A file's publishes as a library, newest first. */
+  libraryPublishes: (fileId: string) =>
+    request<{ publishes: LibraryPublish[] }>("GET", `/files/${fileId}/library`),
+  /** The team libraries a file can use: the latest publish of each. */
+  availableLibraries: (fileId: string) =>
+    request<{ libraries: LibraryPublish[] }>("GET", `/files/${fileId}/libraries`),
   /** Restores the whole file. `sessionId` is this tab's, so the room doesn't also notify it. */
   restoreVersion: (fileId: string, versionId: string, sessionId: string | null) =>
     request<RestoreResult>("POST", `/files/${fileId}/versions/${versionId}/restore`, {
