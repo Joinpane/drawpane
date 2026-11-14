@@ -153,12 +153,13 @@ test.describe
       await code.getByRole("radio", { name: "SVG" }).click();
       const shown = page.locator(".inspect__code");
       await expect(shown).toContainText('<svg xmlns="http://www.w3.org/2000/svg"');
-      // One element per line, indented; effects as filters.
-      await expect(shown).toContainText("\n  <defs>\n");
+      // Effects as filters.
       await expect(shown).toContainText("<feGaussianBlur");
       await page.getByRole("button", { name: "Copy code" }).click();
       const copied = await page.evaluate(() => navigator.clipboard.readText());
-      expect(copied.startsWith('<svg xmlns="http://www.w3.org/2000/svg"')).toBe(true);
+      // Formatted as shown: a long tag's attributes one per line.
+      expect(copied).toMatch(/^<svg\n {2}xmlns="http:\/\/www\.w3\.org\/2000\/svg"\n/);
+      expect(copied).toContain("\n  <defs>\n");
       expect(copied).toContain('data-name="Effects"');
       // Background blur can't be expressed in SVG: Inspect says so.
       await page.evaluate((id) => {
