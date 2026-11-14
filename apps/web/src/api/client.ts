@@ -31,6 +31,8 @@ export interface FileMeta {
   readonly deletedAt: number | null;
   /** When the dashboard thumbnail was last published; null until the editor makes one. */
   readonly thumbnailAt: number | null;
+  /** The team starts new files from it (New file → your team). */
+  readonly isTemplate?: boolean;
 }
 export interface Member {
   readonly id: string;
