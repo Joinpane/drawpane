@@ -31,6 +31,9 @@ const vars = {
   GOOGLE_CLIENT_SECRET: "e2e-google-secret",
   // Tests never ask npm for releases; the health page's notice is tested with a stubbed answer.
   UPDATE_CHECK: "off",
+  // Email is printed by the test Worker, never sent.
+  EMAIL_PROVIDER: "log",
+  EMAIL_FROM: "Drawpane <design@example.com>",
 };
 const child = spawn(
   wrangler,

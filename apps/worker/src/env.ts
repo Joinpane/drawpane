@@ -31,6 +31,21 @@ export interface Env {
   /** Sign in with Google: an OAuth client's id and secret (docs/self-hosting.md). */
   readonly GOOGLE_CLIENT_ID?: string;
   readonly GOOGLE_CLIENT_SECRET?: string;
+  /**
+   * Email (email/setup.ts, docs/decisions/0006-email.md): which way to send
+   * (`off` by default), who it's from, and that provider's credentials.
+   */
+  readonly EMAIL_PROVIDER?: string;
+  readonly EMAIL_FROM?: string;
+  readonly EMAIL_API_KEY?: string;
+  readonly MAILGUN_DOMAIN?: string;
+  readonly MAILGUN_REGION?: string;
+  readonly AWS_ACCESS_KEY_ID?: string;
+  readonly AWS_SECRET_ACCESS_KEY?: string;
+  readonly AWS_REGION?: string;
+  readonly SMTP_URL?: string;
+  /** Cloudflare Email Service: a send_email binding. */
+  readonly EMAIL?: { send(message: unknown): Promise<void> };
 }
 
 export type Role = "owner" | "editor" | "viewer";

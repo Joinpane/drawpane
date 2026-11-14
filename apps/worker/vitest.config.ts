@@ -17,6 +17,9 @@ export default defineConfig(async () => {
             GITHUB_CLIENT_SECRET: "gh-secret",
             GOOGLE_CLIENT_ID: "google-client",
             GOOGLE_CLIENT_SECRET: "google-secret",
+            // Email is printed in tests, never sent.
+            EMAIL_PROVIDER: "log",
+            EMAIL_FROM: "Drawpane <design@example.com>",
           },
         },
       }),
