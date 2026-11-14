@@ -41,10 +41,13 @@ class FakeCloudflare implements Cloudflare {
   async secretNames() {
     return [...this.secrets];
   }
+  /** What the next migrate reports as applied. */
+  applied: string[] = [];
   async migrate(dir: string) {
     // Wrangler would read the rendered config: it has to be there.
     await stat(join(dir, "wrangler.jsonc"));
     this.calls.push("migrate");
+    return this.applied;
   }
   async deploy(dir: string, _: string, secretsFile: string | null) {
     await stat(join(dir, "server/worker/index.js"));
@@ -94,9 +97,11 @@ class ScriptedUi implements Ui {
   async confirm(q: { message: string }) {
     return this.next<boolean>(q.message);
   }
-  async step<T>(label: string, work: () => Promise<T>) {
+  async step<T>(label: string, work: () => Promise<T>, done?: (result: T) => string) {
     this.said.push(`step ${label}`);
-    return work();
+    const result = await work();
+    if (done) this.said.push(`done ${done(result)}`);
+    return result;
   }
   info(message: string) {
     this.said.push(`info ${message}`);
@@ -323,8 +328,13 @@ describe("upgrade", () => {
 
   it("swaps in the new release, migrates, deploys, and keeps the secrets", async () => {
     const ui = new ScriptedUi(false);
+    cloudflare.applied = ["0011_invite_notes", "0012_room_connections"];
     await upgrade({ dir: "team", yes: true }, await deps(ui, "0.2.0"));
     expect(cloudflare.calls).toEqual(["migrate", "deploy"]);
+    // It says what it applied, not just "up to date".
+    expect(ui.said).toContain(
+      "done Database updated: 2 migrations (0011_invite_notes, 0012_room_connections)",
+    );
     expect(cloudflare.deployedSecrets).toHaveLength(1);
     expect((await readConfig(join(cwd, "team")))?.version).toBe("0.2.0");
     expect(await readFile(join(cwd, "team/server/worker/index.js"), "utf8")).toContain("0.2.0");

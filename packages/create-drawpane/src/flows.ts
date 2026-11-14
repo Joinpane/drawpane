@@ -358,7 +358,10 @@ async function deployAndWait(
   await ui.step(
     "Updating the database",
     () => cloudflare.migrate(dir, config.accountId, config.database.name),
-    () => "Database up to date",
+    (applied) =>
+      applied.length === 0
+        ? "Database up to date"
+        : `Database updated: ${applied.length === 1 ? "1 migration" : `${applied.length} migrations`} (${applied.join(", ")})`,
   );
   const workersDev = await ui.step(
     "Deploying",
