@@ -1,5 +1,6 @@
 // Writes figma-plugin/code.js from scenes.json, so the plugin and Drawpane's
 // harness build the same cells. Run: node tools/glass-calibration/build-plugin.mjs
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const here = new URL(".", import.meta.url);
@@ -93,5 +94,8 @@ async function main() {
 main().catch((error) => figma.closePlugin("Couldn't make the cells: " + error.message));
 `;
 
-writeFileSync(new URL("figma-plugin/code.js", here), code);
+const target = new URL("figma-plugin/code.js", here);
+writeFileSync(target, code);
+// Formatted like the rest of the repository, so lint passes on what's generated.
+execFileSync("npx", ["biome", "format", "--write", target.pathname], { stdio: "ignore" });
 console.log(`Wrote figma-plugin/code.js (${scenes.cells.length} cells).`);
