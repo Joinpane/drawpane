@@ -120,6 +120,46 @@ describe("entering nested frames", () => {
   });
 });
 
+describe("holding Control", () => {
+  /** A target 4 units right of the loose rectangle (700–800 × 100–200): within snapping range. */
+  function nearTarget() {
+    const s = setup();
+    s.editor.createLayer("rect", { x: 900, y: 300, width: 50, height: 50 }, "p");
+    return s;
+  }
+
+  it("moves without snapping, and ⌘ alone still snaps", () => {
+    const { editor, loose, interaction } = nearTarget();
+    editor.select([loose]);
+    const x = () => getProp((editor.doc.get(loose) as NodeRecord).props, "x");
+    // Dragging right by 96 puts the right edge at 896, 4 short of the target's left edge (900).
+    interaction.down(at(750, 150));
+    interaction.move(at(800, 150, 1, { noSnap: true }));
+    interaction.move(at(846, 150, 1, { noSnap: true }));
+    expect(x()).toBe(796);
+    expect(editor.s.guides).toEqual([]);
+    // Letting go of Control mid-drag snaps again; ⌘ doesn't turn it off.
+    interaction.move(at(846, 150, 1, { mod: true }));
+    expect(x()).toBe(800);
+    interaction.up(at(846, 150));
+  });
+
+  it("resizes without snapping", () => {
+    const { editor, loose, interaction } = nearTarget();
+    editor.select([loose]);
+    const width = () => getProp((editor.doc.get(loose) as NodeRecord).props, "width");
+    // The right-middle handle at (800, 150), dragged to 896: 4 short of the target's edge.
+    interaction.down(at(800, 150));
+    interaction.move(at(850, 150, 1, { noSnap: true }));
+    interaction.move(at(896, 150, 1, { noSnap: true }));
+    expect(width()).toBe(196);
+    expect(editor.s.guides).toEqual([]);
+    interaction.move(at(896, 150));
+    expect(width()).toBe(200);
+    interaction.up(at(896, 150));
+  });
+});
+
 describe("pixel grid", () => {
   /** The setup, zoomed so a screen pixel is 1.6 units, as in the report. */
   function zoomed() {
@@ -235,16 +275,16 @@ describe("drawing snaps", () => {
     interaction.up(at(803, 148));
   });
 
-  it("leaves the pointer alone with ⌘, or when nothing is near", () => {
+  it("leaves the pointer alone while Control is held, or when nothing is near", () => {
     const { editor, interaction } = setup();
     editor.setTool("rect");
-    interaction.down(at(1004, 504, 1, { mod: true }));
-    interaction.move(at(1100, 600, 1, { mod: true }));
-    interaction.move(at(1203, 597, 1, { mod: true }));
+    interaction.down(at(1004, 504, 1, { noSnap: true }));
+    interaction.move(at(1100, 600, 1, { noSnap: true }));
+    interaction.move(at(1203, 597, 1, { noSnap: true }));
     const node = editor.doc.get(editor.s.selection[0] as string) as NodeRecord;
     expect([getProp(node.props, "x"), getProp(node.props, "width")]).toEqual([1004, 199]);
     expect(editor.s.guides).toEqual([]);
-    interaction.up(at(1203, 597, 1, { mod: true }));
+    interaction.up(at(1203, 597, 1, { noSnap: true }));
   });
 });
 

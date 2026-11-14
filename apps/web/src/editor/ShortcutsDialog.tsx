@@ -27,6 +27,7 @@ function gestures(): Row[] {
   const mod = isMac() ? "⌘" : "Ctrl";
   const alt = isMac() ? "⌥" : "Alt";
   const shift = isMac() ? "⇧" : "Shift";
+  const control = isMac() ? "⌃" : "Ctrl";
   const row = (id: string, label: string, group: Group, caps: string[]): Row => ({
     id,
     label,
@@ -43,7 +44,16 @@ function gestures(): Row[] {
     row("deep", "Select inside groups (click)", "Layer", [mod]),
     row("duplicate.drag", "Duplicate while dragging", "Edit", [alt]),
     row("proportions", "Keep proportions while resizing", "Edit", [shift]),
-    row("ignore.constraints", "Resize a frame without its constraints", "Edit", [mod]),
+    row("no.snap", "Ignore snapping (hold while dragging)", "Edit", [control]),
+    row(
+      "ignore.constraints",
+      // Off a Mac, Ctrl is both: the frame's children stay put, and nothing snaps.
+      isMac()
+        ? "Resize a frame without its constraints"
+        : "Resize a frame without its constraints or snapping",
+      "Edit",
+      [mod],
+    ),
     row("rename.f2", "Rename in the layers panel", "Layer", ["F2"]),
   ];
 }

@@ -213,14 +213,22 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   useEffect(() => {
     const el = overlay.current;
     if (!el) return;
-    const toInput = (e: PointerEvent | MouseEvent, clicks = 1): PointerInput => {
+    /** Where the pointer last was, so a modifier pressed mid-drag can take effect without a move. */
+    let pointer: { clientX: number; clientY: number; button: number } | null = null;
+    const toInput = (
+      e: { clientX: number; clientY: number; button: number },
+      keys: { shiftKey: boolean; altKey: boolean; metaKey: boolean; ctrlKey: boolean },
+      clicks = 1,
+    ): PointerInput => {
       const rect = el.getBoundingClientRect();
       return {
         screen: { x: e.clientX - rect.left, y: e.clientY - rect.top },
         button: e.button,
-        shift: e.shiftKey,
-        alt: e.altKey,
-        mod: isMac() ? e.metaKey : e.ctrlKey,
+        shift: keys.shiftKey,
+        alt: keys.altKey,
+        mod: isMac() ? keys.metaKey : keys.ctrlKey,
+        // Holding Control ignores smart guides (on a Mac too, where ⌘ means other things).
+        noSnap: keys.ctrlKey,
         clicks,
       };
     };
@@ -259,19 +267,22 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       lastDown = now;
       lastPos = { x: e.clientX, y: e.clientY };
       el.setPointerCapture(e.pointerId);
-      interaction.down(toInput(e, clicks));
+      pointer = e;
+      interaction.down(toInput(e, e, clicks));
       el.style.cursor = interaction.cursor;
       e.preventDefault();
     };
     const onMove = (e: PointerEvent) => {
       // Coalesced events give smooth strokes on high-rate pointers; the last one is enough for moves.
-      interaction.move(toInput(e));
+      pointer = e;
+      interaction.move(toInput(e, e));
       el.style.cursor = interaction.cursor;
       sendPresence(e);
     };
     const onUp = (e: PointerEvent) => {
       if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
-      interaction.up(toInput(e));
+      pointer = null;
+      interaction.up(toInput(e, e));
       el.style.cursor = interaction.cursor;
     };
     const onCancel = () => interaction.cancel();
@@ -350,6 +361,15 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       openMenu(editor, { kind: "canvas", x: e.clientX, y: e.clientY, point });
     };
 
+    // Shift, Alt or Control pressed or let go mid-drag applies straight away, as if the pointer moved.
+    const onModifier = (e: KeyboardEvent) => {
+      if (!pointer || !interaction.busy) return;
+      if (e.key !== "Shift" && e.key !== "Alt" && e.key !== "Control" && e.key !== "Meta") return;
+      interaction.move(toInput(pointer, e));
+      el.style.cursor = interaction.cursor;
+    };
+    window.addEventListener("keydown", onModifier);
+    window.addEventListener("keyup", onModifier);
     el.addEventListener("pointerdown", onDown);
     el.addEventListener("contextmenu", onContextMenu);
     el.addEventListener("pointermove", onMove);
@@ -377,6 +397,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       if (moved) editor.sync.setPresence(editor.presence(cursor));
     });
     return () => {
+      window.removeEventListener("keydown", onModifier);
+      window.removeEventListener("keyup", onModifier);
       el.removeEventListener("pointerdown", onDown);
       el.removeEventListener("contextmenu", onContextMenu);
       el.removeEventListener("pointermove", onMove);
