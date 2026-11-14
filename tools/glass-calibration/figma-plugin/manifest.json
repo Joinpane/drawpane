@@ -1,0 +1,8 @@
+{
+  "name": "Drawpane glass calibration",
+  "id": "drawpane-glass-calibration",
+  "api": "1.0.0",
+  "main": "code.js",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page"
+}
