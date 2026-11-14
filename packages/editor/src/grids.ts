@@ -69,7 +69,8 @@ export function visibleGrids(node: NodeRecord): LayoutGrid[] {
 
 /**
  * The edges a layer snaps to inside a frame's layout grids, in page
- * coordinates: column edges on x, row edges on y. Only for unrotated frames,
+ * coordinates: column edges on x, row edges on y, a square grid's lines both
+ * ways. Only for unrotated frames,
  * where a local edge is a page line.
  */
 export function gridSnapLines(
@@ -84,7 +85,14 @@ export function gridSnapLines(
   const height = getProp(node.props, "height");
   const out: Array<{ axis: "x" | "y"; at: number }> = [];
   for (const grid of visibleGrids(node)) {
-    if (grid.type === "grid") continue;
+    if (grid.type === "grid") {
+      // A square grid's lines, both ways (capped, so a fine grid on a huge frame stays cheap).
+      for (const t of gridLines(grid.size, width, 1_000))
+        out.push({ axis: "x", at: m[4] + t * m[0] });
+      for (const t of gridLines(grid.size, height, 1_000))
+        out.push({ axis: "y", at: m[5] + t * m[3] });
+      continue;
+    }
     const axis = grid.type === "columns" ? "x" : "y";
     const origin = axis === "x" ? m[4] : m[5];
     const scale = axis === "x" ? m[0] : m[3];
