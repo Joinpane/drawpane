@@ -90,6 +90,22 @@ test.describe
     });
 
     test("an owner changes a role, and removes someone after asking", async () => {
+      // Bo has one of the team's files open the whole time.
+      const fileId = await ana.evaluate(async () => {
+        const { teams } = await (await fetch("/api/teams")).json();
+        const { projects } = await (await fetch(`/api/teams/${teams[0].id}/projects`)).json();
+        const response = await fetch(`/api/projects/${projects[0].id}/files`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "Onboarding" }),
+        });
+        return (await response.json()).file.id as string;
+      });
+      await bo.goto(`/f/${fileId}`);
+      await expect(bo.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+        timeout: 15_000,
+      });
+
       const people = ana.getByRole("list", { name: "People" });
       await people.getByRole("button", { name: "Bo Chen: Viewer. Change role" }).click();
       const menu = ana.getByRole("menu", { name: "Role for Bo Chen" });
@@ -99,6 +115,10 @@ test.describe
       );
       await menu.getByRole("menuitemcheckbox", { name: "Editor" }).click();
       await expect(ana.getByRole("status")).toContainText("Bo Chen is now an editor.");
+      // His open file hears it at once.
+      await expect(
+        bo.getByRole("alert").filter({ hasText: "Ana Lima made you an editor" }),
+      ).toBeVisible();
       await expect(
         people.getByRole("button", { name: "Bo Chen: Editor. Change role" }),
       ).toBeVisible();
@@ -115,10 +135,13 @@ test.describe
       await expect(ana.getByRole("status")).toContainText("Bo Chen was removed");
       await expect(people.getByRole("listitem")).toHaveCount(1);
 
-      // Bo is on no team now: reloading Ana's team sends him to the page that says so.
-      await bo.reload();
+      // His open file closes at once, and says why; on no team, he lands on the page that says so.
+      const gone = bo
+        .getByRole("alert")
+        .filter({ hasText: "You no longer have access to this file" });
+      await expect(gone).toBeVisible();
+      await gone.getByRole("button", { name: "Go to your files" }).click();
       await expect(bo.getByRole("heading", { name: "You're not on a team" })).toBeVisible();
-      await expect(bo).toHaveURL(/\/$/);
     });
 
     test("fits a phone: who signs in how moves under the name", async () => {
