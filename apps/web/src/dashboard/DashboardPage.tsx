@@ -16,6 +16,8 @@ import { Dialog } from "../app/Dialog";
 import { initials, modKey, timeAgo } from "../app/format";
 import { setTheme, useThemePreference } from "../app/theme";
 import { signOut } from "../auth/passkey";
+import { InboxView } from "../inbox/InboxView";
+import { useUnread } from "../inbox/inbox";
 import { FileThumbnail } from "./FileThumbnail";
 import { ImportDialog } from "./ImportDialog";
 import { InviteDialog } from "./InviteDialog";
@@ -39,7 +41,8 @@ export function DashboardPage() {
     queryFn: () => api.projects(teamId),
   });
   // Fonts and Members are team pages of their own, with no files to list.
-  const showsFiles = view !== "fonts" && view !== "members";
+  const showsFiles = view !== "fonts" && view !== "members" && view !== "inbox";
+  const unread = useUnread();
   const files = useQuery({
     queryKey: ["files", teamId, projectId ?? null, view ?? "recent"],
     enabled: showsFiles,
@@ -165,6 +168,13 @@ export function DashboardPage() {
         <nav className="dash__nav">
           <NavLink active={!projectId && !view} icon="history" to={{ teamId }} label="Recent" />
           <NavLink
+            active={view === "inbox"}
+            icon="inbox"
+            to={{ teamId, view: "inbox" }}
+            label="Inbox"
+            badge={unread}
+          />
+          <NavLink
             active={view === "fonts"}
             icon="text"
             to={{ teamId, view: "fonts" }}
@@ -213,6 +223,10 @@ export function DashboardPage() {
       {view === "fonts" ? (
         <main className="dash__main">
           <TeamFontsView teamId={teamId} canEdit={canEdit} />
+        </main>
+      ) : view === "inbox" ? (
+        <main className="dash__main">
+          <InboxView />
         </main>
       ) : view === "members" ? (
         <main className="dash__main">
@@ -392,6 +406,7 @@ function NavLink({
   to,
   label,
   count,
+  badge,
 }: {
   active: boolean;
   icon?: IconName;
@@ -399,6 +414,8 @@ function NavLink({
   to: { teamId: string; project?: string; view?: TeamView };
   label: string;
   count?: number;
+  /** Something new: a count in the signal colour, read out as "N unread". */
+  badge?: number;
 }) {
   const { teamId, ...search } = to;
   return (
@@ -421,6 +438,12 @@ function NavLink({
       ) : null}
       <span className="dash__link-label">{label}</span>
       {count !== undefined && count > 0 ? <span className="dash__count">{count}</span> : null}
+      {badge !== undefined && badge > 0 ? (
+        <span className="dash__badge">
+          {badge > 99 ? "99+" : badge}
+          <span className="dp-visually-hidden"> unread</span>
+        </span>
+      ) : null}
     </Link>
   );
 }

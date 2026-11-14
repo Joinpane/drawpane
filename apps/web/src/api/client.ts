@@ -51,6 +51,36 @@ export interface Member {
   readonly lastSignedInAt: number | null;
 }
 
+/** Something to hear about, from the inbox. */
+export interface InboxItem {
+  readonly id: string;
+  /** Someone mentioned you; replied in a thread you're in; resolved your thread. */
+  readonly kind: "mention" | "reply" | "resolved";
+  readonly createdAt: number;
+  readonly readAt: number | null;
+  readonly file: { readonly id: string; readonly name: string };
+  readonly threadId: string;
+  /** Whether the thread is resolved now. */
+  readonly resolved: boolean;
+  /** Who did it; null when their account is gone. */
+  readonly actor: { readonly id: string; readonly name: string } | null;
+  /** The start of the comment, on one line. */
+  readonly excerpt: string;
+}
+
+export interface InboxPage {
+  readonly items: readonly InboxItem[];
+  /** Where the next page starts, or null at the end. */
+  readonly before: string | null;
+  readonly unread: number;
+}
+
+/** Which notifications to mark read: some, a thread's, or all. */
+export type MarkRead =
+  | { readonly ids: readonly string[] }
+  | { readonly threadId: string }
+  | { readonly all: true };
+
 /** An invite link not used yet. Its id is the token's hash: never a working link. */
 export interface PendingInvite {
   readonly id: string;
@@ -133,6 +163,13 @@ export const api = {
       `/files/${fileId}`,
     ),
   members: (teamId: string) => request<{ members: Member[] }>("GET", `/teams/${teamId}/members`),
+  inbox: (filter: "unread" | "all", before: string | null) =>
+    request<InboxPage>(
+      "GET",
+      `/notifications?filter=${filter}${before ? `&before=${encodeURIComponent(before)}` : ""}`,
+    ),
+  unread: () => request<{ unread: number }>("GET", "/notifications/unread"),
+  markRead: (which: MarkRead) => request<{ unread: number }>("POST", "/notifications/read", which),
   invites: (teamId: string) =>
     request<{ invites: PendingInvite[] }>("GET", `/teams/${teamId}/invites`),
 

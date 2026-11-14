@@ -177,6 +177,9 @@ const fileRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/f/$fileId",
   beforeLoad: requireUser,
+  // `thread`: open at a comment (from the inbox).
+  validateSearch: (search: Record<string, unknown>): { thread?: string } =>
+    typeof search.thread === "string" ? { thread: search.thread } : {},
   component: () => (
     <Suspense fallback={<div className="app-loading" aria-busy="true" />}>
       <EditorPage />
