@@ -1,6 +1,7 @@
 import { xrayFrames } from "@drawpane/editor";
 import { Kbd } from "@drawpane/ui";
 import { isMac } from "../app/format";
+import { capsFor } from "./actions";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import { useUi } from "./ui-state";
 
@@ -41,7 +42,7 @@ export function XrayLegend() {
       </span>
       {single ? (
         <span className="xray-legend__item">
-          <Kbd keys={[alt, "E"]} /> explain
+          <Kbd keys={capsFor("layout.explain")} /> explain
         </span>
       ) : null}
     </aside>

@@ -1031,11 +1031,27 @@ export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
 }
 
 /** One key's cap on this platform: ⌫ and ↵ on a Mac, Delete and Enter elsewhere (both delete keys work). */
+const NAMED_KEYS: Readonly<Record<string, string>> = {
+  arrowleft: "←",
+  arrowright: "→",
+  arrowup: "↑",
+  arrowdown: "↓",
+  home: "Home",
+  end: "End",
+  pageup: "Page Up",
+  pagedown: "Page Down",
+  insert: "Insert",
+};
+
 function keyCap(key: string, mac: boolean): string {
   const caps: Record<string, string> = mac
     ? { backspace: "⌫", escape: "Esc", enter: "↵", "=": "+" }
     : { backspace: "Delete", escape: "Esc", enter: "Enter", "=": "+" };
-  return caps[key] ?? (key.length === 1 ? key.toUpperCase() : key);
+  const named = caps[key] ?? NAMED_KEYS[key];
+  if (named) return named;
+  if (key.length === 1) return key.toUpperCase();
+  // Function keys and the like: "f5" → "F5".
+  return key.charAt(0).toUpperCase() + key.slice(1);
 }
 
 /** A shortcut as key caps, one per key, in the platform's order: ["⌥", "⇧", "⌘", "K"]. */

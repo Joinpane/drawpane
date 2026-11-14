@@ -46,11 +46,29 @@ const BROWSER: Record<string, string> = {
   q: "quits the browser",
 };
 
-/** Why the browser won't let a page have this shortcut, or null when it will. */
+/** The clipboard's keys: the browser's own copy, cut and paste events come with them. */
+const CLIPBOARD: Record<string, string> = { c: "copy", x: "cut", v: "paste" };
+
+/** The commands that answer to the clipboard's keys, which can't be changed. */
+export const FIXED_ACTIONS: ReadonlySet<string> = new Set(["edit.copy", "edit.cut", "edit.paste"]);
+
+/**
+ * Why a combination can't be a shortcut, or null when it can: the browser keeps
+ * it, it's the clipboard's, or the canvas uses it (arrows nudge, Enter goes in).
+ */
 export function reservedReason(s: Shortcut): string | null {
-  if (!s.mod || s.alt) return null;
-  const what = BROWSER[s.key];
-  return what ? `the browser keeps it (it ${what})` : null;
+  if (s.mod && !s.alt) {
+    const what = BROWSER[s.key];
+    if (what) return `the browser keeps it (it ${what})`;
+  }
+  if (s.mod && !s.alt && !s.shift) {
+    const what = CLIPBOARD[s.key];
+    if (what) return `it's how you ${what}`;
+  }
+  if (!s.mod && !s.alt && s.key.startsWith("arrow")) return "arrows move the selection";
+  if (!s.mod && !s.alt && !s.shift && s.key === "enter") return "Enter goes into the selection";
+  if (!s.mod && !s.alt && !s.shift && s.key === "escape") return "Escape steps out";
+  return null;
 }
 
 /** The action that already answers to `s` (its shortcut or another of its keys), apart from `except`. */

@@ -90,4 +90,63 @@ test.describe
       await expect(keysOf(page, "Move")).toHaveAccessibleName(/now V$/);
       await expect(page.getByRole("button", { name: "Reset all" })).toBeDisabled();
     });
+
+    test("keeps the clipboard's keys, and Copy, Cut and Paste's own shortcuts are fixed", async () => {
+      await keysOf(page, "Zoom to fit").click();
+      await page.keyboard.press("ControlOrMeta+c");
+      await expect(row(page, "Zoom to fit").getByRole("alert")).toContainText(
+        "can't be a shortcut: it's how you copy",
+      );
+      await page.keyboard.press("Escape");
+      await expect(row(page, "Copy").getByRole("button")).toHaveCount(0);
+    });
+
+    test("from the keyboard alone: Tab reaches Replace, and Reset asks before taking a key back", async () => {
+      await keysOf(page, "Ellipse").focus();
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("r");
+      const question = row(page, "Ellipse").getByRole("alert");
+      await expect(question).toContainText("R is used by “Rectangle”. Replace it?");
+      await page.keyboard.press("Tab");
+      await expect(question.getByRole("button", { name: "Cancel" })).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(question.getByRole("button", { name: "Replace" })).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(keysOf(page, "Ellipse")).toHaveAccessibleName(/now R$/);
+      await expect(keysOf(page, "Rectangle")).toHaveAccessibleName(/now none$/);
+
+      // Rectangle's Reset would take R back from Ellipse: it asks first.
+      await row(page, "Rectangle").getByRole("button", { name: "Reset" }).click();
+      const again = row(page, "Rectangle").getByRole("alert");
+      await expect(again).toContainText("R is used by “Ellipse”. Replace it?");
+      await again.getByRole("button", { name: "Replace" }).click();
+      await expect(keysOf(page, "Rectangle")).toHaveAccessibleName(/now R$/);
+      await expect(keysOf(page, "Ellipse")).toHaveAccessibleName(/now none$/);
+      await page.getByRole("button", { name: "Reset all" }).click();
+      await expect(keysOf(page, "Ellipse")).toHaveAccessibleName(/now O$/);
+    });
+
+    test("Play prototype's ⌥⌘↵ works with a layer selected (Enter alone goes in)", async () => {
+      await page.getByRole("link", { name: "Files" }).click();
+      await page.getByRole("button", { name: "New file" }).first().click();
+      await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+        timeout: 15_000,
+      });
+      await page.evaluate(() => {
+        const e = (
+          window as unknown as {
+            drawpane: {
+              s: { pageId: string };
+              createLayer(t: string, r: object, p: string): string;
+              select(ids: string[]): void;
+            };
+          }
+        ).drawpane;
+        const board = e.createLayer("frame", { x: 0, y: 0, width: 393, height: 852 }, e.s.pageId);
+        e.select([board]);
+      });
+      await page.locator(".canvas__overlay").focus();
+      await page.keyboard.press("ControlOrMeta+Alt+Enter");
+      await expect(page).toHaveURL(/\/present/);
+    });
   });

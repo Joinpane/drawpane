@@ -18,7 +18,13 @@ import {
   shortcutCaps,
   shortcutOf,
 } from "../editor/actions";
-import { actionUsing, assign, reservedReason, shortcutFromEvent } from "../editor/keymap";
+import {
+  actionUsing,
+  assign,
+  FIXED_ACTIONS,
+  reservedReason,
+  shortcutFromEvent,
+} from "../editor/keymap";
 import { type ShortcutOverrides, useOverridesVersion } from "../editor/shortcuts-store";
 import { SettingsNav } from "./SettingsNav";
 import "./account.css";
@@ -159,7 +165,15 @@ export function ShortcutsPage() {
                       }}
                       onRemove={() => change(action, null)}
                       onReplace={(shortcut) => change(action, shortcut)}
-                      onReset={() => change(action, action.defaultShortcut ?? null)}
+                      onReset={() => {
+                        // Its default may be someone else's now: ask, as recording does.
+                        const back = action.defaultShortcut ?? null;
+                        const by = back ? actionUsing(back, action.id) : null;
+                        if (back && by) {
+                          setRecording(action.id);
+                          setPending({ kind: "taken", shortcut: back, by });
+                        } else change(action, back);
+                      }}
                     />
                   ))}
                 </ul>
@@ -198,10 +212,13 @@ function Row({
   onReset: () => void;
 }) {
   const current = shortcutOf(action);
+  const fixed = FIXED_ACTIONS.has(action.id);
   const spoken = current ? formatShortcut(current) : "none";
 
   const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (!recording) return;
+    // Tab still moves focus (to Cancel and Replace when there's a question): never a shortcut.
+    if (e.key === "Tab") return;
     e.preventDefault();
     e.stopPropagation();
     if (e.key === "Escape") return onCancel();
@@ -220,33 +237,42 @@ function Row({
             Reset
           </Button>
         ) : null}
-        <button
-          type="button"
-          className="keyprefs__keys"
-          aria-label={
-            recording
-              ? `Press the new shortcut for ${action.label}. Escape cancels; Delete removes it.`
-              : `Change the shortcut for ${action.label}, now ${spoken}`
-          }
-          onClick={recording ? undefined : onRecord}
-          onKeyDown={onKeyDown}
-          onBlur={() => {
-            if (recording && !pending) onCancel();
-          }}
-          // biome-ignore lint/a11y/noAutofocus: recording starts on the field the person just pressed.
-          autoFocus={recording}
-        >
-          {recording ? (
-            <span className="keyprefs__press">
-              Press keys…
-              {pending ? <Kbd keys={shortcutCaps(pending.shortcut)} /> : null}
-            </span>
-          ) : current ? (
-            <Kbd keys={shortcutCaps(current)} />
-          ) : (
-            <span className="keyprefs__none">None</span>
-          )}
-        </button>
+        {fixed ? (
+          <span
+            className="keyprefs__keys keyprefs__keys--fixed"
+            title="Fixed: the browser's copy, cut and paste use these keys"
+          >
+            {current ? <Kbd keys={shortcutCaps(current)} label={`${spoken}, fixed`} /> : null}
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="keyprefs__keys"
+            aria-label={
+              recording
+                ? `Press the new shortcut for ${action.label}. Escape cancels; Delete removes it.`
+                : `Change the shortcut for ${action.label}, now ${spoken}`
+            }
+            onClick={recording ? undefined : onRecord}
+            onKeyDown={onKeyDown}
+            onBlur={() => {
+              if (recording && !pending) onCancel();
+            }}
+            // biome-ignore lint/a11y/noAutofocus: recording starts on the field the person just pressed.
+            autoFocus={recording}
+          >
+            {recording ? (
+              <span className="keyprefs__press">
+                Press keys…
+                {pending ? <Kbd keys={shortcutCaps(pending.shortcut)} /> : null}
+              </span>
+            ) : current ? (
+              <Kbd keys={shortcutCaps(current)} />
+            ) : (
+              <span className="keyprefs__none">None</span>
+            )}
+          </button>
+        )}
       </div>
       {pending ? (
         <div className="keyprefs__question" role="alert">

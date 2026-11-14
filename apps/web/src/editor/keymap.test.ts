@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ACTIONS, matches, shortcutFor, shortcutOf, triggers } from "./actions";
+import { ACTIONS, matches, shortcutCaps, shortcutFor, shortcutOf, triggers } from "./actions";
 import { actionUsing, assign, reservedReason, sameShortcut, shortcutFromEvent } from "./keymap";
 import { setOverrides } from "./shortcuts-store";
 
@@ -59,6 +59,32 @@ describe("recording a shortcut", () => {
       const asHere = { ...p, ctrlKey: p.metaKey } as KeyboardEvent;
       expect(matches(s, asHere), JSON.stringify(s)).toBe(true);
     }
+  });
+});
+
+describe("keys that can't be shortcuts", () => {
+  it("keeps the clipboard's keys for copy, cut and paste", () => {
+    expect(reservedReason({ key: "c", mod: true })).toBe("it's how you copy");
+    expect(reservedReason({ key: "x", mod: true })).toBe("it's how you cut");
+    expect(reservedReason({ key: "v", mod: true })).toBe("it's how you paste");
+    // With another modifier they're free (⇧⌘C copies properties, for one).
+    expect(reservedReason({ key: "c", mod: true, shift: true })).toBeNull();
+  });
+
+  it("keeps the canvas's own keys: arrows nudge, Enter goes in, Escape steps out", () => {
+    expect(reservedReason({ key: "arrowright" })).toBe("arrows move the selection");
+    expect(reservedReason({ key: "arrowup", shift: true })).toBe("arrows move the selection");
+    expect(reservedReason({ key: "enter" })).toBe("Enter goes into the selection");
+    expect(reservedReason({ key: "escape" })).toBe("Escape steps out");
+    // Other combinations are free: ⌥⌘→, Ctrl+Alt+↵ (Play prototype).
+    expect(reservedReason({ key: "arrowright", mod: true, alt: true })).toBeNull();
+    expect(reservedReason({ key: "enter", mod: true, alt: true })).toBeNull();
+  });
+
+  it("shows arrows and other named keys as people know them", () => {
+    expect(shortcutCaps({ key: "arrowright", mod: true, alt: true }).at(-1)).toBe("→");
+    expect(shortcutCaps({ key: "pageup" }).at(-1)).toBe("Page Up");
+    expect(shortcutCaps({ key: "f5" }).at(-1)).toBe("F5");
   });
 });
 

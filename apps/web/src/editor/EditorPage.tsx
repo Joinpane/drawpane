@@ -12,7 +12,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { api } from "../api/client";
-import { isMac, modKey } from "../app/format";
+import { isMac } from "../app/format";
 import { fonts } from "../fonts/fonts";
 import { ShareDialog } from "../prototype/ShareDialog";
 import { AssetsPanel } from "./AssetsPanel";
@@ -55,6 +55,7 @@ import { uiFor } from "./ui-state";
 import { useViewPreferences } from "./view-preferences";
 import { XrayLegend } from "./XrayLegend";
 import "./editor.css";
+import { useOverridesVersion } from "./shortcuts-store";
 
 const CLIPBOARD_MIME = "application/x-drawpane+json";
 
@@ -152,6 +153,8 @@ function FileEditor({ fileId }: { fileId: string }) {
   }, [editor, prototyping]);
   // View preferences, remembered per browser: rulers (⇧R) and layout grids (⇧G).
   useViewPreferences(editor);
+  // Hints and tooltips across the editor show the person's own shortcuts: redraw when they change.
+  useOverridesVersion();
   const rulersOn = useEditorStateOutside(editor, (s) => s.rulers) && view === "design" && !viewing;
   // Room for the floating panes (12px margin + pane width), so comment popovers open over the canvas.
   const insets = useMemo(
@@ -381,7 +384,10 @@ function FileEditor({ fileId }: { fileId: string }) {
         e.preventDefault();
         return;
       }
-      if (e.key.startsWith("Arrow") && editor.s.selection.length > 0) {
+      // Arrows nudge, plain or with Shift; Enter goes in, plain. Those exact keys only:
+      // other combinations (⌥⌘→, Ctrl+Alt+↵ for Play) are for shortcuts.
+      const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
+      if (plain && e.key.startsWith("Arrow") && editor.s.selection.length > 0) {
         const step = e.shiftKey ? 10 : 1;
         const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
         const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
@@ -389,7 +395,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         e.preventDefault();
         return;
       }
-      if (e.key === "Enter" && editor.s.selection.length === 1) {
+      if (plain && !e.shiftKey && e.key === "Enter" && editor.s.selection.length === 1) {
         const node = editor.doc.get(editor.s.selection[0] as string);
         if (node?.type === "text") editor.startTextEdit(node.id);
         else if (node) {
@@ -412,7 +418,7 @@ function FileEditor({ fileId }: { fileId: string }) {
           return;
         }
       }
-      // Native clipboard events handle these.
+      // Native clipboard events handle these (keymap.ts keeps them for copy, cut and paste).
       if (
         (e.metaKey || e.ctrlKey) &&
         ["c", "x", "v"].includes(e.key.toLowerCase()) &&
@@ -859,7 +865,7 @@ function TopRight({
       <IconButton
         icon="play"
         label="Play prototype"
-        shortcut={isMac() ? "⌥⌘↵" : "Ctrl+Alt+↵"}
+        shortcut={shortcutFor("view.present")}
         size="md"
         onClick={onPresent}
       />
@@ -885,7 +891,7 @@ function ZoomControls() {
       <IconButton
         icon="minus"
         label="Zoom out"
-        shortcut={modKey("−")}
+        shortcut={shortcutFor("view.zoomOut")}
         onClick={() => editor.zoomBy(1 / 1.5)}
       />
       <button
@@ -899,7 +905,7 @@ function ZoomControls() {
       <IconButton
         icon="plus"
         label="Zoom in"
-        shortcut={modKey("+")}
+        shortcut={shortcutFor("view.zoomIn")}
         onClick={() => editor.zoomBy(1.5)}
       />
       <IconButton
