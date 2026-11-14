@@ -25,7 +25,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/bundle-server.mjs",
     "typecheck": "tsc -p .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@clack/prompts": "1.8.1",

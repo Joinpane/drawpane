@@ -29,6 +29,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - name: The installer's release deploys (Wrangler dry run)
+        run: pnpm --filter create-drawpane smoke
 
   deploy:
     name: Deploy to the dogfooding instance
