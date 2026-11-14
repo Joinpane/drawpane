@@ -1,29 +1,31 @@
 /**
- * Layout grids on a frame: columns, rows or a square grid, each a summary
- * row (kind, count, alignment) that opens to its values. They show on the
+ * Layout grids on a frame: columns, rows or a square grid. Like effects
+ * (ItemList.tsx): "+" offers the kinds, each grid is a row (kind, count,
+ * alignment), and the row opens its values beside the inspector. They show on the
  * canvas while you design and snap moving layers; exports never include them.
  */
 import { defaultLayoutGrid, type Editor } from "@drawpane/editor";
 import type { LayoutGrid, NodeRecord } from "@drawpane/model";
-import {
-  Icon,
-  IconButton,
-  type IconName,
-  NumberField,
-  PropertyRow,
-  PropertySection,
-} from "@drawpane/ui";
-import { useState } from "react";
+import { NumberField, PropertySection } from "@drawpane/ui";
 import { ColorRow } from "./ColorRow";
 import { common, Select } from "./fields";
+import { AddItemButton, ItemEditor, type ItemKind, ItemRow, useItemEditor } from "./ItemList";
 
 type TrackGrid = Extract<LayoutGrid, { type: "columns" | "rows" }>;
 
-const KIND: Record<LayoutGrid["type"], { label: string; icon: IconName }> = {
-  columns: { label: "Columns", icon: "layout-col" },
-  rows: { label: "Rows", icon: "layout-row" },
-  grid: { label: "Grid", icon: "layout-grid" },
-};
+/**
+ * The kinds of grid, columns first, like Figma. The icons are auto layout's:
+ * a row of items is vertical bars side by side, which is what columns look like.
+ */
+const GRID_KINDS: ReadonlyArray<ItemKind<LayoutGrid["type"]>> = [
+  { type: "columns", label: "Columns", icon: "layout-row" },
+  { type: "rows", label: "Rows", icon: "layout-col" },
+  { type: "grid", label: "Grid", icon: "layout-grid" },
+];
+const KIND = Object.fromEntries(GRID_KINDS.map((k) => [k.type, k])) as Record<
+  LayoutGrid["type"],
+  ItemKind<LayoutGrid["type"]>
+>;
 
 const ALIGNMENT_LABEL: Record<TrackGrid["alignment"], (rows: boolean) => string> = {
   stretch: () => "Stretch",
@@ -49,7 +51,7 @@ function withKind(grid: LayoutGrid, type: LayoutGrid["type"]): LayoutGrid {
 export function LayoutGridsSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
   const grids = common(nodes, "layoutGrids");
-  const [open, setOpen] = useState<number | null>(null);
+  const items = useItemEditor();
   const set = (next: LayoutGrid[], label: string) =>
     editor.setProp(ids, "layoutGrids", next.length ? next : null, label);
   const replace = (i: number, next: LayoutGrid, label: string) =>
@@ -57,25 +59,20 @@ export function LayoutGridsSection({ editor, nodes }: { editor: Editor; nodes: N
       (grids ?? []).map((g, j) => (j === i ? next : g)),
       label,
     );
+  const current = items.open === null ? null : (grids?.[items.open] ?? null);
 
   return (
     <PropertySection
       title="Layout grids"
       actions={
-        <IconButton
-          icon="plus"
+        <AddItemButton
           label="Add layout grid"
-          onClick={() => {
+          kinds={GRID_KINDS}
+          onAdd={(type) => {
             const list = grids ?? [];
-            // Columns first, like Figma; then rows, then a square grid.
-            const kinds = list.map((g) => g.type);
-            const type = !kinds.includes("columns")
-              ? "columns"
-              : !kinds.includes("rows")
-                ? "rows"
-                : "grid";
             set([...list, defaultLayoutGrid(type)], "Add layout grid");
-            setOpen(list.length);
+            items.openNew(list.length);
+            // Grids show while they're being set up.
             if (!editor.s.layoutGrids) editor.state.set({ layoutGrids: true });
           }}
         />
@@ -84,59 +81,52 @@ export function LayoutGridsSection({ editor, nodes }: { editor: Editor; nodes: N
       {grids === null ? (
         <p className="inspector__mixed">Mixed grids. Add one to replace them.</p>
       ) : (
-        grids.map((grid, i) => {
-          const expanded = open === i;
-          const kind = KIND[grid.type];
-          return (
-            <div key={i} className="grid-entry" data-hidden={grid.visible === false || undefined}>
-              <div className="grid-entry__row">
-                <button
-                  type="button"
-                  className="grid-entry__toggle"
-                  aria-expanded={expanded}
-                  onClick={() => setOpen(expanded ? null : i)}
-                >
-                  <span className="layout-grid__icon" aria-hidden="true">
-                    <Icon name={kind.icon} size={12} />
-                  </span>
-                  <span className="grid-entry__name">{kind.label}</span>
-                  <span className="grid-entry__summary">{summary(grid)}</span>
-                </button>
-                <IconButton
-                  icon={grid.visible === false ? "eye-off" : "eye"}
-                  label={grid.visible === false ? "Show layout grid" : "Hide layout grid"}
-                  onClick={() =>
-                    replace(i, { ...grid, visible: grid.visible === false }, "Toggle layout grid")
-                  }
-                />
-                <IconButton
-                  icon="minus"
-                  label="Remove layout grid"
-                  onClick={() => {
-                    set(
-                      grids.filter((_, j) => j !== i),
-                      "Remove layout grid",
-                    );
-                    setOpen(null);
-                  }}
-                />
-              </div>
-              {expanded ? (
-                <GridDetails
-                  editor={editor}
-                  grid={grid}
-                  onChange={(next, label) => replace(i, next, label)}
-                />
-              ) : null}
-            </div>
-          );
-        })
+        grids.map((grid, i) => (
+          <ItemRow
+            key={i}
+            kind={KIND[grid.type]}
+            summary={summary(grid)}
+            hidden={grid.visible === false}
+            open={items.open === i}
+            buttonRef={items.rowRef(i)}
+            onOpen={() => items.toggle(i)}
+            onToggleHidden={() =>
+              replace(i, { ...grid, visible: grid.visible === false }, "Toggle layout grid")
+            }
+            onRemove={() => {
+              set(
+                grids.filter((_, j) => j !== i),
+                "Remove layout grid",
+              );
+              items.setOpen(null);
+            }}
+          />
+        ))
       )}
+      {items.anchor && current && items.open !== null ? (
+        <ItemEditor
+          anchor={items.anchor}
+          kinds={GRID_KINDS}
+          current={current.type}
+          kindLabel="Layout grid type"
+          onKind={(type) =>
+            replace(items.open as number, withKind(current, type), "Layout grid type")
+          }
+          onClose={() => items.setOpen(null)}
+        >
+          <GridFields
+            editor={editor}
+            grid={current}
+            onChange={(next, label) => replace(items.open as number, next, label)}
+          />
+        </ItemEditor>
+      ) : null}
     </PropertySection>
   );
 }
 
-function GridDetails({
+/** A grid's values, each with its name. */
+function GridFields({
   editor,
   grid,
   onChange,
@@ -150,29 +140,24 @@ function GridDetails({
     onScrubEnd: () => editor.endGesture(),
   });
   return (
-    <div className="grid-entry__details">
-      <Select
-        label="Layout grid type"
-        value={grid.type}
-        options={(["columns", "rows", "grid"] as const).map((t) => ({
-          value: t,
-          label: KIND[t].label,
-        }))}
-        onChange={(type) => onChange(withKind(grid, type), "Layout grid type")}
-      />
+    <div className="item-editor__fields">
       {grid.type === "grid" ? (
-        <NumberField
-          icon="layout-grid"
-          unit="px"
-          ariaLabel="Grid size"
-          min={1}
-          value={grid.size}
-          onChange={(size) => onChange({ ...grid, size: Math.max(1, size) }, "Grid size")}
-          {...scrub("Grid size")}
-        />
+        <>
+          <span className="item-editor__label">Size</span>
+          <NumberField
+            icon="layout-grid"
+            unit="px"
+            ariaLabel="Grid size"
+            min={1}
+            value={grid.size}
+            onChange={(size) => onChange({ ...grid, size: Math.max(1, size) }, "Grid size")}
+            {...scrub("Grid size")}
+          />
+        </>
       ) : (
         <TrackFields grid={grid} onChange={onChange} scrub={scrub} />
       )}
+      <span className="item-editor__label">Color</span>
       <ColorRow
         editor={editor}
         label="Grid"
@@ -196,34 +181,35 @@ function TrackFields({
   const noun = rows ? "Row" : "Column";
   return (
     <>
-      <PropertyRow>
-        <NumberField
-          label="#"
-          ariaLabel={`${noun} count`}
-          min={1}
-          max={100}
-          precision={0}
-          value={grid.count}
-          onChange={(count) =>
-            onChange(
-              { ...grid, count: Math.min(100, Math.max(1, Math.round(count))) },
-              `${noun} count`,
-            )
-          }
-          {...scrub(`${noun} count`)}
-        />
-        <Select
-          label={`${noun} alignment`}
-          value={grid.alignment}
-          options={(["stretch", "start", "center", "end"] as const).map((a) => ({
-            value: a,
-            label: ALIGNMENT_LABEL[a](rows),
-          }))}
-          onChange={(alignment) => onChange({ ...grid, alignment }, `${noun} alignment`)}
-        />
-      </PropertyRow>
-      <PropertyRow>
-        {grid.alignment === "stretch" ? (
+      <span className="item-editor__label">Count</span>
+      <NumberField
+        label="#"
+        ariaLabel={`${noun} count`}
+        min={1}
+        max={100}
+        precision={0}
+        value={grid.count}
+        onChange={(count) =>
+          onChange(
+            { ...grid, count: Math.min(100, Math.max(1, Math.round(count))) },
+            `${noun} count`,
+          )
+        }
+        {...scrub(`${noun} count`)}
+      />
+      <span className="item-editor__label">Type</span>
+      <Select
+        label={`${noun} alignment`}
+        value={grid.alignment}
+        options={(["stretch", "start", "center", "end"] as const).map((a) => ({
+          value: a,
+          label: ALIGNMENT_LABEL[a](rows),
+        }))}
+        onChange={(alignment) => onChange({ ...grid, alignment }, `${noun} alignment`)}
+      />
+      {grid.alignment === "stretch" ? (
+        <>
+          <span className="item-editor__label">Margin</span>
           <NumberField
             label="M"
             ariaLabel="Margin"
@@ -232,7 +218,10 @@ function TrackFields({
             onChange={(margin) => onChange({ ...grid, margin: Math.max(0, margin) }, "Grid margin")}
             {...scrub("Grid margin")}
           />
-        ) : (
+        </>
+      ) : (
+        <>
+          <span className="item-editor__label">{rows ? "Height" : "Width"}</span>
           <NumberField
             label={rows ? "H" : "W"}
             ariaLabel={rows ? "Row height" : "Column width"}
@@ -241,25 +230,29 @@ function TrackFields({
             onChange={(size) => onChange({ ...grid, size: Math.max(0, size) }, `${noun} size`)}
             {...scrub(`${noun} size`)}
           />
-        )}
-        <NumberField
-          label="G"
-          ariaLabel="Gutter"
-          min={0}
-          value={grid.gutter}
-          onChange={(gutter) => onChange({ ...grid, gutter: Math.max(0, gutter) }, "Grid gutter")}
-          {...scrub("Grid gutter")}
-        />
-      </PropertyRow>
+        </>
+      )}
+      <span className="item-editor__label">Gutter</span>
+      <NumberField
+        label="G"
+        ariaLabel="Gutter"
+        min={0}
+        value={grid.gutter}
+        onChange={(gutter) => onChange({ ...grid, gutter: Math.max(0, gutter) }, "Grid gutter")}
+        {...scrub("Grid gutter")}
+      />
       {grid.alignment !== "stretch" && grid.alignment !== "center" ? (
-        <NumberField
-          label="M"
-          ariaLabel="Offset"
-          min={0}
-          value={grid.margin}
-          onChange={(margin) => onChange({ ...grid, margin: Math.max(0, margin) }, "Grid offset")}
-          {...scrub("Grid offset")}
-        />
+        <>
+          <span className="item-editor__label">Offset</span>
+          <NumberField
+            label="M"
+            ariaLabel="Offset"
+            min={0}
+            value={grid.margin}
+            onChange={(margin) => onChange({ ...grid, margin: Math.max(0, margin) }, "Grid offset")}
+            {...scrub("Grid offset")}
+          />
+        </>
       ) : null}
     </>
   );

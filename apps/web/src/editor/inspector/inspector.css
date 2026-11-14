@@ -428,13 +428,13 @@
 }
 
 /* Effects */
-.effect {
+.item-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--space-100);
 }
-.effect__toggle {
+.item-row__toggle {
   display: grid;
   /* The name keeps its room; the values give way first. */
   grid-template-columns: 16px auto minmax(0, 1fr);
@@ -450,30 +450,30 @@
   text-align: left;
   cursor: pointer;
 }
-.effect__toggle > .dp-icon {
+.item-row__toggle > .dp-icon {
   color: var(--icon);
 }
-.effect__toggle:hover {
+.item-row__toggle:hover {
   border-color: var(--line-strong);
 }
 /* Its editor is open beside the inspector. */
-.effect__toggle[aria-expanded="true"] {
+.item-row__toggle[aria-expanded="true"] {
   border-color: var(--signal);
   background: var(--signal-soft);
 }
-.effect__toggle:focus-visible {
+.item-row__toggle:focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus);
 }
-.effect[data-hidden] .effect__toggle {
+.item-row[data-hidden] .item-row__toggle {
   color: var(--ink-disabled);
 }
-.effect__name {
+.item-row__name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.effect__summary {
+.item-row__summary {
   min-width: 0;
   overflow: hidden;
   text-align: right;
@@ -485,14 +485,14 @@
   word-spacing: 2px;
 }
 
-/* An effect's editor, in a popover beside the inspector. */
-.effect-editor {
+/* An item's editor (an effect, a layout grid), in a popover beside the inspector (ItemList.tsx). */
+.item-editor {
   width: 264px;
 }
-.effect-editor__body {
+.item-editor__body {
   display: grid;
 }
-.effect-editor__head {
+.item-editor__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -500,7 +500,7 @@
   padding: var(--space-200) var(--space-200) var(--space-200) var(--space-300);
   border-bottom: 1px solid var(--line);
 }
-.effect-editor__type {
+.item-editor__type {
   display: inline-flex;
   align-items: center;
   gap: var(--space-200);
@@ -514,123 +514,63 @@
   font: 600 12px / 16px var(--font-ui);
   cursor: pointer;
 }
-.effect-editor__type > .dp-icon:first-child {
+.item-editor__type > .dp-icon:first-child {
   color: var(--icon);
 }
-.effect-editor__type > .dp-icon:last-child {
+.item-editor__type > .dp-icon:last-child {
   color: var(--ink-muted);
 }
-.effect-editor__type:hover,
-.effect-editor__type[aria-expanded="true"] {
+.item-editor__type:hover,
+.item-editor__type[aria-expanded="true"] {
   background: var(--surface-hover);
 }
-.effect-editor__type:focus-visible {
+.item-editor__type:focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus);
 }
-.effect-editor__fields {
+.item-editor__fields {
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr);
   align-items: center;
   gap: var(--space-200) var(--space-300);
   padding: var(--space-300);
 }
-.effect-editor__label {
+.item-editor__label {
   font: 400 12px / 16px var(--font-ui);
   color: var(--ink-muted);
 }
-.effect-editor__fields[hidden] {
+.item-editor__fields[hidden] {
   display: none;
 }
 /* Glass: the light, then the lens's sliders below a rule. */
-.effect-editor {
+.item-editor {
   max-width: calc(100vw - 16px);
 }
-.effect-editor:has(.effect-editor__fields--sliders) {
+.item-editor--wide {
   width: 300px;
 }
-.effect-editor__fields--light {
+.item-editor__fields--light {
   align-items: start;
   border-bottom: 1px solid var(--line);
 }
-.effect-editor__fields--light > .effect-editor__label {
+.item-editor__fields--light > .item-editor__label {
   padding-top: 6px;
 }
-.effect-editor__light {
+.item-editor__light {
   display: flex;
   gap: var(--space-200);
 }
-.effect-editor__light-values {
+.item-editor__light-values {
   display: grid;
   align-content: start;
   gap: var(--space-200);
   min-width: 0;
   flex: 1;
 }
-.effect-editor__pair {
+.item-editor__pair {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-200);
-}
-/* Layout grids: a row each, opening in place. */
-.grid-entry {
-  display: grid;
-  gap: var(--space-200);
-}
-.grid-entry__row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: var(--space-100);
-}
-.grid-entry__toggle {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-200);
-  height: var(--size-control-sm);
-  padding: 0 var(--space-200) 0 var(--space-100);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--ink);
-  font: 400 12px / 16px var(--font-ui);
-  text-align: left;
-  cursor: pointer;
-}
-.grid-entry__toggle:hover,
-.grid-entry__toggle[aria-expanded="true"] {
-  background: var(--surface-hover);
-}
-.grid-entry__toggle:focus-visible {
-  outline: none;
-  box-shadow: var(--shadow-focus);
-}
-.grid-entry[data-hidden] .grid-entry__toggle {
-  color: var(--ink-disabled);
-}
-.grid-entry__name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.grid-entry__summary {
-  color: var(--ink-muted);
-  font: 400 11px / 14px var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  word-spacing: 2px;
-}
-.grid-entry__details {
-  display: grid;
-  gap: var(--space-200);
-  padding: var(--space-200);
-  border-radius: var(--radius-sm);
-  background: var(--surface-sunken);
-}
-.grid-entry__details .dp-field,
-.grid-entry__details .inspector__select,
-.grid-entry__details .paint-hex {
-  background: var(--surface);
 }
 .paint-row--color {
   grid-template-columns: 24px minmax(0, 1fr) 56px;
@@ -846,15 +786,6 @@
   color: var(--ink-muted);
   font: 400 11px / 14px var(--font-mono);
   font-variant-numeric: tabular-nums;
-}
-
-/* Layout grids reuse the effect rows; the kind shows as an icon. */
-.layout-grid__icon {
-  display: inline-grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  color: var(--icon);
 }
 
 /* Stroke ends: a label, then start, swap, end across the full width. */
