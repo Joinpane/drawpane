@@ -101,7 +101,9 @@ export function Player({
   const [panelOpen, setPanelOpen] = useState(() => window.innerWidth >= 960);
   const [hint, setHint] = useState<{ id: number; text: string } | null>({
     id: 0,
-    text: "Click to interact · R restarts · ← → move between screens",
+    text: touchFirst()
+      ? "Tap to interact"
+      : "Click to interact · R restarts · ← → move between screens",
   });
 
   // Flows on every page, for the picker.
@@ -129,7 +131,7 @@ export function Player({
           id: Date.now(),
           text:
             kind === "hotspots"
-              ? "Highlighted areas are clickable"
+              ? `Highlighted areas are ${touchFirst() ? "tappable" : "clickable"}`
               : "That leads to a screen that's no longer here",
         }),
     });
@@ -284,7 +286,11 @@ export function Player({
                     type="button"
                     className="present__screen"
                     aria-current={id === state.screen || undefined}
-                    onClick={() => stage.current?.play(player.goTo(id))}
+                    onClick={() => {
+                      stage.current?.play(player.goTo(id));
+                      // Narrow, the list covers the screen: get out of the way.
+                      if (window.matchMedia(NARROW).matches) setPanelOpen(false);
+                    }}
                   >
                     <ScreenThumb editor={editor} renderer={renderer} id={id} />
                     <span className="present__screen-text">
@@ -301,6 +307,12 @@ export function Player({
     </div>
   );
 }
+
+/** Where the screens list floats over the prototype instead of sitting beside it (present.css). */
+const NARROW = "(max-width: 720px)";
+
+/** A touch screen is the main way in: hints talk about taps, not keys. */
+const touchFirst = () => window.matchMedia("(pointer: coarse)").matches;
 
 function screenMeta(editor: Editor, id: string, start: string): string {
   const hotspots = hotspotIds(editor.doc, id).filter((h) => h !== id).length;

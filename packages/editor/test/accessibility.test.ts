@@ -101,6 +101,22 @@ describe("tap targets", () => {
     ]);
   });
 
+  it("measures a rotated layer by its own size, not its outer box", () => {
+    const { editor, board } = setup();
+    // 36 × 36 turned 45°: its outer box is 50.9 wide, but it's no easier to tap.
+    const turned = editor.createLayer("rect", { x: 100, y: 100, width: 36, height: 36 }, board, {
+      reactions: TAP,
+      rotation: 45,
+    }) as string;
+    expect(tapTargetIssue(editor, turned)).toMatchObject({ width: 36, height: 36 });
+    // 120 × 20 turned 90° is still 120 × 20.
+    const bar = editor.createLayer("rect", { x: 100, y: 200, width: 120, height: 20 }, board, {
+      reactions: TAP,
+      rotation: 90,
+    }) as string;
+    expect(tapTargetIssue(editor, bar)).toMatchObject({ width: 120, height: 20 });
+  });
+
   it("can't grow text or a group: their size follows what's in them", () => {
     const { editor, board } = setup();
     const label = editor.createLayer("text", { x: 10, y: 10, width: 30, height: 16 }, board, {

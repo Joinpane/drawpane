@@ -105,8 +105,11 @@ export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(functio
           label={resolved ? "Reopen thread" : "Resolve thread"}
           shortcut={isMac() ? "⌘⇧R" : "Ctrl+Shift+R"}
           pressed={resolved}
-          disabled={busy}
-          onClick={() => void run(() => store.setResolved(thread.id, !resolved))}
+          // aria-disabled, not disabled: a disabled button drops keyboard focus onto the page.
+          aria-disabled={busy || undefined}
+          onClick={() => {
+            if (!busy) void run(() => store.setResolved(thread.id, !resolved));
+          }}
         />
         <MenuButton label="Thread options" items={menuItems} />
       </header>

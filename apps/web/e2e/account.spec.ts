@@ -101,6 +101,20 @@ test.describe
       );
       await notice.getByRole("button", { name: "Upgrade" }).click();
       await expect(notice.locator("code").last()).toHaveText("npm create drawpane@latest upgrade");
+      // On a phone: nothing runs past the right edge, and the two buttons stay together.
+      const desktop = page.viewportSize();
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+        ),
+      ).toBe(true);
+      const notesBox = await notice.getByRole("link", { name: "Release notes" }).boundingBox();
+      const upgradeBox = await notice.getByRole("button", { name: "Upgrade" }).boundingBox();
+      expect(Math.abs((notesBox?.y ?? 0) - (upgradeBox?.y ?? 1))).toBeLessThan(1);
+      const noticeBox = await notice.boundingBox();
+      expect((noticeBox?.x ?? 0) + (noticeBox?.width ?? 0)).toBeLessThanOrEqual(390 - 16);
+      if (desktop) await page.setViewportSize(desktop);
       await page.unroute("**/api/admin/health?*");
       await page.getByRole("link", { name: "Files" }).click();
       await expect(page.getByRole("heading", { level: 1 })).toBeVisible();

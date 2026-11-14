@@ -233,6 +233,38 @@ test.describe
       await guestPage.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.3);
       await expect(guestPage.locator(".present__count")).toHaveText("Screen 2 of 3");
 
+      // On a phone: the whole screen is in view (its tab bar too), the hint
+      // talks about taps, and the screens list floats over the prototype.
+      const phone = await browser.newContext({
+        baseURL: instance.url,
+        viewport: { width: 390, height: 844 },
+        hasTouch: true,
+        isMobile: true,
+      });
+      const phonePage = await phone.newPage();
+      await phonePage.goto(url);
+      await expect(
+        phonePage.getByRole("status").filter({ hasText: "Tap to interact" }),
+      ).toBeVisible();
+      const stage = await phonePage.locator(".present__stage").boundingBox();
+      const shown = await phonePage.locator(".stage__viewport").boundingBox();
+      const drawn = await phonePage.locator(".stage__screen canvas").boundingBox();
+      if (!stage || !shown || !drawn) throw new Error("no stage");
+      expect(shown.y + shown.height).toBeLessThanOrEqual(stage.y + stage.height + 0.5);
+      expect(drawn.height).toBeLessThanOrEqual(shown.height + 0.5);
+      await phonePage.getByRole("button", { name: "Show screens" }).tap();
+      const list = phonePage.getByRole("complementary", { name: "Screens" });
+      await expect(list).toBeVisible();
+      await list.getByRole("button", { name: /^Today detail/ }).tap();
+      await expect(list).toBeHidden();
+      // It went there: reopened, the list marks that screen as the current one.
+      await phonePage.getByRole("button", { name: "Show screens" }).tap();
+      await expect(list.getByRole("button", { name: /^Today detail/ })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
+      await phone.close();
+
       // Turning it off shows the guest the door, live.
       await page.getByRole("button", { name: "Share prototype" }).click();
       await dialog
