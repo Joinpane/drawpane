@@ -614,7 +614,7 @@ describe("exportSvg", () => {
     ]);
     const svg = svgOf(editor, ["f"]);
     const filter =
-      /<filter id="(blur\d+)" filterUnits="userSpaceOnUse" x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)"/.exec(
+      /<filter id="(post\d+)" filterUnits="userSpaceOnUse" x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)"/.exec(
         svg,
       );
     expect(filter).not.toBeNull();

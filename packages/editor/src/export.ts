@@ -9,6 +9,7 @@ import { type Rect, unionRects } from "./geometry";
 import { markerLength } from "./markers";
 import type { CanvasRenderer } from "./render";
 import type { Scene } from "./scene";
+import { textureReach } from "./texture";
 
 export type ExportFormat = "png" | "jpeg" | "webp" | "svg" | "pdf";
 /** Formats drawn into pixels; SVG and PDF stay vector, at 1×. */
@@ -82,6 +83,9 @@ export function paintOutset(node: NodeRecord): {
     } else if (e.type === "layer-blur") {
       // The renderer's blur is a Gaussian with this standard deviation; 2σ holds nearly all of it.
       const r = e.radius * 2;
+      grow(r, r, r, r);
+    } else if (e.type === "texture") {
+      const r = textureReach(e);
       grow(r, r, r, r);
     }
   }
