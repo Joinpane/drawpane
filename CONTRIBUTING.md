@@ -31,9 +31,10 @@ Open http://localhost:5173. A fresh local database sends you to setup; the token
 ```sh
 pnpm check    # Biome lint, TypeScript, all tests
 pnpm build
+pnpm --filter create-drawpane smoke   # the installer's release deploys (Wrangler dry run)
 ```
 
-CI runs the same on every pull request.
+CI runs the same on every pull request. Releases are cut by pushing a version tag: see [RELEASING.md](RELEASING.md).
 
 ## Pull requests
 

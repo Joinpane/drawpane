@@ -1,0 +1,67 @@
+name: Release
+
+# Pushing a tag like v0.1.1 publishes create-drawpane at that version to npm,
+# from this workflow, with npm trusted publishing: no token is stored anywhere,
+# and the package carries a provenance attestation that ties it to this commit.
+# See RELEASING.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # the GitHub release
+  id-token: write # npm trusted publishing and provenance
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish create-drawpane
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: npm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+
+      - name: The tag matches the package's version
+        run: |
+          version=$(node -p "require('./packages/create-drawpane/package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME, but create-drawpane is at $version. Bump the version first (RELEASING.md)."
+            exit 1
+          fi
+
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: The release deploys (Wrangler dry run)
+        run: pnpm --filter create-drawpane smoke
+
+      - name: Pack
+        # pnpm turns catalog: and workspace: versions into real ones.
+        run: pnpm --filter create-drawpane pack --pack-destination "$RUNNER_TEMP/release"
+
+      - name: The packed installer runs from a clean folder
+        run: |
+          mkdir "$RUNNER_TEMP/try" && cd "$RUNNER_TEMP/try"
+          npm init -y > /dev/null
+          npm install "$RUNNER_TEMP"/release/create-drawpane-*.tgz
+          test "$(npx create-drawpane --version)" = "${GITHUB_REF_NAME#v}"
+
+      - name: Publish to npm
+        run: npm publish "$RUNNER_TEMP"/release/create-drawpane-*.tgz --access public --provenance
+
+      - name: GitHub release
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag "$RUNNER_TEMP"/release/create-drawpane-*.tgz
+        env:
+          GH_TOKEN: ${{ github.token }}
