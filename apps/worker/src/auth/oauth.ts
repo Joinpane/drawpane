@@ -70,8 +70,7 @@ interface Pending {
 
 /** A path inside this app, or "/" for anything else (no open redirects). */
 export function safePath(value: string | undefined | null, fallback = "/"): string {
-  if (!value?.startsWith("/") || value.startsWith("//") || value.startsWith("/\\"))
-    return fallback;
+  if (!value?.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return fallback;
   return value.slice(0, 512);
 }
 
