@@ -120,6 +120,89 @@ describe("entering nested frames", () => {
   });
 });
 
+describe("pixel grid", () => {
+  /** The setup, zoomed so a screen pixel is 1.6 units, as in the report. */
+  function zoomed() {
+    const s = setup();
+    s.editor.zoomTo(0.625);
+    const screen = (x: number, y: number) => s.editor.s.camera.toScreen({ x, y });
+    // Pointer events at the screen position of a page point, nudged by screen pixels.
+    const point = (x: number, y: number, nx = 0, ny = 0, extra: Partial<PointerInput> = {}) => {
+      const p = screen(x, y);
+      return at(p.x + nx, p.y + ny, 1, extra);
+    };
+    return { ...s, point };
+  }
+  const geometry = (editor: Editor, id: string) => {
+    const p = (editor.doc.get(id) as NodeRecord).props;
+    return ["x", "y", "width", "height"].map((k) => getProp(p, k as "x"));
+  };
+
+  it("draws on whole pixels", () => {
+    const { editor, interaction, point } = zoomed();
+    editor.setTool("rect");
+    interaction.down(point(1000, 500, 0.4, 0.3));
+    interaction.move(point(1100, 600, 0.3, 0.6));
+    interaction.move(point(1200, 580, 0.7, 0.2));
+    const id = editor.s.selection[0] as string;
+    expect(geometry(editor, id).every(Number.isInteger)).toBe(true);
+    interaction.up(point(1200, 580, 0.7, 0.2));
+  });
+
+  it("moves a layer onto whole pixels, keeping a Shift-locked axis exactly", () => {
+    const { editor, interaction, point } = zoomed();
+    const odd = editor.createLayer(
+      "rect",
+      { x: 1000.4, y: 500.7, width: 50, height: 50 },
+      "p",
+    ) as string;
+    editor.select([odd]);
+    interaction.down(point(1025, 525));
+    interaction.move(point(1025, 525, 10.3, 0.4));
+    interaction.move(point(1025, 525, 21.7, 0.6));
+    const [x, y] = geometry(editor, odd);
+    expect(Number.isInteger(x)).toBe(true);
+    expect(Number.isInteger(y)).toBe(true);
+    interaction.up(point(1025, 525, 21.7, 0.6));
+    // With Shift, the axis it doesn't move along stays where it was, fraction and all.
+    const other = editor.createLayer(
+      "rect",
+      { x: 1200, y: 700.7, width: 50, height: 50 },
+      "p",
+    ) as string;
+    editor.select([other]);
+    interaction.down(point(1225, 725));
+    interaction.move(point(1225, 725, 30.3, 0.4, { shift: true }));
+    expect(geometry(editor, other)[1]).toBe(700.7);
+    interaction.up(point(1225, 725, 30.3, 0.4, { shift: true }));
+  });
+
+  it("resizes the dragged edge onto a whole pixel and leaves the other where it was", () => {
+    const { editor, loose, interaction, point } = zoomed();
+    editor.select([loose]);
+    // The right-middle handle of the loose rectangle (700–800).
+    interaction.down(point(800, 150));
+    interaction.move(point(800, 150, 15.3, 0));
+    interaction.move(point(800, 150, 31.7, 0));
+    const [x, , width] = geometry(editor, loose);
+    expect(x).toBe(700);
+    expect(Number.isInteger(width)).toBe(true);
+    interaction.up(point(800, 150, 31.7, 0));
+  });
+
+  it("can be turned off", () => {
+    const { editor, interaction, point } = zoomed();
+    editor.state.set({ pixelSnap: false });
+    editor.setTool("rect");
+    interaction.down(point(1000, 500));
+    interaction.move(point(1100, 600, 0.3, 0.6));
+    interaction.move(point(1150, 580, 0.5, 0));
+    const id = editor.s.selection[0] as string;
+    expect(geometry(editor, id).every(Number.isInteger)).toBe(false);
+    interaction.up(point(1150, 580, 0.5, 0));
+  });
+});
+
 describe("drawing snaps", () => {
   it("starts and ends a shape on the frame's edges, and shows the guides", () => {
     const { editor, phone, interaction } = setup();

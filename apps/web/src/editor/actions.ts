@@ -815,6 +815,15 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.state.set({ layoutGrids: !editor.s.layoutGrids }),
   },
   {
+    id: "view.pixelSnap",
+    label: "Snap to pixel grid",
+    group: "View",
+    icon: "pixel-grid",
+    shortcut: { key: "'", mod: true, shift: true },
+    keywords: "pixel grid round whole integer snapping",
+    run: ({ editor }) => editor.state.set({ pixelSnap: !editor.s.pixelSnap }),
+  },
+  {
     id: "view.lens",
     label: "Selection Lens",
     group: "View",
@@ -969,6 +978,8 @@ export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
   if (key === "+") key = "=";
   // Shift changes some keys (Shift+1 is "!"): fall back to the physical digit.
   if (shortcut.shift && /^digit\d$/i.test(e.code)) key = e.code.slice(5);
+  // And Shift+' is a double quote.
+  if (shortcut.shift && e.code === "Quote") key = "'";
   // Option changes letters on macOS (⌥⇧U is "¨"): fall back to the physical key.
   if (shortcut.alt && /^Key[A-Z]$/.test(e.code)) key = e.code.slice(3).toLowerCase();
   return (

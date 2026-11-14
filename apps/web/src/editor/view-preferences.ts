@@ -1,6 +1,6 @@
 /**
  * View preferences that follow a person between files, in this browser:
- * rulers, layout grids and the Selection Lens. Read once when an editor
+ * rulers, layout grids, pixel-grid snapping and the Selection Lens. Read once when an editor
  * opens, written whenever they change.
  */
 import type { Editor } from "@drawpane/editor";
@@ -12,12 +12,14 @@ const KEY = "drawpane:view";
 interface ViewPreferences {
   readonly rulers: boolean;
   readonly layoutGrids: boolean;
+  readonly pixelSnap: boolean;
   readonly lens: boolean;
 }
 
 const NAMES = [
   "rulers",
   "layoutGrids",
+  "pixelSnap",
   "lens",
 ] as const satisfies readonly (keyof ViewPreferences)[];
 
@@ -50,6 +52,7 @@ export function useViewPreferences(editor: Editor): void {
     const current = (): ViewPreferences => ({
       rulers: editor.s.rulers,
       layoutGrids: editor.s.layoutGrids,
+      pixelSnap: editor.s.pixelSnap,
       lens: ui.get().lens,
     });
     let last = current();

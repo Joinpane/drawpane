@@ -169,6 +169,11 @@ export interface EditorState {
   readonly rulers: boolean;
   /** Frames' layout grids on the canvas (⇧G). */
   readonly layoutGrids: boolean;
+  /**
+   * Drawing, moving and resizing land on whole pixels (⇧⌘'), before smart
+   * guides snap: so pointer-made geometry is never 408.4 × 79.2 at odd zooms.
+   */
+  readonly pixelSnap: boolean;
   /** A guide being dragged (from a ruler, or an existing one), drawn live and committed on drop. */
   readonly guideDraft: GuideDraft | null;
   /** The collaborator (session id) whose view this one follows, if any. */
@@ -307,6 +312,7 @@ export class Editor {
     connecting: null,
     rulers: false,
     layoutGrids: true,
+    pixelSnap: true,
     guideDraft: null,
     hoverGuide: null,
     cropping: null,

@@ -82,6 +82,7 @@ describe("context menus", () => {
       "—",
       "Show rulers",
       "Show layout grids",
+      "Snap to pixel grid",
       "Show comments",
       "Hide other people's cursors",
       "—",

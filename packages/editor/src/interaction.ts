@@ -268,7 +268,7 @@ export class Interaction {
       if (tool === "text") {
         const id = editor.createLayer(
           "text",
-          { x: page.x, y: page.y, width: 0, height: 0 },
+          { x: this.#px(page.x), y: this.#px(page.y), width: 0, height: 0 },
           parent,
         );
         if (id) editor.startTextEdit(id);
@@ -279,7 +279,8 @@ export class Interaction {
       const type: LayerType = tool === "arrow" ? "line" : tool;
       const extra: Props = tool === "arrow" ? { markerEnd: "arrow" } : {};
       // The corner you start from snaps too, so a shape can begin exactly on an edge.
-      const start = input.mod ? page : this.#snapPoint(parent, page, new Map()).point;
+      const onGrid = { x: this.#px(page.x), y: this.#px(page.y) };
+      const start = input.mod ? onGrid : this.#snapPoint(parent, onGrid, new Map()).point;
       this.#mode = { kind: "draw", type, extra, startPage: start, parent, id: null };
       return;
     }
@@ -837,10 +838,14 @@ export class Interaction {
     const editor = this.#editor;
     let dx = page.x - mode.startPage.x;
     let dy = page.y - mode.startPage.y;
-    if (input.shift) {
-      if (Math.abs(dx) > Math.abs(dy)) dy = 0;
-      else dx = 0;
-    }
+    // Shift keeps to one axis; the other stays exactly where it was.
+    const lockY = input.shift && Math.abs(dx) > Math.abs(dy);
+    const lockX = input.shift && !lockY;
+    if (lockY) dy = 0;
+    if (lockX) dx = 0;
+    // The selection's corner lands on the pixel grid.
+    if (!lockX) dx = this.#px(mode.bounds.x + dx) - mode.bounds.x;
+    if (!lockY) dy = this.#px(mode.bounds.y + dy) - mode.bounds.y;
     // Smart guides against siblings and the parent frame.
     const moving = { ...mode.bounds, x: mode.bounds.x + dx, y: mode.bounds.y + dy };
     const roots = editor.s.selection;
@@ -1031,6 +1036,19 @@ export class Interaction {
     // guides and grid edges, like moving does. Upright selections only: a
     // rotated box's edges don't run along the page axes.
     const upright = Math.abs(m[1]) < 1e-9 && Math.abs(m[2]) < 1e-9 && m[0] > 0 && m[3] > 0;
+    // The dragged edges land on the pixel grid, in page space.
+    if (upright) {
+      const gridX = (x: number) => (this.#px(m[4] + m[0] * x) - m[4]) / m[0];
+      const gridY = (y: number) => (this.#px(m[5] + m[3] * y) - m[5]) / m[3];
+      if (movesX) {
+        if (hu === 0) x0 = gridX(x0);
+        else x1 = gridX(x1);
+      }
+      if (movesY) {
+        if (hv === 0) y0 = gridY(y0);
+        else y1 = gridY(y1);
+      }
+    }
     const first = editor.doc.get(editor.s.selection[0] ?? "");
     const snapped: { x: number | null; y: number | null } = { x: null, y: null };
     let targets: Rect[] = [];
@@ -1240,6 +1258,11 @@ export class Interaction {
     if (ops.length > 0) editor.commit(ops, "Rotate");
   }
 
+  /** A page coordinate on the pixel grid, when snapping to it is on. */
+  #px(v: number): number {
+    return this.#editor.s.pixelSnap ? Math.round(v) : v;
+  }
+
   /**
    * Snaps a point on each axis to what a layer in `parent` snaps to (its
    * siblings in view, the parent, guides, grid edges), within a few screen
@@ -1268,10 +1291,11 @@ export class Interaction {
     // The dragged corner snaps like a resize handle (⌘ turns snapping off). A Shift-drawn
     // line keeps its 45° angle instead.
     const snapping = !input.mod && !(input.shift && mode.type === "line");
+    const onGrid = { x: this.#px(page.x), y: this.#px(page.y) };
     const snap = snapping
-      ? this.#snapPoint(mode.parent, page, new Map(mode.id ? [[mode.id, true]] : []))
+      ? this.#snapPoint(mode.parent, onGrid, new Map(mode.id ? [[mode.id, true]] : []))
       : null;
-    let { x: x1, y: y1 } = snap?.point ?? page;
+    let { x: x1, y: y1 } = snap?.point ?? onGrid;
     const { x: x0, y: y0 } = mode.startPage;
     if (input.shift) {
       if (mode.type === "line") {
