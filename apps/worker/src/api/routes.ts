@@ -220,19 +220,26 @@ export const api = new Hono<AppContext>()
     );
     const now = Date.now();
     const { sender } = emailSetup(c.env);
+    // The email's slot under the team's daily cap, taken before anything is created.
+    const slot = newId();
     if (email) {
       if (!sender) throw conflict("This instance doesn't send email. Create a link and share it.");
-      const [member, recent] = await c.env.DB.batch<{ n: number }>([
-        c.env.DB.prepare(
-          `SELECT COUNT(*) AS n FROM team_members tm JOIN users u ON u.id = tm.user_id
-            WHERE tm.team_id = ? AND lower(u.email) = ?`,
-        ).bind(teamId, email),
-        c.env.DB.prepare(
-          "SELECT COUNT(*) AS n FROM invites WHERE team_id = ? AND emailed_at > ?",
-        ).bind(teamId, now - 86_400_000),
-      ]);
-      if ((member?.results[0]?.n ?? 0) > 0) throw conflict(`${email} is already on this team.`);
-      if ((recent?.results[0]?.n ?? 0) >= INVITE_EMAILS_PER_DAY)
+      const member = await c.env.DB.prepare(
+        `SELECT 1 FROM team_members tm JOIN users u ON u.id = tm.user_id
+          WHERE tm.team_id = ? AND lower(u.email) = ?`,
+      )
+        .bind(teamId, email)
+        .first();
+      if (member) throw conflict(`${email} is already on this team.`);
+      // Checked and taken in one statement: requests at the same moment can't all slip under.
+      const reserved = await c.env.DB.prepare(
+        `INSERT INTO invite_emails (id, team_id, sent_at)
+         SELECT ?1, ?2, ?3
+          WHERE (SELECT COUNT(*) FROM invite_emails WHERE team_id = ?2 AND sent_at > ?4) < ?5`,
+      )
+        .bind(slot, teamId, now, now - 86_400_000, INVITE_EMAILS_PER_DAY)
+        .run();
+      if (reserved.meta.changes === 0)
         throw rateLimited(
           `This team has sent ${INVITE_EMAILS_PER_DAY} invite emails today. Create a link and share it, or try again tomorrow.`,
         );
@@ -272,6 +279,8 @@ export const api = new Hono<AppContext>()
       } catch (error) {
         // The details are for whoever runs the instance (Admin › Health can test sending).
         console.error(`couldn't email an invite for team ${teamId}`, error);
+        // Nothing went out: the slot goes back.
+        await c.env.DB.prepare("DELETE FROM invite_emails WHERE id = ?").bind(slot).run();
       }
     }
     return c.json({ token, url, role, expiresAt, email, emailed }, 201);

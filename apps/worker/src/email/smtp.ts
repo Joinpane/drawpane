@@ -198,6 +198,9 @@ async function connectSocket(config: SmtpConfig): Promise<SmtpTransport> {
       await writer.write(encoder.encode(text));
     },
     async startTls() {
+      // Anything already read arrived in the clear after "ready to start TLS": a
+      // man in the middle answering for the server. Never read it as the server's.
+      if (buffer !== "") throw new Error("The SMTP server sent data before TLS started.");
       reader.releaseLock();
       writer.releaseLock();
       socket = socket.startTls();

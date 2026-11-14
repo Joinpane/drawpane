@@ -377,9 +377,10 @@ function describeSecrets(secrets: EmailSecrets): string[] {
     const value = secrets[name] as string;
     let shown = SHOWN.includes(name) ? value : "set, hidden";
     if (name === "SMTP_URL") {
+      // Built by hand: setting a URL's password to "•••" would percent-encode it.
       const url = new URL(value);
-      if (url.password) url.password = "•••";
-      shown = url.toString();
+      const user = url.username ? `${decodeURIComponent(url.username)}:•••@` : "";
+      shown = `${url.protocol}//${user}${url.host}`;
     }
     return `${name.padEnd(width)}  ${shown}`;
   });

@@ -58,6 +58,11 @@ describe("invites by email", () => {
     expect(created.emailed).toBe(false);
     const token = created.url.split("/invite/")[1];
     expect((await ana.browser.fetch(`/api/invites/${token}`)).status).toBe(200);
+    // Nothing went out, so it doesn't count against the team's daily emails.
+    const sent = await env.DB.prepare("SELECT COUNT(*) AS n FROM invite_emails WHERE team_id = ?")
+      .bind(ana.teamId)
+      .first<{ n: number }>();
+    expect(sent?.n).toBe(0);
   });
 
   it("refuses an address that isn't one, or someone already on the team", async () => {
@@ -77,29 +82,42 @@ describe("invites by email", () => {
     expect(await (await invite("")).json()).toMatchObject({ email: null, emailed: false });
   });
 
-  it("caps how many invite emails a team sends in a day", async () => {
+  it("caps how many invite emails a team sends in a day, however they're taken back or raced", async () => {
     const ana = await signedInUser("Ana Lima");
-    const day = Date.now();
+    captureEmails();
+    const now = Date.now();
+    // 47 sent today already.
     await env.DB.batch(
-      Array.from({ length: 50 }, (_, i) =>
-        env.DB.prepare(
-          "INSERT INTO invites (id, team_id, role, created_by, created_at, expires_at, email, emailed_at) VALUES (?, ?, 'editor', ?, ?, ?, ?, ?)",
-        ).bind(`cap-${ana.teamId}-${i}`, ana.teamId, ana.userId, day, day + 1e9, `p${i}@x.co`, day),
+      Array.from({ length: 47 }, (_, i) =>
+        env.DB.prepare("INSERT INTO invite_emails (id, team_id, sent_at) VALUES (?, ?, ?)").bind(
+          `cap-${ana.teamId}-${i}`,
+          ana.teamId,
+          now,
+        ),
       ),
     );
-    const capped = await ana.browser.fetch(`/api/teams/${ana.teamId}/invites`, {
-      method: "POST",
-      json: { email: "lee@example.com" },
+    const send = (to: string) =>
+      ana.browser.fetch(`/api/teams/${ana.teamId}/invites`, {
+        method: "POST",
+        json: { email: to },
+      });
+    // Taking one back doesn't give its email back to the cap.
+    const first = await send("lee@example.com");
+    expect(first.status).toBe(201);
+    const { invites } = await ana.browser.json<{ invites: { id: string }[] }>(
+      `/api/teams/${ana.teamId}/invites`,
+    );
+    await ana.browser.fetch(`/api/teams/${ana.teamId}/invites/${invites[0]?.id}`, {
+      method: "DELETE",
     });
-    expect(capped.status).toBe(429);
+    // Five at once with two left: two go out.
+    const raced = await Promise.all(["a", "b", "c", "d", "e"].map((n) => send(`${n}@example.com`)));
+    expect(raced.map((r) => r.status).sort()).toEqual([201, 201, 429, 429, 429]);
+    expect((await send("z@example.com")).status).toBe(429);
     // A link still works.
     expect(
-      (
-        await ana.browser.fetch(`/api/teams/${ana.teamId}/invites`, {
-          method: "POST",
-          json: {},
-        })
-      ).status,
+      (await ana.browser.fetch(`/api/teams/${ana.teamId}/invites`, { method: "POST", json: {} }))
+        .status,
     ).toBe(201);
   });
 
