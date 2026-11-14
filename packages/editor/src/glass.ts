@@ -19,6 +19,7 @@ import {
   begin,
   type Ctx,
   draw,
+  fits,
   type QuadProgram,
   quadProgram,
   scratch,
@@ -192,7 +193,7 @@ export class GlassPainter {
     backdrop.filter = "none";
 
     const gl = this.#webgl();
-    if (!gl) {
+    if (!gl || !fits(gl, rw, rh)) {
       this.#fallback(ctx, shape, p, x0, y0, rw, rh);
       return;
     }
@@ -215,7 +216,10 @@ export class GlassPainter {
     height.filter = "none";
 
     const { gl: g, uniforms } = gl;
-    begin(gl, rw, rh);
+    if (!begin(gl, rw, rh)) {
+      this.#fallback(ctx, shape, p, x0, y0, rw, rh);
+      return;
+    }
     upload(gl, "backdrop", this.#backdrop);
     upload(gl, "shape", this.#shape);
     upload(gl, "height", this.#height);

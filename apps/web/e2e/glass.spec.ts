@@ -33,7 +33,7 @@ type W = {
     select(ids: string[]): void;
     zoomTo(z: number): void;
     centerOn(p: { x: number; y: number }): void;
-    doc: { get(id: string): { props: Record<string, unknown> } | undefined };
+    doc: { get(id: string): { props: Record<string, unknown>; parent: string } | undefined };
   };
 };
 
@@ -140,6 +140,32 @@ test.describe
       await expect.poll(async () => distance(await pixel(page, 106, 150), rim)).toBeGreaterThan(15);
     });
 
+    test("still bends with noise on the same layer, drawn behind it as it is alone", async () => {
+      // Noise makes the layer draw alone first; its glass still reads what's behind it.
+      const clear = {
+        type: "noise",
+        noiseType: "mono",
+        size: 1,
+        density: 0,
+        color: "#000000ff",
+        secondaryColor: "#ffffff40",
+        opacity: 25,
+      };
+      await page.evaluate(
+        ({ id, effects }) =>
+          (window as unknown as W).drawpane.setProp([id], "effects", effects, "Glass"),
+        { id: glass, effects: [{ ...BASE, visible: false }, clear] },
+      );
+      await page.waitForTimeout(150);
+      const rim = await pixel(page, 106, 150);
+      await page.evaluate(
+        ({ id, effects }) =>
+          (window as unknown as W).drawpane.setProp([id], "effects", effects, "Glass"),
+        { id: glass, effects: [{ ...BASE, refraction: 100 }, clear] },
+      );
+      await expect.poll(async () => distance(await pixel(page, 106, 150), rim)).toBeGreaterThan(15);
+    });
+
     test("lights the rim on the light's side", async () => {
       // Lit from the left (−90°), nothing bent: the left rim brightens, the middle doesn't.
       await set({ ...BASE, angle: -90, visible: false });
@@ -187,5 +213,14 @@ test.describe
           splay: 0,
         },
       ]);
+      // Another layer with effects of its own: the editor closes, rather than open on its first.
+      await page.evaluate((id) => {
+        const e = (window as unknown as W).drawpane;
+        const frame = e.doc.get(id)?.parent as string;
+        e.setProp([frame], "effects", [{ type: "layer-blur", radius: 0 }], "Blur");
+        e.select([frame]);
+      }, glass);
+      await expect(inspector.getByRole("button", { name: /^Layer blur/ })).toBeVisible();
+      await expect(page.getByRole("dialog", { name: /Glass|Layer blur/ })).toHaveCount(0);
     });
   });

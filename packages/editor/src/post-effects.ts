@@ -36,6 +36,21 @@ export function postEffects(effects: readonly Effect[]): readonly PostEffect[] {
   return post ?? NONE;
 }
 
+/**
+ * How far post effects spread a layer's picture past what it paints, in its
+ * units, for its bounds (exports, culling): 2σ of each blur, which holds
+ * nearly all of it, and an unclipped texture's radius. Each works on what
+ * the one before left (shadows and strokes included), so they add up.
+ */
+export function postReach(post: readonly PostEffect[]): number {
+  let reach = 0;
+  for (const e of post) {
+    if (e.type === "layer-blur") reach += e.radius * 2;
+    else if (e.type === "texture") reach += textureReach(e);
+  }
+  return reach;
+}
+
 /** How far a layer blur shows past what it blurs: a Gaussian is all but gone by 3σ. */
 const BLUR_REACH = 3;
 

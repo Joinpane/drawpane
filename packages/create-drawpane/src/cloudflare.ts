@@ -77,16 +77,19 @@ export const RETRY_DELAYS_MS = [1_000, 3_000] as const;
 /**
  * Runs `attempt`, trying again after each delay when it fails transiently
  * (a WranglerError `isTransient` recognises); anything else fails at once.
+ * `onFailure` hears each failed try's error, for what it did before failing.
  */
 export async function withRetries<T>(
   attempt: () => Promise<T>,
   delays: readonly number[] = RETRY_DELAYS_MS,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  onFailure?: (error: unknown) => void,
 ): Promise<T> {
   for (let tries = 0; ; tries++) {
     try {
       return await attempt();
     } catch (error) {
+      onFailure?.(error);
       const wait = delays[tries];
       if (wait === undefined || !(error instanceof WranglerError) || !isTransient(error.output))
         throw error;
@@ -160,7 +163,13 @@ export const wrangler: Cloudflare = {
   },
 
   async createDatabase(accountId, name) {
-    await run(["d1", "create", name], { accountId });
+    try {
+      await run(["d1", "create", name], { accountId });
+    } catch (error) {
+      // A try that failed after Cloudflare made it (an internal error, then a retry): it's ours.
+      if (error instanceof WranglerError && /already exists|7502/i.test(error.output)) return;
+      throw error;
+    }
   },
 
   async ensureBucket(accountId, name) {
@@ -195,11 +204,17 @@ export const wrangler: Cloudflare = {
   },
 
   async migrate(dir, accountId, database) {
-    const output = await run(["d1", "migrations", "apply", database, "--remote"], {
-      cwd: dir,
-      accountId,
-    });
-    return appliedMigrations(output);
+    // A try that fails partway may have applied some first: they count too.
+    const applied: string[] = [];
+    const output = await withRetries(
+      () => runOnce(["d1", "migrations", "apply", database, "--remote"], { cwd: dir, accountId }),
+      RETRY_DELAYS_MS,
+      undefined,
+      (error) => {
+        if (error instanceof WranglerError) applied.push(...appliedMigrations(error.output));
+      },
+    );
+    return [...new Set([...applied, ...appliedMigrations(output)])];
   },
 
   async deploy(dir, accountId, secretsFile) {

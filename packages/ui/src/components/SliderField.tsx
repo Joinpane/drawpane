@@ -84,9 +84,15 @@ export function SliderField({
         onPointerDown={() => {
           dragging.current = true;
           onScrubStart?.();
+          // Released anywhere, even off the track: the drag (and its undo step) ends there.
+          const release = () => {
+            window.removeEventListener("pointerup", release);
+            window.removeEventListener("pointercancel", release);
+            end();
+          };
+          window.addEventListener("pointerup", release);
+          window.addEventListener("pointercancel", release);
         }}
-        onPointerUp={end}
-        onPointerCancel={end}
         onBlur={end}
         onKeyDown={onKey}
         onChange={(e) => {

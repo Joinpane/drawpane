@@ -217,6 +217,29 @@ describe("isTransient", () => {
     expect(waits).toEqual([]);
   });
 
+  it("tells each failed try, so what it did before failing still counts", async () => {
+    const seen: string[] = [];
+    let n = 0;
+    const partly = async () => {
+      if (n++ === 0)
+        throw new WranglerError(
+          "d1 migrations",
+          "│ 0001_init.sql │ ✅ │\n│ 0002_more.sql │ ❌ │\nInternal error [code: 10001]",
+        );
+      return "│ 0002_more.sql │ ✅ │";
+    };
+    const output = await withRetries(
+      partly,
+      [1],
+      async () => {},
+      (error) => {
+        if (error instanceof WranglerError) seen.push(...appliedMigrations(error.output));
+      },
+    );
+    expect(seen).toEqual(["0001_init"]);
+    expect(appliedMigrations(output)).toEqual(["0002_more"]);
+  });
+
   it("doesn't on a refusal that won't change", () => {
     expect(isTransient("Authentication error [code: 10000]")).toBe(false);
     expect(isTransient("A bucket with this name already exists [code: 10004]")).toBe(false);

@@ -51,7 +51,7 @@ function withKind(grid: LayoutGrid, type: LayoutGrid["type"]): LayoutGrid {
 export function LayoutGridsSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
   const grids = common(nodes, "layoutGrids");
-  const items = useItemEditor();
+  const items = useItemEditor(ids.join(","), grids?.length ?? 0);
   const set = (next: LayoutGrid[], label: string) =>
     editor.setProp(ids, "layoutGrids", next.length ? next : null, label);
   const replace = (i: number, next: LayoutGrid, label: string) =>

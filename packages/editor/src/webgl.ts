@@ -51,6 +51,8 @@ function compile(
 export interface QuadProgram<T extends string, U extends string> {
   readonly canvas: AnyCanvas;
   readonly gl: WebGL2RenderingContext;
+  /** The largest texture side this GPU takes. */
+  readonly maxTexture: number;
   readonly textures: Readonly<Record<T, { readonly unit: number; readonly texture: WebGLTexture }>>;
   readonly uniforms: Readonly<Record<U, WebGLUniformLocation | null>>;
 }
@@ -116,16 +118,37 @@ export function quadProgram<T extends string, U extends string>(
   });
   const uniforms = {} as Record<U, WebGLUniformLocation | null>;
   for (const name of options.uniforms) uniforms[name] = gl.getUniformLocation(program, name);
-  return { canvas, gl, textures, uniforms };
+  const maxTexture = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096;
+  return { canvas, gl, maxTexture, textures, uniforms };
 }
 
-/** Sizes the program's canvas to w × h and clears it, ready to draw. */
-export function begin(p: QuadProgram<string, string>, w: number, h: number): void {
-  if (p.canvas.width !== w) p.canvas.width = w;
-  if (p.canvas.height !== h) p.canvas.height = h;
-  p.gl.viewport(0, 0, w, h);
-  p.gl.clearColor(0, 0, 0, 0);
-  p.gl.clear(p.gl.COLOR_BUFFER_BIT);
+/**
+ * Whether the program can draw a w × h picture now: its context isn't lost,
+ * and the picture fits the GPU's textures. When it can't, the caller keeps
+ * what it has rather than draw a blank.
+ */
+export function fits(p: QuadProgram<string, string>, w: number, h: number): boolean {
+  return !p.gl.isContextLost() && w <= p.maxTexture && h <= p.maxTexture;
+}
+
+/**
+ * Readies the program to draw a w × h picture at its canvas's top left
+ * (read it back from (0, 0, w, h)), cleared. The canvas only grows, so a
+ * zoom doesn't reallocate it every frame, unless it's far bigger than needed.
+ * False when the drawing buffer came out smaller than asked (the browser
+ * caps it): don't use what it draws.
+ */
+export function begin(p: QuadProgram<string, string>, w: number, h: number): boolean {
+  const { canvas, gl } = p;
+  const oversized = canvas.width * canvas.height > 4 * w * h;
+  if (canvas.width < w || oversized) canvas.width = w;
+  if (canvas.height < h || oversized) canvas.height = h;
+  if (gl.drawingBufferWidth < w || gl.drawingBufferHeight < h) return false;
+  // The viewport's origin is the bottom left: the top rows are the canvas's top.
+  gl.viewport(0, gl.drawingBufferHeight - h, w, h);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  return true;
 }
 
 /** Puts a canvas's pixels in one of the program's textures. */
