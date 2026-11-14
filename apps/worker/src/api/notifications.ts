@@ -204,6 +204,8 @@ interface Row {
   read_at: number | null;
   file_id: string;
   file_name: string;
+  team_id: string;
+  team_name: string;
   thread_id: string;
   resolved_at: number | null;
   actor_id: string | null;
@@ -252,10 +254,12 @@ export const notifications = new Hono<AppContext>()
     if (cursor) where.push("(n.created_at < ?2 OR (n.created_at = ?2 AND n.id < ?3))");
     const { results } = await c.env.DB.prepare(
       `SELECT n.id, n.kind, n.created_at, n.read_at, n.file_id, f.name AS file_name, n.thread_id,
+              tt.id AS team_id, tt.name AS team_name,
               t.resolved_at, a.id AS actor_id, a.name AS actor_name,
               COALESCE(c.body, (SELECT fc.body FROM comments fc WHERE fc.thread_id = n.thread_id
                                  ORDER BY fc.created_at, fc.id LIMIT 1)) AS body
          FROM ${VISIBLE}
+         JOIN teams tt ON tt.id = f.team_id
          JOIN comment_threads t ON t.id = n.thread_id
          LEFT JOIN comments c ON c.id = n.comment_id
          LEFT JOIN users a ON a.id = n.actor_id
@@ -273,6 +277,7 @@ export const notifications = new Hono<AppContext>()
         createdAt: r.created_at,
         readAt: r.read_at,
         file: { id: r.file_id, name: r.file_name },
+        team: { id: r.team_id, name: r.team_name },
         threadId: r.thread_id,
         resolved: r.resolved_at !== null,
         actor: r.actor_id && r.actor_name !== null ? { id: r.actor_id, name: r.actor_name } : null,

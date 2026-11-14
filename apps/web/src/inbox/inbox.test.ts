@@ -31,6 +31,7 @@ describe("inboxSentence", () => {
     createdAt: 0,
     readAt: null,
     file: { id: "f", name: "Onboarding" },
+    team: { id: "tm", name: "Studio" },
     threadId: "t",
     resolved: false,
     actor,
