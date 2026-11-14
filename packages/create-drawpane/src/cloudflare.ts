@@ -25,6 +25,10 @@ export interface Cloudflare {
   ensureBucket(accountId: string, name: string): Promise<void>;
   /** The names of the secrets the instance's Worker has; none when it doesn't exist yet. */
   secretNames(dir: string, accountId: string): Promise<string[]>;
+  /** Sets the Worker's secrets from a JSON file of names and values, without deploying its code. */
+  putSecrets(dir: string, accountId: string, secretsFile: string): Promise<void>;
+  /** Removes a secret from the Worker. */
+  deleteSecret(dir: string, accountId: string, name: string): Promise<void>;
   /** Applies the instance's pending D1 migrations; returns the ones it applied ("0011_invite_notes"). */
   migrate(dir: string, accountId: string, database: string): Promise<string[]>;
   /**
@@ -139,6 +143,15 @@ export const wrangler: Cloudflare = {
       if (error instanceof WranglerError && /not found|10007/i.test(error.output)) return [];
       throw error;
     }
+  },
+
+  async putSecrets(dir, accountId, secretsFile) {
+    await run(["secret", "bulk", secretsFile], { cwd: dir, accountId });
+  },
+
+  async deleteSecret(dir, accountId, name) {
+    // With no terminal attached, Wrangler takes "yes" for its "are you sure?".
+    await run(["secret", "delete", name], { cwd: dir, accountId });
   },
 
   async migrate(dir, accountId, database) {

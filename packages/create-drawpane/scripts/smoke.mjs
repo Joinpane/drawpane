@@ -19,10 +19,15 @@ import {
 const release = await bundledRelease();
 const dir = await mkdtemp(join(tmpdir(), "drawpane-smoke-"));
 try {
-  for (const domain of [null, "design.example.com"]) {
+  // On workers.dev; and on a domain, sending email through Cloudflare Email Service.
+  for (const { domain, sendEmail } of [
+    { domain: null, sendEmail: false },
+    { domain: "design.example.com", sendEmail: true },
+  ]) {
     const config = {
       ...newConfig({ accountId: "smoke", name: "drawpane-smoke", domain }),
       database: { name: "drawpane-smoke", id: "00000000-0000-4000-8000-000000000000" },
+      ...(sendEmail ? { sendEmail } : {}),
     };
     await copyRelease(release, dir);
     await writeConfig(dir, config);
@@ -51,6 +56,7 @@ try {
       "env.FILES",
       "env.ASSETS",
       "env.DRAWPANE_VERSION",
+      ...(sendEmail ? ["env.EMAIL"] : []),
     ])
       if (!output.includes(binding)) {
         console.error(output);

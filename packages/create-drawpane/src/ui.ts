@@ -21,6 +21,11 @@ export interface Ui {
     placeholder?: string;
     validate?: (value: string) => string | null;
   }): Promise<string>;
+  /** Like text, but what's typed is masked: for keys and passwords. */
+  secret(question: {
+    message: string;
+    validate?: (value: string) => string | null;
+  }): Promise<string>;
   select<T>(question: { message: string; options: readonly Choice<T>[] }): Promise<T>;
   confirm(question: { message: string; initial?: boolean }): Promise<boolean>;
   /** Runs one step with a spinner; `done` describes it once it has finished. */
@@ -54,6 +59,16 @@ export function terminalUi(): Ui {
           message,
           ...(initial !== undefined ? { initialValue: initial } : {}),
           ...(placeholder !== undefined ? { placeholder } : {}),
+          ...(validate ? { validate: (v) => validate((v ?? "").trim()) ?? undefined } : {}),
+        }),
+      );
+      return (value ?? "").trim();
+    },
+    async secret({ message, validate }) {
+      const value = answer(
+        await clack.password({
+          message,
+          mask: "•",
           ...(validate ? { validate: (v) => validate((v ?? "").trim()) ?? undefined } : {}),
         }),
       );

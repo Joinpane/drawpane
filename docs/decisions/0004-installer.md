@@ -28,6 +28,8 @@ Someone running an instance shouldn't need our toolchain, our repository, or to 
 
 **Upgrading is one command in the folder:** `npm create drawpane@latest upgrade`. It refuses to go backwards, swaps in the new `server/`, regenerates `wrangler.jsonc`, applies new migrations, then deploys (migrations are additive, so the old Worker keeps working until the new one takes over). Secrets are left as they are.
 
+**Email is one command too:** `npm create drawpane@latest email` asks which provider and what it needs, and saves the answers as Worker secrets without a deploy (Cloudflare Email Service, whose binding is part of the Worker, deploys; `drawpane.json` records it as `sendEmail`). Switching providers removes the old one's keys; choosing "off" removes them all. See 0006-email.md.
+
 **It's scriptable.** Every question has a flag (`--account`, `--name`, `--domain`, `--yes`), and with `--yes` and no TTY it never prompts: CI can install and upgrade.
 
 **The end is the setup page.** The installer waits for `/api/health`, then prints the address and the one-time setup token, and opens `/setup` in the browser.

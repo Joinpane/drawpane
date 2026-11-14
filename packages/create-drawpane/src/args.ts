@@ -57,33 +57,40 @@ export function explainArgsError(error: unknown): unknown {
 }
 
 export interface Command {
-  readonly kind: "install" | "upgrade";
-  /** The instance's folder; undefined means ask (install) or here (upgrade). */
+  readonly kind: "install" | "upgrade" | "email";
+  /** The instance's folder; undefined means ask (install) or here (upgrade, email). */
   readonly dir: string | undefined;
 }
 
 /** Commands, and words people type for them by mistake. */
-const COMMANDS: Record<string, readonly string[]> = { upgrade: ["update"] };
+const COMMANDS: Record<Exclude<Command["kind"], "install">, readonly string[]> = {
+  upgrade: ["update"],
+  email: ["mail", "emails"],
+};
 
 /**
  * What to do, from the words after the options: `[folder]` installs,
- * `upgrade [folder]` upgrades. A word that looks like a mistyped command
+ * `upgrade [folder]` upgrades, `email [folder]` sets up email. A word that looks like a mistyped command
  * ("upgarde") is asked about rather than made into a folder; `./upgarde`
  * still means the folder.
  */
 export function parseCommand(positionals: readonly string[]): Command {
   const [first, ...rest] = positionals;
-  const command = first === "upgrade" ? "upgrade" : "install";
-  const dir = command === "upgrade" ? rest.shift() : first;
+  const command: Command["kind"] = first === "upgrade" || first === "email" ? first : "install";
+  const dir = command === "install" ? first : rest.shift();
   if (rest.length > 0) {
     throw new Problem(
-      `Unexpected: ${rest.join(" ")}. ${command === "upgrade" ? "Upgrade takes one folder" : "Give one folder"}. See --help.`,
+      `Unexpected: ${rest.join(" ")}. ${command === "install" ? "Give one folder" : `${command === "upgrade" ? "Upgrade" : "Email"} takes one folder`}. See --help.`,
     );
   }
   if (command === "install" && first !== undefined) {
     const word = first.toLowerCase();
     const meant = Object.keys(COMMANDS).find(
-      (c) => first !== c && (distance(word, c) <= 2 || COMMANDS[c]?.includes(word)),
+      (c) =>
+        first !== c &&
+        // A short command is a closer call: "detail" is a folder, not a mistyped "email".
+        (distance(word, c) <= Math.floor(c.length / 3) ||
+          COMMANDS[c as keyof typeof COMMANDS].includes(word)),
     );
     if (meant) {
       throw new Problem(

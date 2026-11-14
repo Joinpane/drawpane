@@ -114,7 +114,19 @@ Who gets in stays the same: signing in with a provider finds an existing account
 
 Email is optional and off by default. Without it, mentions and replies show up in each person's **Inbox** in Drawpane, and invites are links you share. With it, Drawpane can also email people about them.
 
-Pick one way to send. Set everything with `npx wrangler secret put`, from the instance's folder (or `apps/worker`, installed by hand): secrets stay through upgrades, and `EMAIL_PROVIDER` and `EMAIL_FROM` aren't sensitive but are kept the same way.
+The quickest way is the installer, in the instance's folder:
+
+```sh
+npm create drawpane@latest email
+```
+
+It asks which way to send and what that needs (an API key, or an SMTP server and its login), and saves the answers as the Worker's secrets: they stay through upgrades. Run it again to switch to another provider (the old one's keys are removed) or to turn email off. Cloudflare Email Service also deploys the Worker again, with its `send_email` binding, so the installer has to carry the version the instance runs: upgrade first if it doesn't.
+
+For scripts and CI, `npm create drawpane@latest email -- --yes` reads the same settings from the environment (`EMAIL_PROVIDER`, `EMAIL_FROM` and the provider's, as in the table below), and says everything that's missing at once.
+
+### By hand
+
+Set everything with `npx wrangler secret put`, from the instance's folder (or `apps/worker`, installed by hand): secrets stay through upgrades, and `EMAIL_PROVIDER` and `EMAIL_FROM` aren't sensitive but are kept the same way.
 
 ```sh
 npx wrangler secret put EMAIL_PROVIDER   # cloudflare, resend, postmark, sendgrid, mailgun, ses or smtp
@@ -125,7 +137,7 @@ Then the provider's credentials:
 
 | Provider | Also set | Notes |
 | --- | --- | --- |
-| Cloudflare Email Service (`cloudflare`) | A `send_email` binding named `EMAIL` on the Worker | No key. Onboard your sending domain in the Cloudflare dashboard first; until then it only reaches verified addresses. Needs Workers Paid. |
+| Cloudflare Email Service (`cloudflare`) | A `send_email` binding named `EMAIL` on the Worker (the installer adds it; by hand, add `"send_email": [{ "name": "EMAIL" }]` to `wrangler.jsonc`) | No key. Onboard your sending domain in the Cloudflare dashboard first; until then it only reaches verified addresses. Needs Workers Paid. |
 | Resend (`resend`) | `EMAIL_API_KEY` | Verify the domain of `EMAIL_FROM` in Resend. |
 | Postmark (`postmark`) | `EMAIL_API_KEY` (a server token) | Sends on the server's `outbound` stream. |
 | SendGrid (`sendgrid`) | `EMAIL_API_KEY` | Verify the sender or domain in SendGrid. |

@@ -90,6 +90,8 @@ export function renderWranglerConfig(
   delete rendered.$schema;
   delete rendered.routes;
   if (config.domain) rendered.routes = [{ pattern: config.domain, custom_domain: true }];
+  delete rendered.send_email;
+  if (config.sendEmail) rendered.send_email = [{ name: "EMAIL" }];
   return `${HEADER}${JSON.stringify(rendered, null, 2)}\n`;
 }
 
