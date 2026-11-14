@@ -6,7 +6,14 @@
  */
 import type { Editor } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { Badge, type BadgeTone, Icon, Popover, SegmentedControl } from "@drawpane/ui";
+import {
+  Badge,
+  type BadgeTone,
+  Icon,
+  Popover,
+  type PopoverSide,
+  SegmentedControl,
+} from "@drawpane/ui";
 import {
   type KeyboardEvent,
   useEffect,
@@ -17,6 +24,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { describeFamily, type FontFamily, fonts, nearestWeight } from "../../fonts/fonts";
+import { useDisclosure } from "./fields";
 
 type Tab = "all" | "file" | "team" | "google" | "local";
 
@@ -82,9 +90,23 @@ function setFamily(editor: Editor, weights: ReadonlyMap<string, number>, f: Font
   }
 }
 
-export function FontPicker({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
+export function FontPicker({
+  editor,
+  nodes,
+  side = "left",
+  compact = false,
+  onOpenChange,
+}: {
+  editor: Editor;
+  nodes: NodeRecord[];
+  /** Where the list opens. Default "left", beside the inspector. */
+  side?: PopoverSide;
+  /** A narrower trigger, for the Selection Lens. */
+  compact?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
   const ref = useRef<HTMLButtonElement>(null);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosure(onOpenChange);
   const families = new Set(nodes.map((n) => getProp(n.props, "fontFamily")));
   const family = families.size === 1 ? ([...families][0] ?? null) : null;
   const status = useFontStatus(family);
@@ -93,11 +115,11 @@ export function FontPicker({ editor, nodes }: { editor: Editor; nodes: NodeRecor
       <button
         ref={ref}
         type="button"
-        className="font-trigger"
+        className={compact ? "font-trigger font-trigger--compact" : "font-trigger"}
         aria-label={`Font: ${family ?? "Mixed"}`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setOpen(!open)}
       >
         <span className="font-trigger__name">{family ?? "Mixed"}</span>
         {status === "missing" ? (
@@ -114,6 +136,7 @@ export function FontPicker({ editor, nodes }: { editor: Editor; nodes: NodeRecor
         <Popover
           anchor={ref.current}
           label="Fonts"
+          side={side}
           className="font-picker dp-root"
           onClose={() => setOpen(false)}
         >

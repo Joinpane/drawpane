@@ -6,18 +6,19 @@
  */
 import { describeTextStyle, type Editor, textStyles, textStyleUsers } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { Button, Icon, IconButton, Popover } from "@drawpane/ui";
+import { Button, Icon, IconButton, Popover, type PopoverSide } from "@drawpane/ui";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { uiFor, useUi } from "../ui-state";
+import { useDisclosure } from "./fields";
 import { TypographyFields } from "./TypographyFields";
 
 /** The style's own type, for its "Ag" sample (capped so big headings fit a row). */
-function sample(style: NodeRecord): React.CSSProperties {
+function sample(style: NodeRecord, max = 20): React.CSSProperties {
   return {
     fontFamily: `"${getProp(style.props, "fontFamily")}", var(--font-ui)`,
     fontWeight: getProp(style.props, "fontWeight"),
     fontStyle: getProp(style.props, "fontStyle"),
-    fontSize: Math.min(20, Math.max(11, getProp(style.props, "fontSize"))),
+    fontSize: Math.min(max, Math.max(11, getProp(style.props, "fontSize"))),
   };
 }
 
@@ -30,35 +31,89 @@ const pathOf = (style: NodeRecord) => {
   return { group: parts.slice(0, -1).join(" / "), leaf: parts.at(-1) ?? "" };
 };
 
+/** The Text section's style row: the style the text follows, its picker, and detach. */
 export function TextStyleRow({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
-  const trigger = useRef<HTMLButtonElement>(null);
-  const [open, setOpen] = useState(false);
+  // ⌥⌘T opens the picker for the selected text (here, not in the Lens).
   const request = useUi(editor, (ui) => ui.textStyles);
-  // ⌥⌘T opens the picker for the selected text.
-  const [seen, setSeen] = useState(request);
-  if (request !== seen) {
-    setSeen(request);
-    setOpen(true);
-  }
-  const ids = new Set(nodes.map((n) => getProp(n.props, "textStyle")));
-  const mixed = ids.size > 1;
-  const styleId = mixed ? null : ([...ids][0] ?? null);
-  const style = styleId ? editor.doc.get(styleId) : undefined;
-
+  const style = appliedStyle(editor, nodes);
   return (
     <div className="text-style-row">
+      <TextStyleTrigger editor={editor} nodes={nodes} openRequest={request} />
+      {style ? (
+        <IconButton
+          icon="detach"
+          label="Detach style"
+          onClick={() =>
+            editor.applyTextStyle(
+              nodes.map((n) => n.id),
+              null,
+            )
+          }
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** The style every node follows; null for none or a mix. */
+function appliedStyle(editor: Editor, nodes: NodeRecord[]): NodeRecord | null {
+  const ids = new Set(nodes.map((n) => getProp(n.props, "textStyle")));
+  const id = ids.size === 1 ? [...ids][0] : null;
+  const style = id ? editor.doc.get(id) : undefined;
+  return style?.type === "textStyle" ? style : null;
+}
+
+/**
+ * A button showing the applied text style (in its own type) that opens the
+ * styles picker. `openRequest` opens it whenever the number changes.
+ */
+export function TextStyleTrigger({
+  editor,
+  nodes,
+  side = "left",
+  compact = false,
+  openRequest,
+  onOpenChange,
+}: {
+  editor: Editor;
+  nodes: NodeRecord[];
+  /** Where the picker opens. Default "left", beside the inspector. */
+  side?: PopoverSide;
+  /** A narrower trigger, for the Selection Lens. */
+  compact?: boolean;
+  openRequest?: number;
+  onOpenChange?: (open: boolean) => void;
+}) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useDisclosure(onOpenChange);
+  const [seen, setSeen] = useState(openRequest);
+  if (openRequest !== seen) {
+    setSeen(openRequest);
+    setOpen(true);
+  }
+  const mixed = new Set(nodes.map((n) => getProp(n.props, "textStyle"))).size > 1;
+  const style = appliedStyle(editor, nodes);
+
+  return (
+    <>
       <button
         ref={trigger}
         type="button"
-        className="text-style-trigger"
+        className={
+          compact ? "text-style-trigger text-style-trigger--compact" : "text-style-trigger"
+        }
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`Text style: ${style ? nameOf(style) : mixed ? "Mixed" : "None"}`}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setOpen(!open)}
       >
         {style ? (
           <>
-            <span className="text-style__ag" style={sample(style)} aria-hidden="true">
+            <span
+              className="text-style__ag"
+              style={sample(style, compact ? 14 : 20)}
+              aria-hidden="true"
+            >
               Ag
             </span>
             <span className="text-style-trigger__name">{nameOf(style)}</span>
@@ -73,34 +128,23 @@ export function TextStyleRow({ editor, nodes }: { editor: Editor; nodes: NodeRec
         )}
         <Icon name="chevron-down" size={12} />
       </button>
-      {style ? (
-        <IconButton
-          icon="detach"
-          label="Detach style"
-          onClick={() =>
-            editor.applyTextStyle(
-              nodes.map((n) => n.id),
-              null,
-            )
-          }
-        />
-      ) : null}
       {open && trigger.current ? (
         <Popover
           anchor={trigger.current}
           label="Text styles"
+          side={side}
           className="text-styles dp-root"
           onClose={() => setOpen(false)}
         >
           <TextStylePanel
             editor={editor}
             nodes={nodes}
-            current={styleId}
+            current={style?.id ?? null}
             onDone={() => setOpen(false)}
           />
         </Popover>
       ) : null}
-    </div>
+    </>
   );
 }
 

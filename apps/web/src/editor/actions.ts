@@ -796,6 +796,17 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.state.set({ layoutGrids: !editor.s.layoutGrids }),
   },
   {
+    id: "view.lens",
+    label: "Selection Lens",
+    group: "View",
+    icon: "inspector",
+    keywords: "lens quick controls toolbar floating show hide",
+    run: ({ editor }) => {
+      const ui = uiFor(editor);
+      ui.set({ lens: !ui.get().lens });
+    },
+  },
+  {
     id: "view.clearGuides",
     label: "Remove all guides",
     group: "View",
