@@ -69,6 +69,7 @@ describe("notifications", () => {
       {
         kind: "mention",
         file: { id: fileId, name: "Onboarding" },
+        team: { id: ana.teamId, name: "Team" },
         threadId: thread.id,
         actor: { id: ana.userId, name: "Ana Ruiz" },
         excerpt: "@Bo Chen can you check the spacing?",

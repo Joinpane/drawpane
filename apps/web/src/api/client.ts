@@ -59,6 +59,8 @@ export interface InboxItem {
   readonly createdAt: number;
   readonly readAt: number | null;
   readonly file: { readonly id: string; readonly name: string };
+  /** The file's team: rows name it for people on more than one. */
+  readonly team: { readonly id: string; readonly name: string };
   readonly threadId: string;
   /** Whether the thread is resolved now. */
   readonly resolved: boolean;

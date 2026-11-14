@@ -3,7 +3,7 @@
  * editor's inbox menu), and the list query both use.
  */
 import { Icon } from "@drawpane/ui";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import type { MouseEvent } from "react";
 import { api, type InboxItem } from "../api/client";
@@ -46,6 +46,9 @@ export function InboxRow({
 }) {
   const { who, did } = inboxSentence(item);
   const unread = item.readAt === null;
+  // On more than one team, say whose file it is (the teams list is already loaded app-wide).
+  const teams = useQuery({ queryKey: ["teams"], queryFn: api.teams });
+  const manyTeams = (teams.data?.teams.length ?? 0) > 1;
   return (
     <li>
       <Link
@@ -71,6 +74,7 @@ export function InboxRow({
           <span className="inbox__sentence">
             <strong>{who}</strong> {did}{" "}
             {item.file.id === here ? "this file" : <strong>{item.file.name}</strong>}
+            {manyTeams ? <span className="inbox__team"> · {item.team.name}</span> : null}
             {item.resolved && item.kind !== "resolved" ? (
               <span className="inbox__resolved">Resolved</span>
             ) : null}

@@ -90,6 +90,10 @@
 .inbox__item--unread .inbox__sentence strong {
   font-weight: 650;
 }
+/* Whose file, for people on more than one team. */
+.inbox__team {
+  color: var(--ink-muted);
+}
 .inbox__resolved {
   margin-left: var(--space-200);
   padding: 0 6px;
