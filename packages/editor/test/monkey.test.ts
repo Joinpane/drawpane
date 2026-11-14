@@ -16,6 +16,10 @@
  * At the end, undoing everything gets back the start, and redoing as many
  * steps gets back the end.
  */
+
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { type NodeRecord, type PropName, ROOT_ID } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
@@ -24,6 +28,7 @@ import { Editor } from "../src/editor";
 import { explainSize } from "../src/explain";
 import { layoutOps } from "../src/layout";
 import { sizePill } from "../src/size-pill";
+import { type BooleanEngine, loadPathKitEngine } from "../src/vector";
 
 type Action =
   | {
@@ -44,6 +49,8 @@ type Action =
   | { kind: "copyPaste" }
   | { kind: "gesture"; node: number; props: [PropName, unknown][]; cancel: boolean }
   | { kind: "undo" | "redo" }
+  /** Union, subtract, intersect or exclude the selection (async: the engine is WebAssembly). */
+  | { kind: "boolean"; op: "union" | "subtract" | "intersect" | "exclude" }
   /** A named editor command, with two picks for whatever it needs (a layer, a style, an edge). */
   | { kind: "command"; name: Command; a: number; b: number };
 
@@ -193,8 +200,12 @@ const action: fc.Arbitrary<Action> = fc.oneof(
 /** More runs when fuzzing (FUZZ_RUNS); the seed is set for every property test in vitest.setup.ts. */
 const runs = (normally: number) => ({ numRuns: Number(process.env.FUZZ_RUNS) || normally });
 
-function setup() {
-  const editor = new Editor({ measurer: { width: (_f, t) => t.length * 7 }, clientId: "monkey" });
+function setup(engine?: BooleanEngine) {
+  const editor = new Editor({
+    ...(engine ? { booleanEngine: async () => engine } : {}),
+    measurer: { width: (_f, t) => t.length * 7 },
+    clientId: "monkey",
+  });
   editor.state.set({ role: "editor" });
   editor.doc.apply([
     { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
@@ -313,6 +324,9 @@ function run(editor: Editor, a: Action): void {
       return;
     case "command":
       command(editor, a, all);
+      return;
+    case "boolean":
+      // Async: `drive` runs it.
       return;
   }
 }
@@ -550,42 +564,73 @@ function stayedPut(editor: Editor, before: ReturnType<typeof placed>, history: s
   }
 }
 
+/** Runs a sequence, checking after every step, then undoes all the way and redoes. */
+async function drive(actions: readonly Action[], engine?: BooleanEngine): Promise<void> {
+  const editor = setup(engine);
+  const start = snapshot(editor);
+  const done: string[] = [];
+  for (const a of actions) {
+    const structural = STRUCTURAL.has(a.kind);
+    const before = structural ? placed(editor) : null;
+    if (a.kind === "boolean") await editor.booleanOp(a.op);
+    else run(editor, a);
+    done.push(
+      a.kind === "set"
+        ? `set ${a.prop}=${JSON.stringify(a.value)}`
+        : a.kind === "command"
+          ? a.name
+          : a.kind === "boolean"
+            ? a.op
+            : a.kind,
+    );
+    check(editor, done.join(", "));
+    if (before) stayedPut(editor, before, done.join(", "));
+  }
+  const end = snapshot(editor);
+  // Undo to the start, then redo as many steps (the run may have ended on an undo).
+  let steps = 0;
+  while (editor.s.canUndo && steps < 500) {
+    editor.undo();
+    steps++;
+  }
+  expect(snapshot(editor), "undo all the way").toEqual(start);
+  for (let i = 0; i < steps; i++) editor.redo();
+  expect(snapshot(editor), "redo all the way").toEqual(end);
+}
+
+const sequence = (extra?: fc.Arbitrary<Action>) =>
+  fc.array(
+    extra ? fc.oneof({ arbitrary: action, weight: 6 }, { arbitrary: extra, weight: 1 }) : action,
+    {
+      minLength: 10,
+      maxLength: Number(process.env.FUZZ_LENGTH ?? 60),
+    },
+  );
+
 describe("the editor, driven at random", () => {
-  it("keeps the document sound, laid out and explainable, and undoes all the way back", () => {
-    fc.assert(
-      fc.property(
-        fc.array(action, { minLength: 10, maxLength: Number(process.env.FUZZ_LENGTH ?? 60) }),
-        (actions) => {
-          const editor = setup();
-          const start = snapshot(editor);
-          const done: string[] = [];
-          for (const a of actions) {
-            const structural = STRUCTURAL.has(a.kind);
-            const before = structural ? placed(editor) : null;
-            run(editor, a);
-            done.push(
-              a.kind === "set"
-                ? `set ${a.prop}=${JSON.stringify(a.value)}`
-                : a.kind === "command"
-                  ? a.name
-                  : a.kind,
-            );
-            check(editor, done.join(", "));
-            if (before) stayedPut(editor, before, done.join(", "));
-          }
-          const end = snapshot(editor);
-          // Undo to the start, then redo as many steps (the run may have ended on an undo).
-          let steps = 0;
-          while (editor.s.canUndo && steps < 500) {
-            editor.undo();
-            steps++;
-          }
-          expect(snapshot(editor), "undo all the way").toEqual(start);
-          for (let i = 0; i < steps; i++) editor.redo();
-          expect(snapshot(editor), "redo all the way").toEqual(end);
-        },
-      ),
+  it("keeps the document sound, laid out and explainable, and undoes all the way back", async () => {
+    await fc.assert(
+      fc.asyncProperty(sequence(), (actions) => drive(actions)),
       runs(150),
+    );
+  }, 120_000);
+
+  it("does the same with boolean operations, on the real engine", async () => {
+    const require = createRequire(import.meta.url);
+    const wasm = join(dirname(require.resolve("pathkit-wasm")), "pathkit.wasm");
+    const engine = await loadPathKitEngine({ wasmBinary: readFileSync(wasm) });
+    const boolean = fc.record({
+      kind: fc.constant("boolean" as const),
+      op: fc.constantFrom(
+        "union" as const,
+        "subtract" as const,
+        "intersect" as const,
+        "exclude" as const,
+      ),
+    });
+    await fc.assert(
+      fc.asyncProperty(sequence(boolean), (actions) => drive(actions, engine)),
+      runs(60),
     );
   }, 120_000);
 });
