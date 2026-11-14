@@ -216,6 +216,8 @@ export const passkeys = new Hono<AppContext>()
         throw conflict("This instance was already set up. Sign in instead.");
       const teamId = newId();
       statements.push(
+        // Whoever sets the instance up runs it.
+        db.prepare("UPDATE users SET is_admin = 1 WHERE id = ?").bind(pending.userId),
         db
           .prepare("INSERT INTO teams (id, name, created_at) VALUES (?, ?, ?)")
           .bind(teamId, `${pending.name.split(" ")[0]}'s team`, now),

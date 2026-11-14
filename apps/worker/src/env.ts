@@ -35,6 +35,8 @@ export interface User {
   readonly id: string;
   readonly email: string;
   readonly name: string;
+  /** Runs the instance: sees its health, cost and settings. */
+  readonly isAdmin: boolean;
 }
 
 export interface AppContext {

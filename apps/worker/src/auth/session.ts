@@ -45,6 +45,7 @@ interface SessionRow {
   id: string;
   email: string;
   name: string;
+  is_admin: number;
 }
 
 /** Resolves the session cookie to a user. Extends sessions that are past half their life. */
@@ -55,7 +56,7 @@ export async function readSession(
   if (!token || token.length > 128) return null;
   const sessionId = await sha256Hex(token);
   const row = await env.DB.prepare(
-    `SELECT s.id AS session_id, s.expires_at, u.id, u.email, u.name
+    `SELECT s.id AS session_id, s.expires_at, u.id, u.email, u.name, u.is_admin
        FROM sessions s JOIN users u ON u.id = s.user_id
       WHERE s.id = ? AND s.expires_at > ?`,
   )
@@ -67,7 +68,10 @@ export async function readSession(
       .bind(Date.now() + SESSION_DAYS * DAY, sessionId)
       .run();
   }
-  return { user: { id: row.id, email: row.email, name: row.name }, sessionId };
+  return {
+    user: { id: row.id, email: row.email, name: row.name, isAdmin: row.is_admin === 1 },
+    sessionId,
+  };
 }
 
 /** Attaches the signed-in user (or null) to the request. */

@@ -14,6 +14,7 @@ import {
   ClientMessage,
   type CommentEvent,
   keyBetween,
+  LATENCY_BUCKETS_MS,
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_OPS_PER_TRANSACTION,
   MemoryStore,
@@ -83,7 +84,23 @@ const LOG_SCHEMA = `
     at INTEGER NOT NULL
   ) STRICT;
   CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
+  -- Usage not yet reported to D1 (see #flushUsage): counted here so it
+  -- survives the room going to sleep, and moved out by the alarm.
+  CREATE TABLE IF NOT EXISTS usage (
+    day TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    value REAL NOT NULL,
+    PRIMARY KEY (day, metric)
+  ) STRICT, WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS usage_editors (
+    day TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    PRIMARY KEY (day, user_id)
+  ) STRICT, WITHOUT ROWID;
 `;
+
+/** Today in UTC, the key usage is counted under. */
+const today = (now = Date.now()) => new Date(now).toISOString().slice(0, 10);
 
 /** Transactions kept for reconnect catch-up. Older history lives in R2 snapshots. */
 const LOG_RETENTION = 10_000;
@@ -221,6 +238,12 @@ export class FileRoom extends DurableObject<Env> {
       case "ping":
         this.#send(ws, { t: "pong" });
         return;
+      case "stats":
+        // How long this room took to confirm someone's edits, for the health page.
+        if (me.guest) return;
+        this.#countLatency(message.latency);
+        void this.#scheduleAlarm();
+        return;
     }
   }
 
@@ -239,6 +262,7 @@ export class FileRoom extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     const fileId = this.#meta("file_id");
+    if (fileId) await this.#flushUsage(fileId);
     if (fileId && this.#meta("touched") === "1") {
       const editedAt = Number(this.#meta("touched_at")) || Date.now();
       await this.env.DB.prepare("UPDATE files SET updated_at = ? WHERE id = ?")
@@ -562,6 +586,7 @@ export class FileRoom extends DurableObject<Env> {
             now,
           );
         }
+        if (author.userId !== "system") this.#count(now, author.userId);
         this.#setMeta("revn", String(next));
         this.#setMeta("touched", "1");
         // When the file was last edited (not when the alarm gets round to saying so).
@@ -620,6 +645,93 @@ export class FileRoom extends DurableObject<Env> {
       ],
       { clientId: "system", seq: 0, userId: "system", sessionId: "system" },
     );
+  }
+
+  /** Counts one edit by `userId` for the health page (inside the edit's own storage transaction). */
+  #count(now: number, userId: string): void {
+    const day = today(now);
+    this.#sql.exec(
+      "INSERT INTO usage (day, metric, value) VALUES (?, 'edits', 1) ON CONFLICT (day, metric) DO UPDATE SET value = value + 1",
+      day,
+    );
+    this.#sql.exec("INSERT OR IGNORE INTO usage_editors (day, user_id) VALUES (?, ?)", day, userId);
+  }
+
+  /** Adds a client's latency histogram (counts per LATENCY_BUCKETS_MS bucket) to today's usage. */
+  #countLatency(counts: readonly number[]): void {
+    const day = today();
+    this.ctx.storage.transactionSync(() => {
+      counts.forEach((n, i) => {
+        if (n <= 0) return;
+        const ceiling = LATENCY_BUCKETS_MS[i];
+        this.#sql.exec(
+          "INSERT INTO usage (day, metric, value) VALUES (?, ?, ?) ON CONFLICT (day, metric) DO UPDATE SET value = value + excluded.value",
+          day,
+          `latency_le_${ceiling ?? "inf"}`,
+          n,
+        );
+      });
+    });
+  }
+
+  /**
+   * Moves the counted usage to D1 in one batch, with the room's storage size:
+   * at most once per alarm, so measuring costs next to nothing. If D1 fails,
+   * the counts go back to wait for the next alarm.
+   */
+  async #flushUsage(fileId: string): Promise<void> {
+    const { usage, editors } = this.ctx.storage.transactionSync(() => {
+      const usage = this.#sql
+        .exec<{ day: string; metric: string; value: number }>(
+          "SELECT day, metric, value FROM usage",
+        )
+        .toArray();
+      const editors = this.#sql
+        .exec<{ day: string; user_id: string }>("SELECT day, user_id FROM usage_editors")
+        .toArray();
+      this.#sql.exec("DELETE FROM usage");
+      this.#sql.exec("DELETE FROM usage_editors");
+      return { usage, editors };
+    });
+    const db = this.env.DB;
+    try {
+      await db.batch([
+        ...usage.map((u) =>
+          db
+            .prepare(
+              "INSERT INTO usage_daily (day, metric, value) VALUES (?, ?, ?) ON CONFLICT (day, metric) DO UPDATE SET value = value + excluded.value",
+            )
+            .bind(u.day, u.metric, u.value),
+        ),
+        ...editors.map((e) =>
+          db
+            .prepare("INSERT OR IGNORE INTO editors_daily (day, user_id) VALUES (?, ?)")
+            .bind(e.day, e.user_id),
+        ),
+        db
+          .prepare(
+            "INSERT INTO room_storage (file_id, bytes, updated_at) VALUES (?, ?, ?) ON CONFLICT (file_id) DO UPDATE SET bytes = excluded.bytes, updated_at = excluded.updated_at",
+          )
+          .bind(fileId, this.ctx.storage.sql.databaseSize, Date.now()),
+      ]);
+    } catch (error) {
+      console.error("usage flush failed", error);
+      this.ctx.storage.transactionSync(() => {
+        for (const u of usage)
+          this.#sql.exec(
+            "INSERT INTO usage (day, metric, value) VALUES (?, ?, ?) ON CONFLICT (day, metric) DO UPDATE SET value = value + excluded.value",
+            u.day,
+            u.metric,
+            u.value,
+          );
+        for (const e of editors)
+          this.#sql.exec(
+            "INSERT OR IGNORE INTO usage_editors (day, user_id) VALUES (?, ?)",
+            e.day,
+            e.user_id,
+          );
+      });
+    }
   }
 
   /** Brings the alarm forward to soon (it keeps the file's "edited" time fresh), never later. */
