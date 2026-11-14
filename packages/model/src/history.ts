@@ -128,6 +128,8 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   description: "tokens",
   bindings: "tokens",
   variableModes: "tokens",
+  libraryFile: "component",
+  libraryPublish: "component",
 };
 
 const TOKEN_TYPES: ReadonlySet<NodeType> = new Set(["collection", "variable", "textStyle"]);

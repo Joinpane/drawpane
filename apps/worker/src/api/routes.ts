@@ -12,6 +12,7 @@ import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from
 import { comments } from "./comments";
 import { fonts } from "./fonts";
 import { imports } from "./imports";
+import { libraries } from "./libraries";
 import { media, thumbnailKey } from "./media";
 import { notifications } from "./notifications";
 import { backfillSearchNames, fileSearch, SEARCH_LIMIT } from "./search";
@@ -609,6 +610,8 @@ export const api = new Hono<AppContext>()
   .route("/", media)
   .route("/", share)
   .route("/", versions)
+  // Team libraries (./libraries.ts) ------------------------------------------
+  .route("/", libraries)
   // Filling a new file from an import (./imports.ts) ------------------------------
   .route("/", imports)
   // Fonts a team uploads (./team-fonts.ts) ------------------------------------

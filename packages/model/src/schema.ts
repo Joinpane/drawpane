@@ -16,6 +16,7 @@ export const NODE_TYPES = [
   "collection",
   "variable",
   "textStyle",
+  "library",
   "frame",
   "group",
   "rect",
@@ -44,11 +45,13 @@ export type LayerType = (typeof LAYER_TYPES)[number];
 
 /** Which child types each parent type accepts. The virtual root holds pages only. */
 export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]>> = {
-  root: ["page", "collection", "textStyle"],
+  root: ["page", "collection", "textStyle", "library"],
   page: LAYER_TYPES,
   collection: ["variable"],
   variable: [],
   textStyle: [],
+  // A team library a file uses (decision 0010): read-only copies of its components and what they need.
+  library: [...LAYER_TYPES, "textStyle", "collection"],
   frame: LAYER_TYPES,
   group: LAYER_TYPES,
   rect: [],
@@ -690,6 +693,9 @@ export const PROPS = {
   variableType: prop(z.enum(["color", "number", "string"]), "color", ["variable"]),
   values: prop(z.record(z.string().regex(ID_PATTERN), VariableValue), {}, ["variable"]),
   description: prop(z.string().max(2000), "", ["variable", "collection", "textStyle"]),
+  // A library this file uses (decision 0010): the library's file, and the publish its copies are from.
+  libraryFile: prop(z.string().regex(ID_PATTERN).nullable(), null, ["library"]),
+  libraryPublish: prop(z.string().regex(ID_PATTERN).nullable(), null, ["library"]),
   /** Bound properties: binding key → variable id. The bound property holds the resolved value. */
   bindings: prop(z.partialRecord(z.enum(BINDING_KEYS), z.string().regex(ID_PATTERN)), {}, LAYERS),
   /** Which mode of each collection applies inside this frame or page: collection id → mode id. */

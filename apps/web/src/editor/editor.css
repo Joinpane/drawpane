@@ -1335,12 +1335,20 @@
   display: flex;
   flex-direction: column;
 }
+/* The search and the team libraries button, in a row. */
+.assets__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-100);
+  margin: var(--space-100) var(--space-200) var(--space-200);
+}
 .assets__search {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--space-200);
   height: var(--size-control-sm);
-  margin: var(--space-100) var(--space-200) var(--space-200);
   padding: 0 var(--space-200);
   border-radius: var(--radius-sm);
   background: var(--surface-sunken);
@@ -1439,6 +1447,255 @@
 }
 .assets__pad {
   padding: var(--space-300);
+}
+/* A line under a heading, level with it. */
+.assets__note {
+  padding: 0 var(--space-100);
+}
+.assets__empty .dp-button {
+  margin-top: var(--space-300);
+}
+/* "This file", above its own components when it uses team libraries too. */
+.assets__heading {
+  margin: var(--space-100) 0 var(--space-200);
+  padding: 0 var(--space-100);
+  color: var(--ink);
+  font: 600 11px / 14px var(--font-ui);
+}
+/* A team library the file uses: its name, an update when there is one, its components. */
+.assets__library {
+  margin-top: var(--space-400);
+  padding-top: var(--space-300);
+  border-top: 1px solid var(--line);
+}
+.assets__library-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  min-height: 22px;
+  margin-bottom: var(--space-200);
+  padding: 0 var(--space-100);
+  color: var(--icon);
+}
+.assets__library-head .assets__group-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-weight: 600;
+}
+.assets__update {
+  height: 22px;
+  padding: 0 var(--space-200);
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--signal-soft);
+  color: var(--signal);
+  font: 600 11px / 14px var(--font-ui);
+  cursor: pointer;
+}
+.assets__update:hover {
+  filter: brightness(0.97);
+}
+.assets__update:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.assets__update:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.assets__link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--signal);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Team library dialogs (libraries/): publishing, browsing, reviewing updates. */
+.library-dialog__lede {
+  margin: calc(var(--space-200) * -1) 0 0;
+  font: var(--type-ui-body);
+  color: var(--ink-muted);
+  text-wrap: pretty;
+}
+.library-dialog__note {
+  margin: 0;
+  padding: var(--space-200) var(--space-300);
+  border-left: 2px solid var(--line-strong);
+  font: var(--type-ui-body);
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+.library-dialog__group {
+  display: grid;
+  gap: var(--space-100);
+}
+.library-dialog__group-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-200);
+  margin: var(--space-100) 0 0;
+  font: 600 12px / 16px var(--font-ui);
+  color: var(--ink);
+}
+.library-dialog__count {
+  font-weight: 500;
+  color: var(--ink-muted);
+}
+.library-dialog__summary {
+  margin-left: auto;
+  font: 500 11px / 14px var(--font-ui);
+  color: var(--signal);
+}
+.library-dialog__hint {
+  margin: 0;
+  font: 400 12px / 16px var(--font-ui);
+  color: var(--ink-muted);
+}
+.library-dialog__list {
+  display: grid;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--space-100);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  list-style: none;
+}
+.library-dialog__list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  min-height: 24px;
+  padding: 0 var(--space-200);
+  font: 400 12px / 16px var(--font-ui);
+  color: var(--ink);
+}
+.library-dialog__list .dp-icon {
+  flex: none;
+  color: var(--icon);
+}
+.library-dialog__item {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.library-dialog__badge {
+  flex: none;
+  padding: 1px var(--space-200);
+  border-radius: var(--radius-full);
+  background: var(--signal-soft);
+  color: var(--signal);
+  font: 600 10px / 14px var(--font-ui);
+}
+.library-dialog__list li[data-status="removed"] {
+  color: var(--ink-muted);
+}
+.library-dialog__list li[data-status="removed"] .library-dialog__item {
+  text-decoration: line-through;
+}
+.library-dialog__list li[data-status="removed"] .library-dialog__badge {
+  background: var(--surface-hover);
+  color: var(--ink-muted);
+}
+.library-dialog__textarea {
+  height: auto;
+  min-height: 64px;
+  padding-top: var(--space-200);
+  padding-bottom: var(--space-200);
+  resize: vertical;
+  font: var(--type-ui-body);
+  line-height: 18px;
+}
+.library-dialog__optional {
+  margin-left: var(--space-100);
+  font-weight: 400;
+  color: var(--ink-muted);
+}
+.library-dialog__error {
+  margin: 0;
+  font: 400 12px / 16px var(--font-ui);
+  color: var(--danger);
+}
+.library-dialog__empty {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-300);
+  padding: var(--space-300);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  color: var(--ink-muted);
+  font: 400 12px / 18px var(--font-ui);
+}
+.library-dialog__empty p {
+  margin: 0;
+}
+.library-dialog__empty .dp-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--icon);
+}
+.library-dialog__libraries {
+  display: grid;
+  gap: var(--space-100);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.library-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  padding: var(--space-200) var(--space-200) var(--space-200) var(--space-300);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.library-row--own {
+  background: var(--surface-sunken);
+  box-shadow: none;
+}
+.library-row__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--icon);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.library-row__text {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.library-row__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 12px / 16px var(--font-ui);
+  color: var(--ink);
+}
+.library-row__meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 11px / 14px var(--font-ui);
+  color: var(--ink-muted);
 }
 
 /* Variable binding */

@@ -21,6 +21,7 @@ export * from "./images";
 export * from "./interaction";
 export * from "./labels";
 export * from "./layout";
+export * from "./libraries";
 export * from "./masks";
 export * from "./minimap";
 export * from "./names";

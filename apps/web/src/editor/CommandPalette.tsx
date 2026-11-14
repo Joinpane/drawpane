@@ -124,12 +124,14 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
         if (node.type === "page") continue;
         const name = getProp(node.props, "name");
         if (!name.toLowerCase().includes(q)) continue;
+        // Layers are on pages: not tokens, text styles or a team library's copies.
         const page = editor.doc.pageOf(node.id);
+        if (!page) continue;
         layers.push({
           id: `layer:${node.id}`,
           label: name,
           icon: layerKind(node.type).icon,
-          hint: page && page.id !== pageId ? getProp(page.props, "name") : node.type,
+          hint: page.id !== pageId ? getProp(page.props, "name") : node.type,
         });
         if (layers.length >= 8) break;
       }

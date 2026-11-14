@@ -230,7 +230,7 @@ Reference key: **Penpot** means Penpot has this capability and its behavior is o
 | Layout | Breakpoint strip, exportable media and container queries | v0.3 | New |
 | Components | Main components, instances, overrides, variants | v0.1 | Penpot |
 | Components | Slots, component playground with auto-generated state matrix | v0.3 | New |
-| Libraries | Shared team libraries with versioned publish and update review | v0.2 | Penpot |
+| Libraries | Shared team libraries with versioned publish and update review (decision 0010) | v0.2 | Penpot |
 | Tokens | One model for tokens, variables, modes and styles; DTCG import and export | v0.1 | Penpot |
 | Tokens | Two-way GitHub sync of tokens | v0.3 | New |
 | Prototyping | Interactions, flows, overlays, present mode, shareable prototype links | v0.1 | Penpot |

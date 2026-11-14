@@ -76,6 +76,20 @@ import {
   layoutOps,
   placedByLayout,
 } from "./layout";
+import {
+  assetMain,
+  importBatches,
+  importOps,
+  isLibraryCopy,
+  keepUsedCopies,
+  type LibraryRef,
+  libraryContainerId,
+  libraryNodeId,
+  libraryOf,
+  libraryUses,
+  touchesLibraryCopies,
+  updateOps,
+} from "./libraries";
 import { readingOrderOf } from "./reading-order";
 import {
   isRunProp,
@@ -243,6 +257,12 @@ export interface CommitOptions {
    * default). Off while ⌘ is held during a resize, like Figma.
    */
   readonly constraints?: boolean;
+  /**
+   * A team library's own write (decision 0010): copying, updating, using or
+   * no longer using one. Anything else that would write a library's copies
+   * is refused: they're the library's, read-only here.
+   */
+  readonly library?: boolean;
 }
 
 export interface EditorOptions {
@@ -453,6 +473,10 @@ export class Editor {
    */
   commit(ops: readonly Op[], label = "Edit", options: CommitOptions = {}): boolean {
     if (!this.canEdit || ops.length === 0) return false;
+    if (!options.library && touchesLibraryCopies(this.doc, ops)) {
+      this.notify("That's part of a team library. Change it in the library's file, then publish.");
+      return false;
+    }
     // Editing takes the view back: you can't follow someone and work at once.
     if (this.s.following) this.state.set({ following: null });
     let inverse: Op[];
@@ -566,6 +590,8 @@ export class Editor {
     for (const id of ids) {
       const node = this.doc.get(id);
       if (node?.type !== "text") continue;
+      // A library's copy is as published: sized there, not by this browser's fonts.
+      if (isLibraryCopy(this.doc, id)) continue;
       const size = autoSize(node, this.measurer);
       if (!size) continue;
       const width = round2(size.width);
@@ -620,7 +646,8 @@ export class Editor {
   undo(): void {
     if (!this.canEdit) return;
     const selection = this.history.undo(
-      (ops) => this.#commitWithFixups(ops, false),
+      // Copies a teammate has used since stay: their instances need their mains.
+      (ops) => this.#commitWithFixups(keepUsedCopies(this.doc, ops), false),
       this.s.selection,
     );
     if (selection) this.select(selection.filter((id) => this.doc.has(id)));
@@ -1754,6 +1781,74 @@ export class Editor {
     return made.rootId;
   }
 
+  /**
+   * Places an instance of a team library's component (decision 0010): its
+   * main and what it needs are copied from `source` (the publish this file
+   * has, or the library's latest for a first use) unless the file has them,
+   * then an instance goes in as for the file's own components. One undo step.
+   */
+  insertLibraryComponent(
+    source: Doc,
+    lib: LibraryRef,
+    assetId: string,
+    at?: { x: number; y: number },
+  ): string | null {
+    const main = assetMain(source, assetId);
+    if (!main || !this.canEdit) return null;
+    this.beginGesture("Insert instance");
+    try {
+      // One transaction per copy: a teammate copying the same at once clashes on one, not all.
+      for (const batch of importBatches(this.doc, source, lib, [assetId]))
+        if (!this.commit(batch, "Insert instance", { overrides: false, library: true }))
+          return null;
+      return this.insertInstance(libraryNodeId(lib.fileId, main), at);
+    } finally {
+      this.endGesture();
+    }
+  }
+
+  /** Starts using a team library in this file, so its components show in Assets. */
+  useLibrary(lib: LibraryRef): boolean {
+    if (this.doc.has(libraryContainerId(lib.fileId))) return true;
+    return this.commit(importOps(this.doc, new Doc(), lib, []), `Use ${lib.name || "library"}`, {
+      overrides: false,
+      library: true,
+    });
+  }
+
+  /**
+   * Stops using a team library. Only once no instance in the file is of its
+   * components (detach them first), so nothing loses its main.
+   */
+  stopUsingLibrary(libraryFileId: string): boolean {
+    const container = libraryContainerId(libraryFileId);
+    if (!this.doc.has(container)) return false;
+    const uses = libraryUses(this.doc, libraryFileId);
+    if (uses > 0) {
+      this.notify(
+        `${uses} ${uses === 1 ? "instance uses" : "instances use"} this library. Detach ${uses === 1 ? "it" : "them"} first.`,
+      );
+      return false;
+    }
+    return this.commit([{ op: "delete", id: container }], "Stop using library", {
+      library: true,
+    });
+  }
+
+  /**
+   * Brings this file's copies of a library's components in line with a newer
+   * publish (`source`, its snapshot); their instances follow, overrides kept.
+   */
+  updateLibrary(source: Doc, lib: LibraryRef): boolean {
+    const ops = updateOps(this.doc, source, lib);
+    if (ops.length === 0) return false;
+    return this.commit(ops, `Update ${lib.name || "library"}`, {
+      overrides: false,
+      constraints: false,
+      library: true,
+    });
+  }
+
   /** Selects an instance's main component, switching page if needed (⌥⌘G on an instance). */
   goToMainComponent(id = this.s.selection[0]): void {
     const root = id ? instanceRootOf(this.doc, id) : undefined;
@@ -1761,6 +1856,14 @@ export class Editor {
     const main = mainId ? this.doc.get(mainId) : undefined;
     if (!main) {
       this.notify("The main component was deleted. Detach the instance to keep it as a frame.");
+      return;
+    }
+    // A team library's: it lives in the library's file, not this one.
+    const library = libraryOf(this.doc, main.id);
+    if (library) {
+      this.notify(
+        `${getProp(main.props, "name") || "This component"} is from the ${getProp(library.props, "name") || "team"} library. Change it in that file, then publish.`,
+      );
       return;
     }
     const page = this.doc.pageOf(main.id);

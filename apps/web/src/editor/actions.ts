@@ -50,6 +50,10 @@ export interface ActionContext {
   readonly showHistory: () => void;
   /** Asks for a name and saves the file as it is now as a version. */
   readonly saveVersion: () => void;
+  /** Opens the team's libraries, to use in this file. */
+  readonly browseLibraries: () => void;
+  /** Publishes this file's components as a team library. */
+  readonly publishLibrary: () => void;
   /** Starts renaming the selected layer in the layers panel. */
   readonly rename: () => void;
   /** Opens the keyboard shortcuts sheet. */
@@ -1002,6 +1006,23 @@ export const ACTIONS: readonly Action[] = [
     keywords: "version name milestone checkpoint history",
     enabled: canEdit,
     run: ({ saveVersion }) => saveVersion(),
+  },
+  {
+    id: "file.browseLibraries",
+    label: "Team libraries…",
+    group: "File",
+    icon: "book",
+    keywords: "library libraries design system components team shared use",
+    run: ({ browseLibraries }) => browseLibraries(),
+  },
+  {
+    id: "file.publishLibrary",
+    label: "Publish library…",
+    group: "File",
+    icon: "book",
+    keywords: "library publish design system components team share",
+    enabled: canEdit,
+    run: ({ publishLibrary }) => publishLibrary(),
   },
   {
     id: "file.addPage",

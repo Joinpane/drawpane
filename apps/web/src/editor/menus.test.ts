@@ -55,6 +55,8 @@ function setup(role: "editor" | "viewer" = "editor") {
     showTab: noop,
     showHistory: noop,
     saveVersion: noop,
+    browseLibraries: noop,
+    publishLibrary: noop,
     rename: vi.fn(),
     showShortcuts: noop,
     findLayers: noop,

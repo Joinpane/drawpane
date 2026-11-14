@@ -54,6 +54,8 @@ import { InspectPanel } from "./InspectPanel";
 import { Inspector } from "./inspector/Inspector";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
+import { BrowseLibrariesDialog } from "./libraries/LibrarySections";
+import { PublishDialog } from "./libraries/PublishDialog";
 import { Minimap } from "./Minimap";
 import { chooseImageFiles, filesFrom, importImageFiles, pasteFromClipboard } from "./media";
 import { PaneResizer } from "./PaneResizer";
@@ -169,6 +171,9 @@ function FileEditor({ fileId }: { fileId: string }) {
   }, []);
   const [versionTab, setVersionTab] = useState<"version" | "inspect">("version");
   const [naming, setNaming] = useState<{ version: VersionInfo | null } | null>(null);
+  // Team libraries (decision 0010): the team's libraries, and publishing this file as one.
+  const [librariesOpen, setLibrariesOpen] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
   const [confirmRestore, setConfirmRestore] = useState<VersionInfo | null>(null);
   const showVersion = (version: VersionInfo | null) => {
     if (version) {
@@ -323,6 +328,10 @@ function FileEditor({ fileId }: { fileId: string }) {
       },
       saveVersion: () => {
         if (editor.canEdit) setNaming({ version: null });
+      },
+      browseLibraries: () => setLibrariesOpen(true),
+      publishLibrary: () => {
+        if (editor.canEdit) setPublishOpen(true);
       },
       rename: () => {
         const id = editor.s.selection[0];
@@ -668,7 +677,7 @@ function FileEditor({ fileId }: { fileId: string }) {
                   <LayersPanel />
                 </>
               ) : leftTab === "assets" ? (
-                <AssetsPanel />
+                <AssetsPanel onLibraries={() => setLibrariesOpen(true)} />
               ) : (
                 <HistoryPanel
                   versions={history.versions}
@@ -795,6 +804,16 @@ function FileEditor({ fileId }: { fileId: string }) {
           <ContextMenus editor={active} ctx={ctx} fileId={fileId} commentsShown={commentsOpen} />
         ) : null}
         <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+        <BrowseLibrariesDialog
+          open={librariesOpen}
+          fileId={fileId}
+          onClose={() => setLibrariesOpen(false)}
+          onPublish={() => {
+            setLibrariesOpen(false);
+            setPublishOpen(true);
+          }}
+        />
+        <PublishDialog open={publishOpen} fileId={fileId} onClose={() => setPublishOpen(false)} />
         <NameVersionDialog
           open={naming !== null}
           fileId={fileId}
