@@ -247,7 +247,7 @@ Reference key: **Penpot** means Penpot has this capability and its behavior is o
 | Accounts | Email with passkeys, GitHub and Google login, invites, roles (owner, editor, viewer) | v0.1 | Penpot |
 | Accounts | OIDC and SAML SSO, SCIM, audit log | v1.0 | New |
 | Extensibility | Plugin API v2 (typed operations); a best-effort `penpot` compatibility shim for existing Penpot plugins | v0.3 | Penpot |
-| Extensibility | Public REST API, webhooks, MCP server for AI clients | v0.2 | New |
+| Extensibility | Public REST API, webhooks, MCP server for AI clients (decision 0011) | v0.2 | New |
 | Offline | Installable PWA; edits queue offline and merge on reconnect | v1.0 | New |
 | Self-host | `npm create drawpane` installer, one-command upgrade, R2 backups, health page | v0.1 | New |
 
