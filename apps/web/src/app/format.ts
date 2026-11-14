@@ -12,6 +12,15 @@ export function timeAgo(ms: number, now = Date.now()): string {
   return dateFormat.format(ms);
 }
 
+/** How long until a time ahead, always as a countdown: "in 40 minutes", "in 5 hours", "in 6 days". */
+export function timeUntil(ms: number, now = Date.now()): string {
+  const minutes = Math.max(1, Math.round((ms - now) / 60_000));
+  if (minutes < 60) return rtf.format(minutes, "minute");
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return rtf.format(hours, "hour");
+  return rtf.format(Math.round(hours / 24), "day");
+}
+
 export function initials(name: string): string {
   const parts = name.trim().split(/\s+/);
   return (

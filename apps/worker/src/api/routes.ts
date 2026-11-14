@@ -17,6 +17,13 @@ import { versions } from "./versions";
 
 const Name = z.string().trim().min(1, "Enter a name.").max(120, "Keep names under 120 characters.");
 const RoleSchema = z.enum(["owner", "editor", "viewer"]);
+/** Who an invite is for, as its owner wrote it; blank means none. */
+const InviteNote = z
+  .string()
+  .trim()
+  .max(80)
+  .optional()
+  .transform((v) => v || null);
 const INVITE_DAYS = 7;
 
 function room(env: Env, fileId: string) {
@@ -37,11 +44,13 @@ export const api = new Hono<AppContext>()
   .get("/teams", async (c) => {
     const user = requireUser(c);
     const { results } = await c.env.DB.prepare(
-      `SELECT t.id, t.name, m.role FROM teams t JOIN team_members m ON m.team_id = t.id
+      `SELECT t.id, t.name, m.role,
+              (SELECT COUNT(*) FROM team_members n WHERE n.team_id = t.id) AS members
+         FROM teams t JOIN team_members m ON m.team_id = t.id
         WHERE m.user_id = ? ORDER BY t.created_at`,
     )
       .bind(user.id)
-      .all<{ id: string; name: string; role: Role }>();
+      .all<{ id: string; name: string; role: Role; members: number }>();
     return c.json({ teams: results });
   })
 
@@ -58,14 +67,36 @@ export const api = new Hono<AppContext>()
     const user = requireUser(c);
     const teamId = c.req.param("teamId");
     await requireTeamRole(c.env, user.id, teamId, "viewer");
+    // How each person signs in, and when they last did: a session started, or a passkey or provider used.
     const { results } = await c.env.DB.prepare(
-      `SELECT u.id, u.name, u.email, m.role, m.created_at AS joinedAt
+      `SELECT u.id, u.name, u.email, m.role, m.created_at AS joinedAt,
+              (SELECT COUNT(*) FROM passkeys p WHERE p.user_id = u.id) AS passkeys,
+              (SELECT group_concat(o.provider) FROM oauth_identities o WHERE o.user_id = u.id) AS providers,
+              MAX(
+                COALESCE((SELECT MAX(s.created_at) FROM sessions s WHERE s.user_id = u.id), 0),
+                COALESCE((SELECT MAX(p.last_used_at) FROM passkeys p WHERE p.user_id = u.id), 0),
+                COALESCE((SELECT MAX(o.last_used_at) FROM oauth_identities o WHERE o.user_id = u.id), 0)
+              ) AS lastSignedInAt
          FROM team_members m JOIN users u ON u.id = m.user_id
         WHERE m.team_id = ? ORDER BY m.created_at`,
     )
       .bind(teamId)
-      .all();
-    return c.json({ members: results });
+      .all<{
+        id: string;
+        name: string;
+        email: string;
+        role: Role;
+        joinedAt: number;
+        passkeys: number;
+        providers: string | null;
+        lastSignedInAt: number;
+      }>();
+    const members = results.map(({ providers, lastSignedInAt, ...m }) => ({
+      ...m,
+      providers: providers ? providers.split(",").sort() : [],
+      lastSignedInAt: lastSignedInAt > 0 ? lastSignedInAt : null,
+    }));
+    return c.json({ members });
   })
 
   .patch("/teams/:teamId/members/:userId", async (c) => {
@@ -121,16 +152,50 @@ export const api = new Hono<AppContext>()
     const user = requireUser(c);
     const teamId = c.req.param("teamId");
     await requireTeamRole(c.env, user.id, teamId, "owner");
-    const { role } = await readBody(c, z.object({ role: RoleSchema.default("editor") }));
+    const { role, note } = await readBody(
+      c,
+      z.object({ role: RoleSchema.default("editor"), note: InviteNote }),
+    );
     const token = randomToken();
     const expiresAt = Date.now() + INVITE_DAYS * 86_400_000;
     await c.env.DB.prepare(
-      "INSERT INTO invites (id, team_id, role, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO invites (id, team_id, role, created_by, created_at, expires_at, note) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-      .bind(await sha256Hex(token), teamId, role, user.id, Date.now(), expiresAt)
+      .bind(await sha256Hex(token), teamId, role, user.id, Date.now(), expiresAt, note)
       .run();
     const url = new URL(`/invite/${token}`, publicOrigins(c)[0]).toString();
     return c.json({ token, url, role, expiresAt }, 201);
+  })
+
+  // Pending invites: links not used yet and not expired. An invite's id is
+  // the hash of its token, so listing them never reveals a working link.
+  .get("/teams/:teamId/invites", async (c) => {
+    const user = requireUser(c);
+    const teamId = c.req.param("teamId");
+    await requireTeamRole(c.env, user.id, teamId, "owner");
+    const { results } = await c.env.DB.prepare(
+      `SELECT i.id, i.role, i.note, i.created_at AS createdAt, i.expires_at AS expiresAt,
+              u.name AS createdBy
+         FROM invites i LEFT JOIN users u ON u.id = i.created_by
+        WHERE i.team_id = ? AND i.used_at IS NULL AND i.expires_at > ?
+        ORDER BY i.created_at DESC`,
+    )
+      .bind(teamId, Date.now())
+      .all();
+    return c.json({ invites: results });
+  })
+
+  .delete("/teams/:teamId/invites/:inviteId", async (c) => {
+    const user = requireUser(c);
+    const { teamId, inviteId } = c.req.param();
+    await requireTeamRole(c.env, user.id, teamId, "owner");
+    const result = await c.env.DB.prepare(
+      "DELETE FROM invites WHERE id = ? AND team_id = ? AND used_at IS NULL",
+    )
+      .bind(inviteId, teamId)
+      .run();
+    if (result.meta.changes === 0) throw notFound("That invite was already used or taken back.");
+    return c.json({ ok: true });
   })
 
   .get("/invites/:token", async (c) => {

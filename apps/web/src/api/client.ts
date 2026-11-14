@@ -14,6 +14,8 @@ export interface Team {
   readonly id: string;
   readonly name: string;
   readonly role: Role;
+  /** How many people are on it. */
+  readonly members: number;
 }
 export interface Project {
   readonly id: string;
@@ -42,6 +44,22 @@ export interface Member {
   readonly email: string;
   readonly role: Role;
   readonly joinedAt: number;
+  /** How they sign in: passkeys, and the providers they've connected. */
+  readonly passkeys: number;
+  readonly providers: readonly ("github" | "google")[];
+  /** When they last started a session, or used a passkey or provider. */
+  readonly lastSignedInAt: number | null;
+}
+
+/** An invite link not used yet. Its id is the token's hash: never a working link. */
+export interface PendingInvite {
+  readonly id: string;
+  readonly role: Role;
+  /** Who it's for, as the owner wrote it. */
+  readonly note: string | null;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly createdBy: string | null;
 }
 
 export interface ShareLink {
@@ -115,6 +133,8 @@ export const api = {
       `/files/${fileId}`,
     ),
   members: (teamId: string) => request<{ members: Member[] }>("GET", `/teams/${teamId}/members`),
+  invites: (teamId: string) =>
+    request<{ invites: PendingInvite[] }>("GET", `/teams/${teamId}/invites`),
 
   /** The file's prototype link, if it's on. */
   shareLink: (fileId: string) =>
