@@ -90,8 +90,17 @@ export function DashboardPage() {
       setNavOpen(false);
       menuButton.current?.focus();
     };
+    // A destination picked (clicked, or Enter on it), even the current one: the drawer closes.
+    const onPick = (e: MouseEvent) => {
+      if (e.target instanceof Element && e.target.closest("a")) setNavOpen(false);
+    };
+    const drawer = side.current;
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    drawer?.addEventListener("click", onPick);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      drawer?.removeEventListener("click", onPick);
+    };
   }, [navOpen]);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -243,10 +252,6 @@ export function DashboardPage() {
         aria-label="Navigation"
         // Off screen on a phone until opened: out of the tab order too.
         inert={phone && !navOpen}
-        // A destination picked, even the current one: the drawer closes.
-        onClick={(e) => {
-          if (navOpen && (e.target as HTMLElement).closest("a")) setNavOpen(false);
-        }}
       >
         <TeamSwitcher teamName={team?.name ?? "…"} members={memberCount} />
         <nav className="dash__nav">
