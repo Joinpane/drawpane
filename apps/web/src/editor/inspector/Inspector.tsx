@@ -10,6 +10,7 @@ import { useRef, useState } from "react";
 import { ComponentSection } from "../ComponentSection";
 import { useDocVersion, useEditor, useEditorState } from "../hooks";
 import { layerKind } from "../layer-kinds";
+import { textViews } from "../text-views";
 import { ModesSection } from "../tokens/ModesSection";
 import { CombineSection, PathSection } from "../VectorSections";
 import { AlignSection } from "./AlignSection";
@@ -32,6 +33,8 @@ export function Inspector() {
   const selection = useEditorState((s) => s.selection);
   const tool = useEditorState((s) => s.tool);
   const canEdit = useEditorState((s) => s.role !== "viewer");
+  // While editing text, its typography and fill follow the selected characters.
+  useEditorState((s) => s.textSelection);
   const nodes = selection.map((id) => editor.doc.get(id)).filter((n): n is NodeRecord => !!n);
 
   if (nodes.length === 0)
@@ -102,10 +105,10 @@ export function Inspector() {
       <ShapeSection editor={editor} nodes={nodes} />
       <AppearanceSection editor={editor} nodes={nodes} corners={corners} frames={frames} />
       {texts.length > 0 && texts.length === nodes.length ? (
-        <TextSection editor={editor} nodes={texts} />
+        <TextSection editor={editor} nodes={texts} views={textViews(editor, texts)} />
       ) : null}
       {shapes.length > 0 ? (
-        <PaintSection editor={editor} nodes={shapes} prop="fills" title="Fill" />
+        <PaintSection editor={editor} nodes={textViews(editor, shapes)} prop="fills" title="Fill" />
       ) : null}
       {shapes.length > 0 ? (
         <PaintSection editor={editor} nodes={shapes} prop="strokes" title="Stroke" />

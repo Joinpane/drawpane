@@ -10,12 +10,14 @@ import { IconButton, type IconName, KIND_ICONS, NumberField, SelectionLens } fro
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import { FontPicker } from "./inspector/FontPicker";
+import { common } from "./inspector/fields";
 import { PaintSwatch } from "./inspector/PaintSection";
 import { TextStyleTrigger } from "./inspector/TextStyles";
 import { WeightSelect } from "./inspector/TypographyFields";
 import { layerKind } from "./layer-kinds";
 import { kindOf } from "./layer-tree";
 import { type Box, hasLabelAbove, type LensSide, lensObstacles, placeLens } from "./lens-placement";
+import { textViews } from "./text-views";
 import { useUi } from "./ui-state";
 
 /** Clear of the top bar (file title, tools, share) at 12–52px. */
@@ -221,6 +223,8 @@ function lensContents(
   // Text: font token (its text style, or its font), weight, size, fill.
   if (node.type === "text") {
     const styled = getProp(p, "textStyle") !== null;
+    // Every look among its characters: a bold word makes the weight "Mixed".
+    const views = textViews(editor, nodes);
     return {
       kind: base.label,
       icon,
@@ -238,14 +242,16 @@ function lensContents(
           <FontPicker
             key="font"
             editor={editor}
-            nodes={nodes}
+            nodes={views}
             side={ctx.side}
             compact
             onOpenChange={ctx.hold}
           />
         ),
-        <WeightSelect key="weight" editor={editor} nodes={nodes} className="lens-select" />,
-        prop("fontSize", "Font size", { label: "Aa" }),
+        <WeightSelect key="weight" editor={editor} nodes={views} className="lens-select" />,
+        field("fontSize", common(views, "fontSize"), "Font size", { label: "Aa" }, (v) =>
+          editor.setProp([node.id], "fontSize", v, "Font size"),
+        ),
         fill,
       ],
     };

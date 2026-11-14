@@ -85,7 +85,6 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       frame = 0;
       const s = editor.s;
       if (contentDirty && s.pageId) {
-        renderer.hidden = s.editingText ? new Set([s.editingText]) : new Set();
         renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr);
         contentDirty = false;
       }
@@ -126,12 +125,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     });
     const offState = editor.state.subscribe(() => {
       const s = editor.s;
-      if (
-        s.camera !== last.camera ||
-        s.pageId !== last.pageId ||
-        s.editingText !== last.editingText ||
-        s.viewport !== last.viewport
-      ) {
+      if (s.camera !== last.camera || s.pageId !== last.pageId || s.viewport !== last.viewport) {
         contentDirty = true;
       }
       last = s;
