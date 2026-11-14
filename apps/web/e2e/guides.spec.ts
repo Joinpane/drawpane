@@ -84,6 +84,10 @@ test.describe
       await page.reload();
       await expect(page.locator(".rulers__top")).toBeVisible({ timeout: 15_000 });
       expect((await debug(page)).rulers).toBe(true);
+      // The rulers show before the file arrives: wait for the board, which the next tests drag onto.
+      await expect
+        .poll(async () => (await props(page, board)).name, { timeout: 15_000 })
+        .toBe("Board");
     });
 
     test("drags a guide out of the ruler onto the board, moves it, and removes it", async () => {
