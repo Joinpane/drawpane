@@ -31,6 +31,8 @@ See the [PRD](docs/PRD.md) for where it's going.
 | [`packages/model`](packages/model) | The document model: a flat map of nodes, typed operations, validation. Shared by the browser, the server and agents. |
 | [`packages/editor`](packages/editor) | The editor engine: sync client, undo, geometry, auto layout, Canvas renderer, interaction. Framework-free. |
 | [`packages/ui`](packages/ui) | The design system as React components, with tokens generated from [`design-system/tokens.json`](design-system/tokens.json). |
+| [`packages/penpot`](packages/penpot) | Reads Penpot's `.penpot` exports and converts them to Drawpane files. |
+| [`packages/create-drawpane`](packages/create-drawpane) | `npm create drawpane`: installs and upgrades an instance on your Cloudflare account. |
 | [`apps/worker`](apps/worker) | The Cloudflare Worker: passkey auth, REST API, static assets, and a FileRoom Durable Object per file (SQLite, one row per node). |
 | [`apps/web`](apps/web) | The browser app: sign-in, dashboard and the editor. |
 | [`docs/`](docs) | [PRD](docs/PRD.md), [decisions](docs/decisions), [self-hosting guide](docs/self-hosting.md). |
@@ -51,7 +53,11 @@ Then open http://localhost:5173. More in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Self-host
 
-Follow [docs/self-hosting.md](docs/self-hosting.md).
+```sh
+npm create drawpane my-design
+```
+
+It signs you in to Cloudflare, creates what the instance needs on your account, deploys it, and opens the page where you create the first account. Upgrading is `npm create drawpane@latest upgrade` in that folder. Until the installer is published to npm, run it from a clone: `pnpm install && pnpm build && node packages/create-drawpane/dist/cli.js my-design`. Details, and the steps done by hand: [docs/self-hosting.md](docs/self-hosting.md).
 
 ## Viewing the designs
 

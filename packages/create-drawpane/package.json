@@ -1,0 +1,46 @@
+{
+  "name": "create-drawpane",
+  "version": "0.1.0",
+  "license": "MPL-2.0",
+  "description": "Install and upgrade Drawpane on your own Cloudflare account: `npm create drawpane`.",
+  "keywords": [
+    "drawpane",
+    "design",
+    "self-hosted",
+    "cloudflare",
+    "create"
+  ],
+  "type": "module",
+  "bin": {
+    "create-drawpane": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "server",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/bundle-server.mjs",
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@clack/prompts": "1.8.1",
+    "wrangler": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Joinpane/drawpane.git",
+    "directory": "packages/create-drawpane"
+  },
+  "homepage": "https://github.com/Joinpane/drawpane/blob/main/docs/self-hosting.md"
+}

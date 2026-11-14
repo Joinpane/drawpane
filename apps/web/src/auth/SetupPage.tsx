@@ -1,9 +1,18 @@
 import { Button, TextField } from "@drawpane/ui";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { AuthLayout, FormError } from "./AuthLayout";
 import { registerWithPasskey } from "./passkey";
+
+/**
+ * The installer opens `/setup#token=…` so the token is filled in. A fragment
+ * never reaches the server or its logs, and it's taken off the address bar
+ * once read.
+ */
+function tokenFromLink(): string {
+  return new URLSearchParams(window.location.hash.slice(1)).get("token") ?? "";
+}
 
 /** First run: the instance owner creates the first account with the deploy's setup token. */
 export function SetupPage() {
@@ -11,7 +20,10 @@ export function SetupPage() {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [setupToken, setSetupToken] = useState("");
+  const [setupToken, setSetupToken] = useState(tokenFromLink);
+  useEffect(() => {
+    if (tokenFromLink()) history.replaceState(history.state, "", window.location.pathname);
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

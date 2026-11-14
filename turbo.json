@@ -29,6 +29,10 @@
     "@drawpane/worker#test": {
       "dependsOn": ["@drawpane/web#build"],
       "outputs": []
+    },
+    "create-drawpane#build": {
+      "dependsOn": ["@drawpane/worker#build", "@drawpane/web#build"],
+      "outputs": ["dist/**", "server/**"]
     }
   }
 }
