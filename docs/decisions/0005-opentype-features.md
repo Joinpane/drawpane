@@ -1,6 +1,6 @@
 # 0005. OpenType features: shaping text ourselves where they're used
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-14
 - Deciders: Ziyang (lead maintainer)
 
@@ -18,7 +18,7 @@ So only small caps could ship with today's renderer. Everything else needs a dif
 2. **Draw feature text through the DOM**: lay the run out in an HTML element with `font-feature-settings`, then rasterize it (SVG `foreignObject`, or reading glyph positions back from the DOM). Rasterizing is asynchronous and slow, positions read back from the DOM are inexact, and both break the one-frame budget the PRD sets.
 3. **Shape text ourselves** with HarfBuzz compiled to WebAssembly. HarfBuzz is the shaper browsers use, a few hundred KB, loaded on first use. It turns a run, its font's bytes and the requested features into glyph ids and positions. We draw the glyph outlines from the font (cached as `Path2D`s). Export (SVG, PDF) writes the same outlines, so what's exported is what was on the canvas.
 
-## Decision (proposed)
+## Decision
 
 Option 3, for the runs that need it. A text run with no features set keeps today's fast path (`fillText`). A run with features is shaped by HarfBuzz and drawn from glyph outlines. That needs the font's bytes:
 

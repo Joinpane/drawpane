@@ -402,6 +402,9 @@ The biggest risk is scope: building from scratch means rebuilding editor capabil
 | Penpot plugin API | Best-effort compatibility shim | v0.3 ships plugin API v2 on typed operations under a `drawpane` global, plus a `penpot` global shim for common Penpot plugins |
 | Paid hosted tier | Not yet; revisit once the repo has momentum | Hosted service stays deferred; no feature gating anywhere |
 | Language | TypeScript everywhere; Rust/WASM only for measured hot paths | One toolchain from browser to Durable Object |
+| Layer blur (Nov 14) | Blurs the whole layer, as in Figma: fills, strokes, shadows, and a frame's children | Canvas, SVG export and Inspect's CSS agree |
+| OpenType features (Nov 14) | Shape text that uses them with HarfBuzz ([decision 0005](decisions/0005-opentype-features.md)) | Text without features keeps the fast path |
+| Email (Nov 14) | Optional, through one interface with many providers: Cloudflare, Resend, Postmark, SendGrid, Mailgun, SES, SMTP ([decision 0006](decisions/0006-email.md)) | Mention emails, digests and invites by email; nothing requires email |
 
 ## Sources
 
