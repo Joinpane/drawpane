@@ -79,7 +79,8 @@ export interface InboxPage {
 export type MarkRead =
   | { readonly ids: readonly string[] }
   | { readonly threadId: string }
-  | { readonly all: true };
+  /** `upTo`: only those up to then, the newest the person was shown. */
+  | { readonly all: true; readonly upTo?: number };
 
 /** An invite link not used yet. Its id is the token's hash: never a working link. */
 export interface PendingInvite {

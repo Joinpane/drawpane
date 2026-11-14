@@ -1,4 +1,8 @@
-/** Dashboard search helpers: waiting for typing to settle, and showing what matched. */
+/**
+ * Dashboard search helpers: waiting for typing to settle, and showing what
+ * matched. Text is compared folded (searchFold), as the server compares it.
+ */
+import { searchFold } from "@drawpane/model";
 import { useEffect, useState } from "react";
 
 /** `value` once it has stopped changing for `ms`. */
@@ -12,13 +16,12 @@ export function useDebounced<T>(value: T, ms: number): T {
 }
 
 /** The words a query searches for, as the server reads them. */
-export const searchWords = (query: string) =>
-  query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+export const searchWords = (query: string) => searchFold(query).trim().split(/\s+/).filter(Boolean);
 
 /** Whether a name has every word of the query, as the server matches. */
 export const matchesAll = (name: string, query: string) => {
-  const lower = name.toLowerCase();
-  return searchWords(query).every((w) => lower.includes(w));
+  const folded = searchFold(name);
+  return searchWords(query).every((w) => folded.includes(w));
 };
 
 /**
@@ -29,11 +32,19 @@ export const matchesAll = (name: string, query: string) => {
 export function highlightParts(text: string, query: string): { text: string; match: boolean }[] {
   const words = searchWords(query);
   if (words.length === 0) return [{ text, match: false }];
-  const lower = text.toLowerCase();
+  // Fold each character, remembering which character every folded one came from:
+  // "École" folds to "ecole", and a match on "eco" marks "Éco".
+  let folded = "";
+  const from: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const f = searchFold(text[i] as string);
+    folded += f;
+    for (let k = 0; k < f.length; k++) from.push(i);
+  }
   const marked = new Array<boolean>(text.length).fill(false);
   for (const word of words) {
-    for (let at = lower.indexOf(word); at !== -1; at = lower.indexOf(word, at + 1))
-      marked.fill(true, at, at + word.length);
+    for (let at = folded.indexOf(word); at !== -1; at = folded.indexOf(word, at + 1))
+      for (let k = at; k < at + word.length; k++) marked[from[k] as number] = true;
   }
   const parts: { text: string; match: boolean }[] = [];
   for (let i = 0; i < text.length; i++) {

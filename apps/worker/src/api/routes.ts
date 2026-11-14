@@ -1,4 +1,4 @@
-import { ID_PATTERN, type NodeRecord, newId } from "@drawpane/model";
+import { ID_PATTERN, type NodeRecord, newId, searchFold } from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
 import { publicOrigins } from "../auth/passkeys";
@@ -12,7 +12,7 @@ import { fonts } from "./fonts";
 import { imports } from "./imports";
 import { media, thumbnailKey } from "./media";
 import { notifications } from "./notifications";
-import { fileSearch, SEARCH_LIMIT } from "./search";
+import { backfillSearchNames, fileSearch, SEARCH_LIMIT } from "./search";
 import { share } from "./share";
 import { teamFonts } from "./team-fonts";
 import { versions } from "./versions";
@@ -344,6 +344,7 @@ export const api = new Hono<AppContext>()
     const deleted = `deleted_at IS ${trash ? "NOT NULL" : "NULL"}`;
     // With `q`: the team's files whose names match, best first (see search.ts).
     const search = fileSearch(c.req.query("q") ?? "");
+    if (search) await backfillSearchNames(c.env.DB, teamId);
     const { results } = await (search
       ? c.env.DB.prepare(
           `SELECT * FROM files WHERE team_id = ? AND ${deleted} AND ${search.where}
@@ -401,8 +402,17 @@ export const api = new Hono<AppContext>()
     };
     await c.env.DB.batch([
       c.env.DB.prepare(
-        "INSERT INTO files (id, project_id, team_id, name, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      ).bind(row.id, row.project_id, row.team_id, row.name, user.id, now, now),
+        "INSERT INTO files (id, project_id, team_id, name, search_name, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).bind(
+        row.id,
+        row.project_id,
+        row.team_id,
+        row.name,
+        searchFold(row.name),
+        user.id,
+        now,
+        now,
+      ),
       c.env.DB.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").bind(now, project.id),
     ]);
     if (source) {
@@ -473,10 +483,11 @@ export const api = new Hono<AppContext>()
     // Marking a template isn't an edit to the file: its edited time stays.
     const edited = body.name !== undefined || body.projectId !== undefined;
     await c.env.DB.prepare(
-      "UPDATE files SET name = ?, project_id = ?, is_template = ?, updated_at = ? WHERE id = ?",
+      "UPDATE files SET name = ?, search_name = ?, project_id = ?, is_template = ?, updated_at = ? WHERE id = ?",
     )
       .bind(
         body.name ?? file.name,
+        searchFold(body.name ?? file.name),
         body.projectId ?? file.project_id,
         body.isTemplate === undefined ? (file.is_template ?? 0) : body.isTemplate ? 1 : 0,
         edited ? Date.now() : file.updated_at,

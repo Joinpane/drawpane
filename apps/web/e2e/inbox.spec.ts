@@ -198,4 +198,44 @@ test.describe
       );
       await expect(button).toHaveAccessibleName("Inbox");
     });
+
+    test("a reply in a thread you have open counts as read", async () => {
+      // Ana has her own thread open in the file; Bo replies in it.
+      const threadId = await ana.evaluate(
+        async ({ fileId, pageId }) => {
+          const response = await fetch(`/api/files/${fileId}/comments`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ pageId, x: 500, y: 300, body: "Margins?" }),
+          });
+          return (await response.json()).thread.id as string;
+        },
+        { fileId, pageId },
+      );
+      await ana.goto(`/f/${fileId}?thread=${threadId}`);
+      await expect(ana.getByRole("dialog", { name: /^Thread on/ })).toBeVisible({
+        timeout: 15_000,
+      });
+      await bo.evaluate(
+        async ({ fileId, threadId }) => {
+          await fetch(`/api/files/${fileId}/comments/${threadId}/replies`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ body: "Tighter, I think." }),
+          });
+        },
+        { fileId, threadId },
+      );
+      await expect(ana.getByRole("dialog", { name: /^Thread on/ })).toContainText(
+        "Tighter, I think.",
+      );
+      // She's looking right at it: nothing waits unread.
+      await expect
+        .poll(() =>
+          ana.evaluate(
+            async () => (await (await fetch("/api/notifications/unread")).json()).unread as number,
+          ),
+        )
+        .toBe(0);
+    });
   });

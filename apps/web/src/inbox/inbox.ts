@@ -23,8 +23,11 @@ export function useUnread(): number {
 }
 
 const matches = (item: InboxItem, which: MarkRead) =>
-  "all" in which ||
-  ("threadId" in which ? item.threadId === which.threadId : which.ids.includes(item.id));
+  "all" in which
+    ? which.upTo === undefined || item.createdAt <= which.upTo
+    : "threadId" in which
+      ? item.threadId === which.threadId
+      : which.ids.includes(item.id);
 
 /**
  * Marks notifications read: lists show it at once (items stay where they are
@@ -45,8 +48,23 @@ export async function markRead(queryClient: QueryClient, which: MarkRead): Promi
         }
       : data,
   );
-  const { unread } = await api.markRead(which);
-  queryClient.setQueryData(UNREAD_KEY, { unread });
+  try {
+    const { unread } = await api.markRead(which);
+    queryClient.setQueryData(UNREAD_KEY, { unread });
+  } catch (error) {
+    // Didn't take: show what the server has, rather than what was hoped.
+    refreshInbox(queryClient);
+    throw error;
+  }
+}
+
+/**
+ * "Mark all read" for a list: everything up to the newest item it shows,
+ * so something arriving meanwhile isn't marked read unseen.
+ */
+export function allShown(items: readonly InboxItem[]): MarkRead {
+  const newest = Math.max(0, ...items.map((i) => i.createdAt));
+  return newest > 0 ? { all: true, upTo: newest } : { all: true };
 }
 
 /** Something changed that may have notified someone: ask again. */

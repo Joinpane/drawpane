@@ -1,9 +1,11 @@
+import { env } from "cloudflare:test";
 import type { CommentThread } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { type Browser, signedInUser } from "./helpers";
 
 interface Item {
   id: string;
+  createdAt: number;
   kind: "mention" | "reply" | "resolved";
   readAt: number | null;
   file: { id: string; name: string };
@@ -172,5 +174,72 @@ describe("notifications", () => {
     // Trashed: gone from the inbox and the count.
     await ana.browser.json(`/api/files/${fileId}`, { method: "DELETE" });
     expect(await inbox(bo.browser)).toMatchObject({ items: [], unread: 0 });
+  });
+
+  it("takes back an unread 'resolved' when a reply reopens the thread, and notifies once per resolve", async () => {
+    const { ana, bo, fileId } = await team();
+    const thread = await start(ana.browser, fileId, "Is the logo too small?");
+    const resolve = () =>
+      bo.browser.json(`/api/files/${fileId}/comments/${thread.id}`, {
+        method: "PATCH",
+        json: { resolved: true },
+      });
+    await resolve();
+    // Resolving again (a stale screen) doesn't say it twice.
+    await ana.browser.json("/api/notifications/read", { method: "POST", json: { all: true } });
+    await resolve();
+    expect((await inbox(ana.browser)).unread).toBe(0);
+    // Unresolved by a reply: the 'resolved' that's still unread goes.
+    await bo.browser.json(`/api/files/${fileId}/comments/${thread.id}`, {
+      method: "PATCH",
+      json: { resolved: false },
+    });
+    await resolve();
+    await reply(bo.browser, fileId, thread.id, "Actually, one more thing.");
+    expect((await inbox(ana.browser)).items.map((i) => i.kind)).toEqual(["reply", "resolved"]);
+    expect((await inbox(ana.browser, "?filter=unread")).items.map((i) => i.kind)).toEqual([
+      "reply",
+    ]);
+  });
+
+  it("turns a mention edited out of a reply back into a reply notification", async () => {
+    const { ana, bo, fileId } = await team();
+    const thread = await start(ana.browser, fileId, "Spacing?");
+    const message = await reply(bo.browser, fileId, thread.id, "@Ana Ruiz look", [ana.userId]);
+    const commentId = message.messages.at(-1)?.id as string;
+    expect((await inbox(ana.browser)).items.map((i) => i.kind)).toEqual(["mention"]);
+    await bo.browser.json(`/api/files/${fileId}/comments/${thread.id}/messages/${commentId}`, {
+      method: "PATCH",
+      json: { body: "look", mentions: [] },
+    });
+    // She started the thread: she still hears about the reply.
+    expect((await inbox(ana.browser)).items).toMatchObject([{ kind: "reply", excerpt: "look" }]);
+  });
+
+  it("doesn't notify people who've left the team", async () => {
+    const { ana, bo, cy, fileId } = await team();
+    const thread = await start(ana.browser, fileId, "Spacing?");
+    await reply(cy.browser, fileId, thread.id, "Looks fine");
+    await ana.browser.json(`/api/teams/${ana.teamId}/members/${cy.userId}`, { method: "DELETE" });
+    await reply(bo.browser, fileId, thread.id, "Said while Cy was away");
+    const rows = await env.DB.prepare("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ?")
+      .bind(cy.userId)
+      .first<{ n: number }>();
+    expect(rows?.n).toBe(0);
+  });
+
+  it("marks all read only up to what was shown", async () => {
+    const { ana, bo, fileId } = await team();
+    await start(ana.browser, fileId, "One @Bo Chen", [bo.userId]);
+    const shown = await inbox(bo.browser);
+    const newest = shown.items[0]?.createdAt as number;
+    // Arrives after the list was loaded.
+    await new Promise((r) => setTimeout(r, 5));
+    await start(ana.browser, fileId, "Two @Bo Chen", [bo.userId]);
+    const result = await bo.browser.json<{ unread: number }>("/api/notifications/read", {
+      method: "POST",
+      json: { all: true, upTo: newest },
+    });
+    expect(result.unread).toBe(1);
   });
 });

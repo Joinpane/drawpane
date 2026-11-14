@@ -69,35 +69,70 @@ export async function commentNotifications(
     insert(db, { ...c, userId, kind: "mention", commentId: c.commentId }),
   );
   if (!c.reply) return statements;
-  // Everyone already in the thread: who started it, and who wrote in it.
-  const { results } = await db
-    .prepare(
-      `SELECT created_by AS id FROM comment_threads WHERE id = ?1 AND created_by IS NOT NULL
-       UNION SELECT author_id FROM comments WHERE thread_id = ?1 AND author_id IS NOT NULL`,
-    )
-    .bind(c.threadId)
-    .all<{ id: string }>();
-  for (const { id } of results) {
+  // A reply reopens a resolved thread: an unread "resolved" no longer holds.
+  statements.push(
+    db
+      .prepare(
+        "DELETE FROM notifications WHERE thread_id = ? AND kind = 'resolved' AND read_at IS NULL",
+      )
+      .bind(c.threadId),
+  );
+  for (const id of await threadPeople(db, c.fileId, c.threadId, null)) {
     if (id === c.actorId || mentioned.has(id)) continue;
     statements.push(insert(db, { ...c, userId: id, kind: "reply", commentId: c.commentId }));
   }
   return statements;
 }
 
-/** A comment edited: newly mentioned people hear about it; a mention taken out is taken back if unread. */
-export function editNotifications(
+/**
+ * Who's in a thread, and still on the file's team: whoever started it, and
+ * whoever wrote in it (before `before`, when given).
+ */
+async function threadPeople(
+  db: D1Database,
+  fileId: string,
+  threadId: string,
+  before: number | null,
+): Promise<string[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT p.id FROM (
+         SELECT created_by AS id FROM comment_threads WHERE id = ?1 AND created_by IS NOT NULL
+         UNION SELECT author_id FROM comments
+          WHERE thread_id = ?1 AND author_id IS NOT NULL AND (?3 IS NULL OR created_at < ?3)
+       ) p
+       JOIN team_members m ON m.user_id = p.id
+        AND m.team_id = (SELECT team_id FROM files WHERE id = ?2)`,
+    )
+    .bind(threadId, fileId, before)
+    .all<{ id: string }>();
+  return results.map((r) => r.id);
+}
+
+/**
+ * A comment edited: newly mentioned people hear about it; a mention taken
+ * out is taken back if unread, and someone already in the thread gets the
+ * "reply" they'd have had without it.
+ */
+export async function editNotifications(
   db: D1Database,
   c: {
     fileId: string;
     threadId: string;
     commentId: string;
     actorId: string;
+    /** Who the comment mentioned before the edit. */
+    previous: readonly string[];
     mentions: readonly string[];
+    /** When the comment was written: a replacement "reply" keeps its place. */
+    writtenAt: number;
     now: number;
   },
-): D1PreparedStatement[] {
+): Promise<D1PreparedStatement[]> {
   const mentioned = [...new Set(c.mentions)].filter((id) => id !== c.actorId);
   const keep = mentioned.length > 0 ? mentioned.map((_, i) => `?${i + 2}`).join(", ") : "''";
+  const dropped = new Set(c.previous.filter((id) => id !== c.actorId && !mentioned.includes(id)));
+  const people = dropped.size > 0 ? await threadPeople(db, c.fileId, c.threadId, c.writtenAt) : [];
   return [
     db
       .prepare(
@@ -107,6 +142,19 @@ export function editNotifications(
       .bind(c.commentId, ...mentioned),
     // Already notified (read or not): INSERT OR IGNORE leaves them be.
     ...mentioned.map((userId) => insert(db, { ...c, userId, kind: "mention" })),
+    // Dropped from the mentions but in the thread: the reply, unless a (read) mention still stands.
+    ...people
+      .filter((id) => dropped.has(id))
+      .map((userId) =>
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO notifications (id, user_id, kind, file_id, thread_id, comment_id, actor_id, created_at)
+             SELECT ?1, ?2, 'reply', ?3, ?4, ?5, ?6, ?7
+              WHERE NOT EXISTS (SELECT 1 FROM notifications
+                                 WHERE comment_id = ?5 AND user_id = ?2 AND kind = 'mention')`,
+          )
+          .bind(newId(), userId, c.fileId, c.threadId, c.commentId, c.actorId, c.writtenAt),
+      ),
   ];
 }
 
@@ -119,10 +167,12 @@ export function resolveNotifications(
     starterId: string | null;
     actorId: string;
     resolved: boolean;
+    /** Whether it was resolved before: resolving twice (a stale screen) says nothing new. */
+    wasResolved: boolean;
     now: number;
   },
 ): D1PreparedStatement[] {
-  if (!t.starterId) return [];
+  if (!t.starterId || t.resolved === t.wasResolved) return [];
   // One "resolved" at a time: a newer one replaces an unread older one, and reopening takes it back.
   const clear = db
     .prepare(
@@ -170,6 +220,8 @@ const MarkRead = z
     ids: z.array(z.string().regex(ID_PATTERN)).max(200).optional(),
     threadId: z.string().regex(ID_PATTERN).optional(),
     all: z.literal(true).optional(),
+    /** With `all`: only those up to this time, the newest the person was shown. */
+    upTo: z.number().int().positive().optional(),
   })
   .refine((b) => [b.ids, b.threadId, b.all].filter((v) => v !== undefined).length === 1, {
     message: "Say which to mark read: ids, a threadId, or all.",
@@ -232,7 +284,11 @@ export const notifications = new Hono<AppContext>()
     const now = Date.now();
     const db = c.env.DB;
     const base = "UPDATE notifications SET read_at = ?1 WHERE user_id = ?2 AND read_at IS NULL";
-    if (body.all) await db.prepare(base).bind(now, user.id).run();
+    if (body.all)
+      await (body.upTo
+        ? db.prepare(`${base} AND created_at <= ?3`).bind(now, user.id, body.upTo)
+        : db.prepare(base).bind(now, user.id)
+      ).run();
     else if (body.threadId)
       await db.prepare(`${base} AND thread_id = ?3`).bind(now, user.id, body.threadId).run();
     else if (body.ids && body.ids.length > 0)

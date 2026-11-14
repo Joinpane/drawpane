@@ -19,4 +19,12 @@ describe("dashboard search", () => {
     expect(matchesAll("Onboarding flow v2", "FLOW onboard")).toBe(true);
     expect(matchesAll("Checkout flow", "flow onboard")).toBe(false);
   });
+
+  it("matches and marks whatever the accents, as the server does", () => {
+    expect(matchesAll("École brief", "ecole")).toBe(true);
+    expect(highlightParts("École brief", "eco")).toEqual([
+      { text: "Éco", match: true },
+      { text: "le brief", match: false },
+    ]);
+  });
 });

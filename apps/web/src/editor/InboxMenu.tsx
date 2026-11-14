@@ -10,7 +10,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { InboxRow, useInboxList } from "../inbox/InboxRow";
-import { markRead, useUnread } from "../inbox/inbox";
+import { allShown, markRead, useUnread } from "../inbox/inbox";
 import "../inbox/inbox.css";
 
 /** How many the menu shows; the rest are on the dashboard. */
@@ -89,7 +89,7 @@ function InboxMenuList({
           variant="ghost"
           icon="check"
           disabled={unread === 0}
-          onClick={() => void markRead(queryClient, { all: true })}
+          onClick={() => void markRead(queryClient, allShown(items)).catch(() => {})}
         >
           Mark all read
         </Button>
@@ -117,7 +117,8 @@ function InboxMenuList({
               item={item}
               here={fileId}
               onOpen={(event) => {
-                if (item.readAt === null) void markRead(queryClient, { ids: [item.id] });
+                if (item.readAt === null)
+                  void markRead(queryClient, { ids: [item.id] }).catch(() => {});
                 onDone();
                 // This file: open the comment where it is, without reloading the editor.
                 if (item.file.id === fileId) {

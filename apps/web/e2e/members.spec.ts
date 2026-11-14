@@ -171,20 +171,38 @@ test.describe
           () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
         ),
       ).toBe(true);
-      const nav = ana.getByRole("complementary", { name: "Navigation" });
+      // A complementary landmark when shut; a modal dialog while open.
+      const nav = ana.locator("#dash-nav");
       const open = ana.getByRole("button", { name: "Open navigation" });
       // Closed, it's out of sight and out of the tab order.
       await expect(nav.getByRole("link", { name: /^Members/ })).not.toBeVisible();
       await open.click();
-      await expect(ana.getByRole("button", { name: "Close navigation" })).toHaveAttribute(
-        "aria-expanded",
+      await expect(open).toHaveAttribute("aria-expanded", "true");
+      await expect(ana.getByRole("dialog", { name: "Navigation" })).toHaveAttribute(
+        "aria-modal",
         "true",
       );
+      await expect(nav.getByRole("button", { name: "Close navigation" })).toBeVisible();
       // Focus starts on where you are; Escape closes and hands it back.
       await expect(nav.getByRole("link", { name: /^Members/ })).toBeFocused();
       await ana.keyboard.press("Escape");
       await expect(nav.getByRole("link", { name: /^Members/ })).not.toBeVisible();
       await expect(open).toBeFocused();
+      // Open, it's modal: Tab never reaches the page behind the scrim.
+      await open.click();
+      for (let i = 0; i < 14; i++) {
+        await ana.keyboard.press("Tab");
+        expect(
+          await ana.evaluate(() => !!document.activeElement?.closest(".dash__main, .dash__topbar")),
+        ).toBe(false);
+      }
+      // Widened while open (a rotated tablet): back to the desktop layout, drawer gone.
+      await ana.setViewportSize({ width: 1280, height: 800 });
+      await expect(ana.locator(".dash__scrim")).toHaveCount(0);
+      const main = await ana.locator(".dash__main").boundingBox();
+      expect(main?.x).toBeGreaterThanOrEqual(200);
+      expect(main?.y).toBe(0);
+      await ana.setViewportSize({ width: 390, height: 844 });
       // Picking a place goes there and closes the drawer.
       await open.click();
       await nav.getByRole("link", { name: /^Recent/ }).click();
