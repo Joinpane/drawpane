@@ -69,6 +69,18 @@ export const OpSchema = z.discriminatedUnion("op", [
 
 export const OpsSchema = z.array(OpSchema).min(1).max(MAX_OPS_PER_TRANSACTION);
 
+/**
+ * Structural shape of a node record (an import, a snapshot). As with ops,
+ * its props are checked against its type when it's created in a store.
+ */
+export const NodeRecordSchema = z.object({
+  id: Id,
+  type: z.enum(NODE_TYPES),
+  parent: Id,
+  key: Key,
+  props: z.record(PropKey, z.unknown()),
+});
+
 /** Parses untrusted input into operations, or throws a `z.ZodError`. */
 export function parseOps(input: unknown): Op[] {
   return OpsSchema.parse(input) as Op[];

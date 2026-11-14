@@ -9,6 +9,7 @@ import { badRequest, conflict, notFound } from "../lib/http";
 import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
 import { comments } from "./comments";
 import { fonts } from "./fonts";
+import { imports } from "./imports";
 import { media, thumbnailKey } from "./media";
 import { share } from "./share";
 import { teamFonts } from "./team-fonts";
@@ -334,6 +335,8 @@ export const api = new Hono<AppContext>()
   .route("/", media)
   .route("/", share)
   .route("/", versions)
+  // Filling a new file from an import (./imports.ts) ------------------------------
+  .route("/", imports)
   // Fonts a team uploads (./team-fonts.ts) ------------------------------------
   .route("/", teamFonts)
   // Google Fonts, copied to this server on first use (./fonts.ts) ------------

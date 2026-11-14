@@ -8,6 +8,8 @@ import { initials, modKey, timeAgo } from "../app/format";
 import { setTheme, useThemePreference } from "../app/theme";
 import { signOut } from "../auth/passkey";
 import { FileThumbnail } from "./FileThumbnail";
+import { ImportDialog } from "./ImportDialog";
+import { isPenpotFile } from "./penpot-import";
 import { TeamFontsView } from "./TeamFonts";
 import "./dashboard.css";
 
@@ -40,6 +42,10 @@ export function DashboardPage() {
   const [query, setQuery] = useState("");
   const [inviteOpen, setInviteOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  // A file dragged over the page: show where it can go.
+  const [dragging, setDragging] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -75,9 +81,33 @@ export function DashboardPage() {
 
   const heading = view === "trash" ? "Trash" : project ? project.name : "Recent files";
   const target = project ?? drafts;
+  const canImport = canEdit && !!target && view !== "trash" && view !== "fonts";
+  const openImport = (file: File | null = null) => {
+    setImportFile(file);
+    setImportOpen(true);
+  };
 
   return (
-    <div className="dash">
+    // biome-ignore lint/a11y/noStaticElementInteractions: dropping a .penpot export anywhere imports it; the Import button is the keyboard way
+    <div
+      className="dash"
+      onDragOver={(e) => {
+        if (!canImport || !e.dataTransfer.types.includes("Files") || importOpen) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.relatedTarget === null || !e.currentTarget.contains(e.relatedTarget as Node))
+          setDragging(false);
+      }}
+      onDrop={(e) => {
+        if (!canImport || importOpen) return;
+        e.preventDefault();
+        setDragging(false);
+        const file = [...e.dataTransfer.files].find(isPenpotFile) ?? e.dataTransfer.files[0];
+        if (file) openImport(file);
+      }}
+    >
       <aside className="dash__side" aria-label="Navigation">
         <TeamSwitcher teamName={team?.name ?? "…"} members={null} />
         <nav className="dash__nav">
@@ -143,6 +173,11 @@ export function DashboardPage() {
                 Invite
               </Button>
             ) : null}
+            {canImport ? (
+              <Button size="lg" icon="import" onClick={() => openImport()}>
+                Import
+              </Button>
+            ) : null}
             {canEdit && view !== "trash" ? (
               <Button
                 variant="primary"
@@ -174,6 +209,7 @@ export function DashboardPage() {
               searching={query.trim() !== ""}
               canCreate={canEdit && !!target}
               onCreate={() => target && createFile.mutate(target)}
+              onImport={canImport ? () => openImport() : null}
             />
           ) : (
             <ul className="dash__grid">
@@ -196,6 +232,27 @@ export function DashboardPage() {
       )}
 
       <InviteDialog open={inviteOpen} teamId={teamId} onClose={() => setInviteOpen(false)} />
+      {target ? (
+        <ImportDialog
+          open={importOpen}
+          projectId={target.id}
+          projectName={target.name}
+          file={importFile}
+          onClose={() => {
+            setImportOpen(false);
+            setImportFile(null);
+          }}
+          onImported={invalidateFiles}
+        />
+      ) : null}
+      {dragging ? (
+        <div className="dash__drop" aria-hidden="true">
+          <p>
+            <Icon name="import" size={16} />
+            Drop to import into {target?.name ?? "this project"}
+          </p>
+        </div>
+      ) : null}
       <NewProjectDialog
         open={newProjectOpen}
         teamId={teamId}
@@ -439,11 +496,13 @@ function EmptyState({
   searching,
   canCreate,
   onCreate,
+  onImport,
 }: {
   trash: boolean;
   searching: boolean;
   canCreate: boolean;
   onCreate: () => void;
+  onImport: (() => void) | null;
 }) {
   if (searching) {
     return (
@@ -470,9 +529,16 @@ function EmptyState({
         Create a file to start designing. Everyone on the team sees it right away.
       </p>
       {canCreate ? (
-        <Button variant="primary" size="lg" icon="plus" onClick={onCreate}>
-          New file
-        </Button>
+        <div className="dash__empty-actions">
+          <Button variant="primary" size="lg" icon="plus" onClick={onCreate}>
+            New file
+          </Button>
+          {onImport ? (
+            <Button size="lg" icon="import" onClick={onImport}>
+              Import from Penpot
+            </Button>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
