@@ -17,7 +17,8 @@
  * Drop and inner shadows (with spread, as the canvas casts them) and layer
  * blur are SVG filters in page space, so a rotated layer's shadow still
  * falls the way it does on the canvas. A layer blur blurs the whole layer,
- * children, strokes and shadows included, as on the canvas and in Figma.
+ * children, strokes and shadows included, as on the canvas and in Figma;
+ * so do noise and texture, approximated with turbulence (decision 0008).
  *
  * Not covered yet:
  * - image fills without a supplied image, and image strokes (left out)
@@ -34,6 +35,7 @@ import { type Matrix, type Rect, round2 } from "./geometry";
 import { FULL_CROP, imagePlacement } from "./images";
 import { markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
+import { type PostEffect, postEffects, postMargin } from "./post-effects";
 import { textSpans } from "./rich-text";
 import type { Scene } from "./scene";
 import {
@@ -101,6 +103,96 @@ const attr = (name: string, value: string | number) =>
 
 /** Wedges in an exported angular gradient: two per degree. */
 const ANGULAR_WEDGES = 180;
+
+/**
+ * Where turbulence's noise sits above `1 − density` of the time. One octave
+ * of `fractalNoise` is close to normal around 0.5 (σ ≈ 0.12); the logistic
+ * curve stands in for the normal quantile.
+ */
+export function noiseThreshold(density: number): number {
+  const d = Math.min(1, Math.max(0, density / 100));
+  if (d <= 0) return Number.POSITIVE_INFINITY;
+  if (d >= 1) return Number.NEGATIVE_INFINITY;
+  return 0.5 + (0.12 * Math.log((1 - d) / d)) / 1.702;
+}
+
+/** Steps in the table that turns turbulence into on and off cells. */
+const NOISE_STEPS = 32;
+
+/**
+ * SVG filter primitives for a layer's post effects (decision 0008), in
+ * order, starting from `SourceGraphic`. `scale` is the layer's page units
+ * per unit. The last primitive's result is the picture.
+ *
+ * Noise and texture are approximations: turbulence is smooth noise, not the
+ * canvas's square cells. A layer blur is exact.
+ */
+export function postPrimitives(post: readonly PostEffect[], scale: number): string {
+  const parts: string[] = [];
+  let input = "SourceGraphic";
+  post.forEach((e, i) => {
+    const result = `post${i}`;
+    if (e.type === "layer-blur") {
+      parts.push(
+        `<feGaussianBlur in="${input}"${attr("stdDeviation", e.radius * scale)} result="${result}"/>`,
+      );
+    } else if (e.type === "noise") {
+      // Grain about `size` across: thresholded, turbulence's features are about its lattice.
+      const frequency = 1 / Math.max(1e-6, e.size * scale);
+      const t = noiseThreshold(e.density);
+      const table = Array.from({ length: NOISE_STEPS }, (_, k) =>
+        (k + 0.5) / NOISE_STEPS >= t ? 1 : 0,
+      ).join(" ");
+      const cells = `cells${i}`;
+      parts.push(
+        `<feTurbulence type="fractalNoise"${attr("baseFrequency", frequency)} numOctaves="1" seed="${11 + i}" result="${cells}"/>`,
+        `<feComponentTransfer in="${cells}" result="${cells}"><feFuncA type="discrete" tableValues="${table}"/></feComponentTransfer>`,
+      );
+      const flood = (hex: string, as: string) => {
+        const { color, alpha } = splitColor(hex);
+        return `<feFlood${attr("flood-color", color)}${alpha < 1 ? attr("flood-opacity", alpha) : ""} result="${as}"/>`;
+      };
+      let grain = `grain${i}`;
+      if (e.noiseType === "multi") {
+        // Colours from a second turbulence, stretched to fill the range.
+        const channel = (c: string) => `<feFunc${c} type="linear" slope="3" intercept="-1"/>`;
+        parts.push(
+          `<feTurbulence type="fractalNoise"${attr("baseFrequency", frequency)} numOctaves="1" seed="${41 + i}" result="${grain}"/>`,
+          `<feComponentTransfer in="${grain}" result="${grain}">${channel("R")}${channel("G")}${channel("B")}<feFuncA type="linear" slope="0"${attr("intercept", e.opacity / 100)}/></feComponentTransfer>`,
+          `<feComposite in="${grain}" in2="${cells}" operator="in" result="${grain}"/>`,
+        );
+      } else {
+        parts.push(
+          flood(e.color, grain),
+          `<feComposite in="${grain}" in2="${cells}" operator="in" result="${grain}"/>`,
+        );
+        if (e.noiseType === "duo") {
+          const off = `off${i}`;
+          parts.push(
+            flood(e.secondaryColor, off),
+            `<feComposite in="${off}" in2="${cells}" operator="out" result="${off}"/>`,
+            `<feMerge result="duo${i}"><feMergeNode in="${off}"/><feMergeNode in="${grain}"/></feMerge>`,
+          );
+          grain = `duo${i}`;
+        }
+      }
+      parts.push(`<feComposite in="${grain}" in2="${input}" operator="atop" result="${result}"/>`);
+    } else {
+      // Turbulence's channels spread about ±0.3 around the middle: scaled so a pixel moves up to the radius.
+      const frequency = 1 / Math.max(1e-6, e.size * scale);
+      const grit = `grit${i}`;
+      const moved = e.clipToShape ? `moved${i}` : result;
+      parts.push(
+        `<feTurbulence type="fractalNoise"${attr("baseFrequency", frequency)} numOctaves="1" seed="${71 + i}" result="${grit}"/>`,
+        `<feDisplacementMap in="${input}" in2="${grit}"${attr("scale", (e.radius * scale) / 0.3)} xChannelSelector="R" yChannelSelector="G" result="${moved}"/>`,
+      );
+      if (e.clipToShape)
+        parts.push(`<feComposite in="${moved}" in2="${input}" operator="in" result="${result}"/>`);
+    }
+    input = result;
+  });
+  return parts.join("");
+}
 
 /** The colour at `t` (0–1) along gradient stops, interpolated in sRGB with alpha. */
 export function stopColorAt(
@@ -490,24 +582,23 @@ export function exportSvg(
     }
   };
 
-  /** A layer blur's filter id, or null: CSS-style blur(radius) on the layer's own drawing. */
   /**
-   * A layer blur blurs the whole layer, as on the canvas (and in Figma): its
-   * fills, strokes and shadows, and a frame's or group's children, as one
-   * picture. Wraps a layer's markup in the blur, over all it paints.
+   * Post effects (decision 0008) work on the whole layer, as on the canvas
+   * (and in Figma): its fills, strokes and shadows, and a frame's or group's
+   * children, as one picture. Wraps a layer's markup in one filter that
+   * applies them in order.
    */
-  const blurred = (node: NodeRecord, parts: string[]): string[] => {
-    let radius = 0;
-    for (const e of getProp(node.props, "effects"))
-      if (e.type === "layer-blur" && e.visible !== false) radius = Math.max(radius, e.radius);
-    if (radius <= 0 || parts.length === 0) return parts;
+  const processed = (node: NodeRecord, parts: string[]): string[] => {
+    const post = postEffects(getProp(node.props, "effects"));
+    if (post.length === 0 || parts.length === 0) return parts;
     const bounds = exportBounds(scene, [node.id]);
     if (!bounds) return parts;
-    const id = out.id("blur");
-    const pad = radius * 3;
+    const [a, b] = scene.worldMatrix(node.id);
+    const id = out.id("post");
+    const pad = postMargin(post) * Math.hypot(a, b) + 1;
     const region = `${attr("x", bounds.x - pad)}${attr("y", bounds.y - pad)}${attr("width", bounds.width + pad * 2)}${attr("height", bounds.height + pad * 2)}`;
     out.defs.push(
-      `<filter id="${id}" filterUnits="userSpaceOnUse"${region} color-interpolation-filters="sRGB"><feGaussianBlur${attr("stdDeviation", radius)}/></filter>`,
+      `<filter id="${id}" filterUnits="userSpaceOnUse"${region} color-interpolation-filters="sRGB">${postPrimitives(post, Math.hypot(a, b))}</filter>`,
     );
     return [`<g filter="url(#${id})">${parts.join("")}</g>`];
   };
@@ -525,7 +616,7 @@ export function exportSvg(
 
     if (node.type === "group") {
       visitChildren(id, parts);
-      const drawn = blurred(node, parts);
+      const drawn = processed(node, parts);
       if (drawn.length > 0) into.push(`<g${name}${wrapperAttrs}>${drawn.join("")}</g>`);
       return;
     }
@@ -584,7 +675,7 @@ export function exportSvg(
         strokes(node, shape, w, h, transform, above);
       }
     }
-    const drawn = blurred(node, [...shadows, ...below, ...inner, ...children, ...above]);
+    const drawn = processed(node, [...shadows, ...below, ...inner, ...children, ...above]);
     if (drawn.length === 0) return;
     if (wrapperAttrs || name) into.push(`<g${name}${wrapperAttrs}>${drawn.join("")}</g>`);
     else into.push(...drawn);

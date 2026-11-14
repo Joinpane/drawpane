@@ -12,6 +12,7 @@ import {
   NumberField,
   PromptField,
   SegmentedControl,
+  SliderField,
   Switch,
 } from "../src";
 
@@ -570,5 +571,59 @@ describe("PromptField", () => {
     await user.keyboard("{Enter}");
     expect(onSubmit).toHaveBeenCalledWith("Add states\nfor /");
     expect(input.value).toBe("");
+  });
+});
+
+describe("SliderField", () => {
+  it("moves evenly along its range by default", () => {
+    const onChange = vi.fn();
+    render(<SliderField label="Density" value={50} min={0} max={100} onChange={onChange} />);
+    const track = screen.getByRole("slider", { name: "Density" }) as HTMLInputElement;
+    expect(track.value).toBe("50");
+    fireEvent.change(track, { target: { value: "25" } });
+    expect(onChange).toHaveBeenLastCalledWith(25);
+  });
+
+  it("on a curve, gives the low end more of the track, and lands on whole steps", () => {
+    const onChange = vi.fn();
+    render(
+      <SliderField
+        label="Size"
+        value={12.875}
+        min={0.5}
+        max={50}
+        step={0.5}
+        unit="px"
+        curve={2}
+        onChange={onChange}
+      />,
+    );
+    const track = screen.getByRole("slider", { name: "Size" }) as HTMLInputElement;
+    // A quarter of the range sits at the middle of the track: (12.875 − 0.5) / 49.5 = 0.25 = 0.5².
+    expect(track.value).toBe("500");
+    expect(track.getAttribute("aria-valuetext")).toBe("12.875px");
+    fireEvent.change(track, { target: { value: "100" } });
+    // 0.5 + 49.5 × 0.1² = 0.995, to the nearest half: 1.
+    expect(onChange).toHaveBeenLastCalledWith(1);
+  });
+
+  it("on a curve, still moves a step a key (ten with shift), within its range", () => {
+    const onChange = vi.fn();
+    render(
+      <SliderField
+        label="Size"
+        value={49.5}
+        min={0.5}
+        max={50}
+        step={0.5}
+        curve={2}
+        onChange={onChange}
+      />,
+    );
+    const track = screen.getByRole("slider", { name: "Size" });
+    fireEvent.keyDown(track, { key: "ArrowLeft" });
+    expect(onChange).toHaveBeenLastCalledWith(49);
+    fireEvent.keyDown(track, { key: "ArrowRight", shiftKey: true });
+    expect(onChange).toHaveBeenLastCalledWith(50);
   });
 });

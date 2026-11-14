@@ -227,10 +227,84 @@ export const DEFAULT_GLASS: Glass = {
 
 /** The range of a glass property, for fields and sliders. */
 export function glassBounds(key: Exclude<keyof Glass, "type" | "visible" | "angle">): Bounds {
-  return BOUNDS.get(Glass.shape[key]) ?? {};
+  return effectBounds("glass", key);
 }
 
-export const Effect = z.discriminatedUnion("type", [Shadow, Blur, Glass]);
+/** A grain's size in px: noise and texture cells. */
+const grain = ranged(
+  finite.refine((n) => n >= 0.5 && n <= 50, "must be between 0.5 and 50"),
+  { min: 0.5, max: 50 },
+);
+
+/**
+ * Noise (decision 0008): grain over the layer, only where it paints. Each
+ * cell `size` px square is "on" with a `density`% chance. Mono paints on
+ * cells in `color`; duo paints on cells in `color` and the rest in
+ * `secondaryColor`; multi paints on cells in random colours at `opacity`%.
+ * All the values are kept whichever kind it is, so switching back loses nothing.
+ */
+export const Noise = z.object({
+  type: z.literal("noise"),
+  noiseType: z.enum(["mono", "duo", "multi"]),
+  size: grain,
+  density: amount,
+  color: Color,
+  secondaryColor: Color,
+  opacity: amount,
+  visible: z.boolean().optional(),
+});
+export type Noise = z.infer<typeof Noise>;
+export type NoiseType = Noise["noiseType"];
+
+/** A new noise: fine dark grain over half the layer. */
+export const DEFAULT_NOISE: Noise = {
+  type: "noise",
+  noiseType: "mono",
+  size: 1,
+  density: 50,
+  color: "#00000040",
+  secondaryColor: "#ffffff40",
+  opacity: 25,
+};
+
+/**
+ * Texture (decision 0008): the layer's edges roughened, as if printed on
+ * rough paper. Each cell `size` px square moves its pixels by up to
+ * `radius` px; with `clipToShape` nothing reaches past the layer's edge.
+ */
+export const Texture = z.object({
+  type: z.literal("texture"),
+  size: grain,
+  radius: ranged(
+    finite.refine((n) => n >= 0 && n <= 100, "must be between 0 and 100"),
+    { min: 0, max: 100 },
+  ),
+  clipToShape: z.boolean(),
+  visible: z.boolean().optional(),
+});
+export type Texture = z.infer<typeof Texture>;
+
+/** A new texture: a fine, sandy edge. */
+export const DEFAULT_TEXTURE: Texture = {
+  type: "texture",
+  size: 2,
+  radius: 4,
+  clipToShape: false,
+};
+
+const EFFECT_SHAPES = { glass: Glass.shape, noise: Noise.shape, texture: Texture.shape };
+type RangedEffect = keyof typeof EFFECT_SHAPES;
+
+/** The range of an effect's number, for fields and sliders: `effectBounds("noise", "density")`. */
+export function effectBounds<T extends RangedEffect>(
+  type: T,
+  key: keyof (typeof EFFECT_SHAPES)[T],
+): Bounds {
+  const schema = EFFECT_SHAPES[type][key] as z.ZodType;
+  return BOUNDS.get(schema) ?? {};
+}
+
+export const Effect = z.discriminatedUnion("type", [Shadow, Blur, Glass, Noise, Texture]);
 export type Effect = z.infer<typeof Effect>;
 
 /** A ruler guide: a line across its page, or across its frame, at an offset on one axis. */
