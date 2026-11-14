@@ -219,11 +219,13 @@ export function canvasMenu(host: MenuHost, request: MenuRequest): ContextMenuEnt
   const focus = action(host, "view.focus", "Hide other people's cursors");
   const rulers = action(host, "view.rulers", "Show rulers");
   const grids = action(host, "view.layoutGrids", "Show layout grids");
+  const pixels = action(host, "view.pixelSnap");
   return sections(
     [pasteHere(host, request), a("edit.selectAll")],
     [
       toggle(rulers, editor.s.rulers),
       toggle(grids, editor.s.layoutGrids),
+      toggle(pixels, editor.s.pixelSnap),
       toggle(comments, host.commentsShown),
       toggle(focus, editor.s.focusMode),
     ],
