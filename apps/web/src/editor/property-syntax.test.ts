@@ -58,6 +58,8 @@ describe("parsePropertyCommand", () => {
       sets: [{ prop: "minWidth", value: null }],
     });
     expect(parsePropertyCommand("maxh -4")).toBeNull();
+    // Not a percentage of the parent, as in CSS: refused rather than read as pixels.
+    expect(parsePropertyCommand("maxw 100%")).toBeNull();
     expect(parsePropertyCommand("rowgap 12")?.sets).toEqual([{ prop: "rowGap", value: 12 }]);
   });
 

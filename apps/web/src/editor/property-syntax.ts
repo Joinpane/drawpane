@@ -209,6 +209,8 @@ export function parsePropertyCommand(text: string): PropertyCommand | null {
           sets: alias.props.map((prop) => ({ prop, value: null })),
         };
       }
+      // A limit is a length: "100%" would read as 100px here, not as CSS's "of the parent".
+      if (rest.includes("%")) return null;
       const value = evaluate(rest);
       if (value === null || value < 0) return null;
       return {

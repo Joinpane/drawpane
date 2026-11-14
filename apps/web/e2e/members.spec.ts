@@ -92,6 +92,23 @@ test.describe
       await expect(bo.getByRole("complementary").getByText("What roles can do")).toBeVisible();
     });
 
+    test("the role menu works from the keyboard alone", async () => {
+      const button = ana
+        .getByRole("list", { name: "People" })
+        .getByRole("button", { name: "Bo Chen: Viewer. Change role" });
+      await button.focus();
+      await ana.keyboard.press("Enter");
+      const menu = ana.getByRole("menu", { name: "Role for Bo Chen" });
+      // Focus moves into the menu, on its first item.
+      await expect(menu.getByRole("menuitemcheckbox", { name: "Owner" })).toBeFocused();
+      await ana.keyboard.press("ArrowDown");
+      await expect(menu.getByRole("menuitemcheckbox", { name: "Editor" })).toBeFocused();
+      // Escape closes it and hands focus back to the button.
+      await ana.keyboard.press("Escape");
+      await expect(menu).toHaveCount(0);
+      await expect(button).toBeFocused();
+    });
+
     test("an owner changes a role, and removes someone after asking", async () => {
       // Bo has one of the team's files open the whole time.
       const fileId = await ana.evaluate(async () => {
@@ -147,13 +164,34 @@ test.describe
       await expect(bo.getByRole("heading", { name: "You're not on a team" })).toBeVisible();
     });
 
-    test("fits a phone: who signs in how moves under the name", async () => {
+    test("on a phone, the sidebar is a drawer: open, move around, close", async () => {
       await ana.setViewportSize({ width: 390, height: 844 });
       expect(
         await ana.evaluate(
           () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
         ),
       ).toBe(true);
+      const nav = ana.getByRole("complementary", { name: "Navigation" });
+      const open = ana.getByRole("button", { name: "Open navigation" });
+      // Closed, it's out of sight and out of the tab order.
+      await expect(nav.getByRole("link", { name: /^Members/ })).not.toBeVisible();
+      await open.click();
+      await expect(ana.getByRole("button", { name: "Close navigation" })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      // Focus starts on where you are; Escape closes and hands it back.
+      await expect(nav.getByRole("link", { name: /^Members/ })).toBeFocused();
+      await ana.keyboard.press("Escape");
+      await expect(nav.getByRole("link", { name: /^Members/ })).not.toBeVisible();
+      await expect(open).toBeFocused();
+      // Picking a place goes there and closes the drawer.
+      await open.click();
+      await nav.getByRole("link", { name: /^Recent/ }).click();
+      await expect(ana.getByRole("heading", { name: "Recent files", level: 1 })).toBeVisible();
+      await expect(nav.getByRole("link", { name: /^Recent/ })).not.toBeVisible();
+      // Search is there on a phone too.
+      await expect(ana.getByRole("searchbox", { name: "Search files" })).toBeVisible();
       await ana.setViewportSize({ width: 1440, height: 900 });
     });
   });

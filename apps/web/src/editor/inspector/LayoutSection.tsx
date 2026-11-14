@@ -538,11 +538,15 @@ function Limit({
   const ids = nodes.map((n) => n.id);
   const values = nodes.map((n) => getProp(n.props, prop));
   const same = values.every((v) => v === values[0]);
+  // Scrubbing a limit that isn't set starts from the layer's size, not from 0 (which would collapse it).
+  const first = nodes[0];
+  const size = first ? getProp(first.props, prop.endsWith("Width") ? "width" : "height") : 0;
   return (
     <NumberField
       label={label}
       ariaLabel={name}
       min={0}
+      scrubFrom={size}
       value={same ? (values[0] ?? null) : null}
       nullLabel={same ? "None" : "Mixed"}
       onChange={(value) => editor.setProp(ids, prop, value, name)}
