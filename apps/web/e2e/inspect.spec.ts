@@ -76,8 +76,23 @@ test.describe
           fills: solid("#0f8a7e"),
           effects: [{ type: "layer-blur", radius: 6 }],
         });
-        // Blurred, with a wide outside stroke and a sharp shadow: the blur covers the
-        // whole stroke, and leaves the shadow alone, as on the canvas.
+        // A blurred frame: its child (overlapping its edge) is blurred with it, as one picture.
+        const blurredFrame = e.createLayer(
+          "frame",
+          { x: 20, y: 150, width: 34, height: 50 },
+          frame,
+          {
+            fills: solid("#c2410c"),
+            clipContent: false,
+            effects: [{ type: "layer-blur", radius: 3 }],
+          },
+        ) as string;
+        // Page coordinates: across the frame's right edge.
+        e.createLayer("rect", { x: 40, y: 168, width: 30, height: 14 }, blurredFrame, {
+          fills: solid("#ffffff"),
+        });
+        // Blurred, with a wide outside stroke and a shadow: the whole layer is blurred,
+        // stroke and shadow included, as in Figma.
         e.createLayer("rect", { x: 220, y: 150, width: 60, height: 30 }, frame, {
           fills: solid("#f5b400"),
           strokes: solid("#1c1b1a"),

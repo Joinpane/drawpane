@@ -406,36 +406,6 @@ describe("exportSvg", () => {
     expect(svg.match(/<filter /g)).toHaveLength(2);
   });
 
-  it("blurs a layer's own drawing, not its children", () => {
-    const editor = makeEditor([
-      {
-        op: "create",
-        id: "f",
-        type: "frame",
-        parent: "p",
-        key: "a0",
-        props: {
-          x: 0,
-          y: 0,
-          width: 200,
-          height: 100,
-          fills: [{ type: "solid", color: "#eeeeee" }],
-          effects: [{ type: "layer-blur", radius: 4 }],
-        },
-      },
-      rect(
-        "c",
-        { x: 10, y: 10, width: 20, height: 20, fills: [{ type: "solid", color: "#000000" }] },
-        "f",
-      ),
-    ]);
-    const svg = svgOf(editor, ["f"]);
-    expect(svg).toContain('<feGaussianBlur stdDeviation="4"/>');
-    expect(svg).toContain(
-      '<g filter="url(#blur2)"><rect width="200" height="100" fill="#eeeeee"/></g><g clip-path="url(#clip1)"><rect transform="translate(10 10)"',
-    );
-  });
-
   it("masks an outside stroke where the layer is on the page, not at the origin", () => {
     const editor = makeEditor([
       rect("r", {
@@ -465,31 +435,53 @@ describe("exportSvg", () => {
     expect(y + height).toBeGreaterThanOrEqual(250 + 4);
   });
 
-  it("blurs only the fills of a layer, as the canvas does: not its shadows or strokes", () => {
+  it("blurs a whole layer, as the canvas and Figma do: shadows, fills, children and strokes", () => {
     const editor = makeEditor([
-      rect("r", {
-        fills: [{ type: "solid", color: "#2b4fd6" }],
-        strokes: [{ type: "solid", color: "#000000" }],
-        strokeWeight: 20,
-        strokeAlign: "outside",
-        effects: [
-          { type: "layer-blur", radius: 1 },
-          { type: "drop-shadow", color: "#00000080", x: 0, y: 30, blur: 2, spread: 0 },
-          { type: "inner-shadow", color: "#ffffff", x: 2, y: 2, blur: 2, spread: 0 },
-        ],
-      }),
+      {
+        op: "create",
+        id: "f",
+        type: "frame",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 200,
+          height: 100,
+          fills: [{ type: "solid", color: "#eeeeee" }],
+          strokes: [{ type: "solid", color: "#000000" }],
+          strokeWeight: 8,
+          strokeAlign: "outside",
+          effects: [
+            { type: "layer-blur", radius: 4 },
+            { type: "drop-shadow", color: "#00000080", x: 0, y: 20, blur: 0, spread: 0 },
+          ],
+        },
+      },
+      rect(
+        "c",
+        { x: 10, y: 10, width: 20, height: 20, fills: [{ type: "solid", color: "#2b4fd6" }] },
+        "f",
+      ),
     ]);
-    const svg = svgOf(editor, ["r"]);
-    const blur = /<filter id="(blur\d+)"/.exec(svg)?.[1];
-    expect(blur).toBeDefined();
-    const blurred = [...svg.matchAll(new RegExp(`<g filter="url\\(#${blur}\\)">(.*?)</g>`, "g"))]
-      .map((m) => m[1])
-      .join("");
-    expect(blurred).toContain('fill="#2b4fd6"');
-    expect(blurred).not.toContain("shadow");
-    expect(blurred).not.toContain('stroke="#000000"');
-    // The stroke is still drawn, outside the blurred group.
-    expect(svg).toContain('stroke="#000000"');
+    const svg = svgOf(editor, ["f"]);
+    const filter =
+      /<filter id="(blur\d+)" filterUnits="userSpaceOnUse" x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)"/.exec(
+        svg,
+      );
+    expect(filter).not.toBeNull();
+    const [, id, x, y, width, height] = filter as RegExpExecArray;
+    // One blurred group holds all of it.
+    const group = new RegExp(`<g filter="url\\(#${id}\\)">(.*)</g>`).exec(svg)?.[1] ?? "";
+    expect(group).toContain("shadow");
+    expect(group).toContain('fill="#eeeeee"');
+    expect(group).toContain('fill="#2b4fd6"');
+    expect(group).toContain('stroke="#000000"');
+    // Over everything it paints: the outside stroke (8), the shadow 20 below, and 3 radii of blur.
+    expect(Number(x)).toBeLessThanOrEqual(-8 - 12);
+    expect(Number(y)).toBeLessThanOrEqual(-8 - 12);
+    expect(Number(x) + Number(width)).toBeGreaterThanOrEqual(208 + 12);
+    expect(Number(y) + Number(height)).toBeGreaterThanOrEqual(120 + 12);
   });
 
   it("casts a rotated layer's shadow in page space, as the canvas does", () => {
