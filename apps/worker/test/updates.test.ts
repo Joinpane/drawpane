@@ -74,4 +74,25 @@ describe("compareVersions", () => {
     expect(compareVersions("1.0.0-beta.1", "1.0.0")).toBeLessThan(0);
     expect(compareVersions("1.2.3", "1.2.3")).toBe(0);
   });
+
+  it("orders pre-releases by semver: numbers as numbers, before words", () => {
+    // The order the semver spec gives, shuffled; plus build metadata, which doesn't count.
+    const ordered = [
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0-rc.1",
+      "1.0.0",
+      "1.0.1-0",
+      "1.0.1",
+    ];
+    const shuffled = [...ordered].reverse();
+    shuffled.push(shuffled.shift() as string);
+    expect(shuffled.sort(compareVersions)).toEqual(ordered);
+    expect(compareVersions("1.0.0-beta.10", "1.0.0-beta.9")).toBeGreaterThan(0);
+    expect(compareVersions("1.0.0+build.7", "1.0.0")).toBe(0);
+  });
 });

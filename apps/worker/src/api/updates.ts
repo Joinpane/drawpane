@@ -62,11 +62,20 @@ export async function availableUpdate(
   };
 }
 
-/** Dotted versions: negative when a is older. A pre-release sorts before its release. */
+/**
+ * Compares versions by semver precedence: negative when a is older than b.
+ * A pre-release sorts before its release. The installer and the Worker each
+ * keep a copy (the installer is published on its own); packages/create-drawpane/src/instance.ts has the other,
+ * and both test the same cases.
+ */
 export function compareVersions(a: string, b: string): number {
   const parse = (v: string) => {
-    const [core = "", pre] = v.split("-", 2);
-    return { parts: core.split(".").map((n) => Number.parseInt(n, 10) || 0), pre };
+    // Build metadata ("+abc") doesn't order versions.
+    const [core = "", ...pre] = (v.split("+", 1)[0] ?? "").split("-");
+    return {
+      parts: core.split(".").map((n) => Number.parseInt(n, 10) || 0),
+      pre: pre.length > 0 ? pre.join("-").split(".") : [],
+    };
   };
   const x = parse(a);
   const y = parse(b);
@@ -74,8 +83,19 @@ export function compareVersions(a: string, b: string): number {
     const d = (x.parts[i] ?? 0) - (y.parts[i] ?? 0);
     if (d !== 0) return d;
   }
-  if (x.pre === y.pre) return 0;
-  if (x.pre === undefined) return 1;
-  if (y.pre === undefined) return -1;
-  return x.pre < y.pre ? -1 : 1;
+  // A release is newer than its pre-releases.
+  if (x.pre.length === 0 || y.pre.length === 0) return y.pre.length - x.pre.length;
+  // Pre-releases part by part: numbers as numbers ("beta.2" < "beta.10"), and before words.
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === undefined || q === undefined) return p === undefined ? -1 : 1;
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) - Number(q);
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
 }

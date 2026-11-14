@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,6 +11,7 @@ import {
   suggestName,
   writeConfig,
 } from "../src/instance";
+import { Problem } from "../src/problem";
 import { renderWranglerConfig } from "../src/release";
 
 describe("names", () => {
@@ -42,6 +43,27 @@ describe("versions", () => {
     expect(compareVersions("1.0.0-beta.1", "1.0.0")).toBeLessThan(0);
     expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.1")).toBeGreaterThan(0);
   });
+
+  it("orders pre-releases by semver: numbers as numbers, before words", () => {
+    // The order the semver spec gives, shuffled; plus build metadata, which doesn't count.
+    const ordered = [
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0-rc.1",
+      "1.0.0",
+      "1.0.1-0",
+      "1.0.1",
+    ];
+    const shuffled = [...ordered].reverse();
+    shuffled.push(shuffled.shift() as string);
+    expect(shuffled.sort(compareVersions)).toEqual(ordered);
+    expect(compareVersions("1.0.0-beta.10", "1.0.0-beta.9")).toBeGreaterThan(0);
+    expect(compareVersions("1.0.0+build.7", "1.0.0")).toBe(0);
+  });
 });
 
 describe("drawpane.json", () => {
@@ -53,6 +75,21 @@ describe("drawpane.json", () => {
     expect(await readConfig(dir)).toEqual(config);
     await writeFile(join(dir, "drawpane.json"), JSON.stringify({ ...config, name: "Not OK" }));
     await expect(readConfig(dir)).rejects.toThrow(/name: lowercase/);
+  });
+
+  it("names the file and what's wrong when it can't be used, as something to fix", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "drawpane-config-"));
+    const file = join(dir, "drawpane.json");
+    await writeFile(file, '{ "name": "design", }');
+    const broken = await readConfig(dir).catch((e: unknown) => e);
+    expect(broken).toBeInstanceOf(Problem);
+    expect((broken as Error).message.startsWith(`${file} isn't valid JSON (`)).toBe(true);
+    await writeFile(file, "[]");
+    await expect(readConfig(dir)).rejects.toThrow(`${file} isn't valid: `);
+    // A folder where the file should be: still a problem to fix, not a crash.
+    await rm(file);
+    await mkdir(file);
+    await expect(readConfig(dir)).rejects.toThrow(`Couldn't read ${file}: EISDIR.`);
   });
 });
 

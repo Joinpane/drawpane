@@ -7,6 +7,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { Problem } from "./problem.js";
 
 export const CONFIG_FILE = "drawpane.json";
 
@@ -52,21 +53,33 @@ export function newConfig({
   };
 }
 
-/** The folder's config, or null when the folder has none. Throws when it's there but invalid. */
+/**
+ * The folder's config, or null when the folder has none. When it's there but
+ * can't be used, says which file and what's wrong with it.
+ */
 export async function readConfig(dir: string): Promise<InstanceConfig | null> {
+  const path = join(dir, CONFIG_FILE);
   let text: string;
   try {
-    text = await readFile(join(dir, CONFIG_FILE), "utf8");
+    text = await readFile(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    throw new Problem(`Couldn't read ${path}: ${code ?? (error as Error).message}.`);
   }
-  const parsed = InstanceConfig.safeParse(JSON.parse(text));
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch (error) {
+    throw new Problem(
+      `${path} isn't valid JSON (${(error as Error).message}). Fix it, or restore it from a backup.`,
+    );
+  }
+  const parsed = InstanceConfig.safeParse(json);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
-    throw new Error(
-      `${CONFIG_FILE} isn't valid: ${issue ? `${issue.path.join(".")}: ${issue.message}` : "unreadable"}.`,
-    );
+    const where = issue && issue.path.length > 0 ? `${issue.path.join(".")}: ` : "";
+    throw new Problem(`${path} isn't valid: ${issue ? `${where}${issue.message}` : "unreadable"}.`);
   }
   return parsed.data;
 }
@@ -109,11 +122,20 @@ export function domainProblem(domain: string): string | null {
   return null;
 }
 
-/** Compares dotted versions: negative when a is older than b. Pre-release tags sort first. */
+/**
+ * Compares versions by semver precedence: negative when a is older than b.
+ * A pre-release sorts before its release. The installer and the Worker each
+ * keep a copy (the installer is published on its own); apps/worker/src/api/updates.ts has the other,
+ * and both test the same cases.
+ */
 export function compareVersions(a: string, b: string): number {
   const parse = (v: string) => {
-    const [core = "", pre] = v.split("-", 2);
-    return { parts: core.split(".").map((n) => Number.parseInt(n, 10) || 0), pre };
+    // Build metadata ("+abc") doesn't order versions.
+    const [core = "", ...pre] = (v.split("+", 1)[0] ?? "").split("-");
+    return {
+      parts: core.split(".").map((n) => Number.parseInt(n, 10) || 0),
+      pre: pre.length > 0 ? pre.join("-").split(".") : [],
+    };
   };
   const x = parse(a);
   const y = parse(b);
@@ -121,8 +143,19 @@ export function compareVersions(a: string, b: string): number {
     const d = (x.parts[i] ?? 0) - (y.parts[i] ?? 0);
     if (d !== 0) return d;
   }
-  if (x.pre === y.pre) return 0;
-  if (x.pre === undefined) return 1;
-  if (y.pre === undefined) return -1;
-  return x.pre < y.pre ? -1 : 1;
+  // A release is newer than its pre-releases.
+  if (x.pre.length === 0 || y.pre.length === 0) return y.pre.length - x.pre.length;
+  // Pre-releases part by part: numbers as numbers ("beta.2" < "beta.10"), and before words.
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === undefined || q === undefined) return p === undefined ? -1 : 1;
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) - Number(q);
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
 }

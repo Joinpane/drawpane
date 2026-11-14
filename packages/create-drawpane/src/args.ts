@@ -4,7 +4,7 @@
  * means something else to npm); a typo here gets "did you mean".
  */
 import { parseArgs } from "node:util";
-import { Problem } from "./flows.js";
+import { Problem } from "./problem.js";
 
 export const OPTIONS = {
   account: { type: "string" },
@@ -54,6 +54,44 @@ export function explainArgsError(error: unknown): unknown {
     );
   }
   return error;
+}
+
+export interface Command {
+  readonly kind: "install" | "upgrade";
+  /** The instance's folder; undefined means ask (install) or here (upgrade). */
+  readonly dir: string | undefined;
+}
+
+/** Commands, and words people type for them by mistake. */
+const COMMANDS: Record<string, readonly string[]> = { upgrade: ["update"] };
+
+/**
+ * What to do, from the words after the options: `[folder]` installs,
+ * `upgrade [folder]` upgrades. A word that looks like a mistyped command
+ * ("upgarde") is asked about rather than made into a folder; `./upgarde`
+ * still means the folder.
+ */
+export function parseCommand(positionals: readonly string[]): Command {
+  const [first, ...rest] = positionals;
+  const command = first === "upgrade" ? "upgrade" : "install";
+  const dir = command === "upgrade" ? rest.shift() : first;
+  if (rest.length > 0) {
+    throw new Problem(
+      `Unexpected: ${rest.join(" ")}. ${command === "upgrade" ? "Upgrade takes one folder" : "Give one folder"}. See --help.`,
+    );
+  }
+  if (command === "install" && first !== undefined) {
+    const word = first.toLowerCase();
+    const meant = Object.keys(COMMANDS).find(
+      (c) => first !== c && (distance(word, c) <= 2 || COMMANDS[c]?.includes(word)),
+    );
+    if (meant) {
+      throw new Problem(
+        `Did you mean ${meant}? To install into a folder named ${first}, say ./${first}.`,
+      );
+    }
+  }
+  return { kind: command, dir };
 }
 
 /** The known option nearest to a mistyped one, if it's a plausible typo. */

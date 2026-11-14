@@ -5,9 +5,10 @@
  * version. See docs/decisions/0004-installer.md.
  */
 import { spawn } from "node:child_process";
-import { parseCli } from "./args.js";
+import { parseCli, parseCommand } from "./args.js";
 import { WranglerError, wrangler } from "./cloudflare.js";
-import { type Deps, install, Problem, upgrade } from "./flows.js";
+import { type Deps, install, upgrade } from "./flows.js";
+import { Problem } from "./problem.js";
 import { bundledRelease } from "./release.js";
 import { Cancelled, terminalUi } from "./ui.js";
 
@@ -53,6 +54,7 @@ async function main(argv: readonly string[]): Promise<number> {
     process.stdout.write(HELP);
     return 0;
   }
+  const command = parseCommand(positionals);
   const release = await bundledRelease();
   if (values.version) {
     process.stdout.write(`${release.version}\n`);
@@ -69,15 +71,12 @@ async function main(argv: readonly string[]): Promise<number> {
     env: process.env,
     cwd: process.cwd(),
   };
-  const [first, second, ...rest] = positionals;
-  if (rest.length > 0) throw new Problem(`Unexpected: ${rest.join(" ")}. See --help.`);
-  if (first === "upgrade")
-    await upgrade({ dir: second, yes: values.yes, force: values.force }, deps);
-  else {
-    if (second !== undefined) throw new Problem(`Unexpected: ${second}. See --help.`);
+  if (command.kind === "upgrade")
+    await upgrade({ dir: command.dir, yes: values.yes, force: values.force }, deps);
+  else
     await install(
       {
-        dir: first,
+        dir: command.dir,
         account: values.account,
         name: values.name,
         domain: values.domain,
@@ -85,7 +84,6 @@ async function main(argv: readonly string[]): Promise<number> {
       },
       deps,
     );
-  }
   return 0;
 }
 

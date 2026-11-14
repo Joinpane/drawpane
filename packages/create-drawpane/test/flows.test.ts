@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Account, Cloudflare } from "../src/cloudflare";
-import { type Deps, install, Problem, upgrade } from "../src/flows";
+import { type Deps, install, upgrade } from "../src/flows";
 import { readConfig } from "../src/instance";
+import { Problem } from "../src/problem";
 import type { Release } from "../src/release";
 import type { Choice, Ui } from "../src/ui";
 
