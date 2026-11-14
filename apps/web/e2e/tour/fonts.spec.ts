@@ -99,7 +99,7 @@ test("font picker tour", async ({ browser }) => {
   await page.keyboard.press("Enter");
 
   await panel.getByRole("button", { name: /^Font:/ }).click();
-  await dialog.getByRole("radio", { name: "In this file" }).click();
+  await dialog.getByRole("radio", { name: "This file" }).click();
   await page.waitForTimeout(800);
   await shot(page, "107-font-in-file");
   await context.close();

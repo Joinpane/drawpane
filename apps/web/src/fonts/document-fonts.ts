@@ -21,9 +21,24 @@ export function watchDocumentFonts(doc: Doc): () => void {
       const key = `${family}\u0000${weight}\u0000${italic}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      void fonts.ensure(family, [{ weight, italic }]);
+      load(family, weight, italic, key);
     }
   };
+
+  // Faces nothing provided yet: retried when the registry learns more (the
+  // team's fonts arriving after the document, say).
+  const unresolved = new Map<string, { family: string; weight: number; italic: boolean }>();
+  const load = (family: string, weight: number, italic: boolean, key: string) => {
+    void fonts.ensure(family, [{ weight, italic }]).then((found) => {
+      if (found) unresolved.delete(key);
+      else unresolved.set(key, { family, weight, italic });
+    });
+  };
+  const offFonts = fonts.subscribe(() => {
+    for (const [key, face] of unresolved) {
+      if (fonts.get(face.family)) load(face.family, face.weight, face.italic, key);
+    }
+  });
 
   // Batched to one pass per task: a paste or a remote batch touches many layers at once.
   const flush = () => {
@@ -35,7 +50,7 @@ export function watchDocumentFonts(doc: Doc): () => void {
 
   pending = "all";
   queueMicrotask(flush);
-  return doc.subscribe((change) => {
+  const offDoc = doc.subscribe((change) => {
     const first = pending === null;
     if (change.reset) pending = "all";
     else if (pending !== "all") {
@@ -44,6 +59,10 @@ export function watchDocumentFonts(doc: Doc): () => void {
     }
     if (first) queueMicrotask(flush);
   });
+  return () => {
+    offDoc();
+    offFonts();
+  };
 }
 
 /**

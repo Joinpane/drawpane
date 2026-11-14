@@ -96,9 +96,11 @@ const teamRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/t/$teamId",
   beforeLoad: requireUser,
-  validateSearch: (search: Record<string, unknown>): { project?: string; view?: "trash" } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { project?: string; view?: "trash" | "fonts" } => ({
     ...(typeof search.project === "string" ? { project: search.project } : {}),
-    ...(search.view === "trash" ? { view: "trash" as const } : {}),
+    ...(search.view === "trash" || search.view === "fonts" ? { view: search.view } : {}),
   }),
   component: DashboardPage,
 });

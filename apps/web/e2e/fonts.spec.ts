@@ -126,7 +126,7 @@ test.describe
 
     test("lists the file's fonts and flags the missing one", async () => {
       await panel(page).getByRole("button", { name: "Font: Fraunces" }).click();
-      await picker(page).getByRole("radio", { name: "In this file" }).click();
+      await picker(page).getByRole("radio", { name: "This file" }).click();
       const missing = picker(page).getByRole("option", { name: /^Frutiger/ });
       await expect(missing).toContainText("Missing");
       await expect(missing).toHaveAttribute("aria-disabled", "true");

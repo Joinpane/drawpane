@@ -56,6 +56,8 @@ Pull the new version, then run step 5 again. Migrations are additive and run bef
 
 The font picker offers the open-source Google Fonts catalog. The first time someone uses a family, the Worker fetches it from Google and keeps a copy in your R2 bucket (under `fonts/gstatic/`). After that, everyone loads it from your server: browsers never contact Google, and files keep rendering even if Google changes the font or removes it.
 
+Teams can also upload their own fonts (TrueType, OpenType, WOFF or WOFF2) from **Fonts** in the dashboard. They're kept in your R2 bucket under `fonts/team/`, read on upload for their family, weight and style, and served only to members of the team that uploaded them.
+
 To keep the Worker from contacting Google at all, set `GOOGLE_FONTS` to `off` in the `vars` of `wrangler.jsonc`. The picker then offers only the built-in fonts, system fonts and fonts installed on each person's computer.
 
 ## Backups
