@@ -10,8 +10,10 @@ import {
   getProp,
   type NodeRecord,
   type Paint,
+  type Props,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
+import { type RunStyle, textSpans } from "./rich-text";
 import { letterSpacingPx, lineHeightPx } from "./text";
 import { cssVariableName } from "./variables";
 import { shapeVertices } from "./vector/shapes";
@@ -424,6 +426,32 @@ function tw(prefix: string, value: string, numeric?: number): string {
   return `${prefix}-[${value.replace(/\s+/g, "_")}]`;
 }
 
+/** Tailwind classes for what a styled run changes from its text layer. */
+function runClasses(props: Props, own: RunStyle): string[] {
+  const out: string[] = [];
+  if (own.fontFamily)
+    out.push(`font-['${own.fontFamily.replace(/['"]/g, "").replace(/\s+/g, "_")}']`);
+  if (own.fontSize !== undefined) out.push(tw("text", px(own.fontSize)));
+  if (own.fontWeight !== undefined) out.push(`font-[${own.fontWeight}]`);
+  if (own.fontStyle) out.push(own.fontStyle === "italic" ? "italic" : "not-italic");
+  if (own.letterSpacing) out.push(tw("tracking", px(letterSpacingPx(props))));
+  if (own.textCase)
+    out.push(
+      { upper: "uppercase", lower: "lowercase", title: "capitalize", none: "normal-case" }[
+        own.textCase
+      ],
+    );
+  if (own.textDecoration)
+    out.push(
+      { underline: "underline", strikethrough: "line-through", none: "no-underline" }[
+        own.textDecoration
+      ],
+    );
+  const solid = own.fills?.findLast((f) => f.visible !== false && f.type === "solid");
+  if (solid?.type === "solid") out.push(tw("text", solid.color));
+  return out;
+}
+
 /** Tailwind classes for a layer (arbitrary values where the scale has no step). */
 export function tailwindFor(doc: Doc, node: NodeRecord): string[] {
   const classes: string[] = [];
@@ -581,7 +609,16 @@ export function jsxFor(doc: Doc, node: NodeRecord, depth = 0, limit = 200): stri
   const classes = tailwindFor(doc, node).join(" ");
   const attr = classes ? ` className="${classes}"` : "";
   if (node.type === "text") {
-    return `${indent}<p${attr}>${escapeJsx(getProp(node.props, "characters"))}</p>`;
+    const characters = getProp(node.props, "characters");
+    // Styled runs become spans carrying what they change.
+    const inner = textSpans(node)
+      .map((span) => {
+        const text = escapeJsx(characters.slice(span.start, span.end));
+        const own = runClasses(span.props, span.own);
+        return own.length > 0 ? `<span className="${own.join(" ")}">${text}</span>` : text;
+      })
+      .join("");
+    return `${indent}<p${attr}>${inner}</p>`;
   }
   const children = doc.childIds(node.id);
   if (children.length === 0 || limit <= 0) return `${indent}<div${attr} />`;
