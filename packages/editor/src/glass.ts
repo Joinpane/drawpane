@@ -30,6 +30,75 @@ import {
   scratch,
 } from "./webgl";
 
+/**
+ * The constants that shape glass's look: what calibration against Figma's
+ * renders fits (tools/glass-calibration). The defaults are the fitted
+ * values; nothing in the editor changes them.
+ */
+export interface GlassTuning {
+  /** At full refraction, how far the edge looks in, as a share of the rim's depth. */
+  readonly bend: number;
+  /** How fast the bend eases toward the flat middle: (1 − t)^profile. */
+  readonly profile: number;
+  /** At full dispersion, how far colours part, as a share of the bend. */
+  readonly dispersion: number;
+  /** Blur per unit of frost. */
+  readonly frost: number;
+  /** Degrees added to the light's angle, and whether it turns the other way (−1). */
+  readonly angleOffset: number;
+  readonly angleTurn: 1 | -1;
+  /** The specular line on the lit edge: width (share of depth, at least `lineMin` px) and strength. */
+  readonly lineWidth: number;
+  readonly lineMin: number;
+  readonly line: number;
+  /** A broader glow inside the lit edge: width (share of depth, at least `glowMin` px) and strength. */
+  readonly glowWidth: number;
+  readonly glowMin: number;
+  readonly glow: number;
+  /** How tightly the light falls on edges facing it: cos^facing. */
+  readonly facing: number;
+  /** The edge opposite the light: its line and glow strength, and falloff power. */
+  readonly backLine: number;
+  readonly backGlow: number;
+  readonly backFacing: number;
+  /** A sheen across the whole rim, and shade on the side away from the light. */
+  readonly sheen: number;
+  readonly shade: number;
+}
+
+export const DEFAULT_GLASS_TUNING: GlassTuning = {
+  bend: 0.45,
+  profile: 3,
+  dispersion: 0.25,
+  frost: 1,
+  angleOffset: 0,
+  angleTurn: 1,
+  lineWidth: 0.05,
+  lineMin: 1.2,
+  line: 1.1,
+  glowWidth: 0.35,
+  glowMin: 3,
+  glow: 0.3,
+  facing: 1.4,
+  backLine: 0.55,
+  backGlow: 0.1,
+  backFacing: 2,
+  sheen: 0.05,
+  shade: 0.1,
+};
+
+let tuning: GlassTuning = DEFAULT_GLASS_TUNING;
+
+/** The tuning glass draws with. */
+export function glassTuning(): GlassTuning {
+  return tuning;
+}
+
+/** Calibration only: draws glass with other constants (`null` restores the defaults). */
+export function setGlassTuning(next: Partial<GlassTuning> | null): void {
+  tuning = next ? { ...DEFAULT_GLASS_TUNING, ...next } : DEFAULT_GLASS_TUNING;
+}
+
 /** A glass effect in device pixels, as the shader takes it. */
 export interface GlassParams {
   /**
@@ -58,15 +127,19 @@ export interface GlassParams {
  * A glass effect's values in device pixels at `scale` (device pixels per
  * unit). 0° is light from the top, turning clockwise: −45° is the top left.
  */
-export function glassParams(glass: Glass, scale: number): GlassParams {
+export function glassParams(
+  glass: Glass,
+  scale: number,
+  tune: GlassTuning = glassTuning(),
+): GlassParams {
   const depth = Math.max(0, glass.depth) * scale;
-  // Full refraction bends a ray 0.45 of the rim's width at its edge (never over less than a few pixels).
-  const refraction = (glass.refraction / 100) * 0.45 * Math.max(depth, 4 * scale);
-  // Colours part by up to a quarter of the bend: real glass fringes subtly.
-  const dispersion = (glass.dispersion / 100) * 0.25;
-  const frost = Math.max(0, glass.frost) * scale;
+  // Full refraction bends a ray a share of the rim's width at its edge (never over less than a few pixels).
+  const refraction = (glass.refraction / 100) * tune.bend * Math.max(depth, 4 * scale);
+  // Colours part by a share of the bend: real glass fringes subtly.
+  const dispersion = (glass.dispersion / 100) * tune.dispersion;
+  const frost = Math.max(0, glass.frost) * scale * tune.frost;
   const splay = glass.splay / 100;
-  const radians = (glass.angle * Math.PI) / 180;
+  const radians = ((glass.angle * tune.angleTurn + tune.angleOffset) * Math.PI) / 180;
   return {
     refraction,
     depth,
@@ -155,6 +228,12 @@ uniform float dispersion;
 uniform float splay;
 uniform vec2 light;
 uniform float intensity;
+// GlassTuning: (profile, lineWidth, lineMin, line), (glowWidth, glowMin, glow, facing),
+// (backLine, backGlow, backFacing, sheen), (shade, -, -, -).
+uniform vec4 tuneA;
+uniform vec4 tuneB;
+uniform vec4 tuneC;
+uniform vec4 tuneD;
 
 vec4 canvasAt(sampler2D t, vec2 p) { return texture(t, vec2(p.x, size.y - p.y) / size); }
 
@@ -177,7 +256,7 @@ void main() {
   float t = clamp(d / rimDepth, 0.0, 1.0);
   // How far in the rim looks: most at the edge, easing (with its slope) to
   // nothing a depth in, so the lens meets the flat middle without a crease.
-  float slope = (1.0 - t) * (1.0 - t) * (1.0 - t);
+  float slope = pow(1.0 - t, tuneA.x);
 
   vec2 fromCenter = p - center;
   vec2 fan = length(fromCenter) > 1e-3 ? normalize(fromCenter) : vec2(0.0);
@@ -192,12 +271,12 @@ void main() {
   // sheen across the lit side of the rim.
   vec2 l = vec2(light.x, -light.y);
   float facing = dot(outward, l);
-  float line = exp(-d / max(1.2, depth * 0.05));
-  float glow = exp(-d / max(3.0, depth * 0.35));
-  float lit = pow(max(facing, 0.0), 1.4) * (1.1 * line + 0.3 * glow)
-            + pow(max(-facing, 0.0), 2.0) * (0.55 * line + 0.1 * glow)
-            + 0.05 * slope;
-  float shade = max(-facing, 0.0) * slope * 0.1;
+  float line = exp(-d / max(tuneA.z, depth * tuneA.y));
+  float glow = exp(-d / max(tuneB.y, depth * tuneB.x));
+  float lit = pow(max(facing, 0.0), tuneB.w) * (tuneA.w * line + tuneB.z * glow)
+            + pow(max(-facing, 0.0), tuneC.z) * (tuneC.x * line + tuneC.y * glow)
+            + tuneC.w * slope;
+  float shade = max(-facing, 0.0) * slope * tuneD.x;
   seen = mix(seen, vec3(1.0), clamp(intensity * lit, 0.0, 1.0)) * (1.0 - intensity * shade);
   color = vec4(seen * a, a);
 }`;
@@ -441,6 +520,11 @@ export class GlassPainter {
     gl.uniform1f(u("splay"), p.splay);
     gl.uniform2f(u("light"), p.light.x, p.light.y);
     gl.uniform1f(u("intensity"), p.intensity);
+    const k = glassTuning();
+    gl.uniform4f(u("tuneA"), k.profile, k.lineWidth, k.lineMin, k.line);
+    gl.uniform4f(u("tuneB"), k.glowWidth, k.glowMin, k.glow, k.facing);
+    gl.uniform4f(u("tuneC"), k.backLine, k.backGlow, k.backFacing, k.sheen);
+    gl.uniform4f(u("tuneD"), k.shade, 0, 0, 0);
     draw(g);
     return true;
   }

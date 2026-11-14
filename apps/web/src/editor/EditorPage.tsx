@@ -1,4 +1,11 @@
-import { Editor, Interaction, liveFlows, screenOf } from "@drawpane/editor";
+import {
+  Editor,
+  glassTuning,
+  Interaction,
+  liveFlows,
+  screenOf,
+  setGlassTuning,
+} from "@drawpane/editor";
 import type { VersionInfo } from "@drawpane/model";
 import { Button, Icon, IconButton, Logo, SegmentedControl } from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -262,8 +269,11 @@ function FileEditor({ fileId }: { fileId: string }) {
       drawpaneFrames?: FrameStats;
       /** The read-only editor showing a version, while one is open. */
       drawpaneVersion?: Editor;
+      /** Glass's constants, for calibration (tools/glass-calibration). */
+      drawpaneGlass?: { set: typeof setGlassTuning; get: typeof glassTuning };
     };
     w.drawpane = editor;
+    w.drawpaneGlass = { set: setGlassTuning, get: glassTuning };
     w.drawpaneFrames = frameStatsFor(editor);
     w.drawpaneVersion = history.view.preview;
     return () => {

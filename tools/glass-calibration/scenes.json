@@ -37,7 +37,11 @@
     { "id": "angle-0", "lightAngle": 0 },
     { "id": "angle-90", "lightAngle": 90 },
     { "id": "angle-135", "lightAngle": 135 },
-    { "id": "circle", "shape": "ellipse", "glass": { "x": 110, "y": 50, "width": 140, "height": 140 } },
+    {
+      "id": "circle",
+      "shape": "ellipse",
+      "glass": { "x": 110, "y": 50, "width": 140, "height": 140 }
+    },
     { "id": "pill", "glass": { "x": 50, "y": 80, "width": 260, "height": 80, "cornerRadius": 40 } },
     { "id": "square-corners", "glass": { "cornerRadius": 0 } },
     { "id": "lens-only", "lightIntensity": 0, "dispersion": 0, "frost": 0 },
