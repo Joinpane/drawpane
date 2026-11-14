@@ -103,7 +103,9 @@ test("tour", async ({ browser }) => {
 
   // Variants: combine the main into a set, add a variant, then switch the instance to it.
   await page.keyboard.press("ControlOrMeta+k");
-  await page.getByRole("combobox", { name: "Type a command or a property" }).fill("combine as variants");
+  await page
+    .getByRole("combobox", { name: "Type a command or a property" })
+    .fill("combine as variants");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(300);
   await shot(page, "17-component-set");
