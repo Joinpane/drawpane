@@ -120,6 +120,51 @@ describe("entering nested frames", () => {
   });
 });
 
+describe("drawing snaps", () => {
+  it("starts and ends a shape on the frame's edges, and shows the guides", () => {
+    const { editor, phone, interaction } = setup();
+    editor.setTool("rect");
+    // The phone spans x 100–500, y 100–900. Press 4 in from its corner, release 3 short of its right edge.
+    interaction.down(at(104, 104));
+    interaction.move(at(300, 150));
+    interaction.move(at(497, 180));
+    const id = editor.s.selection[0] as string;
+    const node = editor.doc.get(id) as NodeRecord;
+    expect(node.parent).toBe(phone);
+    expect(getProp(node.props, "x")).toBe(0);
+    expect(getProp(node.props, "y")).toBe(0);
+    expect(getProp(node.props, "width")).toBe(400);
+    expect(editor.s.guides).toContainEqual(expect.objectContaining({ axis: "x", at: 500 }));
+    interaction.up(at(497, 180));
+    expect(editor.s.guides).toEqual([]);
+  });
+
+  it("snaps to a sibling's edge and centre, not to the shape being drawn", () => {
+    const { editor, interaction } = setup();
+    // The loose rectangle spans x 700–800, y 100–200 (centre 750, 150).
+    editor.setTool("ellipse");
+    interaction.down(at(900, 300));
+    interaction.move(at(870, 250));
+    interaction.move(at(803, 148));
+    const node = editor.doc.get(editor.s.selection[0] as string) as NodeRecord;
+    expect(getProp(node.props, "x")).toBe(800);
+    expect(getProp(node.props, "y")).toBe(150);
+    interaction.up(at(803, 148));
+  });
+
+  it("leaves the pointer alone with ⌘, or when nothing is near", () => {
+    const { editor, interaction } = setup();
+    editor.setTool("rect");
+    interaction.down(at(1004, 504, 1, { mod: true }));
+    interaction.move(at(1100, 600, 1, { mod: true }));
+    interaction.move(at(1203, 597, 1, { mod: true }));
+    const node = editor.doc.get(editor.s.selection[0] as string) as NodeRecord;
+    expect([getProp(node.props, "x"), getProp(node.props, "width")]).toEqual([1004, 199]);
+    expect(editor.s.guides).toEqual([]);
+    interaction.up(at(1203, 597, 1, { mod: true }));
+  });
+});
+
 describe("resize snapping", () => {
   it("snaps a dragged edge to a sibling's edge and shows the guide", () => {
     const { editor, loose, interaction } = setup();

@@ -278,7 +278,9 @@ export class Interaction {
       // The arrow tool draws a line that ends in an arrow.
       const type: LayerType = tool === "arrow" ? "line" : tool;
       const extra: Props = tool === "arrow" ? { markerEnd: "arrow" } : {};
-      this.#mode = { kind: "draw", type, extra, startPage: page, parent, id: null };
+      // The corner you start from snaps too, so a shape can begin exactly on an edge.
+      const start = input.mod ? page : this.#snapPoint(parent, page, new Map()).point;
+      this.#mode = { kind: "draw", type, extra, startPage: start, parent, id: null };
       return;
     }
 
@@ -1238,9 +1240,38 @@ export class Interaction {
     if (ops.length > 0) editor.commit(ops, "Rotate");
   }
 
+  /**
+   * Snaps a point on each axis to what a layer in `parent` snaps to (its
+   * siblings in view, the parent, guides, grid edges), within a few screen
+   * pixels. Returns the point and, per axis, the line it snapped to.
+   */
+  #snapPoint(
+    parent: string,
+    point: Point,
+    changing: ReadonlyMap<string, unknown>,
+  ): { point: Point; snapped: { x: number | null; y: number | null }; targets: Rect[] } {
+    const editor = this.#editor;
+    const targets = this.#snapTargets(parent, changing);
+    const lines = this.#snapLines(parent);
+    const threshold = SNAP_PX / editor.s.camera.zoom;
+    const hx = snapEdges([point.x], "x", targets, threshold, lines);
+    const hy = snapEdges([point.y], "y", targets, threshold, lines);
+    return {
+      point: { x: point.x + (hx?.d ?? 0), y: point.y + (hy?.d ?? 0) },
+      snapped: { x: hx?.at ?? null, y: hy?.at ?? null },
+      targets,
+    };
+  }
+
   #draw(mode: Extract<Mode, { kind: "draw" }>, page: Point, input: PointerInput): void {
     const editor = this.#editor;
-    let { x: x1, y: y1 } = page;
+    // The dragged corner snaps like a resize handle (⌘ turns snapping off). A Shift-drawn
+    // line keeps its 45° angle instead.
+    const snapping = !input.mod && !(input.shift && mode.type === "line");
+    const snap = snapping
+      ? this.#snapPoint(mode.parent, page, new Map(mode.id ? [[mode.id, true]] : []))
+      : null;
+    let { x: x1, y: y1 } = snap?.point ?? page;
     const { x: x0, y: y0 } = mode.startPage;
     if (input.shift) {
       if (mode.type === "line") {
@@ -1270,6 +1301,16 @@ export class Interaction {
     } else {
       rect = normalizeRect({ x: x0, y: y0 }, { x: x1, y: y1 });
     }
+    // Guides where the drawn shape (after Shift or Alt) still meets a line it snapped to.
+    const guides: Guide[] = [];
+    if (snap) {
+      for (const axis of ["x", "y"] as const) {
+        const at = snap.snapped[axis];
+        const guide = at === null ? null : snapGuide(rect, snap.targets, axis, at);
+        if (guide) guides.push(guide);
+      }
+    }
+    editor.state.set({ guides });
     if (!mode.id) {
       const id = editor.createLayer(mode.type, rect, mode.parent, {
         ...mode.extra,

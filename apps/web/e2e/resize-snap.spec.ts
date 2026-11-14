@@ -1,8 +1,9 @@
 /**
- * Resizing a layer against its frame's edge with a real mouse, at a
- * fractional zoom: the dragged edge snaps flush every time, including when it
+ * Snapping to a frame's edges with a real mouse, at a fractional zoom.
+ * Resizing: the dragged edge snaps flush every time, including when it
  * started on that edge (the drag works from its start, and coming back to it
- * once left the layer where the previous pointer move had it).
+ * once left the layer where the previous pointer move had it). Drawing: both
+ * the corner you press and the one you drag snap.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -22,7 +23,7 @@ type Debug = {
 type W = { drawpane: Debug };
 
 test.describe
-  .serial("Resizing to a frame's edge", () => {
+  .serial("Snapping to a frame's edges", () => {
     test.skip(!!process.env.E2E_BASE_URL, "Needs its own local instance.");
 
     let instance: Instance;
@@ -97,5 +98,32 @@ test.describe
           width: 420,
         });
       }
+    });
+
+    test("draws a shape from edge to edge of the frame", async () => {
+      const canvas = await page.locator(".canvas__overlay").boundingBox();
+      if (!canvas) throw new Error("no canvas");
+      const toScreen = async (p: { x: number; y: number }) => {
+        const s = await page.evaluate(
+          (p) => (window as unknown as W).drawpane.s.camera.toScreen(p),
+          p,
+        );
+        return { x: canvas.x + s.x, y: canvas.y + s.y };
+      };
+      // Pressed and released a few pixels inside the phone's left and right edges.
+      const from = await toScreen({ x: 0, y: 200 });
+      const to = await toScreen({ x: 420, y: 300 });
+      await page.keyboard.press("r");
+      await page.mouse.move(from.x + 4, from.y);
+      await page.mouse.down();
+      await page.mouse.move(to.x - 40, to.y, { steps: 4 });
+      await page.mouse.move(to.x - 3, to.y, { steps: 4 });
+      await page.mouse.up();
+      const drawn = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const props = e.doc.get(e.s.selection[0] as string).props;
+        return { x: props.x, width: props.width };
+      });
+      expect(drawn).toEqual({ x: 0, width: 420 });
     });
   });
