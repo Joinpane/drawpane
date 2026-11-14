@@ -30,8 +30,12 @@ describe("first-run setup with a passkey", () => {
     });
     expect(user.name).toBe("Ana Lima");
 
-    const session = await browser.json<{ user: { email: string } }>("/api/session");
+    const session = await browser.json<{ user: { email: string; isAdmin: boolean } }>(
+      "/api/session",
+    );
     expect(session.user.email).toBe("ana@example.com");
+    // Whoever sets the instance up runs it.
+    expect(session.user.isAdmin).toBe(true);
     const { teams } = await browser.json<{ teams: Array<{ role: string }> }>("/api/teams");
     expect(teams).toHaveLength(1);
     expect(teams[0]?.role).toBe("owner");
@@ -105,6 +109,10 @@ describe("invites", () => {
       method: "POST",
       json: await new SoftPasskey(ORIGIN).create(options),
     });
+    // An invited person isn't the instance's admin.
+    expect((await guest.json<{ user: { isAdmin: boolean } }>("/api/session")).user.isAdmin).toBe(
+      false,
+    );
     const { teams } = await guest.json<{ teams: Array<{ id: string; role: string }> }>(
       "/api/teams",
     );

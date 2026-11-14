@@ -7,6 +7,8 @@ export interface User {
   readonly id: string;
   readonly email: string;
   readonly name: string;
+  /** Runs the instance: sees its health and cost (Admin pages). */
+  readonly isAdmin?: boolean;
 }
 export interface Team {
   readonly id: string;

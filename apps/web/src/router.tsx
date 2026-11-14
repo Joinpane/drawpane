@@ -7,6 +7,7 @@ import {
   redirect,
 } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
+import { HealthPage } from "./admin/HealthPage";
 import { api } from "./api/client";
 import { ErrorPage } from "./app/ErrorPage";
 import { NotFound } from "./app/NotFound";
@@ -121,6 +122,20 @@ const settingsRoute = createRoute({
   component: AccountPage,
 });
 
+/** The instance's admin pages: whoever set it up. Anyone else goes back to their files. */
+async function requireAdmin(args: { context: RouterContext; location: { href: string } }) {
+  const user = await requireUser(args);
+  if (!user.isAdmin) throw redirect({ to: "/" });
+  return user;
+}
+
+const adminHealthRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/health",
+  beforeLoad: requireAdmin,
+  component: HealthPage,
+});
+
 const teamRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/t/$teamId",
@@ -201,6 +216,7 @@ const routeTree = rootRoute.addChildren([
   setupRoute,
   inviteRoute,
   settingsRoute,
+  adminHealthRoute,
   teamRoute,
   newFileRoute,
   fileRoute,

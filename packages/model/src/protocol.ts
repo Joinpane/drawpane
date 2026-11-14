@@ -36,6 +36,15 @@ export const Presence = z.object({
 });
 export type Presence = z.infer<typeof Presence>;
 
+/** Upper bounds of the edit latency histogram, in ms (log₂ steps). */
+export const LATENCY_BUCKETS_MS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] as const;
+
+/** The bucket a latency falls in: an index into LATENCY_BUCKETS_MS, or its length for slower. */
+export function latencyBucket(ms: number): number {
+  const i = LATENCY_BUCKETS_MS.findIndex((ceiling) => ms <= ceiling);
+  return i === -1 ? LATENCY_BUCKETS_MS.length : i;
+}
+
 export const ClientMessage = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("hello"),
@@ -53,6 +62,15 @@ export const ClientMessage = z.discriminatedUnion("t", [
   }),
   z.object({ t: z.literal("presence"), presence: Presence }),
   z.object({ t: z.literal("ping") }),
+  z.object({
+    t: z.literal("stats"),
+    /**
+     * How long the room took to confirm this client's edits (send to ack),
+     * counted into LATENCY_BUCKETS_MS (the last count is anything slower),
+     * since the client's last report. For the instance's health page.
+     */
+    latency: z.array(z.number().int().min(0).max(1_000_000)).length(LATENCY_BUCKETS_MS.length + 1),
+  }),
 ]);
 export type ClientMessage = z.infer<typeof ClientMessage>;
 

@@ -13,6 +13,8 @@
  */
 import {
   type ClientMessage,
+  LATENCY_BUCKETS_MS,
+  latencyBucket,
   ModelError,
   type NodeRecord,
   type Op,
@@ -52,6 +54,8 @@ export interface SyncOptions {
   readonly clientId: string;
   readonly flushIntervalMs?: number;
   readonly presenceIntervalMs?: number;
+  /** How often the edit latency histogram goes to the room (for the health page). */
+  readonly statsIntervalMs?: number;
   /** Injected for tests. */
   readonly setTimer?: (fn: () => void, ms: number) => unknown;
 }
@@ -64,6 +68,11 @@ export class SyncEngine {
   readonly #flushIntervalMs: number;
   readonly #presenceIntervalMs: number;
   readonly #setTimer: (fn: () => void, ms: number) => unknown;
+  readonly #statsIntervalMs: number;
+  /** When each sent transaction left, by seq, to time the room's confirmation. */
+  readonly #sentAt = new Map<number, number>();
+  /** Confirmation times since the last report, counted into LATENCY_BUCKETS_MS. */
+  #latency: number[] | null = null;
   readonly #listeners: Partial<{ [K in keyof SyncEvents]: Set<SyncEvents[K]> }> = {};
 
   #send: Send | null = null;
@@ -89,6 +98,7 @@ export class SyncEngine {
     this.#flushIntervalMs = options.flushIntervalMs ?? 50;
     this.#presenceIntervalMs = options.presenceIntervalMs ?? 50;
     this.#setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.#statsIntervalMs = options.statsIntervalMs ?? 30_000;
   }
 
   get status(): ConnectionStatus {
@@ -174,6 +184,7 @@ export class SyncEngine {
     for (const txn of this.#pending) {
       if (txn.seq !== null) continue;
       txn.seq = ++this.#seq;
+      this.#sentAt.set(txn.seq, Date.now());
       this.#send({ t: "txn", seq: txn.seq, ops: txn.ops });
     }
   }
@@ -288,6 +299,8 @@ export class SyncEngine {
       this.#undoPending();
       this.#pending = this.#pending.filter((t) => t.seq === null || t.seq > message.lastSeq);
       for (const txn of this.#pending) txn.seq = null;
+      // Resent under new numbers: their old send times no longer apply.
+      this.#sentAt.clear();
       this.#seq = Math.max(this.#seq, message.lastSeq);
       if (message.mode === "catchup") {
         this.#redoPending();
@@ -356,6 +369,28 @@ export class SyncEngine {
     while (this.#pending[0] && (this.#pending[0].seq ?? Number.POSITIVE_INFINITY) <= seq)
       this.#pending.shift();
     this.#revn = Math.max(this.#revn ?? 0, revn);
+    this.#timeAck(seq);
+  }
+
+  /** Counts how long the room took to confirm everything up to `seq`, and reports it in a while. */
+  #timeAck(seq: number): void {
+    const now = Date.now();
+    for (const [sent, at] of this.#sentAt) {
+      if (sent > seq) continue;
+      this.#sentAt.delete(sent);
+      if (!this.#latency) {
+        this.#latency = new Array<number>(LATENCY_BUCKETS_MS.length + 1).fill(0);
+        this.#setTimer(() => this.#report(), this.#statsIntervalMs);
+      }
+      const bucket = latencyBucket(now - at);
+      this.#latency[bucket] = (this.#latency[bucket] ?? 0) + 1;
+    }
+  }
+
+  #report(): void {
+    const latency = this.#latency;
+    this.#latency = null;
+    if (latency && this.#send && this.#status === "live") this.#send({ t: "stats", latency });
   }
 
   #reject(seq: number, code: string, message: string): void {

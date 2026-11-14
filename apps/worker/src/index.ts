@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import { ZodError } from "zod";
 import { requireFileRole } from "./api/access";
+import { admin } from "./api/admin";
 import { api } from "./api/routes";
 import { resolveShareToken } from "./api/share";
 import { account } from "./auth/account";
@@ -32,6 +33,7 @@ app.get("/api/health", (c) => c.json({ ok: true }));
 app.route("/api/auth/oauth", oauth);
 app.route("/api/auth", passkeys);
 app.route("/api/account", account);
+app.route("/api/admin", admin);
 app.route("/api", api);
 
 app.get("/ws/files/:fileId", async (c) => {

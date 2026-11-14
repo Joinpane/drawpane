@@ -387,6 +387,36 @@ describe("SyncEngine room requests", () => {
     expect(heard).toHaveLength(2);
   });
 
+  it("times how long the room takes to confirm edits, and reports it now and then", () => {
+    const doc = new Doc();
+    const timers: (() => void)[] = [];
+    const engine = new SyncEngine(doc, {
+      clientId: "c1",
+      setTimer: (fn) => timers.push(fn),
+    });
+    const sent: ClientMessage[] = [];
+    engine.connected((m) => sent.push(m));
+    engine.receive({
+      t: "welcome",
+      sessionId: "s1",
+      revn: 1,
+      role: "editor",
+      peers: [],
+      mode: "snapshot",
+      lastSeq: 0,
+    });
+    engine.receive({ t: "snapshot", nodes: [], done: true });
+    engine.commit(seed);
+    engine.flush();
+    const txn = sent.find((m) => m.t === "txn") as { seq: number };
+    engine.receive({ t: "ack", seq: txn.seq, revn: 2 });
+    // The report goes out on a timer, with the one confirmation counted (fast: the first bucket).
+    for (const fire of timers.splice(0)) fire();
+    const stats = sent.find((m) => m.t === "stats") as { latency: number[] } | undefined;
+    expect(stats?.latency.reduce((a, b) => a + b, 0)).toBe(1);
+    expect(stats?.latency[0]).toBe(1);
+  });
+
   it("tells listeners who restored which version", () => {
     const { engine } = live();
     const heard: unknown[] = [];
