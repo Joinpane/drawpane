@@ -2745,6 +2745,8 @@ export class Editor {
     "textAlignVertical",
     "textDecoration",
     "textCase",
+    "paragraphSpacing",
+    "maxLines",
     "bindings",
   ];
 

@@ -183,6 +183,7 @@ interface CachedLayout {
   readonly measurer: TextMeasurer;
   readonly generation: number;
   readonly maxWidth: number | null;
+  readonly whole: boolean;
   readonly layout: TextLayout;
 }
 /**
@@ -201,31 +202,41 @@ export function layoutText(
   node: NodeRecord,
   measurer: TextMeasurer,
   maxWidth: number | null,
+  options: LayoutOptions = {},
 ): TextLayout {
   const generation = measurer.generation ?? 0;
+  const whole = options.whole ?? false;
   const hit = layoutCache.get(node.props);
   if (
     hit &&
     hit.measurer === measurer &&
     hit.generation === generation &&
-    hit.maxWidth === maxWidth
+    hit.maxWidth === maxWidth &&
+    hit.whole === whole
   )
     return hit.layout;
-  const layout = computeLayout(node, measurer, maxWidth);
-  layoutCache.set(node.props, { measurer, generation, maxWidth, layout });
+  const layout = computeLayout(node, measurer, maxWidth, whole);
+  layoutCache.set(node.props, { measurer, generation, maxWidth, whole, layout });
   return layout;
+}
+
+export interface LayoutOptions {
+  /** Every line, even past `maxLines`: while the text is being edited, all of it shows. */
+  readonly whole?: boolean;
 }
 
 function computeLayout(
   node: NodeRecord,
   measurer: TextMeasurer,
   maxWidth: number | null,
+  whole: boolean,
 ): TextLayout {
   const props = node.props;
   const text = getProp(props, "characters");
   const styles = spanStyles(node);
   const m = new RangeMeasure(text, styles, measurer);
-  const breaks: Array<{ start: number; end: number; next: number }> = [];
+  /** `para`: the line ends a paragraph that another follows (paragraph spacing goes after it). */
+  const breaks: Array<{ start: number; end: number; next: number; para?: boolean }> = [];
 
   const trimEnd = (a: number, b: number) => {
     while (b > a && /\s/.test(text[b - 1] as string)) b--;
@@ -236,8 +247,9 @@ function computeLayout(
     const nl = text.indexOf("\n", paragraph);
     const pEnd = nl === -1 ? text.length : nl;
     const after = nl === -1 ? text.length + 1 : nl + 1;
+    const para = nl !== -1;
     if (maxWidth === null || pEnd === paragraph) {
-      breaks.push({ start: paragraph, end: trimEnd(paragraph, pEnd), next: after });
+      breaks.push({ start: paragraph, end: trimEnd(paragraph, pEnd), next: after, para });
     } else {
       let start = paragraph;
       let end = paragraph;
@@ -276,14 +288,63 @@ function computeLayout(
           lineWidth = m.width(start, end);
         }
       }
-      breaks.push({ start, end: trimEnd(start, end), next: after });
+      breaks.push({ start, end: trimEnd(start, end), next: after, para });
     }
     paragraph = after;
   }
 
-  const lines: TextLine[] = [];
-  let top = 0;
-  for (const br of breaks) {
+  const fragmentOf = (
+    s: SpanStyle,
+    a: number,
+    b: number,
+    shown: string,
+    x: number,
+    width: number,
+  ): TextFragment => ({
+    start: a,
+    end: b,
+    text: shown,
+    x,
+    width,
+    font: s.font,
+    fontSize: s.size,
+    letterSpacing: s.spacing,
+    decoration: getProp(s.span.props, "textDecoration"),
+    fills: s.span.own.fills ?? null,
+  });
+
+  /**
+   * The last line shown of truncated text: as much of it as fits with "…"
+   * after it (in the style of the last character kept), within `maxWidth`.
+   */
+  const ellipsize = (br: { start: number; end: number; next: number }, top: number): TextLine => {
+    const room = maxWidth ?? Number.POSITIVE_INFINITY;
+    const dots = (at: number) => {
+      const s = styles[m.styleAt(Math.max(br.start, at - 1))] as SpanStyle;
+      return { s, width: measurer.width(s.font, "…") + s.spacing };
+    };
+    let cut = br.end;
+    while (cut > br.start && m.width(br.start, cut) + dots(cut).width > room) {
+      cut--;
+      if (cut > br.start && isLow(text.charCodeAt(cut))) cut--;
+    }
+    // No dangling space before the dots.
+    while (cut > br.start && /\s/.test(text[cut - 1] as string)) cut--;
+    const line = makeLine({ start: br.start, end: cut, next: br.next }, top);
+    const { s, width } = dots(cut);
+    const fragment = fragmentOf(s, cut, cut, "…", line.width, width);
+    return {
+      ...line,
+      text: `${line.text}…`,
+      width: line.width + width,
+      baseline: line.fragments.length > 0 ? line.baseline : top + s.ascent,
+      height: Math.max(line.height, s.ascent + s.descent),
+      fragments: [...line.fragments, fragment],
+    };
+  };
+
+  /** A line's fragments and box for the characters [start, end), its top at `top`. */
+  const makeLine = (br: { start: number; end: number; next: number }, top: number): TextLine => {
     // The styles on this line (an empty line takes the style at its start).
     const first = m.styleAt(br.start);
     const last = br.end > br.start ? m.styleAt(br.end - 1) : first;
@@ -299,36 +360,35 @@ function computeLayout(
       const b = Math.min(br.end, s.span.end);
       if (b <= a) continue;
       const width = m.width(a, b);
-      const fills = s.span.own.fills;
-      fragments.push({
-        start: a,
-        end: b,
-        text: caseSlice(text, a, b, s.span.props),
-        x,
-        width,
-        font: s.font,
-        fontSize: s.size,
-        letterSpacing: s.spacing,
-        decoration: getProp(s.span.props, "textDecoration"),
-        fills: fills ?? null,
-      });
+      fragments.push(fragmentOf(s, a, b, caseSlice(text, a, b, s.span.props), x, width));
       x += width;
     }
-    const height = ascent + descent;
-    lines.push({
+    return {
       text: fragments.map((f) => f.text).join(""),
       width: x,
       baseline: top + ascent,
       top,
-      height,
+      height: ascent + descent,
       start: br.start,
       end: br.end,
       next: Math.min(br.next, text.length + 1),
       fragments,
-    });
-    top += height;
-  }
+    };
+  };
 
+  const spacing = getProp(props, "paragraphSpacing");
+  const maxLines = whole ? null : getProp(props, "maxLines");
+  const kept = maxLines !== null && breaks.length > maxLines ? breaks.slice(0, maxLines) : breaks;
+  const lines: TextLine[] = [];
+  let top = 0;
+  for (const [i, br] of kept.entries()) {
+    const truncated = kept !== breaks && i === kept.length - 1;
+    const line = truncated ? ellipsize(br, top) : makeLine(br, top);
+    lines.push(line);
+    top += line.height;
+    // Space after a paragraph, not after the last line shown.
+    if (br.para && i < kept.length - 1) top += spacing;
+  }
   const width = lines.reduce((w, l) => Math.max(w, l.width), 0);
   return {
     font: fontString(props),
@@ -365,9 +425,18 @@ export function autoSize(
 }
 
 /** Lays a text node out at its current box, the way the canvas draws it. */
-export function layoutTextNode(node: NodeRecord, measurer: TextMeasurer): TextLayout {
+export function layoutTextNode(
+  node: NodeRecord,
+  measurer: TextMeasurer,
+  options: LayoutOptions = {},
+): TextLayout {
   const mode = getProp(node.props, "textAutoResize");
-  return layoutText(node, measurer, mode === "width" ? null : getProp(node.props, "width"));
+  return layoutText(
+    node,
+    measurer,
+    mode === "width" ? null : getProp(node.props, "width"),
+    options,
+  );
 }
 
 // ---------------------------------------------------------------------------

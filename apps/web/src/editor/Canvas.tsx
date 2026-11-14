@@ -100,6 +100,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       const s = editor.s;
       const t0 = performance.now();
       if (contentDirty && s.pageId) {
+        // Truncated text shows all its lines while it's being edited.
+        renderer.whole = s.editingText;
         const done = renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr, { exact });
         exact = false;
         clearTimeout(settle);
@@ -152,7 +154,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     });
     const offState = editor.state.subscribe(() => {
       const s = editor.s;
-      if (s.camera !== last.camera || s.pageId !== last.pageId || s.viewport !== last.viewport) {
+      if (
+        s.camera !== last.camera ||
+        s.pageId !== last.pageId ||
+        s.viewport !== last.viewport ||
+        s.editingText !== last.editingText
+      ) {
         contentDirty = true;
       }
       last = s;

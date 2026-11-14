@@ -1,14 +1,23 @@
 /**
- * The Text section: the layer's text style, typography, alignment and box
- * sizing. Typography shows `views` (see `textViews`): the selected
+ * The Text section: the layer's text style, typography, alignment, box
+ * sizing, paragraph spacing and truncation. Typography shows `views` (see `textViews`): the selected
  * characters while editing, every look in the layer otherwise.
  */
 import type { Editor } from "@drawpane/editor";
-import type { NodeRecord } from "@drawpane/model";
-import { PropertySection, SegmentedControl } from "@drawpane/ui";
-import { common } from "./fields";
+import { getProp, type NodeRecord } from "@drawpane/model";
+import { PropertyRow, PropertySection, SegmentedControl } from "@drawpane/ui";
+import { common, Num, Select } from "./fields";
 import { TextStyleRow } from "./TextStyles";
 import { TypographyFields } from "./TypographyFields";
+
+/** At most this many lines, the last ending in "…". */
+const TRUNCATE = [
+  { value: "off", label: "All lines" },
+  ...[1, 2, 3, 4, 5, 6].map((n) => ({
+    value: String(n),
+    label: `Max ${n} ${n === 1 ? "line" : "lines"}`,
+  })),
+];
 
 export function TextSection({
   editor,
@@ -20,6 +29,9 @@ export function TextSection({
   views?: NodeRecord[];
 }) {
   const ids = nodes.map((n) => n.id);
+  // undefined: the layers differ.
+  const lines = nodes.map((n) => getProp(n.props, "maxLines"));
+  const truncation = lines.every((l) => l === lines[0]) ? lines[0] : undefined;
   return (
     <PropertySection title="Text">
       <TextStyleRow editor={editor} nodes={nodes} />
@@ -56,6 +68,25 @@ export function TextSection({
         value={common(nodes, "textAutoResize") ?? ""}
         onChange={(v) => editor.setProp(ids, "textAutoResize", v, "Text sizing")}
       />
+      <PropertyRow>
+        <Num
+          editor={editor}
+          nodes={nodes}
+          prop="paragraphSpacing"
+          label="¶"
+          ariaLabel="Paragraph spacing"
+          min={0}
+        />
+        <Select<string>
+          label="Truncate"
+          value={truncation === undefined ? null : truncation === null ? "off" : String(truncation)}
+          mixed={truncation === undefined}
+          options={TRUNCATE}
+          onChange={(v) =>
+            editor.setProp(ids, "maxLines", v === "off" ? null : Number(v), "Truncate text")
+          }
+        />
+      </PropertyRow>
     </PropertySection>
   );
 }

@@ -64,7 +64,8 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
   }, [node]);
 
   if (node?.type !== "text") return null;
-  const layout = layoutTextNode(node, editor.measurer);
+  // All of it, past any truncation, the way the canvas draws it while editing.
+  const layout = layoutTextNode(node, editor.measurer, { whole: true });
   const m = editor.scene.worldMatrix(nodeId);
   const props = node.props;
   const width = getProp(props, "width");

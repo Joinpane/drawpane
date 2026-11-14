@@ -463,6 +463,10 @@ export const PROPS = {
   textAutoResize: prop(z.enum(["none", "width", "height"]), "width", ["text"]),
   textCase: prop(z.enum(["none", "upper", "lower", "title"]), "none", TYPOGRAPHY),
   textDecoration: prop(z.enum(["none", "underline", "strikethrough"]), "none", TYPOGRAPHY),
+  /** Extra space after each paragraph (each hard line break), in px. */
+  paragraphSpacing: prop(z.number().min(0).max(1000), 0, TYPOGRAPHY),
+  /** Show at most this many lines, the last ending in "…"; null shows them all. */
+  maxLines: prop(z.number().int().min(1).max(1000).nullable(), null, ["text"]),
   /** Styled ranges of the characters (bold words, a coloured phrase); see `TextRun`. */
   textRuns: prop(z.array(TextRun).max(10_000), [], ["text"]),
   /** The text style this layer follows; its typography comes from the style while it does. */

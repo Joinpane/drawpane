@@ -363,6 +363,15 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
         property: "text-decoration",
         value: td === "strikethrough" ? "line-through" : "underline",
       });
+    // Truncation: the standard way to show at most N lines with an ellipsis.
+    const maxLines = getProp(p, "maxLines");
+    if (maxLines !== null)
+      out.push(
+        { property: "display", value: "-webkit-box" },
+        { property: "-webkit-box-orient", value: "vertical" },
+        { property: "-webkit-line-clamp", value: String(maxLines) },
+        { property: "overflow", value: "hidden" },
+      );
   }
   return out;
 }
@@ -455,10 +464,23 @@ function runClasses(props: Props, own: RunStyle): string[] {
 /** Tailwind classes for a layer (arbitrary values where the scale has no step). */
 export function tailwindFor(doc: Doc, node: NodeRecord): string[] {
   const classes: string[] = [];
-  for (const d of cssFor(doc, node)) {
+  const declarations = cssFor(doc, node);
+  // `line-clamp-N` is all four truncation declarations in one.
+  const clamped = declarations.some((d) => d.property === "-webkit-line-clamp");
+  for (const d of declarations) {
     const n = Number.parseFloat(d.value);
     const isPx = /^-?[\d.]+px$/.test(d.value);
+    if (
+      clamped &&
+      ((d.property === "display" && d.value === "-webkit-box") ||
+        d.property === "-webkit-box-orient" ||
+        (d.property === "overflow" && d.value === "hidden"))
+    )
+      continue;
     switch (d.property) {
+      case "-webkit-line-clamp":
+        classes.push(`line-clamp-${d.value}`);
+        break;
       case "position":
         classes.push(d.value);
         break;
@@ -610,15 +632,31 @@ export function jsxFor(doc: Doc, node: NodeRecord, depth = 0, limit = 200): stri
   const attr = classes ? ` className="${classes}"` : "";
   if (node.type === "text") {
     const characters = getProp(node.props, "characters");
+    const spans = textSpans(node);
     // Styled runs become spans carrying what they change.
-    const inner = textSpans(node)
-      .map((span) => {
-        const text = escapeJsx(characters.slice(span.start, span.end));
-        const own = runClasses(span.props, span.own);
-        return own.length > 0 ? `<span className="${own.join(" ")}">${text}</span>` : text;
-      })
-      .join("");
-    return `${indent}<p${attr}>${inner}</p>`;
+    const inner = (a: number, b: number) =>
+      spans
+        .filter((span) => span.end > a && span.start < b)
+        .map((span) => {
+          const text = escapeJsx(characters.slice(Math.max(a, span.start), Math.min(b, span.end)));
+          const own = runClasses(span.props, span.own);
+          return own.length > 0 ? `<span className="${own.join(" ")}">${text}</span>` : text;
+        })
+        .join("");
+    const spacing = getProp(node.props, "paragraphSpacing");
+    if (spacing <= 0 || !characters.includes("\n"))
+      return `${indent}<p${attr}>${inner(0, characters.length)}</p>`;
+    // Paragraph spacing: a paragraph each, spaced apart.
+    const paragraphs: string[] = [];
+    let start = 0;
+    for (const line of characters.split("\n")) {
+      paragraphs.push(`${indent}  <p>${inner(start, start + line.length)}</p>`);
+      start += line.length + 1;
+    }
+    const wrapper = [classes, `space-y-[${Math.round(spacing * 100) / 100}px]`]
+      .filter(Boolean)
+      .join(" ");
+    return `${indent}<div className="${wrapper}">\n${paragraphs.join("\n")}\n${indent}</div>`;
   }
   const children = doc.childIds(node.id);
   if (children.length === 0 || limit <= 0) return `${indent}<div${attr} />`;
