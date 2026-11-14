@@ -8,6 +8,7 @@ import { initials, modKey, timeAgo } from "../app/format";
 import { setTheme, useThemePreference } from "../app/theme";
 import { signOut } from "../auth/passkey";
 import { FileThumbnail } from "./FileThumbnail";
+import { TeamFontsView } from "./TeamFonts";
 import "./dashboard.css";
 
 export function DashboardPage() {
@@ -24,6 +25,7 @@ export function DashboardPage() {
   });
   const files = useQuery({
     queryKey: ["files", teamId, projectId ?? null, view ?? "recent"],
+    enabled: view !== "fonts",
     queryFn: () =>
       projectId
         ? api.projectFiles(projectId)
@@ -79,11 +81,12 @@ export function DashboardPage() {
       <aside className="dash__side" aria-label="Navigation">
         <TeamSwitcher teamName={team?.name ?? "…"} members={null} />
         <nav className="dash__nav">
+          <NavLink active={!projectId && !view} icon="history" to={{ teamId }} label="Recent" />
           <NavLink
-            active={!projectId && view !== "trash"}
-            icon="history"
-            to={{ teamId }}
-            label="Recent"
+            active={view === "fonts"}
+            icon="text"
+            to={{ teamId, view: "fonts" }}
+            label="Fonts"
           />
           <NavLink
             active={view === "trash"}
@@ -115,76 +118,82 @@ export function DashboardPage() {
         </div>
       </aside>
 
-      <main className="dash__main">
-        <header className="dash__header">
-          <h1 className="dash__title">{heading}</h1>
-          <label className="dash__search">
-            <Icon name="search" />
-            <input
-              ref={searchRef}
-              type="search"
-              placeholder="Search files"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              aria-label="Search files"
-            />
-            <kbd>{modKey("K")}</kbd>
-          </label>
-          {role === "owner" ? (
-            <Button size="lg" onClick={() => setInviteOpen(true)}>
-              Invite
-            </Button>
-          ) : null}
-          {canEdit && view !== "trash" ? (
-            <Button
-              variant="primary"
-              size="lg"
-              icon="plus"
-              disabled={!target || createFile.isPending}
-              onClick={() => target && createFile.mutate(target)}
-            >
-              New file
-            </Button>
-          ) : null}
-        </header>
-
-        {createFile.error ? (
-          <p className="dash__error" role="alert">
-            {createFile.error.message}
-          </p>
-        ) : null}
-
-        {files.isPending ? (
-          <div className="dash__grid" aria-busy="true">
-            {[0, 1, 2, 3].map((i) => (
-              <div key={i} className="dash__card dash__card--skeleton" />
-            ))}
-          </div>
-        ) : visible.length === 0 ? (
-          <EmptyState
-            trash={view === "trash"}
-            searching={query.trim() !== ""}
-            canCreate={canEdit && !!target}
-            onCreate={() => target && createFile.mutate(target)}
-          />
-        ) : (
-          <ul className="dash__grid">
-            {visible.map((file) => (
-              <FileCard
-                key={file.id}
-                file={file}
-                trash={view === "trash"}
-                canEdit={canEdit}
-                isOwner={role === "owner"}
-                projectName={
-                  projects.data?.projects.find((p) => p.id === file.projectId)?.name ?? ""
-                }
-                onChanged={invalidateFiles}
+      {view === "fonts" ? (
+        <main className="dash__main">
+          <TeamFontsView teamId={teamId} canEdit={canEdit} />
+        </main>
+      ) : (
+        <main className="dash__main">
+          <header className="dash__header">
+            <h1 className="dash__title">{heading}</h1>
+            <label className="dash__search">
+              <Icon name="search" />
+              <input
+                ref={searchRef}
+                type="search"
+                placeholder="Search files"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                aria-label="Search files"
               />
-            ))}
-          </ul>
-        )}
-      </main>
+              <kbd>{modKey("K")}</kbd>
+            </label>
+            {role === "owner" ? (
+              <Button size="lg" onClick={() => setInviteOpen(true)}>
+                Invite
+              </Button>
+            ) : null}
+            {canEdit && view !== "trash" ? (
+              <Button
+                variant="primary"
+                size="lg"
+                icon="plus"
+                disabled={!target || createFile.isPending}
+                onClick={() => target && createFile.mutate(target)}
+              >
+                New file
+              </Button>
+            ) : null}
+          </header>
+
+          {createFile.error ? (
+            <p className="dash__error" role="alert">
+              {createFile.error.message}
+            </p>
+          ) : null}
+
+          {files.isPending ? (
+            <div className="dash__grid" aria-busy="true">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="dash__card dash__card--skeleton" />
+              ))}
+            </div>
+          ) : visible.length === 0 ? (
+            <EmptyState
+              trash={view === "trash"}
+              searching={query.trim() !== ""}
+              canCreate={canEdit && !!target}
+              onCreate={() => target && createFile.mutate(target)}
+            />
+          ) : (
+            <ul className="dash__grid">
+              {visible.map((file) => (
+                <FileCard
+                  key={file.id}
+                  file={file}
+                  trash={view === "trash"}
+                  canEdit={canEdit}
+                  isOwner={role === "owner"}
+                  projectName={
+                    projects.data?.projects.find((p) => p.id === file.projectId)?.name ?? ""
+                  }
+                  onChanged={invalidateFiles}
+                />
+              ))}
+            </ul>
+          )}
+        </main>
+      )}
 
       <InviteDialog open={inviteOpen} teamId={teamId} onClose={() => setInviteOpen(false)} />
       <NewProjectDialog
@@ -233,7 +242,7 @@ function NavLink({
   active: boolean;
   icon?: IconName;
   dot?: number;
-  to: { teamId: string; project?: string; view?: "trash" };
+  to: { teamId: string; project?: string; view?: "trash" | "fonts" };
   label: string;
   count?: number;
 }) {
@@ -243,6 +252,8 @@ function NavLink({
       to="/t/$teamId"
       params={{ teamId }}
       search={search}
+      // Exact: otherwise Recent (no search) counts as active on every view.
+      activeOptions={{ exact: true }}
       className="dash__link"
       aria-current={active ? "page" : undefined}
     >

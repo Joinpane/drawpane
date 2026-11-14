@@ -19,7 +19,7 @@ import {
   type SvgImageSource,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
-import { fonts, nearestWeight } from "../fonts/fonts";
+import { type FontFamily, fonts, nearestWeight } from "../fonts/fonts";
 import { embeddedImages, readingOrder } from "./export-assets";
 
 /** A face text is set in: family, weight and style. */
@@ -143,21 +143,9 @@ async function embedFonts(
         return;
       }
       try {
-        // Bundled families are Google fonts too, so both come through the proxy.
-        if (!info || (info.source !== "google" && info.source !== "bundled"))
-          throw new Error("not embeddable");
-        const variants = new Set(
-          wanted.map((face) => {
-            const available = face.italic && info.italics.length > 0 ? info.italics : info.weights;
-            const weight = info.variable ? face.weight : nearestWeight(available, face.weight);
-            return `${weight}${face.italic && info.italics.length > 0 ? "i" : ""}`;
-          }),
-        );
-        const response = await fetch(
-          `/api/fonts/google.css?family=${encodeURIComponent(family)}&variants=${[...variants].join(",")}&format=ttf`,
-        );
-        if (!response.ok) throw new Error(String(response.status));
-        const offered = parseFontFaces(await response.text());
+        if (!info) throw new Error("missing");
+        const offered = await facesOffered(family, info, wanted);
+        if (offered.length === 0) throw new Error("not embeddable");
         const files = new Map<string, Promise<string>>();
         for (const face of wanted) {
           const chosen = pickFace(offered, face);
@@ -183,6 +171,44 @@ async function embedFonts(
     }),
   );
   return { fontFor, missing };
+}
+
+/**
+ * The TrueType faces a family offers for embedding, with where to fetch each.
+ * Team fonts embed their own files (TrueType only: PDFs can't take WOFF, and
+ * jsPDF can't take CFF-based OpenType). Google and built-in families come as
+ * static TrueType through this server's font proxy.
+ */
+async function facesOffered(
+  family: string,
+  info: FontFamily,
+  wanted: readonly Face[],
+): Promise<Array<{ weight: number; italic: boolean; url: string }>> {
+  if (info.source === "team") {
+    const teamId = fonts.teamId;
+    if (!teamId) return [];
+    return (info.faces ?? [])
+      .filter((f) => f.format === "ttf")
+      .map((f) => ({
+        weight: f.weight,
+        italic: f.italic,
+        url: `/api/teams/${encodeURIComponent(teamId)}/fonts/file/${f.sha}`,
+      }));
+  }
+  // Bundled families are Google fonts too, so both come through the proxy.
+  if (info.source !== "google" && info.source !== "bundled") return [];
+  const variants = new Set(
+    wanted.map((face) => {
+      const available = face.italic && info.italics.length > 0 ? info.italics : info.weights;
+      const weight = info.variable ? face.weight : nearestWeight(available, face.weight);
+      return `${weight}${face.italic && info.italics.length > 0 ? "i" : ""}`;
+    }),
+  );
+  const response = await fetch(
+    `/api/fonts/google.css?family=${encodeURIComponent(family)}&variants=${[...variants].join(",")}&format=ttf`,
+  );
+  if (!response.ok) throw new Error(String(response.status));
+  return parseFontFaces(await response.text());
 }
 
 /** Points text at the embedded fonts: one PDF font per face, so weight and style live in it. */

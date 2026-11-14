@@ -1,7 +1,8 @@
+import type { TeamFontFace } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { matchRank } from "../editor/inspector/FontPicker";
 import { loadedFamilies } from "./document-fonts";
-import { describeFamily, fonts, nearestWeight } from "./fonts";
+import { describeFamily, fonts, nearestWeight, teamFamilies } from "./fonts";
 
 describe("fonts", () => {
   it("knows the built-in families without loading anything", () => {
@@ -49,5 +50,44 @@ describe("fonts", () => {
     expect(
       loadedFamilies([face('"Instrument Sans Variable"'), face("Fraunces"), face("Inter Preview")]),
     ).toEqual(new Set(["Instrument Sans", "Fraunces"]));
+  });
+
+  it("groups a team's faces into families, with a variable face's whole range", () => {
+    const face = (
+      family: string,
+      weight: number,
+      italic = false,
+      weightMax: number | null = null,
+    ) =>
+      ({
+        id: `${family}-${weight}-${italic}`,
+        family,
+        style: italic ? "Italic" : "Regular",
+        weight,
+        weightMax,
+        italic,
+        format: "woff2",
+        sha: "a".repeat(64),
+        bytes: 1000,
+        license: null,
+        restricted: false,
+        uploadedBy: "Lena",
+        createdAt: 0,
+      }) satisfies TeamFontFace;
+    const [acme, frame] = teamFamilies([
+      face("Frame", 300, false, 700),
+      face("Acme Sans", 700),
+      face("Acme Sans", 400),
+      face("Acme Sans", 400, true),
+    ]);
+    expect(acme).toMatchObject({
+      family: "Acme Sans",
+      source: "team",
+      weights: [400, 700],
+      italics: [400],
+    });
+    expect(acme?.faces).toHaveLength(3);
+    expect(frame).toMatchObject({ weights: [300, 400, 500, 600, 700], variable: true });
+    expect(describeFamily(acme as never)).toBe("Team · 2 weights");
   });
 });

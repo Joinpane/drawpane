@@ -933,7 +933,11 @@
   margin: 0;
 }
 .font-picker__cta {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
   height: var(--size-control-sm);
+  text-decoration: none;
   padding: 0 var(--space-300);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
