@@ -14,6 +14,7 @@ import {
   Icon,
   IconButton,
   Popover,
+  type PopoverSide,
   SegmentedControl,
 } from "@drawpane/ui";
 import { useEffect, useMemo, useState } from "react";
@@ -47,6 +48,8 @@ export interface PaintPickerProps {
   kinds?: readonly PaintKind[];
   onChange: (next: Paint, label: string) => void;
   onClose: () => void;
+  /** Where it opens beside the anchor. Default "left", beside the inspector. */
+  side?: PopoverSide;
 }
 
 const KIND_LABEL: Record<PaintKind, string> = {
@@ -65,6 +68,7 @@ export function PaintPicker({
   kinds = ["solid", "gradient", "image"],
   onChange,
   onClose,
+  side = "left",
 }: PaintPickerProps) {
   const kind = paintKind(paint);
   // The tab can run ahead of the paint: Image waits for a file before the paint changes.
@@ -77,6 +81,7 @@ export function PaintPicker({
     <Popover
       anchor={anchor}
       label={`${label} paint`}
+      side={side}
       className="paint-picker dp-root"
       onClose={onClose}
     >

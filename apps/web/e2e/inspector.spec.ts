@@ -81,7 +81,7 @@ test.describe
         });
       }, frame)) as string;
       await select(page, [card]);
-      await page.getByRole("button", { name: "Edit fill" }).click();
+      await panel(page).getByRole("button", { name: "Edit fill" }).click();
       const picker = page.getByRole("dialog", { name: "Fill paint" });
       await picker.getByLabel("Fill hex").fill("rgba(43, 79, 214, 0.5)");
       await picker.getByLabel("Fill hex").press("Enter");
@@ -101,7 +101,7 @@ test.describe
       await page.keyboard.press("Escape");
       await expect(picker).toHaveCount(0);
       // Escape closed the picker, not the selection.
-      await expect(page.getByRole("button", { name: "Edit fill" })).toBeVisible();
+      await expect(panel(page).getByRole("button", { name: "Edit fill" })).toBeVisible();
     });
 
     test("gives a shadow a color and spread", async () => {

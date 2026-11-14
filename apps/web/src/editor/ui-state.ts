@@ -32,6 +32,8 @@ export interface EditorUi {
   readonly collapseLayers: number;
   /** Bumped to open the text styles picker for the selected text (⌥⌘T). */
   readonly textStyles: number;
+  /** The Selection Lens shows beside the selection (a view preference). */
+  readonly lens: boolean;
 }
 
 const stores = new WeakMap<Editor, Store<EditorUi>>();
@@ -45,6 +47,7 @@ export function uiFor(editor: Editor): Store<EditorUi> {
       findLayers: 0,
       collapseLayers: 0,
       textStyles: 0,
+      lens: true,
     });
     stores.set(editor, store);
   }

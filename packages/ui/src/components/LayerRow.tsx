@@ -25,7 +25,8 @@ export type LayerKind =
   | "frame-column"
   | "frame-grid";
 
-const KIND_ICONS: Record<LayerKind, IconName> = {
+/** The glyph each kind of layer is drawn with, wherever a layer is shown. */
+export const KIND_ICONS: Readonly<Record<LayerKind, IconName>> = {
   frame: "board",
   board: "board",
   group: "group",
