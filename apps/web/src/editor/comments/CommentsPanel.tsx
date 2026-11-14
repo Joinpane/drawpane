@@ -154,7 +154,7 @@ export function CommentsPanel({ store, insets, onClose }: CommentsPanelProps) {
                     </span>
                     <span className="comments-panel__text">
                       {first ? (
-                        <CommentText body={first.body} mentions={first.mentions} me={me} />
+                        <CommentText body={first.body} mentions={first.mentions} me={me} compact />
                       ) : null}
                     </span>
                     <span className="comments-panel__where">

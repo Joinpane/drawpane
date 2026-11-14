@@ -1,7 +1,7 @@
 /**
  * Screenshots of comments for design review, in both themes: a thread with
- * replies, the last comment's menu right above the reply box, and editing a
- * comment in place. Run with `pnpm --filter @drawpane/web tour`.
+ * replies (one formatted: a list, bold, code, italic and a link), the last
+ * comment's menu right above the reply box, and editing a comment in place. Run with `pnpm --filter @drawpane/web tour`.
  */
 import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 
@@ -62,11 +62,15 @@ test("comments tour", async ({ browser }) => {
   await page.keyboard.press("ControlOrMeta+Enter");
   const thread = page.getByRole("dialog", { name: /^Thread on/ });
   const messages = thread.getByRole("list", { name: "Messages" });
-  for (const text of ["I'll check it against the tokens.", "@Ana Lima will work on this"]) {
+  for (const text of [
+    "- hello?\n* yes!\n**hello**, with `brand/primary` and _care_: https://example.com/spec",
+    "@Ana Lima will work on this",
+  ]) {
     await thread.getByRole("combobox", { name: "Reply" }).fill(text);
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect(messages.getByText(text)).toBeVisible();
+    await expect(thread.getByRole("combobox", { name: "Reply" })).toHaveValue("");
   }
+  await expect(messages.getByRole("link", { name: "https://example.com/spec" })).toBeVisible();
   await page.waitForTimeout(250);
   await shot(page, "140-comment-thread");
 
