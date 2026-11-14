@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
 import { exportBounds } from "../src/export";
 import { NOISE_TILE, noisePixels, seeded } from "../src/noise";
-import { postEffects, postMargin } from "../src/post-effects";
+import { postEffects, postMargin, postReach } from "../src/post-effects";
 import { exportSvg, noiseThreshold, postPrimitives } from "../src/svg";
 import type { TextMeasurer } from "../src/text";
 import { textureReach } from "../src/texture";
@@ -159,6 +159,25 @@ describe("post effects", () => {
     expect(postMargin([{ ...DEFAULT_TEXTURE, radius: 5 }, blur(2)])).toBe(11);
     expect(postMargin([{ ...DEFAULT_TEXTURE, radius: 5, clipToShape: true }])).toBe(0);
     expect(textureReach({ ...DEFAULT_TEXTURE, radius: 7 })).toBe(7);
+  });
+
+  it("spread what the layer paints, shadows and strokes included: their reach adds", () => {
+    expect(postReach([blur(3), { ...DEFAULT_TEXTURE, radius: 5 }])).toBe(11);
+    const at = (effects: EffectValue[]) =>
+      exportBounds(makeEditor([square(effects)]).scene, ["r"]) ?? null;
+    // A shadow 10 below with blur 4, then texture moving its fringe up to 6 further.
+    const shadow = {
+      type: "drop-shadow",
+      color: "#000000",
+      x: 0,
+      y: 10,
+      blur: 4,
+      spread: 0,
+    } as const;
+    const plain = at([shadow]);
+    const rough = at([shadow, { ...DEFAULT_TEXTURE, radius: 6 }]);
+    expect(rough?.height).toBe((plain?.height ?? 0) + 12);
+    expect(rough?.y).toBe((plain?.y ?? 0) - 6);
   });
 
   it("grow what an export covers by an unclipped texture's reach, and not for noise", () => {

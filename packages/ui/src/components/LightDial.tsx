@@ -38,6 +38,14 @@ export function LightDial({
   // The light on its ring (a 40% radius of the dial), y down.
   const lx = 50 + Math.sin(radians) * 38;
   const ly = 50 - Math.cos(radians) * 38;
+  /** Ends a drag however it ends: released, cancelled (a touch the browser takes back), or capture lost. */
+  const endDrag = (e: PointerEvent<HTMLDivElement>) => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    if (e.currentTarget.hasPointerCapture(e.pointerId))
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    onDragEnd?.();
+  };
   const angleAt = (e: PointerEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const dx = e.clientX - (rect.left + rect.width / 2);
@@ -77,13 +85,9 @@ export function LightDial({
       onPointerMove={(e) => {
         if (dragging.current) onChange(angleAt(e));
       }}
-      onPointerUp={(e) => {
-        if (!dragging.current) return;
-        dragging.current = false;
-        if (e.currentTarget.hasPointerCapture(e.pointerId))
-          e.currentTarget.releasePointerCapture(e.pointerId);
-        onDragEnd?.();
-      }}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
       onKeyDown={onKey}
     >
       <span className="dp-light-dial__shape" aria-hidden="true" />

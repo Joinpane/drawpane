@@ -7,6 +7,7 @@ import {
   type CommandGroup,
   IconButton,
   LayerRow,
+  LightDial,
   Menu,
   type MenuItem,
   NumberField,
@@ -625,5 +626,48 @@ describe("SliderField", () => {
     expect(onChange).toHaveBeenLastCalledWith(49);
     fireEvent.keyDown(track, { key: "ArrowRight", shiftKey: true });
     expect(onChange).toHaveBeenLastCalledWith(50);
+  });
+});
+
+describe("drags end however they end, so their undo step closes", () => {
+  it("LightDial: on release, on a cancelled touch, and on lost capture", () => {
+    const start = vi.fn();
+    const end = vi.fn();
+    render(<LightDial angle={0} onChange={() => {}} onDragStart={start} onDragEnd={end} />);
+    const dial = screen.getByRole("slider", { name: "Light angle" });
+    for (const finish of [
+      fireEvent.pointerUp,
+      fireEvent.pointerCancel,
+      fireEvent.lostPointerCapture,
+    ]) {
+      fireEvent.pointerDown(dial, { button: 0, pointerId: 1, clientX: 5, clientY: 5 });
+      finish(dial, { pointerId: 1 });
+    }
+    expect(start).toHaveBeenCalledTimes(3);
+    expect(end).toHaveBeenCalledTimes(3);
+    // A stray end without a drag doesn't close anything.
+    fireEvent.pointerUp(dial, { pointerId: 1 });
+    expect(end).toHaveBeenCalledTimes(3);
+  });
+
+  it("SliderField: released off the track, the drag still ends, once", () => {
+    const start = vi.fn();
+    const end = vi.fn();
+    render(
+      <SliderField
+        label="Depth"
+        value={4}
+        min={0}
+        max={10}
+        onChange={() => {}}
+        onScrubStart={start}
+        onScrubEnd={end}
+      />,
+    );
+    fireEvent.pointerDown(screen.getByRole("slider", { name: "Depth" }));
+    fireEvent.pointerUp(window);
+    fireEvent.pointerUp(window);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(end).toHaveBeenCalledTimes(1);
   });
 });

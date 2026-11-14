@@ -16,8 +16,10 @@ import {
   begin,
   type Ctx,
   draw,
+  fits,
   type QuadProgram,
   quadProgram,
+  scratch,
   upload,
 } from "./webgl";
 
@@ -26,9 +28,8 @@ precision highp float;
 in vec2 uv;
 out vec4 color;
 uniform sampler2D source;
-// The source canvas, and the part of it the picture covers (from its top left), in pixels.
+// The picture, in pixels.
 uniform vec2 size;
-uniform vec2 extent;
 // The canvas's pixels (y down) to the layer's units.
 uniform mat3 toLayer;
 // A cell, in the layer's units; the farthest a pixel moves, in pixels.
@@ -49,14 +50,14 @@ uvec2 hash(uvec2 v) {
 }
 
 vec4 at(vec2 px) {
-  if (px.x < 0.0 || px.y < 0.0 || px.x > extent.x || px.y > extent.y) return vec4(0.0);
   vec2 t = px / size;
+  if (t.x < 0.0 || t.y < 0.0 || t.x > 1.0 || t.y > 1.0) return vec4(0.0);
   return texture(source, t);
 }
 
 void main() {
   // Canvases are uploaded top row first: flip so y runs down, as on screen.
-  vec2 px = vec2(uv.x, 1.0 - uv.y) * extent;
+  vec2 px = vec2(uv.x, 1.0 - uv.y) * size;
   vec2 local = (toLayer * vec3(px, 1.0)).xy;
   vec2 r = vec2(hash(uvec2(ivec2(floor(local / cell))))) / 4294967295.0;
   // A point spread evenly over the disc of the radius.
@@ -66,7 +67,7 @@ void main() {
   if (clip) color *= at(px).a;
 }`;
 
-type Program = QuadProgram<"source", "size" | "extent" | "toLayer" | "cell" | "radius" | "clip">;
+type Program = QuadProgram<"source", "size" | "toLayer" | "cell" | "radius" | "clip">;
 
 /** How far an unclipped texture reaches past its layer's edge, in the layer's units. */
 export function textureReach(texture: Texture): number {
@@ -76,6 +77,8 @@ export function textureReach(texture: Texture): number {
 /** Roughens layers' pictures; keeps its WebGL context between frames. */
 export class TexturePainter {
   #program: Program | null | undefined;
+  /** The picture alone, w × h: the canvas it's on can be far bigger, and is uploaded whole. */
+  #source: AnyCanvas | null = null;
 
   #webgl(): Program | null {
     if (this.#program === undefined)
@@ -83,7 +86,7 @@ export class TexturePainter {
         label: "texture",
         fragment: FRAGMENT,
         textures: ["source"],
-        uniforms: ["size", "extent", "toLayer", "cell", "radius", "clip"],
+        uniforms: ["size", "toLayer", "cell", "radius", "clip"],
         // Whole pixels move: grain stays crisp, as on paper.
         filter: "nearest",
         premultiply: true,
@@ -94,7 +97,8 @@ export class TexturePainter {
   /**
    * Roughens the w × h pixels at `canvas`'s top left, in place. `layer`
    * takes the layer's units to the canvas's pixels; `scale` is pixels per
-   * unit. False where there's no WebGL2 (the picture is left as it was).
+   * unit. False where it can't (no WebGL2, a lost context, a picture too
+   * big for the GPU): the picture is left as it was, unroughened.
    */
   paint(
     canvas: AnyCanvas,
@@ -108,13 +112,18 @@ export class TexturePainter {
     if (radius <= 0 || w <= 0 || h <= 0) return true;
     const program = this.#webgl();
     const ctx = canvas.getContext("2d") as Ctx | null;
-    if (!program || !ctx) return false;
+    if (!program || !ctx || !fits(program, w, h)) return false;
+    this.#source = scratch(this.#source, w, h);
+    const source = this.#source?.getContext("2d") as Ctx | null | undefined;
+    if (!this.#source || !source) return false;
+    source.setTransform(1, 0, 0, 1, 0, 0);
+    source.globalCompositeOperation = "copy";
+    source.drawImage(canvas, 0, 0, w, h, 0, 0, w, h);
     const { gl, uniforms } = program;
-    begin(program, w, h);
-    upload(program, "source", canvas);
+    if (!begin(program, w, h)) return false;
+    upload(program, "source", this.#source);
     const [a, b, c, d, e, f] = invert(layer);
-    gl.uniform2f(uniforms.size, canvas.width, canvas.height);
-    gl.uniform2f(uniforms.extent, w, h);
+    gl.uniform2f(uniforms.size, w, h);
     gl.uniformMatrix3fv(uniforms.toLayer, false, [a, b, 0, c, d, 0, e, f, 1]);
     gl.uniform1f(uniforms.cell, texture.size);
     gl.uniform1f(uniforms.radius, radius);

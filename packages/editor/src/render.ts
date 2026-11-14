@@ -7,7 +7,7 @@
  * the design.
  */
 
-import { type Effect, getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
 import { exportBounds } from "./export";
 import type { Matrix, Rect } from "./geometry";
@@ -16,7 +16,7 @@ import { ImageCache, imagePlacement } from "./images";
 import { markerLength, markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
 import { NoiseTiles, paintNoise } from "./noise";
-import { type PostEffect, postEffects, postMargin } from "./post-effects";
+import { type PostEffect, postEffects, postMargin, postReach } from "./post-effects";
 import type { Scene } from "./scene";
 import {
   layoutText,
@@ -27,7 +27,7 @@ import {
   type TextMeasurer,
   textBlockOffset,
 } from "./text";
-import { TexturePainter, textureReach } from "./texture";
+import { TexturePainter } from "./texture";
 import { isClosedPath } from "./vector/cache";
 import { nodePath } from "./vector/shapes";
 import { serializePath } from "./vector/svg";
@@ -51,8 +51,6 @@ const PLACEHOLDER = { light: "#ececea", dark: "#dfdfdc", cell: 8 };
  */
 const BLUR_MAX_PIXELS = 6_000_000;
 const POST_MAX_PIXELS = 16_000_000;
-
-const isBackgroundBlur = (e: Effect) => e.type === "background-blur" && e.visible !== false;
 
 export interface RenderStats {
   drawn: number;
@@ -559,8 +557,18 @@ export class CanvasRenderer {
     const id = node.id;
     const z = camera.zoom * dpr;
     const m = this.#scene.worldMatrix(id);
-    // Background blur reads what's already drawn behind the layer: here, before the layer goes on.
-    if (node.type !== "group" && getProp(node.props, "effects").some(isBackgroundBlur)) {
+    // Background blur and glass read what's already drawn behind the layer: here, before the
+    // layer goes on (drawn alone, it has nothing behind it), as the layer's opacity and blending.
+    const effects = getProp(node.props, "effects");
+    if (
+      node.type !== "group" &&
+      effects.some(
+        (e) => e.visible !== false && (e.type === "background-blur" || e.type === "glass"),
+      )
+    ) {
+      resetState(ctx);
+      ctx.globalAlpha = opacity;
+      ctx.globalCompositeOperation = blend;
       ctx.setTransform(
         m[0] * z,
         m[1] * z,
@@ -569,12 +577,11 @@ export class CanvasRenderer {
         (m[4] * camera.zoom + camera.x) * dpr,
         (m[5] * camera.zoom + camera.y) * dpr,
       );
-      const shape = this.#shapePath(
-        node,
-        getProp(node.props, "width"),
-        getProp(node.props, "height"),
-      );
+      const width = getProp(node.props, "width");
+      const height = getProp(node.props, "height");
+      const shape = this.#shapePath(node, width, height);
       this.#backgroundBlur(ctx, node, shape, z);
+      this.#glassEffect(ctx, node, shape, width, height, z);
     }
     const region = exportBounds(this.#scene, [id]);
     if (!region) return;
@@ -604,7 +611,8 @@ export class CanvasRenderer {
     const lctx = layer?.getContext("2d") as Ctx | null | undefined;
     if (!layer || !lctx) return;
     resetState(lctx);
-    lctx.clearRect(0, 0, w, h);
+    // All of it, not just w×h: a child's background blur or glass reads past its corner.
+    lctx.clearRect(0, 0, layer.width, layer.height);
     // The same camera, moved so the region's corner is the canvas's, at the reduced resolution.
     const shifted = new Camera(camera.x - x0 / dpr, camera.y - y0 / dpr, camera.zoom);
     this.#isolated.add(id);
@@ -641,7 +649,7 @@ export class CanvasRenderer {
         const c = into?.getContext("2d") as Ctx | null | undefined;
         if (!into || !c) continue;
         resetState(c);
-        c.clearRect(0, 0, w, h);
+        c.clearRect(0, 0, into.width, into.height);
         c.filter = `blur(${e.radius * zs}px)`;
         c.drawImage(layer, 0, 0, w, h, 0, 0, w, h);
         c.filter = "none";
@@ -725,19 +733,17 @@ export class CanvasRenderer {
 
   #effectReach(node: NodeRecord): number {
     let reach = 0;
-    for (const e of getProp(node.props, "effects")) {
-      if (e.visible === false) continue;
-      if (e.type === "drop-shadow")
+    const effects = getProp(node.props, "effects");
+    for (const e of effects)
+      if (e.visible !== false && e.type === "drop-shadow")
         reach = Math.max(reach, Math.abs(e.x) + Math.abs(e.y) + e.blur * 2 + Math.max(0, e.spread));
-      if (e.type === "layer-blur") reach = Math.max(reach, e.radius * 2);
-      if (e.type === "texture") reach = Math.max(reach, textureReach(e));
-    }
     if (
       (node.type === "line" || node.type === "path") &&
       (getProp(node.props, "markerStart") !== "none" || getProp(node.props, "markerEnd") !== "none")
     )
       reach = Math.max(reach, markerLength(getProp(node.props, "strokeWeight")));
-    return reach;
+    // Blur and texture spread everything above: their reach adds.
+    return reach + postReach(postEffects(effects));
   }
 
   #shapePath(node: NodeRecord, w: number, h: number): Path2D {

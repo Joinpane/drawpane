@@ -9,7 +9,7 @@
  *   kind as a switcher in its header, a close button, then its values.
  */
 import { DropdownMenu, Icon, IconButton, type IconName, MenuButton, Popover } from "@drawpane/ui";
-import { type ReactNode, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 export interface ItemKind<T extends string> {
   readonly type: T;
@@ -164,9 +164,25 @@ export function ItemEditor<T extends string>({
   );
 }
 
-/** Which item's editor is open, and the row buttons it opens beside. */
-export function useItemEditor() {
-  const [open, setOpen] = useState<number | null>(null);
+/**
+ * Which item's editor is open, and the row buttons it opens beside. Items
+ * are by position, so the editor closes when they stop being the same
+ * list: another selection (`scope`, its ids), or the open item gone (an
+ * undo took it, so the list is shorter than `count` says it was).
+ */
+export function useItemEditor(scope: string, count: number) {
+  const [state, setState] = useState<{ scope: string; index: number } | null>(null);
+  // Closed at once for another selection or a missing item, then forgotten, so it can't reopen later.
+  const open = state && state.scope === scope && state.index < count ? state.index : null;
+  useEffect(() => {
+    if (state && open === null) setState(null);
+  }, [state, open]);
+  const setOpen = (index: number | null | ((current: number | null) => number | null)) =>
+    setState((current) => {
+      const now = current && current.scope === scope ? current.index : null;
+      const next = typeof index === "function" ? index(now) : index;
+      return next === null ? null : { scope, index: next };
+    });
   const rows = useRef(new Map<number, HTMLButtonElement>());
   return {
     open,

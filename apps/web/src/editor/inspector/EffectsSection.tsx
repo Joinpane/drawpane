@@ -110,7 +110,7 @@ export function effectSummary(e: Effect): string {
 export function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
   const effects = common(nodes, "effects");
-  const items = useItemEditor();
+  const items = useItemEditor(ids.join(","), effects?.length ?? 0);
   const set = (next: Effect[], label: string) =>
     editor.setProp(ids, "effects", next.length ? next : null, label);
   const replace = (i: number, next: Effect, label: string) =>

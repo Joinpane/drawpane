@@ -7,9 +7,9 @@ import { getProp, type NodeRecord } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { type Rect, unionRects } from "./geometry";
 import { markerLength } from "./markers";
+import { postEffects, postReach } from "./post-effects";
 import type { CanvasRenderer } from "./render";
 import type { Scene } from "./scene";
-import { textureReach } from "./texture";
 
 export type ExportFormat = "png" | "jpeg" | "webp" | "svg" | "pdf";
 /** Formats drawn into pixels; SVG and PDF stay vector, at 1×. */
@@ -39,7 +39,10 @@ export const EXPORT_EXTENSION: Record<ExportFormat, string> = {
 export const MAX_EXPORT_SIDE = 16_384;
 export const MAX_EXPORT_PIXELS = 8192 * 8192;
 
-/** How far a node's paint reaches past its box: strokes outside it, shadows, blur. */
+/**
+ * How far a node's paint reaches past its box: strokes outside it and
+ * shadows, then its post effects (blur, texture) spreading all of that.
+ */
 export function paintOutset(node: NodeRecord): {
   left: number;
   top: number;
@@ -75,21 +78,15 @@ export function paintOutset(node: NodeRecord): {
       }
     }
   }
-  for (const e of getProp(node.props, "effects")) {
-    if (e.visible === false) continue;
-    if (e.type === "drop-shadow") {
-      const r = Math.max(0, e.blur + e.spread);
-      grow(r - e.x, r - e.y, r + e.x, r + e.y);
-    } else if (e.type === "layer-blur") {
-      // The renderer's blur is a Gaussian with this standard deviation; 2σ holds nearly all of it.
-      const r = e.radius * 2;
-      grow(r, r, r, r);
-    } else if (e.type === "texture") {
-      const r = textureReach(e);
-      grow(r, r, r, r);
-    }
+  const effects = getProp(node.props, "effects");
+  for (const e of effects) {
+    if (e.visible === false || e.type !== "drop-shadow") continue;
+    const r = Math.max(0, e.blur + e.spread);
+    grow(r - e.x, r - e.y, r + e.x, r + e.y);
   }
-  return { left, top, right, bottom };
+  // Blur and texture work on the whole picture, shadows and strokes included: their reach adds.
+  const post = postReach(postEffects(effects));
+  return { left: left + post, top: top + post, right: right + post, bottom: bottom + post };
 }
 
 /**
