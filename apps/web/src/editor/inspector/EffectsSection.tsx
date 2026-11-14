@@ -1,33 +1,48 @@
 /**
- * Effects: drop and inner shadows, layer and background blur. Each effect is
- * a summary row (type, values, visibility); opening it shows every value,
- * with the shadow's color in a full picker (alpha included).
+ * Effects: drop and inner shadows, layer and background blur.
+ *
+ * "+" opens a menu of effect types; picking one adds it and opens its
+ * editor. Each effect is a row (its kind, a glance at its values, show or
+ * hide, remove); the row opens the editor in a popover beside the
+ * inspector, where the kind can change and every value is labelled.
  */
 import type { Editor } from "@drawpane/editor";
 import type { NodeRecord, PropValues } from "@drawpane/model";
-import { IconButton, NumberField, PropertyRow, PropertySection } from "@drawpane/ui";
-import { useState } from "react";
+import {
+  DropdownMenu,
+  Icon,
+  IconButton,
+  type IconName,
+  MenuButton,
+  type MenuItem,
+  NumberField,
+  Popover,
+  PropertySection,
+} from "@drawpane/ui";
+import { useRef, useState } from "react";
 import { ColorRow } from "./ColorRow";
-import { common, Select } from "./fields";
-import { swatchCss } from "./paint";
+import { common } from "./fields";
 
 type Effect = PropValues["effects"][number];
+type EffectType = Effect["type"];
 
-const TYPE_OPTIONS = [
-  { value: "drop-shadow", label: "Drop shadow" },
-  { value: "inner-shadow", label: "Inner shadow" },
-  { value: "layer-blur", label: "Layer blur" },
-  { value: "background-blur", label: "Background blur" },
-] as const;
+/** The kinds of effect, in the order the menu lists them. */
+export const EFFECT_KINDS: ReadonlyArray<{ type: EffectType; label: string; icon: IconName }> = [
+  { type: "drop-shadow", label: "Drop shadow", icon: "drop-shadow" },
+  { type: "inner-shadow", label: "Inner shadow", icon: "inner-shadow" },
+  { type: "layer-blur", label: "Layer blur", icon: "layer-blur" },
+  { type: "background-blur", label: "Background blur", icon: "background-blur" },
+];
 
-const TYPE_LABEL: Record<Effect["type"], string> = Object.fromEntries(
-  TYPE_OPTIONS.map((o) => [o.value, o.label]),
-) as Record<Effect["type"], string>;
+const KIND = Object.fromEntries(EFFECT_KINDS.map((k) => [k.type, k])) as Record<
+  EffectType,
+  (typeof EFFECT_KINDS)[number]
+>;
 
 const DEFAULT_SHADOW = { color: "#00000040", x: 0, y: 4, blur: 12, spread: 0 } as const;
 
 /** A fresh effect of `type`, keeping what carries over (visibility, shadow values). */
-function effectOfType(type: Effect["type"], from?: Effect): Effect {
+export function effectOfType(type: EffectType, from?: Effect): Effect {
   const visible = from?.visible === false ? { visible: false } : {};
   if (type === "layer-blur" || type === "background-blur")
     return { type, radius: from && "radius" in from ? from.radius : 8, ...visible };
@@ -43,8 +58,8 @@ function effectOfType(type: Effect["type"], from?: Effect): Effect {
   };
 }
 
-/** "0 4 12 0" for shadows (x, y, blur, spread), the radius for blurs. */
-function summary(e: Effect): string {
+/** A glance at the values: "0 4 12 0" for a shadow (x, y, blur, spread), the radius for a blur. */
+export function effectSummary(e: Effect): string {
   if ("radius" in e) return `${e.radius}`;
   return `${e.x} ${e.y} ${e.blur} ${e.spread}`;
 }
@@ -52,7 +67,9 @@ function summary(e: Effect): string {
 export function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
   const effects = common(nodes, "effects");
+  // The effect whose editor is open, by index.
   const [open, setOpen] = useState<number | null>(null);
+  const rows = useRef(new Map<number, HTMLButtonElement>());
   const set = (next: Effect[], label: string) =>
     editor.setProp(ids, "effects", next.length ? next : null, label);
   const replace = (i: number, next: Effect, label: string) =>
@@ -61,154 +78,209 @@ export function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeR
       label,
     );
 
+  const addItems: MenuItem[] = EFFECT_KINDS.map((kind) => ({
+    id: kind.type,
+    label: kind.label,
+    icon: kind.icon,
+    onSelect: () => {
+      const list = effects ?? [];
+      set([...list, effectOfType(kind.type)], `Add ${kind.label.toLowerCase()}`);
+      // Its editor opens once its row is there.
+      requestAnimationFrame(() => setOpen(list.length));
+    },
+  }));
+
+  const anchor = open === null ? null : (rows.current.get(open) ?? null);
+  const current = open === null ? null : (effects?.[open] ?? null);
+
   return (
     <PropertySection
       title="Effects"
-      actions={
-        <IconButton
-          icon="plus"
-          label="Add effect"
-          onClick={() => {
-            const list = effects ?? [];
-            set([...list, effectOfType("drop-shadow")], "Add shadow");
-            setOpen(list.length);
-          }}
-        />
-      }
+      actions={<MenuButton icon="plus" label="Add effect" items={addItems} />}
     >
       {effects === null ? (
         <p className="inspector__mixed">Mixed effects. Add one to replace them.</p>
       ) : (
         effects.map((effect, i) => {
-          const expanded = open === i;
+          const kind = KIND[effect.type];
+          const hidden = effect.visible === false;
           return (
-            <div key={i} className="effect" data-hidden={effect.visible === false || undefined}>
-              <div className="effect__row">
-                <button
-                  type="button"
-                  className="effect__toggle"
-                  aria-expanded={expanded}
-                  onClick={() => setOpen(expanded ? null : i)}
-                >
-                  {"color" in effect ? (
-                    <span
-                      className="effect__swatch"
-                      style={{ background: swatchCss({ type: "solid", color: effect.color }) }}
-                      aria-hidden="true"
-                    />
-                  ) : (
-                    <span className="effect__swatch effect__swatch--blur" aria-hidden="true" />
-                  )}
-                  <span className="effect__name">{TYPE_LABEL[effect.type]}</span>
-                  <span className="effect__summary">{summary(effect)}</span>
-                </button>
-                <IconButton
-                  icon={effect.visible === false ? "eye-off" : "eye"}
-                  label={effect.visible === false ? "Show effect" : "Hide effect"}
-                  onClick={() =>
-                    replace(i, { ...effect, visible: effect.visible === false }, "Toggle effect")
-                  }
-                />
-                <IconButton
-                  icon="minus"
-                  label="Remove effect"
-                  onClick={() => {
-                    set(
-                      effects.filter((_, j) => j !== i),
-                      "Remove effect",
-                    );
-                    setOpen(null);
-                  }}
-                />
-              </div>
-              {expanded ? (
-                <EffectDetails
-                  editor={editor}
-                  effect={effect}
-                  onChange={(next, label) => replace(i, next, label)}
-                />
-              ) : null}
+            <div
+              key={i}
+              className="effect"
+              data-hidden={hidden || undefined}
+              data-open={open === i || undefined}
+            >
+              <button
+                ref={(el) => {
+                  if (el) rows.current.set(i, el);
+                  else rows.current.delete(i);
+                }}
+                type="button"
+                className="effect__toggle"
+                aria-haspopup="dialog"
+                aria-expanded={open === i}
+                onClick={() => setOpen(open === i ? null : i)}
+              >
+                <Icon name={kind.icon} size={16} />
+                <span className="effect__name">{kind.label}</span>
+                <span className="effect__summary">{effectSummary(effect)}</span>
+              </button>
+              <IconButton
+                icon={hidden ? "eye-off" : "eye"}
+                label={
+                  hidden ? `Show ${kind.label.toLowerCase()}` : `Hide ${kind.label.toLowerCase()}`
+                }
+                onClick={() => replace(i, { ...effect, visible: hidden }, "Toggle effect")}
+              />
+              <IconButton
+                icon="minus"
+                label={`Remove ${kind.label.toLowerCase()}`}
+                onClick={() => {
+                  set(
+                    effects.filter((_, j) => j !== i),
+                    "Remove effect",
+                  );
+                  setOpen(null);
+                }}
+              />
             </div>
           );
         })
       )}
+      {anchor && current && open !== null ? (
+        <Popover
+          anchor={anchor}
+          label={KIND[current.type].label}
+          className="effect-editor dp-root"
+          autoFocus={false}
+          onClose={() => setOpen(null)}
+        >
+          <EffectEditor
+            editor={editor}
+            effect={current}
+            onChange={(next, label) => replace(open, next, label)}
+            onClose={() => setOpen(null)}
+          />
+        </Popover>
+      ) : null}
     </PropertySection>
   );
 }
 
-function EffectDetails({
+/** One effect's editor: its kind (switchable), then each value with its name. */
+function EffectEditor({
   editor,
   effect,
   onChange,
+  onClose,
 }: {
   editor: Editor;
   effect: Effect;
   onChange: (next: Effect, label: string) => void;
+  onClose: () => void;
 }) {
+  const kind = KIND[effect.type];
+  const typeButton = useRef<HTMLButtonElement>(null);
+  const [choosing, setChoosing] = useState(false);
   const scrub = (label: string) => ({
     onScrubStart: () => editor.beginGesture(label),
     onScrubEnd: () => editor.endGesture(),
   });
   return (
-    <div className="effect__details">
-      <Select
-        label="Effect type"
-        value={effect.type}
-        options={TYPE_OPTIONS}
-        onChange={(type) => onChange(effectOfType(type, effect), "Effect type")}
-      />
-      {"color" in effect ? (
-        <>
-          <PropertyRow>
+    <div className="effect-editor__body">
+      <div className="effect-editor__head">
+        <button
+          ref={typeButton}
+          type="button"
+          className="effect-editor__type"
+          aria-haspopup="menu"
+          aria-expanded={choosing}
+          aria-label={`Effect type: ${kind.label}`}
+          onClick={() => setChoosing(!choosing)}
+        >
+          <Icon name={kind.icon} size={16} />
+          <span>{kind.label}</span>
+          <Icon name="chevron-down" size={12} />
+        </button>
+        <IconButton icon="close" label="Close" onClick={onClose} />
+      </div>
+      {choosing && typeButton.current ? (
+        <DropdownMenu
+          anchor={typeButton.current}
+          label="Effect type"
+          align="start"
+          items={EFFECT_KINDS.map((k) => ({
+            id: k.type,
+            label: k.label,
+            icon: k.icon,
+            checked: k.type === effect.type,
+            // With icons the menu shows no check: the current kind starts highlighted instead.
+            active: k.type === effect.type,
+            onSelect: () => onChange(effectOfType(k.type, effect), "Effect type"),
+          }))}
+          onClose={() => setChoosing(false)}
+        />
+      ) : null}
+      <div className="effect-editor__fields">
+        {"color" in effect ? (
+          <>
+            <span className="effect-editor__label">Position</span>
+            <div className="effect-editor__pair">
+              <NumberField
+                label="X"
+                ariaLabel="Shadow X offset"
+                value={effect.x}
+                onChange={(x) => onChange({ ...effect, x }, "Shadow offset")}
+                {...scrub("Shadow offset")}
+              />
+              <NumberField
+                label="Y"
+                ariaLabel="Shadow Y offset"
+                value={effect.y}
+                onChange={(y) => onChange({ ...effect, y }, "Shadow offset")}
+                {...scrub("Shadow offset")}
+              />
+            </div>
+            <span className="effect-editor__label">Blur</span>
             <NumberField
-              label="X"
-              ariaLabel="Shadow X offset"
-              value={effect.x}
-              onChange={(x) => onChange({ ...effect, x }, "Shadow offset")}
-              {...scrub("Shadow offset")}
-            />
-            <NumberField
-              label="Y"
-              ariaLabel="Shadow Y offset"
-              value={effect.y}
-              onChange={(y) => onChange({ ...effect, y }, "Shadow offset")}
-              {...scrub("Shadow offset")}
-            />
-          </PropertyRow>
-          <PropertyRow>
-            <NumberField
-              label="B"
+              icon="layer-blur"
               ariaLabel="Shadow blur"
               min={0}
               value={effect.blur}
               onChange={(blur) => onChange({ ...effect, blur }, "Shadow blur")}
               {...scrub("Shadow blur")}
             />
+            <span className="effect-editor__label">Spread</span>
             <NumberField
-              label="S"
+              icon="padding"
               ariaLabel="Shadow spread"
               value={effect.spread}
               onChange={(spread) => onChange({ ...effect, spread }, "Shadow spread")}
               {...scrub("Shadow spread")}
             />
-          </PropertyRow>
-          <ColorRow
-            editor={editor}
-            label="Shadow"
-            color={effect.color}
-            onChange={(color, label) => onChange({ ...effect, color }, label)}
-          />
-        </>
-      ) : (
-        <NumberField
-          label="R"
-          ariaLabel="Blur radius"
-          min={0}
-          value={effect.radius}
-          onChange={(radius) => onChange({ ...effect, radius }, "Blur radius")}
-          {...scrub("Blur radius")}
-        />
-      )}
+            <span className="effect-editor__label">Color</span>
+            <ColorRow
+              editor={editor}
+              label="Shadow"
+              color={effect.color}
+              onChange={(color, label) => onChange({ ...effect, color }, label)}
+            />
+          </>
+        ) : (
+          <>
+            <span className="effect-editor__label">Blur</span>
+            <NumberField
+              icon="layer-blur"
+              ariaLabel="Blur radius"
+              min={0}
+              value={effect.radius}
+              onChange={(radius) => onChange({ ...effect, radius }, "Blur radius")}
+              {...scrub("Blur radius")}
+            />
+          </>
+        )}
+      </div>
     </div>
   );
 }
