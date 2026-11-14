@@ -8,7 +8,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import type { InboxItem } from "../api/client";
 import { type InboxFilter, InboxRow, useInboxList } from "./InboxRow";
-import { dayLabel, markRead, useUnread } from "./inbox";
+import { allShown, dayLabel, markRead, useUnread } from "./inbox";
 import "./inbox.css";
 
 type Filter = InboxFilter;
@@ -17,6 +17,13 @@ export function InboxView() {
   const queryClient = useQueryClient();
   const unread = useUnread();
   const [filter, setFilter] = useState<Filter>("unread");
+  const [failed, setFailed] = useState<string | null>(null);
+  const mark = (which: Parameters<typeof markRead>[1]) => {
+    setFailed(null);
+    void markRead(queryClient, which).catch(() =>
+      setFailed("Couldn't mark that read. Check your connection and try again."),
+    );
+  };
   const list = useInboxList(filter);
   const items = list.data?.pages.flatMap((p) => p.items) ?? [];
   const groups: { label: string; items: InboxItem[] }[] = [];
@@ -49,21 +56,29 @@ export function InboxView() {
             variant="ghost"
             icon="check"
             disabled={unread === 0}
-            onClick={() => void markRead(queryClient, { all: true })}
+            onClick={() => mark(allShown(items))}
           >
             Mark all read
           </Button>
         </div>
+        {failed ? (
+          <p className="inbox__alert" role="alert">
+            {failed}
+          </p>
+        ) : null}
         {list.isPending ? (
           <ul className="inbox__list">
             {[0, 1, 2].map((i) => (
               <li key={i} className="inbox__skeleton" />
             ))}
           </ul>
-        ) : list.error ? (
-          <p className="inbox__empty" role="alert">
-            {list.error.message}
-          </p>
+        ) : list.error && !list.data ? (
+          <div className="inbox__empty" role="alert">
+            <p>{list.error.message}</p>
+            <Button size="sm" onClick={() => void list.refetch()}>
+              Try again
+            </Button>
+          </div>
         ) : items.length === 0 ? (
           <div className="inbox__empty">
             <span className="inbox__empty-mark" aria-hidden="true">
@@ -87,7 +102,7 @@ export function InboxView() {
                     key={item.id}
                     item={item}
                     onOpen={() => {
-                      if (item.readAt === null) void markRead(queryClient, { ids: [item.id] });
+                      if (item.readAt === null) mark({ ids: [item.id] });
                     }}
                   />
                 ))}
@@ -97,12 +112,21 @@ export function InboxView() {
         )}
         {list.hasNextPage ? (
           <div className="inbox__more">
+            {list.isFetchNextPageError ? (
+              <span className="inbox__more-error" role="alert">
+                Couldn't load older notifications.
+              </span>
+            ) : null}
             <Button
               variant="ghost"
               disabled={list.isFetchingNextPage}
               onClick={() => void list.fetchNextPage()}
             >
-              {list.isFetchingNextPage ? "Loading…" : "Show older"}
+              {list.isFetchingNextPage
+                ? "Loading…"
+                : list.isFetchNextPageError
+                  ? "Try again"
+                  : "Show older"}
             </Button>
           </div>
         ) : null}

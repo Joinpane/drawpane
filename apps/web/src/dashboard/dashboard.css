@@ -453,6 +453,11 @@
     visibility: visible;
     transition: transform 200ms cubic-bezier(0.2, 0, 0, 1);
   }
+  .dash__side-close {
+    position: absolute;
+    top: var(--space-300);
+    right: var(--space-300);
+  }
   .dash__scrim {
     position: fixed;
     inset: 0;
@@ -1203,4 +1208,12 @@
   background: var(--signal-soft);
   color: inherit;
   box-shadow: 0 0 0 1px var(--signal-soft);
+}
+
+/* Search: still asking, and a note when there are more matches than shown. */
+.dash__searching,
+.dash__search-note {
+  margin: 0 0 var(--space-400);
+  color: var(--ink-muted);
+  font: 400 13px / 18px var(--font-ui);
 }

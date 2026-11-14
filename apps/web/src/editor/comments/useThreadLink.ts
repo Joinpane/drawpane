@@ -7,7 +7,7 @@ import type { Editor } from "@drawpane/editor";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { markRead, UNREAD_KEY } from "../../inbox/inbox";
+import { markRead } from "../../inbox/inbox";
 import { useEditorStateOutside } from "../hooks";
 import { useComments } from "./CommentsLayer";
 import { focusThread } from "./CommentsPanel";
@@ -53,11 +53,12 @@ export function useThreadLink(
     void navigate({ to: "/f/$fileId", params: { fileId }, search: {}, replace: true });
   }, [linked, live, loaded, store, editor, insets.left, navigate, fileId]);
 
-  // Seen: a thread's notifications are read once it's open. Only asks when something's unread.
+  // Seen: a thread's notifications are read once it's open, and again when a
+  // reply arrives while it is. Always asked: the count cached here can be stale.
+  const openedAt = useComments(store, (s) => (s.openId ? s.threads.get(s.openId)?.updatedAt : 0));
   useEffect(() => {
+    void openedAt;
     if (!openId) return;
-    const unread = queryClient.getQueryData<{ unread: number }>(UNREAD_KEY)?.unread;
-    if (unread === 0) return;
     void markRead(queryClient, { threadId: openId }).catch(() => {});
-  }, [openId, queryClient]);
+  }, [openId, openedAt, queryClient]);
 }

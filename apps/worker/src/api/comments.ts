@@ -353,10 +353,10 @@ export const comments = new Hono<AppContext>()
     const threadId = c.req.param("threadId");
     const { resolved, anchor } = await readBody(c, CommentThreadPatch);
     const row = await c.env.DB.prepare(
-      "SELECT created_by FROM comment_threads WHERE id = ? AND file_id = ?",
+      "SELECT created_by, resolved_at FROM comment_threads WHERE id = ? AND file_id = ?",
     )
       .bind(threadId, file.id)
-      .first<{ created_by: string | null }>();
+      .first<{ created_by: string | null; resolved_at: number | null }>();
     if (!row) throw notFound("That comment was deleted. Refresh the comments list.");
     // Anyone who can comment can resolve; moving someone else's pin takes edit access.
     if (anchor && role === "viewer" && row.created_by !== user.id)
@@ -375,6 +375,7 @@ export const comments = new Hono<AppContext>()
           starterId: row.created_by,
           actorId: user.id,
           resolved,
+          wasResolved: row.resolved_at !== null,
           now,
         }),
       );
@@ -427,6 +428,12 @@ export const comments = new Hono<AppContext>()
     const body = await readBody(c, CommentEdit);
     const mentions = await validMentions(c.env.DB, file, body.mentions);
     const now = Date.now();
+    const before = await c.env.DB.prepare(
+      `SELECT c.created_at, (SELECT group_concat(user_id) FROM comment_mentions WHERE comment_id = c.id) AS mentioned
+         FROM comments c WHERE c.id = ?`,
+    )
+      .bind(commentId)
+      .first<{ created_at: number; mentioned: string | null }>();
     await c.env.DB.batch([
       c.env.DB.prepare("UPDATE comments SET body = ?, edited_at = ? WHERE id = ?").bind(
         body.body,
@@ -439,14 +446,16 @@ export const comments = new Hono<AppContext>()
       ),
       c.env.DB.prepare("DELETE FROM comment_mentions WHERE comment_id = ?").bind(commentId),
       ...mentionInserts(c.env.DB, commentId, file.id, mentions, now),
-      ...editNotifications(c.env.DB, {
+      ...(await editNotifications(c.env.DB, {
         fileId: file.id,
         threadId,
         commentId,
         actorId: user.id,
+        previous: before?.mentioned ? before.mentioned.split(",") : [],
         mentions,
+        writtenAt: before?.created_at ?? now,
         now,
-      }),
+      })),
     ]);
     const thread = await loadThread(c.env.DB, file.id, threadId);
     await relay(c.env, file.id, { kind: "thread", thread });

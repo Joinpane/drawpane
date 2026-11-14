@@ -75,6 +75,24 @@ export function DashboardPage() {
   // On a phone the sidebar is a drawer, opened from the top bar.
   const phone = useMediaQuery(PHONE);
   const [navOpen, setNavOpen] = useState(false);
+  // Left the phone width (a rotated tablet, a wider window): the drawer has no meaning there.
+  useEffect(() => {
+    if (!phone) setNavOpen(false);
+  }, [phone]);
+  // The drawer open on a phone is modal: everything behind it is out of reach.
+  const behind = phone && navOpen;
+  // Shut by Escape, the scrim or its close button: focus goes back to the menu button, once
+  // it's no longer inert (after the commit that closes the drawer, not before).
+  const refocus = useRef(false);
+  const closeNav = () => {
+    refocus.current = true;
+    setNavOpen(false);
+  };
+  useEffect(() => {
+    if (navOpen || !refocus.current) return;
+    refocus.current = false;
+    menuButton.current?.focus();
+  }, [navOpen]);
   const menuButton = useRef<HTMLButtonElement>(null);
   const side = useRef<HTMLElement>(null);
   // Somewhere chosen: the drawer gets out of the way.
@@ -86,9 +104,7 @@ export function DashboardPage() {
     const current = side.current?.querySelector<HTMLElement>('[aria-current="page"]');
     (current ?? links?.[0])?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      setNavOpen(false);
-      menuButton.current?.focus();
+      if (e.key === "Escape") closeNav();
     };
     // A destination picked (clicked, or Enter on it), even the current one: the drawer closes.
     const onPick = (e: MouseEvent) => {
@@ -166,6 +182,10 @@ export function DashboardPage() {
     // Until the first answer arrives, what's on screen already, filtered the same way.
     return results.data?.files ?? list.filter((f) => matchesAll(f.name, query));
   }, [files.data, results.data, searching, query]);
+  // The server has answered for what's typed now: only then can "nothing matches" be said.
+  const settled =
+    searching && results.isSuccess && !results.isPlaceholderData && term === query.trim();
+  const capped = settled && (results.data?.files.length ?? 0) >= SEARCH_RESULTS;
 
   const heading = searching
     ? `Results for “${query.trim()}”`
@@ -212,12 +232,13 @@ export function DashboardPage() {
         if (file) openImport(file);
       }}
     >
-      <header className="dash__topbar">
+      <header className="dash__topbar" inert={behind}>
         <IconButton
           ref={menuButton}
           icon="menu"
           size="md"
-          label={navOpen ? "Close navigation" : "Open navigation"}
+          // Only reachable while the drawer is shut (it's inert behind the open drawer).
+          label="Open navigation"
           aria-expanded={navOpen}
           aria-controls="dash-nav"
           onClick={() => setNavOpen((v) => !v)}
@@ -235,16 +256,7 @@ export function DashboardPage() {
           </Link>
         ) : null}
       </header>
-      {navOpen ? (
-        <div
-          className="dash__scrim"
-          aria-hidden="true"
-          onClick={() => {
-            setNavOpen(false);
-            menuButton.current?.focus();
-          }}
-        />
-      ) : null}
+      {behind ? <div className="dash__scrim" aria-hidden="true" onClick={closeNav} /> : null}
       <aside
         id="dash-nav"
         ref={side}
@@ -252,7 +264,17 @@ export function DashboardPage() {
         aria-label="Navigation"
         // Off screen on a phone until opened: out of the tab order too.
         inert={phone && !navOpen}
+        {...(behind ? { role: "dialog", "aria-modal": true } : {})}
       >
+        {behind ? (
+          <IconButton
+            icon="close"
+            size="md"
+            label="Close navigation"
+            className="dash__side-close"
+            onClick={closeNav}
+          />
+        ) : null}
         <TeamSwitcher teamName={team?.name ?? "…"} members={memberCount} />
         <nav className="dash__nav">
           <NavLink active={!projectId && !view} icon="history" to={{ teamId }} label="Recent" />
@@ -310,15 +332,15 @@ export function DashboardPage() {
       </aside>
 
       {view === "fonts" ? (
-        <main className="dash__main">
+        <main className="dash__main" inert={behind}>
           <TeamFontsView teamId={teamId} canEdit={canEdit} />
         </main>
       ) : view === "inbox" ? (
-        <main className="dash__main">
+        <main className="dash__main" inert={behind}>
           <InboxView />
         </main>
       ) : view === "members" ? (
-        <main className="dash__main">
+        <main className="dash__main" inert={behind}>
           <MembersView
             teamId={teamId}
             teamName={team?.name ?? "this team"}
@@ -328,7 +350,7 @@ export function DashboardPage() {
           />
         </main>
       ) : (
-        <main className="dash__main">
+        <main className="dash__main" inert={behind}>
           <header className="dash__header">
             <h1 className="dash__title">{heading}</h1>
             <label className="dash__search">
@@ -395,6 +417,16 @@ export function DashboardPage() {
                 <div key={i} className="dash__card dash__card--skeleton" />
               ))}
             </div>
+          ) : searching && results.isError ? (
+            <div className="dash__empty" role="alert">
+              <p className="app-display-md">Couldn't search.</p>
+              <p className="app-muted">{results.error.message}</p>
+              <Button onClick={() => void results.refetch()}>Try again</Button>
+            </div>
+          ) : visible.length === 0 && searching && !settled ? (
+            <p className="dash__searching" aria-live="polite">
+              Searching every file on the team…
+            </p>
           ) : visible.length === 0 ? (
             <EmptyState
               trash={view === "trash"}
@@ -405,22 +437,29 @@ export function DashboardPage() {
               onImport={canImport ? () => openImport() : null}
             />
           ) : (
-            <ul className="dash__grid" aria-busy={searching && results.isFetching}>
-              {visible.map((file) => (
-                <FileCard
-                  key={file.id}
-                  file={file}
-                  trash={view === "trash"}
-                  canEdit={canEdit}
-                  isOwner={role === "owner"}
-                  projectName={
-                    projects.data?.projects.find((p) => p.id === file.projectId)?.name ?? ""
-                  }
-                  highlight={searching ? query : ""}
-                  onChanged={invalidateFiles}
-                />
-              ))}
-            </ul>
+            <>
+              {capped ? (
+                <p className="dash__search-note">
+                  Showing the best {SEARCH_RESULTS} matches. Add a word to narrow it down.
+                </p>
+              ) : null}
+              <ul className="dash__grid" aria-busy={searching && results.isFetching}>
+                {visible.map((file) => (
+                  <FileCard
+                    key={file.id}
+                    file={file}
+                    trash={view === "trash"}
+                    canEdit={canEdit}
+                    isOwner={role === "owner"}
+                    projectName={
+                      projects.data?.projects.find((p) => p.id === file.projectId)?.name ?? ""
+                    }
+                    highlight={searching ? query : ""}
+                    onChanged={invalidateFiles}
+                  />
+                ))}
+              </ul>
+            </>
           )}
         </main>
       )}
@@ -459,6 +498,9 @@ export function DashboardPage() {
     </div>
   );
 }
+
+/** How many results a search returns at most (the Worker's SEARCH_LIMIT). */
+const SEARCH_RESULTS = 50;
 
 /** Where the sidebar becomes a drawer (dashboard.css). */
 const PHONE = "(max-width: 760px)";

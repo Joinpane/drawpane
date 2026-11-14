@@ -1,3 +1,4 @@
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { escapeLike, fileSearch } from "../src/api/search";
 import { signedInUser } from "./helpers";
@@ -69,6 +70,33 @@ describe("file search", () => {
     expect(await search("100%")).toEqual(["Growth 100% plan"]);
     expect(await search("snake_case")).toEqual(["snake_case"]);
     expect(await search("snake_case", true)).toEqual(["Old snake_case"]);
+  });
+
+  it("matches whatever the case or accents, and fills in names from before", async () => {
+    const ana = await signedInUser("Ana Lima");
+    const make = (name: string) =>
+      ana.browser.json<{ file: { id: string } }>(`/api/projects/${ana.projectId}/files`, {
+        method: "POST",
+        json: { name },
+      });
+    await make("École brief");
+    const { file } = await make("Über landing");
+    // As if made before search names existed.
+    await env.DB.prepare("UPDATE files SET search_name = NULL WHERE id = ?").bind(file.id).run();
+    const search = (q: string) =>
+      ana.browser
+        .json<{ files: { name: string }[] }>(
+          `/api/teams/${ana.teamId}/files?q=${encodeURIComponent(q)}`,
+        )
+        .then((r) => r.files.map((f) => f.name));
+    expect(await search("École")).toEqual(["École brief"]);
+    expect(await search("ecole")).toEqual(["École brief"]);
+    expect(await search("ÉCOLE BRIEF")).toEqual(["École brief"]);
+    expect(await search("über")).toEqual(["Über landing"]);
+    expect(await search("uber landing")).toEqual(["Über landing"]);
+    // Renaming keeps it findable by its new name.
+    await ana.browser.json(`/api/files/${file.id}`, { method: "PATCH", json: { name: "Façade" } });
+    expect(await search("facade")).toEqual(["Façade"]);
   });
 
   it("builds patterns with the user's text escaped", () => {
