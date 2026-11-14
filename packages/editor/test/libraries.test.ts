@@ -3,14 +3,15 @@
  * a file that uses them, instanced there, and updated from a newer publish
  * with the instances following and keeping their overrides.
  */
-import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { getProp, keyBetween, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { instancesOf, listComponents } from "../src/components";
+import { instancesOf, instantiateOps, listComponents } from "../src/components";
 import { Doc } from "../src/doc";
 import { Editor } from "../src/editor";
 import {
   assetChanges,
   assetHash,
+  importBatches,
   isLibraryCopy,
   type LibraryRef,
   libraryAssets,
@@ -247,5 +248,123 @@ describe("using and no longer using a library", () => {
     expect(libraryUses(file.doc, LIB_FILE)).toBe(0);
     expect(file.stopUsingLibrary(LIB_FILE)).toBe(true);
     expect(usedLibraries(file.doc)).toEqual([]);
+  });
+});
+
+describe("copies the file uses are kept (review of #96)", () => {
+  it("keeps a variant the library removed while an instance uses it", () => {
+    const lib = editorWithPage();
+    const a = lib.createLayer("frame", { x: 0, y: 0, width: 80, height: 32 }, "p", {
+      name: "A",
+    }) as string;
+    const b = lib.createLayer("frame", { x: 100, y: 0, width: 80, height: 32 }, "p", {
+      name: "B",
+    }) as string;
+    for (const id of [a, b]) {
+      lib.select([id]);
+      lib.createComponent();
+    }
+    lib.select([a, b]);
+    lib.combineAsVariants();
+    const set = lib.doc.get(a)?.parent as string;
+    const file = editorWithPage();
+    file.insertLibraryComponent(snapshot(lib), ref(), set, { x: 0, y: 0 });
+    const instance = [...file.doc.nodes()].find(
+      (n) => n.parent === "p" && getProp(n.props, "instanceOf") === libraryNodeId(LIB_FILE, a),
+    ) as NodeRecord;
+    expect(instance).toBeDefined();
+    // The library drops variant A.
+    lib.select([a]);
+    lib.deleteSelection();
+    file.updateLibrary(snapshot(lib), ref("pub2"));
+    expect(file.doc.has(libraryNodeId(LIB_FILE, a))).toBe(true);
+    expect(file.doc.has(libraryNodeId(LIB_FILE, b))).toBe(true);
+    expect(libraryUses(file.doc, LIB_FILE)).toBe(1);
+  });
+
+  it("keeps a nested main the library moved out, as a copy of its own, still updated", () => {
+    const lib = editorWithPage();
+    const card = lib.createLayer("frame", { x: 0, y: 0, width: 200, height: 120 }, "p", {
+      name: "Card",
+    }) as string;
+    const icon = lib.createLayer("frame", { x: 10, y: 10, width: 24, height: 24 }, card, {
+      name: "Icon",
+    }) as string;
+    lib.select([icon]);
+    lib.createComponent();
+    lib.select([card]);
+    lib.createComponent();
+    const file = editorWithPage();
+    const source = snapshot(lib);
+    file.insertLibraryComponent(source, ref(), card, { x: 0, y: 0 });
+    // An instance of the nested Icon, from the copy inside the Card copy.
+    file.insertInstance(libraryNodeId(LIB_FILE, icon), { x: 300, y: 0 });
+    // The library moves Icon out of Card, onto the page, and recolours it.
+    const next = snapshot(lib);
+    const last = next.childIds("p").at(-1) as string;
+    next.apply([
+      { op: "move", id: icon, parent: "p", key: keyBetween(next.get(last)?.key ?? null, null) },
+      { op: "set", id: icon, prop: "opacity", value: 0.4 },
+    ]);
+    expect(next.get(icon)?.parent).toBe("p");
+    file.updateLibrary(next, ref("pub2"));
+    const copy = file.doc.get(libraryNodeId(LIB_FILE, icon));
+    expect(copy?.parent).toBe(libraryContainerId(LIB_FILE));
+    expect(getProp(copy?.props ?? {}, "opacity")).toBe(0.4);
+    expect(file.doc.childIds(libraryNodeId(LIB_FILE, card))).not.toContain(
+      libraryNodeId(LIB_FILE, icon),
+    );
+  });
+
+  it("keeps copies a teammate has used since, when the insert is undone", () => {
+    const { lib, button } = makeLibrary();
+    const file = editorWithPage();
+    file.insertLibraryComponent(snapshot(lib), ref(), button, { x: 0, y: 0 });
+    // A teammate's instance of the same copy arrives (not in this person's history).
+    const theirs = instantiateOps(
+      file.doc,
+      libraryNodeId(LIB_FILE, button),
+      "p",
+      keyBetween(null, null),
+      {
+        x: 200,
+        y: 0,
+      },
+    );
+    file.doc.apply(theirs?.ops ?? []);
+    file.undo();
+    expect(file.doc.has(libraryNodeId(LIB_FILE, button))).toBe(true);
+    expect(libraryUses(file.doc, LIB_FILE)).toBe(1);
+  });
+});
+
+describe("copies are read-only (review of #96)", () => {
+  it("refuses edits and deletes of copies and the library node, but not of instances", () => {
+    const { lib, button } = makeLibrary();
+    const file = editorWithPage();
+    const instance = file.insertLibraryComponent(snapshot(lib), ref(), button, {
+      x: 0,
+      y: 0,
+    }) as string;
+    const copy = libraryNodeId(LIB_FILE, button);
+    file.setProp([copy], "opacity", 0.2, "Opacity");
+    expect(getProp(file.doc.get(copy)?.props ?? {}, "opacity")).toBe(1);
+    file.select([libraryContainerId(LIB_FILE)]);
+    file.deleteSelection();
+    expect(file.doc.has(libraryContainerId(LIB_FILE))).toBe(true);
+    // The instance is the file's own.
+    file.setProp([instance], "opacity", 0.5, "Opacity");
+    expect(getProp(file.doc.get(instance)?.props ?? {}, "opacity")).toBe(0.5);
+  });
+
+  it("copies each top copy in its own transaction, so a clash drops only that one", () => {
+    const { lib, card } = makeLibrary();
+    const file = editorWithPage();
+    const batches = importBatches(file.doc, snapshot(lib), ref(), [card]);
+    // The library node, then the card, the button it nests, the colours and the text style.
+    expect(batches.length).toBe(5);
+    expect(batches[0]?.map((op) => op.op)).toEqual(["create"]);
+    for (const batch of batches.slice(1))
+      expect(batch[0]).toMatchObject({ op: "create", parent: libraryContainerId(LIB_FILE) });
   });
 });

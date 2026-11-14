@@ -10,7 +10,11 @@ import {
   type LibraryAsset,
   LibraryAssets,
   type LibraryPublish,
+  libraryAssets,
+  MAX_LIBRARY_ASSETS,
+  type NodeRecord,
   newId,
+  nodeReader,
   type VersionPerson,
 } from "@drawpane/model";
 import { Hono } from "hono";
@@ -18,6 +22,7 @@ import { z } from "zod";
 import { requireUser } from "../auth/session";
 import type { AppContext, Env } from "../env";
 import { badRequest, notFound } from "../lib/http";
+import { readSnapshot, snapshotKey } from "../rooms/snapshots";
 import { readBody, requireFileRole } from "./access";
 
 /** Publishes listed per library, newest first. */
@@ -80,16 +85,16 @@ const Description = z
 export const libraries = new Hono<AppContext>()
   /**
    * Publishes the file as a library (editors): a named version of it now,
-   * and what it offers, as the editor read it from the same document.
+   * and what that version offers, read from its own snapshot, so the list
+   * and the content can't disagree (an edit in flight, a collaborator's).
    */
   .post("/files/:fileId/library/publish", async (c) => {
     const user = requireUser(c);
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
-    const body = await readBody(
-      c,
-      z.object({ description: Description.optional(), assets: LibraryAssets }),
-    );
-    if (body.assets.length === 0)
+    const body = await readBody(c, z.object({ description: Description.optional() }));
+    // A first look, so an empty publish doesn't leave a version behind.
+    const now = (await room(c.env, file.id).allNodes()) as unknown as NodeRecord[];
+    if (libraryAssets(nodeReader(now)).length === 0)
       throw badRequest("There's nothing to publish: make a component first.");
     const description = body.description ?? null;
     const firstLine = description?.split("\n")[0]?.slice(0, 100);
@@ -98,6 +103,11 @@ export const libraries = new Hono<AppContext>()
       firstLine ? `Published: ${firstLine}` : "Published",
       description,
     );
+    const nodes = await readSnapshot(c.env.FILES, snapshotKey(file.id, saved.revn));
+    if (!nodes) throw notFound("The version didn't save. Try again.");
+    const assets = libraryAssets(nodeReader(nodes));
+    if (assets.length > MAX_LIBRARY_ASSETS)
+      throw badRequest(`A library can offer up to ${MAX_LIBRARY_ASSETS} components.`);
     const id = newId();
     await c.env.DB.prepare(
       `INSERT INTO library_publishes (id, file_id, team_id, version_id, revn, published_by, published_at, description, assets)
@@ -112,7 +122,7 @@ export const libraries = new Hono<AppContext>()
         user.id,
         Date.now(),
         description,
-        JSON.stringify(body.assets),
+        JSON.stringify(assets),
       )
       .run();
     const row = await c.env.DB.prepare(`${SELECT} WHERE p.id = ?`).bind(id).first<PublishRow>();
@@ -125,11 +135,22 @@ export const libraries = new Hono<AppContext>()
     const user = requireUser(c);
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "viewer");
     const { results } = await c.env.DB.prepare(
-      `${SELECT} WHERE p.file_id = ? ORDER BY p.published_at DESC LIMIT ?`,
+      `${SELECT} WHERE p.file_id = ? ORDER BY p.published_at DESC, p.rowid DESC LIMIT ?`,
     )
       .bind(file.id, HISTORY_LIMIT)
       .all<PublishRow>();
     return c.json({ publishes: results.map(toPublish) });
+  })
+
+  /** One publish of a file's, however old: what a file using it has (anyone on the team). */
+  .get("/files/:fileId/library/publishes/:publishId", async (c) => {
+    const user = requireUser(c);
+    const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "viewer");
+    const row = await c.env.DB.prepare(`${SELECT} WHERE p.file_id = ? AND p.id = ?`)
+      .bind(file.id, c.req.param("publishId"))
+      .first<PublishRow>();
+    if (!row) throw notFound("That publish doesn't exist.");
+    return c.json({ publish: toPublish(row) });
   })
 
   /**
@@ -142,7 +163,8 @@ export const libraries = new Hono<AppContext>()
     const { results } = await c.env.DB.prepare(
       `${SELECT}
         WHERE p.team_id = ? AND p.file_id != ? AND f.deleted_at IS NULL
-          AND p.published_at = (SELECT MAX(q.published_at) FROM library_publishes q WHERE q.file_id = p.file_id)
+          AND p.id = (SELECT q.id FROM library_publishes q WHERE q.file_id = p.file_id
+                       ORDER BY q.published_at DESC, q.rowid DESC LIMIT 1)
         ORDER BY f.name COLLATE NOCASE`,
     )
       .bind(file.team_id, file.id)

@@ -1,222 +1,43 @@
 /**
  * Team libraries in a document (docs/decisions/0010-team-libraries.md):
- * what a library file offers, and the operations that copy its components
- * into a file that uses it and bring those copies up to date.
+ * the operations that copy a library's components into a file that uses it
+ * and bring those copies up to date. What a library offers (its assets and
+ * their hashes) is in @drawpane/model, shared with the Worker.
  *
  * A file keeps what it uses from a library under a `library` node: copies
  * of the published mains and everything they need (nested mains, text
  * styles, variable collections), with ids derived from the library's, so a
- * copy is found again by id alone. Instances on pages point at the copies,
- * and updating the copies syncs the instances through the editor's usual
- * propagation, overrides kept.
+ * copy is found again by id alone. Copies are read-only: only these
+ * operations write them. Instances on pages point at the copies, and
+ * updating the copies syncs the instances through the editor's usual
+ * propagation, overrides kept. A copy an instance in the file uses is never
+ * deleted, whatever the library did with it.
  */
 import {
+  dependencyRoots,
   getProp,
   keyBetween,
-  type LibraryAsset,
+  libraryContainerId,
+  libraryNodeId,
   type NodeRecord,
   type Op,
   type Props,
   ROOT_ID,
+  stableJson,
+  subtree,
 } from "@drawpane/model";
-import { componentSetOf, isComponentSet, isMainComponent, listComponents } from "./components";
 import type { Doc } from "./doc";
 
-// ---------------------------------------------------------------------------
-// Hashing
-
-/** cyrb53: a fast, well-mixed 53-bit hash of a string. */
-function cyrb53(text: string, seed: number): number {
-  let h1 = 0xdeadbeef ^ seed;
-  let h2 = 0x41c6ce57 ^ seed;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
-  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
-  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
-}
-
-/** 64 bits of hash, as 16 hex digits. */
-function hash64(text: string): string {
-  const hex = (n: number) => (n % 4294967296).toString(16).padStart(8, "0");
-  return hex(cyrb53(text, 1)) + hex(cyrb53(text, 2));
-}
-
-/** JSON with object keys sorted, so equal values hash alike. */
-function stable(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
-  if (value && typeof value === "object")
-    return `{${Object.keys(value)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${stable((value as Record<string, unknown>)[k])}`)
-      .join(",")}}`;
-  return JSON.stringify(value) ?? "null";
-}
-
-/**
- * The id a library node's copy has in a file that uses the library: derived
- * from the library's file and the node, so it's the same in every file and
- * every update, and never one of the file's own.
- */
-export function libraryNodeId(libraryFileId: string, nodeId: string): string {
-  return `lib${hash64(`${libraryFileId}\u0000${nodeId}`)}`;
-}
-
-/** The node a file keeps a library's copies under. */
-export function libraryContainerId(libraryFileId: string): string {
-  return libraryNodeId(libraryFileId, ROOT_ID);
-}
-
-// ---------------------------------------------------------------------------
-// What a component needs
-
-/** The variable collection a variable belongs to. */
-function collectionOf(doc: Doc, variableId: string): string | null {
-  const variable = doc.get(variableId);
-  return variable?.type === "variable" ? variable.parent : null;
-}
-
-/** The nodes another node points at: what its copy needs to be there too. */
-function references(doc: Doc, node: NodeRecord): string[] {
-  const out: string[] = [];
-  const p = node.props as Record<string, unknown>;
-  if (typeof p.instanceOf === "string")
-    out.push(componentSetOf(doc, p.instanceOf)?.id ?? p.instanceOf);
-  if (typeof p.textStyle === "string") out.push(p.textStyle);
-  if (p.values && typeof p.values === "object")
-    for (const value of Object.values(p.values as Record<string, unknown>))
-      if (value && typeof value === "object" && "alias" in value) {
-        const collection = collectionOf(doc, (value as { alias: string }).alias);
-        if (collection) out.push(collection);
-      }
-  if (p.bindings && typeof p.bindings === "object")
-    for (const variableId of Object.values(p.bindings as Record<string, string>)) {
-      const collection = collectionOf(doc, variableId);
-      if (collection) out.push(collection);
-    }
-  if (p.variableModes && typeof p.variableModes === "object")
-    out.push(...Object.keys(p.variableModes as Record<string, string>));
-  return out;
-}
-
-/** A node and everything inside it, parents first, children in order. */
-function subtree(doc: Doc, id: string): NodeRecord[] {
-  const out: NodeRecord[] = [];
-  const visit = (nodeId: string) => {
-    const node = doc.get(nodeId);
-    if (!node) return;
-    out.push(node);
-    for (const child of doc.childIds(nodeId)) visit(child);
-  };
-  visit(id);
-  return out;
-}
-
-/**
- * What copying `assetIds` takes: the top nodes to copy (the assets, the
- * mains, text styles and collections they use, and so on), in the order
- * they're found, without any inside another.
- */
-export function dependencyRoots(doc: Doc, assetIds: Iterable<string>): string[] {
-  const roots: string[] = [];
-  const seen = new Set<string>();
-  const queue = [...assetIds];
-  while (queue.length > 0) {
-    const id = queue.shift() as string;
-    if (seen.has(id) || !doc.has(id)) continue;
-    seen.add(id);
-    roots.push(id);
-    for (const node of subtree(doc, id)) queue.push(...references(doc, node));
-  }
-  const rootSet = new Set(roots);
-  const insideAnother = (id: string) => {
-    for (let n = doc.get(doc.get(id)?.parent ?? ""); n; n = doc.get(n.parent))
-      if (rootSet.has(n.id)) return true;
-    return false;
-  };
-  return roots.filter((id) => !insideAnother(id));
-}
-
-/** Props that place a top node in its own file: not part of what it looks like. */
-const PLACEMENT = new Set(["x", "y", "positioning", "constraintH", "constraintV"]);
-
-/**
- * A content hash of everything a component (or set) draws: its layers and
- * the mains, text styles and variables it uses. Where it sits on its page
- * doesn't count.
- */
-export function assetHash(doc: Doc, assetId: string): string {
-  const parts: string[] = [];
-  for (const root of dependencyRoots(doc, [assetId]))
-    for (const node of subtree(doc, root)) {
-      const props =
-        node.id === root
-          ? Object.fromEntries(Object.entries(node.props).filter(([k]) => !PLACEMENT.has(k)))
-          : node.props;
-      parts.push(stable([node.id, node.type, node.id === root ? "" : node.key, props]));
-    }
-  return hash64(parts.join("\n"));
-}
-
-/** What a library file offers: its components, a set of variants as one, in file order. */
-export function libraryAssets(doc: Doc): LibraryAsset[] {
-  const out: LibraryAsset[] = [];
-  const seen = new Set<string>();
-  for (const component of listComponents(doc)) {
-    const set = componentSetOf(doc, component.id);
-    const asset = set ?? component;
-    if (seen.has(asset.id)) continue;
-    seen.add(asset.id);
-    out.push({
-      id: asset.id,
-      name: getProp(asset.props, "name") || (set ? "Set" : "Component"),
-      description: getProp(asset.props, "componentDescription"),
-      set: set !== undefined,
-      hash: assetHash(doc, asset.id),
-    });
-  }
-  return out;
-}
-
-/** The main to instance for an asset: itself, or a set's first variant. */
-export function assetMain(doc: Doc, assetId: string): string | null {
-  const node = doc.get(assetId);
-  if (isMainComponent(node)) return assetId;
-  if (isComponentSet(node))
-    return doc.childIds(assetId).find((id) => isMainComponent(doc.get(id))) ?? null;
-  return null;
-}
-
-/** What changed between two publishes' assets. */
-export interface AssetChanges {
-  readonly added: readonly LibraryAsset[];
-  readonly changed: readonly LibraryAsset[];
-  readonly removed: readonly LibraryAsset[];
-}
-
-export function assetChanges(
-  from: readonly LibraryAsset[],
-  to: readonly LibraryAsset[],
-): AssetChanges {
-  const before = new Map(from.map((a) => [a.id, a]));
-  const after = new Set(to.map((a) => a.id));
-  return {
-    added: to.filter((a) => !before.has(a.id)),
-    changed: to.filter((a) => {
-      const old = before.get(a.id);
-      return old !== undefined && old.hash !== a.hash;
-    }),
-    removed: from.filter((a) => !after.has(a.id)),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Copies in a file that uses the library
+export {
+  type AssetChanges,
+  assetChanges,
+  assetHash,
+  assetMain,
+  dependencyRoots,
+  libraryAssets,
+  libraryContainerId,
+  libraryNodeId,
+} from "@drawpane/model";
 
 /** A library as a file using it knows it. */
 export interface LibraryRef {
@@ -238,15 +59,66 @@ export function usedLibraries(doc: Doc): LibraryRef[] {
   return out;
 }
 
-/** Is `id` one of a library's copies (or its library node)? Copies are read-only. */
-export function isLibraryCopy(doc: Doc, id: string): boolean {
+/** The library node a node is under (or is), if any. */
+export function libraryOf(doc: Doc, id: string): NodeRecord | undefined {
   for (let node = doc.get(id); node; node = doc.get(node.parent))
-    if (node.type === "library") return true;
-  return false;
+    if (node.type === "library") return node;
+  return undefined;
+}
+
+/** Is `id` one of a library's copies (or a library node)? Copies are read-only. */
+export function isLibraryCopy(doc: Doc, id: string): boolean {
+  return libraryOf(doc, id) !== undefined;
+}
+
+/**
+ * Would these operations write a library's copies (or library nodes)? Only
+ * the library operations may: everything else is refused, so copies stay
+ * what the library published.
+ */
+export function touchesLibraryCopies(doc: Doc, ops: readonly Op[]): boolean {
+  return ops.some((op) => {
+    if (op.op === "create") return op.type === "library" || isLibraryCopy(doc, op.parent);
+    if (op.op === "move") return isLibraryCopy(doc, op.id) || isLibraryCopy(doc, op.parent);
+    return isLibraryCopy(doc, op.id);
+  });
+}
+
+/**
+ * The copies instances in the file (outside the copies themselves) are of,
+ * with the sets they're variants of: what the file uses, and must keep.
+ * Instances in `without` (about to be deleted) don't count.
+ */
+export function usedCopies(doc: Doc, without: ReadonlySet<string> = new Set()): Set<string> {
+  const used = new Set<string>();
+  for (const node of doc.nodes()) {
+    if (node.type !== "frame" || without.has(node.id)) continue;
+    const of = getProp(node.props, "instanceOf");
+    if (!of || !isLibraryCopy(doc, of) || isLibraryCopy(doc, node.id)) continue;
+    used.add(of);
+    const parent = doc.get(doc.get(of)?.parent ?? "");
+    if (parent?.type === "frame" && getProp(parent.props, "isComponentSet")) used.add(parent.id);
+  }
+  return used;
+}
+
+/**
+ * How many instances in the file (outside the library's own copies) are of
+ * a library's components: while any are, the library stays.
+ */
+export function libraryUses(doc: Doc, libraryFileId: string): number {
+  const container = libraryContainerId(libraryFileId);
+  let uses = 0;
+  for (const node of doc.nodes()) {
+    if (node.type !== "frame" || isLibraryCopy(doc, node.id)) continue;
+    const of = getProp(node.props, "instanceOf");
+    if (of && libraryOf(doc, of)?.id === container) uses++;
+  }
+  return uses;
 }
 
 /** A node's props with every id it points at turned into its copy's. */
-function remap(node: NodeRecord, to: (id: string) => string): Props {
+function remap(node: NodeRecord, to: (id: string) => string, copied: ReadonlySet<string>): Props {
   const props: Record<string, unknown> = { ...node.props };
   const p = node.props as Record<string, unknown>;
   for (const key of ["instanceOf", "mirrors", "textStyle"] as const)
@@ -269,60 +141,65 @@ function remap(node: NodeRecord, to: (id: string) => string): Props {
           : v,
       ]),
     );
+  // A prototype link to a layer that came along points at its copy; others stay as they were.
+  if (Array.isArray(p.reactions))
+    props.reactions = JSON.parse(JSON.stringify(p.reactions), (key, value) =>
+      key === "to" && typeof value === "string" && copied.has(value) ? to(value) : value,
+    );
   return props as Props;
 }
 
-/** The key after a parent's last child. */
-function keyAfterLast(doc: Doc, parent: string): string {
+function keyOfLast(doc: Doc, parent: string): string | null {
   const last = doc.childIds(parent).at(-1);
-  return keyBetween(last ? (doc.get(last)?.key ?? null) : null, null);
+  return last ? (doc.get(last)?.key ?? null) : null;
 }
 
 /**
- * Operations that make a file's copies of `assetIds` (and what they need)
- * match `source`, a library's published snapshot: copying what's missing,
- * and, with `update`, bringing what's there in line. Removed from the
- * library, a copy stays as it is, so its instances don't break. The editor
- * then syncs instances of changed copies as for any edit to a main.
+ * Operations that copy what `roots` need from `source` and, with `update`,
+ * bring the copies already there in line. Grouped by top copy: a teammate
+ * copying the same thing at once makes the same ids, so each group goes in
+ * as its own transaction, and a clash only drops the group that clashed.
  */
-function reconcileOps(
+function reconcileBatches(
   doc: Doc,
   source: Doc,
   lib: LibraryRef,
-  assetIds: Iterable<string>,
+  roots: readonly string[],
   update: boolean,
-): Op[] {
+): Op[][] {
   const to = (id: string) => libraryNodeId(lib.fileId, id);
   const container = libraryContainerId(lib.fileId);
-  const ops: Op[] = [];
+  const batches: Op[][] = [];
   const existing = doc.get(container);
   if (!existing)
-    ops.push({
-      op: "create",
-      id: container,
-      type: "library",
-      parent: ROOT_ID,
-      key: keyAfterLast(doc, ROOT_ID),
-      props: { name: lib.name, libraryFile: lib.fileId, libraryPublish: lib.publishId },
-    });
+    batches.push([
+      {
+        op: "create",
+        id: container,
+        type: "library",
+        parent: ROOT_ID,
+        key: keyBetween(keyOfLast(doc, ROOT_ID), null),
+        props: { name: lib.name, libraryFile: lib.fileId, libraryPublish: lib.publishId },
+      },
+    ]);
   else if (update) {
+    const head: Op[] = [];
     if (getProp(existing.props, "libraryPublish") !== lib.publishId)
-      ops.push({ op: "set", id: container, prop: "libraryPublish", value: lib.publishId });
+      head.push({ op: "set", id: container, prop: "libraryPublish", value: lib.publishId });
     if (getProp(existing.props, "name") !== lib.name)
-      ops.push({ op: "set", id: container, prop: "name", value: lib.name });
+      head.push({ op: "set", id: container, prop: "name", value: lib.name });
+    if (head.length > 0) batches.push(head);
   }
 
-  const roots = dependencyRoots(source, assetIds);
-  const wanted = new Set<string>();
-  for (const root of roots) for (const node of subtree(source, root)) wanted.add(to(node.id));
+  const copied = new Set<string>();
+  for (const root of roots) for (const node of subtree(source, root)) copied.add(node.id);
 
-  const lastRoot = doc.childIds(container).at(-1);
-  let rootKey = lastRoot ? (doc.get(lastRoot)?.key ?? null) : null;
-  const reconcile = (sourceId: string, parent: string, key: string) => {
+  let rootKey = keyOfLast(doc, container);
+  const reconcile = (ops: Op[], sourceId: string, parent: string, key: string) => {
     const src = source.get(sourceId);
     if (!src) return;
     const id = to(sourceId);
-    const props = remap(src, to);
+    const props = remap(src, to, copied);
     const here = doc.get(id);
     if (!here || here.type !== src.type) {
       if (here) ops.push({ op: "delete", id });
@@ -332,13 +209,13 @@ function reconcileOps(
       for (const prop of new Set([...Object.keys(here.props), ...Object.keys(props)])) {
         const want = (props as Record<string, unknown>)[prop];
         const have = (here.props as Record<string, unknown>)[prop];
-        if (stable(want) !== stable(have))
+        if (stableJson(want) !== stableJson(have))
           ops.push({ op: "set", id, prop: prop as never, value: want === undefined ? null : want });
       }
     }
     for (const child of source.childIds(sourceId)) {
       const childKey = source.get(child)?.key;
-      if (childKey) reconcile(child, id, childKey);
+      if (childKey) reconcile(ops, child, id, childKey);
     }
   };
   for (const root of roots) {
@@ -350,43 +227,46 @@ function reconcileOps(
       key = keyBetween(rootKey, null);
       rootKey = key;
     }
-    reconcile(root, container, key);
+    const ops: Op[] = [];
+    reconcile(ops, root, container, key);
+    if (ops.length > 0) batches.push(ops);
   }
-
-  // What the library no longer has inside the copies it still has: deleted
-  // last, after anything that moved out of it has. Whole copies it dropped stay.
-  if (update)
-    for (const root of roots) {
-      const top = doc.get(to(root));
-      if (!top || top.parent !== container) continue;
-      const drop = (id: string) => {
-        for (const child of doc.childIds(id)) {
-          if (!wanted.has(child)) ops.push({ op: "delete", id: child });
-          else drop(child);
-        }
-      };
-      drop(top.id);
-    }
-  return ops;
+  return batches;
 }
 
 /**
  * Operations that copy a library's assets into a file, with what they need,
  * leaving copies the file already has alone (inserting takes the publish
- * the file has: updating is its own step).
+ * the file has: updating is its own step), in transactions to apply in turn.
  */
+export function importBatches(
+  doc: Doc,
+  source: Doc,
+  lib: LibraryRef,
+  assetIds: Iterable<string>,
+): Op[][] {
+  return reconcileBatches(doc, source, lib, dependencyRoots(source, assetIds), false);
+}
+
+/** `importBatches` as one list, for a single transaction. */
 export function importOps(
   doc: Doc,
   source: Doc,
   lib: LibraryRef,
   assetIds: Iterable<string>,
 ): Op[] {
-  return reconcileOps(doc, source, lib, assetIds, false);
+  return importBatches(doc, source, lib, assetIds).flat();
 }
 
 /**
  * Operations that bring every copy a file has from a library in line with
  * a newer publish (`source`, its snapshot), adding what they now need.
+ *
+ * What the file has is its top copies and every main an instance in it
+ * uses (a nested one too, so one the library moved out of its component
+ * comes out with it). What the library removed from inside a copy goes,
+ * unless an instance in the file uses it: that stays as it was, moved out
+ * to the top if what held it goes. Whole copies the library dropped stay.
  */
 export function updateOps(doc: Doc, source: Doc, lib: LibraryRef): Op[] {
   const container = libraryContainerId(lib.fileId);
@@ -394,30 +274,61 @@ export function updateOps(doc: Doc, source: Doc, lib: LibraryRef): Op[] {
   // The library nodes the file's copies came from, found by their ids.
   const original = new Map<string, string>();
   for (const node of source.nodes()) original.set(libraryNodeId(lib.fileId, node.id), node.id);
-  const assets: string[] = [];
-  for (const id of doc.childIds(container)) {
+  const used = new Set([...usedCopies(doc)].filter((id) => libraryOf(doc, id)?.id === container));
+  const assets = new Set<string>();
+  for (const id of [...doc.childIds(container), ...used]) {
     const from = original.get(id);
-    if (from) assets.push(from);
+    if (from) assets.add(from);
   }
-  return reconcileOps(doc, source, lib, assets, true);
+  const roots = dependencyRoots(source, assets);
+  const ops = reconcileBatches(doc, source, lib, roots, true).flat();
+
+  // What the library no longer has inside the copies the file keeps: deleted
+  // last, after anything that moved out of it has, keeping what's used.
+  const wanted = new Set<string>();
+  for (const root of roots)
+    for (const node of subtree(source, root)) wanted.add(libraryNodeId(lib.fileId, node.id));
+  // New top keys go after any the copying above gave out.
+  let rootKey = keyOfLast(doc, container);
+  for (const op of ops)
+    if ((op.op === "create" || op.op === "move") && op.parent === container)
+      if (rootKey === null || op.key > rootKey) rootKey = op.key;
+  // Used mains the library removed (one it still has moved out already, with the copying).
+  const usedInside = (id: string): string[] =>
+    wanted.has(id)
+      ? []
+      : used.has(id)
+        ? [id]
+        : doc.childIds(id).flatMap((child) => usedInside(child));
+  const drop = (id: string) => {
+    for (const child of doc.childIds(id)) {
+      if (wanted.has(child)) {
+        drop(child);
+        continue;
+      }
+      if (used.has(child)) continue;
+      // Used mains inside what goes come out first, as copies of their own.
+      for (const keep of usedInside(child)) {
+        rootKey = keyBetween(rootKey, null);
+        ops.push({ op: "move", id: keep, parent: container, key: rootKey });
+      }
+      ops.push({ op: "delete", id: child });
+    }
+  };
+  for (const top of doc.childIds(container)) if (wanted.has(top)) drop(top);
+  return ops;
 }
 
 /**
- * How many instances in the file (outside the library's own copies) are of
- * a library's components: while any are, the library stays.
+ * Undoing can delete copies a teammate has used since (their instance came
+ * after): those deletes are left out, so their instances keep their mains.
  */
-export function libraryUses(doc: Doc, libraryFileId: string): number {
-  const container = libraryContainerId(libraryFileId);
-  let uses = 0;
-  for (const node of doc.nodes()) {
-    if (node.type !== "frame") continue;
-    const of = getProp(node.props, "instanceOf");
-    if (!of || doc.get(of)?.parent === undefined) continue;
-    // An instance of a copy (anywhere under the library node), not itself a copy.
-    let copyRoot = doc.get(of);
-    while (copyRoot && copyRoot.parent !== container && copyRoot.parent !== ROOT_ID)
-      copyRoot = doc.get(copyRoot.parent);
-    if (copyRoot?.parent === container && !isLibraryCopy(doc, node.id)) uses++;
-  }
-  return uses;
+export function keepUsedCopies(doc: Doc, ops: readonly Op[]): Op[] {
+  const deleted = new Set<string>();
+  for (const op of ops)
+    if (op.op === "delete") for (const node of subtree(doc, op.id)) deleted.add(node.id);
+  const used = usedCopies(doc, deleted);
+  if (used.size === 0) return [...ops];
+  const holdsUsed = (id: string) => subtree(doc, id).some((node) => used.has(node.id));
+  return ops.filter((op) => op.op !== "delete" || !isLibraryCopy(doc, op.id) || !holdsUsed(op.id));
 }

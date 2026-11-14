@@ -479,7 +479,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           return;
         }
         // A team library's component: its tile showed it, so its publish is loaded.
-        const drag = JSON.parse(fromLibrary) as LibraryDrag;
+        let drag: LibraryDrag;
+        try {
+          drag = JSON.parse(fromLibrary) as LibraryDrag;
+        } catch {
+          return;
+        }
         const source = loadedSource(drag.publishId);
         if (source)
           editor.insertLibraryComponent(

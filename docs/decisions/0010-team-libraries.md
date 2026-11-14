@@ -24,16 +24,20 @@ Drawpane already has most of the machinery inside one file:
 1. **Publishing.**
    - Publishing saves a named version of the library file (named "Published", or after its note) and records a row in `library_publishes`. The row holds the file, team, version, revision, who published and when, the note, and a manifest of the published components.
    - The manifest gives each component's id, name, description and a content hash of everything it draws (its layers, the components nested in it, and the text styles and variables it uses). So what changed between publishes is known without loading either snapshot.
+   - The Worker reads the manifest from the version's own snapshot (the hashing lives in `@drawpane/model`), so the list and the content can't disagree, whatever was in flight when someone pressed Publish.
    - Versions a publish points at are never swept by autosave retention, even if someone un-names them.
 2. **Using.**
    - A file that uses a library holds a `library` node under the root, naming the library file and the publish it has taken.
    - When a component is first inserted, its main and everything it depends on are copied from the publish's snapshot into that node: nested mains, text styles, and variable collections with their variables.
    - Copied ids are derived from the library file and the original id (a stable hash). Copies never collide with the file's own nodes, and an update maps old to new by id alone.
    - Copies sit outside every page, so they're never selected, listed among the file's own components, or exported. Instances on pages point at them with `instanceOf`, exactly as at home, so drawing, layout, overrides, swapping and the inspector need nothing new.
+   - Copies are read-only: the editor refuses any edit that writes them, except the library operations themselves (insert, update, use, stop using). "Go to main" on a library instance says which library it comes from.
+   - Each top copy goes in as its own transaction. Two people copying the same component at once make the same ids, so one transaction clashes and is dropped, and the rest of each insert stands.
 3. **Updating.**
    - The Assets panel compares each library node's publish with the library's latest. When they differ, it offers **Review updates**: the components that changed, were added or were removed, from the two manifests.
    - Updating rewrites the copies to match the new snapshot in one undoable transaction. Instances then sync through the existing propagation, keeping their overrides, like any edit to a main.
-   - A component the library removed stays in the file: its copy is kept, unchanged, so instances don't break.
+   - A component the library removed stays in the file: its copy is kept, unchanged, so instances don't break. The same goes for anything inside a copy that an instance in the file uses: a variant the library deleted stays, and a nested main it moved out comes out as a copy of its own and keeps updating.
+   - Undoing an insert keeps copies a teammate has used since.
 4. **Access.** Libraries are per team. Any team member can publish a file they can edit, and any member can use the team's libraries. Images are content-addressed and readable by the team, so copied image fills keep working.
 
 ## Consequences

@@ -44,7 +44,8 @@ export function PublishDialog({
   const nothingNew = last !== null && changed === 0;
 
   const publish = useMutation({
-    mutationFn: () => api.publishLibrary(fileId, { description: description.trim(), assets }),
+    // The server reads what's offered from the version it saves: this list is a preview.
+    mutationFn: () => api.publishLibrary(fileId, { description: description.trim() }),
     onSuccess: ({ publish: published }) => {
       void queries.invalidateQueries({ queryKey: ["library", fileId] });
       const n = published.assets.length;

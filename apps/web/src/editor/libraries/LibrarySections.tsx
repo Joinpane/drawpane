@@ -8,6 +8,7 @@ import {
   type Editor,
   type LibraryRef,
   libraryAssets,
+  updateOps,
   usedLibraries,
 } from "@drawpane/editor";
 import type { LibraryAsset, LibraryPublish } from "@drawpane/model";
@@ -47,7 +48,13 @@ export function LibrarySections({ query }: { query: string }) {
 function LibrarySection({ lib, query }: { lib: LibraryRef; query: string }) {
   const editor = useEditor();
   const history = useLibraryHistory(lib.fileId);
-  const current = history.data?.find((p) => p.id === lib.publishId) ?? null;
+  // The publish this file has, however old (the history lists the latest ones).
+  const currentQuery = useQuery({
+    queryKey: ["library-publish", lib.fileId, lib.publishId],
+    queryFn: async () => (await api.libraryPublish(lib.fileId, lib.publishId)).publish,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const current = currentQuery.data ?? null;
   const latest = history.data?.[0] ?? null;
   const source = useQuery({
     queryKey: ["library-source", current?.id],
@@ -78,7 +85,7 @@ function LibrarySection({ lib, query }: { lib: LibraryRef; query: string }) {
           </button>
         ) : null}
       </div>
-      {history.isError || source.isError ? (
+      {history.isError || currentQuery.isError || source.isError ? (
         <p className="assets__empty-body assets__pad">
           Couldn’t load {lib.name}.{" "}
           <button
@@ -86,6 +93,7 @@ function LibrarySection({ lib, query }: { lib: LibraryRef; query: string }) {
             className="assets__link"
             onClick={() => {
               void history.refetch();
+              void currentQuery.refetch();
               void source.refetch();
             }}
           >
@@ -172,10 +180,17 @@ function ReviewUpdatesDialog({
   // Without the publish the file has (pruned from the list), everything counts as changed.
   const changes = assetChanges(current?.assets ?? [], latest.assets);
   const update = useMutation({
-    mutationFn: () => librarySource(latest, editor.measurer),
-    onSuccess: (source) => {
-      if (editor.updateLibrary(source.doc, refOf(latest)))
-        editor.notify(`Updated ${latest.fileName}.`);
+    mutationFn: async () => {
+      const source = await librarySource(latest, editor.measurer);
+      // Nothing to change counts as done; a refused edit keeps the dialog open to say so.
+      if (
+        updateOps(editor.doc, source.doc, refOf(latest)).length > 0 &&
+        !editor.updateLibrary(source.doc, refOf(latest))
+      )
+        throw new Error("This file couldn't take the update. Reload it and try again.");
+    },
+    onSuccess: () => {
+      editor.notify(`Updated ${latest.fileName}.`);
       onClose();
     },
   });
@@ -233,7 +248,7 @@ function ReviewUpdatesDialog({
       ) : null}
       {update.error ? (
         <p className="library-dialog__error" role="alert">
-          Couldn’t load the update: {update.error.message}
+          {update.error.message}
         </p>
       ) : null}
     </Dialog>
