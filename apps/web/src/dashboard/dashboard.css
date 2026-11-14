@@ -1123,3 +1123,11 @@
     grid-area: action;
   }
 }
+
+/* What a search matched, in a file's name. */
+.dash__match {
+  border-radius: 2px;
+  background: var(--signal-soft);
+  color: inherit;
+  box-shadow: 0 0 0 1px var(--signal-soft);
+}
