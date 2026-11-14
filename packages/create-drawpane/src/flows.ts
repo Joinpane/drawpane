@@ -305,7 +305,7 @@ async function prepare(dir: string, config: InstanceConfig, deps: Deps): Promise
 async function renderConfig(dir: string, config: InstanceConfig, release: Release) {
   await writeFile(
     join(dir, "wrangler.jsonc"),
-    renderWranglerConfig(await readTemplate(release), config),
+    renderWranglerConfig(await readTemplate(release), config, release.version),
   );
 }
 

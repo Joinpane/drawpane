@@ -4,11 +4,12 @@
  * estimate, said plainly), whether each service answers, and when the last
  * backup was taken. See docs/decisions/0003-instance-health.md.
  */
-import { Icon, Logo, SegmentedControl } from "@drawpane/ui";
+import { Button, ButtonLink, Icon, Logo, SegmentedControl } from "@drawpane/ui";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { api } from "../api/client";
+import { CopyField } from "../app/CopyField";
 import "./admin.css";
 
 type Period = "7" | "30" | "90";
@@ -31,7 +32,12 @@ interface Health {
   }[];
   readonly lastBackupAt: number | null;
   readonly retentionDays: number;
+  /** The release running; null when it wasn't installed with `npm create drawpane`. */
+  readonly version: string | null;
+  readonly update: { readonly version: string; readonly notesUrl: string } | null;
 }
+
+const UPGRADE = "npm create drawpane@latest upgrade";
 
 const NUMBER = new Intl.NumberFormat();
 const USD = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" });
@@ -77,7 +83,10 @@ export function HealthPage() {
         <div className="admin__head">
           <div>
             <h1 className="admin__title">Health and cost</h1>
-            <p className="admin__lede">How this instance is doing, for whoever runs it.</p>
+            <p className="admin__lede">
+              {data?.version ? `Drawpane ${data.version} · ` : ""}How this instance is doing, for
+              whoever runs it.
+            </p>
           </div>
           <SegmentedControl<Period>
             label="Period"
@@ -90,6 +99,8 @@ export function HealthPage() {
             ]}
           />
         </div>
+
+        {data?.update ? <UpdateNotice running={data.version} update={data.update} /> : null}
 
         {health.error ? (
           <p className="admin__notice" role="alert">
@@ -184,6 +195,48 @@ export function HealthPage() {
           </section>
         </div>
       </main>
+    </div>
+  );
+}
+
+/**
+ * A newer release is out. Upgrading runs where the instance was installed
+ * (its folder holds drawpane.json), so "Upgrade" shows the command to run there.
+ */
+function UpdateNotice({
+  running,
+  update,
+}: {
+  running: string | null;
+  update: NonNullable<Health["update"]>;
+}) {
+  const [how, setHow] = useState(false);
+  return (
+    <div className="admin__update" role="status">
+      <div className="admin__update-row">
+        <span className="admin__update-icon" aria-hidden="true">
+          <Icon name="arrow-up" size={16} />
+        </span>
+        <span className="admin__update-text">
+          <b>Drawpane {update.version} is available.</b>
+          {running ? ` This instance runs ${running}.` : ""}
+        </span>
+        <ButtonLink href={update.notesUrl} variant="ghost" size="sm">
+          Release notes
+        </ButtonLink>
+        <Button size="sm" variant="primary" aria-expanded={how} onClick={() => setHow((v) => !v)}>
+          Upgrade
+        </Button>
+      </div>
+      {how ? (
+        <div className="admin__update-how">
+          <p>
+            In the instance's folder (the one with <code>drawpane.json</code>), run this. It applies
+            new database migrations, then deploys; files, people and settings stay as they are.
+          </p>
+          <CopyField value={UPGRADE} />
+        </div>
+      ) : null}
     </div>
   );
 }

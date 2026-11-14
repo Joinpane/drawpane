@@ -33,6 +33,8 @@ npm create drawpane@latest upgrade
 
 It swaps in the new release, applies new database migrations (additive, so the running version keeps working), and deploys. Secrets and data are left as they are. It won't move an instance to an older version.
 
+The instance's **Health and cost** page (the bolt beside your name in the dashboard, for whoever set the instance up) shows the version it runs, and says when a newer one is out, with its release notes and this command. To know that, the Worker asks the npm registry for `create-drawpane`'s latest version when the page is opened, at most once every six hours. To turn that off, add `"vars": { "UPDATE_CHECK": "off" }` to `drawpane.json` and run `npm create drawpane@latest upgrade -- --force`.
+
 ## Installing by hand
 
 The installer runs these steps; they're here as a reference, or for setups it doesn't cover. They take about ten minutes. You need:
@@ -122,4 +124,4 @@ D1 also has 30-day point-in-time recovery built in (`wrangler d1 time-travel`).
 - Provider sign-in uses the authorization-code flow with PKCE and a signed, 10-minute state cookie. A provider account is matched to an existing account only through an email address the provider has verified.
 - Sessions are random 256-bit tokens in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie; only their SHA-256 hash is stored.
 - The Worker checks your role on every request and hands each file socket to its FileRoom with a signed, 60-second claim that the room verifies.
-- No telemetry. Fonts are bundled, so the app makes no third-party requests.
+- No telemetry. Browsers never contact anyone but your instance. The Worker itself contacts Google Fonts when someone first uses a font (see Fonts) and the npm registry when the health page checks for a newer release (see Upgrading); both can be turned off.

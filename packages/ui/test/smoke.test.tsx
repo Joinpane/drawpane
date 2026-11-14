@@ -6,6 +6,7 @@ import {
   AgentTag,
   Badge,
   Button,
+  ButtonLink,
   CommandBar,
   Icon,
   IconButton,
@@ -52,6 +53,22 @@ describe("render smoke tests", () => {
     const button = screen.getByRole("button", { name: "Publish library" });
     expect(button.className).toBe("dp-btn dp-btn--primary dp-btn--md");
     expect(button.getAttribute("type")).toBe("button");
+  });
+
+  it("ButtonLink looks like a Button, and opens other sites in a new tab", () => {
+    render(
+      <>
+        <ButtonLink href="https://example.com/notes" variant="ghost" size="sm">
+          Release notes
+        </ButtonLink>
+        <ButtonLink href="/settings">Settings</ButtonLink>
+      </>,
+    );
+    const notes = screen.getByRole("link", { name: "Release notes" });
+    expect(notes.className).toBe("dp-btn dp-btn--ghost dp-btn--sm");
+    expect(notes.getAttribute("target")).toBe("_blank");
+    expect(notes.getAttribute("rel")).toBe("noreferrer");
+    expect(screen.getByRole("link", { name: "Settings" }).getAttribute("target")).toBeNull();
   });
 
   it("IconButton", () => {

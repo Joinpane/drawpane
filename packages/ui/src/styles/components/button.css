@@ -9,6 +9,7 @@
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   font: var(--type-ui-strong);
+  text-decoration: none;
   white-space: nowrap;
   cursor: pointer;
   transition:

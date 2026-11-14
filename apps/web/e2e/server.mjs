@@ -29,6 +29,8 @@ const vars = {
   GITHUB_CLIENT_SECRET: "e2e-github-secret",
   GOOGLE_CLIENT_ID: "e2e-google-client",
   GOOGLE_CLIENT_SECRET: "e2e-google-secret",
+  // Tests never ask npm for releases; the health page's notice is tested with a stubbed answer.
+  UPDATE_CHECK: "off",
 };
 const child = spawn(
   wrangler,

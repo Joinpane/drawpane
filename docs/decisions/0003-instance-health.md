@@ -30,7 +30,7 @@ None of those numbers exist today. The Worker keeps no usage counters, there is 
 
 **Last backup.** The newest version snapshot across files, with the 30-day retention the PRD promises.
 
-**Upgrades.** The running version is a build-time constant. A "new version available" check waits until releases are published.
+**Upgrades.** The installer sets the running version (`DRAWPANE_VERSION`) in the instance's configuration. When the page opens, the Worker asks the npm registry for `create-drawpane`'s latest version (cached for six hours, off with `UPDATE_CHECK=off`), and a newer one shows a notice with its release notes and the upgrade command. Upgrading itself runs where the instance was installed, not from the browser (decision 0004).
 
 ## Consequences
 

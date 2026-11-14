@@ -72,6 +72,48 @@
   font: 400 13px / 18px var(--font-ui);
 }
 
+/* A newer release (the design's notice: signal-soft, with the command one click away). */
+.admin__update {
+  display: grid;
+  gap: var(--space-300);
+  padding: var(--space-300) 14px;
+  border-radius: var(--radius-md);
+  background: var(--signal-soft);
+}
+.admin__update-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-300);
+}
+.admin__update-icon {
+  display: inline-flex;
+  color: var(--signal-ink);
+}
+.admin__update-text {
+  flex: 1;
+  min-width: 200px;
+  font: 400 13px / 18px var(--font-ui);
+}
+.admin__update-text b {
+  font-weight: 600;
+}
+.admin__update-how {
+  display: grid;
+  gap: var(--space-200);
+  /* Under the text, not the icon: 16px icon + 12px gap. */
+  padding-left: 28px;
+}
+.admin__update-how p {
+  margin: 0;
+  font: var(--type-ui-body);
+  color: var(--ink-muted);
+}
+.admin__update-how p code {
+  font: 400 12px / 16px var(--font-mono);
+  color: var(--ink);
+}
+
 /* At a glance */
 .admin__kpis {
   display: grid;
