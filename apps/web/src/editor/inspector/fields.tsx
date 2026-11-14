@@ -7,6 +7,7 @@ import {
   type NodeRecord,
   type PropName,
   type PropValues,
+  propBounds,
 } from "@drawpane/model";
 import { type IconName, NumberField } from "@drawpane/ui";
 import { useState } from "react";
@@ -56,6 +57,7 @@ export interface NumProps {
   label?: string;
   icon?: IconName;
   ariaLabel: string;
+  /** The range the field offers; by default the property's own (propBounds), so typing and dragging stop at its edges. */
   min?: number;
   max?: number;
   unit?: string;
@@ -80,6 +82,9 @@ export function Num({
   commit,
 }: NumProps) {
   const value = common(nodes, prop) as number | null;
+  const bounds = propBounds(prop);
+  const low = min ?? (bounds.min === undefined ? undefined : bounds.min * scale);
+  const high = max ?? (bounds.max === undefined ? undefined : bounds.max * scale);
   const bindKey = NUMBER_BINDINGS.has(prop) ? (prop as BindingKey) : undefined;
   const field = (token?: { name: string; open: () => void }) => (
     <NumberField
@@ -88,8 +93,8 @@ export function Num({
       {...(icon ? { icon } : {})}
       ariaLabel={ariaLabel}
       {...(unit ? { unit } : {})}
-      {...(min !== undefined ? { min } : {})}
-      {...(max !== undefined ? { max } : {})}
+      {...(low !== undefined ? { min: low } : {})}
+      {...(high !== undefined ? { max: high } : {})}
       value={value === null ? null : Math.round(value * scale * 100) / 100}
       placeholder="Mixed"
       onChange={(v) => {

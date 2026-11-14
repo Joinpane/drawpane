@@ -376,6 +376,22 @@ describe("NumberField", () => {
     expect(onChange).toHaveBeenLastCalledWith(12);
   });
 
+  it("lands exactly on its minimum when dragged past it fast, and climbs straight back", () => {
+    const onChange = vi.fn();
+    render(<NumberField label="R" value={0.5} min={0} step={1} onChange={onChange} />);
+    const label = screen.getByText("R");
+    fireEvent.pointerDown(label, { pointerId: 1, button: 0, clientX: 300 });
+    // One big jump left, the way a quick flick arrives.
+    fireEvent.pointerMove(label, { pointerId: 1, clientX: 10 });
+    expect(onChange).toHaveBeenLastCalledWith(0);
+    expect(onChange.mock.calls.every(([v]) => v >= 0)).toBe(true);
+    // Further left changes nothing; back right counts from the edge, not from where the pointer went.
+    fireEvent.pointerMove(label, { pointerId: 1, clientX: 0 });
+    fireEvent.pointerMove(label, { pointerId: 1, clientX: 3 });
+    expect(onChange).toHaveBeenLastCalledWith(3);
+    fireEvent.pointerUp(label, { pointerId: 1, clientX: 3 });
+  });
+
   it("scrubs when the label is dragged", () => {
     const onScrubStart = vi.fn();
     const onScrubEnd = vi.fn();
