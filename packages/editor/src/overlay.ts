@@ -251,10 +251,11 @@ export function drawOverlay(
   }
 
   // Alt + hover: measure from the selection to the hovered layer.
-  if (xray && selection.length > 0 && hover && !selection.includes(hover)) {
+  if (editor.s.measure && selection.length > 0 && hover && !selection.includes(hover)) {
     const a = scene.unionBounds(selection);
     const b = scene.bounds(hover);
-    if (a && b) drawMeasurements(ctx, a, b, (p) => toScreen(p), theme);
+    const pill = sizePill(editor);
+    if (a && b) drawMeasurements(ctx, a, b, (p) => toScreen(p), theme, pill ? [pill.box] : []);
   }
   if (prototyping) drawPrototypeOverlay(ctx, editor, theme);
   // Pen and vector edit: anchors, handles and the pen's rubber band.
@@ -367,10 +368,93 @@ function drawReadingOrder(
   ctx.restore();
 }
 
+interface MeasureLine {
+  readonly from: Point;
+  readonly to: Point;
+  readonly length: number;
+}
+
+/** The distances between two boxes: each edge of `a` to the facing edge of `b`, in page units. */
+export function measureLines(a: Rect, b: Rect): MeasureLine[] {
+  const right = (r: Rect) => r.x + r.width;
+  const bottom = (r: Rect) => r.y + r.height;
+  const inside = (inner: Rect, outer: Rect) =>
+    outer.x <= inner.x &&
+    outer.y <= inner.y &&
+    right(outer) >= right(inner) &&
+    bottom(outer) >= bottom(inner);
+  // One inside the other (a container, or a layer inside the selection):
+  // from the inner box's four sides out to the outer box's, through its middle.
+  const [inner, outer] = inside(a, b) ? [a, b] : inside(b, a) ? [b, a] : [null, null];
+  if (inner && outer) {
+    const midY = inner.y + inner.height / 2;
+    const midX = inner.x + inner.width / 2;
+    return [
+      { from: { x: outer.x, y: midY }, to: { x: inner.x, y: midY }, length: inner.x - outer.x },
+      {
+        from: { x: right(inner), y: midY },
+        to: { x: right(outer), y: midY },
+        length: right(outer) - right(inner),
+      },
+      { from: { x: midX, y: outer.y }, to: { x: midX, y: inner.y }, length: inner.y - outer.y },
+      {
+        from: { x: midX, y: bottom(inner) },
+        to: { x: midX, y: bottom(outer) },
+        length: bottom(outer) - bottom(inner),
+      },
+    ].filter((line) => line.length > 0.01);
+  }
+  // Apart (or overlapping): across the gap on each axis, through the part they
+  // share on the other axis, or the selection's middle when they share none.
+  const lines: MeasureLine[] = [];
+  const overlapY = Math.max(a.y, b.y) < Math.min(bottom(a), bottom(b));
+  const overlapX = Math.max(a.x, b.x) < Math.min(right(a), right(b));
+  const y = overlapY
+    ? (Math.max(a.y, b.y) + Math.min(bottom(a), bottom(b))) / 2
+    : a.y + a.height / 2;
+  const x = overlapX ? (Math.max(a.x, b.x) + Math.min(right(a), right(b))) / 2 : a.x + a.width / 2;
+  if (b.x >= right(a))
+    lines.push({ from: { x: right(a), y }, to: { x: b.x, y }, length: b.x - right(a) });
+  else if (right(b) <= a.x)
+    lines.push({ from: { x: right(b), y }, to: { x: a.x, y }, length: a.x - right(b) });
+  if (b.y >= bottom(a))
+    lines.push({ from: { x, y: bottom(a) }, to: { x, y: b.y }, length: b.y - bottom(a) });
+  else if (bottom(b) <= a.y)
+    lines.push({ from: { x, y: bottom(b) }, to: { x, y: a.y }, length: a.y - bottom(b) });
+  return lines.filter((line) => line.length > 0.01);
+}
+
 /**
- * Distance lines between two boxes, like browser devtools: from each edge of
- * `a` to the facing edge of `b` (or to `b`'s inner edges when `b` contains
- * `a`), each labelled with its length in page units.
+ * Where a distance line ends beside a box rather than at it (the line runs
+ * through the selection's middle, past the target's side): a dashed line
+ * along that side of the target, out to the line, so it's clear what the
+ * distance is to. Figma draws the same.
+ */
+function measureExtensions(line: MeasureLine, b: Rect): Array<{ from: Point; to: Point }> {
+  const out: Array<{ from: Point; to: Point }> = [];
+  const horizontal = line.from.y === line.to.y;
+  for (const end of [line.from, line.to]) {
+    if (horizontal) {
+      // The end sits on b's left or right side: reach it along that side.
+      if (end.x !== b.x && end.x !== b.x + b.width) continue;
+      const y = Math.min(Math.max(end.y, b.y), b.y + b.height);
+      if (Math.abs(y - end.y) > 0.01) out.push({ from: { x: end.x, y }, to: end });
+    } else {
+      if (end.y !== b.y && end.y !== b.y + b.height) continue;
+      const x = Math.min(Math.max(end.x, b.x), b.x + b.width);
+      if (Math.abs(x - end.x) > 0.01) out.push({ from: { x, y: end.y }, to: end });
+    }
+  }
+  return out;
+}
+
+const overlaps = (r: Rect, s: Rect) =>
+  r.x < s.x + s.width && s.x < r.x + r.width && r.y < s.y + s.height && s.y < r.y + r.height;
+
+/**
+ * Distance lines from the selection (`a`) to what Alt-hover measures to
+ * (`b`), each labelled with its length in page units. Labels sit on their
+ * line's middle, and step aside from the size pill and from each other.
  */
 function drawMeasurements(
   ctx: CanvasRenderingContext2D,
@@ -378,55 +462,13 @@ function drawMeasurements(
   b: Rect,
   toScreen: (p: Point) => Point,
   theme: OverlayTheme,
+  avoid: readonly Rect[],
 ): void {
-  const lines: Array<{ from: Point; to: Point; length: number }> = [];
-  const contains =
-    b.x <= a.x && b.y <= a.y && b.x + b.width >= a.x + a.width && b.y + b.height >= a.y + a.height;
-  const midY = a.y + a.height / 2;
-  const midX = a.x + a.width / 2;
-  if (contains) {
-    lines.push({ from: { x: a.x, y: midY }, to: { x: b.x, y: midY }, length: a.x - b.x });
-    lines.push({
-      from: { x: a.x + a.width, y: midY },
-      to: { x: b.x + b.width, y: midY },
-      length: b.x + b.width - (a.x + a.width),
-    });
-    lines.push({ from: { x: midX, y: a.y }, to: { x: midX, y: b.y }, length: a.y - b.y });
-    lines.push({
-      from: { x: midX, y: a.y + a.height },
-      to: { x: midX, y: b.y + b.height },
-      length: b.y + b.height - (a.y + a.height),
-    });
-  } else {
-    const overlapY = Math.max(a.y, b.y) < Math.min(a.y + a.height, b.y + b.height);
-    const overlapX = Math.max(a.x, b.x) < Math.min(a.x + a.width, b.x + b.width);
-    const y = overlapY ? (Math.max(a.y, b.y) + Math.min(a.y + a.height, b.y + b.height)) / 2 : midY;
-    const x = overlapX ? (Math.max(a.x, b.x) + Math.min(a.x + a.width, b.x + b.width)) / 2 : midX;
-    if (b.x >= a.x + a.width)
-      lines.push({
-        from: { x: a.x + a.width, y },
-        to: { x: b.x, y },
-        length: b.x - (a.x + a.width),
-      });
-    else if (b.x + b.width <= a.x)
-      lines.push({
-        from: { x: b.x + b.width, y },
-        to: { x: a.x, y },
-        length: a.x - (b.x + b.width),
-      });
-    if (b.y >= a.y + a.height)
-      lines.push({
-        from: { x, y: a.y + a.height },
-        to: { x, y: b.y },
-        length: b.y - (a.y + a.height),
-      });
-    else if (b.y + b.height <= a.y)
-      lines.push({
-        from: { x, y: b.y + b.height },
-        to: { x, y: a.y },
-        length: a.y - (b.y + b.height),
-      });
-  }
+  const lines = measureLines(a, b);
+  const px = (p: Point) => {
+    const s = toScreen(p);
+    return { x: Math.round(s.x) + 0.5, y: Math.round(s.y) + 0.5 };
+  };
   ctx.save();
   ctx.strokeStyle = theme.guide;
   ctx.fillStyle = theme.guide;
@@ -434,35 +476,49 @@ function drawMeasurements(
   ctx.font = `600 11px ${theme.fontUi}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  // Outline the hovered box so it's clear what you measure to.
-  const tl = toScreen({ x: b.x, y: b.y });
-  const br = toScreen({ x: b.x + b.width, y: b.y + b.height });
+  // Outline what's measured to.
+  const tl = px({ x: b.x, y: b.y });
+  const br = px({ x: b.x + b.width, y: b.y + b.height });
+  ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
   ctx.setLineDash([3, 3]);
-  ctx.strokeRect(
-    Math.round(tl.x) + 0.5,
-    Math.round(tl.y) + 0.5,
-    Math.round(br.x - tl.x),
-    Math.round(br.y - tl.y),
-  );
+  for (const line of lines)
+    for (const dash of measureExtensions(line, b)) {
+      const p1 = px(dash.from);
+      const p2 = px(dash.to);
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+    }
   ctx.setLineDash([]);
+  const placed: Rect[] = [...avoid];
   for (const line of lines) {
-    if (line.length <= 0.01) continue;
-    const p1 = toScreen(line.from);
-    const p2 = toScreen(line.to);
+    const p1 = px(line.from);
+    const p2 = px(line.to);
     ctx.beginPath();
-    ctx.moveTo(Math.round(p1.x) + 0.5, Math.round(p1.y) + 0.5);
-    ctx.lineTo(Math.round(p2.x) + 0.5, Math.round(p2.y) + 0.5);
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
     const label = fmt(line.length);
-    const w = ctx.measureText(label).width + 8;
+    const w = Math.round(ctx.measureText(label).width) + 8;
+    const h = 16;
     const cx = (p1.x + p2.x) / 2;
     const cy = (p1.y + p2.y) / 2;
+    // On the line; else beside it, either way across it.
+    const horizontal = line.from.y === line.to.y;
+    const step = horizontal ? h / 2 + 6 : w / 2 + 6;
+    const spots = [0, step, -step, step * 2, -step * 2].map((d) =>
+      horizontal ? { x: cx, y: cy + d } : { x: cx + d, y: cy },
+    );
+    const box = (c: Point): Rect => ({ x: c.x - w / 2, y: c.y - h / 2, width: w, height: h });
+    const spot = spots.find((c) => !placed.some((r) => overlaps(box(c), r))) ?? (spots[0] as Point);
+    placed.push(box(spot));
+    ctx.fillStyle = theme.guide;
     ctx.beginPath();
-    ctx.roundRect(cx - w / 2, cy - 8, w, 16, 3);
+    ctx.roundRect(Math.round(spot.x - w / 2), Math.round(spot.y - h / 2), w, h, 3);
     ctx.fill();
     ctx.fillStyle = "#ffffff";
-    ctx.fillText(label, cx, cy + 0.5);
-    ctx.fillStyle = theme.guide;
+    ctx.fillText(label, Math.round(spot.x), Math.round(spot.y) + 0.5);
   }
   ctx.restore();
 }

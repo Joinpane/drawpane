@@ -29,11 +29,16 @@ export interface XrayRegion {
   readonly kind: "padding" | "gap";
 }
 
-/** The frames X-ray shows: each selected or hovered auto layout frame, or the one a layer sits in. */
+/**
+ * The frames X-ray shows: each selected or hovered auto layout frame, or the
+ * one a layer sits in (not the hovered one while measuring).
+ */
 export function xrayFrames(editor: Editor): string[] {
-  const { selection, hover } = editor.s;
+  const { selection, hover, measure } = editor.s;
   const out = new Set<string>();
-  for (const id of new Set([...selection, ...(hover ? [hover] : [])])) {
+  // While measuring, the hovered layer is what's measured to: its padding would cover the distances.
+  const hovered = hover && !measure ? [hover] : [];
+  for (const id of new Set([...selection, ...hovered])) {
     const node = editor.doc.get(id);
     const frameId = node?.type === "frame" ? id : node?.parent;
     const frame = frameId ? editor.doc.get(frameId) : undefined;

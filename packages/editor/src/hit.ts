@@ -172,6 +172,50 @@ export function selectionTarget(
 }
 
 /**
+ * What Alt-hover measures to, from the selection, like Figma: the layer under
+ * the pointer at the selection's own level of the tree. Resting on an
+ * ancestor's bare area measures to that ancestor (the parent, its parent…);
+ * resting on anything else measures to the branch it belongs to, as seen from
+ * the nearest ancestor it shares with the selection: a sibling, an
+ * ancestor's sibling, another top-level frame, or (inside the selection) the
+ * selected layer's child. ⌘ (`deep`) measures to the layer itself.
+ *
+ * Null when there's nothing to measure to: the pointer is over the selection.
+ */
+export function measureTarget(
+  scene: Scene,
+  pageId: string,
+  leaf: string,
+  selection: readonly string[],
+  deep: boolean,
+): string | null {
+  const doc = scene.doc;
+  if (selection.length === 0) return null;
+  // The pointer's branch, top-level layer first.
+  const chain: string[] = [];
+  for (let id: string | undefined = leaf; id && id !== pageId; id = doc.get(id)?.parent) {
+    if (!doc.get(id)) return null;
+    chain.unshift(id);
+  }
+  // The selection, and every layer above it.
+  const context = new Set<string>();
+  for (const id of selection)
+    for (let at: string | undefined = id; at && at !== pageId; at = doc.get(at)?.parent)
+      context.add(at);
+  let shared = -1;
+  for (let i = chain.length - 1; i >= 0; i--)
+    if (context.has(chain[i] as string)) {
+      shared = i;
+      break;
+    }
+  const target = deep
+    ? leaf
+    : // Below the shared layer, the branch that holds the pointer; or the shared layer's own area.
+      ((chain[shared + 1] ?? chain[shared]) as string);
+  return selection.includes(target) ? null : target;
+}
+
+/**
  * Entering a container: the layer one level below `container` on the way
  * down to `leaf` (null when the leaf isn't inside it). Double-click uses this
  * to step into a group or nested frame, one level per double-click.
