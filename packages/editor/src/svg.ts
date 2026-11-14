@@ -752,20 +752,32 @@ export function exportSvg(
     const lines = (pass: number) =>
       layout.lines
         .map((line) => {
+          const fillOf = (frag: TextFragment) => {
+            if (!frag.fills) return "";
+            const top = [...frag.fills].reverse().find((f) => f.visible !== false);
+            const fill = pass === 0 && top ? out.paint("fill", top, w, h) : null;
+            return fill ?? ' fill="none"';
+          };
+          const y = round2(line.baseline + dy);
+          // A line with outlined runs (PDF): its other fragments are placed one by one, where
+          // the layout put them, since the viewer measures text without the outlined runs' features.
+          if (line.fragments.some((f) => outlined.has(f))) {
+            const x0 = lineOffset(line, w, base);
+            return line.fragments
+              .filter((frag) => !outlined.has(frag) && frag.text)
+              .map(
+                (frag) =>
+                  `<tspan${attr("x", round2(x0 + frag.x))}${attr("y", y)} text-anchor="start"${typeOf(frag)}${fillOf(frag)}>${escapeXml(frag.text)}</tspan>`,
+              )
+              .join("");
+          }
           const inner = line.fragments
             .map((frag) => {
-              let own = typeOf(frag);
-              // Drawn as outlines below: here it only keeps its room.
-              if (outlined.has(frag)) own += ' fill="none"';
-              else if (frag.fills) {
-                const top = [...frag.fills].reverse().find((f) => f.visible !== false);
-                const fill = pass === 0 && top ? out.paint("fill", top, w, h) : null;
-                own += fill ?? ' fill="none"';
-              }
+              const own = typeOf(frag) + fillOf(frag);
               return own ? `<tspan${own}>${escapeXml(frag.text)}</tspan>` : escapeXml(frag.text);
             })
             .join("");
-          return `<tspan${attr("x", round2(lineX))}${attr("y", round2(line.baseline + dy))}>${inner}</tspan>`;
+          return `<tspan${attr("x", round2(lineX))}${attr("y", y)}>${inner}</tspan>`;
         })
         .join("");
     /** A shaped run's glyphs (and its decoration) in the text box, where the canvas draws them. */

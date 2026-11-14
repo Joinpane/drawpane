@@ -8,6 +8,7 @@ import type { Editor } from "@drawpane/editor";
 import { type FontFeatures, getProp, type NodeRecord } from "@drawpane/model";
 import { Icon, Popover } from "@drawpane/ui";
 import { useEffect, useRef, useState } from "react";
+import { fonts } from "../../fonts/fonts";
 import { shaper } from "../shaping";
 import { featureGroups, featureOn, featureSummary, withFeature } from "./opentype";
 
@@ -30,8 +31,12 @@ function shared(maps: readonly FontFeatures[]): FontFeatures {
 }
 
 /** What the font of `face` offers, read once the panel opens. */
-function useOffered(face: { family: string; weight: number; italic: boolean } | null): Offered {
-  const key = face ? `${face.family}\u0000${face.weight}\u0000${face.italic}` : "";
+function useOffered(
+  face: { family: string; weight: number; italic: boolean } | null,
+  /** Bumped to read the font again after it failed. */
+  attempt = 0,
+): Offered {
+  const key = face ? `${face.family}\u0000${face.weight}\u0000${face.italic}\u0000${attempt}` : "";
   const [state, setState] = useState<{ key: string; offered: Offered }>({
     key: "",
     offered: { status: "loading" },
@@ -108,7 +113,8 @@ function FeaturesPanel({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
         italic: getProp(lead.props, "fontStyle") === "italic",
       }
     : null;
-  const offered = useOffered(face);
+  const [attempt, setAttempt] = useState(0);
+  const offered = useOffered(face, attempt);
   const maps = nodes.map((n) => getProp(n.props, "fontFeatures"));
   const setAnywhere: FontFeatures = Object.assign({}, ...maps);
 
@@ -145,10 +151,13 @@ function FeaturesPanel({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
           Reading {family}’s features…
         </p>
       ) : offered.status === "unavailable" ? (
-        <p className="features__note">
-          {family} isn’t a Google, team or built-in font, so its features can’t be read. Text in it
-          draws without them.
-        </p>
+        <Unavailable
+          family={family}
+          onRetry={() => {
+            if (face) shaper.retry(face);
+            setAttempt((n) => n + 1);
+          }}
+        />
       ) : (
         (() => {
           const groups = featureGroups(offered.names, setAnywhere);
@@ -187,6 +196,42 @@ function FeaturesPanel({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Why a font's features can't be read, and what to do about it: a font on
+ * this computer only, a team font uploaded only as WOFF (HarfBuzz reads
+ * TrueType and OpenType files), or a file that didn't load (try again).
+ */
+function Unavailable({ family, onRetry }: { family: string; onRetry: () => void }) {
+  const info = fonts.get(family);
+  if (!info || info.source === "system" || info.source === "local")
+    return (
+      <p className="features__note">
+        {family} isn’t a Google, team or built-in font, so its features can’t be read. Text in it
+        draws without them.
+      </p>
+    );
+  if (
+    info.source === "team" &&
+    (info.faces ?? []).every((f) => f.format === "woff" || f.format === "woff2")
+  )
+    return (
+      <p className="features__note">
+        {family} was uploaded as WOFF, which features can’t be read from. Upload its TTF or OTF
+        files under Fonts to use them.
+      </p>
+    );
+  return (
+    <div className="features__retry">
+      <p className="features__note">
+        {family}’s font file didn’t load, so its features can’t be read.
+      </p>
+      <button type="button" className="features__reset" onClick={onRetry}>
+        Try again
+      </button>
     </div>
   );
 }

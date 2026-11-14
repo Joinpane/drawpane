@@ -167,6 +167,8 @@ export class CanvasRenderer {
   readonly #shapes = new WeakMap<object, { w: number; h: number; path: Path2D }>();
   /** Shaped text as one outline at its origin, by letter spacing (see #shapedOutline). */
   readonly #shapedRuns = new WeakMap<ShapedText, Map<number, Path2D>>();
+  /** Each outline where it was last placed: text that holds still costs nothing per frame. */
+  readonly #placedRuns = new WeakMap<Path2D, { x: number; y: number; path: Path2D }>();
   /** What the last screen frame showed, to move it on a pan instead of redrawing. */
   #last: LastFrame | null = null;
   /** The last frame drew every layer (not a scaled stand-in). */
@@ -1027,6 +1029,20 @@ export class CanvasRenderer {
   }
 
   /**
+   * An outline moved to (x, y) in the text box's space. Filled there rather
+   * than under a translated transform, so gradient and image fills stay
+   * where the text box puts them.
+   */
+  #placed(outline: Path2D, x: number, y: number): Path2D {
+    const hit = this.#placedRuns.get(outline);
+    if (hit && hit.x === x && hit.y === y) return hit.path;
+    const path = new Path2D();
+    path.addPath(outline, new DOMMatrix([1, 0, 0, 1, x, y]));
+    this.#placedRuns.set(outline, { x, y, path });
+    return path;
+  }
+
+  /**
    * A shaped run's glyphs as one outline, from its start on the baseline, in
    * px (y down), with `spacing` after each character like the canvas's
    * letterSpacing. Kept per run, so a frame only places it.
@@ -1119,14 +1135,11 @@ export class CanvasRenderer {
           }
           // OpenType features: the shaped glyphs, when the shaper has them (else as the canvas sets it).
           const shaped = frag.run ? (this.#measurer.shape?.(frag.text, frag.run) ?? null) : null;
-          if (shaped) {
-            const at = new Path2D();
-            at.addPath(
-              this.#shapedOutline(shaped, frag.text, frag.letterSpacing),
-              new DOMMatrix([1, 0, 0, 1, x, baseline]),
+          if (shaped)
+            ctx.fill(
+              this.#placed(this.#shapedOutline(shaped, frag.text, frag.letterSpacing), x, baseline),
             );
-            ctx.fill(at);
-          } else ctx.fillText(frag.text, x, baseline);
+          else ctx.fillText(frag.text, x, baseline);
           if (frag.decoration !== "none") {
             const size = frag.fontSize;
             const y =

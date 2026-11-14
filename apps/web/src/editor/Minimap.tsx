@@ -222,6 +222,8 @@ export function Minimap() {
     return () => {
       off();
       window.clearTimeout(sleep.current);
+      // Its timer is gone: asleep, until the view moves again (a page switch doesn't count).
+      setAwake(false);
     };
   }, [editor, mode, mounted, pageId]);
   const visible = mounted && (mode === "always" || awake || hovered || grabbing);

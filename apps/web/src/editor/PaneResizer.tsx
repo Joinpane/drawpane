@@ -26,7 +26,13 @@ export function PaneResizer({
   /** The other panel's width while it's open, 0 when it isn't: the canvas keeps room between them. */
   other: number;
 }) {
-  const drag = useRef<{ x: number; width: number; frame: number; next: number } | null>(null);
+  const drag = useRef<{
+    x: number;
+    width: number;
+    frame: number;
+    next: number;
+    moved: boolean;
+  } | null>(null);
   const [dragging, setDragging] = useState(false);
   const clamp = (w: number) => clampPane(w, viewportWidth, other);
   // The right panel grows leftwards: dragging left makes it wider.
@@ -39,13 +45,14 @@ export function PaneResizer({
     if (e.button !== 0) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    drag.current = { x: e.clientX, width: shown, frame: 0, next: shown };
+    drag.current = { x: e.clientX, width: shown, frame: 0, next: shown, moved: false };
     setDragging(true);
   };
   const onMove = (e: PointerEvent<HTMLDivElement>) => {
     const d = drag.current;
     if (!d) return;
     d.next = d.width + (e.clientX - d.x) * sign;
+    d.moved ||= e.clientX !== d.x;
     // At most once a frame: everything beside the panel follows it.
     if (!d.frame)
       d.frame = requestAnimationFrame(() => {
@@ -61,7 +68,9 @@ export function PaneResizer({
       e.currentTarget.releasePointerCapture(e.pointerId);
     drag.current = null;
     setDragging(false);
-    set(d.next);
+    // A press without a drag changes nothing: the saved width stays (it may be wider than
+    // this window shows).
+    if (d.moved) set(d.next);
   };
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
     const step = e.shiftKey ? BIG_STEP : STEP;

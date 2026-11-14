@@ -1289,6 +1289,11 @@
   font: 400 12px / 18px var(--font-ui);
   color: var(--ink-muted);
 }
+.features__retry {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-100);
+}
 .features__group {
   display: grid;
   gap: 2px;

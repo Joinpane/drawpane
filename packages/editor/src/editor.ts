@@ -85,6 +85,7 @@ import {
   remapRuns,
   runStyleAt,
   styleRange,
+  textFaces,
   textRunOps,
 } from "./rich-text";
 import { Scene } from "./scene";
@@ -608,7 +609,8 @@ export class Editor {
     const ids: string[] = [];
     for (const node of this.doc.nodes()) {
       if (node.type !== "text") continue;
-      if (families && !families.has(getProp(node.props, "fontFamily"))) continue;
+      // Its own family or any of its runs' (a word in another font).
+      if (families && !textFaces(node).some((face) => families.has(face.family))) continue;
       ids.push(node.id);
     }
     const ops = this.#textFixups(ids);

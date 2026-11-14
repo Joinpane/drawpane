@@ -404,7 +404,8 @@ describe("exportSvg", () => {
   it("draws runs with features as glyph outlines when asked (for PDF), keeping their room", () => {
     // A shaper's measurer: every glyph a 10-unit square, 600 units wide, 1000 per em.
     const shaping: TextMeasurer = {
-      width: measurer.width,
+      // Shaped runs measure by their glyphs, as ShapingMeasurer does.
+      width: (font, text, run) => (run ? text.length * run.size * 0.6 : measurer.width(font, text)),
       shape: (text, run) => ({
         glyphs: [...text].map((_, i) => ({
           path: null,
@@ -439,8 +440,9 @@ describe("exportSvg", () => {
     const bounds = exportBounds(editor.scene, ["t"]);
     if (!bounds) throw new Error("no bounds");
     const pdfSvg = exportSvg(editor.scene, shaping, ["t"], bounds, { outlineFeatures: true });
-    // The run keeps its room in the text, unpainted; the rest stays text.
-    expect(pdfSvg).toContain(`fill="none">12</tspan> ab`);
+    // The rest of the line stays text, placed where the layout put it (after the shaped run).
+    expect(pdfSvg).toContain(`<tspan x="12" y="9.25" text-anchor="start"> ab</tspan>`);
+    expect(pdfSvg).not.toContain(">12</tspan>");
     expect(pdfSvg).toContain(
       `<g fill="#1c1b1a"><path transform="matrix(0.01 0 0 -0.01 0 9.25)" d="M0,0L10,0L10,10Z"/><path transform="matrix(0.01 0 0 -0.01 6 9.25)" d="M0,0L10,0L10,10Z"/></g>`,
     );
