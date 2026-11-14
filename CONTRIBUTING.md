@@ -32,9 +32,12 @@ Open http://localhost:5173. A fresh local database sends you to setup; the token
 pnpm check    # Biome lint, TypeScript, all tests
 pnpm build
 pnpm --filter create-drawpane smoke   # the installer's release deploys (Wrangler dry run)
+pnpm --filter @drawpane/web e2e       # the browser suite, after a build (Playwright, Chromium)
 ```
 
-CI runs the same on every pull request. Releases are cut by pushing a version tag: see [RELEASING.md](RELEASING.md).
+The browser suite starts its own Workers with throwaway databases, each spec file on its own ports, so nothing else needs to be running. One file: `pnpm --filter @drawpane/web e2e e2e/layers.spec.ts`. A failure keeps a trace in `apps/web/test-results`: open it with `npx playwright show-trace`.
+
+CI runs the same on every pull request, the browser suite split four ways. Releases are cut by pushing a version tag: see [RELEASING.md](RELEASING.md).
 
 ## Pull requests
 
