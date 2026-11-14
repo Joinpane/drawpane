@@ -145,6 +145,12 @@ describe("SVG path parsing", () => {
     );
   });
 
+  it("writes a curve whose handles round onto its anchors as the line it reads back as", () => {
+    // A sub-pixel arc: saving it twice gives the same text.
+    const once = serializePath(parsePath("M0 0 a 1 1 0 0 0 0 -0.001"));
+    expect(serializePath(parsePath(once))).toBe(once);
+  });
+
   it("round-trips relative and shorthand commands through absolute form", () => {
     const cmd = fc.oneof(
       fc.tuple(fc.constantFrom("l", "L", "m", "M", "t", "T"), coord, coord).map((t) => t.join(" ")),

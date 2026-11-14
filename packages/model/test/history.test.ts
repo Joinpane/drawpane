@@ -48,6 +48,27 @@ function restore(store: MemoryStore, version: NodeRecord[], roots?: string[]) {
   return plan;
 }
 
+describe("restoring layers", () => {
+  it("only reports the layers it brought back: one whose page is gone, with nowhere else, isn't", () => {
+    const store = storeWith(page("p1"));
+    applyTransaction(store, [
+      { op: "create", id: "c", type: "group", parent: "p1", key: "a0", props: { name: "n" } },
+    ]);
+    const version = snapshot(store);
+    applyTransaction(store, [
+      { op: "create", id: "p2", type: "page", parent: ROOT_ID, key: "a1", props: {} },
+      { op: "delete", id: "p1" },
+    ]);
+    const plan = restoreOps(store, version, { roots: ["c"], fallbackParent: "p1" });
+    expect(plan.restored).toEqual([]);
+    expect(plan.ops).toEqual([]);
+    // With somewhere to go, it comes back there.
+    expect(restoreOps(store, version, { roots: ["c"], fallbackParent: "p2" }).restored).toEqual([
+      "c",
+    ]);
+  });
+});
+
 describe("summarizeEdits", () => {
   it("counts each kind of change once per edit", () => {
     expect(
