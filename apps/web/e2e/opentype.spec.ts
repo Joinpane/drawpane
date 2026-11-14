@@ -6,7 +6,9 @@
  * font (Instrument Sans, which has tabular figures), so nothing comes from
  * Google during the test.
  */
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { inflateSync } from "node:zlib";
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
 
@@ -136,6 +138,65 @@ test.describe
       await expect.poll(() => width(page, id)).toBeLessThan(70);
       await expect(trigger).toContainText("Font defaults");
       await page.keyboard.press("Escape");
+    });
+
+    test("exports text with features to PDF as its glyphs", async () => {
+      const { frame, label } = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const f = e.createLayer("frame", { x: 0, y: 200, width: 300, height: 120 }, e.s.pageId, {
+          name: "Prices",
+          fills: [{ type: "solid", color: "#ffffff" }],
+        }) as string;
+        const t = e.createLayer("text", { x: 20, y: 220, width: 10, height: 10 }, f, {
+          characters: "1111",
+          fontSize: 40,
+          fontFamily: "Instrument Sans",
+          fontFeatures: { tnum: true },
+        }) as string;
+        e.select([f]);
+        return { frame: f, label: t };
+      });
+      /** Path-building operators in the PDF's (deflated) content streams. */
+      const pathOps = async () => {
+        await page
+          .getByRole("radiogroup", { name: "Export format" })
+          .getByRole("radio", { name: "PDF" })
+          .click();
+        const [download] = await Promise.all([
+          page.waitForEvent("download"),
+          page.getByRole("button", { name: "Export PDF" }).click(),
+        ]);
+        const bytes = readFileSync((await download.path()) as string);
+        const raw = bytes.toString("latin1");
+        let ops = 0;
+        for (const m of raw.matchAll(/stream\r?\n/g)) {
+          const start = (m.index ?? 0) + m[0].length;
+          const end = raw.indexOf("endstream", start);
+          try {
+            const body = inflateSync(bytes.subarray(start, end)).toString("latin1");
+            ops += body.match(/ (c|l)\n/g)?.length ?? 0;
+          } catch {
+            // Not a deflated content stream (an embedded font, say).
+          }
+        }
+        return { ops, embedsFont: raw.includes("/FontFile2") };
+      };
+      const shaped = await pathOps();
+      await page.evaluate(
+        ({ id, frame }) => {
+          const e = (window as unknown as W).drawpane as unknown as {
+            setProp(ids: string[], prop: string, value: unknown, label: string): void;
+            select(ids: string[]): void;
+          };
+          e.setProp([id], "fontFeatures", null, "Features");
+          e.select([frame]);
+        },
+        { id: label, frame },
+      );
+      const plain = await pathOps();
+      // Four "1"s drawn as outlines: their curves and lines are in the page.
+      expect(shaped.ops).toBeGreaterThan(plain.ops + 8);
+      expect(plain.embedsFont).toBe(true);
     });
 
     test("says so when a font's features can't be read", async () => {

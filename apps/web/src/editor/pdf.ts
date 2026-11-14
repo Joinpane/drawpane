@@ -6,7 +6,8 @@
  * every family the pages use is embedded as TrueType, fetched through this
  * server's font proxy (one static file per weight). Built-in system faces
  * map to the PDF standard fonts, and anything unavailable falls back to
- * Helvetica, which the caller is told about.
+ * Helvetica, which the caller is told about. Text with OpenType features
+ * goes in as its shaped glyphs (outlines), since PDF text can't take them.
  *
  * jsPDF and svg2pdf load on first use, so they cost nothing until then.
  */
@@ -15,14 +16,17 @@ import {
   ExportError,
   exportBounds,
   exportSvg,
+  featureRun,
   type Rect,
   type SvgImageSource,
   textFaces,
+  textSpans,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import { type Face, faceKey, facesOffered, pickFace } from "../fonts/font-files";
 import { fonts } from "../fonts/fonts";
 import { embeddedImages, readingOrder } from "./export-assets";
+import { shaper } from "./shaping";
 
 /** What a face becomes in the PDF: an embedded font's name, or a standard one with its style. */
 interface PdfFont {
@@ -57,6 +61,24 @@ function facesIn(editor: Editor, ids: readonly string[]): Face[] {
     const node = editor.doc.get(id);
     if (!node || getProp(node.props, "visible") === false) return;
     if (node.type === "text") for (const face of textFaces(node)) faces.set(faceKey(face), face);
+    for (const child of editor.doc.childIds(id)) visit(child);
+  };
+  for (const id of ids) visit(id);
+  return [...faces.values()];
+}
+
+/** The faces of every run with OpenType features inside some layers. */
+function featureFacesIn(editor: Editor, ids: readonly string[]): Face[] {
+  const faces = new Map<string, Face>();
+  const visit = (id: string) => {
+    const node = editor.doc.get(id);
+    if (!node || getProp(node.props, "visible") === false) return;
+    if (node.type === "text")
+      for (const span of textSpans(node)) {
+        const run = featureRun(span.props);
+        if (run)
+          faces.set(faceKey(run), { family: run.family, weight: run.weight, italic: run.italic });
+      }
     for (const child of editor.doc.childIds(id)) visit(child);
   };
   for (const id of ids) visit(id);
@@ -197,6 +219,8 @@ export async function renderPdf(
   const [images, { fontFor, missing }] = await Promise.all([
     embeddedImages(editor, ids),
     embedFonts(pdf, facesIn(editor, ids)),
+    // The faces text with OpenType features is shaped in, ready before drawing.
+    Promise.all(featureFacesIn(editor, ids).map((face) => shaper.load(face))),
   ]);
 
   // svg2pdf reads computed styles, so each page's SVG is attached while it draws.
@@ -225,7 +249,11 @@ function pageSvg(
   page: PdfPage,
   images: (ref: string) => SvgImageSource | null,
 ): SVGSVGElement {
-  const markup = exportSvg(editor.scene, editor.measurer, page.ids, page.bounds, { images });
+  // Text with OpenType features goes in as its glyphs: a PDF's text can't take features.
+  const markup = exportSvg(editor.scene, editor.measurer, page.ids, page.bounds, {
+    images,
+    outlineFeatures: true,
+  });
   const parsed = new DOMParser().parseFromString(markup, "image/svg+xml");
   return document.importNode(parsed.documentElement, true) as unknown as SVGSVGElement;
 }

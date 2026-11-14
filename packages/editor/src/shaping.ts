@@ -43,8 +43,8 @@ interface ReadyFace {
   readonly face: HbFace;
   readonly font: HbFont;
   readonly upem: number;
-  /** Outlines by glyph id. */
-  readonly paths: Map<number, Path2D | null>;
+  /** Outlines by glyph id, as path data and as a Path2D. */
+  readonly paths: Map<number, { readonly d: string; readonly path: Path2D | null }>;
 }
 
 type FaceEntry =
@@ -206,14 +206,15 @@ export class Shaper {
       const p = positions[i];
       if (!p) continue;
       const id = info.codepoint;
-      let path = paths.get(id);
-      if (path === undefined) {
+      let outline = paths.get(id);
+      if (!outline) {
         const d = font.glyphToPath(id);
-        path = d ? this.#makePath(d) : null;
-        paths.set(id, path);
+        outline = { d, path: d ? this.#makePath(d) : null };
+        paths.set(id, outline);
       }
       glyphs.push({
-        path,
+        path: outline.path,
+        d: outline.d,
         x: (pen + p.xOffset) * scale,
         y: (rise + p.yOffset) * scale,
         cluster: info.cluster,
