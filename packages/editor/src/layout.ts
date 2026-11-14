@@ -77,9 +77,9 @@ function participates(node: NodeRecord): boolean {
 }
 
 /**
- * The layers an auto layout frame places, in order: visible, not absolute,
- * and not groups (a group keeps its own place for now). The one rule for
- * layout, X-ray and Explain alike.
+ * The layers an auto layout frame places, in order: visible and not
+ * absolute. A group takes part as the box around what's in it. The one rule
+ * for layout, X-ray and Explain alike.
  */
 export function flowChildren(doc: Doc, frameId: string): NodeRecord[] {
   const out: NodeRecord[] = [];
@@ -92,7 +92,60 @@ export function flowChildren(doc: Doc, frameId: string): NodeRecord[] {
 
 /** Whether auto layout places this layer, in a layout frame (see `flowChildren`). */
 export function inFlow(node: NodeRecord): boolean {
-  return node.type !== "group" && participates(node);
+  return participates(node);
+}
+
+/**
+ * A layer's box as auto layout sees it, in its parent's space: its own
+ * position and size, or for a group, the box around everything in it.
+ */
+export function layoutBox(doc: Doc, id: string): LayoutBox {
+  const node = doc.get(id);
+  if (node?.type !== "group") {
+    const p = node?.props ?? {};
+    return {
+      x: getProp(p, "x"),
+      y: getProp(p, "y"),
+      width: getProp(p, "width"),
+      height: getProp(p, "height"),
+    };
+  }
+  let x0 = Number.POSITIVE_INFINITY;
+  let y0 = Number.POSITIVE_INFINITY;
+  let x1 = Number.NEGATIVE_INFINITY;
+  let y1 = Number.NEGATIVE_INFINITY;
+  for (const child of doc.childIds(id)) {
+    const b = layoutBox(doc, child);
+    x0 = Math.min(x0, b.x);
+    y0 = Math.min(y0, b.y);
+    x1 = Math.max(x1, b.x + b.width);
+    y1 = Math.max(y1, b.y + b.height);
+  }
+  return Number.isFinite(x0)
+    ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
+    : { x: 0, y: 0, width: 0, height: 0 };
+}
+
+/**
+ * Whether auto layout decides where this layer goes: it's in a layout
+ * frame's flow, or inside a group (or groups) that is.
+ */
+export function placedByLayout(doc: Doc, id: string): boolean {
+  let node = doc.get(id);
+  while (node) {
+    if (!inFlow(node)) return false;
+    const parent = doc.get(node.parent);
+    if (parent?.type !== "group") return isLayoutFrame(parent);
+    node = parent;
+  }
+  return false;
+}
+
+/** The layers that hold a position: a group's are its contents', all the way down. */
+function positioned(doc: Doc, id: string): string[] {
+  const node = doc.get(id);
+  if (node?.type !== "group") return [id];
+  return doc.childIds(id).flatMap((child) => positioned(doc, child));
 }
 
 function clamp(value: number, min: number | null, max: number | null): number {
@@ -103,6 +156,8 @@ function clamp(value: number, min: number | null, max: number | null): number {
 }
 
 function sizing(node: NodeRecord, axis: Axis) {
+  // A group is as big as what's in it: never Fill or Hug, like Figma's.
+  if (node.type === "group") return "fixed";
   return getProp(node.props, axis === "h" ? "sizingH" : "sizingV");
 }
 
@@ -142,6 +197,7 @@ function cellAlign(frame: NodeRecord, child: NodeRecord, axis: Axis): Align {
  * always does; Stretch alignment does unless the child hugs its content.
  */
 function stretches(child: NodeRecord, axis: Axis, align: Align): boolean {
+  if (child.type === "group") return false;
   const s = sizing(child, axis);
   return s === "fill" || (align === "stretch" && s !== "hug");
 }
@@ -335,20 +391,47 @@ export class LayoutEngine {
     this.#doc = doc;
   }
 
+  /** Where each group placed in a flow was before, to move its contents by the difference. */
+  readonly #groupOrigins = new Map<string, { x: number; y: number }>();
+
   box(id: string): LayoutBox {
     let box = this.boxes.get(id);
     if (!box) {
-      const node = this.#doc.get(id);
-      const p = node?.props ?? {};
-      box = {
-        x: getProp(p, "x"),
-        y: getProp(p, "y"),
-        width: getProp(p, "width"),
-        height: getProp(p, "height"),
-      };
+      if (this.#doc.get(id)?.type === "group") {
+        box = this.#bounds(id);
+        this.#groupOrigins.set(id, { x: box.x, y: box.y });
+      } else box = layoutBox(this.#doc, id);
       this.boxes.set(id, box);
     }
     return box;
+  }
+
+  /** A group's box from its contents as laid out so far (a frame in it may have just re-hugged). */
+  #bounds(groupId: string): LayoutBox {
+    let x0 = Number.POSITIVE_INFINITY;
+    let y0 = Number.POSITIVE_INFINITY;
+    let x1 = Number.NEGATIVE_INFINITY;
+    let y1 = Number.NEGATIVE_INFINITY;
+    for (const id of this.#doc.childIds(groupId)) {
+      const node = this.#doc.get(id);
+      const b = node?.type === "group" ? this.#bounds(id) : this.box(id);
+      x0 = Math.min(x0, b.x);
+      y0 = Math.min(y0, b.y);
+      x1 = Math.max(x1, b.x + b.width);
+      y1 = Math.max(y1, b.y + b.height);
+    }
+    return Number.isFinite(x0)
+      ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
+      : { x: 0, y: 0, width: 0, height: 0 };
+  }
+
+  /** Lays out the layout frames in a group (through nested groups) before the group is measured. */
+  #settleGroup(groupId: string): void {
+    for (const id of this.#doc.childIds(groupId)) {
+      const node = this.#doc.get(id);
+      if (node?.type === "group") this.#settleGroup(id);
+      else if (isLayoutFrame(node)) this.run(id);
+    }
   }
 
   #get(id: string, axis: Axis): number {
@@ -395,8 +478,11 @@ export class LayoutEngine {
     const children = this.#children(frame);
     for (const child of children) if (isLayoutFrame(child)) this.measure(child);
     // Layout frames out of the flow (absolute or hidden) still size themselves
-    // and their contents; the flow just doesn't place them.
+    // and their contents; the flow just doesn't place them. The frames in a
+    // group settle before the group's box is read.
     for (const child of this.#outOfFlow(frame)) this.run(child.id);
+    for (const id of this.#doc.childIds(frame.id))
+      if (this.#doc.get(id)?.type === "group") this.#settleGroup(id);
     if (isGrid(frame)) this.#measureGrid(frame, children);
     else this.#measureFlex(frame, children);
   }
@@ -512,10 +598,10 @@ export class LayoutEngine {
       this.#hug(frame, main, total(sizes, axes.gap));
     }
     if (sizing(frame, cross) === "hug") {
+      // Layers that stretch across follow the frame, so they don't size it
+      // (counting them would hold it open after what does size it shrinks).
       const lines = this.#lines(children, axes);
-      const thickness = axes.wraps
-        ? lines.map((line) => this.#lineCross(frame, line, cross))
-        : [children.reduce((m, c) => Math.max(m, this.#get(c.id, cross)), 0)];
+      const thickness = lines.map((line) => this.#lineCross(frame, line, cross));
       this.#hug(frame, cross, total(thickness, axes.lineGap));
     }
   }
@@ -770,10 +856,40 @@ export class LayoutEngine {
 
   /** `set` operations for every box that differs from the document. */
   diff(): Op[] {
+    // A group has no position of its own: moving it moves what's in it.
+    const moved = new Map<string, { x: number; y: number }>();
+    for (const [id, origin] of this.#groupOrigins) {
+      const box = this.boxes.get(id);
+      if (!box) continue;
+      const dx = box.x - origin.x;
+      const dy = box.y - origin.y;
+      if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) continue;
+      for (const leaf of positioned(this.#doc, id)) {
+        const own = this.boxes.get(leaf);
+        if (own) {
+          // Laid out too (a layout frame in the group): move its box with the group.
+          own.x += dx;
+          own.y += dy;
+          continue;
+        }
+        const node = this.#doc.get(leaf);
+        if (!node) continue;
+        const at = moved.get(leaf) ?? { x: getProp(node.props, "x"), y: getProp(node.props, "y") };
+        moved.set(leaf, { x: at.x + dx, y: at.y + dy });
+      }
+    }
     const ops: Op[] = [];
-    for (const [id, box] of this.boxes) {
+    for (const [id, at] of moved) {
       const node = this.#doc.get(id);
       if (!node) continue;
+      if (round2(at.x) !== round2(getProp(node.props, "x")))
+        ops.push({ op: "set", id, prop: "x", value: round2(at.x) });
+      if (round2(at.y) !== round2(getProp(node.props, "y")))
+        ops.push({ op: "set", id, prop: "y", value: round2(at.y) });
+    }
+    for (const [id, box] of this.boxes) {
+      const node = this.#doc.get(id);
+      if (!node || node.type === "group") continue;
       for (const prop of ["x", "y", "width", "height"] as const) {
         const value = round2(box[prop]);
         if (value !== round2(getProp(node.props, prop))) ops.push({ op: "set", id, prop, value });
@@ -821,15 +937,19 @@ export function layoutRoots(doc: Doc, ids: Iterable<string>): string[] {
     let node = doc.get(id);
     if (isLayoutFrame(node)) top = node.id;
     while (node) {
-      const parent = doc.get(node.parent);
+      // Through groups: a group in a flow is as big as what's in it.
+      let parent = doc.get(node.parent);
+      while (parent?.type === "group") parent = doc.get(parent.parent);
       if (!isLayoutFrame(parent)) break;
       top = parent.id;
       node = parent;
     }
     if (top) roots.add(top);
   }
-  // Drop roots nested in other roots.
-  return [...roots].filter((id) => !doc.ancestors(id).some((a) => roots.has(a.id)));
+  // Each root is as far up as layout reaches from where the change was, so a
+  // root inside another (an auto layout frame in a plain frame in an auto
+  // layout frame) isn't covered by it: both run.
+  return [...roots];
 }
 
 /** Layout fix-up operations to commit alongside an edit that touched `ids`. */

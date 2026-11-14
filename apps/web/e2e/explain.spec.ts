@@ -2,7 +2,8 @@
  * Layout Explain and X-ray in a real browser, on a throwaway instance:
  * clicking the size pill explains that number, switching to the other axis,
  * a fix from the card, Esc and ⌥E, selecting the layers a term counts, and
- * dragging a gap wider while Alt is held.
+ * dragging a gap wider while Alt is held, and a group taking its place in
+ * the stack.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -186,5 +187,22 @@ test.describe
       );
       await toggle.click();
       await expect(page.getByRole("complementary", { name: "Layout X-ray" })).toHaveCount(0);
+    });
+    test("⌘G on two rows keeps the stack as it was, and Explain counts the group as one", async () => {
+      const ys = () =>
+        page.evaluate(
+          (ids) => ids.map((id) => (window as unknown as W).drawpane.doc.get(id)?.props.y),
+          rows,
+        );
+      const before = await ys();
+      await select(page, [rows[1] as string, rows[2] as string]);
+      await page.keyboard.press("ControlOrMeta+g");
+      // Grouped in place: nothing moved, and the stack is the same height.
+      expect(await ys()).toEqual(before);
+      expect((await props(page, upcoming)).height).toBe(196);
+      await select(page, [upcoming]);
+      await page.keyboard.press("Alt+KeyE");
+      await expect(card(page).getByText("12 + 52 + 112 + 8 + 12")).toBeVisible();
+      await page.keyboard.press("Escape");
     });
   });

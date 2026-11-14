@@ -5,6 +5,7 @@ import { Doc } from "../src/doc";
 import {
   gridCellAt,
   gridGeometry,
+  layoutBox,
   layoutOps,
   layoutRoots,
   parseTrackList,
@@ -179,6 +180,95 @@ describe("auto layout", () => {
     doc.apply(layoutOps(doc, ["dot"]));
     expect(box("badge")).toEqual([200, 40, 20, 8]);
     expect(box("dot")).toEqual([4, 0, 12, 8]);
+  });
+
+  it("places a group as the box around its layers, moving them with it", () => {
+    // Row: c0 (50 wide), then a group of two rects spanning 30..90 by 0..30, gap 10.
+    const { doc, box } = setup(
+      { layoutMode: "row", gap: 10 },
+      [{}],
+      [
+        { op: "create", id: "g", type: "group", parent: "f", key: "a5", props: {} },
+        {
+          op: "create",
+          id: "g1",
+          type: "rect",
+          parent: "g",
+          key: "a0",
+          props: { x: 200, y: 40, width: 20, height: 10 },
+        },
+        {
+          op: "create",
+          id: "g2",
+          type: "rect",
+          parent: "g",
+          key: "a1",
+          props: { x: 240, y: 50, width: 20, height: 20 },
+        },
+      ],
+    );
+    // The group starts right after c0 and its gap; its layers keep their places in it.
+    expect(box("g1")).toEqual([60, 0, 20, 10]);
+    expect(box("g2")).toEqual([100, 10, 20, 20]);
+    expect(layoutBox(doc, "g")).toEqual({ x: 60, y: 0, width: 60, height: 30 });
+    // Never stretched: its size is its layers'.
+    doc.apply([{ op: "set", id: "f", prop: "alignItems", value: "stretch" }]);
+    doc.apply(layoutOps(doc, ["f"]));
+    expect(layoutBox(doc, "g")).toEqual({ x: 60, y: 0, width: 60, height: 30 });
+  });
+
+  it("re-lays out when a layer inside a group changes, and re-hugs a frame inside one", () => {
+    const { doc, box } = setup(
+      { layoutMode: "row", gap: 10, sizingH: "hug" },
+      [{}],
+      [
+        { op: "create", id: "g", type: "group", parent: "f", key: "a5", props: {} },
+        {
+          op: "create",
+          id: "inner",
+          type: "frame",
+          parent: "g",
+          key: "a0",
+          props: { x: 0, y: 0, layoutMode: "row", gap: 4, sizingH: "hug", sizingV: "hug" },
+        },
+        {
+          op: "create",
+          id: "i1",
+          type: "rect",
+          parent: "inner",
+          key: "a0",
+          props: { width: 10, height: 10 },
+        },
+        {
+          op: "create",
+          id: "i2",
+          type: "rect",
+          parent: "inner",
+          key: "a1",
+          props: { width: 10, height: 10 },
+        },
+      ],
+    );
+    expect(box("inner")).toEqual([60, 0, 24, 10]);
+    expect(box("f")[2]).toBe(84);
+    doc.apply([{ op: "set", id: "i2", prop: "width", value: 30 }]);
+    doc.apply(layoutOps(doc, ["i2"]));
+    expect(box("inner")).toEqual([60, 0, 44, 10]);
+    expect(box("f")[2]).toBe(104);
+  });
+
+  it("shrinks a frame that hugs across when its content does, whatever stretches", () => {
+    const { doc, box } = setup({ layoutMode: "row", sizingV: "hug", alignItems: "stretch" }, [
+      { height: 40, alignSelf: "start" },
+      { height: 10 },
+    ]);
+    // The tall layer sizes the row; the other stretches to it.
+    expect(box("f")[3]).toBe(40);
+    expect(box("c1")[3]).toBe(40);
+    doc.apply([{ op: "set", id: "c0", prop: "height", value: 20 }]);
+    doc.apply(layoutOps(doc, ["c0"]));
+    expect(box("f")[3]).toBe(20);
+    expect(box("c1")[3]).toBe(20);
   });
 
   it("produces no ops when nothing changes", () => {

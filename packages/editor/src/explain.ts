@@ -8,7 +8,7 @@
  */
 import { getProp, type NodeRecord } from "@drawpane/model";
 import type { Doc } from "./doc";
-import { type FlowLine, flowChildren, flowLines, inFlow } from "./layout";
+import { type FlowLine, flowChildren, flowLines, inFlow, layoutBox } from "./layout";
 
 export type ExplainAxis = "width" | "height";
 
@@ -43,7 +43,8 @@ export interface Explanation {
 
 const n = (v: number) => String(Math.round(v * 100) / 100);
 const name = (node: NodeRecord) => getProp(node.props, "name") || node.type;
-const sizeOf = (node: NodeRecord, axis: ExplainAxis) => getProp(node.props, axis);
+/** A layer's size as auto layout sees it (a group's is the box around what's in it). */
+const sizeOf = (doc: Doc, node: NodeRecord, axis: ExplainAxis) => layoutBox(doc, node.id)[axis];
 const sizingOf = (node: NodeRecord, axis: ExplainAxis) =>
   getProp(node.props, axis === "width" ? "sizingH" : "sizingV");
 const isLayout = (node: NodeRecord | undefined): node is NodeRecord =>
@@ -68,22 +69,20 @@ function flowOf(doc: Doc, frame: NodeRecord) {
   const visible = flowChildren(doc, frame.id);
   let hidden = 0;
   let absolute = 0;
-  let groups = 0;
   for (const id of doc.childIds(frame.id)) {
     const c = doc.get(id);
     if (!c) continue;
     if (!getProp(c.props, "visible")) hidden++;
     else if (getProp(c.props, "positioning") === "absolute") absolute++;
-    else if (c.type === "group") groups++;
   }
-  return { visible, hidden, absolute, groups };
+  return { visible, hidden, absolute };
 }
 
 /** Children grouped by name, sizing and size: "3 × Event row · fixed 52". */
-function grouped(children: readonly NodeRecord[], axis: ExplainAxis): ExplainTerm[] {
+function grouped(doc: Doc, children: readonly NodeRecord[], axis: ExplainAxis): ExplainTerm[] {
   const groups = new Map<string, { nodes: NodeRecord[]; size: number; sizing: string }>();
   for (const c of children) {
-    const size = sizeOf(c, axis);
+    const size = sizeOf(doc, c, axis);
     const sizing = c.type === "text" ? "text" : sizingOf(c, axis);
     const key = `${name(c)}\u0000${sizing}\u0000${n(size)}`;
     const g = groups.get(key) ?? { nodes: [], size, sizing };
@@ -172,8 +171,8 @@ function wrappedStretch(
   const lineGap = getProp(parent.props, "rowGap");
   const terms: ExplainTerm[] = [
     {
-      label: `${name(parent)} is ${n(sizeOf(parent, axis))}`,
-      value: sizeOf(parent, axis),
+      label: `${name(parent)} is ${n(sizeOf(doc, parent, axis))}`,
+      value: sizeOf(doc, parent, axis),
       kind: "parent",
       ids: [parent.id],
     },
@@ -215,7 +214,8 @@ function wrappedStretch(
 /** Whether a layer's size on an axis is set by hand, fills its parent, or hugs what's inside. */
 export function sizeMode(doc: Doc, id: string, axis: ExplainAxis): "fixed" | "fill" | "hug" {
   const node = doc.get(id);
-  if (!node) return "fixed";
+  // A group is the box around what's in it: neither Fill nor Hug.
+  if (!node || node.type === "group") return "fixed";
   if (node.type === "text") {
     const mode = getProp(node.props, "textAutoResize");
     if (axis === "width" ? mode === "width" : mode !== "none") return "hug";
@@ -239,7 +239,7 @@ function stretches(node: NodeRecord, parent: NodeRecord): boolean {
 export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanation | null {
   const node = doc.get(id);
   if (!node || node.type === "page") return null;
-  const size = sizeOf(node, axis);
+  const size = sizeOf(doc, node, axis);
   const tall = axis === "width" ? "wide" : "tall";
   const question = `Why is ${name(node)} ${n(size)} px ${tall}?`;
   const Axis = axis === "width" ? "Width" : "Height";
@@ -301,24 +301,34 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
     if (stretched) {
       const terms: ExplainTerm[] = [
         {
-          label: `${name(parent)} is ${n(sizeOf(parent, axis))}`,
-          value: sizeOf(parent, axis),
+          label: `${name(parent)} is ${n(sizeOf(doc, parent, axis))}`,
+          value: sizeOf(doc, parent, axis),
           kind: "parent",
           ids: [parent.id],
         },
         { label: `Padding ${startName}`, value: -startPad, kind: "padding" },
         { label: `Padding ${endName}`, value: -endPad, kind: "padding" },
       ];
-      const inner = sizeOf(parent, axis) - startPad - endPad;
+      const inner = sizeOf(doc, parent, axis) - startPad - endPad;
       const floor = floorNote(inner);
       if (floor) terms.push(floor);
       const clamp = clampNote(node, axis, Math.max(0, inner));
       if (clamp) terms.push(clamp);
       return {
         ...base,
-        answer: `${Axis} is ${sizing === "fill" ? "Fill" : "stretched"}: ${name(parent)} is ${n(sizeOf(parent, axis))}, minus ${n(startPad)} ${startName} and ${n(endPad)} ${endName} padding.`,
+        answer: `${Axis} is ${sizing === "fill" ? "Fill" : "stretched"}: ${name(parent)} is ${n(sizeOf(doc, parent, axis))}, minus ${n(startPad)} ${startName} and ${n(endPad)} ${endName} padding.`,
         terms,
         formula: formulaOf(terms),
+        actions: [fix, { kind: "select", label: `Select ${name(parent)}`, ids: [parent.id] }],
+      };
+    }
+    if (sizing === "fill" && direction === "main" && sizingOf(parent, axis) === "hug") {
+      // A hugging frame has no room to share out: Fill keeps its own size.
+      return {
+        ...base,
+        answer: `${Axis} is Fill, but ${name(parent)} hugs its contents, so there's nothing to fill: it stays ${n(size)}.`,
+        terms: [],
+        formula: null,
         actions: [fix, { kind: "select", label: `Select ${name(parent)}`, ids: [parent.id] }],
       };
     }
@@ -330,14 +340,14 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
       const gaps = Math.max(0, visible.length - 1);
       const terms: ExplainTerm[] = [
         {
-          label: `${name(parent)} is ${n(sizeOf(parent, axis))}`,
-          value: sizeOf(parent, axis),
+          label: `${name(parent)} is ${n(sizeOf(doc, parent, axis))}`,
+          value: sizeOf(doc, parent, axis),
           kind: "parent",
           ids: [parent.id],
         },
         { label: `Padding ${startName}`, value: -startPad, kind: "padding" },
         { label: `Padding ${endName}`, value: -endPad, kind: "padding" },
-        ...grouped(others, axis).map((t) => ({ ...t, value: -t.value })),
+        ...grouped(doc, others, axis).map((t) => ({ ...t, value: -t.value })),
         ...(gaps > 0
           ? [
               {
@@ -372,7 +382,7 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
   if (sizing === "hug" && isLayout(node)) {
     const direction = along(node, axis);
     const [startPad, endPad, startName, endName] = paddings(node, axis);
-    const { visible, hidden, absolute, groups } = flowOf(doc, node);
+    const { visible, hidden, absolute } = flowOf(doc, node);
     const terms: ExplainTerm[] = [
       { label: `Padding ${startName}`, value: startPad, kind: "padding" },
     ];
@@ -380,7 +390,7 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
     if (direction === "main" && !getProp(node.props, "layoutWrap")) {
       const gap = getProp(node.props, "gap");
       const gaps = Math.max(0, visible.length - 1);
-      terms.push(...grouped(visible, axis));
+      terms.push(...grouped(doc, visible, axis));
       if (gaps > 0)
         terms.push({
           label: `${gaps} ${gaps === 1 ? "gap" : "gaps"} of ${n(gap)}`,
@@ -391,20 +401,20 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
       answer = `${Axis} hugs its children in a ${getProp(node.props, "layoutMode") === "row" ? "horizontal row" : "vertical stack"}.`;
     } else if (direction === "cross" && !getProp(node.props, "layoutWrap")) {
       const tallest = visible.reduce<NodeRecord | null>(
-        (m, c) => (!m || sizeOf(c, axis) > sizeOf(m, axis) ? c : m),
+        (m, c) => (!m || sizeOf(doc, c, axis) > sizeOf(doc, m, axis) ? c : m),
         null,
       );
       if (tallest)
         terms.push({
           label: `${name(tallest)}, the ${axis === "width" ? "widest" : "tallest"}`,
-          value: sizeOf(tallest, axis),
+          value: sizeOf(doc, tallest, axis),
           kind: "child",
           ids: [tallest.id],
         });
       answer = `${Axis} hugs its ${axis === "width" ? "widest" : "tallest"} child.`;
     } else {
       // Wrapped lines and grid tracks: the content box as laid out.
-      const content = sizeOf(node, axis) - startPad - endPad;
+      const content = sizeOf(doc, node, axis) - startPad - endPad;
       terms.push({
         label: direction === "grid" ? "Its tracks and gaps" : "Its wrapped lines and line gaps",
         value: content,
@@ -426,12 +436,6 @@ export function explainSize(doc: Doc, id: string, axis: ExplainAxis): Explanatio
     if (absolute > 0)
       terms.push({
         label: `${absolute} absolute ${absolute === 1 ? "layer" : "layers"}, not counted`,
-        value: 0,
-        kind: "hidden",
-      });
-    if (groups > 0)
-      terms.push({
-        label: `${groups} ${groups === 1 ? "group" : "groups"}, not in the auto layout`,
         value: 0,
         kind: "hidden",
       });

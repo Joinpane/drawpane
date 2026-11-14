@@ -344,6 +344,11 @@ export function fmt(n: number): string {
   return String(r);
 }
 
+/** Whether two points are written the same (the serializer rounds). */
+function sameWritten(p: { x: number; y: number }, q: { x: number; y: number }): boolean {
+  return fmt(p.x) === fmt(q.x) && fmt(p.y) === fmt(q.y);
+}
+
 export function serializePath(path: VectorPath): string {
   const parts: string[] = [];
   const pt = (x: number, y: number) => `${fmt(x)} ${fmt(y)}`;
@@ -357,12 +362,16 @@ export function serializePath(path: VectorPath): string {
       const a = sub.anchors[i] as Anchor;
       const b = sub.anchors[(i + 1) % n] as Anchor;
       const closing = sub.closed && i === n - 1;
-      if (a.out === null && b.in === null) {
+      // A handle that rounds onto its anchor is no handle: written as a curve
+      // it would read back as a line, so saving twice would differ.
+      const out = a.out && !sameWritten(a.out, a) ? a.out : null;
+      const into = b.in && !sameWritten(b.in, b) ? b.in : null;
+      if (out === null && into === null) {
         // The closing line is drawn by Z itself.
         if (!closing) parts.push(`L${pt(b.x, b.y)}`);
       } else {
-        const c1 = a.out ?? a;
-        const c2 = b.in ?? b;
+        const c1 = out ?? a;
+        const c2 = into ?? b;
         parts.push(`C${pt(c1.x, c1.y)} ${pt(c2.x, c2.y)} ${pt(b.x, b.y)}`);
       }
     }

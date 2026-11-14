@@ -1059,6 +1059,27 @@ export class Editor {
     );
   }
 
+  /** The box around layers, in `parent`'s coordinate space (its own rotation and all). */
+  #boxIn(ids: readonly string[], parent: string): Rect | null {
+    const toParent = invert(this.scene.spaceMatrix(this.scene.spaceOwner(parent)));
+    let x0 = Number.POSITIVE_INFINITY;
+    let y0 = Number.POSITIVE_INFINITY;
+    let x1 = Number.NEGATIVE_INFINITY;
+    let y1 = Number.NEGATIVE_INFINITY;
+    // A group's own corners are world-aligned: use its layers' instead.
+    const leaves = (id: string): string[] =>
+      this.doc.get(id)?.type === "group" ? this.doc.childIds(id).flatMap(leaves) : [id];
+    for (const id of ids.flatMap(leaves))
+      for (const corner of this.scene.corners(id) ?? []) {
+        const p = apply(toParent, corner);
+        x0 = Math.min(x0, p.x);
+        y0 = Math.min(y0, p.y);
+        x1 = Math.max(x1, p.x);
+        y1 = Math.max(y1, p.y);
+      }
+    return Number.isFinite(x0) ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
+  }
+
   /**
    * Where a new group or frame around `ids` (in tree order) goes: in the
    * topmost layer's parent, just above it, like Figma. The layers may come
@@ -1343,8 +1364,10 @@ export class Editor {
     if (!slot) return;
     const { parent } = slot;
     const frameId = newId();
-    const origin = this.scene.toSpace(parent, { x: bounds.x, y: bounds.y });
-    const horizontal = bounds.width >= bounds.height;
+    // The selection's box in the parent's space, which may be rotated.
+    const box = this.#boxIn(ids, parent) ?? bounds;
+    const origin = { x: box.x, y: box.y };
+    const horizontal = box.width >= box.height;
     const ops: Op[] = [
       {
         op: "create",
@@ -1356,8 +1379,8 @@ export class Editor {
           name: this.defaultName("frame"),
           x: round2(origin.x),
           y: round2(origin.y),
-          width: round2(bounds.width),
-          height: round2(bounds.height),
+          width: round2(box.width),
+          height: round2(box.height),
           ...(autoLayout
             ? { layoutMode: horizontal ? "row" : "column", gap: 8, sizingH: "hug", sizingV: "hug" }
             : {}),
