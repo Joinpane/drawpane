@@ -60,7 +60,47 @@ function wranglerBin(): string {
   return join(dirname(require.resolve("wrangler/package.json")), "bin", "wrangler.js");
 }
 
+/**
+ * A failure worth trying again: Cloudflare's "internal error, please try
+ * again" (code 10001), a rate limit, or the network dropping. Every step the
+ * installer takes is safe to repeat (it finds before it creates).
+ */
+export function isTransient(output: string): boolean {
+  return /code: 10001|code: 10013|code: 971|internal error|please try again|rate limit|429 Too Many|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up/i.test(
+    output,
+  );
+}
+
+/** Waits between tries, longer each time. */
+export const RETRY_DELAYS_MS = [1_000, 3_000] as const;
+
+/**
+ * Runs `attempt`, trying again after each delay when it fails transiently
+ * (a WranglerError `isTransient` recognises); anything else fails at once.
+ */
+export async function withRetries<T>(
+  attempt: () => Promise<T>,
+  delays: readonly number[] = RETRY_DELAYS_MS,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<T> {
+  for (let tries = 0; ; tries++) {
+    try {
+      return await attempt();
+    } catch (error) {
+      const wait = delays[tries];
+      if (wait === undefined || !(error instanceof WranglerError) || !isTransient(error.output))
+        throw error;
+      await sleep(wait);
+    }
+  }
+}
+
+/** Runs Wrangler; a transient failure is tried again (not interactive runs, like signing in). */
 function run(args: readonly string[], options: RunOptions = {}): Promise<string> {
+  return options.interactive ? runOnce(args, options) : withRetries(() => runOnce(args, options));
+}
+
+function runOnce(args: readonly string[], options: RunOptions = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [wranglerBin(), ...args], {
       cwd: options.cwd,
