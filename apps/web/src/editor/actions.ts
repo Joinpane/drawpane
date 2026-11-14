@@ -12,13 +12,14 @@ import {
   instanceRootOf,
   isInstanceRoot,
   isMainComponent,
+  sizeMode,
   type ToolId,
 } from "@drawpane/editor";
 import type { IconName } from "@drawpane/ui";
 import { isMac } from "../app/format";
 import { copySelectionAs, exportPageAsPdf, exportSelection } from "./exporting";
 import { openTextStyles } from "./inspector/TextStyles";
-import { uiFor } from "./ui-state";
+import { toggleXray, uiFor } from "./ui-state";
 
 export interface Shortcut {
   /** `KeyboardEvent.key`, lowercased. */
@@ -804,6 +805,40 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => {
       const ui = uiFor(editor);
       ui.set({ lens: !ui.get().lens });
+    },
+  },
+  {
+    id: "view.xray",
+    label: "Layout X-ray",
+    group: "View",
+    icon: "xray",
+    keywords: "padding gap spacing auto layout show overlay alt",
+    run: ({ editor }) => toggleXray(editor),
+  },
+  {
+    id: "layout.explain",
+    label: "Explain size",
+    group: "Layer",
+    icon: "help",
+    shortcut: { key: "e", alt: true },
+    keywords: "why width height hug fill fixed auto layout size calculate",
+    enabled: (e) => {
+      const node = e.s.selection.length === 1 ? e.doc.get(e.s.selection[0] as string) : null;
+      return !!node && node.type !== "page";
+    },
+    run: ({ editor }) => {
+      const id = editor.s.selection[0] as string;
+      if (editor.s.explain?.id === id) {
+        editor.state.set({ explain: null });
+        return;
+      }
+      // The axis that's decided by something (hug or fill) says more than one set by hand.
+      const axis =
+        sizeMode(editor.doc, id, "height") === "fixed" &&
+        sizeMode(editor.doc, id, "width") !== "fixed"
+          ? "width"
+          : "height";
+      editor.state.set({ explain: { id, axis } });
     },
   },
   {

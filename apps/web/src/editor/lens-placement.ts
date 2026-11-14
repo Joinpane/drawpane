@@ -40,6 +40,8 @@ export interface LensPlacementInput {
   readonly previous?: LensSide | null;
   /** Only these sides (while a popover hangs off the Lens), falling back to any. */
   readonly sides?: readonly LensSide[];
+  /** Which sides to prefer, first to last (below, above, right, left, inside by default). */
+  readonly order?: readonly LensSide[];
 }
 
 /** Below clears the size pill under the selection. */
@@ -113,8 +115,9 @@ function candidate(side: LensSide, input: LensPlacementInput): Box | null {
 export function placeLens(input: LensPlacementInput): LensPlacement | null {
   const area = input.size.width * input.size.height;
   let best: { side: LensSide; box: Box; score: number } | null = null;
-  const allowed = input.sides ?? ORDER;
-  ORDER.forEach((side, rank) => {
+  const order = input.order ?? ORDER;
+  const allowed = input.sides ?? order;
+  order.forEach((side, rank) => {
     if (!allowed.includes(side)) return;
     const box = candidate(side, input);
     if (!box) return;

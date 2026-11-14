@@ -45,6 +45,7 @@ import { constraintOps } from "./constraints";
 import * as crop from "./crop-session";
 import { Doc } from "./doc";
 import { dependsOn, parseDtcg } from "./dtcg";
+import type { ExplainAxis } from "./explain";
 import {
   apply,
   boxOf,
@@ -143,6 +144,8 @@ export interface EditorState {
   readonly gesture: boolean;
   /** Layout X-ray: overlay padding and gaps (hold Alt). */
   readonly xray: boolean;
+  /** Explain is open: why this layer is the size it is on this axis. */
+  readonly explain: { readonly id: string; readonly axis: ExplainAxis } | null;
   /** Hide other people's cursors and selections. */
   readonly focusMode: boolean;
   readonly status: ConnectionStatus;
@@ -288,6 +291,7 @@ export class Editor {
     guides: [],
     gesture: false,
     xray: false,
+    explain: null,
     focusMode: false,
     status: "connecting",
     role: "viewer",
@@ -342,6 +346,15 @@ export class Editor {
     this.doc.subscribe(() => vector.reconcileVectorEdit(this));
     this.state.subscribe(() => crop.reconcileCrop(this));
     this.doc.subscribe(() => crop.reconcileCrop(this));
+    // Close Explain when its layer is no longer the selection, or is gone.
+    const reconcileExplain = () => {
+      const { explain, selection } = this.s;
+      if (!explain) return;
+      if (selection.length !== 1 || selection[0] !== explain.id || !this.doc.get(explain.id))
+        this.state.set({ explain: null });
+    };
+    this.state.subscribe(reconcileExplain);
+    this.doc.subscribe(reconcileExplain);
   }
 
   get s(): EditorState {

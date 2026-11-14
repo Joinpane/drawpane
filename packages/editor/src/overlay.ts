@@ -13,9 +13,11 @@ import { gridLines, gridTracks, placedGuides, visibleGrids } from "./grids";
 import type { ImageCache } from "./images";
 import type { Interaction } from "./interaction";
 import { frameLabels, LABEL_FONT } from "./labels";
-import { type GridGeometry, gridGeometry, trackLabel } from "./layout";
+import { trackLabel } from "./layout";
 import { drawPrototypeOverlay } from "./prototype/overlay";
+import { PILL_FONT, PILL_MODE_FONT, sizePill } from "./size-pill";
 import { drawVectorOverlay } from "./tools/overlay";
+import { explainedFrame, solvedGrid, xrayFrames, xrayRegions } from "./xray";
 
 export interface OverlayTheme {
   signal: string;
@@ -41,6 +43,9 @@ export interface OverlayTheme {
 }
 
 const HANDLE = 7;
+/** Dark inks of the X-ray colours, for values drawn on them (the design's own). */
+const XRAY_PADDING_INK = "#6b4e00";
+const XRAY_GAP_INK = "#8a1f50";
 
 export function drawOverlay(
   ctx: CanvasRenderingContext2D,
@@ -59,6 +64,7 @@ export function drawOverlay(
     guides,
     pageId,
     xray,
+    explain,
     editingText,
     focusMode,
     peers,
@@ -153,16 +159,12 @@ export function drawOverlay(
     for (const [frameId, picked] of grids) drawGridLayout(ctx, editor, frameId, picked, theme);
   }
 
-  // Layout X-ray: padding and gaps of the selected or hovered auto-layout frame.
-  if (xray) {
-    const ids = new Set([...selection, ...(hover ? [hover] : [])]);
-    for (const id of ids) {
-      const frameId = doc.get(id)?.type === "frame" ? id : doc.get(id)?.parent;
-      const frame = frameId ? doc.get(frameId) : undefined;
-      if (frame?.type !== "frame" || getProp(frame.props, "layoutMode") === "none") continue;
-      drawXray(ctx, editor, frame.id, theme);
-    }
-  }
+  // Layout X-ray: padding and gaps of the selected or hovered auto-layout
+  // frame, and of the frame whose padding and gaps Explain is adding up.
+  const xrayed = new Set(xray ? xrayFrames(editor) : []);
+  const explained = explain ? explainedFrame(editor, explain.id, explain.axis) : null;
+  if (explained) xrayed.add(explained);
+  for (const frameId of xrayed) drawXray(ctx, editor, frameId, theme);
 
   // Collaborators: their selections, then cursors with name tags.
   if (!focusMode) {
@@ -242,24 +244,9 @@ export function drawOverlay(
         ctx.stroke();
       }
     }
-    // Size pill under the selection (not while prototyping: it would sit on the connections).
-    const bounds = prototyping ? null : scene.unionBounds(selection);
-    if (bounds) {
-      const label = `${fmt(frame.width)} × ${fmt(frame.height)}`;
-      const bottom = toScreen({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height });
-      ctx.font = `600 11px ${theme.fontUi}`;
-      const w = ctx.measureText(label).width + 10;
-      ctx.fillStyle = theme.signal;
-      ctx.beginPath();
-      ctx.roundRect(bottom.x - w / 2, bottom.y + 8, w, 18, 3);
-      ctx.fill();
-      ctx.fillStyle = theme.onSignal;
-      ctx.textBaseline = "middle";
-      ctx.textAlign = "center";
-      ctx.fillText(label, bottom.x, bottom.y + 17.5);
-      ctx.textAlign = "left";
-    }
   }
+
+  drawSizePill(ctx, editor, theme);
 
   // Alt + hover: measure from the selection to the hovered layer.
   if (xray && selection.length > 0 && hover && !selection.includes(hover)) {
@@ -452,108 +439,101 @@ function drawDiamond(
   ctx.restore();
 }
 
+/**
+ * "300 Fill × 196 Hug" under the selection. With Explain open, the number
+ * being explained gets a halo, so the card and the canvas point at each other.
+ */
+function drawSizePill(ctx: CanvasRenderingContext2D, editor: Editor, theme: OverlayTheme): void {
+  const pill = sizePill(editor);
+  if (!pill) return;
+  const { box, parts, middle } = pill;
+  const explaining = editor.s.explain?.axis;
+  ctx.fillStyle = theme.signal;
+  ctx.beginPath();
+  ctx.roundRect(box.x, box.y, box.width, box.height, 3);
+  ctx.fill();
+  if (explaining) {
+    const part = parts[explaining === "width" ? 0 : 1];
+    ctx.strokeStyle = withAlpha(theme.signal, 0.28);
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(box.x - 1.5, box.y - 1.5, box.width + 3, box.height + 3, 4.5);
+    ctx.stroke();
+    // A hairline under the number it's about.
+    ctx.fillStyle = theme.onSignal;
+    ctx.fillRect(Math.round(part.x), box.y + box.height - 4, Math.round(part.width), 1);
+  }
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.fillStyle = theme.onSignal;
+  ctx.font = PILL_FONT;
+  for (const part of parts) ctx.fillText(part.value, part.x, middle);
+  ctx.fillText(" × ", pill.timesX, middle);
+  ctx.font = PILL_MODE_FONT;
+  ctx.globalAlpha = 0.78;
+  for (const part of parts) if (part.mode) ctx.fillText(part.mode, part.modeX, middle);
+  ctx.globalAlpha = 1;
+  ctx.textBaseline = "alphabetic";
+}
+
 function drawXray(
   ctx: CanvasRenderingContext2D,
   editor: Editor,
   frameId: string,
   theme: OverlayTheme,
 ): void {
-  const doc = editor.doc;
-  const frame = doc.get(frameId);
-  if (!frame) return;
-  const p = frame.props;
   const m = editor.scene.worldMatrix(frameId);
-  const w = getProp(p, "width");
-  const h = getProp(p, "height");
-  const top = getProp(p, "paddingTop");
-  const right = getProp(p, "paddingRight");
-  const bottom = getProp(p, "paddingBottom");
-  const left = getProp(p, "paddingLeft");
   const camera = editor.s.camera;
-  const fillLocal = (x: number, y: number, rw: number, rh: number, color: string) => {
-    if (rw <= 0 || rh <= 0) return;
-    const pts = [
-      { x, y },
-      { x: x + rw, y },
-      { x: x + rw, y: y + rh },
-      { x, y: y + rh },
+  const frame = editor.doc.get(frameId);
+  if (!frame) return;
+  const corners = (r: Rect) =>
+    [
+      { x: r.x, y: r.y },
+      { x: r.x + r.width, y: r.y },
+      { x: r.x + r.width, y: r.y + r.height },
+      { x: r.x, y: r.y + r.height },
     ].map((pt) => camera.toScreen(apply(m, pt)));
+  const padding = withAlpha(theme.xrayPadding, 0.35);
+  const gap = withAlpha(theme.xrayGap, 0.35);
+  for (const region of xrayRegions(editor, frameId)) {
+    const pts = corners(region.rect);
     ctx.beginPath();
     ctx.moveTo((pts[0] as Point).x, (pts[0] as Point).y);
     for (const pt of pts.slice(1)) ctx.lineTo(pt.x, pt.y);
     ctx.closePath();
-    ctx.fillStyle = color;
+    ctx.fillStyle = region.kind === "gap" ? gap : padding;
     ctx.fill();
-  };
-  const padding = withAlpha(theme.xrayPadding, 0.35);
-  fillLocal(0, 0, w, top, padding);
-  fillLocal(0, h - bottom, w, bottom, padding);
-  fillLocal(0, top, left, h - top - bottom, padding);
-  fillLocal(w - right, top, right, h - top - bottom, padding);
-  const gapColor = withAlpha(theme.xrayGap, 0.35);
-  if (getProp(p, "layoutMode") === "grid") {
-    // Gaps between tracks, across the whole content box.
-    const grid = solvedGrid(editor, frameId);
-    if (!grid) return;
-    const between = (tracks: readonly { start: number; size: number }[]) =>
-      tracks.slice(1).map((t, i) => {
-        const prev = tracks[i] as { start: number; size: number };
-        return { at: prev.start + prev.size, size: t.start - prev.start - prev.size };
-      });
-    for (const g of between(grid.columns)) fillLocal(g.at, top, g.size, h - top - bottom, gapColor);
-    for (const g of between(grid.rows)) fillLocal(left, g.at, w - left - right, g.size, gapColor);
-    return;
+    // Its value in the middle, where there's room for it.
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    const wide = Math.max(...xs) - Math.min(...xs);
+    const tall = Math.max(...ys) - Math.min(...ys);
+    if (wide < 16 || tall < 14) continue;
+    const value = String(Math.round(getProp(frame.props, region.prop) * 100) / 100);
+    // Padding values sit a quarter of the way along, clear of the edge's middle handle.
+    const along = region.kind === "padding" ? 0.25 : 0.5;
+    const across = region.axis === "y";
+    const cx = Math.min(...xs) + wide * (across ? along : 0.5);
+    const cy = Math.min(...ys) + tall * (across ? 0.5 : along);
+    ctx.font = `600 10px ${theme.fontMono ?? theme.fontUi}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    if (region.kind === "gap") {
+      // A gap's value sits on a white chip ringed in the gap colour: it's a handle.
+      const w = ctx.measureText(value).width + 8;
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.roundRect(cx - w / 2, cy - 6.5, w, 13, 6.5);
+      ctx.fill();
+      ctx.strokeStyle = theme.xrayGap;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = XRAY_GAP_INK;
+    } else ctx.fillStyle = XRAY_PADDING_INK;
+    ctx.fillText(value, cx, cy + 0.5);
   }
-  // Gaps between consecutive children along the main axis, across the band
-  // the two share (wrapped lines each have their own).
-  const row = getProp(p, "layoutMode") === "row";
-  const children = doc
-    .childIds(frameId)
-    .map((id) => doc.get(id))
-    .filter((c) => c && c.props.visible !== false && getProp(c.props, "positioning") === "auto");
-  for (let i = 0; i < children.length - 1; i++) {
-    const a = children[i]?.props;
-    const b = children[i + 1]?.props;
-    if (!a || !b) continue;
-    const [ax, ay, aw, ah] = [
-      getProp(a, "x"),
-      getProp(a, "y"),
-      getProp(a, "width"),
-      getProp(a, "height"),
-    ];
-    const [bx, by, bw, bh] = [
-      getProp(b, "x"),
-      getProp(b, "y"),
-      getProp(b, "width"),
-      getProp(b, "height"),
-    ];
-    const wrapped = getProp(p, "layoutWrap");
-    if (row) {
-      const y0 = wrapped ? Math.min(ay, by) : top;
-      const y1 = wrapped ? Math.max(ay + ah, by + bh) : h - bottom;
-      fillLocal(ax + aw, y0, bx - ax - aw, y1 - y0, gapColor);
-    } else {
-      const x0 = wrapped ? Math.min(ax, bx) : left;
-      const x1 = wrapped ? Math.max(ax + aw, bx + bw) : w - right;
-      fillLocal(x0, ay + ah, x1 - x0, by - ay - ah, gapColor);
-    }
-  }
-}
-
-/** Solved grids, per document and version: the overlay repaints on every pointer move. */
-const solvedGrids = new WeakMap<
-  object,
-  { version: number; grids: Map<string, GridGeometry | null> }
->();
-
-function solvedGrid(editor: Editor, frameId: string): GridGeometry | null {
-  let entry = solvedGrids.get(editor.doc);
-  if (!entry || entry.version !== editor.doc.version) {
-    entry = { version: editor.doc.version, grids: new Map() };
-    solvedGrids.set(editor.doc, entry);
-  }
-  if (!entry.grids.has(frameId)) entry.grids.set(frameId, gridGeometry(editor.doc, frameId));
-  return entry.grids.get(frameId) ?? null;
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
 }
 
 function isGridFrame(node: NodeRecord | undefined): boolean {
