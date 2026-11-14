@@ -1,6 +1,6 @@
 import { env, runDurableObjectAlarm } from "cloudflare:test";
 import type { NodeRecord, Op } from "@drawpane/model";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type InstanceHealth, p95 } from "../src/api/admin";
 import { openSocket, signedInUser } from "./helpers";
 
@@ -94,5 +94,40 @@ describe("p95", () => {
     ]);
     expect(p95(buckets)).toBe(128);
     expect(p95(new Map([[Number.POSITIVE_INFINITY, 100]]))).toBeNull();
+  });
+});
+
+describe("test email", () => {
+  it("sends the admin a test through the configured provider, and is the admin's alone", async () => {
+    const admin = await signedInUser("Ana Lima");
+    await env.DB.prepare("UPDATE users SET is_admin = 1 WHERE id = ?").bind(admin.userId).run();
+    const other = await signedInUser("Bo", "editor", admin.teamId);
+    const printed: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+      printed.push(String(line));
+    });
+    try {
+      const sent = await admin.browser.json<{ to: string; via: string }>("/api/admin/email/test", {
+        method: "POST",
+      });
+      expect(sent).toEqual({
+        ok: true,
+        to: `${admin.userId}@example.com`,
+        via: "Log (development: printed, not sent)",
+      });
+      expect(printed.join("\n")).toContain("Drawpane can send email");
+    } finally {
+      log.mockRestore();
+    }
+    expect((await other.browser.fetch("/api/admin/email/test", { method: "POST" })).status).toBe(
+      403,
+    );
+    // The health page says how email goes out.
+    const health = await admin.browser.json<{ email: unknown }>("/api/admin/health?days=7");
+    expect(health.email).toEqual({
+      via: "Log (development: printed, not sent)",
+      from: "Drawpane <design@example.com>",
+      problem: null,
+    });
   });
 });

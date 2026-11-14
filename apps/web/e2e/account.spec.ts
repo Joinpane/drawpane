@@ -74,6 +74,38 @@ test.describe
       await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     });
 
+    test("shows how email goes out, sends a test, and says what's wrong when it's set up wrong", async () => {
+      await page.goto("/admin/health");
+      const panel = page.getByRole("region", { name: "Email" });
+      await expect(panel).toContainText("Sent through Log (development: printed, not sent)");
+      await expect(panel).toContainText("Drawpane <design@example.com>");
+      await panel.getByRole("button", { name: "Send a test email" }).click();
+      await expect(panel.getByRole("status")).toContainText("Sent to ana@example.com");
+      // Set up wrong, as the Worker would report it: the fix is spelled out.
+      await page.route("**/api/admin/health?*", async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({
+          response,
+          json: {
+            ...(await response.json()),
+            email: {
+              via: null,
+              from: null,
+              problem: "Set the EMAIL_API_KEY secret to your Resend API key.",
+            },
+          },
+        });
+      });
+      await page.reload();
+      await expect(panel).toContainText("Needs attention");
+      await expect(panel.getByRole("alert")).toHaveText(
+        "Set the EMAIL_API_KEY secret to your Resend API key.",
+      );
+      await page.unroute("**/api/admin/health?*");
+      await page.getByRole("link", { name: "Files" }).click();
+      await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    });
+
     test("tells the admin when a newer release is out, and how to upgrade", async () => {
       // As if npm said 0.2.0 is out while this instance runs 0.1.0.
       await page.route("**/api/admin/health?*", async (route) => {

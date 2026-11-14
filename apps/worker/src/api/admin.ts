@@ -6,9 +6,12 @@
  * cheap. Admins only.
  */
 import { Hono } from "hono";
+import { publicOrigins } from "../auth/passkeys";
 import { requireUser } from "../auth/session";
+import type { EmailMessage, EmailSender } from "../email/message";
+import { emailSetup } from "../email/setup";
 import type { AppContext, Env } from "../env";
-import { badRequest, forbidden } from "../lib/http";
+import { badRequest, conflict, forbidden } from "../lib/http";
 import { type AvailableUpdate, availableUpdate } from "./updates";
 
 const PERIODS = [7, 30, 90] as const;
@@ -56,6 +59,12 @@ export interface InstanceHealth {
   readonly version: string | null;
   /** A newer release, when there is one. */
   readonly update: AvailableUpdate | null;
+  /** How the instance sends email: off, set up (what carries it), or set up wrong (what to fix). */
+  readonly email: {
+    readonly via: string | null;
+    readonly from: string | null;
+    readonly problem: string | null;
+  };
 }
 
 /** A latency histogram's p95 from its log₂ buckets ("latency_le_64" → at most 64 ms). */
@@ -173,6 +182,14 @@ export async function instanceHealth(
     retentionDays: RETENTION_DAYS,
     version,
     update,
+    email: (() => {
+      const setup = emailSetup(env);
+      return {
+        via: setup.sender?.label ?? null,
+        from: setup.sender?.from ?? null,
+        problem: setup.problem,
+      };
+    })(),
   };
 }
 
@@ -184,11 +201,47 @@ function formatBytes(bytes: number): string {
   return `${(bytes / GB).toFixed(1)} GB`;
 }
 
-export const admin = new Hono<AppContext>().get("/health", async (c) => {
-  const user = requireUser(c);
-  if (!user.isAdmin) throw forbidden("Only the instance's admin can see its health.");
-  const days = Number(c.req.query("days") ?? 30);
-  if (!PERIODS.includes(days as (typeof PERIODS)[number]))
-    throw badRequest("The period is 7, 30 or 90 days.");
-  return c.json(await instanceHealth(c.env, days));
-});
+export const admin = new Hono<AppContext>()
+  .get("/health", async (c) => {
+    const user = requireUser(c);
+    if (!user.isAdmin) throw forbidden("Only the instance's admin can see its health.");
+    const days = Number(c.req.query("days") ?? 30);
+    if (!PERIODS.includes(days as (typeof PERIODS)[number]))
+      throw badRequest("The period is 7, 30 or 90 days.");
+    return c.json(await instanceHealth(c.env, days));
+  })
+
+  /** Sends the admin a test email, to see that email works (and why not, when it doesn't). */
+  .post("/email/test", async (c) => {
+    const user = requireUser(c);
+    if (!user.isAdmin) throw forbidden("Only the instance's admin can send a test email.");
+    const setup = emailSetup(c.env);
+    if (!setup.sender)
+      throw conflict(
+        setup.problem ??
+          "Email is off on this instance. Set EMAIL_PROVIDER to send it (see the self-hosting guide).",
+      );
+    const origin = publicOrigins(c)[0] ?? "";
+    try {
+      await setup.sender.send(testEmail(user.email, origin, setup.sender));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return c.json({ error: { code: "email_failed", message } }, 502);
+    }
+    return c.json({ ok: true, to: user.email, via: setup.sender.label });
+  });
+
+/** The test email: what sent it, and what email from this instance will be. */
+function testEmail(to: string, origin: string, sender: EmailSender): EmailMessage {
+  const host = origin.replace(/^https?:\/\//, "");
+  return {
+    to: [to],
+    subject: "Drawpane can send email",
+    text: [
+      `This is a test from your Drawpane at ${host}, sent through ${sender.label}.`,
+      "",
+      `Emails about mentions and replies will come from ${sender.from}.`,
+    ].join("\n"),
+    html: `<p>This is a test from your Drawpane at <a href="${origin}">${host}</a>, sent through ${sender.label}.</p><p>Emails about mentions and replies will come from ${sender.from.replace(/</g, "&lt;").replace(/>/g, "&gt;")}.</p>`,
+  };
+}

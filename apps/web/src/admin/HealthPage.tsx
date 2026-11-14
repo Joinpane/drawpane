@@ -5,7 +5,7 @@
  * backup was taken. See docs/decisions/0003-instance-health.md.
  */
 import { Button, ButtonLink, Icon, Logo, SegmentedControl } from "@drawpane/ui";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { api } from "../api/client";
@@ -35,6 +35,12 @@ interface Health {
   /** The release running; null when it wasn't installed with `npm create drawpane`. */
   readonly version: string | null;
   readonly update: { readonly version: string; readonly notesUrl: string } | null;
+  /** How email goes out: off (via null, no problem), set up, or set up wrong (problem). */
+  readonly email: {
+    readonly via: string | null;
+    readonly from: string | null;
+    readonly problem: string | null;
+  };
 }
 
 const UPGRADE = "npm create drawpane@latest upgrade";
@@ -199,8 +205,68 @@ export function HealthPage() {
             </p>
           </section>
         </div>
+
+        {data ? <EmailPanel email={data.email} /> : null}
       </main>
     </div>
+  );
+}
+
+/**
+ * How the instance sends email (docs/decisions/0006-email.md): off, with
+ * what that means; set up, with a test to send yourself; or set up wrong,
+ * with what to fix.
+ */
+function EmailPanel({ email }: { email: Health["email"] }) {
+  const test = useMutation({
+    mutationFn: () => api.post<{ to: string; via: string }>("/admin/email/test"),
+  });
+  const state = email.via ? "on" : email.problem ? "wrong" : "off";
+  return (
+    <section className="admin__panel admin__email" aria-labelledby="email-title">
+      <div className="admin__panel-head">
+        <h2 id="email-title" className="admin__heading">
+          Email
+        </h2>
+        <span
+          className="admin__status"
+          data-status={state === "on" ? "healthy" : state === "wrong" ? "down" : "off"}
+        >
+          <span className="admin__dot" aria-hidden="true" />
+          {state === "on" ? "On" : state === "wrong" ? "Needs attention" : "Off"}
+        </span>
+      </div>
+      {state === "on" ? (
+        <>
+          <p className="admin__email-line">
+            Sent through <b>{email.via}</b>, from <code>{email.from}</code>.
+          </p>
+          <div className="admin__email-test">
+            <Button size="sm" disabled={test.isPending} onClick={() => test.mutate()}>
+              {test.isPending ? "Sending…" : "Send a test email"}
+            </Button>
+            <span role="status" className="admin__email-result">
+              {test.isSuccess ? `Sent to ${test.data.to}. Check that it arrived.` : ""}
+            </span>
+          </div>
+          {test.isError ? (
+            <p className="admin__email-error" role="alert">
+              {test.error.message}
+            </p>
+          ) : null}
+        </>
+      ) : state === "wrong" ? (
+        <p className="admin__email-error" role="alert">
+          {email.problem}
+        </p>
+      ) : (
+        <p className="admin__email-line">
+          Email is off: mentions and replies show up in each person's inbox here, and invites are
+          links to share. To send email too, set <code>EMAIL_PROVIDER</code> (Cloudflare, Resend,
+          Postmark, SendGrid, Mailgun, Amazon SES or SMTP); the self-hosting guide has the steps.
+        </p>
+      )}
+    </section>
   );
 }
 

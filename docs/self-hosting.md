@@ -110,6 +110,33 @@ npx wrangler secret put GOOGLE_CLIENT_SECRET
 
 Who gets in stays the same: signing in with a provider finds an existing account by the provider account you connected, or by an email address the provider has verified. A new account still needs an invite link, which can then be accepted with **Join with GitHub** or **Join with Google**. Everyone can connect or disconnect providers and add passkeys under **Account** (click your name in the dashboard). The last way to sign in can't be removed.
 
+## Email
+
+Email is optional and off by default. Without it, mentions and replies show up in each person's **Inbox** in Drawpane, and invites are links you share. With it, Drawpane can also email people about them.
+
+Pick one way to send. Set everything with `npx wrangler secret put`, from the instance's folder (or `apps/worker`, installed by hand): secrets stay through upgrades, and `EMAIL_PROVIDER` and `EMAIL_FROM` aren't sensitive but are kept the same way.
+
+```sh
+npx wrangler secret put EMAIL_PROVIDER   # cloudflare, resend, postmark, sendgrid, mailgun, ses or smtp
+npx wrangler secret put EMAIL_FROM       # e.g. Drawpane <design@example.com>
+```
+
+Then the provider's credentials:
+
+| Provider | Also set | Notes |
+| --- | --- | --- |
+| Cloudflare Email Service (`cloudflare`) | A `send_email` binding named `EMAIL` on the Worker | No key. Onboard your sending domain in the Cloudflare dashboard first; until then it only reaches verified addresses. Needs Workers Paid. |
+| Resend (`resend`) | `EMAIL_API_KEY` | Verify the domain of `EMAIL_FROM` in Resend. |
+| Postmark (`postmark`) | `EMAIL_API_KEY` (a server token) | Sends on the server's `outbound` stream. |
+| SendGrid (`sendgrid`) | `EMAIL_API_KEY` | Verify the sender or domain in SendGrid. |
+| Mailgun (`mailgun`) | `EMAIL_API_KEY`; `MAILGUN_DOMAIN` if it isn't `EMAIL_FROM`'s domain; `MAILGUN_REGION=eu` for the EU region | |
+| Amazon SES (`ses`) | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | An IAM user allowed only `ses:SendEmail`; leave the SES sandbox to email anyone. |
+| SMTP (`smtp`) | `SMTP_URL`, like `smtp://user:password@smtp.example.com:587` | Any mail server: Google Workspace, Microsoft 365, Fastmail, your own. Port 587 upgrades with STARTTLS (credentials are never sent unencrypted); use `smtps://` for port 465. URL-encode special characters in the password. |
+
+Open **Instance health** (your name → Instance health and cost) to see how email is set up, or what's missing, and send yourself a test. For mail to land in inboxes rather than spam, set up SPF, DKIM and DMARC for the sending domain as your provider describes.
+
+To turn email off again: `npx wrangler secret delete EMAIL_PROVIDER`.
+
 ## Backups
 
 Every file keeps its own version history. While a file is being edited, its FileRoom saves a gzip snapshot to R2 (`files/<file-id>/snapshots/`) once editing pauses for 10 minutes, and at least once an hour during long sessions. It also saves one whenever someone names a version, and just before anyone restores one, so a restore can always be undone. Each snapshot has a row in D1's `versions` table that says who edited and what changed.
