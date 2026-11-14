@@ -6,7 +6,7 @@
  *
  * Screenshots land in TOUR_OUT (default `tour-shots`), in both themes.
  */
-import { test as base, type Page } from "@playwright/test";
+import { test as base, type Locator, type Page } from "@playwright/test";
 import { startWorker } from "../fresh-instance";
 
 export { addPasskey as passkey } from "../fresh-instance";
@@ -38,8 +38,8 @@ export const test = base.extend({
   ],
 });
 
-/** Screenshots the page in the light theme, then the dark one. */
-export async function shot(page: Page, name: string): Promise<void> {
+/** Screenshots the page (or just `target` in it) in the light theme, then the dark one. */
+export async function shot(page: Page, name: string, target?: Locator): Promise<void> {
   for (const theme of ["light", "dark"] as const) {
     await page.evaluate((t) => {
       if (t === "dark") document.documentElement.dataset.theme = "dark";
@@ -47,7 +47,8 @@ export async function shot(page: Page, name: string): Promise<void> {
     }, theme);
     // Let theme transitions settle.
     await page.waitForTimeout(300);
-    await page.screenshot({ path: `${OUT}/${name}-${theme}.png` });
+    const path = `${OUT}/${name}-${theme}.png`;
+    await (target ? target.screenshot({ path }) : page.screenshot({ path }));
   }
   await page.evaluate(() => delete document.documentElement.dataset.theme);
 }

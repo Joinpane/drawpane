@@ -34,6 +34,8 @@ export interface EditorUi {
   readonly textStyles: number;
   /** The Selection Lens shows beside the selection (a view preference). */
   readonly lens: boolean;
+  /** The minimap shows at the canvas's bottom left (a view preference, ⌥M). */
+  readonly minimap: boolean;
   /** Layout X-ray stays on without holding Alt (the inspector's X-ray button). */
   readonly xrayPinned: boolean;
 }
@@ -50,6 +52,7 @@ export function uiFor(editor: Editor): Store<EditorUi> {
       collapseLayers: 0,
       textStyles: 0,
       lens: true,
+      minimap: true,
       xrayPinned: false,
     });
     stores.set(editor, store);

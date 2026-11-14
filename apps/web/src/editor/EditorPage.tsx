@@ -43,6 +43,7 @@ import { InspectPanel } from "./InspectPanel";
 import { Inspector } from "./inspector/Inspector";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
+import { Minimap } from "./Minimap";
 import { chooseImageFiles, filesFrom, importImageFiles, pasteFromClipboard } from "./media";
 import { PrototypePanel } from "./prototype/PrototypePanel";
 import { RULER, RULER_GAP, Rulers } from "./Rulers";
@@ -680,6 +681,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         ) : view === "design" ? (
           <>
             <EditorContext.Provider value={active}>
+              <Minimap />
               <ZoomControls />
             </EditorContext.Provider>
             <SyncStatus />

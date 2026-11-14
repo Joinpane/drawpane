@@ -684,28 +684,46 @@ export class Editor {
    * area the panes don't cover), who you follow and whether you spotlight.
    */
   presence(cursor: Point | null): Presence {
-    const { pageId, selection, camera, viewport, insets, following, spotlight } = this.s;
+    const { pageId, selection, following, spotlight } = this.s;
+    const area = this.visibleArea();
+    return {
+      cursor,
+      pageId,
+      selection: [...selection].slice(0, 500),
+      viewport: area
+        ? {
+            x: round2(area.x),
+            y: round2(area.y),
+            width: round2(area.width),
+            height: round2(area.height),
+          }
+        : null,
+      following,
+      spotlight,
+    };
+  }
+
+  /** The part of the page on screen that the floating panes don't cover; null before layout. */
+  visibleArea(): Rect | null {
+    const { camera, viewport, insets } = this.s;
+    if (viewport.width <= 0) return null;
     const tl = camera.toPage({ x: insets.left, y: insets.top });
     const br = camera.toPage({
       x: Math.max(insets.left + 1, viewport.width - insets.right),
       y: Math.max(insets.top + 1, viewport.height - insets.bottom),
     });
-    return {
-      cursor,
-      pageId,
-      selection: [...selection].slice(0, 500),
-      viewport:
-        viewport.width > 0
-          ? {
-              x: round2(tl.x),
-              y: round2(tl.y),
-              width: round2(br.x - tl.x),
-              height: round2(br.y - tl.y),
-            }
-          : null,
-      following,
-      spotlight,
+    return { x: tl.x, y: tl.y, width: br.x - tl.x, height: br.y - tl.y };
+  }
+
+  /** Pans so a page point sits in the middle of the visible area, keeping the zoom. */
+  centerOn(point: Point): void {
+    const { camera, viewport, insets } = this.s;
+    const centre = {
+      x: insets.left + (viewport.width - insets.left - insets.right) / 2,
+      y: insets.top + (viewport.height - insets.top - insets.bottom) / 2,
     };
+    const at = camera.toScreen(point);
+    this.setCamera(camera.pan(centre.x - at.x, centre.y - at.y));
   }
 
   /** Shows the followed collaborator's page and view; stops if they left. */

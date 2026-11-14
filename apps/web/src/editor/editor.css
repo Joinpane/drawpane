@@ -2047,6 +2047,40 @@
   text-align: center;
 }
 
+/* Minimap: the page in miniature, bottom left, beside the zoom controls. */
+.minimap {
+  bottom: 12px;
+  width: 168px;
+  padding: var(--space-200);
+  box-sizing: border-box;
+}
+.minimap__head {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+  font: 500 11px / 14px var(--font-ui);
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+.minimap__page {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.minimap__head > :not(.minimap__page) {
+  flex: none;
+}
+.minimap__map {
+  display: block;
+  border-radius: var(--radius-xs);
+  background: var(--canvas);
+  cursor: pointer;
+  touch-action: none;
+}
+.minimap__map[data-grabbing] {
+  cursor: grabbing;
+}
+
 /* Rulers: two floating strips beside the panes; new guides drag out of them. */
 .rulers {
   position: absolute;

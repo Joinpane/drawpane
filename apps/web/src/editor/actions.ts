@@ -835,6 +835,18 @@ export const ACTIONS: readonly Action[] = [
     },
   },
   {
+    id: "view.minimap",
+    label: "Minimap",
+    group: "View",
+    icon: "minimap",
+    shortcut: { key: "m", alt: true },
+    keywords: "overview map navigator where people",
+    run: ({ editor }) => {
+      const ui = uiFor(editor);
+      ui.set({ minimap: !ui.get().minimap });
+    },
+  },
+  {
     id: "view.xray",
     label: "Layout X-ray",
     group: "View",
