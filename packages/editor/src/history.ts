@@ -20,7 +20,13 @@ const LIMIT = 500;
 export class History {
   #undo: HistoryEntry[] = [];
   #redo: HistoryEntry[] = [];
-  #open: { label: string; undo: Op[][]; selection: readonly string[]; depth: number } | null = null;
+  /**
+   * The group being recorded. `marks` holds, for each nested group inside
+   * it, how much undo there was when it began, so a nested preview can be
+   * discarded without touching what the outer group did.
+   */
+  #open: { label: string; undo: Op[][]; selection: readonly string[]; marks: number[] } | null =
+    null;
   readonly #listeners = new Set<() => void>();
 
   get canUndo(): boolean {
@@ -28,6 +34,10 @@ export class History {
   }
   get canRedo(): boolean {
     return this.#redo.length > 0;
+  }
+  /** Whether a group (a gesture) is being recorded. */
+  get grouping(): boolean {
+    return this.#open !== null;
   }
 
   subscribe(listener: () => void): () => void {
@@ -42,30 +52,38 @@ export class History {
   /** Starts grouping commits into one entry. Calls nest; the outermost `end` closes it. */
   begin(label: string, selection: readonly string[]): void {
     if (this.#open) {
-      this.#open.depth++;
+      this.#open.marks.push(this.#open.undo.length);
       return;
     }
-    this.#open = { label, undo: [], selection, depth: 1 };
+    this.#open = { label, undo: [], selection, marks: [] };
   }
 
   end(): void {
     const open = this.#open;
     if (!open) return;
-    if (--open.depth > 0) return;
+    if (open.marks.length > 0) {
+      open.marks.pop();
+      return;
+    }
     this.#open = null;
     if (open.undo.length === 0) return;
     this.#push({ label: open.label, undo: open.undo.reverse().flat(), selection: open.selection });
   }
 
   /**
-   * Closes the open group and reverts what it did, leaving no undo or redo
-   * entry: a preview you backed out of. Returns false when no group is open.
+   * Closes the innermost open group and reverts what it did, leaving no undo
+   * or redo entry: a preview you backed out of. An outer group stays open
+   * with what it did before (fonts previewed while typing, say). Returns
+   * false when no group is open.
    */
   discard(commit: Commit): boolean {
     const open = this.#open;
     if (!open) return false;
-    this.#open = null;
-    if (open.undo.length > 0) applyBestEffort(commit, open.undo.reverse().flat());
+    const mark = open.marks.pop();
+    const from = mark ?? 0;
+    const undone = open.undo.splice(from).reverse().flat();
+    if (mark === undefined) this.#open = null;
+    if (undone.length > 0) applyBestEffort(commit, undone);
     return true;
   }
 

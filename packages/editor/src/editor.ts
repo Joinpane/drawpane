@@ -64,6 +64,16 @@ import { applyBestEffort, History } from "./history";
 import { hitAll } from "./hit";
 import { layoutImageRow } from "./images";
 import { layoutOps } from "./layout";
+import {
+  isRunProp,
+  type RunPatch,
+  type RunStyle,
+  rangeProps,
+  remapRuns,
+  runStyleAt,
+  styleRange,
+  textRunOps,
+} from "./rich-text";
 import { Scene } from "./scene";
 import type { Guide } from "./snap";
 import { Store } from "./store";
@@ -121,6 +131,10 @@ export interface EditorState {
   /** Parts of the viewport covered by floating panels; fitting and revealing avoid them. */
   readonly insets: Insets;
   readonly editingText: string | null;
+  /** The characters selected in the text being edited, [start, end) (a caret when equal). */
+  readonly textSelection: { readonly start: number; readonly end: number } | null;
+  /** Styling for the next characters typed at the caret (⌘B with nothing selected). */
+  readonly textPending: RunPatch | null;
   /** A top-level frame whose name is being edited on its canvas label. */
   readonly renamingFrame: string | null;
   readonly marquee: Rect | null;
@@ -267,6 +281,8 @@ export class Editor {
     viewport: { width: 0, height: 0 },
     insets: NO_INSETS,
     editingText: null,
+    textSelection: null,
+    textPending: null,
     renamingFrame: null,
     marquee: null,
     guides: [],
@@ -346,6 +362,8 @@ export class Editor {
       status: "live",
       role: "viewer",
       editingText: null,
+      textSelection: null,
+      textPending: null,
       renamingFrame: null,
       vectorEdit: null,
       cropping: null,
@@ -366,7 +384,11 @@ export class Editor {
     const alive = selection.filter((id) => this.doc.has(id));
     if (alive.length !== selection.length) patch.selection = alive;
     if (hover && !this.doc.has(hover)) patch.hover = null;
-    if (editingText && !this.doc.has(editingText)) patch.editingText = null;
+    if (editingText && !this.doc.has(editingText)) {
+      patch.editingText = null;
+      patch.textSelection = null;
+      patch.textPending = null;
+    }
     if (Object.keys(patch).length > 0) this.state.set(patch);
   }
 
@@ -406,6 +428,7 @@ export class Editor {
             ...overrideOps(this.doc, ops),
             ...unbindOps(this.doc, ops),
             ...textStyleDetachOps(this.doc, ops),
+            ...textRunOps(this.doc, ops),
           ]
         : [];
       // Resizing a frame moves its children by their constraints; resizing a
@@ -487,7 +510,8 @@ export class Editor {
 
   endGesture(): void {
     this.history.end();
-    this.state.set({ gesture: false, guides: [] });
+    // Still in an outer gesture (typing, while a font preview ends) until it ends too.
+    this.state.set({ gesture: this.history.grouping, guides: [] });
   }
 
   /**
@@ -496,7 +520,7 @@ export class Editor {
    */
   cancelGesture(): void {
     this.history.discard((ops) => this.#commitWithFixups(ops, false));
-    this.state.set({ gesture: false, guides: [] });
+    this.state.set({ gesture: this.history.grouping, guides: [] });
   }
 
   /**
@@ -919,9 +943,19 @@ export class Editor {
   /** Sets one property on several layers, skipping layers the property doesn't apply to. */
   setProp(ids: readonly string[], prop: PropName, value: unknown, label = "Change property"): void {
     const ops: Op[] = [];
-    for (const id of ids) {
+    // Characters selected in the text being edited: style just those.
+    const range = isRunProp(prop) ? this.#textRange() : null;
+    for (const id of new Set(ids)) {
       const node = this.doc.get(id);
       if (!node) continue;
+      if (range && id === range.id) {
+        // null means the default, as everywhere; a run states it outright.
+        const patch = { [prop]: value ?? getProp({}, prop) } as RunPatch;
+        const runs = styleRange(node, range.start, range.end, patch);
+        if (JSON.stringify(runs) !== JSON.stringify(getProp(node.props, "textRuns")))
+          ops.push({ op: "set", id, prop: "textRuns", value: runs.length > 0 ? runs : null });
+        continue;
+      }
       if (JSON.stringify(node.props[prop] ?? null) === JSON.stringify(value ?? null)) continue;
       ops.push({ op: "set", id, prop, value });
     }
@@ -1828,19 +1862,36 @@ export class Editor {
    * already is, then regular; italic and underline toggle the same way.
    */
   toggleTextStyle(kind: "bold" | "italic" | "underline"): void {
+    const prop =
+      kind === "bold" ? "fontWeight" : kind === "italic" ? "fontStyle" : "textDecoration";
+    const isOn = (p: Props) =>
+      kind === "bold"
+        ? getProp(p, "fontWeight") >= 600
+        : kind === "italic"
+          ? getProp(p, "fontStyle") === "italic"
+          : getProp(p, "textDecoration") === "underline";
+    const label = kind === "bold" ? "Bold" : kind === "italic" ? "Italic" : "Underline";
+    const offValue = kind === "bold" ? 400 : kind === "italic" ? "normal" : "none";
+    const onValue = kind === "bold" ? 700 : kind === "italic" ? "italic" : "underline";
+    // While typing: the selected characters, or the next ones typed at the caret.
+    const editing = this.s.editingText ? this.doc.get(this.s.editingText) : undefined;
+    const sel = this.s.textSelection;
+    if (editing?.type === "text" && sel) {
+      if (sel.start !== sel.end) {
+        const allOn = rangeProps(editing, sel.start, sel.end).every(isOn);
+        this.setProp([editing.id], prop, allOn ? offValue : onValue, label);
+        return;
+      }
+      const pending = this.s.textPending ?? {};
+      const at = { ...editing.props, ...runStyleAt(editing, sel.start), ...pending } as Props;
+      this.state.set({ textPending: { ...pending, [prop]: isOn(at) ? offValue : onValue } });
+      return;
+    }
     const texts = this.#selectedTexts()
       .map((id) => this.doc.get(id))
       .filter((n): n is NodeRecord => !!n);
     if (texts.length === 0) return;
-    const prop =
-      kind === "bold" ? "fontWeight" : kind === "italic" ? "fontStyle" : "textDecoration";
-    const on = (n: NodeRecord) =>
-      kind === "bold"
-        ? getProp(n.props, "fontWeight") >= 600
-        : kind === "italic"
-          ? getProp(n.props, "fontStyle") === "italic"
-          : getProp(n.props, "textDecoration") === "underline";
-    const allOn = texts.every(on);
+    const allOn = texts.every((n) => isOn(n.props));
     const value =
       kind === "bold"
         ? allOn
@@ -1857,7 +1908,7 @@ export class Editor {
       texts.map((n) => n.id),
       prop,
       value,
-      kind === "bold" ? "Bold" : kind === "italic" ? "Italic" : "Underline",
+      label,
     );
   }
 
@@ -2823,22 +2874,70 @@ export class Editor {
 
   startTextEdit(id: string): void {
     if (!this.canEdit) return;
-    this.state.set({ editingText: id, selection: [id], tool: "select" });
+    this.state.set({
+      editingText: id,
+      selection: [id],
+      tool: "select",
+      textSelection: null,
+      textPending: null,
+    });
     this.beginGesture("Edit text");
   }
 
-  updateText(id: string, characters: string): void {
+  /** The text being edited's selected characters, when there are some. */
+  #textRange(): { id: string; start: number; end: number } | null {
+    const id = this.s.editingText;
+    const sel = this.s.textSelection;
+    if (!id || !sel || sel.start === sel.end) return null;
+    return { id, start: Math.min(sel.start, sel.end), end: Math.max(sel.start, sel.end) };
+  }
+
+  /** Where the caret or selection is in the text being edited (the editor reports it). */
+  setTextSelection(start: number, end: number): void {
+    if (!this.s.editingText) return;
+    const now = this.s.textSelection;
+    if (now && now.start === start && now.end === end) return;
+    // Moving the caret drops styling waiting for the next characters.
+    this.state.set({ textSelection: { start, end }, textPending: null });
+  }
+
+  /**
+   * The text being typed. `caret` is where the caret ended up, so the edit's
+   * runs land exactly where it happened (see `remapRuns`).
+   */
+  updateText(id: string, characters: string, caret?: number): void {
     const node = this.doc.get(id);
     if (node?.type !== "text") return;
     if (getProp(node.props, "characters") === characters) return;
-    this.commit([{ op: "set", id, prop: "characters", value: characters }], "Edit text");
+    const editing = id === this.s.editingText;
+    const sel = editing ? this.s.textSelection : null;
+    const pending = editing ? this.s.textPending : null;
+    let inserted: RunStyle | undefined;
+    if (pending) {
+      // Typed after ⌘B (or the like) at a caret: the new characters get that styling.
+      inserted = { ...runStyleAt(node, sel?.start ?? getProp(node.props, "characters").length) };
+      for (const [prop, value] of Object.entries(pending)) {
+        if (value === null) delete inserted[prop as keyof RunStyle];
+        else (inserted as Record<string, unknown>)[prop] = value;
+      }
+      this.state.set({ textPending: null });
+    }
+    const ops: Op[] = [{ op: "set", id, prop: "characters", value: characters }];
+    if (inserted || (sel && caret !== undefined)) {
+      const runs = remapRuns(node, characters, {
+        ...(inserted ? { inserted } : {}),
+        ...(sel && caret !== undefined ? { edit: { ...sel, caret } } : {}),
+      });
+      ops.push({ op: "set", id, prop: "textRuns", value: runs.length > 0 ? runs : null });
+    }
+    this.commit(ops, "Edit text");
   }
 
   endTextEdit(): void {
     const id = this.s.editingText;
     if (!id) return;
     this.endGesture();
-    this.state.set({ editingText: null });
+    this.state.set({ editingText: null, textSelection: null, textPending: null });
     const node = this.doc.get(id);
     // An empty text layer has nothing to show: remove it, like every design tool.
     if (node && getProp(node.props, "characters").trim() === "") {
