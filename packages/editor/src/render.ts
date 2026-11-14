@@ -21,6 +21,7 @@ import {
   lineHeightPx,
   lineOffset,
   type ShapedText,
+  type TextFragment,
   type TextMeasurer,
   textBlockOffset,
 } from "./text";
@@ -203,6 +204,8 @@ export class CanvasRenderer {
   readonly #blurCanvases: Array<OffscreenCanvas | HTMLCanvasElement> = [];
   /** Draws glass effects, with its own canvases and (made on first use) WebGL context. */
   readonly #glass = new GlassPainter();
+  /** Where a text stroke inside or outside its glyphs is drawn, then cut to one side (#textStrokes). */
+  #strokeCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
 
   constructor(scene: Scene, measurer: TextMeasurer, options: CanvasRendererOptions = {}) {
     this.#scene = scene;
@@ -524,7 +527,8 @@ export class CanvasRenderer {
         place();
       }
     }
-    this.#strokes(ctx, node, shape, width, height);
+    if (node.type === "text") this.#textStrokes(ctx, node, width, camera.zoom * dpr);
+    else this.#strokes(ctx, node, shape, width, height);
   }
 
   /**
@@ -1042,6 +1046,134 @@ export class CanvasRenderer {
       ctx.fillRect(x, i * lh + (lh - size) / 2 + size * 0.18, w, size * 0.5);
     }
     ctx.globalAlpha = alpha;
+  }
+
+  /**
+   * A text layer's strokes, around its glyphs (like Figma), not its box.
+   * Centred strokes are drawn on the glyphs directly. Inside and outside
+   * strokes are drawn twice as wide on a scratch canvas, which then keeps
+   * only the half inside (or outside) the glyphs, and is laid on the canvas
+   * with the layer's opacity and blending: a canvas can't clip to text.
+   */
+  #textStrokes(ctx: Ctx, node: NodeRecord, width: number, scale: number): void {
+    const strokes = getProp(node.props, "strokes").filter((s) => s.visible !== false);
+    const weight = getProp(node.props, "strokeWeight");
+    if (strokes.length === 0 || weight <= 0) return;
+    // Too small to read is drawn as bars, which have no glyphs to outline.
+    if (this.#detail && largestFontSize(node) * scale < GREEK_BELOW) return;
+    const mode = getProp(node.props, "textAutoResize");
+    const layout = layoutText(node, this.#measurer, mode === "width" ? null : width, {
+      whole: node.id === this.whole,
+    });
+    const height = getProp(node.props, "height");
+    const dy = textBlockOffset(node, layout);
+    const align = getProp(node.props, "strokeAlign");
+    const dashes = getProp(node.props, "strokeDashes");
+    const join = getProp(node.props, "strokeJoin");
+    const spaced = "letterSpacing" in ctx;
+
+    /** Each glyph run, where #text draws it: `paint` strokes or fills it. */
+    const eachRun = (c: Ctx, paint: (frag: TextFragment, x: number, y: number) => void) => {
+      for (const line of layout.lines) {
+        const x0 = lineOffset(line, width, node.props);
+        for (const frag of line.fragments) {
+          if (!frag.text) continue;
+          c.font = frag.font;
+          if (spaced)
+            (c as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
+          paint(frag, x0 + frag.x, line.baseline + dy);
+        }
+      }
+    };
+    const outline = (frag: TextFragment, x: number, y: number) => {
+      const shaped = frag.run ? (this.#measurer.shape?.(frag.text, frag.run) ?? null) : null;
+      return shaped
+        ? this.#placed(this.#shapedOutline(shaped, frag.text, frag.letterSpacing), x, y)
+        : null;
+    };
+    const strokeGlyphs = (c: Ctx, lineWidth: number) => {
+      c.save();
+      c.filter = "none";
+      c.textBaseline = "alphabetic";
+      c.lineWidth = lineWidth;
+      c.lineJoin = join;
+      if (dashes.length > 0) c.setLineDash(dashes);
+      for (const paint of strokes) {
+        const style = this.#paintStyle(c, paint, width, height);
+        if (!style) continue;
+        c.strokeStyle = style;
+        eachRun(c, (frag, x, y) => {
+          const path = outline(frag, x, y);
+          if (path) c.stroke(path);
+          else c.strokeText(frag.text, x, y);
+        });
+      }
+      c.restore();
+    };
+
+    if (align === "center") {
+      strokeGlyphs(ctx, weight);
+      return;
+    }
+    // The text's reach on the device, its strokes and overhanging glyphs included,
+    // within what the canvas shows.
+    const t = ctx.getTransform();
+    const grow = weight * 2 + largestFontSize(node) * 0.5;
+    const box = {
+      x: -grow,
+      y: Math.min(0, dy) - grow,
+      w: width + grow * 2,
+      h: Math.max(height, layout.height + dy) + grow * 2,
+    };
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const [px, py] of [
+      [box.x, box.y],
+      [box.x + box.w, box.y],
+      [box.x, box.y + box.h],
+      [box.x + box.w, box.y + box.h],
+    ] as const) {
+      xs.push(t.a * px + t.c * py + t.e);
+      ys.push(t.b * px + t.d * py + t.f);
+    }
+    const x0 = Math.max(0, Math.floor(Math.min(...xs)));
+    const y0 = Math.max(0, Math.floor(Math.min(...ys)));
+    const x1 = Math.min(ctx.canvas.width, Math.ceil(Math.max(...xs)));
+    const y1 = Math.min(ctx.canvas.height, Math.ceil(Math.max(...ys)));
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (w <= 0 || h <= 0) return;
+    if (!this.#strokeCanvas) {
+      if (typeof OffscreenCanvas !== "undefined") this.#strokeCanvas = new OffscreenCanvas(w, h);
+      else if (typeof document !== "undefined")
+        this.#strokeCanvas = document.createElement("canvas");
+      else return;
+    }
+    const scratch = this.#strokeCanvas;
+    if (scratch.width < w) scratch.width = w;
+    if (scratch.height < h) scratch.height = h;
+    const s = scratch.getContext("2d") as Ctx | null;
+    if (!s) return;
+    s.setTransform(1, 0, 0, 1, 0, 0);
+    s.globalAlpha = 1;
+    s.globalCompositeOperation = "source-over";
+    s.clearRect(0, 0, w, h);
+    s.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0);
+    strokeGlyphs(s, weight * 2);
+    // Keep the half inside the glyphs, or the half outside them.
+    s.globalCompositeOperation = align === "inside" ? "destination-in" : "destination-out";
+    s.fillStyle = "#000";
+    eachRun(s, (frag, x, y) => {
+      const path = outline(frag, x, y);
+      if (path) s.fill(path);
+      else s.fillText(frag.text, x, y);
+    });
+    s.globalCompositeOperation = "source-over";
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.filter = "none";
+    ctx.drawImage(scratch, 0, 0, w, h, x0, y0, w, h);
+    ctx.restore();
   }
 
   /**

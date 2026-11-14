@@ -811,7 +811,16 @@ export function exportSvg(
         })
         .join("");
     /** A shaped run's glyphs (and its decoration) in the text box, where the canvas draws them. */
-    const glyphs = (frag: TextFragment, shaped: ShapedText) => {
+    /**
+     * `prefix`: a transform to put before each glyph's own (the layer's, inside a
+     * clip path, which can't hold groups). `strokeWidth`: stroked glyphs at that
+     * width (scaled into the glyphs' units), without decorations.
+     */
+    const glyphs = (
+      frag: TextFragment,
+      shaped: ShapedText,
+      { prefix = "", strokeWidth }: { prefix?: string; strokeWidth?: number } = {},
+    ) => {
       const line = layout.lines.find((l) => l.fragments.includes(frag));
       if (!line) return "";
       const x0 = lineOffset(line, w, base) + frag.x;
@@ -829,9 +838,13 @@ export function exportSvg(
         if (!g.d) continue;
         const x = round2(x0 + g.x + frag.letterSpacing * (before[g.cluster] ?? 0));
         const y = round2(y0 - g.y);
-        svg += `<path transform="matrix(${s} 0 0 ${-s} ${x} ${y})"${attr("d", g.d)}/>`;
+        const width =
+          strokeWidth === undefined
+            ? ""
+            : attr("stroke-width", round2((strokeWidth / s) * 100) / 100);
+        svg += `<path transform="${prefix}matrix(${s} 0 0 ${-s} ${x} ${y})"${width}${attr("d", g.d)}/>`;
       }
-      if (frag.decoration !== "none") {
+      if (frag.decoration !== "none" && strokeWidth === undefined) {
         const size = frag.fontSize;
         const y = frag.decoration === "underline" ? y0 + size * 0.1 : y0 - size * 0.3;
         svg += `<rect${attr("x", round2(x0))}${attr("y", round2(y))}${attr("width", round2(frag.width))}${attr("height", round2(Math.max(1, size / 16)))}/>`;
@@ -863,6 +876,68 @@ export function exportSvg(
     // The layer's own fills are all hidden: its own-coloured fragments still show.
     if (pass === 0 && layout.lines.some((l) => l.fragments.some((f) => f.fills)))
       parts.push(`<text${transform}${style} fill="none" xml:space="preserve">${lines(0)}</text>`);
+
+    // Strokes, around the glyphs (centred on their edges, or inside or outside them).
+    const strokePaints = getProp(base, "strokes").filter((p) => p.visible !== false);
+    const weight = getProp(base, "strokeWeight");
+    if (strokePaints.length === 0 || weight <= 0) return;
+    const strokeAlign = getProp(base, "strokeAlign");
+    const width = strokeAlign === "center" ? weight : weight * 2;
+    const largestSize = Math.max(
+      getProp(base, "fontSize"),
+      ...layout.lines.flatMap((l) => l.fragments.map((f) => f.fontSize)),
+    );
+    let strokeStyle = attr("stroke-width", width);
+    const join = getProp(base, "strokeJoin");
+    if (join !== "miter") strokeStyle += attr("stroke-linejoin", join);
+    const dashes = getProp(base, "strokeDashes");
+    if (dashes.length > 0) strokeStyle += attr("stroke-dasharray", dashes.map(svgNumber).join(" "));
+    // The glyphs as a shape (a clip or a mask): the text, and any outlined runs.
+    const inner = /transform="([^"]*)"/.exec(transform)?.[1] ?? "";
+    const shapeOfGlyphs = (fill: string, inClip: boolean) =>
+      `<text${transform}${style}${fill} xml:space="preserve">${lines(1)}</text>${[...outlined]
+        .map(([frag, shaped]) =>
+          inClip
+            ? glyphs(frag, shaped, { prefix: inner ? `${inner} ` : "" })
+            : `<g${transform}${fill}>${glyphs(frag, shaped)}</g>`,
+        )
+        .join("")}`;
+    let wrap = (svg: string) => svg;
+    if (strokeAlign === "inside") {
+      const clip = out.id("clip");
+      out.defs.push(`<clipPath id="${clip}">${shapeOfGlyphs("", true)}</clipPath>`);
+      wrap = (svg) => `<g clip-path="url(#${clip})">${svg}</g>`;
+    } else if (strokeAlign === "outside") {
+      const mask = out.id("mask");
+      // In the layer's space: its box, grown by the stroke and the glyphs' overhang.
+      const m = weight * 2 + largestSize * 0.5;
+      const local = `${attr("x", -m)}${attr("y", -m)}${attr("width", w + m * 2)}${attr("height", Math.max(h, layout.height + dy) + m * 2)}`;
+      const page = regionAttrs(
+        scene.worldMatrix(node.id),
+        -m,
+        -m,
+        w + m,
+        Math.max(h, layout.height + dy) + m,
+        0,
+      );
+      out.defs.push(
+        `<mask id="${mask}" maskUnits="userSpaceOnUse"${page}><rect${transform}${local} fill="#fff"/>${shapeOfGlyphs(' fill="#000"', false)}</mask>`,
+      );
+      wrap = (svg) => `<g mask="url(#${mask})">${svg}</g>`;
+    }
+    const stroked: string[] = [];
+    for (const paint of strokePaints) {
+      const stroke = out.paint("stroke", paint, w, h);
+      if (!stroke) continue;
+      stroked.push(
+        `<text${transform}${style} fill="none"${stroke}${strokeStyle} xml:space="preserve">${lines(1)}</text>`,
+      );
+      for (const [frag, shaped] of outlined)
+        stroked.push(
+          `<g${transform} fill="none"${stroke}>${glyphs(frag, shaped, { strokeWidth: width })}</g>`,
+        );
+    }
+    if (stroked.length > 0) parts.push(wrap(stroked.join("")));
   };
 
   for (const id of ids) visit(id, out.body);
