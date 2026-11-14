@@ -4,20 +4,10 @@
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance } from "../fresh-instance";
+import { shot as tourShot } from "./harness";
 
-const OUT = process.env.TOUR_OUT ?? "tour-shots";
-
-async function shot(page: Page, name: string) {
-  for (const theme of ["light", "dark"] as const) {
-    await page.evaluate((t) => {
-      if (t === "dark") document.documentElement.dataset.theme = "dark";
-      else delete document.documentElement.dataset.theme;
-    }, theme);
-    await page.waitForTimeout(300);
-    await page.screenshot({ path: `${OUT}/images-${name}-${theme}.png` });
-  }
-  await page.evaluate(() => delete document.documentElement.dataset.theme);
-}
+/** Images tour shots share a prefix. */
+const shot = (page: Page, name: string) => tourShot(page, `images-${name}`);
 
 async function drag(page: Page, from: [number, number], to: [number, number]) {
   await page.mouse.move(from[0], from[1]);
@@ -197,10 +187,17 @@ test("images tour", async ({ browser }) => {
 
     // Tile mode, to show the picker with another mode and the export preview.
     await page.getByRole("treeitem", { name: /brand-pattern/ }).click();
+    // The scale mode lives in the fill's picker.
     await page
       .getByRole("group", { name: "Properties" })
+      .getByRole("button", { name: "Edit fill" })
+      .click();
+    await page
+      .getByRole("dialog", { name: "Fill paint" })
       .getByRole("radio", { name: "Tile" })
       .click();
+    await shot(page, "04-tile-mode");
+    await page.keyboard.press("Escape");
     await page.getByRole("radio", { name: "2×" }).click();
     await shot(page, "04-tile-and-export");
     await page.getByRole("radio", { name: "1×" }).click();

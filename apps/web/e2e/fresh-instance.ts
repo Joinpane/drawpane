@@ -14,6 +14,15 @@ export interface Instance {
   stop(): Promise<void>;
 }
 
+async function answers(url: string): Promise<boolean> {
+  try {
+    await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(1_000) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function waitForHealth(url: string, child: ChildProcess, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -28,12 +37,27 @@ async function waitForHealth(url: string, child: ChildProcess, timeoutMs: number
   throw new Error(`The test Worker at ${url} didn't start in time.`);
 }
 
-/** Starts a Worker on `port` and signs a new owner in with a virtual passkey. */
-export async function freshInstance(
-  browser: Browser,
-  { port, inspectorPort }: { port: number; inspectorPort: number },
-): Promise<Instance> {
+/** A test Worker of its own: an un-set-up instance with a throwaway database. */
+export interface TestWorker {
+  readonly url: string;
+  stop(): Promise<void>;
+}
+
+/** Starts a Worker on `port` (and its inspector on `inspectorPort`) and waits until it answers. */
+export async function startWorker({
+  port,
+  inspectorPort,
+}: {
+  port: number;
+  inspectorPort: number;
+}): Promise<TestWorker> {
   const url = `http://localhost:${port}`;
+  // Something already answering there is no fresh instance: most often a Worker left
+  // behind by an interrupted run, already set up. Say so rather than test against it.
+  if (await answers(url))
+    throw new Error(
+      `Port ${port} is already serving: a test Worker left by an interrupted run? Stop it and try again.`,
+    );
   const child = spawn("node", [resolve(import.meta.dirname, "server.mjs")], {
     env: { ...process.env, E2E_PORT: String(port), E2E_INSPECTOR_PORT: String(inspectorPort) },
     stdio: "inherit",
@@ -47,20 +71,39 @@ export async function freshInstance(
   };
   try {
     await waitForHealth(url, child, 120_000);
-    const context = await browser.newContext({ baseURL: url, acceptDownloads: true });
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+  return { url, stop };
+}
+
+/** A virtual passkey for this page's browser context, so sign-up and sign-in need no device. */
+export async function addPasskey(context: BrowserContext, page: Page): Promise<void> {
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+}
+
+/** Starts a Worker on `port` and signs a new owner in with a virtual passkey. */
+export async function freshInstance(
+  browser: Browser,
+  ports: { port: number; inspectorPort: number },
+): Promise<Instance> {
+  const worker = await startWorker(ports);
+  try {
+    const context = await browser.newContext({ baseURL: worker.url, acceptDownloads: true });
     const page = await context.newPage();
-    const cdp = await context.newCDPSession(page);
-    await cdp.send("WebAuthn.enable");
-    await cdp.send("WebAuthn.addVirtualAuthenticator", {
-      options: {
-        protocol: "ctap2",
-        transport: "internal",
-        hasResidentKey: true,
-        hasUserVerification: true,
-        isUserVerified: true,
-        automaticPresenceSimulation: true,
-      },
-    });
+    await addPasskey(context, page);
     await page.goto("/setup");
     await page.getByLabel("Your name").fill("Ana Lima");
     await page.getByLabel("Email").fill("ana@example.com");
@@ -68,16 +111,17 @@ export async function freshInstance(
     await page.getByRole("button", { name: "Create account with a passkey" }).click();
     await expect(page.getByRole("heading", { name: "Recent files" })).toBeVisible();
     return {
-      url,
+      url: worker.url,
       context,
       page,
       stop: async () => {
-        await context.close();
-        await stop();
+        // After a timeout the context may be gone already; the Worker must stop regardless.
+        await context.close().catch(() => {});
+        await worker.stop();
       },
     };
   } catch (error) {
-    await stop();
+    await worker.stop();
     throw error;
   }
 }

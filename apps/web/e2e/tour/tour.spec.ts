@@ -3,36 +3,8 @@
  * Not part of the regular suite: run `pnpm --filter @drawpane/web tour`
  * and look at the PNGs in `tour-shots/`.
  */
-import { type BrowserContext, expect, type Page, test } from "@playwright/test";
-
-const OUT = process.env.TOUR_OUT ?? "tour-shots";
-
-async function passkey(context: BrowserContext, page: Page) {
-  const cdp = await context.newCDPSession(page);
-  await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-    },
-  });
-}
-
-async function shot(page: Page, name: string) {
-  for (const theme of ["light", "dark"] as const) {
-    await page.evaluate((t) => {
-      if (t === "dark") document.documentElement.dataset.theme = "dark";
-      else delete document.documentElement.dataset.theme;
-    }, theme);
-    await page.waitForTimeout(250);
-    await page.screenshot({ path: `${OUT}/${name}-${theme}.png` });
-  }
-  await page.evaluate(() => delete document.documentElement.dataset.theme);
-}
+import { expect, type Page } from "@playwright/test";
+import { passkey, shot, test } from "./harness";
 
 async function drag(page: Page, from: [number, number], to: [number, number]) {
   await page.mouse.move(from[0], from[1]);
@@ -103,7 +75,7 @@ test("tour", async ({ browser }) => {
   await shot(page, "04-editor-rect-selected");
 
   await page.keyboard.press("ControlOrMeta+k");
-  await page.getByRole("combobox").fill("w 320");
+  await page.getByRole("combobox", { name: "Type a command or a property" }).fill("w 320");
   await shot(page, "05-command-bar");
   await page.keyboard.press("Escape");
 
@@ -131,7 +103,9 @@ test("tour", async ({ browser }) => {
 
   // Variants: combine the main into a set, add a variant, then switch the instance to it.
   await page.keyboard.press("ControlOrMeta+k");
-  await page.getByRole("combobox").fill("combine as variants");
+  await page
+    .getByRole("combobox", { name: "Type a command or a property" })
+    .fill("combine as variants");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(300);
   await shot(page, "17-component-set");
@@ -170,8 +144,8 @@ test("tour", async ({ browser }) => {
     ["text/strong", "#16181d"],
   ] as const) {
     await page.getByRole("button", { name: "Token", exact: true }).click();
-    const nameButton = page.getByRole("rowheader").last().getByRole("button");
-    await nameButton.dblclick();
+    // A new token opens with its name field focused and selected: type straight in.
+    await expect(page.getByRole("rowheader").last().getByRole("textbox")).toBeFocused();
     await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.type(name);
     await page.keyboard.press("Enter");
