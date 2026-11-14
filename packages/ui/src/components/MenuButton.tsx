@@ -5,6 +5,7 @@ import { cx } from "../lib/cx";
 import { assignRef } from "../lib/refs";
 import { IconButton, type IconButtonProps } from "./IconButton";
 import { Menu, type MenuCloseReason, type MenuItem } from "./Menu";
+import { useInPopover } from "./Popover";
 
 const MARGIN = 8;
 /** Between the button and its menu. */
@@ -73,6 +74,8 @@ export function DropdownMenu({
 }: DropdownMenuProps) {
   const el = useRef<HTMLDivElement | null>(null);
   const [place, setPlace] = useState<{ left: number; top: number; side: string } | null>(null);
+  // Opened from inside a popover (an effect's kind, say), it stays part of it.
+  useInPopover(el);
   const close = useRef(onClose);
   close.current = onClose;
 

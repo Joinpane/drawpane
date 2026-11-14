@@ -105,15 +105,52 @@ test.describe
       await expect(panel(page).getByRole("button", { name: "Edit fill" })).toBeVisible();
     });
 
-    test("gives a shadow a color and spread", async () => {
+    test("adds an effect from a menu of kinds, and edits it beside the inspector", async () => {
       await panel(page).getByRole("button", { name: "Add effect" }).click();
-      await panel(page).getByLabel("Shadow spread").fill("4");
-      await panel(page).getByLabel("Shadow spread").press("Enter");
-      await panel(page).getByLabel("Shadow hex").fill("ff5a1f");
-      await panel(page).getByLabel("Shadow hex").press("Enter");
+      const kinds = page.getByRole("menu", { name: "Add effect" });
+      await expect(kinds.getByRole("menuitem")).toHaveText([
+        "Drop shadow",
+        "Inner shadow",
+        "Layer blur",
+        "Background blur",
+      ]);
+      await kinds.getByRole("menuitem", { name: "Drop shadow" }).click();
+      // Its editor opens at once, every value labelled.
+      const editor = page.getByRole("dialog", { name: "Drop shadow" });
+      await expect(editor).toBeVisible();
+      await editor.getByLabel("Shadow spread").fill("4");
+      await editor.getByLabel("Shadow spread").press("Enter");
+      await editor.getByLabel("Shadow hex").fill("ff5a1f");
+      await editor.getByLabel("Shadow hex").press("Enter");
       await expect
         .poll(async () => (await props(page, card)).effects)
         .toEqual([{ type: "drop-shadow", color: "#ff5a1f40", x: 0, y: 4, blur: 12, spread: 4 }]);
+      // The kind changes in the editor, keeping the values that carry over.
+      await editor.getByRole("button", { name: "Effect type: Drop shadow" }).click();
+      await page
+        .getByRole("menu", { name: "Effect type" })
+        .getByRole("menuitemcheckbox", { name: "Inner shadow" })
+        .click();
+      await expect
+        .poll(async () => (await props(page, card)).effects)
+        .toEqual([{ type: "inner-shadow", color: "#ff5a1f40", x: 0, y: 4, blur: 12, spread: 4 }]);
+      await expect(page.getByRole("dialog", { name: "Inner shadow" })).toBeVisible();
+      await page
+        .getByRole("dialog", { name: "Inner shadow" })
+        .getByRole("button", { name: "Close" })
+        .click();
+      // The row: its kind once, a glance at its values, show/hide and remove.
+      const row = panel(page).getByRole("button", { name: /^Inner shadow/ });
+      await expect(row).toContainText("0 4 12 4");
+      await expect(row).toHaveAttribute("aria-expanded", "false");
+      await panel(page).getByRole("button", { name: "Hide inner shadow" }).click();
+      await expect
+        .poll(
+          async () =>
+            ((await props(page, card)).effects as Array<{ visible?: boolean }>)[0]?.visible,
+        )
+        .toBe(false);
+      await panel(page).getByRole("button", { name: "Show inner shadow" }).click();
     });
 
     test("rounds each corner on its own", async () => {

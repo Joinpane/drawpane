@@ -2,6 +2,7 @@ import {
   type ComponentPropsWithRef,
   createContext,
   type ReactNode,
+  type RefObject,
   useCallback,
   useContext,
   useEffect,
@@ -80,6 +81,19 @@ export function placePopover(
     top: Math.round(Math.min(Math.max(MARGIN, top), clampY)),
     side: chosen,
   };
+}
+
+/**
+ * Keeps an element rendered elsewhere (a dropdown in its own portal) part of
+ * the popover it was opened from: pressing in it doesn't close the popover.
+ */
+export function useInPopover(ref: RefObject<HTMLElement | null>): void {
+  const parent = useContext(PopoverContext);
+  useEffect(() => {
+    const node = ref.current;
+    if (!parent || !node) return;
+    return parent.add(node);
+  }, [parent, ref]);
 }
 
 /**

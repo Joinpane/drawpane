@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { ColorPicker, Popover, placePopover } from "../src";
+import { ColorPicker, DropdownMenu, Popover, placePopover } from "../src";
 
 beforeAll(() => {
   // jsdom has no ResizeObserver.
@@ -118,6 +118,36 @@ function Nested({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** A popover with a dropdown inside it, like an effect's kind. */
+function WithDropdown({ onClose, onPick }: { onClose: () => void; onPick: () => void }) {
+  const outer = useRef<HTMLButtonElement>(null);
+  const kind = useRef<HTMLButtonElement>(null);
+  const [menu, setMenu] = useState(false);
+  const [, rerender] = useState(0);
+  return (
+    <>
+      <button type="button" ref={outer} onClick={() => rerender((n) => n + 1)}>
+        Anchor
+      </button>
+      {outer.current ? (
+        <Popover anchor={outer.current} label="Effect" onClose={onClose}>
+          <button type="button" ref={kind} onClick={() => setMenu(true)}>
+            Kind
+          </button>
+          {menu && kind.current ? (
+            <DropdownMenu
+              anchor={kind.current}
+              label="Kinds"
+              items={[{ label: "Inner shadow", onSelect: onPick }]}
+              onClose={() => setMenu(false)}
+            />
+          ) : null}
+        </Popover>
+      ) : null}
+    </>
+  );
+}
+
 describe("Popover", () => {
   it("stays open while a nested popover is used, and closes from outside", async () => {
     const user = userEvent.setup();
@@ -130,6 +160,18 @@ describe("Popover", () => {
     expect(screen.queryByRole("dialog", { name: "Effect" })).not.toBeNull();
     await user.click(screen.getByRole("button", { name: "Elsewhere" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays open while a dropdown opened inside it is used", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onPick = vi.fn();
+    render(<WithDropdown onClose={onClose} onPick={onPick} />);
+    await user.click(screen.getByRole("button", { name: "Anchor" }));
+    await user.click(screen.getByRole("button", { name: "Kind" }));
+    await user.click(screen.getByRole("menuitem", { name: "Inner shadow" }));
+    expect(onPick).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("closes on Escape without letting it reach the page", async () => {

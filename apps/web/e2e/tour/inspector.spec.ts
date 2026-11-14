@@ -75,10 +75,11 @@ test("inspector tour", async ({ browser }) => {
       value: [{ type: "drop-shadow", color: "#1c1b1a33", x: 0, y: 6, blur: 18, spread: -2 }],
     },
   ]);
-  await page.getByRole("button", { name: /Drop shadow/ }).click();
   await page.getByRole("button", { name: "Independent corners" }).click();
   await page.getByLabel("Top left radius").fill("20");
   await page.getByLabel("Top left radius").press("Enter");
+  // The shadow's editor opens beside the inspector.
+  await page.getByRole("button", { name: /^Drop shadow/ }).click();
   await shot(page, "64-effects-corners");
   await page.getByRole("button", { name: "Edit shadow color" }).click();
   await shot(page, "65-shadow-color");

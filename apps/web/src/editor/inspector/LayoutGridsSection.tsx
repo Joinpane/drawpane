@@ -88,19 +88,19 @@ export function LayoutGridsSection({ editor, nodes }: { editor: Editor; nodes: N
           const expanded = open === i;
           const kind = KIND[grid.type];
           return (
-            <div key={i} className="effect" data-hidden={grid.visible === false || undefined}>
-              <div className="effect__row">
+            <div key={i} className="grid-entry" data-hidden={grid.visible === false || undefined}>
+              <div className="grid-entry__row">
                 <button
                   type="button"
-                  className="effect__toggle"
+                  className="grid-entry__toggle"
                   aria-expanded={expanded}
                   onClick={() => setOpen(expanded ? null : i)}
                 >
                   <span className="layout-grid__icon" aria-hidden="true">
                     <Icon name={kind.icon} size={12} />
                   </span>
-                  <span className="effect__name">{kind.label}</span>
-                  <span className="effect__summary">{summary(grid)}</span>
+                  <span className="grid-entry__name">{kind.label}</span>
+                  <span className="grid-entry__summary">{summary(grid)}</span>
                 </button>
                 <IconButton
                   icon={grid.visible === false ? "eye-off" : "eye"}
@@ -150,7 +150,7 @@ function GridDetails({
     onScrubEnd: () => editor.endGesture(),
   });
   return (
-    <div className="effect__details">
+    <div className="grid-entry__details">
       <Select
         label="Layout grid type"
         value={grid.type}

@@ -3,7 +3,7 @@
 /** One shape of an icon: an SVG element name and its React attributes. */
 export type IconNode = readonly [tag: string, attributes: Readonly<Record<string, string>>];
 
-/** Drawpane's 116 icons on a 16px grid; strokes and fills inherit currentColor. */
+/** Drawpane's 121 icons on a 16px grid; strokes and fills inherit currentColor. */
 export const iconData = {
   pointer: [
     [
@@ -1594,11 +1594,47 @@ export const iconData = {
       },
     ],
   ],
+  "background-blur": [
+    [
+      "rect",
+      {
+        x: "2.25",
+        y: "2.25",
+        width: "11.5",
+        height: "11.5",
+        rx: "1.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5.5 5.5h0M8 5.5h0M10.5 5.5h0M5.5 8h0M8 8h0M10.5 8h0M5.5 10.5h0M8 10.5h0M10.5 10.5h0",
+      },
+    ],
+  ],
   detach: [
     [
       "path",
       {
         d: "M10.25 9.25l2.25-2.25A2.5 2.5 0 0 0 9 3.46l-1 1M5.75 6.75L3.5 9A2.5 2.5 0 0 0 7 12.54l1-1M2.75 5.5h1.5M5.5 2.75v1.5M13.25 10.5h-1.5M10.5 13.25v-1.5",
+      },
+    ],
+  ],
+  "drop-shadow": [
+    [
+      "rect",
+      {
+        x: "2.25",
+        y: "2.25",
+        width: "9",
+        height: "9",
+        rx: "1.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M13.75 5.25v7a1.5 1.5 0 0 1-1.5 1.5h-7",
       },
     ],
   ],
@@ -1623,6 +1659,22 @@ export const iconData = {
       "path",
       {
         d: "M3 2.75h10M3 13.25h10M8 6v4",
+      },
+    ],
+  ],
+  glass: [
+    [
+      "circle",
+      {
+        cx: "8",
+        cy: "8",
+        r: "5.75",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5 7.25a3.25 3.25 0 0 1 2.25-2.25",
       },
     ],
   ],
@@ -1671,6 +1723,32 @@ export const iconData = {
       "path",
       {
         d: "M2.5 9.25h3l.9 1.5h3.2l.9-1.5h3",
+      },
+    ],
+  ],
+  "inner-shadow": [
+    [
+      "rect",
+      {
+        x: "2.25",
+        y: "2.25",
+        width: "11.5",
+        height: "11.5",
+        rx: "1.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5 10.5V6a1 1 0 0 1 1-1h4.5",
+      },
+    ],
+  ],
+  "layer-blur": [
+    [
+      "path",
+      {
+        d: "M3.5 3.5h0M8 3.5h0M12.5 3.5h0M5.75 5.75h0M10.25 5.75h0M3.5 8h0M8 8h0M12.5 8h0M5.75 10.25h0M10.25 10.25h0M3.5 12.5h0M8 12.5h0M12.5 12.5h0",
       },
     ],
   ],
