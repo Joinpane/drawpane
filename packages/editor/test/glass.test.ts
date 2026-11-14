@@ -1,14 +1,14 @@
 import { DEFAULT_GLASS, Effect } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { glassParams } from "../src/glass";
+import { floodSteps, glassParams } from "../src/glass";
 
 describe("glassParams", () => {
   it("takes Figma's defaults to device pixels", () => {
     const p = glassParams(DEFAULT_GLASS, 2);
-    // A 20-unit rim at 2× is 40px; full refraction bends rays across most of it.
+    // A 20-unit rim at 2× is 40px; refraction bends rays under half of it, so nothing folds over.
     expect(p.depth).toBe(40);
-    expect(p.refraction).toBeCloseTo(0.8 * 40 * 1.25, 5);
-    expect(p.dispersion).toBeCloseTo(0.25, 5);
+    expect(p.refraction).toBeCloseTo(0.8 * 0.45 * 40, 5);
+    expect(p.dispersion).toBeCloseTo(0.125, 5);
     expect(p.frost).toBe(8);
     expect(p.splay).toBe(0);
     expect(p.intensity).toBeCloseTo(0.8, 5);
@@ -28,6 +28,15 @@ describe("glassParams", () => {
   it("still bends a little through a rim with no depth, so refraction stays visible", () => {
     expect(glassParams({ ...DEFAULT_GLASS, depth: 0 }, 1).refraction).toBeGreaterThan(0);
     expect(glassParams({ ...DEFAULT_GLASS, refraction: 0 }, 1).refraction).toBe(0);
+  });
+});
+
+describe("floodSteps", () => {
+  it("floods from just past the rim down to single pixels, then once more at 1", () => {
+    expect(floodSteps(20)).toEqual([32, 16, 8, 4, 2, 1, 1]);
+    expect(floodSteps(0)).toEqual([2, 1, 1]);
+    // A huge rim still stops at a step the GPU can take in a few passes.
+    expect(floodSteps(1e6)[0]).toBe(2048);
   });
 });
 

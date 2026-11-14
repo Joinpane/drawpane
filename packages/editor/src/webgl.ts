@@ -47,12 +47,49 @@ function compile(
   return shader;
 }
 
-/** A fragment shader ready to run over its canvas, with its textures and uniforms. */
-export interface QuadProgram<T extends string, U extends string> {
+/**
+ * Links a fragment shader with the full-quad vertex shader, its corner
+ * attribute at location 0, so programs on one context share one quad.
+ */
+export function linkQuad(
+  gl: WebGL2RenderingContext,
+  fragment: string,
+  label: string,
+): WebGLProgram | null {
+  const vs = compile(gl, gl.VERTEX_SHADER, VERTEX, label);
+  const fs = compile(gl, gl.FRAGMENT_SHADER, fragment, label);
+  const program = gl.createProgram();
+  if (!vs || !fs || !program) return null;
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.bindAttribLocation(program, 0, "corner");
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error(`${label} program:`, gl.getProgramInfoLog(program));
+    return null;
+  }
+  return program;
+}
+
+/** The quad every `linkQuad` program draws, bound at attribute 0. */
+export function bindQuad(gl: WebGL2RenderingContext): void {
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+}
+
+/** A WebGL2 context on a canvas of its own: what drawing a picture with it takes. */
+export interface GlCanvas {
   readonly canvas: AnyCanvas;
   readonly gl: WebGL2RenderingContext;
   /** The largest texture side this GPU takes. */
   readonly maxTexture: number;
+}
+
+/** A fragment shader ready to run over its canvas, with its textures and uniforms. */
+export interface QuadProgram<T extends string, U extends string> extends GlCanvas {
   readonly textures: Readonly<Record<T, { readonly unit: number; readonly texture: WebGLTexture }>>;
   readonly uniforms: Readonly<Record<U, WebGLUniformLocation | null>>;
 }
@@ -127,7 +164,7 @@ export function quadProgram<T extends string, U extends string>(
  * and the picture fits the GPU's textures. When it can't, the caller keeps
  * what it has rather than draw a blank.
  */
-export function fits(p: QuadProgram<string, string>, w: number, h: number): boolean {
+export function fits(p: GlCanvas, w: number, h: number): boolean {
   return !p.gl.isContextLost() && w <= p.maxTexture && h <= p.maxTexture;
 }
 
@@ -138,7 +175,7 @@ export function fits(p: QuadProgram<string, string>, w: number, h: number): bool
  * False when the drawing buffer came out smaller than asked (the browser
  * caps it): don't use what it draws.
  */
-export function begin(p: QuadProgram<string, string>, w: number, h: number): boolean {
+export function begin(p: GlCanvas, w: number, h: number): boolean {
   const { canvas, gl } = p;
   const oversized = canvas.width * canvas.height > 4 * w * h;
   if (canvas.width < w || oversized) canvas.width = w;
@@ -165,6 +202,6 @@ export function upload<T extends string>(
 }
 
 /** Runs the shader over the canvas. */
-export function draw(p: QuadProgram<string, string>): void {
+export function draw(p: GlCanvas): void {
   p.gl.drawArrays(p.gl.TRIANGLE_STRIP, 0, 4);
 }

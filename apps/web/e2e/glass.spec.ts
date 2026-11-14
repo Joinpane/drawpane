@@ -133,11 +133,17 @@ test.describe
     test("bends the backdrop over the rim, and leaves the flat middle as it is", async () => {
       await set({ ...BASE, visible: false });
       const middle = await pixel(page, 205, 150);
-      const rim = await pixel(page, 106, 150);
+      const rim = await pixel(page, 102, 150);
       await set({ ...BASE, refraction: 100 });
-      // Flat in the middle: the same stripe.
-      expect(distance(await pixel(page, 205, 150), middle)).toBeLessThan(12);
-      await expect.poll(async () => distance(await pixel(page, 106, 150), rim)).toBeGreaterThan(15);
+      // Flat in the middle: the backdrop as it is.
+      expect(distance(await pixel(page, 205, 150), middle)).toBeLessThan(6);
+      // On the left rim it sees from further in: further right on the ramp, so less red, more blue.
+      await expect
+        .poll(async () => {
+          const bent = await pixel(page, 102, 150);
+          return Math.min(rim[0] - bent[0], bent[2] - rim[2]);
+        })
+        .toBeGreaterThan(4);
     });
 
     test("still bends with noise on the same layer, drawn behind it as it is alone", async () => {
@@ -157,13 +163,18 @@ test.describe
         { id: glass, effects: [{ ...BASE, visible: false }, clear] },
       );
       await page.waitForTimeout(150);
-      const rim = await pixel(page, 106, 150);
+      const rim = await pixel(page, 102, 150);
       await page.evaluate(
         ({ id, effects }) =>
           (window as unknown as W).drawpane.setProp([id], "effects", effects, "Glass"),
         { id: glass, effects: [{ ...BASE, refraction: 100 }, clear] },
       );
-      await expect.poll(async () => distance(await pixel(page, 106, 150), rim)).toBeGreaterThan(15);
+      await expect
+        .poll(async () => {
+          const bent = await pixel(page, 102, 150);
+          return Math.min(rim[0] - bent[0], bent[2] - rim[2]);
+        })
+        .toBeGreaterThan(4);
     });
 
     test("lights the rim on the light's side", async () => {
