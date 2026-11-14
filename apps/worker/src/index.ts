@@ -4,6 +4,8 @@ import { ZodError } from "zod";
 import { requireFileRole } from "./api/access";
 import { api } from "./api/routes";
 import { resolveShareToken } from "./api/share";
+import { account } from "./auth/account";
+import { oauth } from "./auth/oauth";
 import { passkeys, publicOrigins } from "./auth/passkeys";
 import { requireUser, session } from "./auth/session";
 import type { AppContext } from "./env";
@@ -27,7 +29,9 @@ app.use("/api/*", session);
 app.use("/ws/*", session);
 
 app.get("/api/health", (c) => c.json({ ok: true }));
+app.route("/api/auth/oauth", oauth);
 app.route("/api/auth", passkeys);
+app.route("/api/account", account);
 app.route("/api", api);
 
 app.get("/ws/files/:fileId", async (c) => {
