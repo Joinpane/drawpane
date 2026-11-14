@@ -860,3 +860,23 @@
   flex-wrap: wrap;
   gap: var(--space-200);
 }
+.dash__account {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-200);
+  min-width: 0;
+  margin: calc(-1 * var(--space-100));
+  padding: var(--space-100);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  text-decoration: none;
+  transition: background var(--duration-hover) ease-out;
+}
+.dash__account:hover {
+  background: var(--surface-hover);
+}
+.dash__account:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}

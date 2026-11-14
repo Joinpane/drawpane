@@ -21,6 +21,12 @@ export interface Env {
   readonly PUBLIC_ORIGIN?: string;
   /** `off` stops the Worker from fetching Google Fonts (see api/fonts.ts). */
   readonly GOOGLE_FONTS?: string;
+  /** Sign in with GitHub: an OAuth app's client id and secret (docs/self-hosting.md). */
+  readonly GITHUB_CLIENT_ID?: string;
+  readonly GITHUB_CLIENT_SECRET?: string;
+  /** Sign in with Google: an OAuth client's id and secret (docs/self-hosting.md). */
+  readonly GOOGLE_CLIENT_ID?: string;
+  readonly GOOGLE_CLIENT_SECRET?: string;
 }
 
 export type Role = "owner" | "editor" | "viewer";
