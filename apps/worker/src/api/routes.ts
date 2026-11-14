@@ -1,9 +1,9 @@
-import { newId } from "@drawpane/model";
+import { ID_PATTERN, type NodeRecord, newId } from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
 import { publicOrigins } from "../auth/passkeys";
 import { requireUser } from "../auth/session";
-import type { AppContext, Role } from "../env";
+import type { AppContext, Env, Role } from "../env";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { badRequest, conflict, notFound } from "../lib/http";
 import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
@@ -18,6 +18,10 @@ import { versions } from "./versions";
 const Name = z.string().trim().min(1, "Enter a name.").max(120, "Keep names under 120 characters.");
 const RoleSchema = z.enum(["owner", "editor", "viewer"]);
 const INVITE_DAYS = 7;
+
+function room(env: Env, fileId: string) {
+  return env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
+}
 
 export const api = new Hono<AppContext>()
   .get("/session", async (c) => {
@@ -246,11 +250,27 @@ export const api = new Hono<AppContext>()
     return c.json({ files: results.map(toFile) });
   })
 
+  /**
+   * A new file. With `from`, a copy of another file on the team (a duplicate,
+   * or a new file from a template): its content and thumbnail come along.
+   */
   .post("/projects/:projectId/files", async (c) => {
     const user = requireUser(c);
     const project = await projectTeam(c.env.DB, c.req.param("projectId"));
     await requireTeamRole(c.env, user.id, project.team_id, "editor");
-    const { name } = await readBody(c, z.object({ name: Name.default("Untitled") }));
+    const { name, from } = await readBody(
+      c,
+      z.object({
+        name: Name.default("Untitled"),
+        from: z.string().regex(ID_PATTERN).optional(),
+      }),
+    );
+    let source: FileRow | null = null;
+    if (from) {
+      source = (await requireFileRole(c.env, user.id, from, "viewer")).file;
+      if (source.team_id !== project.team_id)
+        throw badRequest("Files can only be copied within the same team.");
+    }
     const now = Date.now();
     const row: FileRow = {
       id: newId(),
@@ -267,7 +287,44 @@ export const api = new Hono<AppContext>()
       ).bind(row.id, row.project_id, row.team_id, row.name, user.id, now, now),
       c.env.DB.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").bind(now, project.id),
     ]);
+    if (source) {
+      // Over RPC the records come back structurally typed; they're the room's own.
+      const nodes = (await room(c.env, source.id).allNodes()) as NodeRecord[];
+      const copied = await room(c.env, row.id).importNodes(
+        { userId: user.id, name: user.name },
+        nodes,
+      );
+      if (!copied.ok) {
+        await c.env.DB.prepare("DELETE FROM files WHERE id = ?").bind(row.id).run();
+        throw conflict("That file couldn't be copied. Try again.");
+      }
+      // The copy looks like its source on the dashboard straight away.
+      const thumbnail = await c.env.FILES.get(thumbnailKey(source.id));
+      if (thumbnail) {
+        await c.env.FILES.put(thumbnailKey(row.id), thumbnail.body, {
+          httpMetadata: thumbnail.httpMetadata ?? {},
+        });
+        await c.env.DB.prepare("UPDATE files SET thumbnail_at = ? WHERE id = ?")
+          .bind(now, row.id)
+          .run();
+        row.thumbnail_at = now;
+      }
+    }
     return c.json({ file: toFile(row) }, 201);
+  })
+
+  /** The team's templates: files new ones can start from. */
+  .get("/teams/:teamId/templates", async (c) => {
+    const user = requireUser(c);
+    const teamId = c.req.param("teamId");
+    await requireTeamRole(c.env, user.id, teamId, "viewer");
+    const { results } = await c.env.DB.prepare(
+      `SELECT * FROM files WHERE team_id = ? AND is_template = 1 AND deleted_at IS NULL
+        ORDER BY name COLLATE NOCASE`,
+    )
+      .bind(teamId)
+      .all<FileRow>();
+    return c.json({ files: results.map(toFile) });
   })
 
   .get("/files/:fileId", async (c) => {
@@ -284,15 +341,29 @@ export const api = new Hono<AppContext>()
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
     const body = await readBody(
       c,
-      z.object({ name: Name.optional(), projectId: z.string().max(64).optional() }),
+      z.object({
+        name: Name.optional(),
+        projectId: z.string().max(64).optional(),
+        isTemplate: z.boolean().optional(),
+      }),
     );
     if (body.projectId && body.projectId !== file.project_id) {
       const target = await projectTeam(c.env.DB, body.projectId);
       if (target.team_id !== file.team_id)
         throw badRequest("Files can only move between projects on the same team.");
     }
-    await c.env.DB.prepare("UPDATE files SET name = ?, project_id = ?, updated_at = ? WHERE id = ?")
-      .bind(body.name ?? file.name, body.projectId ?? file.project_id, Date.now(), file.id)
+    // Marking a template isn't an edit to the file: its edited time stays.
+    const edited = body.name !== undefined || body.projectId !== undefined;
+    await c.env.DB.prepare(
+      "UPDATE files SET name = ?, project_id = ?, is_template = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(
+        body.name ?? file.name,
+        body.projectId ?? file.project_id,
+        body.isTemplate === undefined ? (file.is_template ?? 0) : body.isTemplate ? 1 : 0,
+        edited ? Date.now() : file.updated_at,
+        file.id,
+      )
       .run();
     return c.json({ ok: true });
   })
