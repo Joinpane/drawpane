@@ -1,5 +1,5 @@
 /**
- * The Members page: an owner invites with a note, sees the invite pending,
+ * The Members page: an owner invites with a note or by email, sees the invite pending,
  * takes one back, changes someone's role and removes them; someone who
  * isn't an owner sees the roles and can leave. The server side has its own
  * tests (apps/worker/test/members.test.ts).
@@ -74,6 +74,34 @@ test.describe
       await expect(people.getByRole("listitem")).toHaveCount(2);
       await expect(ana.getByRole("list", { name: /Pending invites/ })).toHaveCount(0);
       await expect(ana.getByText("2 people")).toBeVisible();
+    });
+
+    test("sends an invite by email, and shows where it went", async () => {
+      await ana.getByRole("button", { name: "Invite people" }).click();
+      const dialog = ana.getByRole("dialog", { name: "Invite to this team" });
+      const address = dialog.getByLabel("Email (optional)");
+      const send = dialog.getByRole("button", { name: "Send invite" });
+      // The button says what will happen.
+      await expect(dialog.getByRole("button", { name: "Create link" })).toBeVisible();
+      // Problems with the address show on the address.
+      await address.fill("dee at example");
+      await send.click();
+      await expect(address).toHaveAccessibleDescription("That doesn't look like an email address.");
+      await address.fill("bo@example.com");
+      await send.click();
+      await expect(address).toHaveAccessibleDescription("bo@example.com is already on this team.");
+      await address.fill("Dee@Example.com");
+      await expect(address).not.toHaveAttribute("aria-invalid", "true");
+      await send.click();
+      await expect(dialog.getByRole("status")).toContainText("Sent to dee@example.com");
+      await expect(dialog.locator(".app-copy code")).toContainText("/invite/");
+      await dialog.getByRole("button", { name: "Done" }).click();
+
+      const pending = ana.getByRole("list", { name: /Pending invites/ });
+      const row = pending.getByRole("listitem").filter({ hasText: "dee@example.com" });
+      await expect(row).toContainText("Emailed by Ana Lima");
+      await row.getByRole("button", { name: "Take back the invite for dee@example.com" }).click();
+      await expect(ana.getByRole("list", { name: /Pending invites/ })).toHaveCount(0);
     });
 
     test("someone who isn't an owner sees roles, and can only leave", async () => {

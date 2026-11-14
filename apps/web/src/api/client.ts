@@ -88,6 +88,10 @@ export interface PendingInvite {
   readonly role: Role;
   /** Who it's for, as the owner wrote it. */
   readonly note: string | null;
+  /** The address it was sent to, if it was sent by email. */
+  readonly email: string | null;
+  /** When the email went; null if it wasn't emailed, or sending failed. */
+  readonly emailedAt: number | null;
   readonly createdAt: number;
   readonly expiresAt: number;
   readonly createdBy: string | null;
@@ -178,7 +182,7 @@ export const api = {
   unread: () => request<{ unread: number }>("GET", "/notifications/unread"),
   markRead: (which: MarkRead) => request<{ unread: number }>("POST", "/notifications/read", which),
   invites: (teamId: string) =>
-    request<{ invites: PendingInvite[] }>("GET", `/teams/${teamId}/invites`),
+    request<{ invites: PendingInvite[]; canEmail: boolean }>("GET", `/teams/${teamId}/invites`),
 
   /** The file's prototype link, if it's on. */
   shareLink: (fileId: string) =>

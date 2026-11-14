@@ -1217,3 +1217,32 @@
   color: var(--ink-muted);
   font: 400 13px / 18px var(--font-ui);
 }
+
+/* Invite dialog: what happened to the email. */
+.invite__result {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 18px;
+}
+.invite__result > svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--success);
+}
+.invite__result strong {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.invite__result--warn {
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+.invite__result--warn > svg {
+  color: var(--warning);
+}

@@ -135,6 +135,11 @@ Then the provider's credentials:
 
 Open **Instance health** (your name → Instance health and cost) to see how email is set up, or what's missing, and send yourself a test. For mail to land in inboxes rather than spam, set up SPF, DKIM and DMARC for the sending domain as your provider describes.
 
+What it sends:
+
+- **Mentions, replies and resolved comments** someone hasn't seen in Drawpane 10 minutes after they happened: a few minutes later, or in a daily digest at an hour they pick. Each person chooses in Account settings, and every email has a one-click unsubscribe. A Cron Trigger runs this every 5 minutes.
+- **Invites**: an owner can send an invite link to an address from Members › Invite people. Replies go to the owner who sent it. A team sends at most 50 invite emails a day; links can always be copied and shared by hand.
+
 To turn email off again: `npx wrangler secret delete EMAIL_PROVIDER`.
 
 ## Backups
