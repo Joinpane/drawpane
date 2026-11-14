@@ -1,9 +1,10 @@
 /**
  * Publishes the file's dashboard thumbnail: a picture of the first page,
  * rendered here with the canvas's renderer and uploaded once edits settle
- * (10 s after the last change), when the tab is hidden, when you leave the
- * file, and once 10 s after it opens (so an edit whose tab closed too soon is
- * caught next time). Only editors publish.
+ * (10 s after the last change), and when the tab is hidden or you leave the
+ * file with edits not yet in it. A file whose thumbnail is missing or older
+ * than its last edit (a tab closed too soon) gets one 10 s after it opens.
+ * Only editors publish.
  */
 import { CanvasRenderer, type Editor, renderThumbnail } from "@drawpane/editor";
 import { useQueryClient } from "@tanstack/react-query";
@@ -33,13 +34,19 @@ export function useThumbnailPublisher(
   editor: Editor,
   fileId: string,
   thumbnailAt: number | null | undefined,
+  /** When the file was last edited: a thumbnail older than that is stale. */
+  updatedAt?: number,
 ): void {
   const queryClient = useQueryClient();
   // Read when needed rather than restarting the publisher when file metadata refetches.
   const known = useRef(thumbnailAt);
   known.current = thumbnailAt;
+  const editedAt = useRef(updatedAt);
+  editedAt.current = updatedAt;
   useEffect(() => {
     let dirty = false;
+    /** Edits since the last publish: worth publishing even as the page goes away. */
+    let edited = false;
     let timer = 0;
     let running = false;
     /** Whether the server has a thumbnail: unknown (null) until metadata loads or this publishes. */
@@ -51,6 +58,7 @@ export function useThumbnailPublisher(
       clearTimeout(timer);
       if (!dirty || running || !editor.canEdit) return;
       dirty = false;
+      edited = false;
       running = true;
       try {
         const blob = await render(editor);
@@ -89,22 +97,32 @@ export function useThumbnailPublisher(
     const offDoc = editor.doc.subscribe((change) => {
       // The snapshot that opens the file isn't an edit.
       if (change.reset) return;
+      edited = true;
       schedule();
     });
-    // Once per open, refresh the thumbnail too: it catches files from before
-    // thumbnails existed, and edits whose tab closed before they were published.
+    // On open, refresh a thumbnail that's missing or older than the file's last
+    // edit (an edit whose tab closed before it published). A current one is
+    // left alone: drawing a big file for nothing would also hold up leaving it.
     let opened = false;
     const offState = editor.state.subscribe(() => {
       if (opened || editor.s.status !== "live" || !editor.canEdit) return;
       opened = true;
       const pageId = editor.doc.pageIds()[0];
       const empty = !pageId || editor.doc.childIds(pageId).length === 0;
-      if (!empty || hasThumbnail() !== false) schedule();
+      const at = known.current;
+      const stale =
+        at === null ||
+        (at !== undefined && editedAt.current !== undefined && at < editedAt.current);
+      if (empty ? hasThumbnail() !== false : stale || at === undefined) schedule();
     });
+    // Going away: publish edits now. A refresh nobody edited can wait for the
+    // next open, rather than drawing the file while the next page waits.
     const onHidden = () => {
-      if (document.visibilityState === "hidden") void publish();
+      if (document.visibilityState === "hidden" && edited) void publish();
     };
-    const onPageHide = () => void publish();
+    const onPageHide = () => {
+      if (edited) void publish();
+    };
     document.addEventListener("visibilitychange", onHidden);
     window.addEventListener("pagehide", onPageHide);
     return () => {
@@ -112,8 +130,9 @@ export function useThumbnailPublisher(
       offState();
       document.removeEventListener("visibilitychange", onHidden);
       window.removeEventListener("pagehide", onPageHide);
-      // Leaving the file: publish now. The document stays in memory until this finishes.
-      void publish();
+      // Leaving the file with edits not in the thumbnail: publish now. The
+      // document stays in memory until this finishes.
+      if (edited) void publish();
     };
   }, [editor, fileId, queryClient]);
 }

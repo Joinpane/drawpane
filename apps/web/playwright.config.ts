@@ -34,10 +34,25 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: /tour\//,
+      testIgnore: /(tour|bench)\//,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1440, height: 900 },
+        ...(process.env.CHROMIUM_PATH
+          ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
+          : {}),
+      },
+    },
+    {
+      // Performance budgets (docs/PRD.md, non-functional requirements). `pnpm bench`.
+      name: "bench",
+      testMatch: /bench\/.*\.spec\.ts/,
+      timeout: 300_000,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1440, height: 900 },
+        // A retina laptop: twice the pixels to fill.
+        deviceScaleFactor: 2,
         ...(process.env.CHROMIUM_PATH
           ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
           : {}),
