@@ -155,6 +155,12 @@ export const api = {
       "GET",
       `/teams/${teamId}/files${view === "trash" ? "?view=trash" : ""}`,
     ),
+  /** The team's files whose names match every word of `q`, best first (live files, or the trash). */
+  searchFiles: (teamId: string, q: string, trash: boolean) =>
+    request<{ files: FileMeta[] }>(
+      "GET",
+      `/teams/${teamId}/files?q=${encodeURIComponent(q)}${trash ? "&view=trash" : ""}`,
+    ),
   projectFiles: (projectId: string) =>
     request<{ files: FileMeta[] }>("GET", `/projects/${projectId}/files`),
   file: (fileId: string) =>

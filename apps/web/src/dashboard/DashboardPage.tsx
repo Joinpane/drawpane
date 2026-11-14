@@ -8,7 +8,7 @@ import {
   type MenuItem,
   TextField,
 } from "@drawpane/ui";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, type FileMeta, type Project, type Role } from "../api/client";
@@ -23,6 +23,7 @@ import { ImportDialog } from "./ImportDialog";
 import { InviteDialog } from "./InviteDialog";
 import { MembersView } from "./Members";
 import { isPenpotFile } from "./penpot-import";
+import { highlightParts, matchesAll, useDebounced } from "./search";
 import { TeamFontsView } from "./TeamFonts";
 import type { TeamView } from "./views";
 import "./dashboard.css";
@@ -118,13 +119,30 @@ export function DashboardPage() {
     },
   });
 
+  // Searching looks through every file on the team (or the whole trash), not just this list.
+  const searching = query.trim() !== "";
+  const term = useDebounced(query.trim(), 150);
+  const results = useQuery({
+    queryKey: ["files", teamId, "search", view === "trash" ? "trash" : "live", term],
+    enabled: showsFiles && term !== "",
+    queryFn: () => api.searchFiles(teamId, term, view === "trash"),
+    // Refining a search keeps the last results up until the new ones arrive.
+    placeholderData: keepPreviousData,
+  });
   const visible = useMemo(() => {
     const list = files.data?.files ?? [];
-    const q = query.trim().toLowerCase();
-    return q ? list.filter((f) => f.name.toLowerCase().includes(q)) : list;
-  }, [files.data, query]);
+    if (!searching) return list;
+    // Until the first answer arrives, what's on screen already, filtered the same way.
+    return results.data?.files ?? list.filter((f) => matchesAll(f.name, query));
+  }, [files.data, results.data, searching, query]);
 
-  const heading = view === "trash" ? "Trash" : project ? project.name : "Recent files";
+  const heading = searching
+    ? `Results for “${query.trim()}”`
+    : view === "trash"
+      ? "Trash"
+      : project
+        ? project.name
+        : "Recent files";
   const target = project ?? drafts;
   newBlank.current = () => {
     if (canEdit && target && view !== "trash" && !createFile.isPending) createFile.mutate(target);
@@ -309,14 +327,14 @@ export function DashboardPage() {
           ) : visible.length === 0 ? (
             <EmptyState
               trash={view === "trash"}
-              searching={query.trim() !== ""}
+              searching={searching}
               canCreate={canEdit && !!target}
               onCreate={() => target && createFile.mutate(target)}
               onTemplates={canEdit && target ? openNewFile : null}
               onImport={canImport ? () => openImport() : null}
             />
           ) : (
-            <ul className="dash__grid">
+            <ul className="dash__grid" aria-busy={searching && results.isFetching}>
               {visible.map((file) => (
                 <FileCard
                   key={file.id}
@@ -327,6 +345,7 @@ export function DashboardPage() {
                   projectName={
                     projects.data?.projects.find((p) => p.id === file.projectId)?.name ?? ""
                   }
+                  highlight={searching ? query : ""}
                   onChanged={invalidateFiles}
                 />
               ))}
@@ -498,6 +517,7 @@ function FileCard({
   canEdit,
   isOwner,
   projectName,
+  highlight,
   onChanged,
 }: {
   file: FileMeta;
@@ -505,6 +525,8 @@ function FileCard({
   canEdit: boolean;
   isOwner: boolean;
   projectName: string;
+  /** A search query whose words are marked in the name. */
+  highlight: string;
   onChanged: () => void;
 }) {
   const navigate = useNavigate();
@@ -603,7 +625,15 @@ function FileCard({
             onClick={open}
             onDoubleClick={() => canEdit && !trash && setRenaming(true)}
           >
-            {file.name}
+            {highlightParts(file.name, highlight).map((part, i) =>
+              part.match ? (
+                <mark key={i} className="dash__match">
+                  {part.text}
+                </mark>
+              ) : (
+                part.text
+              ),
+            )}
           </button>
         )}
         <span className="dash__card-sub">
@@ -672,8 +702,12 @@ function EmptyState({
   if (searching) {
     return (
       <div className="dash__empty">
-        <p className="app-display-md">No matches.</p>
-        <p className="app-muted">Try a different name.</p>
+        <p className="app-display-md">No files match.</p>
+        <p className="app-muted">
+          {trash
+            ? "Nothing in the trash has that name."
+            : "That's every file on the team. Try fewer words, or part of a name."}
+        </p>
       </div>
     );
   }

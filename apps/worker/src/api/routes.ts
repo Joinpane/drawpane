@@ -12,6 +12,7 @@ import { fonts } from "./fonts";
 import { imports } from "./imports";
 import { media, thumbnailKey } from "./media";
 import { notifications } from "./notifications";
+import { fileSearch, SEARCH_LIMIT } from "./search";
 import { share } from "./share";
 import { teamFonts } from "./team-fonts";
 import { versions } from "./versions";
@@ -320,12 +321,18 @@ export const api = new Hono<AppContext>()
     const teamId = c.req.param("teamId");
     await requireTeamRole(c.env, user.id, teamId, "viewer");
     const trash = c.req.query("view") === "trash";
-    const { results } = await c.env.DB.prepare(
-      `SELECT * FROM files WHERE team_id = ? AND deleted_at IS ${trash ? "NOT NULL" : "NULL"}
-        ORDER BY updated_at DESC LIMIT 200`,
-    )
-      .bind(teamId)
-      .all<FileRow>();
+    const deleted = `deleted_at IS ${trash ? "NOT NULL" : "NULL"}`;
+    // With `q`: the team's files whose names match, best first (see search.ts).
+    const search = fileSearch(c.req.query("q") ?? "");
+    const { results } = await (search
+      ? c.env.DB.prepare(
+          `SELECT * FROM files WHERE team_id = ? AND ${deleted} AND ${search.where}
+            ORDER BY ${search.order} LIMIT ${SEARCH_LIMIT}`,
+        ).bind(teamId, ...search.binds)
+      : c.env.DB.prepare(
+          `SELECT * FROM files WHERE team_id = ? AND ${deleted} ORDER BY updated_at DESC LIMIT 200`,
+        ).bind(teamId)
+    ).all<FileRow>();
     return c.json({ files: results.map(toFile) });
   })
 
