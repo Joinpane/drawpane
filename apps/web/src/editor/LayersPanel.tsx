@@ -14,6 +14,8 @@ import {
   useRef,
   useState,
 } from "react";
+import { isMac } from "../app/format";
+import { shortcutFor } from "./actions";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import {
   aimDrop,
@@ -118,6 +120,18 @@ export function LayersPanel() {
     return map;
   }, [peers, pageId]);
 
+  // A row the keyboard moved to takes focus as soon as it's on screen (the list is virtual).
+  const focusRow = useRef<string | null>(null);
+  // After each draw of the rows: the selection moved, or the list scrolled to it.
+  useEffect(() => {
+    const id = focusRow.current;
+    if (!id) return;
+    const el = scroller.current?.querySelector<HTMLElement>(`[data-layer-id="${CSS.escape(id)}"]`);
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    focusRow.current = null;
+  }, [selection, scroll]);
+
   // Keep the focused or newly selected row scrolled into view.
   useLayoutEffect(() => {
     const id = selection[0];
@@ -192,6 +206,8 @@ export function LayersPanel() {
       if (next) {
         e.preventDefault();
         select(next.node.id, { shiftKey: e.shiftKey, metaKey: false, ctrlKey: false });
+        // Focus follows the selection (and screen readers with it), once its row is drawn.
+        focusRow.current = next.node.id;
       }
     };
     switch (e.key) {
@@ -342,7 +358,7 @@ export function LayersPanel() {
           <IconButton
             icon="search"
             label="Find layers"
-            shortcut="⌘F"
+            shortcut={shortcutFor("layer.find")}
             pressed={searching}
             onClick={() => {
               if (searching) closeSearch();
@@ -352,7 +368,7 @@ export function LayersPanel() {
           <IconButton
             icon="collapse-all"
             label="Collapse all layers"
-            shortcut="⌥L"
+            shortcut={shortcutFor("layer.collapseAll")}
             disabled={active}
             onClick={collapseAll}
           />
@@ -438,6 +454,7 @@ export function LayersPanel() {
                   // Search results always show what's inside them.
                   expanded={active || !collapsed.has(node.id)}
                   tabIndex={node.id === tabStop ? 0 : -1}
+                  data-layer-id={node.id}
                   {...(presence
                     ? { presence: presence.slot, presenceLabel: `Selected by ${presence.name}` }
                     : {})}
@@ -635,7 +652,9 @@ function DragStatus({
       <span>
         <strong>{what}</strong> · {drag.copy ? "copying" : "moving"} {where}
       </span>
-      {drag.copy ? null : <span className="layers__status-hint">⌥ to copy</span>}
+      {drag.copy ? null : (
+        <span className="layers__status-hint">{isMac() ? "⌥" : "Alt"} to copy</span>
+      )}
     </div>
   );
 }

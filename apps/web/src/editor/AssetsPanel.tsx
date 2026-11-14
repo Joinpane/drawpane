@@ -10,6 +10,7 @@ import { getProp, type NodeRecord } from "@drawpane/model";
 import { Icon } from "@drawpane/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useResolvedTheme } from "../app/theme";
+import { shortcutFor } from "./actions";
 import { useDocVersion, useEditor } from "./hooks";
 
 export const COMPONENT_DRAG_MIME = "application/x-drawpane-component";
@@ -74,8 +75,8 @@ export function AssetsPanel() {
           <div className="assets__empty">
             <p className="assets__empty-title">No components yet</p>
             <p className="assets__empty-body">
-              Select a frame and press <kbd>⌥⌘K</kbd> to make it a component. Its instances update
-              when it changes.
+              Select a frame and press <kbd>{shortcutFor("component.create")}</kbd> to make it a
+              component. Its instances update when it changes.
             </p>
           </div>
         ) : visible.length === 0 ? (

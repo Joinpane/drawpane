@@ -1,7 +1,7 @@
 import type { ToolId } from "@drawpane/editor";
 import { ContextMenu, Icon, IconButton, type IconName, Kbd, Tooltip } from "@drawpane/ui";
 import { useRef, useState } from "react";
-import { ACTIONS, type ActionContext, formatShortcut } from "./actions";
+import { ACTIONS, type ActionContext, capsFor, formatShortcut } from "./actions";
 import { useEditor, useEditorState } from "./hooks";
 
 interface Tool {
@@ -67,13 +67,7 @@ export function Toolbar({ onSearch, ctx }: { onSearch: () => void; ctx: ActionCo
       <span className="toolbar__sep" aria-hidden="true" />
       <button type="button" className="toolbar__search" onClick={onSearch}>
         <span>Search or set…</span>
-        <Kbd
-          keys={
-            formatShortcut({ key: "k", mod: true })
-              .match(/Ctrl|⌘|K|\+/g)
-              ?.filter((k) => k !== "+") ?? ["⌘", "K"]
-          }
-        />
+        <Kbd keys={capsFor("view.command")} />
       </button>
     </div>
   );

@@ -1,4 +1,4 @@
-import { cssFor, cssRule, jsxFor, tailwindFor, trackLabel } from "@drawpane/editor";
+import { cssFor, cssRule, jsxFor, layerName, tailwindFor, trackLabel } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { Badge, IconButton, PropertySection, SegmentedControl } from "@drawpane/ui";
 import { useState } from "react";
@@ -51,9 +51,7 @@ export function InspectPanel() {
   return (
     <div className="inspector inspect">
       <div className="inspect__head">
-        <h2 className="inspector__title inspect__name">
-          {getProp(node.props, "name") || KIND[node.type]}
-        </h2>
+        <h2 className="inspector__title inspect__name">{layerName(node) || KIND[node.type]}</h2>
         <Badge>
           {getProp(node.props, "isComponent")
             ? "Component"

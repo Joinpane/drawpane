@@ -44,6 +44,8 @@ export function Bindable({
           className="bindable__trigger"
           aria-label="Use a variable"
           title="Use a variable"
+          // Out of the Tab order, which runs field to field, like Figma's.
+          tabIndex={-1}
           onClick={open}
         >
           <Icon name="token" size={12} />

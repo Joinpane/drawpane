@@ -154,24 +154,55 @@ describe("Editor", () => {
     }
   });
 
-  it("wraps a selection in an auto-layout frame that hugs its content", () => {
+  it("wraps a selection in an auto-layout frame that hugs it, keeping the space between", () => {
     const a = editor.createLayer("rect", { x: 100, y: 100, width: 40, height: 20 }, "p") as string;
     const b = editor.createLayer("rect", { x: 200, y: 100, width: 60, height: 20 }, "p") as string;
     editor.select([b, a]);
     editor.frameSelection(true);
     const frame = editor.s.selection[0] as string;
+    // 60px apart: that's the gap, so nothing moves.
     expect(props(editor, frame)).toMatchObject({
       layoutMode: "row",
-      gap: 8,
-      width: 108,
+      gap: 60,
+      width: 160,
       height: 20,
     });
     expect(editor.doc.childIds(frame)).toEqual([a, b]);
-    expect(props(editor, b).x).toBe(48);
+    expect(props(editor, b).x).toBe(100);
     // Changing the gap re-runs layout in the same commit.
     editor.setProp([frame], "gap", 20);
     expect(props(editor, frame).width).toBe(120);
     expect(props(editor, b).x).toBe(60);
+  });
+
+  it("turns on auto layout in a frame keeping its spacing, padding and order on screen", () => {
+    // A card: three rows 12px apart, 16px in from the edges, made bottom row first.
+    const card = editor.createLayer(
+      "frame",
+      { x: 0, y: 0, width: 200, height: 152 },
+      "p",
+    ) as string;
+    const rows = [2, 1, 0].map(
+      (i) =>
+        editor.createLayer(
+          "rect",
+          { x: 16, y: 16 + i * 44, width: 168, height: 32 },
+          card,
+        ) as string,
+    );
+    const before = rows.map((id) => [props(editor, id).x, props(editor, id).y]);
+    editor.setLayoutMode([card], "column");
+    expect(props(editor, card)).toMatchObject({
+      layoutMode: "column",
+      gap: 12,
+      paddingTop: 16,
+      paddingLeft: 16,
+      paddingRight: 16,
+      paddingBottom: 16,
+    });
+    // Nothing moved, and the flow runs top to bottom as they're seen.
+    expect(rows.map((id) => [props(editor, id).x, props(editor, id).y])).toEqual(before);
+    expect(editor.doc.childIds(card)).toEqual([...rows].reverse());
   });
 
   it("sizes text to its content", () => {

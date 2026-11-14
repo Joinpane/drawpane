@@ -40,6 +40,9 @@ import { VectorEditTool } from "./tools/vector-edit";
 import { scaledPathData } from "./vector/node";
 import { type XrayRegion, xrayLabel, xrayRegionAt } from "./xray";
 
+/** The most one ctrl+wheel event zooms by, in wheel delta: a notch is a ~1.27× step. */
+const WHEEL_ZOOM_STEP = 24;
+
 export interface PointerInput {
   readonly screen: Point;
   readonly button: number;
@@ -197,6 +200,7 @@ export class Interaction {
     const frame = this.selectionFrame();
     // The Prototype tab trades resize handles for the connection handle.
     if (!frame || this.#editor.s.editingText || this.#editor.s.prototyping) return null;
+    if (this.#editor.selectionLocked) return null;
     const camera = this.#editor.s.camera;
     // Tiny selections only get corner handles, so they stay draggable.
     const screenW = frame.width * camera.zoom;
@@ -450,7 +454,7 @@ export class Interaction {
           let ids = editor.s.selection;
           let duplicated = false;
           if (input.alt) {
-            editor.duplicate();
+            editor.duplicate({ inPlace: true });
             ids = editor.s.selection;
             duplicated = true;
           }
@@ -710,8 +714,10 @@ export class Interaction {
   }): void {
     const editor = this.#editor;
     if (e.ctrlKey || e.metaKey) {
-      // Pinch-zoom arrives as ctrl+wheel. Scale smoothly with the delta.
-      editor.zoomBy(Math.exp(-e.deltaY * 0.01), e.screen);
+      // Pinch-zoom arrives as ctrl+wheel in small deltas: scale smoothly with
+      // them. A mouse wheel's notch is a big delta (~100): cap it to a step.
+      const delta = Math.max(-WHEEL_ZOOM_STEP, Math.min(WHEEL_ZOOM_STEP, e.deltaY));
+      editor.zoomBy(Math.exp(-delta * 0.01), e.screen);
       return;
     }
     const dx = e.shiftKey && e.deltaX === 0 ? e.deltaY : e.deltaX;

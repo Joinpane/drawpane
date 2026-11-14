@@ -154,7 +154,6 @@ export function CommentText({
     items.map((r, i) => run(r, `${key}.${i}`));
   const lines = (items: readonly (readonly Inline[])[], key: string) =>
     items.map((line, i) => (
-      // biome-ignore lint/suspicious/noArrayIndexKey: lines have no identity beyond their place
       <Fragment key={i}>
         {i > 0 ? <br /> : null}
         {runs(line, `${key}.${i}`)}
@@ -164,7 +163,6 @@ export function CommentText({
     return (
       <>
         {blocks.map((block, b) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: blocks have no identity beyond their place
           <Fragment key={b}>
             {b > 0 ? <br /> : null}
             {block.kind === "paragraph"
@@ -185,10 +183,7 @@ export function CommentText({
       {blocks.map((block, b) => {
         const key = String(b);
         if (block.kind === "paragraph") return <p key={key}>{lines(block.lines, key)}</p>;
-        const items = block.items.map((item, n) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: items have no identity beyond their place
-          <li key={n}>{runs(item, `${key}.${n}`)}</li>
-        ));
+        const items = block.items.map((item, n) => <li key={n}>{runs(item, `${key}.${n}`)}</li>);
         return block.ordered ? (
           <ol key={key} start={block.start === 1 ? undefined : block.start}>
             {items}

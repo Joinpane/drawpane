@@ -1,4 +1,4 @@
-import { componentSetOf, variantProperties } from "@drawpane/editor";
+import { componentSetOf, layerName, variantProperties } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { IconButton, PropertySection, SegmentedControl } from "@drawpane/ui";
 import { useState } from "react";
@@ -133,7 +133,7 @@ export function OverridesList({ instance }: { instance: NodeRecord }) {
         <li key={`${node.id}:${prop}`} className="overrides__item">
           <span className="overrides__dot" aria-hidden="true" />
           <span className="overrides__label">
-            {node.id === instance.id ? "Instance" : getProp(node.props, "name") || node.type}
+            {node.id === instance.id ? "Instance" : layerName(node)}
             <span className="overrides__prop"> · {PROP_LABEL[prop] ?? prop}</span>
           </span>
           <IconButton

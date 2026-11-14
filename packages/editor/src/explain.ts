@@ -9,6 +9,7 @@
 import { getProp, type NodeRecord } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { type FlowLine, flowChildren, flowLines, inFlow, layoutBox } from "./layout";
+import { layerName } from "./names";
 
 export type ExplainAxis = "width" | "height";
 
@@ -42,7 +43,7 @@ export interface Explanation {
 }
 
 const n = (v: number) => String(Math.round(v * 100) / 100);
-const name = (node: NodeRecord) => getProp(node.props, "name") || node.type;
+const name = (node: NodeRecord) => layerName(node);
 /** A layer's size as auto layout sees it (a group's is the box around what's in it). */
 const sizeOf = (doc: Doc, node: NodeRecord, axis: ExplainAxis) => layoutBox(doc, node.id)[axis];
 const sizingOf = (node: NodeRecord, axis: ExplainAxis) =>

@@ -13,6 +13,7 @@ import {
   type Props,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
+import { layerName } from "./names";
 import { type RunStyle, textSpans } from "./rich-text";
 import { letterSpacingPx, lineHeightPx } from "./text";
 import { cssVariableName } from "./variables";
@@ -389,7 +390,7 @@ export function className(name: string): string {
 
 /** A CSS rule for a layer, with resolved values of variables in comments. */
 export function cssRule(doc: Doc, node: NodeRecord): string {
-  const name = getProp(node.props, "name") || node.type;
+  const name = layerName(node);
   const lines = cssFor(doc, node).map(
     (d) => `  ${d.property}: ${d.value};${d.resolved ? ` /* ${d.resolved} */` : ""}`,
   );

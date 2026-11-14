@@ -66,7 +66,7 @@ import { withGuide } from "./grids";
 import { applyBestEffort, History } from "./history";
 import { hitAll } from "./hit";
 import { layoutImageRow } from "./images";
-import { layoutOps } from "./layout";
+import { flowChildren, inferFlow, inferPadding, layoutBox, layoutOps } from "./layout";
 import {
   isRunProp,
   type RunPatch,
@@ -357,6 +357,13 @@ export class Editor {
     };
     this.state.subscribe(reconcileExplain);
     this.doc.subscribe(reconcileExplain);
+    // Text is edited only while its layer is the selection: selecting
+    // anything else (or nothing) finishes the edit, so it can't get stuck.
+    this.state.subscribe(() => {
+      const { editingText, selection } = this.s;
+      if (editingText && (selection.length !== 1 || selection[0] !== editingText))
+        this.endTextEdit();
+    });
   }
 
   get s(): EditorState {
@@ -917,7 +924,8 @@ export class Editor {
           parent,
           key: this.topKey(parent),
           props: {
-            name: this.defaultName(type),
+            // Text is called by what it says (see `layerName`), until someone names it.
+            ...(type === "text" ? {} : { name: this.defaultName(type) }),
             ...this.defaultProps(type),
             x: round2(origin.x),
             y: round2(origin.y),
@@ -1059,6 +1067,48 @@ export class Editor {
     );
   }
 
+  /**
+   * Auto layout for a frame without it, keeping what's there: the direction
+   * the children run in (unless given), the gap between them, the padding
+   * around them, and their order along the direction, so nothing jumps.
+   */
+  #flowOps(frame: NodeRecord, direction?: "row" | "column"): Op[] {
+    const children = flowChildren(this.doc, frame.id);
+    const boxes = children.map((c) => layoutBox(this.doc, c.id));
+    const flow = inferFlow(boxes, direction);
+    const ops: Op[] = [{ op: "set", id: frame.id, prop: "layoutMode", value: flow.direction }];
+    if (getProp(frame.props, "gap") === 0)
+      ops.push({ op: "set", id: frame.id, prop: "gap", value: flow.gap });
+    const sides = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"] as const;
+    if (children.length > 0 && sides.every((side) => getProp(frame.props, side) === 0)) {
+      const pad = inferPadding(
+        { width: getProp(frame.props, "width"), height: getProp(frame.props, "height") },
+        boxes,
+      );
+      const values = [pad.top, pad.right, pad.bottom, pad.left];
+      sides.forEach((side, i) => {
+        if (values[i]) ops.push({ op: "set", id: frame.id, prop: side, value: values[i] });
+      });
+    }
+    // Their order in the flow is the order they're in on screen.
+    const row = flow.direction === "row";
+    const along = (i: number) => {
+      const b = boxes[i] as { x: number; y: number };
+      return row ? b.x : b.y;
+    };
+    const order = children.map((_, i) => i).sort((a, b) => along(a) - along(b));
+    // Only when they're all in the flow: fresh keys mustn't land among hidden or absolute ones.
+    const all = this.doc.childIds(frame.id).length === children.length;
+    if (all && order.some((k, i) => k !== i)) {
+      const keys = keysBetween(null, null, order.length);
+      order.forEach((k, i) => {
+        const child = children[k] as NodeRecord;
+        ops.push({ op: "move", id: child.id, parent: frame.id, key: keys[i] as string });
+      });
+    }
+    return ops;
+  }
+
   /** The box around layers, in `parent`'s coordinate space (its own rotation and all). */
   #boxIn(ids: readonly string[], parent: string): Rect | null {
     const toParent = invert(this.scene.spaceMatrix(this.scene.spaceOwner(parent)));
@@ -1161,7 +1211,12 @@ export class Editor {
     }
   }
 
-  duplicate(): void {
+  /**
+   * Copies the selection beside itself (16px over, or a component's instance
+   * a width away), or exactly in place with `inPlace`: an Alt-drag copies
+   * in place, then the drag moves the copy to where it's dropped.
+   */
+  duplicate({ inPlace = false }: { inPlace?: boolean } = {}): void {
     const ids = this.#topmost(this.s.selection);
     if (ids.length === 0) return;
     const ops: Op[] = [];
@@ -1174,7 +1229,7 @@ export class Editor {
       const key = keyBetween(node.key, next ? (this.doc.get(next)?.key ?? null) : null);
       const inLayout = getProp(this.doc.get(node.parent)?.props ?? {}, "layoutMode") !== "none";
       if (isMainComponent(node)) {
-        const offset = inLayout ? 0 : getProp(node.props, "width") + 40;
+        const offset = inLayout || inPlace ? 0 : getProp(node.props, "width") + 40;
         const made = instantiateOps(this.doc, id, node.parent, key, {
           x: round2(getProp(node.props, "x") + offset),
           y: getProp(node.props, "y"),
@@ -1190,7 +1245,7 @@ export class Editor {
         id,
         node.parent,
         key,
-        inLayout ? { x: 0, y: 0 } : { x: 16, y: 16 },
+        inLayout || inPlace ? { x: 0, y: 0 } : { x: 16, y: 16 },
       );
       ops.push(...cloned);
       created.push(rootId);
@@ -1344,20 +1399,8 @@ export class Editor {
     const first = ids[0] && this.doc.get(ids[0]);
     if (!first || !bounds) return;
     if (autoLayout && ids.length === 1 && first.type === "frame") {
-      if (getProp(first.props, "layoutMode") === "none") {
-        this.commit(
-          [
-            {
-              op: "set",
-              id: first.id,
-              prop: "layoutMode",
-              value: bounds.width >= bounds.height ? "row" : "column",
-            },
-            { op: "set", id: first.id, prop: "gap", value: 8 },
-          ],
-          "Add auto layout",
-        );
-      }
+      if (getProp(first.props, "layoutMode") === "none")
+        this.commit(this.#flowOps(first), "Add auto layout");
       return;
     }
     const slot = this.#wrapperSlot(ids);
@@ -1367,7 +1410,9 @@ export class Editor {
     // The selection's box in the parent's space, which may be rotated.
     const box = this.#boxIn(ids, parent) ?? bounds;
     const origin = { x: box.x, y: box.y };
-    const horizontal = box.width >= box.height;
+    // Auto layout keeps the spacing already there: direction and gap read from the layers.
+    const flow = inferFlow(ids.map((id) => this.#boxIn([id], parent) ?? box));
+    const horizontal = flow.direction === "row";
     const ops: Op[] = [
       {
         op: "create",
@@ -1382,7 +1427,7 @@ export class Editor {
           width: round2(box.width),
           height: round2(box.height),
           ...(autoLayout
-            ? { layoutMode: horizontal ? "row" : "column", gap: 8, sizingH: "hug", sizingV: "hug" }
+            ? { layoutMode: flow.direction, gap: flow.gap, sizingH: "hug", sizingV: "hug" }
             : {}),
         },
       },
@@ -1427,12 +1472,13 @@ export class Editor {
       if (frame?.type !== "frame") continue;
       const from = getProp(frame.props, "layoutMode");
       if (from === mode) continue;
-      ops.push({ op: "set", id, prop: "layoutMode", value: mode === "none" ? null : mode });
       if (mode !== "grid") {
-        if (from === "none" && getProp(frame.props, "gap") === 0)
-          ops.push({ op: "set", id, prop: "gap", value: 8 });
+        // From none, read gap, padding and order from how the layers sit.
+        if (from === "none" && mode !== "none") ops.push(...this.#flowOps(frame, mode));
+        else ops.push({ op: "set", id, prop: "layoutMode", value: mode === "none" ? null : mode });
         continue;
       }
+      ops.push({ op: "set", id, prop: "layoutMode", value: mode });
       const gap = getProp(frame.props, "gap") || 8;
       ops.push({ op: "set", id, prop: "gap", value: gap });
       if (getProp(frame.props, "rowGap") === 0)
@@ -2504,8 +2550,14 @@ export class Editor {
   toggleLocked(): void {
     const ids = this.s.selection;
     const anyUnlocked = ids.some((id) => this.doc.get(id)?.props.locked !== true);
+    // The selection stays, like Figma's: the same shortcut unlocks, and the
+    // canvas offers no handles to move it (see `selectionLocked`).
     this.setProp(ids, "locked", anyUnlocked ? true : null, anyUnlocked ? "Lock" : "Unlock");
-    if (anyUnlocked) this.select([]);
+  }
+
+  /** Whether anything selected is locked (in itself or by a locked parent): no resizing on the canvas. */
+  get selectionLocked(): boolean {
+    return this.s.selection.some((id) => this.scene.isLocked(id));
   }
 
   addPage(): void {
@@ -3031,8 +3083,9 @@ export class Editor {
   endTextEdit(): void {
     const id = this.s.editingText;
     if (!id) return;
-    this.endGesture();
+    // Out of editing first, so anything that hears the gesture end sees it finished.
     this.state.set({ editingText: null, textSelection: null, textPending: null });
+    this.endGesture();
     const node = this.doc.get(id);
     // An empty text layer has nothing to show: remove it, like every design tool.
     if (node && getProp(node.props, "characters").trim() === "") {

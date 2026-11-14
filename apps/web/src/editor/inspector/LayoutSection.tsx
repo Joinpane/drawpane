@@ -3,7 +3,7 @@
  * with gaps, alignment, padding and grid tracks), and how a layer sits in its
  * parent's layout (resizing, absolute position, alignment, grid cell).
  */
-import { type Editor, type GridCell, gridGeometry } from "@drawpane/editor";
+import { type Editor, type GridCell, gridGeometry, layerName } from "@drawpane/editor";
 import { type GridTrack, getProp, type NodeRecord, type PropName } from "@drawpane/model";
 import {
   IconButton,
@@ -14,6 +14,7 @@ import {
   type SegmentedOption,
   Switch,
 } from "@drawpane/ui";
+import { shortcutFor } from "../actions";
 import { useEditorStateOutside } from "../hooks";
 import { toggleXray } from "../ui-state";
 import { common, Num, Select } from "./fields";
@@ -66,7 +67,7 @@ export function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: No
           <IconButton
             icon={on ? "minus" : "plus"}
             label={on ? "Remove auto layout" : "Add auto layout"}
-            shortcut="⇧A"
+            shortcut={shortcutFor("layer.autoLayout")}
             onClick={() => editor.setLayoutMode(ids, on ? "none" : "row")}
           />
         </>
@@ -521,8 +522,7 @@ export function GridItemSection({ editor, nodes }: { editor: Editor; nodes: Node
     editor.endGesture();
   };
 
-  const title =
-    nodes.length === 1 ? `${getProp(first.props, "name") || "Layer"} · grid item` : "Grid items";
+  const title = nodes.length === 1 ? `${layerName(first)} · grid item` : "Grid items";
   return (
     <PropertySection
       title={title}

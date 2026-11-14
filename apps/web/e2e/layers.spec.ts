@@ -150,6 +150,21 @@ test.describe
         .toBe(false);
     });
 
+    test("moves focus with the selection from the keyboard", async () => {
+      const rows = tree(page).getByRole("treeitem");
+      await rows.first().click();
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("ArrowDown");
+      const focused = await page.evaluate(() =>
+        document.activeElement?.getAttribute("data-layer-id"),
+      );
+      const selected = await selection(page);
+      expect(focused).toBe(selected[0]);
+      // And End lands focus on the last row.
+      await page.keyboard.press("End");
+      await expect(rows.last()).toBeFocused();
+    });
+
     test("drags a layer into another frame, saying where it goes", async () => {
       const source = row(page, "Title");
       const target = row(page, "Settings");

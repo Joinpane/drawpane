@@ -3,13 +3,20 @@ import type { VersionInfo } from "@drawpane/model";
 import { Button, Icon, IconButton, Logo, SegmentedControl } from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { api } from "../api/client";
 import { isMac, modKey } from "../app/format";
 import { fonts } from "../fonts/fonts";
 import { ShareDialog } from "../prototype/ShareDialog";
 import { AssetsPanel } from "./AssetsPanel";
-import { ACTIONS, type ActionContext, matches } from "./actions";
+import { ACTIONS, type ActionContext, shortcutFor, triggers } from "./actions";
 import { loadBooleanEngine } from "./boolean-engine";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
@@ -54,6 +61,14 @@ export function EditorPage() {
   const { fileId } = useParams({ from: "/f/$fileId" });
   // A new file id remounts everything: one Editor per file.
   return <FileEditor key={fileId} fileId={fileId} />;
+}
+
+/** A control that Enter or Space activates by itself. */
+function isControl(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return !!el?.closest?.(
+    'button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="radio"], summary',
+  );
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -179,14 +194,21 @@ function FileEditor({ fileId }: { fileId: string }) {
       // Storage blocked.
     }
     if (!debug) return;
-    const w = window as unknown as { drawpane?: Editor; drawpaneFrames?: FrameStats };
+    const w = window as unknown as {
+      drawpane?: Editor;
+      drawpaneFrames?: FrameStats;
+      /** The read-only editor showing a version, while one is open. */
+      drawpaneVersion?: Editor;
+    };
     w.drawpane = editor;
     w.drawpaneFrames = frameStatsFor(editor);
+    w.drawpaneVersion = history.view.preview;
     return () => {
       delete w.drawpane;
       delete w.drawpaneFrames;
+      delete w.drawpaneVersion;
     };
-  }, [editor]);
+  }, [editor, history.view]);
 
   // The first time a page shows with content, fit it to the screen.
   useEffect(() => {
@@ -302,6 +324,8 @@ function FileEditor({ fileId }: { fileId: string }) {
     ] as const;
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTyping(e.target) || e.isComposing) return;
+      // Enter and Space press the focused button, menu item or link: never also a shortcut.
+      if ((e.key === "Enter" || e.key === " ") && isControl(e.target)) return;
       // While a version is on screen, keys act on it (read-only) instead of the live file.
       const viewingNow = versionView.s.viewing !== null;
       const editor = versionView.active;
@@ -385,7 +409,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       )
         return;
       for (const action of ACTIONS) {
-        if (action.shortcut && matches(action.shortcut, e)) {
+        if (triggers(action, e)) {
           e.preventDefault();
           if (!action.enabled || action.enabled(editor)) action.run(ctx);
           return;
@@ -774,7 +798,7 @@ function FileTitle({
       <IconButton
         icon="token"
         label={view === "tokens" ? "Back to design" : "Tokens"}
-        shortcut="⌥T"
+        shortcut={shortcutFor("view.tokens")}
         pressed={view === "tokens"}
         className="file-title__tokens"
         onClick={onToggleTokens}
@@ -853,7 +877,7 @@ function ZoomControls() {
         type="button"
         className="zoom__value"
         onClick={() => editor.zoomTo(1)}
-        title="Zoom to 100% (⇧0)"
+        title={`Zoom to 100% (${shortcutFor("view.zoom100")})`}
       >
         {Math.round(zoom * 100)}%
       </button>
@@ -863,7 +887,12 @@ function ZoomControls() {
         shortcut={modKey("+")}
         onClick={() => editor.zoomBy(1.5)}
       />
-      <IconButton icon="fit" label="Zoom to fit" shortcut="⇧1" onClick={() => editor.zoomToFit()} />
+      <IconButton
+        icon="fit"
+        label="Zoom to fit"
+        shortcut={shortcutFor("view.zoomFit")}
+        onClick={() => editor.zoomToFit()}
+      />
     </fieldset>
   );
 }
@@ -871,18 +900,19 @@ function ZoomControls() {
 function SyncStatus() {
   const status = useEditorState((s) => s.status);
   const editor = useEditor();
-  const [pending, setPending] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setPending(editor.sync.pendingCount), 300);
-    return () => clearInterval(id);
-  }, [editor]);
+  // Follows the room as it confirms edits, not on a timer.
+  const progress = useSyncExternalStore(
+    (notify) => editor.sync.on("progress", notify),
+    () => `${editor.sync.pendingCount}:${editor.sync.revn ?? 0}`,
+  );
+  const [pending, revn] = progress.split(":").map(Number) as [number, number];
   const text =
     status === "offline"
       ? "Offline. Your edits are kept and sync when you reconnect."
       : status === "live"
         ? pending > 0
           ? "Saving…"
-          : `Saved · revision ${editor.sync.revn ?? 0}`
+          : `Saved · revision ${revn}`
         : "Connecting…";
   return (
     <div className={`sync pane sync--${status}`} role="status" aria-live="polite">

@@ -369,6 +369,24 @@ describe("SyncEngine room requests", () => {
     expect(desyncs).toEqual([]);
   });
 
+  it("reports progress as edits wait and the room confirms them", () => {
+    const { engine, sent } = live();
+    const heard: [number | null, number][] = [];
+    engine.on("progress", (revn, pending) => heard.push([revn, pending]));
+    engine.commit(seed);
+    expect(heard).toEqual([[1, 1]]);
+    engine.flush();
+    const txn = sent.find((m) => m.t === "txn") as { seq: number } | undefined;
+    engine.receive({ t: "ack", seq: txn?.seq ?? 1, revn: 2 });
+    expect(heard).toEqual([
+      [1, 1],
+      [2, 0],
+    ]);
+    // Nothing moved: nothing said.
+    engine.receive({ t: "ack", seq: txn?.seq ?? 1, revn: 2 });
+    expect(heard).toHaveLength(2);
+  });
+
   it("tells listeners who restored which version", () => {
     const { engine } = live();
     const heard: unknown[] = [];

@@ -150,6 +150,61 @@ test.describe
       expect(sel?.end ?? 0).toBeGreaterThan(2);
     });
 
+    test("selects a word with a double-click, and the line with a triple-click", async () => {
+      const at = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const canvas = document.querySelector(".canvas__layer")?.getBoundingClientRect();
+        const p = e.s.camera.toScreen({ x: 120, y: 60 });
+        return { x: p.x + (canvas?.left ?? 0), y: p.y + (canvas?.top ?? 0) };
+      });
+      const selected = async () => {
+        const sel = await page.evaluate(() => (window as unknown as W).drawpane.s.textSelection);
+        return "Plan your week".slice(sel?.start ?? 0, sel?.end ?? 0);
+      };
+      await page.mouse.dblclick(at.x, at.y);
+      // A whole word, nothing more.
+      expect(["Plan", "your", "week"]).toContain(await selected());
+      await page.mouse.click(at.x, at.y, { clickCount: 3 });
+      expect(await selected()).toBe("Plan your week");
+    });
+
+    test("Escape after the colour picker finishes editing, keeping the layer selected", async () => {
+      // Select one plain word ("ahead", near the end), so the inspector has one fill to edit.
+      const word = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const canvas = document.querySelector(".canvas__layer")?.getBoundingClientRect();
+        const p = e.s.camera.toScreen({ x: 340, y: 60 });
+        return { x: p.x + (canvas?.left ?? 0), y: p.y + (canvas?.top ?? 0) };
+      });
+      await page.mouse.dblclick(word.x, word.y);
+      await panel(page)
+        .getByRole("button", { name: /^Edit fill/ })
+        .first()
+        .click();
+      await expect(page.getByRole("dialog", { name: /fill/i })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog", { name: /fill/i })).toHaveCount(0);
+      await page.keyboard.press("Escape");
+      await expect
+        .poll(() => page.evaluate(() => (window as unknown as W).drawpane.s.editingText))
+        .toBeNull();
+      expect(await page.evaluate(() => (window as unknown as W).drawpane.s.selection)).toEqual([
+        id,
+      ]);
+      // Back to the canvas: R is the rectangle tool again, not a letter typed somewhere.
+      await page.keyboard.press("r");
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => (window as unknown as { drawpane: { s: { tool: string } } }).drawpane.s.tool,
+          ),
+        )
+        .toBe("rect");
+      await page.keyboard.press("v");
+      await page.evaluate((id) => (window as unknown as W).drawpane.startTextEdit(id), id);
+      await expect(editing(page)).toBeFocused();
+    });
+
     test("reads Mixed for the layer once editing ends", async () => {
       await page.keyboard.press("Escape");
       await expect

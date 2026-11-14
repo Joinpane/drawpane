@@ -241,3 +241,27 @@ describe("the size pill and Explain", () => {
     expect(editor.s.explain).toBeNull();
   });
 });
+
+describe("the size pill and X-ray", () => {
+  it("steps aside rather than cover a gap X-ray is showing", () => {
+    const { editor } = setup();
+    // A column with a roomy gap: the first child's pill would sit in it.
+    const stack = editor.createLayer("frame", { x: 0, y: 0, width: 200, height: 300 }, "p", {
+      layoutMode: "column",
+      gap: 40,
+    }) as string;
+    const first = editor.createLayer(
+      "rect",
+      { x: 0, y: 0, width: 200, height: 40 },
+      stack,
+    ) as string;
+    editor.createLayer("rect", { x: 0, y: 0, width: 200, height: 40 }, stack);
+    editor.select([first]);
+    expect(sizePill(editor)).not.toBeNull();
+    editor.state.set({ xray: true });
+    expect(sizePill(editor)).toBeNull();
+    expect(sizePillAt(editor, { x: 100, y: 57 })).toBeNull();
+    editor.state.set({ xray: false });
+    expect(sizePill(editor)).not.toBeNull();
+  });
+});

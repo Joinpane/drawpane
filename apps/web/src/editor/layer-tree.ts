@@ -3,7 +3,7 @@
  * search or filter finds, and the flattened list the panel draws (topmost
  * layer first, like every design tool). Pure, so it's tested without React.
  */
-import { canMoveInto, type Doc, hasMask, maskScopes } from "@drawpane/editor";
+import { canMoveInto, type Doc, hasMask, layerName, maskScopes } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import type { LayerKind } from "@drawpane/ui";
 
@@ -83,7 +83,8 @@ function passes(node: NodeRecord, filter: LayerFilter): boolean {
 }
 
 /** The name a layer shows (and is searched by). */
-export const layerName = (node: NodeRecord) => getProp(node.props, "name") || node.type;
+/** What a layer is called on screen (a text layer, by what it says): see the engine's `layerName`. */
+export { layerName };
 
 export interface Row {
   readonly node: NodeRecord;

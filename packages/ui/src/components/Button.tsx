@@ -13,7 +13,7 @@ export interface ButtonProps extends ComponentPropsWithRef<"button"> {
   size?: ButtonSize;
   icon?: IconName;
   /** Shortcut shown after the label in mono, such as "⌘ ↵". Visual only; set aria-keyshortcuts too. */
-  shortcut?: string;
+  shortcut?: string | undefined;
 }
 
 /** A labelled action. Labels are verb-first, sentence case, one to three words. */

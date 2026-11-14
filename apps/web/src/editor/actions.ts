@@ -63,6 +63,8 @@ export interface Action {
   readonly group: "Tools" | "Edit" | "Arrange" | "Layer" | "View" | "File" | "Help";
   readonly icon?: IconName;
   readonly shortcut?: Shortcut;
+  /** Other keys that do the same (bare + and − zoom too); menus show `shortcut`. */
+  readonly also?: readonly Shortcut[];
   readonly keywords?: string;
   /** Hidden from the command bar and disabled when false. */
   readonly enabled?: (editor: Editor) => boolean;
@@ -250,7 +252,8 @@ export const ACTIONS: readonly Action[] = [
     keywords: "style fill stroke effects",
     enabled: (e) => e.s.selection.length === 1,
     run: ({ editor }) => {
-      if (editor.copyProperties()) editor.notify("Copied properties. Paste them with ⌥⌘V.");
+      if (editor.copyProperties())
+        editor.notify(`Copied properties. Paste them with ${shortcutFor("edit.pasteProperties")}.`);
     },
   },
   {
@@ -276,8 +279,17 @@ export const ACTIONS: readonly Action[] = [
     label: "Deselect",
     group: "Edit",
     shortcut: { key: "escape" },
-    enabled: hasSelection,
-    run: ({ editor }) => editor.select([]),
+    enabled: (e) => hasSelection(e) || e.s.editingText !== null,
+    run: ({ editor }) => {
+      // Editing text: Escape finishes the edit and keeps the layer selected, like Figma.
+      const editing = editor.s.editingText;
+      if (editing) {
+        editor.endTextEdit();
+        if (editor.doc.has(editing)) editor.select([editing]);
+        return;
+      }
+      editor.select([]);
+    },
   },
 
   {
@@ -735,6 +747,8 @@ export const ACTIONS: readonly Action[] = [
     group: "View",
     icon: "plus",
     shortcut: { key: "=", mod: true },
+    // + on its own, typed with Shift or on the number pad, like Figma.
+    also: [{ key: "=" }, { key: "=", shift: true }],
     run: ({ editor }) => editor.zoomBy(1.5),
   },
   {
@@ -743,6 +757,7 @@ export const ACTIONS: readonly Action[] = [
     group: "View",
     icon: "minus",
     shortcut: { key: "-", mod: true },
+    also: [{ key: "-" }],
     run: ({ editor }) => editor.zoomBy(1 / 1.5),
   },
   {
@@ -939,6 +954,11 @@ function hasText(editor: Editor): boolean {
   return editor.s.selection.some(visit);
 }
 
+/** Whether a key press runs `action`, by its shortcut or any of its others. */
+export function triggers(action: Action, e: KeyboardEvent): boolean {
+  return [action.shortcut, ...(action.also ?? [])].some((s) => s !== undefined && matches(s, e));
+}
+
 export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
   const mod = isMac() ? e.metaKey : e.ctrlKey;
   let key = e.key.toLowerCase();
@@ -956,33 +976,35 @@ export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
   );
 }
 
+/** One key's cap on this platform: ⌫ and ↵ on a Mac, Delete and Enter elsewhere (both delete keys work). */
+function keyCap(key: string, mac: boolean): string {
+  const caps: Record<string, string> = mac
+    ? { backspace: "⌫", escape: "Esc", enter: "↵", "=": "+" }
+    : { backspace: "Delete", escape: "Esc", enter: "Enter", "=": "+" };
+  return caps[key] ?? (key.length === 1 ? key.toUpperCase() : key);
+}
+
 /** A shortcut as key caps, one per key, in the platform's order: ["⌥", "⇧", "⌘", "K"]. */
 export function shortcutCaps(s: Shortcut): string[] {
   const mac = isMac();
-  const keyLabel: Record<string, string> = {
-    backspace: "⌫",
-    escape: "Esc",
-    enter: "↵",
-    "=": "+",
-  };
-  const key = keyLabel[s.key] ?? s.key.toUpperCase();
+  const key = keyCap(s.key, mac);
   if (mac) return [s.alt ? "⌥" : "", s.shift ? "⇧" : "", s.mod ? "⌘" : "", key].filter(Boolean);
   return [s.mod ? "Ctrl" : "", s.alt ? "Alt" : "", s.shift ? "Shift" : "", key].filter(Boolean);
 }
 
+/** A shortcut as text: "⌥⌘K" on a Mac, "Ctrl+Alt+K" elsewhere. */
 export function formatShortcut(s: Shortcut): string {
-  const mac = isMac();
-  const keyLabel: Record<string, string> = {
-    backspace: "⌫",
-    escape: "Esc",
-    enter: "↵",
-    "=": "+",
-    "\\": "\\",
-    "/": "/",
-  };
-  const key = keyLabel[s.key] ?? s.key.toUpperCase();
-  if (mac) return `${s.alt ? "⌥" : ""}${s.shift ? "⇧" : ""}${s.mod ? "⌘" : ""}${key}`;
-  return [s.mod ? "Ctrl" : "", s.alt ? "Alt" : "", s.shift ? "Shift" : "", key]
-    .filter(Boolean)
-    .join("+");
+  return shortcutCaps(s).join(isMac() ? "" : "+");
+}
+
+/** An action's shortcut as text, from the one place it's defined: for tooltips and hints. */
+export function shortcutFor(id: string): string | undefined {
+  const action = ACTIONS.find((a) => a.id === id);
+  return action?.shortcut ? formatShortcut(action.shortcut) : undefined;
+}
+
+/** An action's shortcut as key caps, for a `Kbd`. */
+export function capsFor(id: string): string[] {
+  const action = ACTIONS.find((a) => a.id === id);
+  return action?.shortcut ? shortcutCaps(action.shortcut) : [];
 }
