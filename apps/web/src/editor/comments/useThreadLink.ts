@@ -16,6 +16,23 @@ import type { CommentStore } from "./store";
 /** The comments panel's width, which takes up the right of the canvas while it's open. */
 const PANEL = 276;
 
+/** Opens a thread of this file at its pin, with the comments panel; says so when it's gone. */
+export function openThread(
+  editor: Editor,
+  store: CommentStore,
+  threadId: string,
+  left: number,
+): boolean {
+  const thread = store.s.threads.get(threadId);
+  if (!thread) {
+    editor.notify("That comment was deleted.");
+    return false;
+  }
+  store.setPanel(true);
+  focusThread(editor, store, thread, { left, right: PANEL });
+  return true;
+}
+
 export function useThreadLink(
   editor: Editor,
   store: CommentStore,
@@ -32,13 +49,7 @@ export function useThreadLink(
   // Once the document and its comments are in: show the linked thread, then drop it from the address.
   useEffect(() => {
     if (!linked || !live || !loaded) return;
-    const thread = store.s.threads.get(linked);
-    if (thread) {
-      store.setPanel(true);
-      focusThread(editor, store, thread, { left: insets.left, right: PANEL });
-    } else {
-      editor.notify("That comment was deleted.");
-    }
+    openThread(editor, store, linked, insets.left);
     void navigate({ to: "/f/$fileId", params: { fileId }, search: {}, replace: true });
   }, [linked, live, loaded, store, editor, insets.left, navigate, fileId]);
 

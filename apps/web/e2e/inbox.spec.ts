@@ -152,4 +152,50 @@ test.describe
       await expect(inbox).not.toContainText("unread");
       await expect(ana.getByRole("button", { name: "Mark all read" })).toBeDisabled();
     });
+
+    test("inside a file: the inbox button counts it, and opens a comment here in place", async () => {
+      await ana.goto(`/f/${fileId}`);
+      await expect(ana.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+        timeout: 15_000,
+      });
+      // A marker that a reload would wipe.
+      await ana.evaluate(() => {
+        (window as unknown as { stayed: boolean }).stayed = true;
+      });
+      const button = ana.getByRole("button", { name: /^Inbox/ });
+      await expect(button).toHaveAccessibleName("Inbox");
+      await bo.evaluate(
+        async ({ fileId, pageId, anaId }) => {
+          await fetch(`/api/files/${fileId}/comments`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pageId,
+              x: 320,
+              y: 220,
+              body: "@Ana Lima the footer links look cramped",
+              mentions: [anaId],
+            }),
+          });
+        },
+        { fileId, pageId, anaId },
+      );
+      // The comment arrives in the open file, and with it the count.
+      await expect(button).toHaveAccessibleName("Inbox, 1 unread");
+      await button.click();
+      const menu = ana.getByRole("dialog", { name: "Inbox" });
+      // In the file it's about, it says so.
+      const item = menu.getByRole("link", {
+        name: /Bo Chen mentioned you in this file.*footer links/,
+      });
+      await expect(item).toContainText("the footer links look cramped");
+      await item.click();
+      // Opened here: the thread shows, the menu's gone, and the page never reloaded.
+      await expect(ana.getByRole("dialog", { name: /^Thread on/ })).toBeVisible();
+      await expect(menu).toHaveCount(0);
+      expect(await ana.evaluate(() => (window as unknown as { stayed?: boolean }).stayed)).toBe(
+        true,
+      );
+      await expect(button).toHaveAccessibleName("Inbox");
+    });
   });

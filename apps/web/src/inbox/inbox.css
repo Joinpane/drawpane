@@ -190,3 +190,81 @@
     padding-top: 0;
   }
 }
+
+/* The inbox from inside a file (editor top bar). */
+.inbox-menu {
+  position: relative;
+  display: inline-flex;
+}
+/* Something unread: a dot on the icon's corner (the count is in the button's name and the menu). */
+.inbox-menu__dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--signal);
+  box-shadow: 0 0 0 1.5px var(--surface-raised);
+  pointer-events: none;
+}
+.inbox-menu__popover {
+  width: min(380px, calc(100vw - 16px));
+  padding: 0;
+}
+.inbox-menu__body {
+  display: grid;
+}
+.inbox-menu__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-200);
+  padding: var(--space-200) var(--space-200) var(--space-200) var(--space-400);
+  border-bottom: 1px solid var(--line);
+}
+.inbox-menu__head h2 {
+  margin: 0;
+  font: 600 13px / 18px var(--font-ui);
+}
+.inbox-menu__list {
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  padding-top: var(--space-200);
+}
+.inbox-menu__empty {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-200);
+  margin: 0;
+  padding: var(--space-500) var(--space-400);
+  color: var(--ink-muted);
+  font: 400 12px / 17px var(--font-ui);
+}
+.inbox-menu__empty .dp-icon {
+  flex: none;
+  color: var(--icon);
+}
+.inbox-menu__foot {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-200);
+  border-top: 1px solid var(--line);
+}
+.inbox-menu__all {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-100);
+  padding: var(--space-100) var(--space-200);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font: 500 12px / 16px var(--font-ui);
+  text-decoration: none;
+}
+.inbox-menu__all:hover {
+  background: var(--surface-hover);
+}
+.inbox-menu__all:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
