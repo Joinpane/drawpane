@@ -52,6 +52,8 @@ export interface ComposerProps {
   /** Accessible name of the text field. */
   readonly label: string;
   readonly onCancel?: () => void;
+  /** The "Mention someone with @" hint; off where it's already known (editing). Default true. */
+  readonly hint?: boolean;
   readonly busy?: boolean;
   readonly autoFocus?: boolean;
   readonly textareaRef?: RefObject<HTMLTextAreaElement | null>;
@@ -71,6 +73,7 @@ export function Composer({
   placeholder,
   label,
   onCancel,
+  hint = true,
   busy = false,
   autoFocus = false,
   textareaRef,
@@ -219,9 +222,11 @@ export function Composer({
         </div>
       ) : null}
       <div className="comment-composer__foot">
-        <span className="comment-composer__hint">
-          Mention someone with <b>@</b>
-        </span>
+        {hint ? (
+          <span className="comment-composer__hint">
+            Mention someone with <b>@</b>
+          </span>
+        ) : null}
         <span className="comment-composer__actions">
           {onCancel ? (
             <Button size="sm" variant="ghost" onClick={onCancel}>

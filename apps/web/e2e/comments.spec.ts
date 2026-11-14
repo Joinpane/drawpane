@@ -1,7 +1,7 @@
 /**
  * Comments, end to end: drop a pin on a layer, reply with an @mention from a
  * second account (a viewer), see it live, resolve, and find it again in the
- * panel.
+ * panel; a comment's menu right above the reply box, and editing in place.
  *
  * The regular suite's instance is set up by editor.spec.ts, and that
  * account's passkey disappears with its browser context, so this spec starts
@@ -242,6 +242,43 @@ test("comments: pin, reply with a mention, live updates, resolve, find again", a
   expect(Math.abs(pinBox.x - (276 + (1440 - 276 - 276) / 2))).toBeLessThan(40);
   await anaThread.getByRole("button", { name: "Reopen thread" }).click();
   await expect(anaThread.getByText("Resolved by Ana Lima")).toBeHidden();
+
+  // An open thread keeps the Selection Lens out of its way.
+  await expect(ana.getByRole("toolbar", { name: "Selection Lens" })).toHaveCount(0);
+
+  // The last comment's menu, right above the reply box: all of it shows, on
+  // top of the reply box, not clipped by the list or covered by it.
+  await anaThread.getByRole("combobox", { name: "Reply" }).fill("I'll take this one.");
+  await ana.keyboard.press("ControlOrMeta+Enter");
+  const messages = anaThread.getByRole("list", { name: "Messages" });
+  await expect(messages.getByText("I'll take this one.")).toBeVisible();
+  const options = anaThread.getByRole("button", { name: "Options for Ana Lima's comment" }).last();
+  await options.hover();
+  await options.click();
+  const menu = ana.getByRole("menu", { name: "Comment options" });
+  for (const item of ["Edit", "Delete"]) {
+    const b = await box(menu.getByRole("menuitem", { name: item }));
+    const topmost = await ana.evaluate(
+      ([x, y]) => document.elementFromPoint(x, y)?.closest('[role="menuitem"]')?.textContent,
+      [b.x + b.width / 2, b.y + b.height / 2] as const,
+    );
+    expect(topmost).toContain(item);
+  }
+  // Editing fits the thread: no sideways scroll, nothing cut off.
+  await menu.getByRole("menuitem", { name: "Edit" }).click();
+  const editing = anaThread.getByRole("combobox", { name: "Edit comment" });
+  await expect(editing).toBeFocused();
+  const list = anaThread.locator(".comment-popover__messages");
+  expect(await list.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0);
+  const dialog = await box(anaThread);
+  for (const name of ["Cancel", "Save"]) {
+    const b = await box(anaThread.getByRole("button", { name: new RegExp(`^${name}`) }));
+    expect(b.x).toBeGreaterThanOrEqual(dialog.x);
+    expect(b.x + b.width).toBeLessThanOrEqual(dialog.x + dialog.width);
+  }
+  await editing.fill("I'll take this one, today.");
+  await ana.keyboard.press("ControlOrMeta+Enter");
+  await expect(messages.getByText("I'll take this one, today.")).toBeVisible();
 
   await boContext.close();
   await anaContext.close();

@@ -94,6 +94,8 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [fatal, setFatal] = useState<string | null>(null);
   const comments = useCommentStore(editor, fileId);
   const commentsOpen = useComments(comments.store, (s) => s.panelOpen);
+  // An open thread or new comment sits by its pin, often where the Lens would.
+  const threadOpen = useComments(comments.store, (s) => s.openId !== null || s.draft !== null);
   // Version history: the History tab lists versions; picking one puts it on the canvas, read-only.
   const history = useVersionHistory(
     editor,
@@ -614,7 +616,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         {view === "design" && !viewing ? <FollowOverlay /> : null}
         {view === "design" && !viewing ? <ExplainCard /> : null}
         {view === "design" && !viewing ? <XrayLegend /> : null}
-        {view === "design" && !viewing ? (
+        {view === "design" && !viewing && !threadOpen ? (
           <Lens
             onOpenInspector={() => {
               comments.store.setPanel(false);

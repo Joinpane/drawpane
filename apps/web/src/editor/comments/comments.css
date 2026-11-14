@@ -163,18 +163,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.comment-popover__menu,
-.comment-message__menu {
-  position: relative;
-  display: inline-flex;
-}
-.comment-popover__dropdown {
-  position: absolute;
-  top: calc(100% + var(--space-100));
-  right: 0;
-  z-index: 2;
-  min-width: 176px;
-}
 .comment-popover__resolved {
   display: flex;
   align-items: center;
@@ -207,7 +195,8 @@
 
 .comment-message {
   display: grid;
-  grid-template-columns: 24px 1fr;
+  /* minmax: nothing inside a comment (an edit box, a long word) widens the column. */
+  grid-template-columns: 24px minmax(0, 1fr);
   gap: var(--space-200);
   align-items: start;
 }
@@ -316,12 +305,15 @@
 }
 .comment-composer__foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-200);
+  justify-content: flex-end;
+  gap: var(--space-100) var(--space-200);
   margin-top: var(--space-200);
 }
+/* Left of the buttons when both fit; on its own line above them when they don't. */
 .comment-composer__hint {
+  margin-right: auto;
   font: var(--type-ui-label);
   color: var(--ink-muted);
   white-space: nowrap;
@@ -332,6 +324,7 @@
 }
 .comment-composer__actions {
   display: inline-flex;
+  flex: none;
   gap: var(--space-200);
 }
 .comment-composer__people {
