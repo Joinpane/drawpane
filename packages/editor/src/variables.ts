@@ -19,6 +19,7 @@ import {
   type VariableValue,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
+import { textStyles, typographyToken } from "./text-styles";
 
 export type VariableType = "color" | "number" | "string";
 
@@ -404,6 +405,19 @@ export function exportDtcg(doc: Doc): Record<string, unknown> {
       }
       group[path.at(-1) ?? variable.id] = token;
     }
+  }
+  // Text styles, as typography tokens, grouped by their names the same way.
+  for (const style of textStyles(doc)) {
+    const path = getProp(style.props, "name")
+      .split("/")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    let group = root;
+    for (const part of path.slice(0, -1)) {
+      group[part] ??= {};
+      group = group[part] as Record<string, unknown>;
+    }
+    group[path.at(-1) ?? style.id] = typographyToken(style);
   }
   return root;
 }

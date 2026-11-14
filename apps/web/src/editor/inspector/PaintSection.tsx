@@ -3,7 +3,7 @@
  * swatch that opens the paint picker, its hex or kind, opacity, visibility
  * and remove. Strokes add weight, position, dashes, caps and joins.
  */
-import { type Editor, isClosedPath } from "@drawpane/editor";
+import { type Editor, isClosedPath, textContrast } from "@drawpane/editor";
 import { getProp, type NodeRecord, type Paint, type StrokeMarker } from "@drawpane/model";
 import {
   Icon,
@@ -144,7 +144,29 @@ export function PaintSection({
       {prop === "strokes" && paints && paints.length > 0 ? (
         <StrokeOptions editor={editor} nodes={nodes} />
       ) : null}
+      {prop === "fills" && nodes.length === 1 && nodes[0]?.type === "text" ? (
+        <ContrastNote editor={editor} id={nodes[0].id} />
+      ) : null}
     </PropertySection>
+  );
+}
+
+/** How the text stands against what's behind it, WCAG-style: "17.8:1 on #FFFFFF · AAA". */
+function ContrastNote({ editor, id }: { editor: Editor; id: string }) {
+  const contrast = textContrast(editor.doc, id);
+  if (!contrast) return null;
+  const pass = contrast.level !== "fail";
+  return (
+    <p
+      className={`contrast-note contrast-note--${pass ? "pass" : "fail"}`}
+      title={`WCAG 2 contrast for ${contrast.large ? "large" : "body"} text: AA needs ${contrast.large ? "3" : "4.5"}:1, AAA ${contrast.large ? "4.5" : "7"}:1.`}
+    >
+      <Icon name={pass ? "check" : "warning"} size={12} />
+      <span>
+        <strong>{contrast.ratio}:1</strong> on {contrast.background.toUpperCase()}
+      </span>
+      <span className="contrast-note__level">{pass ? contrast.level : "Low contrast"}</span>
+    </p>
   );
 }
 

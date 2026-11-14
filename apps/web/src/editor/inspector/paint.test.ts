@@ -12,7 +12,7 @@ import {
   withPickerValue,
 } from "./paint";
 import { replaceColorOps, selectionColors } from "./selection-colors";
-import { parseLetterSpacing, parseLineHeight } from "./TextSection";
+import { parseLetterSpacing, parseLineHeight } from "./TypographyFields";
 
 describe("gradient angles", () => {
   it.each([0, 45, 90, 135, 180, 270])("round-trips %i°", (angle) => {

@@ -66,6 +66,19 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
       }}
       onKeyDown={(e) => {
         e.stopPropagation();
+        // ⌘B, ⌘I and ⌘U style the layer while you type, like everywhere else.
+        const mod = e.metaKey || e.ctrlKey;
+        const toggle =
+          mod && !e.altKey && !e.shiftKey
+            ? ({ b: "bold", i: "italic", u: "underline" } as const)[
+                e.key.toLowerCase() as "b" | "i" | "u"
+              ]
+            : undefined;
+        if (toggle) {
+          e.preventDefault();
+          editor.toggleTextStyle(toggle);
+          return;
+        }
         if (e.key === "Escape" || (e.key === "Enter" && (e.metaKey || e.ctrlKey))) {
           e.preventDefault();
           editor.endTextEdit();
