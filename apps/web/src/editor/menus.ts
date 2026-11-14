@@ -7,7 +7,7 @@
 import { type Editor, isInstanceRoot, swapTargets } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import type { ContextMenuAction, ContextMenuEntry, IconName } from "@drawpane/ui";
-import { ACTIONS, type Action, type ActionContext, formatShortcut } from "./actions";
+import { ACTIONS, type Action, type ActionContext, shortcutProp } from "./actions";
 import { layerKind } from "./layer-kinds";
 import { type MenuRequest, uiFor } from "./ui-state";
 
@@ -36,7 +36,7 @@ function action(host: MenuHost, id: string, label?: string, icon?: IconName): It
     id,
     label: label ?? a.label,
     ...((icon ?? a.icon) ? { icon: icon ?? a.icon } : {}),
-    ...(a.shortcut ? { shortcut: formatShortcut(a.shortcut) } : {}),
+    ...shortcutProp(a),
     onSelect: () => a.run(host.ctx),
   };
 }
@@ -74,7 +74,7 @@ function pasteHere(host: MenuHost, request: MenuRequest): Item {
     id: "edit.pasteHere",
     label: point ? "Paste here" : "Paste",
     icon: "paste",
-    ...(paste?.shortcut ? { shortcut: formatShortcut(paste.shortcut) } : {}),
+    ...(paste ? shortcutProp(paste) : {}),
     onSelect: () => (point ? host.pasteAt(point) : host.ctx.paste()),
   };
 }

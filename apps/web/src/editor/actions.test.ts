@@ -10,7 +10,7 @@ describe("actions", () => {
   it("never share a shortcut", () => {
     const seen = new Map<string, string>();
     for (const action of ACTIONS) {
-      for (const shortcut of [action.shortcut, ...(action.also ?? [])]) {
+      for (const shortcut of [action.defaultShortcut, ...(action.also ?? [])]) {
         if (!shortcut) continue;
         const { key, mod, shift, alt } = shortcut;
         const combo = `${mod ? "mod+" : ""}${alt ? "alt+" : ""}${shift ? "shift+" : ""}${key}`;
@@ -33,7 +33,7 @@ describe("actions", () => {
         shiftKey: false,
         ...init,
       }) as KeyboardEvent;
-    const pixel = ACTIONS.find((a) => a.id === "view.pixelSnap")?.shortcut;
+    const pixel = ACTIONS.find((a) => a.id === "view.pixelSnap")?.defaultShortcut;
     if (!pixel) throw new Error("no shortcut");
     const both = { metaKey: true, ctrlKey: true, shiftKey: true };
     expect(matches(pixel, event({ key: '"', code: "Quote", ...both }))).toBe(true);

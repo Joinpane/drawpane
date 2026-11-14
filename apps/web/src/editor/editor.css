@@ -2040,6 +2040,16 @@
 .shortcuts__heading:first-child {
   padding-top: 0;
 }
+.shortcuts__customize {
+  margin: 0;
+  font: var(--type-ui-body);
+  color: var(--ink-muted);
+}
+.shortcuts__customize a {
+  color: var(--ink);
+  font-weight: 500;
+  text-underline-offset: 2px;
+}
 .shortcuts__empty {
   padding: var(--space-600) 0;
   color: var(--ink-muted);

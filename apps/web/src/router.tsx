@@ -11,9 +11,11 @@ import { HealthPage } from "./admin/HealthPage";
 import { api } from "./api/client";
 import { ErrorPage } from "./app/ErrorPage";
 import { NotFound } from "./app/NotFound";
+import { ShortcutsSync } from "./app/ShortcutsSync";
 import { AccountPage } from "./auth/AccountPage";
 import { InvitePage } from "./auth/InvitePage";
 import { SetupPage } from "./auth/SetupPage";
+import { ShortcutsPage } from "./auth/ShortcutsPage";
 import { SignInPage } from "./auth/SignInPage";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { NewFilePage } from "./new-file/NewFilePage";
@@ -38,7 +40,12 @@ interface RouterContext {
 const sessionQuery = { queryKey: ["session"], queryFn: api.session };
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
-  component: () => <Outlet />,
+  component: () => (
+    <>
+      <ShortcutsSync />
+      <Outlet />
+    </>
+  ),
   notFoundComponent: NotFound,
 });
 
@@ -129,6 +136,13 @@ async function requireAdmin(args: { context: RouterContext; location: { href: st
   return user;
 }
 
+const shortcutsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/shortcuts",
+  beforeLoad: requireUser,
+  component: ShortcutsPage,
+});
+
 const adminHealthRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/admin/health",
@@ -216,6 +230,7 @@ const routeTree = rootRoute.addChildren([
   setupRoute,
   inviteRoute,
   settingsRoute,
+  shortcutsRoute,
   adminHealthRoute,
   teamRoute,
   newFileRoute,

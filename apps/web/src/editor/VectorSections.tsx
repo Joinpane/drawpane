@@ -1,13 +1,8 @@
 import { BOOLEAN_LABELS, BOOLEAN_OPS, type Editor } from "@drawpane/editor";
 import type { NodeRecord } from "@drawpane/model";
 import { Button, PropertySection } from "@drawpane/ui";
-import { ACTIONS, formatShortcut } from "./actions";
+import { shortcutFor } from "./actions";
 import "./vector.css";
-
-const shortcutOf = (id: string) => {
-  const s = ACTIONS.find((a) => a.id === id)?.shortcut;
-  return s ? formatShortcut(s) : undefined;
-};
 
 /** "Combine shapes": union, subtract, intersect and exclude, for two or more shapes. */
 export function CombineSection({ editor }: { editor: Editor }) {
@@ -16,7 +11,7 @@ export function CombineSection({ editor }: { editor: Editor }) {
     <PropertySection title="Combine shapes">
       <fieldset className="dp-seg vector-combine" aria-label="Combine shapes">
         {BOOLEAN_OPS.map((op) => {
-          const shortcut = shortcutOf(`vector.${op}`);
+          const shortcut = shortcutFor(`vector.${op}`);
           return (
             <button
               key={op}
@@ -48,7 +43,7 @@ export function PathSection({ editor, nodes }: { editor: Editor; nodes: readonly
       (n.type === "frame" && editor.doc.childIds(n.id).length === 0),
   );
   if (single?.type !== "path" && !flattenable) return null;
-  const flattenKey = shortcutOf("vector.flatten");
+  const flattenKey = shortcutFor("vector.flatten");
   return (
     <PropertySection title="Path">
       <div className="vector-path-actions">

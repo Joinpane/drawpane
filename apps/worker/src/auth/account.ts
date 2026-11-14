@@ -22,6 +22,20 @@ async function methodCount(db: D1Database, userId: string): Promise<number> {
   return row?.n ?? 0;
 }
 
+/** One key combination, as the editor's actions describe it (apps/web/src/editor/actions.ts). */
+const Shortcut = z.object({
+  key: z.string().min(1).max(24),
+  mod: z.boolean().optional(),
+  shift: z.boolean().optional(),
+  alt: z.boolean().optional(),
+});
+
+/** Shortcuts changed from the defaults: action id → shortcut, or null to have none. */
+export const Shortcuts = z
+  .record(z.string().regex(/^[a-zA-Z][\w.:-]{0,63}$/, "Not an action."), Shortcut.nullable())
+  .refine((m) => Object.keys(m).length <= 400, "Too many shortcuts.");
+export type Shortcuts = z.infer<typeof Shortcuts>;
+
 const LAST_ONE =
   "That's your only way to sign in. Add another first, so you can still get back in.";
 
@@ -40,6 +54,25 @@ export const account = new Hono<AppContext>()
     await c.env.DB.prepare("UPDATE users SET name = ? WHERE id = ?").bind(name, user.id).run();
     const updated: User = { ...user, name };
     return c.json({ user: updated });
+  })
+
+  .get("/shortcuts", async (c) => {
+    const user = requireUser(c);
+    const row = await c.env.DB.prepare("SELECT shortcuts FROM users WHERE id = ?")
+      .bind(user.id)
+      .first<{ shortcuts: string }>();
+    // What's stored was checked on the way in; anything unreadable counts as no changes.
+    const parsed = Shortcuts.safeParse(JSON.parse(row?.shortcuts ?? "{}"));
+    return c.json({ shortcuts: parsed.success ? parsed.data : {} });
+  })
+
+  .put("/shortcuts", async (c) => {
+    const user = requireUser(c);
+    const { shortcuts } = await readBody(c, z.object({ shortcuts: Shortcuts }));
+    await c.env.DB.prepare("UPDATE users SET shortcuts = ? WHERE id = ?")
+      .bind(JSON.stringify(shortcuts), user.id)
+      .run();
+    return c.json({ shortcuts });
   })
 
   .delete("/identities/:provider", async (c) => {

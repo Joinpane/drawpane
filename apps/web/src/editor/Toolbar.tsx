@@ -1,7 +1,7 @@
 import type { ToolId } from "@drawpane/editor";
 import { ContextMenu, Icon, IconButton, type IconName, Kbd, Tooltip } from "@drawpane/ui";
 import { useRef, useState } from "react";
-import { ACTIONS, type ActionContext, capsFor, formatShortcut } from "./actions";
+import { ACTIONS, type ActionContext, capsFor, shortcutFor, shortcutProp } from "./actions";
 import { useEditor, useEditorState } from "./hooks";
 
 interface Tool {
@@ -35,18 +35,13 @@ const AFTER: readonly Tool[] = [
 /** Tools that don't change the file, so viewers get them too. */
 const VIEWER_TOOLS: ReadonlySet<ToolId> = new Set(["select", "comment", "hand"]);
 
-const shortcutOf = (id: string) => {
-  const s = ACTIONS.find((a) => a.id === id)?.shortcut;
-  return s ? formatShortcut(s) : undefined;
-};
-
 /** The floating command strip: tools, then the search-or-set field that opens the command bar. */
 export function Toolbar({ onSearch, ctx }: { onSearch: () => void; ctx: ActionContext }) {
   const editor = useEditor();
   const tool = useEditorState((s) => s.tool);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const button = (t: Tool) => {
-    const shortcut = shortcutOf(`tool.${t.id}`);
+    const shortcut = shortcutFor(`tool.${t.id}`);
     return (
       <IconButton
         key={t.id}
@@ -83,7 +78,7 @@ function ShapeTools({ tool, ctx }: { tool: ToolId; ctx: ActionContext }) {
   const shown = active ?? last;
   const chevron = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const shortcut = shortcutOf(`tool.${shown.id}`);
+  const shortcut = shortcutFor(`tool.${shown.id}`);
   const placeImage = ACTIONS.find((a) => a.id === "tool.image");
   return (
     <span className="toolbar__group">
@@ -121,8 +116,8 @@ function ShapeTools({ tool, ctx }: { tool: ToolId; ctx: ActionContext }) {
               id: s.id,
               label: s.label,
               icon: s.icon,
-              ...(shortcutOf(`tool.${s.id}`)
-                ? { shortcut: shortcutOf(`tool.${s.id}`) as string }
+              ...(shortcutFor(`tool.${s.id}`)
+                ? { shortcut: shortcutFor(`tool.${s.id}`) as string }
                 : {}),
               onSelect: () => editor.setTool(s.id),
             })),
@@ -131,7 +126,7 @@ function ShapeTools({ tool, ctx }: { tool: ToolId; ctx: ActionContext }) {
               id: "image",
               label: "Place image…",
               icon: "image" as IconName,
-              ...(placeImage?.shortcut ? { shortcut: formatShortcut(placeImage.shortcut) } : {}),
+              ...(placeImage ? shortcutProp(placeImage) : {}),
               onSelect: () => ctx.placeImage(),
             },
           ]}

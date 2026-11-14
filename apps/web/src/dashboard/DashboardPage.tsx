@@ -22,6 +22,7 @@ import { ImportDialog } from "./ImportDialog";
 import { isPenpotFile } from "./penpot-import";
 import { TeamFontsView } from "./TeamFonts";
 import "./dashboard.css";
+import { forgetCachedData } from "../app/session-cache";
 
 export function DashboardPage() {
   const { teamId } = useParams({ from: "/t/$teamId" });
@@ -421,7 +422,7 @@ function UserMenu({ name, email, admin }: { name: string; email: string; admin: 
         label="Sign out"
         onClick={async () => {
           await signOut();
-          queryClient.clear();
+          forgetCachedData(queryClient);
           await navigate({ to: "/signin", search: {} });
         }}
       />

@@ -2,6 +2,7 @@ import { Button, TextField } from "@drawpane/ui";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useState } from "react";
+import { forgetCachedData } from "../app/session-cache";
 import { AuthLayout, FormError } from "./AuthLayout";
 import { registerWithPasskey } from "./passkey";
 
@@ -33,8 +34,8 @@ export function SetupPage() {
     setError(null);
     try {
       const user = await registerWithPasskey({ name, email, setupToken: setupToken.trim() });
-      // Replace cached signed-out data before the router reads it.
-      queryClient.clear();
+      // Nothing cached for the signed-out page may linger (see forgetCachedData).
+      forgetCachedData(queryClient);
       queryClient.setQueryData(["session"], { user, needsSetup: false });
       await navigate({ to: "/" });
     } catch (e) {

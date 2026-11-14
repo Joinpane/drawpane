@@ -4,10 +4,11 @@
  * or press a shortcut in the search field to find what it does.
  */
 import { Kbd, SegmentedControl } from "@drawpane/ui";
+import { Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { Dialog } from "../app/Dialog";
 import { isMac } from "../app/format";
-import { ACTIONS, type Action, matches, type Shortcut, shortcutCaps } from "./actions";
+import { ACTIONS, type Action, matches, type Shortcut, shortcutCaps, shortcutOf } from "./actions";
 
 interface Row {
   readonly id: string;
@@ -70,12 +71,12 @@ export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () 
 
   const rows = useMemo<Row[]>(
     () => [
-      ...ACTIONS.filter((a) => a.shortcut).map((a) => ({
+      ...ACTIONS.filter((a) => shortcutOf(a)).map((a) => ({
         id: a.id,
         label: a.label,
         group: groupOf(a),
-        caps: shortcutCaps(a.shortcut as Shortcut),
-        shortcut: a.shortcut as Shortcut,
+        caps: shortcutCaps(shortcutOf(a) as Shortcut),
+        shortcut: shortcutOf(a) as Shortcut,
         also: a.also ?? [],
       })),
       ...gestures(),
@@ -155,6 +156,12 @@ export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () 
             ])
           )}
         </ul>
+        <p className="shortcuts__customize">
+          <Link to="/settings/shortcuts" onClick={onClose}>
+            Change any shortcut
+          </Link>{" "}
+          in Settings: changes follow your account to every browser.
+        </p>
       </div>
     </Dialog>
   );

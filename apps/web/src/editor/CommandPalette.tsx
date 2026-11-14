@@ -2,7 +2,7 @@ import { allVariables, BINDING_TARGETS, listComponents, resolveVariable } from "
 import { type BindingKey, getProp } from "@drawpane/model";
 import { CommandBar, type CommandGroup, type CommandItem, type IconName } from "@drawpane/ui";
 import { useMemo, useState } from "react";
-import { ACTIONS, type ActionContext, formatShortcut } from "./actions";
+import { ACTIONS, type ActionContext, shortcutProp } from "./actions";
 import { useEditor } from "./hooks";
 import { layerKind } from "./layer-kinds";
 import { parseBindingCommand, parsePropertyCommand } from "./property-syntax";
@@ -95,7 +95,7 @@ export function CommandPalette({ ctx, onClose }: { ctx: ActionContext; onClose: 
           id: a.id,
           label: a.label,
           ...(a.icon ? { icon: a.icon as IconName } : {}),
-          ...(a.shortcut ? { shortcut: formatShortcut(a.shortcut) } : {}),
+          ...shortcutProp(a),
           hint: a.group,
         })),
       });

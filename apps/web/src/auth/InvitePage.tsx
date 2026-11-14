@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
 import { api } from "../api/client";
+import { forgetCachedData } from "../app/session-cache";
 import { AuthLayout, FormError } from "./AuthLayout";
 import { registerWithPasskey } from "./passkey";
 import { OrDivider, ProviderButtons, providerErrorMessage, useProviders } from "./providers";
@@ -34,8 +35,8 @@ export function InvitePage() {
     setError(null);
     try {
       await action();
-      // Replace cached signed-out data before the router reads it.
-      queryClient.clear();
+      // Nothing cached for the signed-out page may linger (see forgetCachedData).
+      forgetCachedData(queryClient);
       await navigate({ to: "/" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
