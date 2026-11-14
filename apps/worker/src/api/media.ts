@@ -18,7 +18,8 @@ import { MEDIA_MAX_BYTES, mediaProblem, type SniffedImage, sniffImage } from "@d
 import { Hono } from "hono";
 import { requireUser } from "../auth/session";
 import type { AppContext } from "../env";
-import { badRequest, notFound, tooLarge, unsupportedMedia } from "../lib/http";
+import { readCapped, sha256 } from "../lib/body";
+import { badRequest, notFound, unsupportedMedia } from "../lib/http";
 import { requireFileRole } from "./access";
 
 /** Thumbnails are at most this many bytes. */
@@ -41,38 +42,6 @@ export interface MediaInfo {
 
 export const mediaKey = (sha: string) => `media/${sha}`;
 export const thumbnailKey = (fileId: string) => `files/${fileId}/thumbnail`;
-
-/** Reads a request body, refusing it as soon as it passes `max` bytes. */
-async function readCapped(request: Request, max: number, message: string): Promise<Uint8Array> {
-  const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > max) throw tooLarge(message);
-  if (!request.body) return new Uint8Array();
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel();
-      throw tooLarge(message);
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-}
-
-async function sha256(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 function etagMatches(request: Request, etag: string): boolean {
   const header = request.headers.get("if-none-match");

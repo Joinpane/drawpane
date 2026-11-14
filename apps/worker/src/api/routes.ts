@@ -11,6 +11,7 @@ import { comments } from "./comments";
 import { fonts } from "./fonts";
 import { media, thumbnailKey } from "./media";
 import { share } from "./share";
+import { teamFonts } from "./team-fonts";
 import { versions } from "./versions";
 
 const Name = z.string().trim().min(1, "Enter a name.").max(120, "Keep names under 120 characters.");
@@ -333,6 +334,8 @@ export const api = new Hono<AppContext>()
   .route("/", media)
   .route("/", share)
   .route("/", versions)
+  // Fonts a team uploads (./team-fonts.ts) ------------------------------------
+  .route("/", teamFonts)
   // Google Fonts, copied to this server on first use (./fonts.ts) ------------
   .route("/fonts", fonts);
 
