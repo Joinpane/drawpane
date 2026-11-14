@@ -8,6 +8,7 @@ import { cp, readFile, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { InstanceConfig } from "./instance.js";
+import { Problem } from "./problem.js";
 
 /** Where the release lives inside an instance's folder. */
 export const SERVER_DIR = "server";
@@ -29,7 +30,7 @@ export async function bundledRelease(): Promise<Release> {
   try {
     await stat(join(root, "wrangler.template.json"));
   } catch {
-    throw new Error(
+    throw new Problem(
       "This installer has no server bundled. In the Drawpane repo, run `pnpm build` first.",
     );
   }

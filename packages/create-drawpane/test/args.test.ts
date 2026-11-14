@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseCli } from "../src/args";
-import { Problem } from "../src/flows";
+import { parseCli, parseCommand } from "../src/args";
+import { Problem } from "../src/problem";
 
 const error = (argv: string[]) => {
   try {
@@ -36,5 +36,35 @@ describe("the command line", () => {
     expect((error(["--yes=1"]) as Error).message).toBe(
       "--yes doesn't take a value: it's on when given. See --help.",
     );
+  });
+
+  it("reads install and upgrade, with their folders", () => {
+    expect(parseCommand([])).toEqual({ kind: "install", dir: undefined });
+    expect(parseCommand(["my-design"])).toEqual({ kind: "install", dir: "my-design" });
+    expect(parseCommand(["upgrade"])).toEqual({ kind: "upgrade", dir: undefined });
+    expect(parseCommand(["upgrade", "my-design"])).toEqual({ kind: "upgrade", dir: "my-design" });
+  });
+
+  it("lists every extra word, and asks about a mistyped command", () => {
+    const message = (words: string[]) => {
+      try {
+        parseCommand(words);
+      } catch (e) {
+        expect(e).toBeInstanceOf(Problem);
+        return (e as Error).message;
+      }
+      throw new Error("parsed");
+    };
+    expect(message(["a", "b", "c"])).toBe("Unexpected: b c. Give one folder. See --help.");
+    expect(message(["upgrade", "a", "b", "c"])).toBe(
+      "Unexpected: b c. Upgrade takes one folder. See --help.",
+    );
+    for (const typo of ["upgarde", "upgrde", "Upgrade", "update"])
+      expect(message([typo])).toBe(
+        `Did you mean upgrade? To install into a folder named ${typo}, say ./${typo}.`,
+      );
+    // Said plainly, it's a folder.
+    expect(parseCommand(["./upgarde"])).toEqual({ kind: "install", dir: "./upgarde" });
+    expect(parseCommand(["design-team"])).toEqual({ kind: "install", dir: "design-team" });
   });
 });

@@ -19,6 +19,7 @@ import {
   suggestName,
   writeConfig,
 } from "./instance.js";
+import { Problem } from "./problem.js";
 import { copyRelease, type Release, readTemplate, renderWranglerConfig } from "./release.js";
 import type { Ui } from "./ui.js";
 
@@ -51,9 +52,6 @@ export interface UpgradeOptions {
   /** Deploy again even when the instance already runs this version. */
   readonly force?: boolean;
 }
-
-/** Something the person has to fix, said plainly; the CLI prints it without a stack. */
-export class Problem extends Error {}
 
 const UPGRADE_COMMAND = "npm create drawpane@latest upgrade";
 
