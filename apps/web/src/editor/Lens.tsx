@@ -57,6 +57,8 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const prototyping = useEditorState((s) => s.prototyping);
   // Explain takes the place beside the selection.
   const explaining = useEditorState((s) => s.explain !== null);
+  // Alt-hover measuring: the distances are what's being read.
+  const measuring = useEditorState((s) => s.measure);
   const scrubbing = useRef(false);
   // One of the Lens's popovers (font, style, fill) is open: stay put while it's in use.
   const [holding, setHolding] = useState(false);
@@ -113,7 +115,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const hidden =
     !enabled ||
     selection.length !== 1 ||
-    (!held && (gesture || !settled || shift)) ||
+    (!held && (gesture || !settled || shift || measuring)) ||
     editing !== null ||
     vectorEdit ||
     !canEdit ||

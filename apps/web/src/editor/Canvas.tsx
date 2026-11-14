@@ -309,7 +309,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     const onCancel = () => interaction.cancel();
     const onLeave = () => {
-      if (!interaction.busy) editor.state.set({ hover: null });
+      interaction.leave();
       sendPresence(null);
     };
     const onWheel = (e: WheelEvent) => {
