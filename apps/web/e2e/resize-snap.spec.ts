@@ -100,6 +100,41 @@ test.describe
       }
     });
 
+    test("holding Control mid-drag lets go of the snap at once, and releasing it snaps again", async () => {
+      const canvas = await page.locator(".canvas__overlay").boundingBox();
+      if (!canvas) throw new Error("no canvas");
+      const toScreen = async (p: { x: number; y: number }) => {
+        const s = await page.evaluate(
+          (p) => (window as unknown as W).drawpane.s.camera.toScreen(p),
+          p,
+        );
+        return { x: canvas.x + s.x, y: canvas.y + s.y };
+      };
+      const bar = await page.evaluate(
+        () => (window as unknown as W).drawpane.s.selection[0] as string,
+      );
+      const x = () =>
+        page.evaluate((id) => (window as unknown as W).drawpane.doc.get(id).props.x, bar);
+      const box = await page.evaluate(
+        (id) => (window as unknown as W).drawpane.scene.bounds(id),
+        bar,
+      );
+      const handle = await toScreen({ x: box.x, y: box.y + box.height / 2 });
+      const edge = await toScreen({ x: 0, y: 0 });
+      await page.mouse.move(handle.x, handle.y);
+      await page.mouse.down();
+      await page.mouse.move(handle.x + 20, handle.y, { steps: 4 });
+      // 4 screen pixels inside the edge: snapped flush.
+      await page.mouse.move(edge.x + 4, handle.y, { steps: 4 });
+      expect(await x()).toBe(0);
+      // Control, without moving: the edge goes where the pointer is (on the pixel grid).
+      await page.keyboard.down("Control");
+      await expect.poll(x).toBeGreaterThan(0);
+      await page.keyboard.up("Control");
+      await expect.poll(x).toBe(0);
+      await page.mouse.up();
+    });
+
     test("draws a shape from edge to edge of the frame", async () => {
       const canvas = await page.locator(".canvas__overlay").boundingBox();
       if (!canvas) throw new Error("no canvas");

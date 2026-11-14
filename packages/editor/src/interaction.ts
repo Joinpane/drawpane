@@ -51,6 +51,11 @@ export interface PointerInput {
   readonly alt: boolean;
   /** ⌘ on macOS, Ctrl elsewhere. */
   readonly mod: boolean;
+  /**
+   * Control held (on every platform): ignore smart guides while moving,
+   * resizing or drawing. The pixel grid still applies.
+   */
+  readonly noSnap?: boolean;
   readonly clicks: number;
 }
 
@@ -280,7 +285,7 @@ export class Interaction {
       const extra: Props = tool === "arrow" ? { markerEnd: "arrow" } : {};
       // The corner you start from snaps too, so a shape can begin exactly on an edge.
       const onGrid = { x: this.#px(page.x), y: this.#px(page.y) };
-      const start = input.mod ? onGrid : this.#snapPoint(parent, onGrid, new Map()).point;
+      const start = input.noSnap ? onGrid : this.#snapPoint(parent, onGrid, new Map()).point;
       this.#mode = { kind: "draw", type, extra, startPage: start, parent, id: null };
       return;
     }
@@ -850,8 +855,8 @@ export class Interaction {
     const moving = { ...mode.bounds, x: mode.bounds.x + dx, y: mode.bounds.y + dy };
     const roots = editor.s.selection;
     const first = editor.doc.get(roots[0] ?? "");
-    const targets = first && !input.mod ? this.#snapTargets(first.parent, mode.nodes) : [];
-    const lines = first && !input.mod ? this.#snapLines(first.parent) : [];
+    const targets = first && !input.noSnap ? this.#snapTargets(first.parent, mode.nodes) : [];
+    const lines = first && !input.noSnap ? this.#snapLines(first.parent) : [];
     const snap = snapRect(moving, targets, SNAP_PX / editor.s.camera.zoom, lines);
     dx += snap.dx;
     dy += snap.dy;
@@ -1052,7 +1057,7 @@ export class Interaction {
     const first = editor.doc.get(editor.s.selection[0] ?? "");
     const snapped: { x: number | null; y: number | null } = { x: null, y: null };
     let targets: Rect[] = [];
-    if (upright && first) {
+    if (upright && first && !input.noSnap) {
       targets = this.#snapTargets(first.parent, mode.nodes);
       const lines = this.#snapLines(first.parent);
       const threshold = SNAP_PX / editor.s.camera.zoom;
@@ -1288,9 +1293,9 @@ export class Interaction {
 
   #draw(mode: Extract<Mode, { kind: "draw" }>, page: Point, input: PointerInput): void {
     const editor = this.#editor;
-    // The dragged corner snaps like a resize handle (⌘ turns snapping off). A Shift-drawn
+    // The dragged corner snaps like a resize handle (holding Control turns snapping off). A Shift-drawn
     // line keeps its 45° angle instead.
-    const snapping = !input.mod && !(input.shift && mode.type === "line");
+    const snapping = !input.noSnap && !(input.shift && mode.type === "line");
     const onGrid = { x: this.#px(page.x), y: this.#px(page.y) };
     const snap = snapping
       ? this.#snapPoint(mode.parent, onGrid, new Map(mode.id ? [[mode.id, true]] : []))
