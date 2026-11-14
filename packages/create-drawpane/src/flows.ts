@@ -9,6 +9,18 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { Account, Cloudflare } from "./cloudflare.js";
 import {
+  EMAIL_SECRETS,
+  type EmailSecret,
+  type EmailSecrets,
+  emailSecrets,
+  emailSecretsFromEnv,
+  fromProblem,
+  PROVIDERS,
+  type Provider,
+  staleEmailSecrets,
+  suggestedFrom,
+} from "./email.js";
+import {
   CONFIG_FILE,
   compareVersions,
   domainProblem,
@@ -53,7 +65,14 @@ export interface UpgradeOptions {
   readonly force?: boolean;
 }
 
+export interface EmailOptions {
+  readonly dir?: string | undefined;
+  /** Take the settings from the environment (EMAIL_PROVIDER, EMAIL_FROM…) and ask nothing. */
+  readonly yes?: boolean;
+}
+
 const UPGRADE_COMMAND = "npm create drawpane@latest upgrade";
+const EMAIL_COMMAND = "npm create drawpane@latest email";
 
 export async function install(options: InstallOptions, deps: Deps): Promise<void> {
   const { ui, release } = deps;
@@ -151,6 +170,9 @@ It's already set up: sign in there.`,
   );
   if (asking && (await ui.confirm({ message: "Open the setup page now?" })))
     deps.openBrowser(setupUrl);
+  ui.info(
+    `Email is off: mentions and replies stay in each person's inbox in Drawpane. To send them by email, and invites too, run \`${EMAIL_COMMAND}\` in ${shortPath(dir, deps.cwd)}/.`,
+  );
   ui.outro(`Keep ${shortPath(dir, deps.cwd)}/: it's how you upgrade (\`${UPGRADE_COMMAND}\`).`);
 }
 
@@ -200,6 +222,167 @@ export async function upgrade(options: UpgradeOptions, deps: Deps): Promise<void
   next = { ...next, version: release.version };
   await writeConfig(dir, next);
   ui.outro(`${next.url} runs Drawpane ${release.version}.`);
+}
+
+/**
+ * Sets up how an instance sends email (docs/decisions/0006-email.md), or
+ * turns it off: asks which way and what it needs, and saves the answers as
+ * the Worker's secrets. Only Cloudflare Email Service deploys (its binding
+ * is part of the Worker); the others take effect without one. Settings from
+ * an earlier provider are removed, so old keys don't linger.
+ */
+export async function configureEmail(options: EmailOptions, deps: Deps): Promise<void> {
+  const { ui, release, cloudflare } = deps;
+  const dir = resolve(deps.cwd, options.dir ?? ".");
+  const config = await readConfig(dir);
+  if (!config)
+    throw new Problem(
+      `There's no ${CONFIG_FILE} in ${shortPath(dir, deps.cwd)}. Run this in your instance's folder, or pass its path.`,
+    );
+  if (!config.version || !config.url)
+    throw new Problem(
+      `This instance's install didn't finish. Run \`npm create drawpane ${shortPath(dir, deps.cwd)}\` to finish it, then set up email.`,
+    );
+  ui.intro(`Email for ${config.url}`);
+  const asking = ui.interactive && !options.yes;
+  const accounts = await signIn(deps, asking);
+  if (!accounts.some((a) => a.id === config.accountId))
+    throw new Problem(
+      `You're signed in to Cloudflare without access to account ${config.accountId}, which this instance uses.`,
+    );
+  const existing = await ui.step(
+    "Reading the instance's settings",
+    () => cloudflare.secretNames(dir, config.accountId),
+    (names) =>
+      names.includes("EMAIL_PROVIDER")
+        ? "Email is set up: choosing again replaces it"
+        : "Email is off",
+  );
+
+  let chosen: Provider | null;
+  let secrets: EmailSecrets;
+  if (asking) {
+    chosen = await ui.select<Provider | null>({
+      message: "How should it send email?",
+      options: [
+        ...PROVIDERS.map((p) => ({ value: p, label: p.label, hint: p.hint })),
+        ...(existing.includes("EMAIL_PROVIDER")
+          ? [{ value: null, label: "Turn email off", hint: "and remove its settings" }]
+          : []),
+      ],
+    });
+    secrets = chosen ? await askEmail(chosen, config.domain, ui) : {};
+  } else {
+    const fromEnv = emailSecretsFromEnv(deps.env);
+    chosen = fromEnv.provider;
+    secrets = fromEnv.provider ? fromEnv.secrets : {};
+  }
+  const stale = staleEmailSecrets(existing, secrets);
+
+  if (asking) {
+    ui.note(
+      chosen
+        ? [
+            ...describeSecrets(secrets),
+            ...(stale.length > 0 ? ["", `Removes the old ${stale.join(", ")}.`] : []),
+          ].join("\n")
+        : `Removes ${stale.join(", ")}. Mentions and replies stay in each person's inbox.`,
+      chosen ? `Email through ${chosen.label}` : "Turn email off",
+    );
+    if (!(await ui.confirm({ message: chosen ? "Save these settings?" : "Turn email off?" })))
+      throw new Problem("Nothing changed.");
+  }
+
+  let next = config;
+  if (chosen?.id === "cloudflare") {
+    // The binding is part of the Worker: it deploys, and deploying another version would be an upgrade.
+    if (config.version !== release.version)
+      throw new Problem(
+        `Cloudflare Email Service deploys the Worker again, and this installer carries Drawpane ${release.version} while the instance runs ${config.version}. Upgrade first (\`${UPGRADE_COMMAND}\`), then run this again.`,
+      );
+    next = await prepare(dir, { ...config, sendEmail: true }, deps);
+    next = await deployAndWait(dir, next, deps, secrets);
+  } else {
+    if (chosen)
+      await ui.step(
+        "Saving the settings",
+        () =>
+          withSecretsFile(secrets, (file) =>
+            cloudflare.putSecrets(dir, config.accountId, file as string),
+          ),
+        () => "Settings saved",
+      );
+    // A binding with nothing using it is harmless; the next upgrade leaves it out.
+    if (config.sendEmail) next = { ...config, sendEmail: false };
+  }
+  if (stale.length > 0)
+    await ui.step(
+      `Removing ${stale.join(", ")}`,
+      async () => {
+        for (const name of stale) await cloudflare.deleteSecret(dir, config.accountId, name);
+      },
+      () => `Removed ${stale.join(", ")}`,
+    );
+  await writeConfig(dir, next);
+  ui.outro(
+    chosen
+      ? `Email goes through ${chosen.label}. Send yourself a test from ${config.url}/admin/health.`
+      : "Email is off. Mentions and replies stay in each person's inbox in Drawpane.",
+  );
+}
+
+/** The questions for one provider: who emails come from, then what the provider needs. */
+async function askEmail(chosen: Provider, domain: string | null, ui: Ui): Promise<EmailSecrets> {
+  if (chosen.before) ui.info(chosen.before);
+  const from = await ui.text({
+    message: "Who should emails come from?",
+    initial: suggestedFrom(domain),
+    validate: fromProblem,
+  });
+  const answers: Record<string, string> = {};
+  for (const field of chosen.fields) {
+    if (field.kind === "select") {
+      answers[field.key] = await ui.select({ message: field.message, options: field.options });
+    } else if (field.kind === "secret") {
+      answers[field.key] = await ui.secret({
+        message: field.message,
+        ...(field.validate ? { validate: field.validate } : {}),
+      });
+    } else {
+      answers[field.key] = await ui.text({
+        message: field.message,
+        ...(field.initial !== undefined ? { initial: field.initial } : {}),
+        ...(field.placeholder !== undefined ? { placeholder: field.placeholder } : {}),
+        ...(field.validate ? { validate: field.validate } : {}),
+      });
+    }
+  }
+  return emailSecrets(chosen, from, answers);
+}
+
+/** Secrets that are fine to show back: everything else is said to be set, not shown. */
+const SHOWN: readonly EmailSecret[] = [
+  "EMAIL_PROVIDER",
+  "EMAIL_FROM",
+  "MAILGUN_DOMAIN",
+  "MAILGUN_REGION",
+  "AWS_REGION",
+  "AWS_ACCESS_KEY_ID",
+];
+
+/** The settings about to be saved, one per line, keys hidden (an SMTP URL shows all but its password). */
+function describeSecrets(secrets: EmailSecrets): string[] {
+  const width = Math.max(...Object.keys(secrets).map((k) => k.length));
+  return EMAIL_SECRETS.filter((name) => secrets[name]).map((name) => {
+    const value = secrets[name] as string;
+    let shown = SHOWN.includes(name) ? value : "set, hidden";
+    if (name === "SMTP_URL") {
+      const url = new URL(value);
+      if (url.password) url.password = "•••";
+      shown = url.toString();
+    }
+    return `${name.padEnd(width)}  ${shown}`;
+  });
 }
 
 /** The accounts the person can use, signing in first when nobody is. */

@@ -2,12 +2,13 @@
 /**
  * `npm create drawpane [folder]` installs an instance on your Cloudflare
  * account; `npm create drawpane@latest upgrade [folder]` moves one to this
- * version. See docs/decisions/0004-installer.md.
+ * version; `… email [folder]` sets up how it sends email. See
+ * docs/decisions/0004-installer.md and 0006-email.md.
  */
 import { spawn } from "node:child_process";
 import { parseCli, parseCommand } from "./args.js";
 import { WranglerError, wrangler } from "./cloudflare.js";
-import { type Deps, install, upgrade } from "./flows.js";
+import { configureEmail, type Deps, install, upgrade } from "./flows.js";
 import { Problem } from "./problem.js";
 import { bundledRelease } from "./release.js";
 import { Cancelled, terminalUi } from "./ui.js";
@@ -17,12 +18,16 @@ const HELP = `Install Drawpane on your own Cloudflare account, or upgrade an ins
 Usage
   npm create drawpane [folder] [options]          install a new instance
   npm create drawpane@latest upgrade [folder]     upgrade the instance in folder (default: .)
+  npm create drawpane@latest email [folder]       set up email: Resend, Postmark, SendGrid,
+                                                  Mailgun, Amazon SES, SMTP or Cloudflare
 
 Options
   --account <name or id>   Cloudflare account (asked when you have several)
   --name <worker>          Worker name (default: from the folder)
   --domain <hostname>      serve on your own domain (default: a workers.dev address)
-  --yes, -y                take the defaults and ask nothing (for scripts and CI)
+  --yes, -y                take the defaults and ask nothing (for scripts and CI);
+                           email reads EMAIL_PROVIDER, EMAIL_FROM and the provider's
+                           settings from the environment (see docs/self-hosting.md)
   --force                  upgrade: deploy again even when already on this version
   --help, -h               show this
   --version, -v            show the Drawpane version this installer carries
@@ -73,6 +78,8 @@ async function main(argv: readonly string[]): Promise<number> {
   };
   if (command.kind === "upgrade")
     await upgrade({ dir: command.dir, yes: values.yes, force: values.force }, deps);
+  else if (command.kind === "email")
+    await configureEmail({ dir: command.dir, yes: values.yes }, deps);
   else
     await install(
       {

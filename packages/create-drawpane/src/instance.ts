@@ -27,6 +27,8 @@ const InstanceConfig = z.object({
   domain: z.string().nullable(),
   /** Where the instance answers, once deployed. */
   url: z.string().nullable(),
+  /** Gives the Worker a send_email binding named EMAIL, for Cloudflare Email Service. */
+  sendEmail: z.boolean().optional(),
   /** Settings for the Worker, over the release's (e.g. `GOOGLE_FONTS: "off"`). */
   vars: z.record(z.string(), z.string()).optional(),
 });

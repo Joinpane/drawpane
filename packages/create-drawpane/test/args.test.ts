@@ -38,11 +38,13 @@ describe("the command line", () => {
     );
   });
 
-  it("reads install and upgrade, with their folders", () => {
+  it("reads install, upgrade and email, with their folders", () => {
     expect(parseCommand([])).toEqual({ kind: "install", dir: undefined });
     expect(parseCommand(["my-design"])).toEqual({ kind: "install", dir: "my-design" });
     expect(parseCommand(["upgrade"])).toEqual({ kind: "upgrade", dir: undefined });
     expect(parseCommand(["upgrade", "my-design"])).toEqual({ kind: "upgrade", dir: "my-design" });
+    expect(parseCommand(["email"])).toEqual({ kind: "email", dir: undefined });
+    expect(parseCommand(["email", "my-design"])).toEqual({ kind: "email", dir: "my-design" });
   });
 
   it("lists every extra word, and asks about a mistyped command", () => {
@@ -63,6 +65,13 @@ describe("the command line", () => {
       expect(message([typo])).toBe(
         `Did you mean upgrade? To install into a folder named ${typo}, say ./${typo}.`,
       );
+    expect(message(["email", "a", "b"])).toBe("Unexpected: b. Email takes one folder. See --help.");
+    for (const typo of ["emial", "mail", "emails", "Email"])
+      expect(message([typo])).toBe(
+        `Did you mean email? To install into a folder named ${typo}, say ./${typo}.`,
+      );
+    // Words near a short command are folders.
+    expect(parseCommand(["detail"])).toEqual({ kind: "install", dir: "detail" });
     // Said plainly, it's a folder.
     expect(parseCommand(["./upgarde"])).toEqual({ kind: "install", dir: "./upgarde" });
     expect(parseCommand(["design-team"])).toEqual({ kind: "install", dir: "design-team" });
