@@ -831,9 +831,22 @@ export function exportSvg(
     if (getProp(base, "textDecoration") !== "none")
       style += attr("text-decoration", decorationOf(getProp(base, "textDecoration")));
     if (anchor) style += attr("text-anchor", anchor);
-    // OpenType features as CSS, which SVG text honours (decision 0005).
+    // OpenType features and variable axes as CSS, which SVG text honours (decisions 0005, 0009).
     const features = (props: Props) => featureSettings(getProp(props, "fontFeatures"));
-    if (features(base)) style += attr("style", `font-feature-settings: ${features(base)}`);
+    const axes = (props: Props) => variationSettings(getProp(props, "fontVariations"));
+    /** The CSS for `props`'s features and axes, each only where it differs from `from`'s. */
+    const fontCss = (props: Props, from: Props | null) =>
+      [
+        features(props) !== (from ? features(from) : "")
+          ? `font-feature-settings: ${features(props) || "normal"}`
+          : "",
+        axes(props) !== (from ? axes(from) : "")
+          ? `font-variation-settings: ${axes(props) || "normal"}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("; ");
+    if (fontCss(base, null)) style += attr("style", fontCss(base, null));
 
     // Runs drawn as glyph outlines (PDF): what the shaper has for them.
     const outlined = new Map<TextFragment, ShapedText>();
@@ -861,8 +874,7 @@ export function exportSvg(
         own += attr("letter-spacing", frag.letterSpacing);
       if (frag.decoration !== getProp(base, "textDecoration"))
         own += attr("text-decoration", decorationOf(frag.decoration));
-      if (features(p) !== features(base))
-        own += attr("style", `font-feature-settings: ${features(p) || "normal"}`);
+      if (fontCss(p, base)) own += attr("style", fontCss(p, base));
       return own;
     };
     /**
@@ -1092,6 +1104,14 @@ export function formatSvg(svg: string, { width = Number.POSITIVE_INFINITY } = {}
     }
   }
   return `${lines.join("\n")}\n`;
+}
+
+/** Variable axes as CSS `font-variation-settings`: `'GRAD' 50, 'wdth' 85` (sorted), or "" for none. */
+export function variationSettings(axes: Readonly<Record<string, number>>): string {
+  return Object.keys(axes)
+    .sort()
+    .map((tag) => `'${tag}' ${svgNumber(axes[tag] ?? 0)}`)
+    .join(", ");
 }
 
 /** OpenType features as CSS `font-feature-settings` ("'tnum' 1, 'liga' 0"), empty for none. */

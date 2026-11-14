@@ -6,6 +6,7 @@
  */
 import {
   type FontFeatures,
+  type FontVariations,
   getProp,
   type NodeRecord,
   type Paint,
@@ -19,25 +20,31 @@ export interface TextMeasurer {
    * `run`, as shaped with its OpenType features when the measurer can (else
    * as the canvas has it).
    */
-  width(font: string, text: string, run?: FeatureRun | null): number;
+  width(font: string, text: string, run?: ShapingRun | null): number;
   /**
    * The glyphs for `text` with the run's OpenType features, or null when
    * they can't be shaped (no shaper, the font's bytes aren't at hand or are
    * still loading): the text then draws without them. See decision 0005.
    */
-  shape?(text: string, run: FeatureRun): ShapedText | null;
+  shape?(text: string, run: ShapingRun): ShapedText | null;
   /** Bumped whenever earlier widths stop being right (a web font arrived), so cached layouts go too. */
   readonly generation?: number;
 }
 
-/** A run's face and OpenType features: what shaping needs besides the text. */
-export interface FeatureRun {
+/**
+ * A run's face, OpenType features and variable axes: what shaping needs
+ * besides the text. Only runs that set features or axes are shaped; the
+ * rest are measured and drawn by the canvas.
+ */
+export interface ShapingRun {
   readonly family: string;
   readonly weight: number;
   readonly italic: boolean;
   readonly size: number;
-  /** Never empty: a run without features is measured and drawn by the canvas. */
+  /** OpenType features it turns on or off (decision 0005); may be empty when it sets axes. */
   readonly features: FontFeatures;
+  /** Variable axes it sets (decision 0009); may be empty when it sets features. */
+  readonly variations: FontVariations;
   /** Everything above as one string, for caches. */
   readonly key: string;
 }
@@ -63,23 +70,33 @@ export interface ShapedText {
   readonly scale: number;
 }
 
-/** A span's feature run, or null when it sets none (the fast path: the canvas draws it). */
-export function featureRun(props: Props): FeatureRun | null {
+/** A run's settings as a stable string: sorted tags, so the same settings share a cache entry. */
+function settingsKey(
+  map: Readonly<Record<string, number | boolean>>,
+  tags: readonly string[],
+): string {
+  return tags.map((t) => `${t}=${Number(map[t])}`).join(",");
+}
+
+/** A span's shaping run, or null when it sets no features or axes (the fast path: the canvas draws it). */
+export function shapingRun(props: Props): ShapingRun | null {
   const features = getProp(props, "fontFeatures");
-  const tags = Object.keys(features).sort();
-  if (tags.length === 0) return null;
+  const variations = getProp(props, "fontVariations");
+  const featureTags = Object.keys(features).sort();
+  const axisTags = Object.keys(variations).sort();
+  if (featureTags.length === 0 && axisTags.length === 0) return null;
   const family = getProp(props, "fontFamily");
   const weight = getProp(props, "fontWeight");
   const italic = getProp(props, "fontStyle") === "italic";
   const size = getProp(props, "fontSize");
-  const list = tags.map((t) => `${t}=${features[t] ? 1 : 0}`).join(",");
   return {
     family,
     weight,
     italic,
     size,
     features,
-    key: `${family}|${weight}|${italic ? "i" : "n"}|${size}|${list}`,
+    variations,
+    key: `${family}|${weight}|${italic ? "i" : "n"}|${size}|${settingsKey(features, featureTags)}|${settingsKey(variations, axisTags)}`,
   };
 }
 
@@ -99,8 +116,8 @@ export interface TextFragment {
   readonly decoration: "none" | "underline" | "strikethrough";
   /** Its own fills, or null when it uses the layer's. */
   readonly fills: readonly Paint[] | null;
-  /** Its OpenType features, when it sets any: drawn from shaped glyphs. */
-  readonly run: FeatureRun | null;
+  /** Its OpenType features and variable axes, when it sets any: drawn from shaped glyphs. */
+  readonly run: ShapingRun | null;
 }
 
 export interface TextLine {
@@ -189,7 +206,7 @@ interface SpanStyle {
   readonly font: string;
   readonly size: number;
   readonly spacing: number;
-  readonly run: FeatureRun | null;
+  readonly run: ShapingRun | null;
   /** Half-leading plus ascent, and what's left below the baseline. */
   readonly ascent: number;
   readonly descent: number;
@@ -206,7 +223,7 @@ function spanStyles(node: NodeRecord): SpanStyle[] {
       font: fontString(span.props),
       size,
       spacing: letterSpacingPx(span.props),
-      run: featureRun(span.props),
+      run: shapingRun(span.props),
       ascent,
       descent: lh - ascent,
     };
@@ -654,7 +671,7 @@ export class CanvasTextMeasurer implements TextMeasurer {
     this.#ctx = ctx as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   }
 
-  width(font: string, text: string, _run?: FeatureRun | null): number {
+  width(font: string, text: string, _run?: ShapingRun | null): number {
     const key = `${font}\u0000${text}`;
     let w = this.#cache.get(key);
     if (w === undefined) {

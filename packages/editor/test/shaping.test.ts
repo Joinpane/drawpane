@@ -7,8 +7,8 @@ import { readFileSync } from "node:fs";
 import { ROOT_ID } from "@drawpane/model";
 import { describe, expect, it, vi } from "vitest";
 import { Editor } from "../src/editor";
-import { Shaper, ShapingMeasurer } from "../src/shaping";
-import { autoSize, type FeatureRun, featureRun, layoutText, type TextMeasurer } from "../src/text";
+import { axisSettings, Shaper, ShapingMeasurer, shapingFace } from "../src/shaping";
+import { autoSize, layoutText, type ShapingRun, shapingRun, type TextMeasurer } from "../src/text";
 
 const FONT = readFileSync(
   new URL("../../../apps/web/e2e/fixtures/InstrumentSans-Regular.ttf", import.meta.url),
@@ -17,7 +17,7 @@ const bytes = () => FONT.buffer.slice(FONT.byteOffset, FONT.byteOffset + FONT.by
 const makePath = (d: string) => ({ d }) as unknown as Path2D;
 
 function run(features: Record<string, boolean>, size = 10, family = "Instrument Sans") {
-  return featureRun({ fontFamily: family, fontSize: size, fontFeatures: features }) as FeatureRun;
+  return shapingRun({ fontFamily: family, fontSize: size, fontFeatures: features }) as ShapingRun;
 }
 
 async function ready(loader = async () => bytes()) {
@@ -151,16 +151,95 @@ describe("ShapingMeasurer", () => {
   });
 });
 
-describe("featureRun", () => {
+describe("shapingRun", () => {
   it("is null without features, so plain text keeps the canvas's fast path", () => {
-    expect(featureRun({})).toBeNull();
-    expect(featureRun({ fontFeatures: {} })).toBeNull();
+    expect(shapingRun({})).toBeNull();
+    expect(shapingRun({ fontFeatures: {} })).toBeNull();
   });
 
   it("keys runs by face, size and features in a stable order", () => {
-    const a = featureRun({ fontFeatures: { tnum: true, liga: false } });
-    const b = featureRun({ fontFeatures: { liga: false, tnum: true } });
+    const a = shapingRun({ fontFeatures: { tnum: true, liga: false } });
+    const b = shapingRun({ fontFeatures: { liga: false, tnum: true } });
     expect(a?.key).toBe(b?.key);
-    expect(a?.key).toBe("Instrument Sans|400|n|16|liga=0,tnum=1");
+    expect(a?.key).toBe("Instrument Sans|400|n|16|liga=0,tnum=1|");
+  });
+});
+
+describe("variable fonts (decision 0009)", () => {
+  const VARIABLE = readFileSync(
+    new URL("../../../apps/web/e2e/fixtures/InstrumentSans-Variable.ttf", import.meta.url),
+  );
+  const variableBytes = () =>
+    VARIABLE.buffer.slice(VARIABLE.byteOffset, VARIABLE.byteOffset + VARIABLE.byteLength);
+  const axesRun = (variations: Record<string, number>, weight = 400, size = 10) =>
+    shapingRun({
+      fontFamily: "Instrument Sans",
+      fontSize: size,
+      fontWeight: weight,
+      fontVariations: variations,
+    }) as ShapingRun;
+  /** Serves the variable file for variable faces, the static one otherwise, counting loads. */
+  const loader = () =>
+    vi.fn(async (face: { variable?: boolean }) => (face.variable ? variableBytes() : bytes()));
+
+  it("shapes text that sets axes from the family's variable file", async () => {
+    const load = loader();
+    const shaper = new Shaper(load, { makePath });
+    expect(shaper.shape("Width", axesRun({ wdth: 75 }))).toBeNull();
+    await shaper.load(shapingFace(axesRun({ wdth: 75 })));
+    expect(load).toHaveBeenLastCalledWith(expect.objectContaining({ variable: true }));
+    const narrow = shaper.shape("Width", axesRun({ wdth: 75 }));
+    const normal = shaper.shape("Width", axesRun({ wdth: 100 }));
+    expect(narrow?.width).toBeGreaterThan(0);
+    expect(narrow?.width).toBeLessThan((normal?.width ?? 0) * 0.95);
+    // The glyphs themselves change shape along the axis, not just their spacing.
+    expect(narrow?.glyphs[0]?.d).not.toBe(normal?.glyphs[0]?.d);
+  });
+
+  it("draws the text's weight on the weight axis, from one file for every weight", async () => {
+    const load = loader();
+    const shaper = new Shaper(load, { makePath });
+    await shaper.load(shapingFace(axesRun({ wdth: 100 })));
+    const regular = shaper.shape("Bold", axesRun({ wdth: 100 }, 400));
+    const bold = shaper.shape("Bold", axesRun({ wdth: 100 }, 700));
+    expect(bold?.width).toBeGreaterThan(regular?.width ?? 0);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("clamps axes to what the font covers, and leaves out what it lacks", () => {
+    const axes = { wght: { min: 400, max: 700 }, wdth: { min: 75, max: 100 } };
+    expect(
+      axisSettings(axes, { weight: 900, size: 12, variations: { wdth: 50, GRAD: 100 } }),
+    ).toEqual({ wght: 700, wdth: 75 });
+    // Optical size follows the font size unless the text sets it.
+    const optical = { opsz: { min: 8, max: 144 } };
+    expect(axisSettings(optical, { weight: 400, size: 12, variations: {} })).toEqual({ opsz: 12 });
+    expect(axisSettings(optical, { weight: 400, size: 300, variations: {} })).toEqual({
+      opsz: 144,
+    });
+    expect(axisSettings(optical, { weight: 400, size: 12, variations: { opsz: 48 } })).toEqual({
+      opsz: 48,
+    });
+  });
+
+  it("lists a variable font's axes with its names for them, and none for a static font", async () => {
+    const shaper = new Shaper(loader(), { makePath });
+    const face = { family: "Instrument Sans", weight: 400, italic: false };
+    expect(await shaper.axes(face)).toEqual([
+      { tag: "wdth", name: "Width", min: 75, default: 100, max: 100 },
+      { tag: "wght", name: "Weight", min: 400, default: 400, max: 700 },
+    ]);
+    const staticOnly = new Shaper(async () => bytes(), { makePath });
+    expect(await staticOnly.axes(face)).toEqual([]);
+    const none = new Shaper(async () => null, { makePath });
+    expect(await none.axes(face)).toBeNull();
+  });
+
+  it("keys runs by their axes, so each point on them is shaped and cached on its own", () => {
+    expect(axesRun({ wdth: 75 }).key).not.toBe(axesRun({ wdth: 80 }).key);
+    expect(axesRun({ wdth: 75, GRAD: 1 }).key).toBe(axesRun({ GRAD: 1, wdth: 75 }).key);
+    expect(shapingFace(axesRun({ wdth: 75 })).variable).toBe(true);
+    expect(shapingFace(run({ tnum: true })).variable).toBeUndefined();
+    expect(shapingRun({ fontFamily: "Inter" })).toBeNull();
   });
 });

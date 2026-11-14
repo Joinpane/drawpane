@@ -401,6 +401,35 @@ describe("exportSvg", () => {
     expect(svg).toContain(`<tspan style="font-feature-settings: 'zero' 1">1,010</tspan>`);
   });
 
+  it("keeps variable axes as CSS, on the layer and on a range that differs", () => {
+    const editor = makeEditor([
+      {
+        op: "create",
+        id: "t",
+        type: "text",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 20,
+          characters: "Wide narrow",
+          fontVariations: { wdth: 125, GRAD: -50 },
+          textRuns: [
+            { start: 5, end: 11, fontVariations: { wdth: 75 } },
+            { start: 0, end: 4, fontFeatures: { ss01: true } },
+          ],
+        },
+      },
+    ]);
+    const svg = svgOf(editor, ["t"]);
+    expect(svg).toMatch(/<text [^>]*style="font-variation-settings: 'GRAD' -50, 'wdth' 125"/);
+    expect(svg).toContain(`<tspan style="font-variation-settings: 'wdth' 75">narrow</tspan>`);
+    // A run that only changes features leaves the axes to the layer.
+    expect(svg).toContain(`<tspan style="font-feature-settings: 'ss01' 1">Wide</tspan>`);
+  });
+
   it("draws runs with features as glyph outlines when asked (for PDF), keeping their room", () => {
     // A shaper's measurer: every glyph a 10-unit square, 600 units wide, 1000 per em.
     const shaping: TextMeasurer = {

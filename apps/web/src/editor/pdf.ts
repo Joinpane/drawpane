@@ -16,9 +16,11 @@ import {
   ExportError,
   exportBounds,
   exportSvg,
-  featureRun,
   type Rect,
+  type ShapingFace,
   type SvgImageSource,
+  shapingFace,
+  shapingRun,
   textFaces,
   textSpans,
 } from "@drawpane/editor";
@@ -67,17 +69,18 @@ function facesIn(editor: Editor, ids: readonly string[]): Face[] {
   return [...faces.values()];
 }
 
-/** The faces of every run with OpenType features inside some layers. */
-function featureFacesIn(editor: Editor, ids: readonly string[]): Face[] {
-  const faces = new Map<string, Face>();
+/** The faces shaped runs (OpenType features, variable axes) draw from inside some layers. */
+function shapedFacesIn(editor: Editor, ids: readonly string[]): ShapingFace[] {
+  const faces = new Map<string, ShapingFace>();
   const visit = (id: string) => {
     const node = editor.doc.get(id);
     if (!node || getProp(node.props, "visible") === false) return;
     if (node.type === "text")
       for (const span of textSpans(node)) {
-        const run = featureRun(span.props);
-        if (run)
-          faces.set(faceKey(run), { family: run.family, weight: run.weight, italic: run.italic });
+        const run = shapingRun(span.props);
+        if (!run) continue;
+        const face = shapingFace(run);
+        faces.set(`${faceKey(face)}\u0000${face.variable ? "v" : ""}`, face);
       }
     for (const child of editor.doc.childIds(id)) visit(child);
   };
@@ -220,7 +223,7 @@ export async function renderPdf(
     embeddedImages(editor, ids),
     embedFonts(pdf, facesIn(editor, ids)),
     // The faces text with OpenType features is shaped in, ready before drawing.
-    Promise.all(featureFacesIn(editor, ids).map((face) => shaper.load(face))),
+    Promise.all(shapedFacesIn(editor, ids).map((face) => shaper.load(face))),
   ]);
 
   // svg2pdf reads computed styles, so each page's SVG is attached while it draws.

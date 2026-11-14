@@ -14,7 +14,9 @@
  * own name, which keeps the number of distinct files bounded by the catalog.
  *
  * Browsers get woff2. `format=ttf` asks for TrueType instead, one static
- * file per weight, for embedding in exported PDFs.
+ * file per weight, for embedding in exported PDFs. `/google-variable` names a
+ * family's variable TrueType files, read from Google's download manifest, for
+ * text that sets a variable font's axes (decision 0009).
  *
  * Self-hosters who don't want any traffic to Google set `GOOGLE_FONTS=off`.
  */
@@ -23,6 +25,8 @@ import type { AppContext } from "../env";
 import { badRequest, HttpError, notFound } from "../lib/http";
 
 const GOOGLE_CSS = "https://fonts.googleapis.com/css2";
+/** What fonts.google.com's download button reads: a family's files, variable ones included. */
+const GOOGLE_DOWNLOAD_LIST = "https://fonts.google.com/download/list";
 const GSTATIC = "https://fonts.gstatic.com/";
 /** Where rewritten stylesheets point font URLs: this router's `/gstatic/` route. */
 export const GSTATIC_PROXY = "/api/fonts/gstatic/";
@@ -71,6 +75,44 @@ export function googleStylesheetUrl(
   }
   const url = `${GOOGLE_CSS}?family=${spec}&display=swap`;
   return text ? `${url}&text=${encodeURIComponent(text)}` : url;
+}
+
+/** A family's variable font file, served through this origin. */
+export interface VariableFile {
+  readonly italic: boolean;
+  readonly url: string;
+}
+
+/** A variable file's name in the manifest, at its top level: `Inter-Italic-VariableFont_opsz,wght.ttf`. */
+const VARIABLE_FILENAME = /^[A-Za-z0-9_-]+-VariableFont_[A-Za-z0-9,]+\.ttf$/;
+
+/**
+ * The variable files a family's download manifest lists (roman and
+ * italic), pointed at this origin. Empty for a static family, and for a
+ * manifest that isn't the shape we know: the manifest isn't a documented
+ * API, so anything unexpected means "none" (decision 0009).
+ */
+export function variableFiles(manifest: string): VariableFile[] {
+  let json: unknown;
+  try {
+    // It starts with an XSSI guard line.
+    json = JSON.parse(manifest.replace(/^\)\]\}'[^\n]*\n?/, ""));
+  } catch {
+    return [];
+  }
+  const refs = (json as { manifest?: { fileRefs?: unknown } } | null)?.manifest?.fileRefs;
+  if (!Array.isArray(refs)) return [];
+  const out = new Map<boolean, VariableFile>();
+  for (const ref of refs) {
+    const { filename, url } = (ref ?? {}) as { filename?: unknown; url?: unknown };
+    if (typeof filename !== "string" || typeof url !== "string") continue;
+    if (!VARIABLE_FILENAME.test(filename) || !url.startsWith(GSTATIC)) continue;
+    const path = url.slice(GSTATIC.length);
+    if (!STATIC_FILE.test(path)) continue;
+    const italic = /-Italic-VariableFont_/.test(filename);
+    if (!out.has(italic)) out.set(italic, { italic, url: `${GSTATIC_PROXY}${path}` });
+  }
+  return [...out.values()];
 }
 
 /** Points a Google stylesheet's font URLs at this origin, and blanks anything else it links. */
@@ -144,6 +186,32 @@ export const fonts = new Hono<AppContext>()
     const out = new Response(rewriteStylesheet(await response.text()), {
       headers: { "content-type": "text/css; charset=utf-8", "cache-control": STYLESHEET_CACHE },
     });
+    c.executionCtx.waitUntil(cache.put(cacheKey, out.clone()));
+    return out;
+  })
+
+  /**
+   * `?family=Roboto Flex`: the family's variable TrueType files, as
+   * `{ files: [{ italic, url }] }` (empty for a static family). Cached at
+   * the edge for a day, like stylesheets.
+   */
+  .get("/google-variable", async (c) => {
+    requireEnabled(c.env);
+    const family = c.req.query("family") ?? "";
+    if (!FAMILY.test(family)) throw badRequest("Name a font family.");
+    const upstream = `${GOOGLE_DOWNLOAD_LIST}?family=${encodeURIComponent(family)}`;
+    const cache = caches.default;
+    const cacheKey = new Request(
+      `https://fonts.drawpane.internal/variable?${encodeURIComponent(upstream)}`,
+    );
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+    const response = await fetch(upstream, { headers: { "user-agent": PLAIN_UA } });
+    if (!response.ok) throw notFound(`Google Fonts has no family called ${family}.`);
+    const out = Response.json(
+      { files: variableFiles(await response.text()) },
+      { headers: { "cache-control": STYLESHEET_CACHE } },
+    );
     c.executionCtx.waitUntil(cache.put(cacheKey, out.clone()));
     return out;
   })

@@ -15,6 +15,7 @@ import {
 import type { Doc } from "./doc";
 import { layerName } from "./names";
 import { type RunStyle, textSpans } from "./rich-text";
+import { featureSettings, variationSettings } from "./svg";
 import { letterSpacingPx, lineHeightPx } from "./text";
 import { cssVariableName } from "./variables";
 import { shapeVertices } from "./vector/shapes";
@@ -348,6 +349,10 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
     if (getProp(p, "fontWeight") !== 400)
       out.push({ property: "font-weight", value: String(getProp(p, "fontWeight")) });
     if (getProp(p, "fontStyle") === "italic") out.push({ property: "font-style", value: "italic" });
+    const features = featureSettings(getProp(p, "fontFeatures"));
+    if (features) out.push({ property: "font-feature-settings", value: features });
+    const axes = variationSettings(getProp(p, "fontVariations"));
+    if (axes) out.push({ property: "font-variation-settings", value: axes });
     const lh = getProp(p, "lineHeight");
     out.push({
       property: "line-height",

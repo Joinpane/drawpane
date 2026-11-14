@@ -111,6 +111,7 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   textCase: "text",
   textDecoration: "text",
   fontFeatures: "text",
+  fontVariations: "text",
   paragraphSpacing: "text",
   maxLines: "text",
   textStyle: "text",
