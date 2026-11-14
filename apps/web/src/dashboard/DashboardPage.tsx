@@ -178,7 +178,11 @@ export function DashboardPage() {
           ))}
         </nav>
         <div className="dash__side-foot">
-          <UserMenu name={session.data?.user?.name ?? ""} email={session.data?.user?.email ?? ""} />
+          <UserMenu
+            name={session.data?.user?.name ?? ""}
+            email={session.data?.user?.email ?? ""}
+            admin={session.data?.user?.isAdmin === true}
+          />
         </div>
       </aside>
 
@@ -368,7 +372,7 @@ function NavLink({
   );
 }
 
-function UserMenu({ name, email }: { name: string; email: string }) {
+function UserMenu({ name, email, admin }: { name: string; email: string; admin: boolean }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const theme = useThemePreference();
@@ -384,6 +388,16 @@ function UserMenu({ name, email }: { name: string; email: string }) {
           <span>{email}</span>
         </span>
       </Link>
+      {admin ? (
+        <Link
+          to="/admin/health"
+          className="dp-iconbtn"
+          aria-label="Instance health and cost"
+          title="Instance health and cost"
+        >
+          <Icon name="bolt" size={16} />
+        </Link>
+      ) : null}
       <IconButton
         icon={theme === "dark" ? "moon" : theme === "light" ? "sun" : "fit"}
         label={`Theme: ${theme}. Switch to ${next}`}
