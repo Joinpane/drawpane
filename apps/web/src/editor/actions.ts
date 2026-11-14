@@ -17,6 +17,7 @@ import {
 import type { IconName } from "@drawpane/ui";
 import { isMac } from "../app/format";
 import { copySelectionAs, exportPageAsPdf, exportSelection } from "./exporting";
+import { openTextStyles } from "./inspector/TextStyles";
 import { uiFor } from "./ui-state";
 
 export interface Shortcut {
@@ -355,6 +356,46 @@ export const ACTIONS: readonly Action[] = [
     keywords: "css grid columns rows tracks",
     enabled: canEditSelection,
     run: ({ editor }) => editor.addGridLayout(),
+  },
+  {
+    id: "text.bold",
+    label: "Bold",
+    group: "Layer",
+    icon: "text",
+    shortcut: { key: "b", mod: true },
+    keywords: "weight strong text",
+    enabled: hasText,
+    run: ({ editor }) => editor.toggleTextStyle("bold"),
+  },
+  {
+    id: "text.italic",
+    label: "Italic",
+    group: "Layer",
+    icon: "italic",
+    shortcut: { key: "i", mod: true },
+    keywords: "slant oblique text",
+    enabled: hasText,
+    run: ({ editor }) => editor.toggleTextStyle("italic"),
+  },
+  {
+    id: "text.underline",
+    label: "Underline",
+    group: "Layer",
+    icon: "text",
+    shortcut: { key: "u", mod: true },
+    keywords: "decoration text",
+    enabled: hasText,
+    run: ({ editor }) => editor.toggleTextStyle("underline"),
+  },
+  {
+    id: "text.styles",
+    label: "Text styles",
+    group: "Layer",
+    icon: "text",
+    shortcut: { key: "t", mod: true, alt: true },
+    keywords: "typography heading body type scale",
+    enabled: hasText,
+    run: ({ editor }) => openTextStyles(editor),
   },
   {
     id: "layer.find",
@@ -841,6 +882,16 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.addPage(),
   },
 ];
+
+/** Some text is selected, directly or inside a selected group or frame, and you can edit. */
+function hasText(editor: Editor): boolean {
+  if (!editor.canEdit) return false;
+  const visit = (id: string): boolean => {
+    const node = editor.doc.get(id);
+    return node?.type === "text" || editor.doc.childIds(id).some(visit);
+  };
+  return editor.s.selection.some(visit);
+}
 
 export function matches(shortcut: Shortcut, e: KeyboardEvent): boolean {
   const mod = isMac() ? e.metaKey : e.ctrlKey;

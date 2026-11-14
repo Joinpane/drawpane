@@ -186,6 +186,10 @@ function Summary({ node }: { node: NodeRecord }) {
       token: token("opacity"),
     });
   if (node.type === "text") {
+    const styleId = getProp(p, "textStyle");
+    const style = styleId ? editor.doc.get(styleId) : undefined;
+    if (style)
+      rows.push({ label: "Text style", value: getProp(style.props, "name") || "Text style" });
     rows.push({
       label: "Font",
       value: `${getProp(p, "fontFamily")} ${getProp(p, "fontWeight")}`,
