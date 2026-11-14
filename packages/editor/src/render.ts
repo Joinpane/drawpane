@@ -6,8 +6,9 @@
  * draws those on a separate canvas so hover and drag feedback never repaint
  * the design.
  */
-import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import { type Effect, getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
+import { exportBounds } from "./export";
 import type { Rect } from "./geometry";
 import { ImageCache, imagePlacement } from "./images";
 import { markerLength, markersOf, trimmedStroke } from "./markers";
@@ -29,6 +30,19 @@ export interface CanvasRendererOptions {
 
 /** Two neutral greys in device pixels, the same in both themes: an image that is still loading. */
 const PLACEHOLDER = { light: "#ececea", dark: "#dfdfdc", cell: 8 };
+
+/** The most pixels a blurred layer's own canvas may have; larger layers are drawn into it smaller. */
+const BLUR_MAX_PIXELS = 6_000_000;
+
+/** A layer's layer-blur radius, or 0. */
+function layerBlurRadius(node: NodeRecord): number {
+  let radius = 0;
+  for (const e of getProp(node.props, "effects"))
+    if (e.type === "layer-blur" && e.visible !== false) radius = Math.max(radius, e.radius);
+  return radius;
+}
+
+const isBackgroundBlur = (e: Effect) => e.type === "background-blur" && e.visible !== false;
 
 export interface RenderStats {
   drawn: number;
@@ -170,6 +184,10 @@ export class CanvasRenderer {
    * Off for exports and thumbnails, which draw everything exactly.
    */
   #detail = true;
+  /** Layers being drawn into their own canvas for a layer blur (see #drawBlurred). */
+  readonly #isolated = new Set<string>();
+  /** Those canvases, one per nesting depth of blurred layers. */
+  readonly #blurCanvases: Array<OffscreenCanvas | HTMLCanvasElement> = [];
 
   constructor(scene: Scene, measurer: TextMeasurer, options: CanvasRendererOptions = {}) {
     this.#scene = scene;
@@ -423,11 +441,21 @@ export class CanvasRenderer {
       return;
     }
     this.stats.drawn++;
-    const opacity = alpha * getProp(node.props, "opacity");
+    // Drawn into its own canvas for a layer blur: its opacity and blending apply when that's composited.
+    const isolated = this.#isolated.has(id);
+    const opacity = alpha * (isolated ? 1 : getProp(node.props, "opacity"));
     if (opacity <= 0) return;
-    const own = BLEND[getProp(node.props, "blendMode")] ?? "source-over";
+    const own = isolated
+      ? "source-over"
+      : (BLEND[getProp(node.props, "blendMode")] ?? "source-over");
     // A group's blending carries to its layers unless they blend their own way.
     const blend = own === "source-over" ? inheritedBlend : own;
+
+    const blurRadius = isolated ? 0 : layerBlurRadius(node);
+    if (blurRadius > 0) {
+      this.#drawBlurred(ctx, node, camera, dpr, visible, opacity, blend, blurRadius);
+      return;
+    }
 
     if (node.type === "group") {
       this.#drawChildren(ctx, id, camera, dpr, visible, opacity, blend);
@@ -449,18 +477,14 @@ export class CanvasRenderer {
       ctx.globalCompositeOperation = blend;
     };
     place();
-    const blur = getProp(node.props, "effects").find(
-      (e) => e.type === "layer-blur" && e.visible !== false,
-    );
-    const blurred = blur?.type === "layer-blur" && blur.radius > 0;
-    if (blurred) ctx.filter = `blur(${blur.radius * camera.zoom * dpr}px)`;
 
     const width = getProp(node.props, "width");
     const height = getProp(node.props, "height");
     const shape = this.#shapePath(node, width, height);
 
     this.#shadows(ctx, node, shape, "drop-shadow", camera.zoom * dpr);
-    this.#backgroundBlur(ctx, node, shape, camera.zoom * dpr);
+    // Isolated for a layer blur, there's nothing behind it here: its background blur was drawn already.
+    if (!isolated) this.#backgroundBlur(ctx, node, shape, camera.zoom * dpr);
     if (node.type === "text") this.#text(ctx, node, width, undefined, camera.zoom * dpr);
     else
       for (const paint of getProp(node.props, "fills"))
@@ -475,18 +499,110 @@ export class CanvasRenderer {
           ctx.save();
           ctx.clip(shape);
         }
-        if (blurred) ctx.filter = "none";
         // Its children are as see-through as it is, and blend as it does.
         this.#drawChildren(ctx, id, camera, dpr, visible, opacity, blend);
         if (clip) ctx.restore();
         // The children set their own state; take this frame's back for its strokes.
         place();
-        if (blurred)
-          ctx.filter = `blur(${(blur as { radius: number }).radius * camera.zoom * dpr}px)`;
       }
     }
     this.#strokes(ctx, node, shape, width, height);
-    if (blurred) ctx.filter = "none";
+  }
+
+  /**
+   * A layer blur blurs the whole layer, as in Figma: its fills, strokes and
+   * shadows, and a frame's children, as one picture. So the layer is drawn
+   * plainly into a canvas of its own, covering what it paints (where that's
+   * on screen) plus the blur's reach, and that is composited blurred, with
+   * the layer's opacity and blending. A large layer is drawn there at a lower
+   * resolution, which the blur hides, so memory stays bounded.
+   */
+  #drawBlurred(
+    ctx: Ctx,
+    node: NodeRecord,
+    camera: Camera,
+    dpr: number,
+    visible: Rect,
+    opacity: number,
+    blend: GlobalCompositeOperation,
+    radius: number,
+  ): void {
+    const id = node.id;
+    const blurPx = radius * camera.zoom * dpr;
+    // Background blur reads what's already drawn behind the layer: here, before the layer goes on.
+    if (node.type !== "group" && getProp(node.props, "effects").some(isBackgroundBlur)) {
+      const m = this.#scene.worldMatrix(id);
+      const z = camera.zoom * dpr;
+      ctx.setTransform(
+        m[0] * z,
+        m[1] * z,
+        m[2] * z,
+        m[3] * z,
+        (m[4] * camera.zoom + camera.x) * dpr,
+        (m[5] * camera.zoom + camera.y) * dpr,
+      );
+      const shape = this.#shapePath(
+        node,
+        getProp(node.props, "width"),
+        getProp(node.props, "height"),
+      );
+      this.#backgroundBlur(ctx, node, shape, z);
+    }
+    const region = exportBounds(this.#scene, [id]);
+    if (!region) return;
+    // In device pixels: what it paints, kept to the canvas plus the blur's reach past it.
+    const margin = blurPx * 3;
+    const x0 = Math.floor(Math.max((region.x * camera.zoom + camera.x) * dpr - margin, -margin));
+    const y0 = Math.floor(Math.max((region.y * camera.zoom + camera.y) * dpr - margin, -margin));
+    const x1 = Math.ceil(
+      Math.min(
+        ((region.x + region.width) * camera.zoom + camera.x) * dpr + margin,
+        ctx.canvas.width + margin,
+      ),
+    );
+    const y1 = Math.ceil(
+      Math.min(
+        ((region.y + region.height) * camera.zoom + camera.y) * dpr + margin,
+        ctx.canvas.height + margin,
+      ),
+    );
+    if (x1 <= x0 || y1 <= y0) return;
+    const scale = Math.min(1, Math.sqrt(BLUR_MAX_PIXELS / ((x1 - x0) * (y1 - y0))));
+    const w = Math.max(1, Math.ceil((x1 - x0) * scale));
+    const h = Math.max(1, Math.ceil((y1 - y0) * scale));
+    const layer = this.#blurCanvas(this.#isolated.size, w, h);
+    const lctx = layer?.getContext("2d") as Ctx | null | undefined;
+    if (!layer || !lctx) return;
+    resetState(lctx);
+    lctx.clearRect(0, 0, layer.width, layer.height);
+    // The same camera, moved so the region's corner is the canvas's, at the reduced resolution.
+    const shifted = new Camera(camera.x - x0 / dpr, camera.y - y0 / dpr, camera.zoom);
+    this.#isolated.add(id);
+    try {
+      this.#draw(lctx, id, shifted, dpr * scale, visible, 1, "source-over");
+    } finally {
+      this.#isolated.delete(id);
+    }
+    resetState(ctx);
+    ctx.globalAlpha = opacity;
+    ctx.globalCompositeOperation = blend;
+    ctx.filter = `blur(${blurPx}px)`;
+    ctx.drawImage(layer, 0, 0, w, h, x0, y0, w / scale, h / scale);
+    resetState(ctx);
+  }
+
+  /** A canvas for drawing a blurred layer by itself: one per nesting depth, kept and grown. */
+  #blurCanvas(depth: number, w: number, h: number): OffscreenCanvas | HTMLCanvasElement | null {
+    let canvas = this.#blurCanvases[depth];
+    if (!canvas) {
+      if (typeof OffscreenCanvas !== "undefined") canvas = new OffscreenCanvas(w, h);
+      else if (typeof document !== "undefined") canvas = document.createElement("canvas");
+      else return null;
+      this.#blurCanvases[depth] = canvas;
+    }
+    if (canvas.width < w) canvas.width = w;
+    if (canvas.height < h) canvas.height = h;
+    return canvas;
   }
 
   /**

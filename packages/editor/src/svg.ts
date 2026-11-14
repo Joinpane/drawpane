@@ -16,7 +16,8 @@
  *
  * Drop and inner shadows (with spread, as the canvas casts them) and layer
  * blur are SVG filters in page space, so a rotated layer's shadow still
- * falls the way it does on the canvas.
+ * falls the way it does on the canvas. A layer blur blurs the whole layer,
+ * children, strokes and shadows included, as on the canvas and in Figma.
  *
  * Not covered yet:
  * - image fills without a supplied image, and image strokes (left out)
@@ -28,6 +29,7 @@
  *   flexbox
  */
 import { getProp, type NodeRecord, type Paint, type Props } from "@drawpane/model";
+import { exportBounds } from "./export";
 import { type Matrix, type Rect, round2 } from "./geometry";
 import { FULL_CROP, imagePlacement } from "./images";
 import { markersOf, trimmedStroke } from "./markers";
@@ -476,18 +478,25 @@ export function exportSvg(
   };
 
   /** A layer blur's filter id, or null: CSS-style blur(radius) on the layer's own drawing. */
-  const layerBlur = (node: NodeRecord, w: number, h: number, matrix: Matrix): string | null => {
-    const blur = getProp(node.props, "effects").find(
-      (e) => e.type === "layer-blur" && e.visible !== false,
-    );
-    if (blur?.type !== "layer-blur" || blur.radius <= 0) return null;
+  /**
+   * A layer blur blurs the whole layer, as on the canvas (and in Figma): its
+   * fills, strokes and shadows, and a frame's or group's children, as one
+   * picture. Wraps a layer's markup in the blur, over all it paints.
+   */
+  const blurred = (node: NodeRecord, parts: string[]): string[] => {
+    let radius = 0;
+    for (const e of getProp(node.props, "effects"))
+      if (e.type === "layer-blur" && e.visible !== false) radius = Math.max(radius, e.radius);
+    if (radius <= 0 || parts.length === 0) return parts;
+    const bounds = exportBounds(scene, [node.id]);
+    if (!bounds) return parts;
     const id = out.id("blur");
-    // Covers the fills it blurs, plus the blur's own reach.
-    const region = regionAttrs(matrix, 0, 0, w, h, blur.radius * 3);
+    const pad = radius * 3;
+    const region = `${attr("x", bounds.x - pad)}${attr("y", bounds.y - pad)}${attr("width", bounds.width + pad * 2)}${attr("height", bounds.height + pad * 2)}`;
     out.defs.push(
-      `<filter id="${id}" filterUnits="userSpaceOnUse"${region} color-interpolation-filters="sRGB"><feGaussianBlur${attr("stdDeviation", blur.radius)}/></filter>`,
+      `<filter id="${id}" filterUnits="userSpaceOnUse"${region} color-interpolation-filters="sRGB"><feGaussianBlur${attr("stdDeviation", radius)}/></filter>`,
     );
-    return id;
+    return [`<g filter="url(#${id})">${parts.join("")}</g>`];
   };
 
   const visit = (id: string, into: string[]) => {
@@ -503,7 +512,8 @@ export function exportSvg(
 
     if (node.type === "group") {
       visitChildren(id, parts);
-      if (parts.length > 0) into.push(`<g${name}${wrapperAttrs}>${parts.join("")}</g>`);
+      const drawn = blurred(node, parts);
+      if (drawn.length > 0) into.push(`<g${name}${wrapperAttrs}>${drawn.join("")}</g>`);
       return;
     }
 
@@ -511,8 +521,7 @@ export function exportSvg(
     const h = getProp(node.props, "height");
     const matrix = scene.worldMatrix(id);
     const transform = transformAttr(matrix);
-    // In the canvas's order: drop shadows, fills, inner shadows, children, strokes. A layer blur
-    // blurs the fills only; shadows, children and strokes are drawn without it, as on the canvas.
+    // In the canvas's order: drop shadows, fills, inner shadows, children, strokes.
     const shadows: string[] = [];
     const below: string[] = [];
     const inner: string[] = [];
@@ -561,13 +570,10 @@ export function exportSvg(
         strokes(node, shape, w, h, transform, above);
       }
     }
-    const blur = layerBlur(node, w, h, matrix);
-    const own = (list: string[]) =>
-      blur && list.length > 0 ? [`<g filter="url(#${blur})">${list.join("")}</g>`] : list;
-    parts.push(...shadows, ...own(below), ...inner, ...children, ...above);
-    if (parts.length === 0) return;
-    if (wrapperAttrs || name) into.push(`<g${name}${wrapperAttrs}>${parts.join("")}</g>`);
-    else into.push(...parts);
+    const drawn = blurred(node, [...shadows, ...below, ...inner, ...children, ...above]);
+    if (drawn.length === 0) return;
+    if (wrapperAttrs || name) into.push(`<g${name}${wrapperAttrs}>${drawn.join("")}</g>`);
+    else into.push(...drawn);
   };
 
   /** A parent's children; layers above a mask go in a group clipped to the mask's outline. */
