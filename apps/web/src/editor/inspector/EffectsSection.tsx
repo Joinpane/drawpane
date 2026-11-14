@@ -14,22 +14,10 @@ import {
   type NodeRecord,
   type PropValues,
 } from "@drawpane/model";
-import {
-  DropdownMenu,
-  Icon,
-  IconButton,
-  type IconName,
-  LightDial,
-  MenuButton,
-  type MenuItem,
-  NumberField,
-  Popover,
-  PropertySection,
-  SliderField,
-} from "@drawpane/ui";
-import { useRef, useState } from "react";
+import { type IconName, LightDial, NumberField, PropertySection, SliderField } from "@drawpane/ui";
 import { ColorRow } from "./ColorRow";
 import { common } from "./fields";
+import { AddItemButton, ItemEditor, ItemRow, useItemEditor } from "./ItemList";
 
 type Effect = PropValues["effects"][number];
 type EffectType = Effect["type"];
@@ -78,9 +66,7 @@ export function effectSummary(e: Effect): string {
 export function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
   const effects = common(nodes, "effects");
-  // The effect whose editor is open, by index.
-  const [open, setOpen] = useState<number | null>(null);
-  const rows = useRef(new Map<number, HTMLButtonElement>());
+  const items = useItemEditor();
   const set = (next: Effect[], label: string) =>
     editor.setProp(ids, "effects", next.length ? next : null, label);
   const replace = (i: number, next: Effect, label: string) =>
@@ -88,213 +74,146 @@ export function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeR
       (effects ?? []).map((e, j) => (j === i ? next : e)),
       label,
     );
-
-  const addItems: MenuItem[] = EFFECT_KINDS.map((kind) => ({
-    id: kind.type,
-    label: kind.label,
-    icon: kind.icon,
-    onSelect: () => {
-      const list = effects ?? [];
-      set([...list, effectOfType(kind.type)], `Add ${kind.label.toLowerCase()}`);
-      // Its editor opens once its row is there.
-      requestAnimationFrame(() => setOpen(list.length));
-    },
-  }));
-
-  const anchor = open === null ? null : (rows.current.get(open) ?? null);
-  const current = open === null ? null : (effects?.[open] ?? null);
+  const current = items.open === null ? null : (effects?.[items.open] ?? null);
 
   return (
     <PropertySection
       title="Effects"
-      actions={<MenuButton icon="plus" label="Add effect" items={addItems} />}
+      actions={
+        <AddItemButton
+          label="Add effect"
+          kinds={EFFECT_KINDS}
+          onAdd={(type) => {
+            const list = effects ?? [];
+            set([...list, effectOfType(type)], `Add ${KIND[type].label.toLowerCase()}`);
+            items.openNew(list.length);
+          }}
+        />
+      }
     >
       {effects === null ? (
         <p className="inspector__mixed">Mixed effects. Add one to replace them.</p>
       ) : (
-        effects.map((effect, i) => {
-          const kind = KIND[effect.type];
-          const hidden = effect.visible === false;
-          return (
-            <div
-              key={i}
-              className="effect"
-              data-hidden={hidden || undefined}
-              data-open={open === i || undefined}
-            >
-              <button
-                ref={(el) => {
-                  if (el) rows.current.set(i, el);
-                  else rows.current.delete(i);
-                }}
-                type="button"
-                className="effect__toggle"
-                aria-haspopup="dialog"
-                aria-expanded={open === i}
-                onClick={() => setOpen(open === i ? null : i)}
-              >
-                <Icon name={kind.icon} size={16} />
-                <span className="effect__name">{kind.label}</span>
-                <span className="effect__summary">{effectSummary(effect)}</span>
-              </button>
-              <IconButton
-                icon={hidden ? "eye-off" : "eye"}
-                label={
-                  hidden ? `Show ${kind.label.toLowerCase()}` : `Hide ${kind.label.toLowerCase()}`
-                }
-                onClick={() => replace(i, { ...effect, visible: hidden }, "Toggle effect")}
-              />
-              <IconButton
-                icon="minus"
-                label={`Remove ${kind.label.toLowerCase()}`}
-                onClick={() => {
-                  set(
-                    effects.filter((_, j) => j !== i),
-                    "Remove effect",
-                  );
-                  setOpen(null);
-                }}
-              />
-            </div>
-          );
-        })
+        effects.map((effect, i) => (
+          <ItemRow
+            key={i}
+            kind={KIND[effect.type]}
+            summary={effectSummary(effect)}
+            hidden={effect.visible === false}
+            open={items.open === i}
+            buttonRef={items.rowRef(i)}
+            onOpen={() => items.toggle(i)}
+            onToggleHidden={() =>
+              replace(i, { ...effect, visible: effect.visible === false }, "Toggle effect")
+            }
+            onRemove={() => {
+              set(
+                effects.filter((_, j) => j !== i),
+                "Remove effect",
+              );
+              items.setOpen(null);
+            }}
+          />
+        ))
       )}
-      {anchor && current && open !== null ? (
-        <Popover
-          anchor={anchor}
-          label={KIND[current.type].label}
-          className="effect-editor dp-root"
-          autoFocus={false}
-          onClose={() => setOpen(null)}
+      {items.anchor && current && items.open !== null ? (
+        <ItemEditor
+          anchor={items.anchor}
+          kinds={EFFECT_KINDS}
+          current={current.type}
+          kindLabel="Effect type"
+          className={current.type === "glass" ? "item-editor--wide" : undefined}
+          onKind={(type) =>
+            replace(items.open as number, effectOfType(type, current), "Effect type")
+          }
+          onClose={() => items.setOpen(null)}
         >
-          <EffectEditor
+          <EffectFields
             editor={editor}
             effect={current}
-            onChange={(next, label) => replace(open, next, label)}
-            onClose={() => setOpen(null)}
+            onChange={(next, label) => replace(items.open as number, next, label)}
           />
-        </Popover>
+        </ItemEditor>
       ) : null}
     </PropertySection>
   );
 }
 
-/** One effect's editor: its kind (switchable), then each value with its name. */
-function EffectEditor({
+/** One effect's values, each with its name. */
+function EffectFields({
   editor,
   effect,
   onChange,
-  onClose,
 }: {
   editor: Editor;
   effect: Effect;
   onChange: (next: Effect, label: string) => void;
-  onClose: () => void;
 }) {
-  const kind = KIND[effect.type];
-  const typeButton = useRef<HTMLButtonElement>(null);
-  const [choosing, setChoosing] = useState(false);
   const scrub = (label: string) => ({
     onScrubStart: () => editor.beginGesture(label),
     onScrubEnd: () => editor.endGesture(),
   });
+  if (effect.type === "glass")
+    return <GlassFields effect={effect} onChange={onChange} scrub={scrub} />;
   return (
-    <div className="effect-editor__body">
-      <div className="effect-editor__head">
-        <button
-          ref={typeButton}
-          type="button"
-          className="effect-editor__type"
-          aria-haspopup="menu"
-          aria-expanded={choosing}
-          aria-label={`Effect type: ${kind.label}`}
-          onClick={() => setChoosing(!choosing)}
-        >
-          <Icon name={kind.icon} size={16} />
-          <span>{kind.label}</span>
-          <Icon name="chevron-down" size={12} />
-        </button>
-        <IconButton icon="close" label="Close" onClick={onClose} />
-      </div>
-      {choosing && typeButton.current ? (
-        <DropdownMenu
-          anchor={typeButton.current}
-          label="Effect type"
-          align="start"
-          items={EFFECT_KINDS.map((k) => ({
-            id: k.type,
-            label: k.label,
-            icon: k.icon,
-            checked: k.type === effect.type,
-            // With icons the menu shows no check: the current kind starts highlighted instead.
-            active: k.type === effect.type,
-            onSelect: () => onChange(effectOfType(k.type, effect), "Effect type"),
-          }))}
-          onClose={() => setChoosing(false)}
-        />
-      ) : null}
-      {effect.type === "glass" ? (
-        <GlassFields effect={effect} onChange={onChange} scrub={scrub} />
-      ) : null}
-      <div className="effect-editor__fields" hidden={effect.type === "glass"}>
-        {effect.type === "glass" ? null : "color" in effect ? (
-          <>
-            <span className="effect-editor__label">Position</span>
-            <div className="effect-editor__pair">
-              <NumberField
-                label="X"
-                ariaLabel="Shadow X offset"
-                value={effect.x}
-                onChange={(x) => onChange({ ...effect, x }, "Shadow offset")}
-                {...scrub("Shadow offset")}
-              />
-              <NumberField
-                label="Y"
-                ariaLabel="Shadow Y offset"
-                value={effect.y}
-                onChange={(y) => onChange({ ...effect, y }, "Shadow offset")}
-                {...scrub("Shadow offset")}
-              />
-            </div>
-            <span className="effect-editor__label">Blur</span>
+    <div className="item-editor__fields">
+      {"color" in effect ? (
+        <>
+          <span className="item-editor__label">Position</span>
+          <div className="item-editor__pair">
             <NumberField
-              icon="layer-blur"
-              ariaLabel="Shadow blur"
-              min={0}
-              value={effect.blur}
-              onChange={(blur) => onChange({ ...effect, blur }, "Shadow blur")}
-              {...scrub("Shadow blur")}
+              label="X"
+              ariaLabel="Shadow X offset"
+              value={effect.x}
+              onChange={(x) => onChange({ ...effect, x }, "Shadow offset")}
+              {...scrub("Shadow offset")}
             />
-            <span className="effect-editor__label">Spread</span>
             <NumberField
-              icon="padding"
-              ariaLabel="Shadow spread"
-              value={effect.spread}
-              onChange={(spread) => onChange({ ...effect, spread }, "Shadow spread")}
-              {...scrub("Shadow spread")}
+              label="Y"
+              ariaLabel="Shadow Y offset"
+              value={effect.y}
+              onChange={(y) => onChange({ ...effect, y }, "Shadow offset")}
+              {...scrub("Shadow offset")}
             />
-            <span className="effect-editor__label">Color</span>
-            <ColorRow
-              editor={editor}
-              label="Shadow"
-              color={effect.color}
-              onChange={(color, label) => onChange({ ...effect, color }, label)}
-            />
-          </>
-        ) : (
-          <>
-            <span className="effect-editor__label">Blur</span>
-            <NumberField
-              icon="layer-blur"
-              ariaLabel="Blur radius"
-              min={0}
-              value={effect.radius}
-              onChange={(radius) => onChange({ ...effect, radius }, "Blur radius")}
-              {...scrub("Blur radius")}
-            />
-          </>
-        )}
-      </div>
+          </div>
+          <span className="item-editor__label">Blur</span>
+          <NumberField
+            icon="layer-blur"
+            ariaLabel="Shadow blur"
+            min={0}
+            value={effect.blur}
+            onChange={(blur) => onChange({ ...effect, blur }, "Shadow blur")}
+            {...scrub("Shadow blur")}
+          />
+          <span className="item-editor__label">Spread</span>
+          <NumberField
+            icon="padding"
+            ariaLabel="Shadow spread"
+            value={effect.spread}
+            onChange={(spread) => onChange({ ...effect, spread }, "Shadow spread")}
+            {...scrub("Shadow spread")}
+          />
+          <span className="item-editor__label">Color</span>
+          <ColorRow
+            editor={editor}
+            label="Shadow"
+            color={effect.color}
+            onChange={(color, label) => onChange({ ...effect, color }, label)}
+          />
+        </>
+      ) : (
+        <>
+          <span className="item-editor__label">Blur</span>
+          <NumberField
+            icon="layer-blur"
+            ariaLabel="Blur radius"
+            min={0}
+            value={effect.radius}
+            onChange={(radius) => onChange({ ...effect, radius }, "Blur radius")}
+            {...scrub("Blur radius")}
+          />
+        </>
+      )}
     </div>
   );
 }
@@ -317,7 +236,7 @@ function GlassFields({
     const drag = scrub(label);
     return (
       <>
-        <span className="effect-editor__label">{label}</span>
+        <span className="item-editor__label">{label}</span>
         <SliderField
           label={label}
           value={effect[key]}
@@ -333,16 +252,16 @@ function GlassFields({
   const light = scrub("Light angle");
   return (
     <>
-      <div className="effect-editor__fields effect-editor__fields--light">
-        <span className="effect-editor__label">Light</span>
-        <div className="effect-editor__light">
+      <div className="item-editor__fields item-editor__fields--light">
+        <span className="item-editor__label">Light</span>
+        <div className="item-editor__light">
           <LightDial
             angle={effect.angle}
             onChange={(angle) => onChange({ ...effect, angle }, "Light angle")}
             onDragStart={light.onScrubStart}
             onDragEnd={light.onScrubEnd}
           />
-          <div className="effect-editor__light-values">
+          <div className="item-editor__light-values">
             <NumberField
               ariaLabel="Light angle"
               unit="°"
@@ -364,7 +283,7 @@ function GlassFields({
           </div>
         </div>
       </div>
-      <div className="effect-editor__fields effect-editor__fields--sliders">
+      <div className="item-editor__fields item-editor__fields--sliders">
         {slider("refraction", "Refraction")}
         {slider("depth", "Depth")}
         {slider("dispersion", "Dispersion")}

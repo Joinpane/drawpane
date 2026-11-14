@@ -123,12 +123,19 @@ test.describe
         (id) => (window as unknown as { drawpane: Debug }).drawpane.select([id]),
         board,
       );
+      // "+" offers the kinds; picking one adds it and opens its editor beside the inspector.
       await panel(page).getByRole("button", { name: "Add layout grid" }).click();
+      await page
+        .getByRole("menu", { name: "Add layout grid" })
+        .getByRole("menuitem", { name: "Columns" })
+        .click();
       await expect
         .poll(async () => ((await props(page, board)).layoutGrids as unknown[])?.length)
         .toBe(1);
-      await panel(page).getByLabel("Column count").fill("4");
-      await panel(page).getByLabel("Column count").press("Enter");
+      const editor = page.getByRole("dialog", { name: "Columns" });
+      await editor.getByLabel("Column count").fill("4");
+      await editor.getByLabel("Column count").press("Enter");
+      await editor.getByRole("button", { name: "Close" }).click();
       // 400 wide, 20 margins and gutters: columns 75 wide, the second starting at 115.
       await expect
         .poll(
