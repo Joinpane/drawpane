@@ -327,7 +327,7 @@
   flex-direction: column;
   align-items: flex-start;
   gap: var(--space-300);
-  max-width: 420px;
+  max-width: 520px;
   margin: var(--space-1200) auto;
   text-align: left;
 }
@@ -879,4 +879,26 @@
 .dash__account:focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus);
+}
+.dash__card-menu {
+  position: relative;
+}
+.dash__card-dropdown {
+  position: absolute;
+  top: calc(100% + var(--space-100));
+  right: 0;
+  z-index: 5;
+  min-width: 196px;
+}
+.dash__template-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: var(--space-100);
+  padding: 0 6px 0 4px;
+  border-radius: var(--radius-full);
+  background: var(--component-soft, var(--surface-sunken));
+  color: var(--component-ink, var(--ink));
+  font: 500 11px / 16px var(--font-ui);
+  vertical-align: 1px;
 }

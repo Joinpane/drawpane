@@ -15,6 +15,7 @@ import { InvitePage } from "./auth/InvitePage";
 import { SetupPage } from "./auth/SetupPage";
 import { SignInPage } from "./auth/SignInPage";
 import { DashboardPage } from "./dashboard/DashboardPage";
+import { NewFilePage } from "./new-file/NewFilePage";
 import type { PresentSearch } from "./prototype/PresentPage";
 import type { SharedSearch } from "./prototype/SharedPrototypePage";
 
@@ -133,6 +134,15 @@ const teamRoute = createRoute({
   component: DashboardPage,
 });
 
+const newFileRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/t/$teamId/new",
+  beforeLoad: requireUser,
+  validateSearch: (search: Record<string, unknown>): { project?: string } =>
+    typeof search.project === "string" ? { project: search.project } : {},
+  component: NewFilePage,
+});
+
 const fileRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/f/$fileId",
@@ -192,6 +202,7 @@ const routeTree = rootRoute.addChildren([
   inviteRoute,
   settingsRoute,
   teamRoute,
+  newFileRoute,
   fileRoute,
   presentRoute,
   sharedRoute,
