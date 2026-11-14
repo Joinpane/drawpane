@@ -70,6 +70,12 @@ import { Store } from "./store";
 import { type ConnectionStatus, SyncEngine } from "./sync";
 import { autoSize, type TextMeasurer } from "./text";
 import {
+  TEXT_STYLE_PROPS,
+  textStyleDetachOps,
+  textStyleFixupOps,
+  textStyleUsers,
+} from "./text-styles";
+import {
   BINDING_TARGETS,
   unbindOps,
   type VariableType,
@@ -396,7 +402,11 @@ export class Editor {
       // bound property by hand detaches its variable; both before the derived
       // writes below, so those leave the edited properties alone.
       const marks = recordOverrides
-        ? [...overrideOps(this.doc, ops), ...unbindOps(this.doc, ops)]
+        ? [
+            ...overrideOps(this.doc, ops),
+            ...unbindOps(this.doc, ops),
+            ...textStyleDetachOps(this.doc, ops),
+          ]
         : [];
       // Resizing a frame moves its children by their constraints; resizing a
       // path (handles, inspector, constraints) scales its path data with its box.
@@ -416,7 +426,10 @@ export class Editor {
         let roundInverse: Op[] = synced.length > 0 ? this.sync.commit(synced) : [];
         const resolved = variableFixupOps(this.doc, [...lastOps, ...synced]);
         if (resolved.length > 0) roundInverse = [...this.sync.commit(resolved), ...roundInverse];
-        const derivedSoFar = [...synced, ...resolved];
+        // Text layers follow their text style.
+        const styled = textStyleFixupOps(this.doc, [...lastOps, ...synced, ...resolved]);
+        if (styled.length > 0) roundInverse = [...this.sync.commit(styled), ...roundInverse];
+        const derivedSoFar = [...synced, ...resolved, ...styled];
         const text = this.#textFixups([...live, ...derivedSoFar.map((o) => o.id)]);
         if (text.length > 0) roundInverse = [...this.sync.commit(text), ...roundInverse];
         const derived = [...derivedSoFar, ...text];
@@ -1704,6 +1717,148 @@ export class Editor {
       "New collection",
     );
     return ok ? id : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Text styles
+
+  /**
+   * Makes a text style from a text layer's typography (the first selected
+   * text layer by default) and applies it to every selected text layer.
+   * Returns the style's id.
+   */
+  createTextStyle(name: string, fromId?: string): string | null {
+    const texts = this.#selectedTexts();
+    const source = this.doc.get(fromId ?? texts[0] ?? "");
+    const trimmed = name.trim();
+    if (source?.type !== "text" || !trimmed) return null;
+    // The layer's typography as stored (defaults stay absent).
+    const props: Record<string, unknown> = { name: trimmed.slice(0, 256) };
+    for (const prop of TEXT_STYLE_PROPS)
+      if (source.props[prop] !== undefined) props[prop] = source.props[prop];
+    const id = newId();
+    const last = this.doc.childIds(ROOT_ID).at(-1);
+    this.beginGesture("New text style");
+    const ok = this.commit(
+      [
+        {
+          op: "create",
+          id,
+          type: "textStyle",
+          parent: ROOT_ID,
+          key: keyBetween(last ? (this.doc.get(last)?.key ?? null) : null, null),
+          props: props as Props,
+        },
+      ],
+      "New text style",
+    );
+    if (ok) this.applyTextStyle(texts.length > 0 ? texts : [source.id], id);
+    this.endGesture();
+    return ok ? id : null;
+  }
+
+  /**
+   * Points text layers at a style (they take its typography), or at none:
+   * null detaches them, keeping how they look.
+   */
+  applyTextStyle(ids: readonly string[], styleId: string | null): void {
+    const style = styleId ? this.doc.get(styleId) : null;
+    if (styleId && style?.type !== "textStyle") return;
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const node = this.doc.get(id);
+      if (node?.type !== "text") continue;
+      ops.push({ op: "set", id, prop: "textStyle", value: styleId });
+      // A style sets these properties, so variables bound to them let go.
+      const bindings = getProp(node.props, "bindings");
+      if (styleId && (bindings.fontSize || bindings.fontFamily)) {
+        const { fontSize: _size, fontFamily: _family, ...rest } = bindings;
+        ops.push({
+          op: "set",
+          id,
+          prop: "bindings",
+          value: Object.keys(rest).length > 0 ? rest : null,
+        });
+      }
+    }
+    if (ops.length > 0) this.commit(ops, styleId ? "Apply text style" : "Detach text style");
+  }
+
+  /** Copies a text layer's typography into its style (Figma's "Update style"); every user follows. */
+  updateTextStyle(styleId: string, fromId: string): void {
+    const style = this.doc.get(styleId);
+    const source = this.doc.get(fromId);
+    if (style?.type !== "textStyle" || source?.type !== "text") return;
+    const ops: Op[] = [];
+    for (const prop of TEXT_STYLE_PROPS)
+      ops.push({ op: "set", id: styleId, prop, value: source.props[prop] ?? null });
+    ops.push({ op: "set", id: fromId, prop: "textStyle", value: styleId });
+    this.commit(ops, "Update text style");
+  }
+
+  /** Deletes a text style. Its layers keep how they look and stop following. */
+  deleteTextStyle(styleId: string): void {
+    const style = this.doc.get(styleId);
+    if (style?.type !== "textStyle") return;
+    const ops: Op[] = textStyleUsers(this.doc, styleId).map((n) => ({
+      op: "set" as const,
+      id: n.id,
+      prop: "textStyle" as const,
+      value: null,
+    }));
+    ops.push({ op: "delete", id: styleId });
+    this.commit(ops, "Delete text style");
+  }
+
+  /** The selected text layers, including text inside selected groups and frames. */
+  #selectedTexts(): string[] {
+    const out: string[] = [];
+    const visit = (id: string) => {
+      const node = this.doc.get(id);
+      if (!node) return;
+      if (node.type === "text") out.push(id);
+      else for (const child of this.doc.childIds(id)) visit(child);
+    };
+    for (const id of this.s.selection) visit(id);
+    return out;
+  }
+
+  /**
+   * ⌘B, ⌘I and ⌘U on the selected text: bold (700) unless every layer
+   * already is, then regular; italic and underline toggle the same way.
+   */
+  toggleTextStyle(kind: "bold" | "italic" | "underline"): void {
+    const texts = this.#selectedTexts()
+      .map((id) => this.doc.get(id))
+      .filter((n): n is NodeRecord => !!n);
+    if (texts.length === 0) return;
+    const prop =
+      kind === "bold" ? "fontWeight" : kind === "italic" ? "fontStyle" : "textDecoration";
+    const on = (n: NodeRecord) =>
+      kind === "bold"
+        ? getProp(n.props, "fontWeight") >= 600
+        : kind === "italic"
+          ? getProp(n.props, "fontStyle") === "italic"
+          : getProp(n.props, "textDecoration") === "underline";
+    const allOn = texts.every(on);
+    const value =
+      kind === "bold"
+        ? allOn
+          ? null
+          : 700
+        : kind === "italic"
+          ? allOn
+            ? null
+            : "italic"
+          : allOn
+            ? null
+            : "underline";
+    this.setProp(
+      texts.map((n) => n.id),
+      prop,
+      value,
+      kind === "bold" ? "Bold" : kind === "italic" ? "Italic" : "Underline",
+    );
   }
 
   /** Adds a variable to a collection, with `value` in every mode. Returns its id. */
