@@ -17,7 +17,7 @@ The installer:
 3. Creates a D1 database and an R2 bucket, applies the migrations, and deploys, with a generated session secret and a one-time setup token.
 4. Opens the setup page with the token filled in. Create your account there: you own the first team and can invite everyone else.
 
-Until the installer is published to npm, run it from a clone of this repository: `pnpm install && pnpm build && node packages/create-drawpane/dist/cli.js my-design`.
+To try a version that isn't released yet, run the installer from a clone of this repository: `pnpm install && pnpm build && node packages/create-drawpane/dist/cli.js my-design`.
 
 The folder it makes (`my-design/`) is your instance: `drawpane.json` records what was chosen and what's deployed, `wrangler.jsonc` is generated from it, and `server/` holds the release. Keep it; you upgrade from it. It holds no secrets, so it's safe to commit. If an install is interrupted, run the same command again: it picks up where it stopped and never creates anything twice.
 

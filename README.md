@@ -57,7 +57,7 @@ Then open http://localhost:5173. More in [CONTRIBUTING.md](CONTRIBUTING.md).
 npm create drawpane my-design
 ```
 
-It signs you in to Cloudflare, creates what the instance needs on your account, deploys it, and opens the page where you create the first account. Upgrading is `npm create drawpane@latest upgrade` in that folder. Until the installer is published to npm, run it from a clone: `pnpm install && pnpm build && node packages/create-drawpane/dist/cli.js my-design`. Details, and the steps done by hand: [docs/self-hosting.md](docs/self-hosting.md).
+It signs you in to Cloudflare, creates what the instance needs on your account, deploys it, and opens the page where you create the first account. Upgrading is `npm create drawpane@latest upgrade` in that folder. The installer is [`create-drawpane`](https://www.npmjs.com/package/create-drawpane) on npm. Details, and the steps done by hand: [docs/self-hosting.md](docs/self-hosting.md).
 
 ## Viewing the designs
 
