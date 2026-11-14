@@ -1,6 +1,7 @@
 import type { CommentPerson } from "@drawpane/model";
 import { type CSSProperties, Fragment, type ReactNode } from "react";
 import { initials } from "../../app/format";
+import { type Inline, parseComment } from "./format";
 
 /** A stable presence color (1–8) for a person, so their pins look the same in every session. */
 export function presenceSlotFor(id: string | null | undefined): number {
@@ -83,40 +84,119 @@ export function mentionsIn(body: string, people: readonly CommentPerson[]): stri
   return [...ids];
 }
 
-/** Renders a comment body with its mentions emphasized; a mention of you uses signal ink. */
+/**
+ * A comment's text, formatted (see `format.ts`): paragraphs, lists, bold,
+ * italic, code, links, and mentions (a mention of you in signal ink).
+ * `compact` runs it all together for a few-line preview: lists become
+ * "• item" lines, and links stay text, so the preview's row stays one button.
+ */
 export function CommentText({
   body,
   mentions,
   me,
+  compact = false,
 }: {
   body: string;
   mentions: readonly CommentPerson[];
   me: string | null;
+  compact?: boolean;
 }) {
-  const pattern = mentionPattern(mentions);
-  if (!pattern) return <>{body}</>;
-  const parts: ReactNode[] = [];
-  let last = 0;
-  for (const match of body.matchAll(pattern)) {
-    const index = match.index ?? 0;
-    if (index > last) parts.push(body.slice(last, index));
-    const person = mentions.find((p) => p.name === match[1]);
-    parts.push(
-      <span
-        key={index}
-        className={person?.id === me ? "comment-mention comment-mention--you" : "comment-mention"}
-      >
-        {match[0]}
-      </span>,
+  const blocks = parseComment(
+    body,
+    mentions.map((p) => p.name),
+  );
+  const run = (r: Inline, k: string): ReactNode => {
+    switch (r.kind) {
+      case "text":
+        return <Fragment key={k}>{r.text}</Fragment>;
+      case "strong":
+        return <strong key={k}>{runs(r.children, k)}</strong>;
+      case "em":
+        return <em key={k}>{runs(r.children, k)}</em>;
+      case "code":
+        return (
+          <code key={k} className="comment-code">
+            {r.text}
+          </code>
+        );
+      case "link":
+        return compact ? (
+          <span key={k} className="comment-link">
+            {r.text}
+          </span>
+        ) : (
+          <a
+            key={k}
+            className="comment-link"
+            href={r.href}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {r.text}
+          </a>
+        );
+      case "mention": {
+        const person = mentions.find((p) => p.name === r.name);
+        return (
+          <span
+            key={k}
+            className={
+              person?.id === me ? "comment-mention comment-mention--you" : "comment-mention"
+            }
+          >
+            {r.text}
+          </span>
+        );
+      }
+    }
+  };
+  const runs = (items: readonly Inline[], key: string): ReactNode =>
+    items.map((r, i) => run(r, `${key}.${i}`));
+  const lines = (items: readonly (readonly Inline[])[], key: string) =>
+    items.map((line, i) => (
+      // biome-ignore lint/suspicious/noArrayIndexKey: lines have no identity beyond their place
+      <Fragment key={i}>
+        {i > 0 ? <br /> : null}
+        {runs(line, `${key}.${i}`)}
+      </Fragment>
+    ));
+  if (compact)
+    return (
+      <>
+        {blocks.map((block, b) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: blocks have no identity beyond their place
+          <Fragment key={b}>
+            {b > 0 ? <br /> : null}
+            {block.kind === "paragraph"
+              ? lines(block.lines, String(b))
+              : lines(
+                  block.items.map((item, n) => [
+                    { kind: "text", text: block.ordered ? `${block.start + n}. ` : "• " },
+                    ...item,
+                  ]),
+                  String(b),
+                )}
+          </Fragment>
+        ))}
+      </>
     );
-    last = index + match[0].length;
-  }
-  if (last < body.length) parts.push(body.slice(last));
   return (
     <>
-      {parts.map((part, i) =>
-        typeof part === "string" ? <Fragment key={`t${String(i)}`}>{part}</Fragment> : part,
-      )}
+      {blocks.map((block, b) => {
+        const key = String(b);
+        if (block.kind === "paragraph") return <p key={key}>{lines(block.lines, key)}</p>;
+        const items = block.items.map((item, n) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: items have no identity beyond their place
+          <li key={n}>{runs(item, `${key}.${n}`)}</li>
+        ));
+        return block.ordered ? (
+          <ol key={key} start={block.start === 1 ? undefined : block.start}>
+            {items}
+          </ol>
+        ) : (
+          <ul key={key}>{items}</ul>
+        );
+      })}
     </>
   );
 }

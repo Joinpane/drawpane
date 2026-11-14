@@ -276,9 +276,10 @@ test("comments: pin, reply with a mention, live updates, resolve, find again", a
     expect(b.x).toBeGreaterThanOrEqual(dialog.x);
     expect(b.x + b.width).toBeLessThanOrEqual(dialog.x + dialog.width);
   }
-  await editing.fill("I'll take this one, today.");
+  // Saved with a little Markdown, it reads formatted.
+  await editing.fill("I'll take this one, **today**.");
   await ana.keyboard.press("ControlOrMeta+Enter");
-  await expect(messages.getByText("I'll take this one, today.")).toBeVisible();
+  await expect(messages.locator("strong", { hasText: "today" })).toBeVisible();
 
   await boContext.close();
   await anaContext.close();

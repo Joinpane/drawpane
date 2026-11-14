@@ -271,9 +271,9 @@ function MessageItem({
             }
           />
         ) : (
-          <p className="comment-message__text">
+          <div className="comment-message__text">
             <CommentText body={message.body} mentions={message.mentions} me={me} />
-          </p>
+          </div>
         )}
         {mode === "confirm" ? (
           <div className="comment-confirm" role="alert">

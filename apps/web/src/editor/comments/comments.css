@@ -230,6 +230,55 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* Formatting (format.ts): paragraphs and lists a little apart, lists indented. */
+.comment-message__text > p,
+.comment-message__text > ul,
+.comment-message__text > ol {
+  margin: 0;
+}
+.comment-message__text > :is(p, ul, ol) + :is(p, ul, ol) {
+  margin-top: 6px;
+}
+.comment-message__text ul,
+.comment-message__text ol {
+  padding-left: 18px;
+}
+.comment-message__text ul {
+  list-style: disc;
+}
+.comment-message__text ol {
+  list-style: decimal;
+}
+.comment-message__text li + li {
+  margin-top: 2px;
+}
+.comment-message__text li::marker {
+  color: var(--ink-muted);
+}
+.comment-message__text strong,
+.comments-panel__text strong {
+  font-weight: 600;
+}
+.comment-code {
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-sunken);
+  font: 500 11px / 16px var(--font-mono);
+}
+.comment-link {
+  color: var(--signal-ink);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+a.comment-link:hover {
+  text-decoration-thickness: 2px;
+}
+a.comment-link:focus-visible {
+  outline: none;
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-focus);
+}
 /* Author actions appear on hover or focus, so the thread reads calmly. */
 .comment-message__more {
   opacity: 0;
