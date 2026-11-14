@@ -61,6 +61,44 @@ test("minimap tour", async ({ browser }) => {
     e.state.set({
       peers: new Map([
         [
+          // Pointer over a panel: a ring where they're looking.
+          "bo",
+          {
+            sessionId: "bo",
+            userId: "bo",
+            name: "Bo Chen",
+            color: 3,
+            kind: "person",
+            presence: {
+              cursor: null,
+              pageId: p,
+              selection: [],
+              viewport: { x: 900, y: 100, width: 500, height: 400 },
+              following: null,
+              spotlight: false,
+            },
+          },
+        ],
+        [
+          // Far from everything: the map widens to keep them on it.
+          "sam",
+          {
+            sessionId: "sam",
+            userId: "sam",
+            name: "Sam Okafor",
+            color: 6,
+            kind: "person",
+            presence: {
+              cursor: { x: 2600, y: 1400 },
+              pageId: p,
+              selection: [],
+              viewport: null,
+              following: null,
+              spotlight: false,
+            },
+          },
+        ],
+        [
           "lena",
           {
             sessionId: "lena",

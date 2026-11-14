@@ -161,6 +161,30 @@ test.describe
       await expect.poll(boOnAna).toBeGreaterThan(200);
     });
 
+    test("scrolling under a still pointer moves the cursor others see", async () => {
+      const overlay = bo.locator(".canvas__overlay");
+      const box = await overlay.boundingBox();
+      if (!box) throw new Error("no canvas");
+      /** Bo's cursor as Ana's copy of his presence has it. */
+      const boOnAna = () =>
+        ana.evaluate(() => {
+          const e = (
+            window as unknown as {
+              drawpane: {
+                s: { peers: Map<string, { presence: { cursor: { y: number } | null } | null }> };
+              };
+            }
+          ).drawpane;
+          return [...e.s.peers.values()][0]?.presence?.cursor?.y ?? null;
+        });
+      await bo.mouse.move(box.x + 300, box.y + 300, { steps: 3 });
+      await expect.poll(boOnAna).not.toBeNull();
+      const before = (await boOnAna()) as number;
+      // The wheel scrolls the canvas; the pointer stays where it is on screen.
+      await bo.mouse.wheel(0, 600);
+      await expect.poll(async () => ((await boOnAna()) as number) - before).toBeGreaterThan(300);
+    });
+
     test("Ana spotlights; Bo is asked, follows, and is told when she leaves", async () => {
       await ana.getByRole("button", { name: "People in this file" }).click();
       await ana.getByRole("button", { name: "Spotlight me" }).click();

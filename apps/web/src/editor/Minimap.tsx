@@ -67,19 +67,18 @@ function draw(canvas: HTMLCanvasElement, model: MinimapModel, fit: MinimapFit): 
   const c = colorsOf(canvas);
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
-  const box = (r: { x: number; y: number; width: number; height: number }) => {
+  /** A rect on the map, at least `min` pixels each way (grown about its centre), so it still shows. */
+  const box = (r: { x: number; y: number; width: number; height: number }, min: number) => {
     const a = toMinimap(fit, r);
-    // At least a pixel and a half, so a small layer still shows.
-    return {
-      x: a.x,
-      y: a.y,
-      w: Math.max(1.5, r.width * fit.scale),
-      h: Math.max(1.5, r.height * fit.scale),
-    };
+    const w = r.width * fit.scale;
+    const h = r.height * fit.scale;
+    const W = Math.max(min, w);
+    const H = Math.max(min, h);
+    return { x: a.x - (W - w) / 2, y: a.y - (H - h) / 2, w: W, h: H };
   };
 
   for (const layer of model.layers) {
-    const b = box(layer.rect);
+    const b = box(layer.rect, 2);
     ctx.globalAlpha = layer.hidden ? 0.5 : 1;
     if (layer.board) {
       ctx.fillStyle = c.board;
@@ -95,7 +94,8 @@ function draw(canvas: HTMLCanvasElement, model: MinimapModel, fit: MinimapFit): 
   ctx.globalAlpha = 1;
 
   // The visible area: the signal outline, a faint wash inside.
-  const v = box(model.view);
+  // Never smaller than a few pixels: on a spread-out page, you still see where you are.
+  const v = box(model.view, 8);
   ctx.beginPath();
   ctx.roundRect(v.x + 0.75, v.y + 0.75, Math.max(0, v.w - 1.5), Math.max(0, v.h - 1.5), 2);
   ctx.fillStyle = withAlpha(c.signal, 0.08);
@@ -106,13 +106,22 @@ function draw(canvas: HTMLCanvasElement, model: MinimapModel, fit: MinimapFit): 
 
   for (const peer of model.peers) {
     const p = toMinimap(fit, peer.at);
+    const color = peer.agent ? c.agent : (c.presence[(peer.color - 1) % 8] ?? c.signal);
     ctx.beginPath();
     ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
-    ctx.fillStyle = peer.agent ? c.agent : (c.presence[(peer.color - 1) % 8] ?? c.signal);
-    ctx.strokeStyle = c.ring;
-    ctx.lineWidth = 1;
-    ctx.fill();
-    ctx.stroke();
+    if (peer.pointing) {
+      // Their pointer: a dot.
+      ctx.fillStyle = color;
+      ctx.strokeStyle = c.ring;
+      ctx.lineWidth = 1;
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      // Their pointer is off the canvas: a ring where they're looking.
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
   }
 }
 

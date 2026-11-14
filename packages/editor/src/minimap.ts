@@ -20,8 +20,10 @@ export interface MinimapLayer {
 export interface MinimapPeer {
   readonly sessionId: string;
   readonly name: string;
-  /** Their pointer, on this page. */
+  /** Their pointer on this page; or, when it's off the canvas (over a panel), the middle of their view. */
   readonly at: Point;
+  /** Whether `at` is their pointer (a dot) rather than where they're looking (a ring). */
+  readonly pointing: boolean;
   /** 1–8: their `presence-n` color. */
   readonly color: number;
   readonly agent: boolean;
@@ -56,16 +58,28 @@ export function minimapModel(editor: Editor): MinimapModel | null {
   const others: MinimapPeer[] = [];
   for (const peer of peers.values()) {
     const presence = peer.presence;
-    if (!presence?.cursor || presence.pageId !== pageId) continue;
+    if (!presence || presence.pageId !== pageId) continue;
+    const looking = presence.viewport;
+    const at =
+      presence.cursor ??
+      (looking ? { x: looking.x + looking.width / 2, y: looking.y + looking.height / 2 } : null);
+    if (!at) continue;
     others.push({
       sessionId: peer.sessionId,
       name: peer.name,
-      at: presence.cursor,
+      at,
+      pointing: presence.cursor !== null,
       color: peer.color,
       agent: peer.kind === "agent",
     });
   }
-  const bounds = unionRects([view, ...layers.map((l) => l.rect)]) ?? view;
+  // Everyone stays on the map, however far from the content they are.
+  const bounds =
+    unionRects([
+      view,
+      ...layers.map((l) => l.rect),
+      ...others.map((p) => ({ x: p.at.x, y: p.at.y, width: 0, height: 0 })),
+    ]) ?? view;
   return { bounds, layers, view, peers: others, boards };
 }
 
