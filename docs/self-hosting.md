@@ -86,6 +86,8 @@ To upgrade an instance installed by hand, pull the new version and run step 5 ag
 
 The font picker offers the open-source Google Fonts catalog. The first time someone uses a family, the Worker fetches it from Google and keeps a copy in your R2 bucket (under `fonts/gstatic/`). After that, everyone loads it from your server: browsers never contact Google, and files keep rendering even if Google changes the font or removes it.
 
+Text that sets a variable font's axes (width, slant and so on, beyond weight) needs the family's variable font file. For Google families the Worker finds it in Google's download list for the family (`fonts.google.com/download/list`), then fetches and keeps it like any other font file.
+
 Teams can also upload their own fonts (TrueType, OpenType, WOFF or WOFF2) from **Fonts** in the dashboard. They're kept in your R2 bucket under `fonts/team/`, read on upload for their family, weight and style, and served only to members of the team that uploaded them.
 
 To keep the Worker from contacting Google at all, set `GOOGLE_FONTS` to `off`: in an installed instance, add `"vars": { "GOOGLE_FONTS": "off" }` to `drawpane.json` and run `npm create drawpane@latest upgrade -- --force` in its folder; installed by hand, put it in the `vars` of `wrangler.jsonc`. The picker then offers only the built-in fonts, system fonts and fonts installed on each person's computer.
@@ -168,4 +170,5 @@ D1 also has 30-day point-in-time recovery built in (`wrangler d1 time-travel`).
 - Provider sign-in uses the authorization-code flow with PKCE and a signed, 10-minute state cookie. A provider account is matched to an existing account only through an email address the provider has verified.
 - Sessions are random 256-bit tokens in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie; only their SHA-256 hash is stored.
 - The Worker checks your role on every request and hands each file socket to its FileRoom with a signed, 60-second claim that the room verifies.
-- No telemetry. Browsers never contact anyone but your instance. The Worker itself contacts Google Fonts when someone first uses a font (see Fonts) and the npm registry when the health page checks for a newer release (see Upgrading); both can be turned off.
+- Personal access tokens, for MCP clients (see [Connecting AI clients](mcp.md)), are shown once and stored only as their SHA-256 hash. They're accepted only by the MCP endpoint, never by the rest of the API, and can be revoked at any time.
+- No telemetry. Browsers never contact anyone but your instance. The Worker itself contacts Google Fonts when someone first uses a font or a variable font's axes (see Fonts) and the npm registry when the health page checks for a newer release (see Upgrading); both can be turned off.

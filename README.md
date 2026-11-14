@@ -7,20 +7,23 @@ The open design tool you own. Drawpane is a real-time design and prototyping too
 ## What works today
 
 - Passkey accounts, teams, invites, projects, files and trash
-- A real-time multiplayer editor: frames, rectangles, ellipses, polygons, stars, lines and arrows, text, images and vector paths; move with smart guides, resize, rotate, group, frame, mask, crop images, reorder; auto layout that maps 1:1 to CSS flexbox; constraints; fills, strokes, shadows and blur; pages and a layers tree
+- A real-time multiplayer editor: frames, rectangles, ellipses, polygons, stars, lines and arrows, text, images and vector paths; move with smart guides, resize, rotate, group, frame, mask, crop images, reorder; auto layout that maps 1:1 to CSS flexbox, and grid layout; constraints; pages and a layers tree
+- Effects like Figma's: drop and inner shadows, layer and background blur, glass (refraction, dispersion, frost and light), noise and texture
+- Rich text with OpenType features, variable font axes (width, slant, optical size and a font's own), text styles, strokes that follow the glyphs, Google Fonts and fonts a team uploads
 - A full color picker (solid, linear, radial and angular gradients, image, eyedropper, contrast ratio), stroke end markers, per-corner radius, frame presets for current phones, tablets and desktops, align, distribute, tidy up and flip
-- Rulers (`⇧R`), guides you drag out of them onto the page or a board, and layout grids (columns, rows, square) that layers snap to
+- Rulers (`⇧R`), guides you drag out of them onto the page or a board, layout grids (columns, rows, square) that layers snap to, and distances to any layer while you hold `Alt`
 - Right-click menus on the canvas, layers and pages; copy and paste properties; a keyboard shortcuts sheet (`⌘/`)
 - The pen tool, vector editing, flatten and boolean operations
-- Components with instances and overrides, and variants with properties you can swap
+- Components with instances and overrides, variants with properties you can swap, and team libraries: publish a file's components, use them in other files, and review updates before taking them
 - Design tokens as variables, with modes, aliases and DTCG import and export
 - Prototyping: interactions on any layer (tap, hover, drag, key, delay), navigate, overlays, back and links, transitions with eases, béziers and springs, flows and devices
 - Present mode, and prototype links that anyone can open without an account, turned off or reset at any time
-- Inspect with CSS, Tailwind and JSX; image export; comments with threads, mentions, live updates and pins you can drag
+- Inspect with CSS, Tailwind and JSX; export to PNG, JPG, WebP, SVG and PDF; comments with threads, mentions, live updates, pins you can drag and email notifications
 - The command bar (`⌘K`) that runs actions, jumps to layers, and sets values with a short syntax: `w 320`, `gap 16`, `fill #ff5a1f`, `p 8 16`
 - The Selection Lens, Layout X-ray (hold `Alt`), focus mode, and collaborators' cursors and selections
 - Undo and redo for your own changes, and edits that survive a dropped connection
 - Version history: automatic and named versions, a timeline to scrub through them, and restoring a single layer or the whole file, which anyone can undo
+- An MCP server, so AI agents and other MCP clients can read the files you can, with a personal access token (see [Connecting AI clients](docs/mcp.md))
 
 See the [PRD](docs/PRD.md) for where it's going.
 
