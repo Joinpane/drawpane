@@ -101,6 +101,7 @@ interface LastFrame {
   readonly fonts: number;
   readonly background: string;
   readonly hidden: ReadonlySet<string>;
+  readonly whole: string | null;
   /** The camera's translation in whole device pixels. */
   readonly tx: number;
   readonly ty: number;
@@ -118,7 +119,8 @@ function sameContent(a: LastFrame, b: LastFrame): boolean {
     a.epoch === b.epoch &&
     a.fonts === b.fonts &&
     a.background === b.background &&
-    a.hidden === b.hidden
+    a.hidden === b.hidden &&
+    a.whole === b.whole
   );
 }
 
@@ -152,6 +154,8 @@ export class CanvasRenderer {
   #epoch = 0;
   /** Nodes not to draw (e.g. text being edited in a DOM overlay). */
   hidden = new Set<string>();
+  /** A text layer drawn with all its lines, past any truncation: the one being edited. */
+  whole: string | null = null;
   /** Page background when the page doesn't set one: the theme's `canvas` token. */
   canvasColor = "#ebeae6";
   stats: RenderStats = { drawn: 0, culled: 0, ms: 0 };
@@ -215,6 +219,7 @@ export class CanvasRenderer {
       fonts: this.#measurer.generation ?? 0,
       background,
       hidden: this.hidden,
+      whole: this.whole,
       tx,
       ty,
     };
@@ -909,7 +914,9 @@ export class CanvasRenderer {
       return;
     }
     const mode = getProp(node.props, "textAutoResize");
-    const layout = layoutText(node, this.#measurer, mode === "width" ? null : width);
+    const layout = layoutText(node, this.#measurer, mode === "width" ? null : width, {
+      whole: node.id === this.whole,
+    });
     const height = getProp(node.props, "height");
     const dy = textBlockOffset(node, layout);
     ctx.textBaseline = "alphabetic";

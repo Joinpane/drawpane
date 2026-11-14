@@ -88,6 +88,29 @@ describe("design to code", () => {
     );
   });
 
+  it("writes truncation as line clamping, and paragraph spacing as spaced paragraphs", () => {
+    const editor = setup();
+    const id = editor.createLayer("text", { x: 0, y: 0, width: 0, height: 0 }, "p", {
+      characters: "First **one**\nSecond",
+      maxLines: 2,
+      paragraphSpacing: 12,
+    }) as string;
+    const node = () => editor.doc.get(id) as never;
+    expect(decl(cssFor(editor.doc, node()))).toMatchObject({
+      display: "-webkit-box",
+      "-webkit-box-orient": "vertical",
+      "-webkit-line-clamp": "2",
+      overflow: "hidden",
+    });
+    const tw = tailwindFor(editor.doc, node());
+    // One class for all four, and none of them on their own.
+    expect(tw).toContain("line-clamp-2");
+    expect(tw.some((c) => c.includes("webkit") || c.includes("overflow"))).toBe(false);
+    const jsx = jsxFor(editor.doc, node());
+    expect(jsx).toContain("space-y-[12px]");
+    expect(jsx).toMatch(/<p>First \*\*one\*\*<\/p>\n\s*<p>Second<\/p>/);
+  });
+
   it("writes text styles and absolute children of plain frames", () => {
     const editor = setup();
     const frame = editor.createLayer(
