@@ -1,5 +1,6 @@
 import type { Editor } from "@drawpane/editor";
 import type { ServerMessage } from "@drawpane/model";
+import { ApiError, api } from "../api/client";
 
 const MIN_BACKOFF = 500;
 const MAX_BACKOFF = 10_000;
@@ -8,7 +9,8 @@ const PING_MS = 25_000;
 /**
  * Keeps a websocket to the file's room open: reconnects with jittered
  * backoff, reconnects at once when the tab comes back online or visible, and
- * gives up only when the room says the file is gone or access was revoked.
+ * gives up only when the file is gone or access was revoked: the room says
+ * so when the socket is open, and the API when a reconnect can't get in.
  */
 export function connectFile(
   editor: Editor,
@@ -26,6 +28,8 @@ export function connectFile(
   let ping: ReturnType<typeof setInterval> | null = null;
 
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
+  // Only a file's own room can be checked through the API; a shared prototype's guests can't.
+  const ownRoom = path === `/ws/files/${encodeURIComponent(fileId)}`;
 
   function open() {
     if (disposed) return;
@@ -35,7 +39,9 @@ export function connectFile(
     }
     const socket = new WebSocket(url);
     ws = socket;
+    let opened = false;
     socket.addEventListener("open", () => {
+      opened = true;
       attempt = 0;
       editor.sync.connected((message) => {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -70,11 +76,33 @@ export function connectFile(
         return;
       }
       if (event.code === 4401) {
-        onFatal("You no longer have access to this file: you were removed from its team.");
+        onFatal(
+          event.reason === "Left the team"
+            ? "You left this file's team, so it's closed here."
+            : "You no longer have access to this file: you were removed from its team.",
+        );
         return;
       }
-      schedule();
+      // Couldn't even get in: offline, or no longer allowed. The API can tell which.
+      if (!opened && ownRoom) void checkAccess();
+      else schedule();
     });
+  }
+
+  /** After a failed reconnect: gone or forbidden ends it; anything else retries. */
+  async function checkAccess() {
+    try {
+      await api.get(`/files/${encodeURIComponent(fileId)}`);
+    } catch (error) {
+      if (disposed) return;
+      if (error instanceof ApiError && (error.status === 404 || error.status === 403)) {
+        onFatal(
+          "This file isn't available to you any more. It was deleted, or you were removed from its team.",
+        );
+        return;
+      }
+    }
+    schedule();
   }
 
   function schedule() {

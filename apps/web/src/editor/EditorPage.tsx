@@ -17,6 +17,7 @@ import { fonts } from "../fonts/fonts";
 import { refreshInbox } from "../inbox/inbox";
 import { ShareDialog } from "../prototype/ShareDialog";
 import { AssetsPanel } from "./AssetsPanel";
+import { roleChangeNotice } from "./access-notices";
 import { ACTIONS, type ActionContext, shortcutFor, triggers } from "./actions";
 import { loadBooleanEngine } from "./boolean-engine";
 import { Canvas } from "./Canvas";
@@ -198,7 +199,10 @@ function FileEditor({ fileId }: { fileId: string }) {
         comments.store.receive(message);
         // Someone commented: it may be for you.
         if (message.t === "comments") refreshInbox(queryClient);
-        if (message.t === "role") editor.notify(roleChangeNotice(message.role, message.by.name));
+        if (message.t === "role") {
+          const me = queryClient.getQueryData<{ user: { id: string } | null }>(["session"])?.user;
+          editor.notify(roleChangeNotice(message, me?.id ?? null));
+        }
       }),
     [editor, fileId, comments.store, queryClient],
   );
@@ -959,17 +963,6 @@ function SyncStatus() {
 }
 
 /** Said when an owner changes your role while you have the file open. */
-function roleChangeNotice(role: "owner" | "editor" | "viewer", by: string): string {
-  switch (role) {
-    case "viewer":
-      return `${by} made you a viewer. You can still view, comment and inspect.`;
-    case "editor":
-      return `${by} made you an editor. You can edit this file now.`;
-    case "owner":
-      return `${by} made you an owner of this team.`;
-  }
-}
-
 /**
  * The editor's toast: one message at a time, with at most one action. It
  * stays while the pointer or focus is on it, and longer when it has an action.

@@ -44,11 +44,11 @@ export interface Member {
   readonly email: string;
   readonly role: Role;
   readonly joinedAt: number;
-  /** How they sign in: passkeys, and the providers they've connected. */
-  readonly passkeys: number;
-  readonly providers: readonly ("github" | "google")[];
-  /** When they last started a session, or used a passkey or provider. */
-  readonly lastSignedInAt: number | null;
+  /** How they sign in: passkeys, and the providers they've connected. Owners only. */
+  readonly passkeys?: number;
+  readonly providers?: readonly ("github" | "google")[];
+  /** When they last started a session, or used a passkey or provider. Owners only. */
+  readonly lastSignedInAt?: number | null;
 }
 
 /** Something to hear about, from the inbox. */

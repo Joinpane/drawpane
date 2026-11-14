@@ -17,9 +17,10 @@ const PROVIDER_NAMES = { github: "GitHub", google: "Google" } as const;
 
 /** "Passkey · GitHub", "2 passkeys". */
 function signInMethods(member: Member): string {
+  const passkeys = member.passkeys ?? 0;
   const methods = [
-    member.passkeys === 1 ? "Passkey" : member.passkeys > 1 ? `${member.passkeys} passkeys` : null,
-    ...member.providers.map((p) => PROVIDER_NAMES[p]),
+    passkeys === 1 ? "Passkey" : passkeys > 1 ? `${passkeys} passkeys` : null,
+    ...(member.providers ?? []).map((p) => PROVIDER_NAMES[p]),
   ].filter(Boolean);
   return methods.length > 0 ? methods.join(" · ") : "No sign-in yet";
 }
@@ -304,14 +305,19 @@ function MemberRow({
         </span>
         <span className="members__sub">{member.email}</span>
       </span>
-      <span className="members__meta">
-        <span>{signInMethods(member)}</span>
-        <span>
-          {member.lastSignedInAt
-            ? `Signed in ${timeAgo(member.lastSignedInAt)}`
-            : "Hasn't signed in yet"}
+      {/* How someone signs in is an account detail: only owners get it. */}
+      {member.providers ? (
+        <span className="members__meta">
+          <span>{signInMethods(member)}</span>
+          <span>
+            {member.lastSignedInAt
+              ? `Signed in ${timeAgo(member.lastSignedInAt)}`
+              : "Hasn't signed in yet"}
+          </span>
         </span>
-      </span>
+      ) : (
+        <span className="members__meta" aria-hidden="true" />
+      )}
       <span className="members__action">
         <RoleControl
           member={member}

@@ -163,7 +163,11 @@ describe("FileRoom", () => {
       method: "PATCH",
       json: { role: "viewer" },
     });
-    expect(await l.next("role")).toMatchObject({ role: "viewer", by: { name: "Ana" } });
+    expect(await l.next("role")).toMatchObject({
+      role: "viewer",
+      previous: "editor",
+      by: { name: "Ana" },
+    });
     l.send({ t: "txn", seq: 1, ops: [rect("r1", page.id)] });
     expect(await l.next("reject")).toMatchObject({ code: "forbidden" });
 
@@ -177,6 +181,41 @@ describe("FileRoom", () => {
     // The owner's own socket is untouched.
     owner.send({ t: "ping" });
     await owner.next("pong");
+  });
+
+  it("closes a socket whose person was removed between joining and saying hello", async () => {
+    const { fileId, teamId } = await newFile();
+    const lena = await signedInUser("Lena", "editor", teamId);
+    // The Worker lets her in; then, before her hello, she's taken off the team without a notice.
+    const socket = await openSocket(lena.browser, fileId);
+    await env.DB.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ?")
+      .bind(teamId, lena.userId)
+      .run();
+    const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+      socket.ws.addEventListener("close", (event) =>
+        resolve({ code: event.code, reason: event.reason }),
+      ),
+    );
+    socket.send({ t: "hello", protocol: 1, clientId: "clientL", revn: null });
+    expect(await closed).toEqual({ code: 4401, reason: "Access removed" });
+  });
+
+  it("keeps the connection record of a reload, whatever order the close and the join land in", async () => {
+    const { fileId, teamId } = await newFile();
+    const lena = await signedInUser("Lena", "editor", teamId);
+    const rows = () =>
+      env.DB.prepare("SELECT COUNT(*) AS n FROM room_connections WHERE file_id = ? AND user_id = ?")
+        .bind(fileId, lena.userId)
+        .first<{ n: number }>()
+        .then((r) => r?.n ?? 0);
+    for (let i = 0; i < 5; i++) {
+      const first = await join(lena.browser, fileId, `reload${i}`);
+      first.ws.close();
+      await join(lena.browser, fileId, `reload${i}b`);
+      // The old socket's close never takes the new one's record with it.
+      await new Promise((r) => setTimeout(r, 30));
+      expect(await rows()).toBe(1);
+    }
   });
 
   it("answers malformed messages without dropping the socket", async () => {
