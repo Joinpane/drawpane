@@ -87,7 +87,15 @@ interface Frame {
 
 type Mode =
   | { kind: "idle" }
-  | { kind: "pending"; start: Point; startPage: Point; target: string | null; additive: boolean }
+  | {
+      kind: "pending";
+      start: Point;
+      startPage: Point;
+      target: string | null;
+      additive: boolean;
+      /** Shift-pressed on a layer already selected: it leaves the selection only if this stays a click. */
+      deselect: boolean;
+    }
   | { kind: "pan"; last: Point }
   | { kind: "marquee"; start: Point; container: string; base: readonly string[] }
   | {
@@ -103,6 +111,12 @@ type Mode =
       frame: Frame;
       nodes: Map<string, NodeRecord>;
       startPage: Point;
+      /**
+       * ⌘ (Ctrl elsewhere) held when the drag began: the frame's children ignore their
+       * constraints. Decided then, so a key pressed mid-drag (Control, to stop snapping,
+       * is the same key off a Mac) can't change it halfway.
+       */
+      ignoreConstraints: boolean;
     }
   | { kind: "rotate"; centre: Point; startAngle: number; nodes: Map<string, NodeRecord> }
   | {
@@ -284,8 +298,8 @@ export class Interaction {
       const type: LayerType = tool === "arrow" ? "line" : tool;
       const extra: Props = tool === "arrow" ? { markerEnd: "arrow" } : {};
       // The corner you start from snaps too, so a shape can begin exactly on an edge.
-      const onGrid = { x: this.#px(page.x), y: this.#px(page.y) };
-      const start = input.noSnap ? onGrid : this.#snapPoint(parent, onGrid, new Map()).point;
+      const snapped = input.noSnap ? page : this.#snapPoint(parent, page, new Map()).point;
+      const start = { x: this.#px(snapped.x), y: this.#px(snapped.y) };
       this.#mode = { kind: "draw", type, extra, startPage: start, parent, id: null };
       return;
     }
@@ -339,6 +353,7 @@ export class Interaction {
           frame: this.selectionFrame() as Frame,
           nodes,
           startPage: page,
+          ignoreConstraints: input.mod,
         };
       }
       return;
@@ -402,21 +417,17 @@ export class Interaction {
 
     if (target) {
       const selected = editor.s.selection.includes(target);
-      if (input.shift) {
-        editor.select(
-          selected
-            ? editor.s.selection.filter((id) => id !== target)
-            : [...editor.s.selection, target],
-        );
-      } else if (!selected) {
-        editor.select([target]);
-      }
+      // Shift adds a layer at once (it's then dragged with the rest). Taking one out waits
+      // for the release: a Shift-drag starting on it moves the whole selection, as in Figma.
+      if (input.shift && !selected) editor.select([...editor.s.selection, target]);
+      else if (!input.shift && !selected) editor.select([target]);
       this.#mode = {
         kind: "pending",
         start: input.screen,
         startPage: page,
         target,
         additive: input.shift,
+        deselect: input.shift && selected,
       };
       return;
     }
@@ -428,6 +439,7 @@ export class Interaction {
       startPage: page,
       target: null,
       additive: input.shift,
+      deselect: false,
     };
   }
 
@@ -539,8 +551,10 @@ export class Interaction {
         this.cursor = this.#spaceHeld ? "grab" : "default";
         return;
       case "pending":
-        // A plain click on an already-selected layer narrows the selection to it.
-        if (mode.target && !mode.additive && editor.s.selection.length > 1)
+        // A Shift-click on a selected layer takes it out; a plain click on one narrows to it.
+        if (mode.target && mode.deselect)
+          editor.select(editor.s.selection.filter((id) => id !== mode.target));
+        else if (mode.target && !mode.additive && editor.s.selection.length > 1)
           editor.select([mode.target]);
         return;
       case "marquee":
@@ -843,36 +857,52 @@ export class Interaction {
     const editor = this.#editor;
     let dx = page.x - mode.startPage.x;
     let dy = page.y - mode.startPage.y;
-    // Shift keeps to one axis; the other stays exactly where it was.
+    // Shift keeps to one axis; the other stays exactly where it was, snapping included.
     const lockY = input.shift && Math.abs(dx) > Math.abs(dy);
     const lockX = input.shift && !lockY;
     if (lockY) dy = 0;
     if (lockX) dx = 0;
-    // The selection's corner lands on the pixel grid.
-    if (!lockX) dx = this.#px(mode.bounds.x + dx) - mode.bounds.x;
-    if (!lockY) dy = this.#px(mode.bounds.y + dy) - mode.bounds.y;
     // Smart guides against siblings and the parent frame.
     const moving = { ...mode.bounds, x: mode.bounds.x + dx, y: mode.bounds.y + dy };
     const roots = editor.s.selection;
     const first = editor.doc.get(roots[0] ?? "");
     const targets = first && !input.noSnap ? this.#snapTargets(first.parent, mode.nodes) : [];
     const lines = first && !input.noSnap ? this.#snapLines(first.parent) : [];
-    const snap = snapRect(moving, targets, SNAP_PX / editor.s.camera.zoom, lines);
+    const snap = snapRect(moving, targets, SNAP_PX / editor.s.camera.zoom, lines, {
+      x: !lockX,
+      y: !lockY,
+    });
     dx += snap.dx;
     dy += snap.dy;
     editor.state.set({ guides: snap.guides });
 
+    // The pixel grid has the last word, after any snap (a centre can sit on a half pixel).
+    // One layer lands its own X and Y on whole pixels (rotated, its box corner wouldn't);
+    // several move by one whole-pixel correction, so they keep their places to each other.
+    const geometry = this.#geometryNodes(mode.nodes);
+    const own = editor.s.pixelSnap && geometry.length === 1 ? geometry[0] : undefined;
+    if (editor.s.pixelSnap && !own) {
+      if (!lockX) dx = Math.round(mode.bounds.x + dx) - mode.bounds.x;
+      if (!lockY) dy = Math.round(mode.bounds.y + dy) - mode.bounds.y;
+    }
+
     const ops: Op[] = [];
-    for (const node of this.#geometryNodes(mode.nodes)) {
+    for (const node of geometry) {
       // Auto layout places it (or the group it's in): the drag reorders instead.
       if (placedByLayout(editor.doc, node.id)) continue;
       const space = editor.scene.spaceMatrix(editor.scene.spaceOwner(node.parent));
       const det = space[0] * space[3] - space[1] * space[2] || 1;
       const lx = (space[3] * dx - space[2] * dy) / det;
       const ly = (-space[1] * dx + space[0] * dy) / det;
+      let x = getProp(node.props, "x") + lx;
+      let y = getProp(node.props, "y") + ly;
+      if (node === own) {
+        if (!lockX) x = Math.round(x);
+        if (!lockY) y = Math.round(y);
+      }
       ops.push(
-        { op: "set", id: node.id, prop: "x", value: round2(getProp(node.props, "x") + lx) },
-        { op: "set", id: node.id, prop: "y", value: round2(getProp(node.props, "y") + ly) },
+        { op: "set", id: node.id, prop: "x", value: round2(x) },
+        { op: "set", id: node.id, prop: "y", value: round2(y) },
       );
     }
     // Inside auto layout, dragging reorders instead of moving.
@@ -886,6 +916,7 @@ export class Interaction {
    */
   #snapTargets(parent: string, changing: ReadonlyMap<string, unknown>): Rect[] {
     const editor = this.#editor;
+    if (!this.#straightSpace(parent)) return [];
     const targets: Rect[] = [];
     const view = editor.s.camera.visibleRect(editor.s.viewport);
     for (const sibling of editor.doc.childIds(parent)) {
@@ -909,14 +940,36 @@ export class Interaction {
   #snapLines(parent: string): SnapLine[] {
     const editor = this.#editor;
     const pageId = editor.s.pageId;
-    if (!pageId) return [];
-    const lines: SnapLine[] = placedGuides(editor.scene, pageId).map((g) => ({
-      axis: g.axis,
-      at: g.at,
-    }));
+    if (!pageId || !this.#straightSpace(parent)) return [];
+    // Page guides reach everywhere; a board's guides only what's on that board.
+    const board = this.#boardOf(parent, pageId);
+    const lines: SnapLine[] = placedGuides(editor.scene, pageId)
+      .filter((g) => g.owner === pageId || g.owner === board)
+      .map((g) => ({ axis: g.axis, at: g.at }));
     const owner = editor.scene.spaceOwner(parent);
     if (owner !== pageId && editor.s.layoutGrids) lines.push(...gridSnapLines(editor.scene, owner));
     return lines;
+  }
+
+  /** The top-level frame a layer inside `parent` sits on, or null on the page itself. */
+  #boardOf(parent: string, pageId: string): string | null {
+    let id: string | undefined = parent;
+    while (id && id !== pageId) {
+      const node = this.#editor.doc.get(id);
+      if (!node) return null;
+      if (node.parent === pageId) return node.id;
+      id = node.parent;
+    }
+    return null;
+  }
+
+  /**
+   * Whether layers in `parent` move along the page's axes. Inside a rotated frame they don't,
+   * so page-space edges and lines would snap them to places that don't line up.
+   */
+  #straightSpace(parent: string): boolean {
+    const m = this.#editor.scene.spaceMatrix(this.#editor.scene.spaceOwner(parent));
+    return Math.abs(m[1]) < 1e-9 && Math.abs(m[2]) < 1e-9;
   }
 
   /** For a single layer in an auto-layout frame: move it to the slot under the pointer. */
@@ -1041,19 +1094,6 @@ export class Interaction {
     // guides and grid edges, like moving does. Upright selections only: a
     // rotated box's edges don't run along the page axes.
     const upright = Math.abs(m[1]) < 1e-9 && Math.abs(m[2]) < 1e-9 && m[0] > 0 && m[3] > 0;
-    // The dragged edges land on the pixel grid, in page space.
-    if (upright) {
-      const gridX = (x: number) => (this.#px(m[4] + m[0] * x) - m[4]) / m[0];
-      const gridY = (y: number) => (this.#px(m[5] + m[3] * y) - m[5]) / m[3];
-      if (movesX) {
-        if (hu === 0) x0 = gridX(x0);
-        else x1 = gridX(x1);
-      }
-      if (movesY) {
-        if (hv === 0) y0 = gridY(y0);
-        else y1 = gridY(y1);
-      }
-    }
     const first = editor.doc.get(editor.s.selection[0] ?? "");
     const snapped: { x: number | null; y: number | null } = { x: null, y: null };
     let targets: Rect[] = [];
@@ -1120,6 +1160,16 @@ export class Interaction {
       }
     }
 
+    // The pixel grid has the last word, after snapping, Alt and Shift: every edge that
+    // moved lands on a whole pixel in page space (edges that didn't stay exactly put).
+    if (upright && editor.s.pixelSnap) {
+      const gridX = (x: number) => (Math.round(m[4] + m[0] * x) - m[4]) / m[0];
+      const gridY = (y: number) => (Math.round(m[5] + m[3] * y) - m[5]) / m[3];
+      if (x0 !== 0) x0 = gridX(x0);
+      if (x1 !== frame.width) x1 = gridX(x1);
+      if (y0 !== 0) y0 = gridY(y0);
+      if (y1 !== frame.height) y1 = gridY(y1);
+    }
     const flipX = x1 < x0;
     const flipY = y1 < y0;
     const nx = Math.min(x0, x1);
@@ -1139,7 +1189,8 @@ export class Interaction {
       };
       for (const axis of ["x", "y"] as const) {
         const at = snapped[axis];
-        const guide = at === null ? null : snapGuide(rect, targets, axis, at);
+        const guide =
+          at === null ? null : snapGuide(rect, targets, axis, at, editor.s.pixelSnap ? 0.51 : 0.01);
         if (guide) guides.push(guide);
       }
     }
@@ -1219,7 +1270,7 @@ export class Interaction {
       }
     }
     // ⌘ resizes a frame without moving its children by their constraints.
-    if (ops.length > 0) editor.commit(ops, "Resize", { constraints: !input.mod });
+    if (ops.length > 0) editor.commit(ops, "Resize", { constraints: !mode.ignoreConstraints });
   }
 
   #rotate(mode: Extract<Mode, { kind: "rotate" }>, page: Point, input: PointerInput): void {
@@ -1296,11 +1347,12 @@ export class Interaction {
     // The dragged corner snaps like a resize handle (holding Control turns snapping off). A Shift-drawn
     // line keeps its 45° angle instead.
     const snapping = !input.noSnap && !(input.shift && mode.type === "line");
-    const onGrid = { x: this.#px(page.x), y: this.#px(page.y) };
     const snap = snapping
-      ? this.#snapPoint(mode.parent, onGrid, new Map(mode.id ? [[mode.id, true]] : []))
+      ? this.#snapPoint(mode.parent, page, new Map(mode.id ? [[mode.id, true]] : []))
       : null;
-    let { x: x1, y: y1 } = snap?.point ?? onGrid;
+    // Snapped first, then onto the pixel grid (a centre can sit on a half pixel).
+    let x1 = this.#px(snap?.point.x ?? page.x);
+    let y1 = this.#px(snap?.point.y ?? page.y);
     const { x: x0, y: y0 } = mode.startPage;
     if (input.shift) {
       if (mode.type === "line") {
@@ -1335,7 +1387,10 @@ export class Interaction {
     if (snap) {
       for (const axis of ["x", "y"] as const) {
         const at = snap.snapped[axis];
-        const guide = at === null ? null : snapGuide(rect, snap.targets, axis, at);
+        const guide =
+          at === null
+            ? null
+            : snapGuide(rect, snap.targets, axis, at, editor.s.pixelSnap ? 0.51 : 0.01);
         if (guide) guides.push(guide);
       }
     }

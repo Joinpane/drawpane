@@ -38,9 +38,12 @@ export function snapRect(
   targets: readonly Rect[],
   threshold: number,
   lines: readonly SnapLine[] = [],
+  /** Which axes may snap: an axis Shift holds still doesn't. */
+  axes: { readonly x: boolean; readonly y: boolean } = { x: true, y: true },
 ): SnapResult {
   const best = { x: { d: threshold + 1, at: 0 }, y: { d: threshold + 1, at: 0 } };
   for (const axis of ["x", "y"] as const) {
+    if (!axes[axis]) continue;
     const mine = stops(moving, axis);
     for (const t of targets) {
       for (const target of stops(t, axis)) {
@@ -86,8 +89,10 @@ export function snapGuide(
   targets: readonly Rect[],
   axis: "x" | "y",
   at: number,
+  /** How near counts as on the line: half a pixel once the pixel grid has rounded a snap. */
+  tolerance = 0.01,
 ): Guide | null {
-  if (!stops(rect, axis).some((m) => Math.abs(m - at) < 0.01)) return null;
+  if (!stops(rect, axis).some((m) => Math.abs(m - at) < tolerance)) return null;
   let from = axis === "x" ? rect.y : rect.x;
   let to = axis === "x" ? rect.y + rect.height : rect.x + rect.width;
   for (const t of targets) {
