@@ -43,3 +43,37 @@ export function Button({
     </button>
   );
 }
+
+export interface ButtonLinkProps extends ComponentPropsWithRef<"a"> {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  icon?: IconName;
+}
+
+/**
+ * A link that looks like a `Button`: for actions that go somewhere (release
+ * notes, docs) rather than do something. A link that leaves the app opens in
+ * a new tab.
+ */
+export function ButtonLink({
+  variant = "secondary",
+  size = "md",
+  icon,
+  className,
+  children,
+  href,
+  ...rest
+}: ButtonLinkProps) {
+  const external = typeof href === "string" && /^https?:\/\//.test(href);
+  return (
+    <a
+      {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
+      {...rest}
+      href={href}
+      className={cx("dp-btn", `dp-btn--${variant}`, `dp-btn--${size}`, className)}
+    >
+      {icon && <Icon name={icon} />}
+      {children}
+    </a>
+  );
+}

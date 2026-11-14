@@ -4,6 +4,7 @@ import { useState } from "react";
 import { api } from "../api/client";
 import { Dialog } from "../app/Dialog";
 import "./share.css";
+import { CopyField, useCopy } from "../app/CopyField";
 
 /**
  * Sharing a file: a prototype link anyone can open (editors turn it on, off
@@ -45,13 +46,8 @@ export function ShareDialog({
     },
     onSuccess: ({ link }) => set(link),
   });
-  const [copied, setCopied] = useState<"prototype" | "file" | null>(null);
+  const [copied, copy] = useCopy<"file">();
   const [confirmReset, setConfirmReset] = useState(false);
-  const copy = async (text: string, which: "prototype" | "file") => {
-    await navigator.clipboard.writeText(text);
-    setCopied(which);
-    setTimeout(() => setCopied((c) => (c === which ? null : c)), 1600);
-  };
 
   const link = query.data?.link ?? null;
   const url = link ? (flowId ? `${link.url}?flow=${encodeURIComponent(flowId)}` : link.url) : null;
@@ -96,14 +92,7 @@ export function ShareDialog({
             onChange={(on) => (on ? turnOn.mutate() : turnOff.mutate())}
           />
         </div>
-        {url ? (
-          <div className="app-copy">
-            <code>{url}</code>
-            <Button size="sm" variant="primary" onClick={() => void copy(url, "prototype")}>
-              {copied === "prototype" ? "Copied" : "Copy link"}
-            </Button>
-          </div>
-        ) : null}
+        {url ? <CopyField value={url} label="Copy link" primary /> : null}
         {link && canEdit ? (
           confirmReset ? (
             <div className="share__confirm">

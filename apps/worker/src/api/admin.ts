@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { requireUser } from "../auth/session";
 import type { AppContext, Env } from "../env";
 import { badRequest, forbidden } from "../lib/http";
+import { type AvailableUpdate, availableUpdate } from "./updates";
 
 const PERIODS = [7, 30, 90] as const;
 /** A room that reported this recently is being edited now. */
@@ -51,6 +52,10 @@ export interface InstanceHealth {
   readonly services: readonly ServiceHealth[];
   readonly lastBackupAt: number | null;
   readonly retentionDays: number;
+  /** The Drawpane release running, or null when it wasn't installed by the installer. */
+  readonly version: string | null;
+  /** A newer release, when there is one. */
+  readonly update: AvailableUpdate | null;
 }
 
 /** A latency histogram's p95 from its log₂ buckets ("latency_le_64" → at most 64 ms). */
@@ -133,15 +138,19 @@ export async function instanceHealth(
     { name: "Durable Object storage beyond 5 GB", usd: round2(durableOver) },
   ];
 
-  const services = await Promise.all([
-    check("D1", 50, async () => {
-      await db.prepare("SELECT 1").first();
-      return "";
-    }),
-    check("R2", 200, async () => {
-      await env.FILES.head("health-check");
-      return formatBytes(r2Bytes);
-    }),
+  const version = env.DRAWPANE_VERSION?.trim() || null;
+  const [update, services] = await Promise.all([
+    availableUpdate(env, version),
+    Promise.all([
+      check("D1", 50, async () => {
+        await db.prepare("SELECT 1").first();
+        return "";
+      }),
+      check("R2", 200, async () => {
+        await env.FILES.head("health-check");
+        return formatBytes(r2Bytes);
+      }),
+    ]),
   ]);
   const total = first<{ n: number }>(files).n;
   const busy = first<{ busy: number }>(rooms).busy ?? 0;
@@ -162,6 +171,8 @@ export async function instanceHealth(
     services,
     lastBackupAt: first<{ at: number | null }>(backup).at ?? null,
     retentionDays: RETENTION_DAYS,
+    version,
+    update,
   };
 }
 

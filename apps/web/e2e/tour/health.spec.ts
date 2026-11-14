@@ -1,6 +1,7 @@
 /**
  * Screenshots of the instance admin's health and cost page for design review,
- * in both themes: at a laptop's width and a narrow window, plus the dashboard
+ * in both themes: at a laptop's width and a narrow window, with a newer release
+ * offered, plus the dashboard
  * header at 1024 wide, where its secondary actions go icon-only.
  * Run with `pnpm --filter @drawpane/web tour`.
  */
@@ -27,6 +28,24 @@ test("health tour", async ({ browser }) => {
 
   await page.setViewportSize({ width: 560, height: 900 });
   await shot(page, "153-health-narrow");
+
+  // A newer release is out (npm's answer stubbed): the notice, and how to upgrade.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.route("**/api/admin/health?*", async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({
+      response,
+      json: {
+        ...(await response.json()),
+        version: "0.1.0",
+        update: { version: "0.2.0", notesUrl: "https://github.com/Joinpane/drawpane/releases" },
+      },
+    });
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Upgrade" }).click();
+  await shot(page, "158-health-update");
+  await page.unroute("**/api/admin/health?*");
 
   await page.setViewportSize({ width: 1024, height: 768 });
   await page.getByRole("link", { name: "Files" }).click();

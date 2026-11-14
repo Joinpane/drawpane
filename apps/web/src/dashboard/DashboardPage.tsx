@@ -12,6 +12,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, type FileMeta, type Project, type Role } from "../api/client";
+import { CopyField } from "../app/CopyField";
 import { Dialog } from "../app/Dialog";
 import { initials, modKey, timeAgo } from "../app/format";
 import { setTheme, useThemePreference } from "../app/theme";
@@ -661,14 +662,12 @@ function InviteDialog({
 }) {
   const [role, setRole] = useState<Role>("editor");
   const [link, setLink] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const create = useMutation({
     mutationFn: () => api.post<{ url: string }>(`/teams/${teamId}/invites`, { role }),
     onSuccess: ({ url }) => setLink(url),
   });
   const close = () => {
     setLink(null);
-    setCopied(false);
     onClose();
   };
   return (
@@ -698,18 +697,7 @@ function InviteDialog({
           <p className="app-muted">
             Send this link to one person. It works once and expires in 7 days.
           </p>
-          <div className="app-copy">
-            <code>{link}</code>
-            <Button
-              size="sm"
-              onClick={async () => {
-                await navigator.clipboard.writeText(link);
-                setCopied(true);
-              }}
-            >
-              {copied ? "Copied" : "Copy"}
-            </Button>
-          </div>
+          <CopyField value={link} />
         </div>
       ) : (
         <div className="app-stack">

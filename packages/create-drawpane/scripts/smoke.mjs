@@ -28,7 +28,7 @@ try {
     await writeConfig(dir, config);
     await writeFile(
       join(dir, "wrangler.jsonc"),
-      renderWranglerConfig(await readTemplate(release), config),
+      renderWranglerConfig(await readTemplate(release), config, release.version),
     );
     const wrangler = join(
       dirname(createRequire(import.meta.url).resolve("wrangler/package.json")),
@@ -45,7 +45,13 @@ try {
       },
     );
     const output = `${result.stdout}${result.stderr}`;
-    for (const binding of ["env.FILE_ROOM", "env.DB", "env.FILES", "env.ASSETS"])
+    for (const binding of [
+      "env.FILE_ROOM",
+      "env.DB",
+      "env.FILES",
+      "env.ASSETS",
+      "env.DRAWPANE_VERSION",
+    ])
       if (!output.includes(binding)) {
         console.error(output);
         throw new Error(`The dry run didn't bind ${binding}.`);

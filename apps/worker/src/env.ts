@@ -19,6 +19,10 @@ export interface Env {
    * request host to the production route. Unset in production.
    */
   readonly PUBLIC_ORIGIN?: string;
+  /** The Drawpane release this Worker is, set by the installer (unset when installed by hand). */
+  readonly DRAWPANE_VERSION?: string;
+  /** `off` stops the health page from asking npm whether a newer release is out (api/updates.ts). */
+  readonly UPDATE_CHECK?: string;
   /** `off` stops the Worker from fetching Google Fonts (see api/fonts.ts). */
   readonly GOOGLE_FONTS?: string;
   /** Sign in with GitHub: an OAuth app's client id and secret (docs/self-hosting.md). */

@@ -74,6 +74,38 @@ test.describe
       await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     });
 
+    test("tells the admin when a newer release is out, and how to upgrade", async () => {
+      // As if npm said 0.2.0 is out while this instance runs 0.1.0.
+      await page.route("**/api/admin/health?*", async (route) => {
+        const response = await route.fetch();
+        const health = await response.json();
+        await route.fulfill({
+          response,
+          json: {
+            ...health,
+            version: "0.1.0",
+            update: {
+              version: "0.2.0",
+              notesUrl: "https://github.com/Joinpane/drawpane/releases/tag/v0.2.0",
+            },
+          },
+        });
+      });
+      await page.goto("/admin/health");
+      await expect(page.getByText("Drawpane 0.1.0 · How this instance is doing")).toBeVisible();
+      const notice = page.getByRole("status").filter({ hasText: "Drawpane 0.2.0 is available." });
+      await expect(notice).toContainText("This instance runs 0.1.0.");
+      await expect(notice.getByRole("link", { name: "Release notes" })).toHaveAttribute(
+        "href",
+        "https://github.com/Joinpane/drawpane/releases/tag/v0.2.0",
+      );
+      await notice.getByRole("button", { name: "Upgrade" }).click();
+      await expect(notice.locator("code").last()).toHaveText("npm create drawpane@latest upgrade");
+      await page.unroute("**/api/admin/health?*");
+      await page.getByRole("link", { name: "Files" }).click();
+      await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    });
+
     test("explains adding a passkey from a device that already has one", async () => {
       await page.getByRole("link", { name: /Ana Lima-Souza/ }).click();
       await page.getByRole("button", { name: "Add a passkey" }).click();
