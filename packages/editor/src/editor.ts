@@ -76,6 +76,7 @@ import {
   layoutOps,
   placedByLayout,
 } from "./layout";
+import { readingOrderOf } from "./reading-order";
 import {
   isRunProp,
   type RunPatch,
@@ -183,6 +184,8 @@ export interface EditorState {
    * guides snap: so pointer-made geometry is never 408.4 × 79.2 at odd zooms.
    */
   readonly pixelSnap: boolean;
+  /** Numbered reading order drawn on the board you're working in. */
+  readonly showReadingOrder: boolean;
   /** A guide being dragged (from a ruler, or an existing one), drawn live and committed on drop. */
   readonly guideDraft: GuideDraft | null;
   /** The collaborator (session id) whose view this one follows, if any. */
@@ -324,6 +327,7 @@ export class Editor {
     rulers: false,
     layoutGrids: true,
     pixelSnap: true,
+    showReadingOrder: false,
     guideDraft: null,
     hoverGuide: null,
     cropping: null,
@@ -755,6 +759,34 @@ export class Editor {
     if (getProp(p, "sizingV") !== "fixed")
       ops.push({ op: "set", id, prop: "sizingV", value: "fixed" });
     this.commit(ops, "Grow tap target");
+  }
+
+  /** Sets a board's reading order (layer ids, first to last); null goes back to the layout's. */
+  setReadingOrder(boardId: string, ids: readonly string[] | null): void {
+    const board = this.doc.get(boardId);
+    if (board?.type !== "frame" || !this.canEdit) return;
+    this.commit(
+      [{ op: "set", id: boardId, prop: "readingOrder", value: ids ? [...ids] : null }],
+      ids ? "Reading order" : "Reading order from layout",
+    );
+  }
+
+  /** Moves one stop earlier (negative) or later in a board's reading order. */
+  moveInReadingOrder(boardId: string, id: string, delta: number): void {
+    const ids = readingOrderOf(this, boardId).items.map((i) => i.id);
+    const from = ids.indexOf(id);
+    const to = Math.max(0, Math.min(ids.length - 1, from + delta));
+    if (from < 0 || to === from) return;
+    ids.splice(to, 0, ...ids.splice(from, 1));
+    this.setReadingOrder(boardId, ids);
+  }
+
+  /** The board (top-level frame) the selection is on, or that's selected; null on the page. */
+  boardOfSelection(): string | null {
+    const pageId = this.s.pageId;
+    let node = this.doc.get(this.s.selection[0] ?? "");
+    while (node && node.parent !== pageId) node = this.doc.get(node.parent);
+    return node?.type === "frame" ? node.id : null;
   }
 
   /** Pans so a page point sits in the middle of the visible area, keeping the zoom. */

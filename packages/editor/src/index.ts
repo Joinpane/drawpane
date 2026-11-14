@@ -26,6 +26,7 @@ export * from "./names";
 export * from "./overlay";
 export * from "./presets";
 export * from "./prototype";
+export * from "./reading-order";
 export * from "./render";
 export * from "./rich-text";
 export * from "./scene";
