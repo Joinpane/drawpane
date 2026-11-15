@@ -17,7 +17,8 @@
   align-items: center;
   gap: var(--space-200);
   height: var(--size-control-md);
-  padding: 0 var(--space-200);
+  /* 8px, plus 12px per nesting level (Menu sets --dp-indent for tree items). */
+  padding: 0 var(--space-200) 0 calc(var(--space-200) + var(--dp-indent, 0) * var(--space-300));
   border-radius: var(--radius-sm);
   color: var(--ink);
   font: var(--type-ui-body);

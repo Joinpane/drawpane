@@ -493,12 +493,17 @@
   background: var(--signal);
   transform: translateX(-50%);
 }
+/*
+ * Below the rail, over the axis labels while it shows: above, it would cover
+ * the version's name and the Day, Week and All control.
+ */
 .scrubber__tip {
   position: absolute;
-  bottom: calc(100% + var(--space-200));
+  top: calc(50% + 12px);
   z-index: 2;
-  display: grid;
-  gap: 1px;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-200);
   padding: var(--space-100) var(--space-200);
   border-radius: var(--radius-sm);
   background: var(--surface-inverse);
@@ -518,6 +523,9 @@
 }
 .scrubber__tip b {
   font-weight: 600;
+}
+.scrubber__tip span {
+  opacity: 0.72;
 }
 .scrubber__axis {
   display: flex;

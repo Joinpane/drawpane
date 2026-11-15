@@ -1,5 +1,6 @@
 import {
   type ComponentPropsWithRef,
+  type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
   useEffect,
@@ -27,6 +28,11 @@ export interface MenuActionItem {
   active?: boolean;
   /** Shows a chevron; ArrowRight and Enter call onSelect so the host can open the submenu. */
   submenu?: boolean;
+  /**
+   * Nesting level from 0, for items that list a tree such as layers: the
+   * whole row, icon and label, starts 12px further in per level.
+   */
+  indent?: number;
   onSelect?: () => void;
 }
 
@@ -64,6 +70,8 @@ export interface MenuProps
 }
 
 const TYPEAHEAD_RESET_MS = 500;
+
+type IndentStyle = CSSProperties & Record<"--dp-indent", number>;
 
 function isAction(item: MenuItem | undefined): item is MenuActionItem {
   return item !== undefined && !("separator" in item) && !("heading" in item);
@@ -231,6 +239,7 @@ export function Menu({
           if (active !== index) focusItem(index);
         }}
         onFocus={() => setActive(index)}
+        {...(item.indent ? { style: { "--dp-indent": item.indent } as IndentStyle } : {})}
       >
         <span className="dp-menu__icon">{glyph && <Icon name={glyph} />}</span>
         <span className="dp-menu__label">{item.label}</span>

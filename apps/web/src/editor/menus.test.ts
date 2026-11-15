@@ -141,13 +141,46 @@ describe("context menus", () => {
       "Copy properties",
     ]);
     const layers = find(items, "Select layer")?.items ?? [];
-    // Outermost first, indented by depth, like the layers panel.
-    expect(labels(layers)).toEqual(["Screen", "\u2003Back", "\u2003Front"]);
+    // Outermost first, indented by depth (the whole row, not the label), like the layers panel.
+    expect(labels(layers)).toEqual(["Screen", "Back", "Front"]);
+    expect(layers.map((l) => (l as ContextMenuAction).indent)).toEqual([undefined, 1, 1]);
     // The selected layer wears a check; the rest show their kind.
     expect((layers[2] as ContextMenuAction).icon).toBe("check");
     expect((layers[0] as ContextMenuAction).icon).toBe("board");
     (layers[1] as ContextMenuAction).onSelect?.();
     expect(editor.s.selection).toEqual(["back"]);
+  });
+
+  it("names and draws the layers under the pointer as the layers panel does", () => {
+    const { editor, host } = setup();
+    editor.doc.apply([
+      {
+        op: "create",
+        id: "button",
+        type: "frame",
+        parent: "frame",
+        key: "a2",
+        props: { name: "Button", x: 0, y: 0, width: 100, height: 40, layoutMode: "row" },
+      },
+      {
+        op: "create",
+        id: "label",
+        type: "text",
+        parent: "button",
+        key: "a0",
+        props: { name: "", characters: "Mark done", x: 10, y: 10, width: 80, height: 20 },
+      },
+    ]);
+    editor.select(["front"]);
+    const items = menuFor(host, { kind: "canvas", x: 0, y: 0, point: { x: 20, y: 20 } });
+    const layers = (find(items, "Select layer")?.items ?? []) as ContextMenuAction[];
+    // Text by what it says, not "text"; auto layout by its direction, not a plain frame.
+    expect(layers.map((l) => [l.label, l.icon, l.indent])).toEqual([
+      ["Screen", "board", undefined],
+      ["Back", "rectangle", 1],
+      ["Button", "layout-row", 1],
+      ["Mark done", "text", 2],
+    ]);
   });
 
   it("runs actions with the page's context", () => {

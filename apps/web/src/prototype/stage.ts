@@ -43,6 +43,11 @@ const MAX_PIXELS = 24_000_000;
  * past that, the design is a long page, so it fills the width and scrolls.
  */
 const PHONE_MIN_FIT = 0.85;
+/**
+ * Kept free below the device for the hint pill (Player's .present__hint):
+ * 16px up from the bottom, 28px tall, and 16px of air above it.
+ */
+const HINT_CLEARANCE = 60;
 /** Bezel and corner sizes by device kind, in device pixels. */
 const CHROME = {
   none: { bezel: 0, radius: 0, inner: 0 },
@@ -79,6 +84,24 @@ export interface StageOptions extends StageCallbacks {
   readonly player: PrototypePlayer;
   readonly host: HTMLElement;
   readonly device: DeviceId;
+}
+
+/**
+ * The room a device has on a stage of `width` × `height`: a margin all
+ * round (less on a narrow window), and at the bottom enough to keep it clear
+ * of the hint pill, so a hint never crowds the bezel. The room is kept
+ * whether or not a hint shows, so the device holds still as hints come and
+ * go. `lift` is how much deeper the bottom margin is than the top: the
+ * device takes it as its own bottom margin to centre in the room that's left.
+ */
+export function deviceRoom(width: number, height: number) {
+  const margin = width < 600 ? 16 : 48;
+  const bottom = Math.max(margin, HINT_CLEARANCE);
+  return {
+    width: Math.max(100, width - margin * 2),
+    height: Math.max(100, height - margin - bottom),
+    lift: bottom - margin,
+  };
 }
 
 const reducedMotion = () =>
@@ -215,6 +238,7 @@ export class PlayerStage {
       if (!whole) this.#vh = box.height / this.#scale;
       this.#deviceEl.dataset.kind = "none";
       const d = this.#deviceEl.style;
+      d.marginBottom = "";
       d.setProperty("--bezel", "0px");
       d.setProperty("--radius", "0px");
       d.setProperty("--inner", "0px");
@@ -224,9 +248,9 @@ export class PlayerStage {
       return;
     }
     const chrome = CHROME[device.kind];
-    const margin = box.width < 600 ? 16 : 48;
-    const availW = Math.max(100, box.width - margin * 2);
-    const availH = Math.max(100, box.height - margin * 2);
+    const room = deviceRoom(box.width, box.height);
+    const availW = room.width;
+    const availH = room.height;
     const outerW = this.#vw + chrome.bezel * 2;
     const outerH = this.#vh + chrome.bezel * 2;
     // Never enlarge a design past its real size; shrink to fit.
@@ -239,6 +263,7 @@ export class PlayerStage {
     this.#scale = scale;
     const d = this.#deviceEl.style;
     this.#deviceEl.dataset.kind = device.kind;
+    d.marginBottom = `${room.lift}px`;
     d.setProperty("--bezel", `${chrome.bezel * scale}px`);
     d.setProperty("--radius", `${chrome.radius * scale}px`);
     d.setProperty("--inner", `${chrome.inner * scale}px`);

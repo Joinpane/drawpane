@@ -178,10 +178,33 @@
   color: var(--ink-muted);
 }
 
-/* File title, top left */
-.file-title {
+/*
+ * The top bar: file title, tools, then people and Share, in one row across
+ * the window. The tools sit in the window's centre while the two sides leave
+ * them room (each side column is at least its own width, and otherwise half
+ * of what's left); when they don't, the tools shift over and their search
+ * field narrows, so the three never overlap. The row itself lets clicks
+ * through to the canvas between them.
+ */
+.topbar {
+  position: absolute;
+  z-index: 2;
   top: 12px;
   left: 12px;
+  right: 12px;
+  display: grid;
+  grid-template-columns: minmax(max-content, 1fr) minmax(0, max-content) minmax(max-content, 1fr);
+  column-gap: 12px;
+  pointer-events: none;
+}
+.topbar > .pane {
+  position: relative;
+  pointer-events: auto;
+}
+
+/* File title, top left */
+.file-title {
+  justify-self: start;
   /* As wide as the layers panel, but never under the centred toolbar. */
   width: min(var(--pane-left, var(--size-pane)), max(var(--size-pane), calc(50vw - 260px)));
   height: 40px;
@@ -252,27 +275,19 @@
   white-space: nowrap;
 }
 
-/* Tool strip, top centre */
+/* Tool strip, top centre (placed by .topbar) */
 .toolbar {
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 2px;
   height: 40px;
   padding: 0 var(--space-100);
   box-sizing: border-box;
+  overflow: hidden;
 }
-/*
- * Below this width, centred tools would run into the file title: they start a
- * gutter after it instead (and the people and Share keep to the right).
- */
-@media (max-width: 1180px) {
-  .toolbar {
-    left: calc(12px + var(--pane-left, var(--size-pane)) + 12px);
-    transform: none;
-  }
+.toolbar > * {
+  flex: none;
 }
 /* The shape tool and its menu of shapes. */
 .toolbar__group {
@@ -308,20 +323,62 @@
   margin: 0 var(--space-200);
   background: var(--line);
 }
+/*
+ * The search field is the part of the strip that gives way: it narrows when
+ * the top bar is short of room, and below about 120px shows just its icon.
+ */
 .toolbar__search {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-400);
+  flex: 0 1 auto;
+  container-type: inline-size;
   width: 220px;
+  min-width: 28px;
   height: 28px;
-  padding: 0 var(--space-100) 0 var(--space-300);
+  padding: 0;
   border: 0;
   border-radius: var(--radius-sm);
   background: var(--surface-sunken);
   color: var(--ink-muted);
   font: 400 12px / 16px var(--font-ui);
   cursor: pointer;
+}
+.toolbar__search-inner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  height: 100%;
+  padding: 0 var(--space-100) 0 var(--space-300);
+}
+.toolbar__search-icon {
+  display: none;
+  flex: none;
+}
+.toolbar__search-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.toolbar__search-inner .dp-kbd {
+  flex: none;
+}
+@container (max-width: 160px) {
+  .toolbar__search-inner .dp-kbd {
+    display: none;
+  }
+}
+@container (max-width: 120px) {
+  .toolbar__search-inner {
+    justify-content: center;
+    padding: 0;
+  }
+  .toolbar__search-icon {
+    display: block;
+  }
+  .toolbar__search-label {
+    display: none;
+  }
 }
 .toolbar__search:hover {
   background: var(--surface-hover);
@@ -333,8 +390,7 @@
 
 /* Presence and share, top right */
 .top-right {
-  top: 12px;
-  right: 12px;
+  justify-self: end;
   height: 40px;
   display: flex;
   align-items: center;
@@ -2405,8 +2461,11 @@
 .file-title__panels {
   flex: none;
 }
-/* Minimize UI: the title keeps to its name, like the panels it stands in for. */
-.editor[data-minimized] .file-title {
+/*
+ * With the layers panel closed or the UI minimized, the title keeps to its
+ * name: there's no panel below for it to head, so the tools get the room.
+ */
+.editor[data-left-closed] .file-title {
   width: auto;
   max-width: var(--pane-left, var(--size-pane));
 }

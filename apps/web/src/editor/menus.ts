@@ -5,10 +5,14 @@
  * out rather than greyed, so each menu only offers what makes sense.
  */
 import { type Editor, isInstanceRoot, swapTargets } from "@drawpane/editor";
-import { getProp } from "@drawpane/model";
-import type { ContextMenuAction, ContextMenuEntry, IconName } from "@drawpane/ui";
+import {
+  type ContextMenuAction,
+  type ContextMenuEntry,
+  type IconName,
+  KIND_ICONS,
+} from "@drawpane/ui";
 import { ACTIONS, type Action, type ActionContext, shortcutProp } from "./actions";
-import { layerKind } from "./layer-kinds";
+import { kindOf, layerName } from "./layer-tree";
 import { type MenuRequest, uiFor } from "./ui-state";
 
 const BY_ID: ReadonlyMap<string, Action> = new Map(ACTIONS.map((a) => [a.id, a]));
@@ -92,13 +96,15 @@ function selectLayer(editor: Editor, request: MenuRequest): Item {
     "layers",
     [...ids].reverse().map((id) => {
       const node = editor.doc.get(id);
-      const name = (node && getProp(node.props, "name")) || node?.type || "Layer";
+      const indent = Math.min(4, depth(id) - base);
       return {
         id: `select-${id}`,
-        // Indent by nesting so the list reads like the layers panel.
-        label: `${" ".repeat(Math.min(4, depth(id) - base))}${name}`,
+        // Named and drawn as in the layers panel: text by what it says, auto layout by its direction.
+        label: node ? layerName(node) : "Layer",
         // Each layer's kind, or a check on the one that's selected now.
-        icon: editor.s.selection.includes(id) ? "check" : layerKind(node?.type ?? "").icon,
+        icon: editor.s.selection.includes(id) ? "check" : KIND_ICONS[node ? kindOf(node) : "rect"],
+        // Indented by nesting, the whole row, so icons step in with their names.
+        ...(indent > 0 ? { indent } : {}),
         onSelect: () => editor.select([id]),
       };
     }),
