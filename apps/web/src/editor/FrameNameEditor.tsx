@@ -6,7 +6,7 @@
  */
 import { frameLabels, LABEL_FONT } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 
 export function FrameNameEditor() {
@@ -59,6 +59,19 @@ function NameInput({
     ref.current?.focus();
     ref.current?.select();
   }, []);
+  // Clicking anywhere else keeps the name, as in Figma and Penpot. Blur alone can't be relied
+  // on: the canvas keeps focus where it is when pressed (it prevents the default), so pressing
+  // it would leave the field open.
+  const latest = useRef(value);
+  latest.current = value;
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      if (e.target instanceof Node && ref.current?.contains(e.target)) return;
+      finish(latest.current);
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  });
   // Grow with the text: measured in the label's own font.
   const width = Math.min(360, Math.max(48, measure(value) + 14));
   return (

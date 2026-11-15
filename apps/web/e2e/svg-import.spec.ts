@@ -206,7 +206,8 @@ test.describe
       );
       const chooser = page.waitForEvent("filechooser");
       await picker.getByRole("button", { name: "Choose an image…" }).click();
-      // Only a viewBox: its size comes from there (60 × 30), drawn at 120 × 60.
+      // Only a viewBox: its shape comes from there (60 × 30); a vector draws sharp at any size,
+      // so the fill's PNG is at least 1024 px across.
       await (await chooser).setFiles({
         name: "badge.svg",
         mimeType: "image/svg+xml",
@@ -218,7 +219,7 @@ test.describe
       expect(response.request().headers()["content-type"]).toBe("image/png");
       expect(response.status()).toBe(201);
       const info = (await response.json()) as { mime: string; width: number; height: number };
-      expect(info).toMatchObject({ mime: "image/png", width: 120, height: 60 });
+      expect(info).toMatchObject({ mime: "image/png", width: 1024, height: 512 });
       await expect
         .poll(() =>
           page.evaluate(() => {

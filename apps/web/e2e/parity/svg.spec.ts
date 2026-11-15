@@ -144,7 +144,7 @@ test.describe
 
     test.beforeAll(async ({ browser }) => {
       test.setTimeout(180_000);
-      instance = await freshInstance(browser, { port: 8971, inspectorPort: 9511 });
+      instance = await freshInstance(browser, { port: 8983, inspectorPort: 9523 });
       page = instance.page;
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));

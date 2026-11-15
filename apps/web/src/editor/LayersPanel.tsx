@@ -3,7 +3,7 @@
  * reorder (⌥ to duplicate), hide and lock on each row, and rename in place.
  * Long trees stay fast: only the rows in view are drawn.
  */
-import { getProp, keyBetween, type NodeRecord, type Op } from "@drawpane/model";
+import { getProp, keyBetween, type Op } from "@drawpane/model";
 import { Icon, IconButton, LayerRow, type PresenceSlot } from "@drawpane/ui";
 import {
   type KeyboardEvent,
@@ -498,6 +498,12 @@ export function LayersPanel() {
                       }
                     : {})}
                   onClick={(e) => select(node.id, e)}
+                  // Double-clicking the icon zooms to the layer, as in Figma (Shift+2, gliding).
+                  onIconDoubleClick={() => {
+                    setFocusId(node.id);
+                    editor.select([node.id]);
+                    editor.zoomToLayers([node.id], { animate: true });
+                  }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     // Right-clicking outside the selection selects that row first.
@@ -655,70 +661,6 @@ function DragStatus({
       {drag.copy ? null : (
         <span className="layers__status-hint">{isMac() ? "⌥" : "Alt"} to copy</span>
       )}
-    </div>
-  );
-}
-
-export function PagesList() {
-  const editor = useEditor();
-  useDocVersion();
-  const pageId = useEditorState((s) => s.pageId);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
-  const renaming = useUi(editor, (ui) => ui.renaming);
-  const setRenaming = (id: string | null) => uiFor(editor).set({ renaming: id });
-  const pages = editor.doc
-    .pageIds()
-    .map((id) => editor.doc.get(id))
-    .filter((p): p is NodeRecord => !!p);
-
-  return (
-    <div className="pages">
-      <div className="pane__head">
-        <span className="pane__label">Pages</span>
-        {canEdit ? (
-          <IconButton icon="plus" label="Add page" onClick={() => editor.addPage()} />
-        ) : null}
-      </div>
-      <ul className="pages__list" aria-label="Pages">
-        {pages.map((page) => (
-          <li key={page.id}>
-            {renaming === page.id ? (
-              <input
-                className="pages__rename"
-                defaultValue={getProp(page.props, "name")}
-                aria-label="Page name"
-                // biome-ignore lint/a11y/noAutofocus: renaming starts from an explicit action
-                autoFocus
-                onFocus={(e) => e.currentTarget.select()}
-                onBlur={(e) => {
-                  editor.rename(page.id, e.currentTarget.value);
-                  setRenaming(null);
-                }}
-                onKeyDown={(e) => {
-                  e.stopPropagation();
-                  if (e.key === "Enter") e.currentTarget.blur();
-                  if (e.key === "Escape") setRenaming(null);
-                }}
-              />
-            ) : (
-              <button
-                type="button"
-                className="pages__item"
-                aria-current={page.id === pageId ? "page" : undefined}
-                onClick={() => editor.setPage(page.id)}
-                onDoubleClick={() => canEdit && setRenaming(page.id)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  openMenu(editor, { kind: "page", x: e.clientX, y: e.clientY, pageId: page.id });
-                }}
-              >
-                <span>{getProp(page.props, "name") || "Page"}</span>
-                <span className="pages__count">{editor.doc.childIds(page.id).length || ""}</span>
-              </button>
-            )}
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }

@@ -6,6 +6,8 @@
   background: var(--canvas);
   user-select: none;
   -webkit-user-select: none;
+  /* Panels scroll, but a pinch never zooms the page: only the canvas zooms (page-zoom.ts). */
+  touch-action: pan-x pan-y;
 }
 
 .canvas {
@@ -351,6 +353,7 @@
 
 /* Pages */
 .pages {
+  position: relative;
   flex: none;
   padding-top: var(--space-100);
 }
@@ -358,8 +361,66 @@
   list-style: none;
   margin: 0;
   padding: 0 var(--space-200);
-  max-height: 160px;
   overflow-y: auto;
+}
+
+/*
+ * The line between the pages and the layers is the layers heading's top
+ * border; this grip (PagesList's Splitter) sits on it. It reaches 4px each
+ * side of the line, over the gap above it and the heading's empty top, so it
+ * never takes a click meant for a page or a button. Like the panels' edges,
+ * the line shows the signal colour while pointed at, focused or dragged.
+ */
+.pages-resizer {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  /* The border is 4px below the list (.pane__head--layers' margin): centre on it. */
+  bottom: -9px;
+  height: 8px;
+  cursor: row-resize;
+  touch-action: none;
+}
+.pages-resizer::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 2px;
+  background: var(--signal);
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+/* A short wait on hover: passing over the line on the way somewhere doesn't flash it. */
+.pages-resizer:hover::after {
+  opacity: 1;
+  transition-delay: 150ms;
+}
+.pages-resizer[data-dragging]::after,
+.pages-resizer:focus-visible::after {
+  opacity: 1;
+  transition-delay: 0ms;
+}
+.pages-resizer:focus-visible {
+  outline: none;
+}
+.pages-resizer:focus-visible::after {
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 4px var(--signal);
+}
+
+/* While a splitter is dragged its cursor goes everywhere, and nothing gets selected. */
+:root[data-resizing] * {
+  user-select: none !important;
+}
+:root[data-resizing="x"] * {
+  cursor: col-resize !important;
+}
+:root[data-resizing="y"] * {
+  cursor: row-resize !important;
 }
 .pages__item {
   display: flex;
@@ -635,9 +696,42 @@
   color: var(--ink-muted);
   font: 400 11px / 14px var(--font-ui);
 }
-/* A detail of the row above it (Width → Limits): set in a step. */
-.inspector__label--sub {
-  padding-left: var(--space-200);
+/* Width and Height: Fixed, Hug and Fill share the track evenly, so it reads as one control. */
+.inspector__sizing .dp-seg__option {
+  flex: 1;
+}
+/* An axis's limits hang from its row: a hairline runs from under its label
+   ("Width") into the Min field, so they read as part of it, not a row of their own. */
+/* Closer to its axis than the next axis is, so each pair reads as a group. */
+.inspector__limits {
+  margin-top: calc(var(--space-100) - var(--space-200));
+}
+.inspector__limits .inspector__branch {
+  position: relative;
+  align-self: stretch;
+}
+.inspector__limits .inspector__branch::before {
+  content: "";
+  position: absolute;
+  /* From just under the label above (across the narrowed gap) to this row's middle. */
+  top: calc(-1 * var(--space-100) - 3px);
+  bottom: 50%;
+  left: 4px;
+  /* Into the value column, stopping short of the field. */
+  right: calc(-1 * var(--space-200) + 4px);
+  border-left: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  border-bottom-left-radius: var(--radius-sm);
+  pointer-events: none;
+}
+.inspector__limit-pair {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+/* An unset limit: a faint dash, quieter than the "Min" beside it. */
+.inspector__limit--unset .dp-field__input::placeholder {
+  color: var(--ink-disabled);
 }
 /* Two fields side by side in a label row's value column. */
 .inspector__pair {

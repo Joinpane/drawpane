@@ -56,6 +56,9 @@ function gestures(): Row[] {
       [mod],
     ),
     row("rename.f2", "Rename in the layers panel", "Layer", ["F2"]),
+    row("zoom.layer", "Zoom to a layer: double-click its icon in the layers panel", "View", [
+      "Double-click",
+    ]),
     // Also by dragging the row (reorder.ts).
     row("reorder.item", "Move a fill, stroke or effect up or down", "Layer", [alt, "↑"]),
   ];

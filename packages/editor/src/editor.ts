@@ -26,6 +26,7 @@ import {
 } from "@drawpane/model";
 import { MIN_TAP_TARGET } from "./accessibility";
 import { Camera, type Insets, MAX_ZOOM, NO_INSETS } from "./camera";
+import { type CameraPath, cameraPath, easeOut, motionDuration } from "./camera-motion";
 import {
   componentSetOf,
   detachOps,
@@ -286,6 +287,46 @@ export interface EditorOptions {
   readonly measurer: TextMeasurer;
   /** Loads the boolean geometry engine on first use (defaults to PathKit). */
   readonly booleanEngine?: BooleanEngineLoader;
+  /** Schedules animation frames (defaults to requestAnimationFrame); tests drive their own. */
+  readonly frames?: FrameClock;
+  /** True when the person asked for less motion (defaults to prefers-reduced-motion). */
+  readonly reducedMotion?: () => boolean;
+}
+
+/** Calls back once on the next frame with its time in ms, like requestAnimationFrame. */
+export interface FrameClock {
+  request(callback: (now: number) => void): unknown;
+  cancel(handle: unknown): void;
+}
+
+/** requestAnimationFrame where there is one; a 60 Hz timer elsewhere (tests, workers). */
+const browserFrames: FrameClock =
+  typeof requestAnimationFrame === "function"
+    ? {
+        request: (callback) => requestAnimationFrame(callback),
+        cancel: (handle) => cancelAnimationFrame(handle as number),
+      }
+    : {
+        request: (callback) => setTimeout(() => callback(performance.now()), 16),
+        cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      };
+
+const prefersReducedMotion = () =>
+  typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** One frame at 60 Hz: how far into its motion the first frame of a camera move lands. */
+const FRAME_MS = 1000 / 60;
+
+/** A camera move in flight (editor.animateCamera). */
+interface CameraMotion {
+  readonly path: CameraPath;
+  readonly target: Camera;
+  readonly duration: number;
+  /** When the first frame ran, less one frame; null until then. */
+  start: number | null;
+  /** The camera this motion last showed: anything else on screen means someone moved it. */
+  shown: Camera;
+  handle: unknown;
 }
 
 /** "State=Hover, Size=Large": how variant layers are named, like Figma. */
@@ -394,12 +435,22 @@ export class Editor {
    */
   imageSize: (ref: string) => { width: number; height: number } | null = () => null;
   readonly #cameras = new Map<string, Camera>();
+  readonly #frames: FrameClock;
+  readonly #reducedMotion: () => boolean;
+  #motion: CameraMotion | null = null;
   #booleanLoader: BooleanEngineLoader;
   #booleanEngine: Promise<BooleanEngine> | null = null;
 
   constructor(options: EditorOptions) {
     this.measurer = options.measurer;
     this.#booleanLoader = options.booleanEngine ?? (() => loadPathKitEngine());
+    this.#frames = options.frames ?? browserFrames;
+    this.#reducedMotion = options.reducedMotion ?? prefersReducedMotion;
+    // Any other camera change (a wheel, a pinch, a pan, a key, following, another page) wins over a move in flight.
+    this.state.subscribe(() => {
+      const motion = this.#motion;
+      if (motion && this.s.camera !== motion.shown) this.stopCameraAnimation();
+    });
     this.sync = new SyncEngine(this.doc, { clientId: options.clientId ?? newId() });
     this.sync.on("status", (status) => this.state.set({ status }));
     this.sync.on("role", (role) => this.state.set({ role }));
@@ -732,6 +783,66 @@ export class Editor {
     this.state.set({ camera, ...(this.s.following ? { following: null } : {}) });
   }
 
+  /**
+   * Glides the view to `target` over a few hundred ms (camera-motion.ts), or
+   * jumps there when the person prefers reduced motion. Like setCamera it
+   * stops following someone; any other camera change stops the glide where it
+   * is, and a new one takes over from wherever the view is now. It ends on
+   * exactly `target`. Collaborators following you see it as it goes.
+   */
+  animateCamera(target: Camera): void {
+    this.stopCameraAnimation();
+    const { camera, viewport, insets } = this.s;
+    const areaW = Math.max(1, viewport.width - insets.left - insets.right);
+    const areaH = Math.max(1, viewport.height - insets.top - insets.bottom);
+    const anchor = { x: insets.left + areaW / 2, y: insets.top + areaH / 2 };
+    const path = cameraPath(camera, target, anchor, areaW);
+    const duration = motionDuration(path.length);
+    if (duration === 0 || this.#reducedMotion() || viewport.width <= 0) {
+      this.setCamera(target);
+      return;
+    }
+    if (this.s.following) this.state.set({ following: null });
+    const motion: CameraMotion = {
+      path,
+      target,
+      duration,
+      start: null,
+      shown: camera,
+      handle: null,
+    };
+    this.#motion = motion;
+    motion.handle = this.#frames.request(this.#cameraFrame);
+  }
+
+  /** Stops a camera glide where it is (nothing to do when there isn't one). */
+  stopCameraAnimation(): void {
+    const motion = this.#motion;
+    if (!motion) return;
+    this.#motion = null;
+    if (motion.handle !== null) this.#frames.cancel(motion.handle);
+  }
+
+  /** True while the view is gliding (animateCamera). */
+  get cameraAnimating(): boolean {
+    return this.#motion !== null;
+  }
+
+  readonly #cameraFrame = (now: number): void => {
+    const motion = this.#motion;
+    if (!motion) return;
+    motion.handle = null;
+    // The first frame already moves, so a click answers within one frame.
+    motion.start ??= now - FRAME_MS;
+    const t = Math.min(1, Math.max(0, (now - motion.start) / motion.duration));
+    const camera = t >= 1 ? motion.target : motion.path.at(easeOut(t));
+    motion.shown = camera;
+    this.state.set({ camera });
+    if (this.#motion !== motion) return;
+    if (t >= 1) this.#motion = null;
+    else motion.handle = this.#frames.request(this.#cameraFrame);
+  };
+
   // -------------------------------------------------------------------------
   // Following and spotlight
 
@@ -936,9 +1047,24 @@ export class Editor {
     }
   }
 
-  zoomToSelection(): void {
-    const bounds = this.scene.unionBounds(this.s.selection);
-    if (bounds) this.setCamera(this.s.camera.fit(bounds, this.s.viewport, 64, 8, this.s.insets));
+  /** Zooms to the selection (Shift+2): it fills the view, up to 800%. */
+  zoomToSelection(options: { animate?: boolean } = {}): void {
+    this.zoomToLayers(this.s.selection, options);
+  }
+
+  /**
+   * Fits layers in the view the way Shift+2 does, gliding there with
+   * `animate`. Hidden and zero-size layers fit by the box they have; with
+   * nothing to show it does nothing.
+   */
+  zoomToLayers(ids: readonly string[], { animate = false }: { animate?: boolean } = {}): void {
+    const bounds = this.scene.unionBounds(ids);
+    if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite))
+      return;
+    const { camera, viewport, insets } = this.s;
+    const target = camera.fit(bounds, viewport, 64, 8, insets);
+    if (animate) this.animateCamera(target);
+    else this.setCamera(target);
   }
 
   insertionParent(): string | null {

@@ -7,6 +7,18 @@ import { isMac } from "../app/format";
 import { ACTIONS, type Action, alsoOf, type Shortcut, shortcutOf } from "./actions";
 import type { ShortcutOverrides } from "./shortcuts-store";
 
+/** Whether keys pressed here are typing (a field, an editable area): not shortcuts. */
+export function isTyping(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return (
+    !!el &&
+    (el.isContentEditable ||
+      el.tagName === "INPUT" ||
+      el.tagName === "TEXTAREA" ||
+      el.tagName === "SELECT")
+  );
+}
+
 const MODIFIERS = new Set(["shift", "alt", "control", "meta", "os", "capslock", "fn"]);
 
 /** The keys a key press is for, as a shortcut; null for a modifier alone, or keys that can't be one. */

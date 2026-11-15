@@ -381,13 +381,18 @@ export function pasteSvgText(editor: Editor, text: string, at?: Point): boolean 
   return true;
 }
 
-/** Twice an SVG's own size for a fill, its longest side at most this. */
+/**
+ * A fill's PNG is drawn with its longest side at least this: a vector costs nothing to draw
+ * bigger, and a 24 px icon drawn at 48 px would blur on a card it fills.
+ */
+const RASTER_MIN_SIDE = 1024;
+/** ...and at most this, as any image's bitmap (MAX_BITMAP_SIDE). */
 const RASTER_MAX_SIDE = 4096;
 
 /**
  * Draws an SVG file to a PNG, for an image fill: at twice its own size
- * (its width and height, else its viewBox's), the longest side at most
- * 4096 px. Drawn through an `<img>`, where an SVG can't run scripts or load
+ * (its width and height, else its viewBox's), and its longest side between
+ * 1024 and 4096 px. Drawn through an `<img>`, where an SVG can't run scripts or load
  * anything. Returns the PNG, or why it couldn't.
  */
 export async function rasterizeSvg(file: File): Promise<File | string> {
@@ -402,7 +407,9 @@ export async function rasterizeSvg(file: File): Promise<File | string> {
       : "The SVG couldn't be read. Export it again and try once more.";
   }
   const size = svgSize(root);
-  const k = Math.min(2, RASTER_MAX_SIDE / Math.max(size.width, size.height));
+  const longest = Math.max(size.width, size.height);
+  const k =
+    Math.min(RASTER_MAX_SIDE, Math.max(RASTER_MIN_SIDE, longest * 2)) / Math.max(1e-6, longest);
   const width = Math.max(1, Math.round(size.width * k));
   const height = Math.max(1, Math.round(size.height * k));
   // Its size, stated: an SVG with only a viewBox has none of its own in an <img>.
