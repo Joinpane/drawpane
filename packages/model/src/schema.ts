@@ -446,6 +446,7 @@ export const TextRun = z
     fontStyle: z.enum(["normal", "italic"]).optional(),
     fontSize: FontSize.optional(),
     letterSpacing: LetterSpacing.optional(),
+    lineHeight: LineHeight.optional(),
     textCase: z.enum(["none", "upper", "lower", "title"]).optional(),
     textDecoration: z.enum(["none", "underline", "strikethrough"]).optional(),
     fontFeatures: FontFeatures.optional(),
