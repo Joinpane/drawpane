@@ -8,8 +8,10 @@ import {
   documentColors,
   gradientAngle,
   handlesForAngle,
+  shownOpacity,
   solidPickerValue,
   withPickerValue,
+  withShownOpacity,
 } from "./paint";
 import { replaceColorOps, selectionColors } from "./selection-colors";
 import { parseLetterSpacing, parseLineHeight } from "./TypographyFields";
@@ -21,6 +23,40 @@ describe("gradient angles", () => {
 
   it("puts 180° from top to bottom", () => {
     expect(handlesForAngle(180)).toEqual({ from: { x: 0.5, y: 0 }, to: { x: 0.5, y: 1 } });
+  });
+});
+
+describe("a paint row's opacity", () => {
+  it("is how see-through a solid is: its color's alpha with the paint's opacity", () => {
+    expect(shownOpacity({ type: "solid", color: "#ffffff33" })).toBeCloseTo(0.2, 5);
+    expect(shownOpacity({ type: "solid", color: "#ff000080", opacity: 0.5 })).toBeCloseTo(0.251, 3);
+    expect(shownOpacity({ type: "solid", color: "#ff0000" })).toBe(1);
+  });
+
+  it("set on a solid, takes the color's alpha into it", () => {
+    expect(withShownOpacity({ type: "solid", color: "#ffffff33" }, 0.6)).toEqual({
+      type: "solid",
+      color: "#ffffff",
+      opacity: 0.6,
+    });
+    expect(withShownOpacity({ type: "solid", color: "#ffffff33", opacity: 0.5 }, 1)).toEqual({
+      type: "solid",
+      color: "#ffffff",
+    });
+  });
+
+  it("is a gradient's own opacity", () => {
+    const gradient = {
+      type: "linear" as const,
+      from: { x: 0, y: 0 },
+      to: { x: 1, y: 0 },
+      stops: [
+        { position: 0, color: "#00000080" },
+        { position: 1, color: "#ffffff" },
+      ],
+    };
+    expect(shownOpacity(gradient)).toBe(1);
+    expect(withShownOpacity(gradient, 0.4)).toEqual({ ...gradient, opacity: 0.4 });
   });
 });
 

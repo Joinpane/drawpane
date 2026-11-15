@@ -22,7 +22,7 @@ import { ImageChip } from "../ImageFill";
 import { Bindable } from "../tokens/Bindable";
 import { common, Num, Select, useDisclosure } from "./fields";
 import { PaintPicker } from "./PaintPicker";
-import { gradientAngle, rgbaOf, swatchCss } from "./paint";
+import { gradientAngle, rgbaOf, shownOpacity, swatchCss, withShownOpacity } from "./paint";
 
 export function PaintSection({
   editor,
@@ -116,8 +116,8 @@ export function PaintSection({
                 min={0}
                 max={100}
                 precision={0}
-                value={Math.round((paint.opacity ?? 1) * 100)}
-                onChange={(v) => replace({ ...paint, opacity: v / 100 }, `${title} opacity`)}
+                value={Math.round(shownOpacity(paint) * 100)}
+                onChange={(v) => replace(withShownOpacity(paint, v / 100), `${title} opacity`)}
                 onScrubStart={() => editor.beginGesture(`${title} opacity`)}
                 onScrubEnd={() => editor.endGesture()}
               />
