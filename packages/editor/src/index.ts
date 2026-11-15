@@ -1,4 +1,6 @@
 export * from "./accessibility";
+export * from "./agent/jsx";
+export * from "./agent/tools";
 export * from "./camera";
 export * from "./camera-motion";
 export * from "./code";
