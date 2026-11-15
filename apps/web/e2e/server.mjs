@@ -36,6 +36,8 @@ const vars = {
   EMAIL_FROM: "Drawpane <design@example.com>",
   // The kit store reads a fixture registry a spec serves locally, or none: tests never reach GitHub or Penpot.
   KIT_REGISTRY: process.env.E2E_KIT_REGISTRY ?? "off",
+  // Agent tools on, with the stand-in text measurer (decision 0021; worker agent/measurer.ts).
+  AGENT_MEASURER: "standin",
 };
 const child = spawn(
   wrangler,

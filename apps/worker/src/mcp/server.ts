@@ -3,14 +3,28 @@
  * stateless JSON-RPC over Streamable HTTP, for every protocol revision since
  * 2025-03-26. A personal access token says who's asking; each tool checks
  * that person's access to the file, exactly as the API does.
+ *
+ * Agents also design here (decision 0021): with a write token they start a
+ * session, live in a file or on a branch of it, and call the agent tools
+ * (render, set_props…), which the file's room runs on its headless editor.
  */
-import { ID_PATTERN, type NodeRecord } from "@drawpane/model";
+import { AGENT_TOOLS, type AgentTool, type ToolLevel } from "@drawpane/editor";
+import { ID_PATTERN, type NodeRecord, newId } from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
+import { agentToolsEnabled } from "../agent/measurer";
+import {
+  type AgentSession,
+  endSession,
+  requireSession,
+  SessionError,
+  startSession,
+} from "../agent/sessions";
 import { requireFileRole } from "../api/access";
-import { userForBearer } from "../auth/tokens";
+import { type TokenScope, userForBearer } from "../auth/tokens";
 import type { AppContext, Env, User } from "../env";
 import { HttpError } from "../lib/http";
+import type { AgentCallResult } from "../rooms/file-room";
 import { components, FileDoc, findNodes, nodeDetail, outline, tokens } from "./document";
 
 /** The revisions we speak, oldest first; the last is what we offer a client that names none we know. */
@@ -18,10 +32,16 @@ export const PROTOCOL_VERSIONS = ["2025-03-26", "2025-06-18", "2025-11-25", "202
 const LATEST = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1] as string;
 
 const SERVER_INFO = { name: "drawpane", title: "Drawpane", version: "0.1.0" };
-const INSTRUCTIONS =
+const READ_INSTRUCTIONS =
   "Drawpane design files. Start with list_files, then get_outline for a file's pages and layers; " +
   "get_node for a layer's full properties; list_components and list_tokens for its design system; " +
   "get_comments and get_history for its conversation and versions. Ids are stable: pass them back as given.";
+const WRITE_INSTRUCTIONS =
+  ' To design, start_session on a file: mode "branch" (the default; a person reviews and merges it) or "live" ' +
+  "(edits the file as people watch). Pass its sessionId to every change, and read the session's targetFileId. " +
+  'Build with render (JSX: <Frame flex="col" gap={12} p={16}><Text size={20}>Title</Text></Frame>), read back ' +
+  "with get_jsx, adjust with set_props, move_nodes, delete_nodes, bind_token and set_variable_mode; prefer the " +
+  "file's components and tokens. undo and redo step over your own changes only. end_session when you're done.";
 
 // ---------------------------------------------------------------------------
 // JSON-RPC
@@ -54,12 +74,26 @@ class ToolError extends Error {}
 interface ToolContext {
   readonly env: Env;
   readonly user: User;
+  /** The token asking, and what it may do. */
+  readonly tokenId: string;
+  readonly scope: TokenScope;
+  /** This request's call id, for a write call that brings none (exactly-once, decision 0021). */
+  readonly callId: string;
 }
 
 interface Tool {
   readonly name: string;
   readonly title: string;
   readonly description: string;
+  /** read tools work with any token; write tools need a write token. */
+  readonly level: ToolLevel;
+  /**
+   * A write that changes or removes what's there (destructiveHint), rather
+   * than only adding (starting and ending sessions).
+   */
+  readonly destructive?: boolean;
+  /** One of the agent tools, listed once a text measurer is configured. */
+  readonly agent?: boolean;
   readonly input: z.ZodObject<z.ZodRawShape>;
   readonly run: (ctx: ToolContext, args: never) => Promise<unknown>;
 }
@@ -89,10 +123,17 @@ function tool<S extends z.ZodRawShape>(
   shape: S,
   run: (ctx: ToolContext, args: z.infer<z.ZodObject<S>>) => Promise<unknown>,
 ): Tool {
-  return { name, title, description, input: z.object(shape), run: run as Tool["run"] };
+  return {
+    name,
+    title,
+    description,
+    level: "read",
+    input: z.object(shape),
+    run: run as Tool["run"],
+  };
 }
 
-export const TOOLS: readonly Tool[] = [
+const READ_TOOLS: readonly Tool[] = [
   tool(
     "list_files",
     "List files",
@@ -283,7 +324,225 @@ export const TOOLS: readonly Tool[] = [
   ),
 ];
 
+// ---------------------------------------------------------------------------
+// Agent tools (decision 0021)
+
+const SessionId = z.string().regex(ID_PATTERN, "a session id from start_session");
+const CallId = z
+  .string()
+  .regex(/^[\w.:-]{8,100}$/, "8 to 100 letters, digits, dots, colons, dashes or underscores")
+  .optional()
+  .describe(
+    "Makes the call exactly-once: send the same id again (a retry after a timeout) and you get the first answer back, without the change being made twice. Made for you when left out.",
+  );
+
+const WRITE_TOKEN_NEEDED =
+  "This token can only read. To let an agent change files, its person makes a token with “Read and write” access in Drawpane (Settings → Access tokens → New token) and connects the client with that one.";
+
+function fileRoom(env: Env, fileId: string) {
+  return env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
+}
+
+/** The session, checked for this caller, or a tool error saying what's wrong. */
+async function session(ctx: ToolContext, sessionId: string): Promise<AgentSession> {
+  try {
+    return await requireSession(ctx.env, { user: ctx.user, tokenId: ctx.tokenId }, sessionId);
+  } catch (error) {
+    if (error instanceof SessionError) throw new ToolError(error.message);
+    throw error;
+  }
+}
+
+/** A room's answer to an agent call, as the tool's result (or its error). */
+function answer(out: AgentCallResult, callId: string): Record<string, unknown> {
+  if (!out.ok) throw new ToolError(out.message);
+  const data =
+    out.result && typeof out.result === "object" && !Array.isArray(out.result)
+      ? (out.result as Record<string, unknown>)
+      : { result: out.result };
+  return { ...data, revision: out.revn, callId, ...(out.replayed ? { replayed: true } : {}) };
+}
+
+const roomRef = (s: AgentSession) => ({ id: s.id, name: s.name, fileId: s.targetId });
+const requester = (ctx: ToolContext) => ({ userId: ctx.user.id, name: ctx.user.name });
+
+/** An agent tool from the editor's tool layer, run by the file's room on its headless editor. */
+function agentTool(t: AgentTool): Tool {
+  const base = t.input as unknown as z.ZodObject<z.ZodRawShape>;
+  if (t.level !== "write") {
+    return {
+      name: t.name,
+      title: t.title,
+      description: `${t.description} Pass the fileId (a session's targetFileId to read its branch).`,
+      level: t.level,
+      agent: true,
+      input: base.extend({ fileId: FileId }),
+      run: (async (ctx: ToolContext, args: { fileId: string } & Record<string, unknown>) => {
+        const { fileId, ...input } = args;
+        const { file } = await readFile(ctx, fileId);
+        // The RPC stub's types lose the union's narrowing; the answer is as the room returns it.
+        const out = (await fileRoom(ctx.env, file.id).readAgentTool(
+          file.id,
+          t.name,
+          input,
+        )) as AgentCallResult;
+        if (!out.ok) throw new ToolError(out.message);
+        return out.result;
+      }) as Tool["run"],
+    };
+  }
+  return {
+    name: t.name,
+    title: t.title,
+    description: `${t.description} Needs a sessionId from start_session; the change lands in that session's file.`,
+    level: "write",
+    destructive: true,
+    agent: true,
+    input: base.extend({ sessionId: SessionId, callId: CallId }),
+    run: (async (
+      ctx: ToolContext,
+      args: { sessionId: string; callId?: string } & Record<string, unknown>,
+    ) => {
+      const { sessionId, callId = ctx.callId, ...input } = args;
+      const s = await session(ctx, sessionId);
+      const out = await fileRoom(ctx.env, s.targetId).runAgentTool(
+        requester(ctx),
+        roomRef(s),
+        callId,
+        t.name,
+        input,
+      );
+      return answer(out, callId);
+    }) as Tool["run"],
+  };
+}
+
+function sessionInfo(s: AgentSession) {
+  return {
+    sessionId: s.id,
+    name: s.name,
+    mode: s.mode,
+    fileId: s.fileId,
+    targetFileId: s.targetId,
+    ended: s.endedAt !== null,
+  };
+}
+
+function stepTool(direction: "undo" | "redo"): Tool {
+  return {
+    name: direction,
+    title: direction === "undo" ? "Undo your last change" : "Redo what you undid",
+    description:
+      direction === "undo"
+        ? "Takes back this session's latest change (one call), as one step. Only your own changes: it refuses, and says who and which layers, when a person has changed them since."
+        : "Brings back the change this session undid last. Refuses when a person has changed those layers since. A new change ends what can be redone.",
+    level: "write",
+    destructive: true,
+    agent: true,
+    input: z.object({ sessionId: SessionId, callId: CallId }),
+    run: (async (
+      ctx: ToolContext,
+      { sessionId, callId = ctx.callId }: { sessionId: string; callId?: string },
+    ) => {
+      const s = await session(ctx, sessionId);
+      const out = await fileRoom(ctx.env, s.targetId).stepAgentCall(
+        requester(ctx),
+        roomRef(s),
+        callId,
+        direction,
+      );
+      return answer(out, callId);
+    }) as Tool["run"],
+  };
+}
+
+const SESSION_TOOLS: readonly Tool[] = [
+  {
+    name: "start_session",
+    title: "Start a design session",
+    description:
+      'Starts working on a file you can edit. mode "branch" (the default) makes a branch: your changes land there, and a person reviews and merges them; the file itself is untouched. mode "live" edits the file directly, as people watch. Returns a sessionId to pass to every change, and the targetFileId your changes land in (read it with get_outline and get_jsx). name is yours as people see it ("Claude"): the session shows as "Claude, for Ana".',
+    level: "write",
+    agent: true,
+    input: z.object({
+      fileId: FileId,
+      mode: z.enum(["live", "branch"]).default("branch"),
+      name: z.string().trim().min(1).max(40).optional().describe("Your name, as people see it."),
+      branchName: z
+        .string()
+        .trim()
+        .min(1)
+        .max(120)
+        .optional()
+        .describe("The branch's name, in branch mode."),
+    }),
+    run: (async (
+      ctx: ToolContext,
+      args: { fileId: string; mode: "live" | "branch"; name?: string; branchName?: string },
+    ) => {
+      try {
+        const s = await startSession(
+          ctx.env,
+          { user: ctx.user, tokenId: ctx.tokenId },
+          {
+            fileId: args.fileId,
+            mode: args.mode,
+            ...(args.name ? { agent: args.name } : {}),
+            ...(args.branchName ? { branchName: args.branchName } : {}),
+          },
+        );
+        return {
+          ...sessionInfo(s),
+          next:
+            s.mode === "branch"
+              ? `Your changes land on the branch ${s.targetId}; ${s.fileId} stays as it is until a person merges them.`
+              : `Your changes land in ${s.fileId}, live, as people watch.`,
+        };
+      } catch (error) {
+        if (error instanceof SessionError) throw new ToolError(error.message);
+        throw error;
+      }
+    }) as Tool["run"],
+  },
+  {
+    name: "end_session",
+    title: "End a design session",
+    description:
+      "Ends a session when you're done: it takes no more changes. On a branch, tell the person it's ready to review.",
+    level: "write",
+    agent: true,
+    input: z.object({ sessionId: SessionId }),
+    run: (async (ctx: ToolContext, { sessionId }: { sessionId: string }) => {
+      try {
+        const s = await endSession(ctx.env, { user: ctx.user, tokenId: ctx.tokenId }, sessionId);
+        return {
+          ...sessionInfo(s),
+          next:
+            s.mode === "branch"
+              ? `The branch ${s.targetId} is ready for review: open ${s.fileId} in Drawpane, then Branches.`
+              : "Done. Your changes are in the file and its history.",
+        };
+      } catch (error) {
+        if (error instanceof SessionError) throw new ToolError(error.message);
+        throw error;
+      }
+    }) as Tool["run"],
+  },
+  stepTool("undo"),
+  stepTool("redo"),
+];
+
+export const TOOLS: readonly Tool[] = [
+  ...READ_TOOLS,
+  ...SESSION_TOOLS.slice(0, 1),
+  ...AGENT_TOOLS.map(agentTool),
+  ...SESSION_TOOLS.slice(1),
+];
+
 const BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
+
+/** The tools this instance offers: the agent tools only once a text measurer is configured. */
+export const offered = (env: Env) => TOOLS.filter((t) => !t.agent || agentToolsEnabled(env));
 
 /** A tool as `tools/list` describes it. */
 function describe(t: Tool) {
@@ -292,7 +551,15 @@ function describe(t: Tool) {
     title: t.title,
     description: t.description,
     inputSchema: z.toJSONSchema(t.input, { io: "input" }),
-    annotations: { readOnlyHint: true, openWorldHint: false },
+    annotations:
+      t.level === "read"
+        ? { readOnlyHint: true, openWorldHint: false }
+        : {
+            readOnlyHint: false,
+            destructiveHint: t.destructive ?? false,
+            idempotentHint: false,
+            openWorldHint: false,
+          },
   };
 }
 
@@ -311,17 +578,21 @@ async function handle(ctx: ToolContext, request: Request) {
         protocolVersion: version,
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
-        instructions: INSTRUCTIONS,
+        instructions: agentToolsEnabled(ctx.env)
+          ? READ_INSTRUCTIONS + WRITE_INSTRUCTIONS
+          : READ_INSTRUCTIONS,
       };
     }
     case "ping":
       return {};
     case "tools/list":
-      return { tools: TOOLS.map(describe) };
+      return { tools: offered(ctx.env).map(describe) };
     case "tools/call": {
       const t = typeof params.name === "string" ? BY_NAME.get(params.name) : undefined;
-      if (!t)
+      if (!t || (t.agent && !agentToolsEnabled(ctx.env)))
         throw Object.assign(new Error(`No tool ${String(params.name)}.`), { rpc: INVALID_PARAMS });
+      if (t.level === "write" && ctx.scope !== "write")
+        return toolResult({ error: WRITE_TOKEN_NEEDED }, true);
       const args = t.input.safeParse(params.arguments ?? {});
       if (!args.success) {
         const issue = args.error.issues[0];
@@ -385,7 +656,16 @@ export const mcp = new Hono<AppContext>()
     // A notification (no id) is accepted, and answered with nothing.
     if (request.id === undefined) return c.body(null, 202);
     try {
-      const result = await handle({ env: c.env, user: auth.user }, request);
+      const result = await handle(
+        {
+          env: c.env,
+          user: auth.user,
+          tokenId: auth.tokenId,
+          scope: auth.scope,
+          callId: newId(),
+        },
+        request,
+      );
       return c.json({ jsonrpc: "2.0", id: request.id, result });
     } catch (error) {
       const code = (error as { rpc?: number }).rpc;

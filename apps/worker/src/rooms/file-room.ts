@@ -9,6 +9,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
+import { findTool, ToolFailure } from "@drawpane/editor";
 import {
   applyTransaction,
   branchChanges,
@@ -37,9 +38,12 @@ import {
   summarizeEdits,
   type VersionReason,
 } from "@drawpane/model";
+import { agentMeasurer } from "../agent/measurer";
 import { FILE_ACCESS, FILE_ROLE } from "../api/access";
 import type { Env, Role } from "../env";
 import { verifyPayload } from "../lib/crypto";
+import { AgentEngine, type EngineRun } from "./agent-engine";
+import { CALL_SCHEMA, CallLedger, changedIds, overlap, type StepCall } from "./call-ledger";
 import { AUTOSAVE_RETENTION_MS, readSnapshot, snapshotKey, writeSnapshot } from "./snapshots";
 import { NODE_SCHEMA, SqlNodeStore } from "./sql-store";
 
@@ -159,6 +163,34 @@ export interface Requester {
   readonly name: string;
 }
 
+/** An agent session writing to this file (decision 0021), checked by the Worker. */
+export interface AgentSessionRef {
+  readonly id: string;
+  /** "Claude, for Ana". */
+  readonly name: string;
+  /** This room's file: the session's target. */
+  readonly fileId: string;
+}
+
+/** What an agent call answers. A failure is worded for the model and committed nothing. */
+export type AgentCallResult =
+  | {
+      readonly ok: true;
+      /** The revision it committed; null when it changed nothing. */
+      readonly revn: number | null;
+      readonly result: unknown;
+      /** True when the call id was seen before: this is the recorded answer, and nothing ran. */
+      readonly replayed: boolean;
+    }
+  | { readonly ok: false; readonly message: string };
+
+/** The largest change one agent call may make, in JSON bytes (one log row, well under SQLite's cap). */
+const MAX_AGENT_CHANGE_BYTES = 1 << 20;
+/** How often a call runs again because the file changed under it, before giving up. */
+const AGENT_ATTEMPTS = 3;
+const NO_ENGINE =
+  "Agents can't design on this instance yet: it has no text measurer configured. Reading still works.";
+
 export interface SavedVersion {
   readonly id: string;
   readonly revn: number;
@@ -188,14 +220,18 @@ export class FileRoom extends DurableObject<Env> {
   /** Live presence by session. Not persisted: after hibernation, peers resend on their next move. */
   readonly #presence = new Map<string, Presence>();
   #revn = 0;
+  readonly #ledger: CallLedger;
+  /** The warm headless editor agents' calls run on (decision 0021); made on the first call. */
+  #engine: AgentEngine | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#sql = ctx.storage.sql;
     this.#store = new SqlNodeStore(this.#sql);
+    this.#ledger = new CallLedger(this.#sql);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
     ctx.blockConcurrencyWhile(async () => {
-      this.#sql.exec(NODE_SCHEMA + LOG_SCHEMA);
+      this.#sql.exec(NODE_SCHEMA + LOG_SCHEMA + CALL_SCHEMA);
       this.#revn = Number(this.#meta("revn") ?? 0);
       const hasPage = this.#store
         .childIds(ROOT_ID)
@@ -362,6 +398,7 @@ export class FileRoom extends DurableObject<Env> {
     }
     if (fileId) await this.#sweepVersions(fileId);
     this.#sql.exec("DELETE FROM log WHERE revn <= ?", this.#revn - LOG_RETENTION);
+    this.#ledger.sweep();
     // Keep going while there are edits no version holds yet.
     const next = this.#autosaveDue();
     if (next !== null) {
@@ -701,6 +738,279 @@ export class FileRoom extends DurableObject<Env> {
     return { ok: true, revn, changes: taken, kept };
   }
 
+  // -------------------------------------------------------------------------
+  // Agents (decision 0021)
+
+  /**
+   * Runs an agent's write tool on the headless editor and commits what it
+   * did as one transaction, attributed to the person and the session and
+   * seen arriving by everyone here. The Worker has checked the session and
+   * the person's access.
+   *
+   * Everything async comes first (the fonts the document needs); from
+   * taking the editor to the commit, nothing waits on anything outside the
+   * room, so the tool runs on the file as it is when it commits. A call id
+   * seen before answers as recorded, without running again. A tool that
+   * fails commits nothing.
+   */
+  async runAgentTool(
+    by: Requester,
+    session: AgentSessionRef,
+    callId: string,
+    name: string,
+    input: unknown,
+  ): Promise<AgentCallResult> {
+    this.#adopt(session.fileId);
+    const tool = findTool(name);
+    if (tool?.level !== "write") return { ok: false, message: `There's no write tool ${name}.` };
+    const replay = this.#replay(session.id, callId);
+    if (replay) return replay;
+    const engine = this.#agentEngine(session.fileId);
+    if (!engine) return { ok: false, message: NO_ENGINE };
+
+    // The fonts the file is set in, loaded before anything is measured.
+    const missing = engine.missingFaces(this.#warmEditor(engine));
+    if (missing.length > 0) await engine.load(missing);
+
+    for (let attempt = 0; attempt < AGENT_ATTEMPTS; attempt++) {
+      // A retry of this call may have finished while the fonts loaded.
+      const again = this.#replay(session.id, callId);
+      if (again) return again;
+      const revn = this.#revn;
+      let run: EngineRun;
+      try {
+        run = await engine.run(this.#warmEditor(engine), name, input);
+      } catch (error) {
+        return failedRun(engine, name, error);
+      }
+      // Tools don't wait on anything, so nothing can have landed meanwhile; if it did, run again.
+      if (this.#revn !== revn) {
+        engine.drop();
+        continue;
+      }
+      // Text in a font not loaded yet: load it, and run again so it's measured right.
+      const fonts = engine.facesMissingFrom(this.#warmEditor(engine), run.ops);
+      if (fonts.length > 0 && attempt < AGENT_ATTEMPTS - 1) {
+        engine.drop();
+        await engine.load(fonts);
+        continue;
+      }
+      return this.#commitAgentCall(by, session, callId, tool.title, name, run);
+    }
+    return { ok: false, message: "The file kept changing while that ran. Try again." };
+  }
+
+  /**
+   * Runs an agent's read tool (get_jsx) on the headless editor: nothing is
+   * committed or recorded.
+   */
+  async readAgentTool(fileId: string, name: string, input: unknown): Promise<AgentCallResult> {
+    this.#adopt(fileId);
+    const tool = findTool(name);
+    if (!tool || tool.level === "write")
+      return { ok: false, message: `There's no read tool ${name}.` };
+    const engine = this.#agentEngine(fileId);
+    if (!engine) return { ok: false, message: NO_ENGINE };
+    try {
+      const { result } = await engine.run(this.#warmEditor(engine), name, input);
+      return { ok: true, revn: null, result: result.data, replayed: false };
+    } catch (error) {
+      return failedRun(engine, name, error);
+    }
+  }
+
+  /**
+   * Whether a session's call committed, and what it answered: how another
+   * engine (an open editor that went away halfway) learns a call is done.
+   */
+  async agentCall(
+    sessionId: string,
+    callId: string,
+  ): Promise<{ revn: number | null; result: unknown } | null> {
+    const call = this.#ledger.get(sessionId, callId);
+    return call ? { revn: call.revn, result: call.result } : null;
+  }
+
+  /**
+   * Undoes the session's latest call, or redoes the one it undid last, as
+   * one transaction. Only that session's calls, and never over a person:
+   * when someone else has changed the same layers since, it refuses and
+   * says who and which.
+   */
+  async stepAgentCall(
+    by: Requester,
+    session: AgentSessionRef,
+    callId: string,
+    direction: "undo" | "redo",
+  ): Promise<AgentCallResult> {
+    this.#adopt(session.fileId);
+    const replay = this.#replay(session.id, callId);
+    if (replay) return replay;
+    const target =
+      direction === "undo"
+        ? this.#ledger.lastDone(session.id)
+        : this.#ledger.lastUndone(session.id);
+    if (!target)
+      return {
+        ok: false,
+        message:
+          direction === "undo"
+            ? "Nothing to undo: this session has no changes left to take back."
+            : "Nothing to redo: undo something first.",
+      };
+    const since = direction === "undo" ? target.revn : (target.undoneRevn ?? target.revn);
+    const blocked = this.#editedSince(since, session.id, changedIds(target.ops, target.inverse));
+    if (blocked)
+      return { ok: false, message: await this.#blockedMessage(direction, target, blocked) };
+
+    const ops = direction === "undo" ? target.inverse : target.ops;
+    const author = { clientId: "agent", seq: 0, userId: by.userId, sessionId: session.id };
+    const result = {
+      [direction === "undo" ? "undone" : "redone"]: { tool: target.tool, label: target.label },
+    };
+    let revn: number;
+    try {
+      revn = this.#commit(ops, author, {
+        also: (next, inverse) => {
+          if (direction === "undo") this.#ledger.markUndone(target, next, inverse);
+          else this.#ledger.markRedone(target, next, inverse);
+          const label = direction === "undo" ? "Undo" : "Redo";
+          const call = { sessionId: session.id, callId, userId: by.userId, tool: direction, label };
+          this.#ledger.recordCall(call, next, result, null, null);
+        },
+      });
+    } catch (error) {
+      if (error instanceof ModelError)
+        return {
+          ok: false,
+          message: `Can't ${direction} “${target.label}”: the layers it changed have changed since.`,
+        };
+      throw error;
+    }
+    this.#broadcastChange(revn, ops, author);
+    void this.#scheduleAlarm();
+    return { ok: true, revn, result, replayed: false };
+  }
+
+  #replay(sessionId: string, callId: string): AgentCallResult | null {
+    const seen = this.#ledger.get(sessionId, callId);
+    return seen ? { ok: true, revn: seen.revn, result: seen.result, replayed: true } : null;
+  }
+
+  /** The room's engine, made with the file's measurer; null when none is configured. */
+  #agentEngine(fileId: string): AgentEngine | null {
+    if (this.#engine) return this.#engine;
+    const measurer = agentMeasurer(this.env, fileId);
+    if (!measurer) return null;
+    this.#engine = new AgentEngine(measurer);
+    return this.#engine;
+  }
+
+  #warmEditor(engine: AgentEngine) {
+    return engine.editorAt(this.#revn, this.#store.count(), () => this.#readAll());
+  }
+
+  /** Commits an engine run as one transaction, with its ledger row in the same storage transaction. */
+  #commitAgentCall(
+    by: Requester,
+    session: AgentSessionRef,
+    callId: string,
+    label: string,
+    tool: string,
+    run: EngineRun,
+  ): AgentCallResult {
+    const engine = this.#engine as AgentEngine;
+    const data = run.result.data ?? null;
+    const call = { sessionId: session.id, callId, userId: by.userId, tool, label };
+    if (run.ops.length === 0) {
+      this.ctx.storage.transactionSync(() => this.#ledger.recordCall(call, null, data, null, null));
+      return { ok: true, revn: null, result: data, replayed: false };
+    }
+    if (JSON.stringify(run.ops).length > MAX_AGENT_CHANGE_BYTES) {
+      engine.drop();
+      return {
+        ok: false,
+        message: "That's too much to change in one call. Build it in parts: one section per call.",
+      };
+    }
+    const author = { clientId: "agent", seq: 0, userId: by.userId, sessionId: session.id };
+    let revn: number;
+    try {
+      revn = this.#commit(run.ops, author, {
+        fromEngine: true,
+        also: (next, inverse) => this.#ledger.recordCall(call, next, data, run.ops, inverse),
+      });
+    } catch (error) {
+      engine.drop();
+      if (error instanceof ModelError)
+        return { ok: false, message: `That change doesn't apply: ${error.message}` };
+      throw error;
+    }
+    this.#broadcastChange(revn, run.ops, author);
+    void this.#scheduleAlarm();
+    return { ok: true, revn, result: data, replayed: false };
+  }
+
+  /**
+   * Whether anyone but `sessionId` changed (or put something inside) any of
+   * `ids` after revision `since`: who, and which. "unknown" when the log no
+   * longer reaches back that far.
+   */
+  #editedSince(
+    since: number,
+    sessionId: string,
+    ids: ReadonlySet<string>,
+  ): { userId: string; ids: string[] } | "unknown" | null {
+    if (since >= this.#revn) return null;
+    const oldest = this.#sql
+      .exec<{ revn: number | null }>("SELECT MIN(revn) AS revn FROM log")
+      .one().revn;
+    if (oldest === null || oldest > since + 1) return "unknown";
+    const rows = this.#sql
+      .exec<{ user_id: string; ops: string }>(
+        "SELECT user_id, ops FROM log WHERE revn > ? AND session_id != ? ORDER BY revn",
+        since,
+        sessionId,
+      )
+      .toArray();
+    for (const row of rows) {
+      const hit = overlap(JSON.parse(row.ops) as Op[], ids);
+      if (hit.length > 0) return { userId: row.user_id, ids: hit };
+    }
+    return null;
+  }
+
+  async #blockedMessage(
+    direction: "undo" | "redo",
+    target: StepCall,
+    blocked: { userId: string; ids: string[] } | "unknown",
+  ): Promise<string> {
+    const what = `Can't ${direction} “${target.label}”`;
+    if (blocked === "unknown")
+      return `${what}: it was too long ago to tell whether anyone changed its layers since.`;
+    const person = await this.env.DB.prepare("SELECT name FROM users WHERE id = ?")
+      .bind(blocked.userId)
+      .first<{ name: string }>()
+      .catch(() => null);
+    const names = blocked.ids
+      .slice(0, 3)
+      .map((id) => {
+        const node = this.#store.get(id);
+        const name = node?.props.name;
+        return typeof name === "string" && name ? `“${name}” (${id})` : id;
+      })
+      .join(", ");
+    this.#store.clearCache();
+    const more = blocked.ids.length > 3 ? ` and ${blocked.ids.length - 3} more` : "";
+    return `${what}: ${person?.name ?? "someone"} changed ${names}${more} since, and undo never reverts a person's work. Change the layers back with the tools instead.`;
+  }
+
+  #readAll(): NodeRecord[] {
+    const nodes: NodeRecord[] = [];
+    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) nodes.push(...page);
+    return nodes;
+  }
+
   /** Every node in the file, for copying it into another (a duplicate, a file from a template). */
   async allNodes(): Promise<NodeRecord[]> {
     const out: NodeRecord[] = [];
@@ -900,11 +1210,21 @@ export class FileRoom extends DurableObject<Env> {
   /**
    * Applies and logs one transaction in a single storage transaction and
    * returns its revision. Throws (changing nothing) when it doesn't apply.
+   * `also` writes more in the same storage transaction (an agent call's
+   * ledger row), given the revision and the operations that undo it.
+   * The warm agent editor follows, unless the change is its own (`fromEngine`).
    */
-  #commit(ops: readonly Op[], author: Author): number {
+  #commit(
+    ops: readonly Op[],
+    author: Author,
+    options: {
+      readonly also?: (revn: number, inverse: Op[]) => void;
+      readonly fromEngine?: boolean;
+    } = {},
+  ): number {
     try {
       const revn = this.ctx.storage.transactionSync(() => {
-        applyTransaction(this.#store, ops, { rollback: false });
+        const inverse = applyTransaction(this.#store, ops, { rollback: false });
         const next = this.#revn + 1;
         const now = Date.now();
         this.#sql.exec(
@@ -932,9 +1252,12 @@ export class FileRoom extends DurableObject<Env> {
         this.#setMeta("touched", "1");
         // When the file was last edited (not when the alarm gets round to saying so).
         this.#setMeta("touched_at", String(now));
+        options.also?.(next, inverse);
         return next;
       });
       this.#revn = revn;
+      if (options.fromEngine) this.#engine?.committed(revn);
+      else this.#engine?.follow(ops, revn);
       return revn;
     } finally {
       this.#store.clearCache();
@@ -1349,6 +1672,20 @@ export class FileRoom extends DurableObject<Env> {
     }
     return sent;
   }
+}
+
+/**
+ * A tool that failed, as its answer: its own failure as worded, anything
+ * else (a bug) logged, with the engine let go in case it was left half-done.
+ */
+function failedRun(engine: AgentEngine, name: string, error: unknown): AgentCallResult {
+  if (error instanceof ToolFailure) return { ok: false, message: error.message };
+  console.error(`agent tool ${name} failed`, error);
+  engine.drop();
+  return {
+    ok: false,
+    message: `${name} failed unexpectedly, and changed nothing. Try it another way, or in smaller steps.`,
+  };
 }
 
 export type UpdateResult =

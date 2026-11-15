@@ -30,6 +30,11 @@ export interface Env {
   readonly KIT_REGISTRY?: string;
   /** `off` stops the Worker from fetching Google Fonts (see api/fonts.ts). */
   readonly GOOGLE_FONTS?: string;
+  /**
+   * `standin` turns on the agent tools with a stand-in text measurer, for
+   * tests and local development (see agent/measurer.ts). Unset in production.
+   */
+  readonly AGENT_MEASURER?: string;
   /** Sign in with GitHub: an OAuth app's client id and secret (docs/self-hosting.md). */
   readonly GITHUB_CLIENT_ID?: string;
   readonly GITHUB_CLIENT_SECRET?: string;

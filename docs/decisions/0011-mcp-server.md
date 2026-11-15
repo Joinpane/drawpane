@@ -21,4 +21,4 @@ MCP clients connect over Streamable HTTP and authenticate with a bearer token (O
 
 - Any MCP client (Claude Code, Cursor, an IDE, a custom agent) can read any file its person can, with one command and nothing installed.
 - No OAuth yet: the token is pasted into the client's config. OAuth (with dynamic or metadata-document clients) can sit in front of the same tools later.
-- Writing (`start_branch`, `apply_ops`) waits for branches, so an agent can't change a file anyone is working in.
+- Writing (`start_branch`, `apply_ops`) waits for branches, so an agent can't change a file anyone is working in. (Since decided in [0021](0021-agent-tools.md): write tokens, and sessions on a branch or live.)

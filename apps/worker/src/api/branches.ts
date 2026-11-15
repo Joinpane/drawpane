@@ -101,6 +101,53 @@ export async function deleteBranchesOf(env: Env, mainId: string): Promise<void> 
   await env.DB.prepare("DELETE FROM files WHERE branch_of = ?").bind(mainId).run();
 }
 
+/**
+ * Makes a branch of `main` (checked by the caller: a main file the person can
+ * edit, not in trash): a copy of it now, with that as its base. Throws a
+ * conflict, leaving nothing behind, when it can't be made.
+ */
+export async function makeBranch(
+  env: Env,
+  by: { readonly id: string; readonly name: string },
+  main: FileRow,
+  name: string,
+): Promise<BranchInfo> {
+  // Main's nodes and the revision they're at, read together.
+  const base = (await room(env, main.id).snapshot()) as { revn: number; nodes: NodeRecord[] };
+  const id = newId();
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO files (id, project_id, team_id, name, search_name, created_by, created_at, updated_at, branch_of)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(id, main.project_id, main.team_id, name, searchFold(name), by.id, now, now, main.id),
+    env.DB.prepare("INSERT INTO branches (file_id, base_revn) VALUES (?, ?)").bind(id, base.revn),
+  ]);
+  try {
+    await writeSnapshot(env.FILES, id, base.revn, now, base.nodes, branchBaseKey(id));
+    const copied = await room(env, id).importNodes(
+      { userId: by.id, name: by.name },
+      base.nodes,
+      id,
+    );
+    if (!copied.ok) throw new Error(`couldn't copy into the branch: ${copied.reason}`);
+    // The branch looks like its main file in the branch list straight away.
+    const thumbnail = await env.FILES.get(thumbnailKey(main.id));
+    if (thumbnail) {
+      await env.FILES.put(thumbnailKey(id), thumbnail.body, {
+        httpMetadata: thumbnail.httpMetadata ?? {},
+      });
+      await env.DB.prepare("UPDATE files SET thumbnail_at = ? WHERE id = ?").bind(now, id).run();
+    }
+  } catch (error) {
+    console.error(`couldn't make a branch of ${main.id}`, error);
+    await deleteBranchStorage(env, id);
+    await env.DB.prepare("DELETE FROM files WHERE id = ?").bind(id).run();
+    throw conflict("The branch couldn't be made. Try again.");
+  }
+  return (await branchInfo(env, id)) as BranchInfo;
+}
+
 /** A branch, checked: the person can see it, and it is one. */
 async function requireBranch(env: Env, userId: string, fileId: string) {
   const { file, role } = await requireFileRole(env, userId, fileId, "viewer");
@@ -139,45 +186,7 @@ export const branches = new Hono<AppContext>()
       throw conflict("Restore the file from trash before branching it.");
     const { name } = await readBody(c, z.object({ name: BranchName }));
 
-    // Main's nodes and the revision they're at, read together.
-    const base = (await room(c.env, main.id).snapshot()) as { revn: number; nodes: NodeRecord[] };
-    const id = newId();
-    const now = Date.now();
-    await c.env.DB.batch([
-      c.env.DB.prepare(
-        `INSERT INTO files (id, project_id, team_id, name, search_name, created_by, created_at, updated_at, branch_of)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(id, main.project_id, main.team_id, name, searchFold(name), user.id, now, now, main.id),
-      c.env.DB.prepare("INSERT INTO branches (file_id, base_revn) VALUES (?, ?)").bind(
-        id,
-        base.revn,
-      ),
-    ]);
-    try {
-      await writeSnapshot(c.env.FILES, id, base.revn, now, base.nodes, branchBaseKey(id));
-      const copied = await room(c.env, id).importNodes(
-        { userId: user.id, name: user.name },
-        base.nodes,
-        id,
-      );
-      if (!copied.ok) throw new Error(`couldn't copy into the branch: ${copied.reason}`);
-      // The branch looks like its main file in the branch list straight away.
-      const thumbnail = await c.env.FILES.get(thumbnailKey(main.id));
-      if (thumbnail) {
-        await c.env.FILES.put(thumbnailKey(id), thumbnail.body, {
-          httpMetadata: thumbnail.httpMetadata ?? {},
-        });
-        await c.env.DB.prepare("UPDATE files SET thumbnail_at = ? WHERE id = ?")
-          .bind(now, id)
-          .run();
-      }
-    } catch (error) {
-      console.error(`couldn't make a branch of ${main.id}`, error);
-      await deleteBranchStorage(c.env, id);
-      await c.env.DB.prepare("DELETE FROM files WHERE id = ?").bind(id).run();
-      throw conflict("The branch couldn't be made. Try again.");
-    }
-    return c.json({ branch: await branchInfo(c.env, id) }, 201);
+    return c.json({ branch: await makeBranch(c.env, user, main, name) }, 201);
   })
 
   /**
