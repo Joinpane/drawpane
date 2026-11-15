@@ -76,7 +76,6 @@ export function minimapBox(
 
 interface Colors {
   readonly canvas: string;
-  readonly board: string;
   readonly line: string;
   readonly signal: string;
   readonly agent: string;
@@ -89,7 +88,6 @@ function colorsOf(el: Element): Colors {
   const v = (name: string) => style.getPropertyValue(name).trim();
   return {
     canvas: v("--canvas"),
-    board: v("--surface-raised"),
     line: v("--line-strong"),
     signal: v("--signal"),
     agent: v("--agent"),
@@ -125,8 +123,12 @@ function draw(canvas: HTMLCanvasElement, model: MinimapModel, fit: MinimapFit): 
     const b = box(layer.rect, 2);
     ctx.globalAlpha = layer.hidden ? 0.5 : 1;
     if (layer.board) {
-      ctx.fillStyle = c.board;
-      ctx.fillRect(b.x, b.y, b.w, b.h);
+      // In its own colour, as on the canvas (a white board stays white in dark theme); with
+      // none, only its outline, as the canvas shows through it.
+      if (layer.fill) {
+        ctx.fillStyle = layer.fill;
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+      }
       ctx.strokeStyle = c.line;
       ctx.lineWidth = 1;
       ctx.strokeRect(b.x + 0.5, b.y + 0.5, Math.max(0, b.w - 1), Math.max(0, b.h - 1));

@@ -3568,6 +3568,12 @@ export class Editor {
 
   startTextEdit(id: string): void {
     if (!this.canEdit) return;
+    // Already typing in it: nothing to start.
+    if (this.s.editingText === id) return;
+    // Typing in another layer: that edit finishes first (its own undo step, and an emptied
+    // layer goes), or its gesture would stay open after this one ends, holding every later
+    // edit in one undo step and keeping on-canvas controls hidden as if mid-drag.
+    if (this.s.editingText) this.endTextEdit();
     this.state.set({
       editingText: id,
       selection: [id],

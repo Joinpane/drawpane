@@ -53,6 +53,29 @@ export function contrastRatio(a: Rgba, b: Rgba): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
+/**
+ * Which ink to draw on `background` (hex): `preferred` while it reads at
+ * `minimum` contrast or better, else whichever of `preferred` and `fallback`
+ * reads better. For marks the canvas draws in UI colours over a page
+ * background the file chose (a light page in dark theme, say). Inks that
+ * aren't six- or eight-digit hex are taken as they are.
+ */
+export function inkOn(
+  background: string,
+  preferred: string,
+  fallback: string,
+  minimum = 3,
+): string {
+  const bg = parseHex(background);
+  const a = parseHex(preferred);
+  const b = parseHex(fallback);
+  if (!bg || !a || !b) return preferred;
+  const ground = over(bg, { r: 255, g: 255, b: 255, a: 1 });
+  const ca = contrastRatio(a, ground);
+  if (ca >= minimum) return preferred;
+  return contrastRatio(b, ground) > ca ? fallback : preferred;
+}
+
 const hex = ({ r, g, b }: Rgba) =>
   `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
 

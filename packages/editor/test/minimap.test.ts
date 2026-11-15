@@ -34,6 +34,45 @@ describe("minimap model", () => {
     expect(model?.boards).toBe(2);
   });
 
+  it("shows each board in the colour the canvas does: its top visible fill, or none", () => {
+    const { editor, home, settings } = setup();
+    editor.doc.apply([
+      {
+        op: "set",
+        id: home,
+        prop: "fills",
+        value: [
+          { type: "solid", color: "#ff0000" },
+          { type: "solid", color: "#ffffff" },
+          { type: "solid", color: "#000000", visible: false },
+        ],
+      },
+      {
+        op: "set",
+        id: settings,
+        prop: "fills",
+        value: [
+          {
+            type: "linear",
+            from: { x: 0, y: 0 },
+            to: { x: 1, y: 0 },
+            stops: [
+              { position: 0, color: "#2b4fd6" },
+              { position: 1, color: "#0b7a75" },
+            ],
+          },
+        ],
+      },
+    ]);
+    const empty = editor.createLayer("frame", { x: 1000, y: 0, width: 100, height: 100 }, "p", {
+      fills: [],
+    }) as string;
+    const fills = new Map(minimapModel(editor)?.layers.map((l) => [l.id, l.fill]));
+    expect(fills.get(home)).toBe("#ffffff");
+    expect(fills.get(settings)).toBe("#2b4fd6");
+    expect(fills.get(empty)).toBeNull();
+  });
+
   it("covers the layers and the visible area together, so the view is never off the map", () => {
     const { editor } = setup();
     editor.state.set({ insets: { top: 60, right: 276, bottom: 56, left: 276 } });

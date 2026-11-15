@@ -13,6 +13,7 @@ import {
   type TextMeasurer,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
+import { colors } from "@drawpane/ui";
 import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
 import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
@@ -36,6 +37,11 @@ function readTheme(): OverlayTheme {
   return {
     signal: v("signal"),
     onSignal: v("on-signal"),
+    // Labels on a page background the file chose read in whichever theme's inks suit it.
+    otherLabels: (() => {
+      const other = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      return { inkMuted: colors["ink-muted"][other], componentInk: colors["component-ink"][other] };
+    })(),
     guide: v("guide"),
     onGuide: v("on-guide"),
     component: v("component"),

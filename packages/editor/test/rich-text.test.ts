@@ -301,3 +301,34 @@ describe("rich text as code", () => {
     );
   });
 });
+
+describe("editing one text layer, then another", () => {
+  it("finishes the first edit before starting the next: each its own undo step, nothing left open", () => {
+    const { editor, text, node } = setup();
+    const a = text("Plan");
+    const b = text("Other");
+    editor.startTextEdit(a);
+    editor.updateText(a, "Plan ahead");
+    // Straight into the other layer, as double-clicking it while typing does.
+    editor.startTextEdit(b);
+    expect(editor.s.editingText).toBe(b);
+    editor.updateText(b, "Other!");
+    editor.endTextEdit();
+    // No gesture left open: on-canvas controls come back, and later edits are steps of their own.
+    expect(editor.s.gesture).toBe(false);
+    editor.undo();
+    expect(getProp(node(b).props, "characters")).toBe("Other");
+    expect(getProp(node(a).props, "characters")).toBe("Plan ahead");
+    editor.undo();
+    expect(getProp(node(a).props, "characters")).toBe("Plan");
+  });
+
+  it("starting to edit the layer already being edited changes nothing", () => {
+    const { editor, text } = setup();
+    const a = text("Plan");
+    editor.startTextEdit(a);
+    editor.startTextEdit(a);
+    editor.endTextEdit();
+    expect(editor.s.gesture).toBe(false);
+  });
+});

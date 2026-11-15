@@ -3,11 +3,13 @@ import { ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import {
   backdropOf,
+  CHECKER,
   colorAt,
   convertPaint,
   documentColors,
   gradientAngle,
   handlesForAngle,
+  mixedSwatchCss,
   shownOpacity,
   solidPickerValue,
   withPickerValue,
@@ -182,5 +184,26 @@ describe("typed text values", () => {
     ["", { unit: "px", value: 0 }],
   ])("letter spacing %s", (text, expected) => {
     expect(parseLetterSpacing(text)).toEqual(expected);
+  });
+});
+
+describe("mixedSwatchCss", () => {
+  it("splits the swatch across its diagonal between two paints, over a checkerboard", () => {
+    const css = mixedSwatchCss(
+      { type: "solid", color: "#ff0000" },
+      {
+        type: "linear",
+        from: { x: 0, y: 0 },
+        to: { x: 1, y: 0 },
+        stops: [
+          { position: 1, color: "#00ff00" },
+          { position: 0, color: "#0000ff" },
+        ],
+      },
+    );
+    // The gradient stands in by its first stop by position.
+    expect(css).toBe(
+      `linear-gradient(135deg, rgba(255, 0, 0, 1) 50%, rgba(0, 0, 255, 1) 50%), ${CHECKER}`,
+    );
   });
 });

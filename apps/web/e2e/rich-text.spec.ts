@@ -233,4 +233,18 @@ test.describe
       await expect(panel(page).getByLabel("Font size")).toHaveValue("");
       await expect(panel(page).getByLabel("Font size")).toHaveAttribute("placeholder", "Mixed");
     });
+
+    test("the Lens shows mixed fills as mixed, and a colour picked there fills all of the text", async () => {
+      // One word was coloured on its own: the Lens's swatch says the fills differ.
+      const swatch = page.getByRole("button", { name: "Edit fill (mixed)" });
+      await expect(swatch).toBeVisible();
+      await swatch.click();
+      const hex = page.getByRole("dialog", { name: "Fill paint" }).getByLabel("Fill hex");
+      await hex.fill("112233");
+      await hex.press("Enter");
+      await page.keyboard.press("Escape");
+      // One fill for all of it now: neither the Lens nor the inspector says mixed.
+      await expect(page.getByRole("button", { name: "Edit fill (mixed)" })).toHaveCount(0);
+      await expect(panel(page).getByText("Mixed fills")).toHaveCount(0);
+    });
   });

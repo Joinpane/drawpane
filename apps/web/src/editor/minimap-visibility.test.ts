@@ -10,6 +10,7 @@ const model = (layers: Array<[number, number, number, number]>): MinimapModel =>
     rect: { x, y, width, height },
     board: true,
     hidden: false,
+    fill: null,
   })),
   peers: [],
   boards: layers.length,

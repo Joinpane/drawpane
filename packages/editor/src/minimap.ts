@@ -5,7 +5,7 @@
  * with `minimapFit`. See PRD "Calm multiplayer": presence shows up in the
  * minimap, so you can see where people are without them crowding your view.
  */
-import { getProp } from "@drawpane/model";
+import { getProp, type Paint } from "@drawpane/model";
 import type { Editor } from "./editor";
 import { type Point, type Rect, unionRects } from "./geometry";
 
@@ -15,6 +15,11 @@ export interface MinimapLayer {
   /** A frame at the top level: a board. */
   readonly board: boolean;
   readonly hidden: boolean;
+  /**
+   * A board's colour as the canvas shows it: its top visible fill (a
+   * gradient's first stop, an image's nothing), or null when it has none.
+   */
+  readonly fill: string | null;
 }
 
 export interface MinimapPeer {
@@ -53,7 +58,13 @@ export function minimapModel(editor: Editor): MinimapModel | null {
     if (!node || !rect) continue;
     const board = node.type === "frame";
     if (board) boards++;
-    layers.push({ id, rect, board, hidden: !getProp(node.props, "visible") });
+    layers.push({
+      id,
+      rect,
+      board,
+      hidden: !getProp(node.props, "visible"),
+      fill: board ? boardFill(getProp(node.props, "fills")) : null,
+    });
   }
   const others: MinimapPeer[] = [];
   for (const peer of peers.values()) {
@@ -109,4 +120,15 @@ export function toMinimap(fit: MinimapFit, p: Point): Point {
 
 export function fromMinimap(fit: MinimapFit, p: Point): Point {
   return { x: (p.x - fit.x) / fit.scale, y: (p.y - fit.y) / fit.scale };
+}
+
+/** The colour a board shows: its top visible solid fill or a gradient's first stop, as hex. */
+function boardFill(fills: readonly Paint[]): string | null {
+  for (let i = fills.length - 1; i >= 0; i--) {
+    const paint = fills[i];
+    if (!paint || paint.visible === false || paint.type === "image") continue;
+    const color = paint.type === "solid" ? paint.color : paint.stops[0]?.color;
+    if (color) return color;
+  }
+  return null;
 }
