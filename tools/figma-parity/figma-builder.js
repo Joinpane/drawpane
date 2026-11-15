@@ -199,6 +199,7 @@ async function buildParity(figma, suites) {
           ),
         );
       if (run.fontSize) node.setRangeFontSize(run.start, run.end, run.fontSize);
+      if (run.lineHeight) node.setRangeLineHeight(run.start, run.end, lineHeight(run.lineHeight));
       if (run.fills) node.setRangeFills(run.start, run.end, run.fills.map(paint));
       if (run.textDecoration)
         node.setRangeTextDecoration(run.start, run.end, run.textDecoration.toUpperCase());

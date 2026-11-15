@@ -145,6 +145,8 @@ export interface TextLine {
   readonly indent: number;
   /** A list item's bullet or number, on its paragraph's first line. */
   readonly marker: TextMarker | null;
+  /** Its line height: the tallest of its characters'. Its baseline is this far below the last. */
+  readonly step: number;
 }
 
 /** A list item's bullet or number: drawn left of the text, at `x` from where the text starts. */
@@ -254,6 +256,8 @@ interface SpanStyle {
   /** Half-leading plus ascent, and what's left below the baseline. */
   readonly ascent: number;
   readonly descent: number;
+  /** Its line height, in px. */
+  readonly lineHeight: number;
 }
 
 function spanStyles(node: NodeRecord, measurer: TextMeasurer): SpanStyle[] {
@@ -273,6 +277,7 @@ function spanStyles(node: NodeRecord, measurer: TextMeasurer): SpanStyle[] {
       run: shapingRun(span.props),
       ascent,
       descent: lh - ascent,
+      lineHeight: lh,
     };
   });
 }
@@ -540,12 +545,14 @@ function computeLayout(
     const last = br.end > br.start ? m.styleAt(br.end - 1) : first;
     let ascent = 0;
     let descent = 0;
+    let step = 0;
     const fragments: TextFragment[] = [];
     let x = 0;
     for (let k = first; k <= last; k++) {
       const s = styles[k] as SpanStyle;
       ascent = Math.max(ascent, s.ascent);
       descent = Math.max(descent, s.descent);
+      step = Math.max(step, s.lineHeight);
       const a = Math.max(br.start, s.span.start);
       const b = Math.min(br.end, s.span.end);
       if (b <= a) continue;
@@ -565,22 +572,28 @@ function computeLayout(
       fragments,
       indent: br.indent ?? 0,
       marker: br.marker ? markerOf(br.marker, br.start) : null,
+      step,
     };
   };
 
   const spacing = getProp(props, "paragraphSpacing");
   const maxLines = whole ? null : getProp(props, "maxLines");
   const kept = maxLines !== null && breaks.length > maxLines ? breaks.slice(0, maxLines) : breaks;
+  // Lines stack baseline to baseline, each its own line height below the last (as in Figma:
+  // a taller line pushes itself down, not the line after it); the first sits centred in its own.
   const lines: TextLine[] = [];
-  let top = 0;
+  let after = 0;
   for (const [i, br] of kept.entries()) {
     const truncated = kept !== breaks && i === kept.length - 1;
-    const line = truncated ? ellipsize(br, top) : makeLine(br, top);
-    lines.push(line);
-    top += line.height;
+    const built = truncated ? ellipsize(br, 0) : makeLine(br, 0);
+    const prev = lines[lines.length - 1];
+    const baseline = prev ? prev.baseline + after + built.step : built.baseline;
+    lines.push({ ...built, top: baseline - built.baseline, baseline });
     // Space after a paragraph, not after the last line shown.
-    if (br.para && i < kept.length - 1) top += spacing;
+    after = br.para && i < kept.length - 1 ? spacing : 0;
   }
+  const last = lines[lines.length - 1];
+  const top = last ? last.top + last.height : 0;
   const width = lines.reduce((w, l) => Math.max(w, l.indent + l.width), 0);
   return {
     font: fontString(props),

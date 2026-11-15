@@ -24,4 +24,4 @@ Most people who'd move to Drawpane have their work in Figma. Penpot import exist
 ## Consequences
 
 - `.fig` files come next only after a legal review; if it rules them out, a Drawpane export plugin running inside Figma is the way to the data the API leaves out (glass settings, variables on non-Enterprise plans, font axes, guides).
-- Real files bring what the parity scenes don't: text in many fonts, deep component trees, images. The fidelity suite grows with a corpus of such files (their API responses and renders cached, as here), and the gaps it finds rank the model changes worth making first (leading trim, per-paragraph text styles; per-side strokes and alpha masks came first, decisions 0015 and 0016).
+- Real files bring what the parity scenes don't: text in many fonts, deep component trees, images. The fidelity suite grows with a corpus of such files (their API responses and renders cached, as here), and the gaps it finds rank the model changes worth making first (leading trim, per-paragraph alignment; per-side strokes, alpha masks, lists and per-range line height came first, decisions 0015 to 0018).

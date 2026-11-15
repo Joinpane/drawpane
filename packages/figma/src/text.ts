@@ -63,6 +63,9 @@ function typography(s: Figma.TypeStyle): Props {
   if (s.textCase && CASES[s.textCase]) out.textCase = CASES[s.textCase];
   if (s.textDecoration && DECORATIONS[s.textDecoration])
     out.textDecoration = DECORATIONS[s.textDecoration];
+  // Line height is a character style too (decision 0018): a line takes its tallest.
+  const lh = lineHeight(s);
+  if (lh) out.lineHeight = lh;
   const f = features(s);
   if (f) out.fontFeatures = f;
   return out;
@@ -119,7 +122,13 @@ export function textRuns(node: Figma.Node, images: ImageLookup, notes: Notes): T
     while (end < ids.length && ids[end] === id) end++;
     const style = id === 0 ? undefined : table[String(id)];
     if (style) {
-      if (style.lineHeightUnit || style.textAlignHorizontal || style.paragraphSpacing !== undefined)
+      // What Drawpane keeps for the whole text only: alignment and paragraph spacing.
+      if (
+        (style.textAlignHorizontal !== undefined &&
+          style.textAlignHorizontal !== node.style?.textAlignHorizontal) ||
+        (style.paragraphSpacing !== undefined &&
+          style.paragraphSpacing !== (node.style?.paragraphSpacing ?? 0))
+      )
         paragraphStyles = true;
       const t = typography(style);
       const run: Record<string, unknown> = { start, end };

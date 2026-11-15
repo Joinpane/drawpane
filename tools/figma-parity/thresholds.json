@@ -155,6 +155,11 @@
     "list-wrapped": 7.56,
     "list-large": 3.23
   },
+  "text-ranges": {
+    "lh-paragraphs": 3.49,
+    "lh-same-line": 1.26,
+    "lh-percent": 4.58
+  },
   "glass-probe-2": {
     "light-80-d20": 0.55,
     "light-100-d20": 0.57,

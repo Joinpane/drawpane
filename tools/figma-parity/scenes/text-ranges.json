@@ -1,0 +1,122 @@
+{
+  "suite": "text-ranges",
+  "about": "Line height set on part of a text: a heading's own line height over its body's, two line heights on one line, and a percentage on one paragraph.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#ffffff",
+  "cells": [
+    {
+      "id": "lh-paragraphs",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 120,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "lineHeight": {
+            "unit": "px",
+            "value": 22
+          },
+          "characters": "Heading\nBody line one\nBody line two",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 8,
+              "fontSize": 28,
+              "fontWeight": 700,
+              "lineHeight": {
+                "unit": "px",
+                "value": 44
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lh-same-line",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 120,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "characters": "Tall short words",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 4,
+              "lineHeight": {
+                "unit": "px",
+                "value": 48
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lh-percent",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 120,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "lineHeight": {
+            "unit": "percent",
+            "value": 120
+          },
+          "characters": "First paragraph\nSecond paragraph\nThird",
+          "textRuns": [
+            {
+              "start": 16,
+              "end": 33,
+              "lineHeight": {
+                "unit": "percent",
+                "value": 200
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

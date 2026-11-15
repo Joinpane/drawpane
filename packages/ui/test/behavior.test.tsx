@@ -412,6 +412,21 @@ describe("NumberField", () => {
     expect(onScrubEnd).toHaveBeenCalledTimes(1);
   });
 
+  it("scrubs when its unit is dragged too, with no label to drag", () => {
+    const onChange = vi.fn();
+    render(
+      <NumberField ariaLabel="Opacity" unit="%" defaultValue={50} max={100} onChange={onChange} />,
+    );
+    const unit = screen.getByText("%");
+    fireEvent.pointerDown(unit, { pointerId: 1, button: 0, clientX: 100 });
+    fireEvent.pointerMove(unit, { pointerId: 1, clientX: 104 });
+    fireEvent.pointerUp(unit, { pointerId: 1, clientX: 104 });
+    expect(onChange).toHaveBeenLastCalledWith(54);
+    // The value has the field's left edge to itself: it's the field's first element.
+    const input = screen.getByRole("spinbutton", { name: "Opacity" });
+    expect(input.parentElement?.firstElementChild).toBe(input);
+  });
+
   it("accepts values typed in its own unit", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
