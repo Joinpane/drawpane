@@ -44,6 +44,8 @@ export interface EditorUi {
   readonly minimap: MinimapMode;
   /** Layout X-ray stays on without holding Alt (the inspector's X-ray button). */
   readonly xrayPinned: boolean;
+  /** How many of the inspector's popovers are open: the Selection Lens steps aside meanwhile. */
+  readonly inspectorPopovers: number;
 }
 
 const stores = new WeakMap<Editor, Store<EditorUi>>();
@@ -60,6 +62,7 @@ export function uiFor(editor: Editor): Store<EditorUi> {
       lens: true,
       minimap: "auto",
       xrayPinned: false,
+      inspectorPopovers: 0,
     });
     stores.set(editor, store);
   }

@@ -7,7 +7,7 @@ import {
   setGlassTuning,
 } from "@drawpane/editor";
 import type { BranchInfo, VersionInfo } from "@drawpane/model";
-import { Button, Icon, IconButton, Logo, SegmentedControl } from "@drawpane/ui";
+import { Button, Icon, IconButton, Logo, PopoverRoomContext, SegmentedControl } from "@drawpane/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
@@ -89,6 +89,7 @@ import { PagesList } from "./PagesList";
 import { PaneResizer } from "./PaneResizer";
 import { usePageZoomLock } from "./page-zoom";
 import { clampPane, PANE, panelLayout, setPanelLayout, usePanelLayout } from "./panel-layout";
+import { useInspectorRoom } from "./popover-room";
 import { PrototypePanel } from "./prototype/PrototypePanel";
 import { RULER, RULER_GAP, Rulers } from "./Rulers";
 import { ShortcutsDialog } from "./ShortcutsDialog";
@@ -134,6 +135,9 @@ function FileEditor({ fileId }: { fileId: string }) {
     () => new Editor({ measurer: textMeasurer(), booleanEngine: loadBooleanEngine }),
   );
   const interaction = useMemo(() => new Interaction(editor), [editor]);
+  // The inspector's popovers open over the canvas, clear of it and of the selection.
+  const inspectorPane = useRef<HTMLElement>(null);
+  const inspectorRoom = useInspectorRoom(editor, inspectorPane);
   usePageZoomLock();
   const [commandOpen, setCommandOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -934,29 +938,31 @@ function FileEditor({ fileId }: { fileId: string }) {
             </aside>
           </EditorContext.Provider>
         ) : rightShown && view === "design" ? (
-          <aside className="pane pane--right" aria-label="Inspector">
-            <div className="pane__tabs">
-              <SegmentedControl
-                label="Right pane"
-                options={[
-                  { value: "design", label: "Design" },
-                  { value: "prototype", label: "Prototype" },
-                  { value: "inspect", label: "Inspect" },
-                ]}
-                value={rightTab}
-                onChange={(tab) => setRightTab(tab as RightTab)}
-              />
-            </div>
-            {rightTab === "design" ? (
-              <>
-                <Inspector />
-                <ExportPanel />
-              </>
-            ) : rightTab === "prototype" ? (
-              <PrototypePanel fileId={fileId} />
-            ) : (
-              <InspectPanel />
-            )}
+          <aside ref={inspectorPane} className="pane pane--right" aria-label="Inspector">
+            <PopoverRoomContext.Provider value={inspectorRoom}>
+              <div className="pane__tabs">
+                <SegmentedControl
+                  label="Right pane"
+                  options={[
+                    { value: "design", label: "Design" },
+                    { value: "prototype", label: "Prototype" },
+                    { value: "inspect", label: "Inspect" },
+                  ]}
+                  value={rightTab}
+                  onChange={(tab) => setRightTab(tab as RightTab)}
+                />
+              </div>
+              {rightTab === "design" ? (
+                <>
+                  <Inspector />
+                  <ExportPanel />
+                </>
+              ) : rightTab === "prototype" ? (
+                <PrototypePanel fileId={fileId} />
+              ) : (
+                <InspectPanel />
+              )}
+            </PopoverRoomContext.Provider>
           </aside>
         ) : null}
         {/* Anchored to the one full canvas: not while main and the branch share the screen. */}

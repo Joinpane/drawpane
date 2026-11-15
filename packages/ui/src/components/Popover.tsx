@@ -25,7 +25,8 @@ export interface PopoverProps extends Omit<ComponentPropsWithRef<"div">, "childr
   /**
    * What it opens beside, when not the anchor itself: a button at a panel's
    * edge can open beside the whole panel, as Figma's type settings do. The
-   * anchor still takes focus back and Escape.
+   * anchor still takes focus back and Escape. A popover opened from inside
+   * another opens beside that one by default, so it never covers it.
    */
   beside?: HTMLElement | undefined;
   /** Preferred side; flips to the opposite side when there's no room. Default "left". */
@@ -39,6 +40,37 @@ export interface PopoverProps extends Omit<ComponentPropsWithRef<"div">, "childr
   children: ReactNode;
 }
 
+/** A box in viewport pixels. */
+export interface PopoverRect {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
+/**
+ * Where popovers opened inside it may go, read when one is placed. The
+ * inspector keeps its popovers over the canvas and off the selection; the
+ * Selection Lens keeps its own between the panes.
+ */
+export interface PopoverRoom {
+  /** Where they may go; the viewport when absent. */
+  readonly bounds?: () => PopoverRect | null;
+  /** What they keep clear of whenever some placement allows: the work being edited. */
+  readonly avoid?: () => PopoverRect | null;
+  /**
+   * Calls back when `avoid` becomes something else (another layer is
+   * selected), so open ones move; returns the unsubscribe function. Not as
+   * it's edited, so a popover never moves out from under the pointer.
+   */
+  readonly subscribe?: (onChange: () => void) => () => void;
+  /** Called as one opens; returns what to call as it closes. */
+  readonly onOpen?: () => () => void;
+}
+
+/** Sets the room for every popover opened inside, nested ones included. */
+export const PopoverRoomContext = createContext<PopoverRoom>({});
+
 interface Registry {
   /** Registers a nested popover's element; returns the unregister function. */
   add(el: HTMLElement): () => void;
@@ -47,46 +79,117 @@ interface Registry {
 const PopoverContext = createContext<Registry | null>(null);
 const MARGIN = 8;
 
-/** Where a box of `size` goes beside `anchor` on `side`, kept inside the viewport. */
+const OPPOSITE: Record<PopoverSide, PopoverSide> = {
+  left: "right",
+  right: "left",
+  top: "bottom",
+  bottom: "top",
+};
+/** The other axis, tried when neither the side nor its opposite works. */
+const ACROSS: Record<PopoverSide, readonly [PopoverSide, PopoverSide]> = {
+  left: ["bottom", "top"],
+  right: ["bottom", "top"],
+  top: ["left", "right"],
+  bottom: ["left", "right"],
+};
+
+const overlaps = (a: PopoverRect, b: PopoverRect) =>
+  a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+
+/**
+ * Where a box of `size` goes beside `anchor` on `side`, kept inside the
+ * viewport (or `room.bounds`): on `side`, else the opposite side, else the
+ * other axis. With `room.avoid`, it first looks, in that order, for a side
+ * that doesn't cover that box, then for one where sliding along the anchor's
+ * edge clears it, then for one beside the anchor and that box together; when
+ * none does, it places as without it.
+ */
 export function placePopover(
   anchor: DOMRect,
   size: { width: number; height: number },
   viewport: { width: number; height: number },
   side: PopoverSide,
   offset: number,
+  room: { bounds?: PopoverRect | null | undefined; avoid?: PopoverRect | null | undefined } = {},
 ): { left: number; top: number; side: PopoverSide } {
-  const fits = (s: PopoverSide) =>
+  const bounds = room.bounds ?? { left: 0, top: 0, right: viewport.width, bottom: viewport.height };
+  const minX = bounds.left + MARGIN;
+  const minY = bounds.top + MARGIN;
+  const maxX = Math.max(minX, bounds.right - MARGIN - size.width);
+  const maxY = Math.max(minY, bounds.bottom - MARGIN - size.height);
+  const fits = (s: PopoverSide, r: PopoverRect = anchor) =>
     s === "left"
-      ? anchor.left - offset - size.width >= MARGIN
+      ? r.left - offset - size.width >= minX
       : s === "right"
-        ? anchor.right + offset + size.width <= viewport.width - MARGIN
+        ? r.right + offset + size.width <= bounds.right - MARGIN
         : s === "top"
-          ? anchor.top - offset - size.height >= MARGIN
-          : anchor.bottom + offset + size.height <= viewport.height - MARGIN;
-  const opposite: Record<PopoverSide, PopoverSide> = {
-    left: "right",
-    right: "left",
-    top: "bottom",
-    bottom: "top",
-  };
-  const chosen = fits(side) || !fits(opposite[side]) ? side : opposite[side];
-  let left: number;
-  let top: number;
-  if (chosen === "left" || chosen === "right") {
-    left = chosen === "left" ? anchor.left - offset - size.width : anchor.right + offset;
-    // Align tops, so the popover reads as coming from the row that opened it.
-    top = anchor.top - MARGIN;
-  } else {
-    top = chosen === "top" ? anchor.top - offset - size.height : anchor.bottom + offset;
-    left = anchor.left;
+          ? r.top - offset - size.height >= minY
+          : r.bottom + offset + size.height <= bounds.bottom - MARGIN;
+  const clampX = (x: number) => Math.min(Math.max(minX, x), maxX);
+  const clampY = (y: number) => Math.min(Math.max(minY, y), maxY);
+  const at = (s: PopoverSide, r: PopoverRect = anchor) =>
+    s === "left" || s === "right"
+      ? {
+          left: clampX(s === "left" ? r.left - offset - size.width : r.right + offset),
+          // Align tops, so the popover reads as coming from the row that opened it.
+          top: clampY(anchor.top - MARGIN),
+        }
+      : {
+          left: clampX(anchor.left),
+          top: clampY(s === "top" ? r.top - offset - size.height : r.bottom + offset),
+        };
+  const box = (p: { left: number; top: number }): PopoverRect => ({
+    ...p,
+    right: p.left + size.width,
+    bottom: p.top + size.height,
+  });
+  const done = (p: { left: number; top: number }, s: PopoverSide) => ({
+    left: Math.round(p.left),
+    top: Math.round(p.top),
+    side: s,
+  });
+
+  const sides = [side, OPPOSITE[side], ...ACROSS[side]];
+  const order = sides.filter((s) => fits(s));
+  const avoid = room.avoid;
+  if (avoid) {
+    // Right beside the anchor on any side, before sliding along one.
+    for (const s of order) {
+      const p = at(s);
+      if (!overlaps(box(p), avoid)) return done(p, s);
+    }
+    for (const s of order) {
+      // To just before or after what it avoids, along the anchor's edge, whichever is nearer.
+      const p = at(s);
+      const across = s === "left" || s === "right" ? "top" : "left";
+      const length = across === "top" ? size.height : size.width;
+      const [lo, hi] = across === "top" ? [minY, maxY] : [minX, maxX];
+      const before = (across === "top" ? avoid.top : avoid.left) - offset - length;
+      const after = (across === "top" ? avoid.bottom : avoid.right) + offset;
+      const slid = [before, after]
+        .filter((v) => v >= lo - 0.5 && v <= hi + 0.5)
+        .sort((a, b) => Math.abs(a - p[across]) - Math.abs(b - p[across]))[0];
+      if (slid !== undefined) return done({ ...p, [across]: slid }, s);
+    }
+    // Out past it: beside the anchor and what it avoids together.
+    const both = {
+      left: Math.min(anchor.left, avoid.left),
+      top: Math.min(anchor.top, avoid.top),
+      right: Math.max(anchor.right, avoid.right),
+      bottom: Math.max(anchor.bottom, avoid.bottom),
+    };
+    for (const s of sides) {
+      if (!fits(s, both)) continue;
+      const p = at(s, both);
+      if (!overlaps(box(p), avoid)) return done(p, s);
+    }
   }
-  const clampX = Math.max(MARGIN, viewport.width - size.width - MARGIN);
-  const clampY = Math.max(MARGIN, viewport.height - size.height - MARGIN);
-  return {
-    left: Math.round(Math.min(Math.max(MARGIN, left), clampX)),
-    top: Math.round(Math.min(Math.max(MARGIN, top), clampY)),
-    side: chosen,
-  };
+  const chosen = fits(side)
+    ? side
+    : fits(OPPOSITE[side])
+      ? OPPOSITE[side]
+      : (ACROSS[side].find((s) => fits(s)) ?? side);
+  return done(at(chosen), chosen);
 }
 
 /**
@@ -107,7 +210,8 @@ export function useInPopover(ref: RefObject<HTMLElement | null>): void {
  * renders in a portal so panes never clip it, follows its anchor as layout
  * changes, closes on Escape (in it, or on its anchor) or a pointer down
  * outside, and returns focus to the anchor. Popovers opened from inside another stay part of it, so using a
- * nested color picker never closes the effect editor that opened it.
+ * nested color picker never closes the effect editor that opened it, and
+ * open beside it rather than over it. `PopoverRoomContext` says where they may go.
  */
 export function Popover({
   anchor,
@@ -124,6 +228,7 @@ export function Popover({
   ...rest
 }: PopoverProps) {
   const parent = useContext(PopoverContext);
+  const room = useContext(PopoverRoomContext);
   const el = useRef<HTMLDivElement | null>(null);
   const nested = useRef(new Set<HTMLElement>());
   const [place, setPlace] = useState<{ left: number; top: number; side: PopoverSide } | null>(null);
@@ -150,20 +255,26 @@ export function Popover({
     return parent.add(el.current);
   }, [parent]);
 
+  useEffect(() => room.onOpen?.(), [room]);
+
+  // Opened from inside another popover: beside that one, so it stays readable.
+  const nextTo = beside ?? anchor.closest<HTMLElement>(".dp-popover") ?? undefined;
+
   const position = useCallback(() => {
     const node = el.current;
     if (!node) return;
     const next = placePopover(
-      (beside ?? anchor).getBoundingClientRect(),
+      (nextTo ?? anchor).getBoundingClientRect(),
       { width: node.offsetWidth, height: node.offsetHeight },
       { width: window.innerWidth, height: window.innerHeight },
       side,
       offset,
+      { bounds: room.bounds?.(), avoid: room.avoid?.() },
     );
     setPlace((p) =>
       p && p.left === next.left && p.top === next.top && p.side === next.side ? p : next,
     );
-  }, [anchor, beside, side, offset]);
+  }, [anchor, nextTo, side, offset, room]);
 
   useLayoutEffect(() => {
     position();
@@ -171,16 +282,18 @@ export function Popover({
     const observer = new ResizeObserver(position);
     if (node) observer.observe(node);
     observer.observe(anchor);
-    if (beside) observer.observe(beside);
+    if (nextTo) observer.observe(nextTo);
     window.addEventListener("resize", position);
     // Panes scroll: follow the anchor (capture catches scrolls of any ancestor).
     window.addEventListener("scroll", position, true);
+    const unsubscribe = room.subscribe?.(position);
     return () => {
+      unsubscribe?.();
       observer.disconnect();
       window.removeEventListener("resize", position);
       window.removeEventListener("scroll", position, true);
     };
-  }, [anchor, beside, position]);
+  }, [anchor, nextTo, position, room]);
 
   useEffect(() => {
     const inside = (target: EventTarget | null) => {
