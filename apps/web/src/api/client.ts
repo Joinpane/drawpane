@@ -45,6 +45,8 @@ export interface FileMeta {
   readonly isTemplate?: boolean;
   /** A branch's main file (decision 0012); null for a main file. */
   readonly branchOf?: string | null;
+  /** In file lists: how many of its branches are open. */
+  readonly openBranches?: number;
 }
 export interface Member {
   readonly id: string;

@@ -169,7 +169,7 @@ function ReviewItem({
       </div>
       {row.conflict && row.sides && included ? (
         <fieldset className="review-row__sides" disabled={!canMerge}>
-          <legend className="review-row__legend">Keep which?</legend>
+          <legend className="dp-visually-hidden">Keep which?</legend>
           <SideOption
             label="Main"
             value={row.sides.main}

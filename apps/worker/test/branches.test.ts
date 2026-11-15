@@ -304,3 +304,19 @@ describe("branches and their main file", () => {
     expect(await env.FILES.head(branchBaseKey(branch.id))).toBeNull();
   });
 });
+
+describe("file lists", () => {
+  it("count each file's open branches", async () => {
+    const { browser, teamId, mainId, branch } = await mainWithBranch();
+    const count = async () =>
+      (
+        await browser.json<{ files: Array<{ id: string; openBranches: number }> }>(
+          `/api/teams/${teamId}/files`,
+        )
+      ).files.find((f) => f.id === mainId)?.openBranches;
+    expect(await count()).toBe(1);
+    // Merged branches are history, not open work.
+    await browser.json(`/api/files/${branch.id}/branch/merge`, { method: "POST", json: {} });
+    expect(await count()).toBe(0);
+  });
+});

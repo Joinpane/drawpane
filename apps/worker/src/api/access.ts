@@ -55,7 +55,13 @@ export interface FileRow {
   is_template?: number;
   /** A branch's main file (decision 0012); null for a main file. */
   branch_of?: string | null;
+  /** In lists: how many of its branches are open (see OPEN_BRANCHES). */
+  open_branches?: number;
 }
+
+/** A column for file lists over `files`: how many open branches each file has. */
+export const OPEN_BRANCHES = `(SELECT COUNT(*) FROM files ob JOIN branches obr ON obr.file_id = ob.id
+   WHERE ob.branch_of = files.id AND obr.merged_at IS NULL) AS open_branches`;
 
 export async function requireFileRole(
   env: Env,
@@ -98,5 +104,6 @@ export function toFile(row: FileRow) {
     thumbnailAt: row.thumbnail_at ?? null,
     isTemplate: row.is_template === 1,
     branchOf: row.branch_of ?? null,
+    openBranches: row.open_branches ?? 0,
   };
 }

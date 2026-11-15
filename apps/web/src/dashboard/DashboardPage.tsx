@@ -759,6 +759,16 @@ function FileCard({
               Template
             </span>
           ) : null}
+          {file.openBranches && !trash ? (
+            <span
+              className="dash__branch-tag"
+              title={`${file.openBranches} open ${file.openBranches === 1 ? "branch" : "branches"}`}
+            >
+              <Icon name="branch" size={12} />
+              <span className="dp-visually-hidden">Open branches: </span>
+              {file.openBranches}
+            </span>
+          ) : null}
           {trash
             ? `Deleted ${timeAgo(file.deletedAt ?? file.updatedAt)}`
             : `Edited ${timeAgo(file.updatedAt)}`}

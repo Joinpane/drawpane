@@ -1246,3 +1246,18 @@
 .invite__result--warn > svg {
   color: var(--warning);
 }
+
+/* A file's open branches (decision 0012), beside its edited time. */
+.dash__branch-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: var(--space-100);
+  padding: 0 6px 0 4px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--info) 10%, var(--surface));
+  color: var(--info);
+  font: 500 11px / 16px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  vertical-align: 1px;
+}
