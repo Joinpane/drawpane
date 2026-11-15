@@ -461,3 +461,138 @@ describe("the showcase export", () => {
     expect(notes.lines()).toEqual([]);
   });
 });
+
+describe("gaps the import used to drop", () => {
+  it("brings an imported SVG's drawable content in, as a group", () => {
+    const { nodes, notes } = convertFile(
+      fileOf([
+        {
+          id: "svg",
+          type: "svg-raw",
+          parentId: ROOT,
+          shapes: ["shape", "defs"],
+          ...box(0, 0, 40, 40),
+        },
+        {
+          id: "shape",
+          type: "path",
+          parentId: "svg",
+          content: "M0,0L40,0L40,40Z",
+          fills: [{ fillColor: "#ff0000", fillOpacity: 1 }],
+        },
+        {
+          id: "defs",
+          type: "svg-raw",
+          parentId: "svg",
+          content: { tag: "defs" },
+          ...box(0, 0, 0, 0),
+        },
+      ]),
+      noMedia,
+    );
+    expect(nodes.find((n) => n.id === "svg")?.type).toBe("group");
+    expect(nodes.find((n) => n.id === "shape")?.parent).toBe("svg");
+    expect(notes.lines()).toEqual(["1 raw SVG element wasn't imported"]);
+    validate(nodes);
+  });
+
+  it("keeps an absolute child's constraints, a board's guides, and aspect locks", () => {
+    const file = fileOf([
+      {
+        id: "board",
+        type: "frame",
+        parentId: ROOT,
+        shapes: ["badge"],
+        layout: "flex",
+        layoutFlexDir: "row",
+        ...box(100, 50, 300, 200),
+      },
+      {
+        id: "badge",
+        type: "rect",
+        parentId: "board",
+        layoutItemAbsolute: true,
+        constraintsH: "right",
+        constraintsV: "bottom",
+        proportionLock: true,
+        ...box(360, 210, 30, 30),
+      },
+    ]);
+    // A guide on the board, at x = 150 on the page.
+    (file.pages[0]?.record as Record<string, unknown>).guides = {
+      g1: { id: "g1", axis: "x", position: 150, frameId: "board" },
+    };
+    const { nodes } = convertFile(file, noMedia);
+    expect(nodes.find((n) => n.id === "badge")?.props).toMatchObject({
+      positioning: "absolute",
+      constraintH: "end",
+      constraintV: "end",
+      lockAspect: true,
+    });
+    expect(nodes.find((n) => n.id === "board")?.props.rulerGuides).toEqual([
+      { axis: "x", offset: 50 },
+    ]);
+    validate(nodes);
+  });
+
+  it("ties a stroke to its library colour", () => {
+    const { nodes } = convertFile(
+      fileOf(
+        [
+          {
+            id: "r",
+            type: "rect",
+            parentId: ROOT,
+            ...box(0, 0, 10, 10),
+            strokes: [
+              { strokeColor: "#007ca5", strokeOpacity: 1, strokeWidth: 1, strokeColorRefId: "c1" },
+            ],
+          },
+        ],
+        {
+          colors: new Map([["c1", { id: "c1", name: "Primary", color: "#007ca5", opacity: 1 }]]),
+        },
+      ),
+      noMedia,
+    );
+    expect(nodes.find((n) => n.id === "r")?.props.bindings).toEqual({ stroke: "c1" });
+    validate(nodes);
+  });
+
+  it("notes what still can't come across", () => {
+    const { notes } = convertFile(
+      fileOf(
+        [
+          {
+            id: "line",
+            type: "path",
+            parentId: ROOT,
+            content: "M0,0L40,0",
+            strokes: [
+              {
+                strokeColor: "#000000",
+                strokeWidth: 2,
+                strokeCapStart: "round",
+                strokeCapEnd: "square",
+              },
+            ],
+          },
+        ],
+        {
+          record: { id: "f", features: ["components/v2", "something/v9"] },
+          colors: new Map([
+            ["g", { id: "g", name: "Sunset", gradient: { type: "linear", stops: [] } }],
+          ]),
+        },
+      ),
+      noMedia,
+    );
+    expect(notes.lines()).toEqual(
+      expect.arrayContaining([
+        "1 file uses Penpot features this import doesn't know yet, so some of it may look different",
+        "1 library colour that's a gradient or an image wasn't kept as a variable",
+        "1 line's two different end caps became one",
+      ]),
+    );
+  });
+});
