@@ -275,6 +275,12 @@ async function buildParity(figma, suites) {
     node.effects = (spec.effects ?? []).map(effect);
     if (spec.opacity !== undefined) node.opacity = spec.opacity;
     if (spec.blendMode) node.blendMode = BLEND(spec.blendMode);
+    if (spec.isMask) {
+      node.isMask = true;
+      node.maskType = { outline: "VECTOR", alpha: "ALPHA", luminance: "LUMINANCE" }[
+        spec.maskType ?? "outline"
+      ];
+    }
     for (const child of spec.children ?? []) await layer(child, node, origin);
     place(node, spec);
     return node;

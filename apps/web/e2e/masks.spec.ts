@@ -1,7 +1,8 @@
 /**
  * Masks in a real browser: ⌥⌘M groups a photo with a circle under it, the
  * canvas only shows the photo inside the circle, clicks outside it miss, the
- * layers panel says which is which, and the menu removes the mask again.
+ * layers panel says which is which, the inspector makes it mask by alpha
+ * (a fading circle fades the photo), and the menu removes the mask again.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { canvasColor, freshInstance, type Instance } from "./fresh-instance";
@@ -15,6 +16,7 @@ type Debug = {
     props?: Record<string, unknown>,
   ): string | null;
   select(ids: string[]): void;
+  setProp(ids: string[], prop: string, value: unknown, label: string): void;
   reorder(d: string): void;
   zoomTo(z: number): void;
   setCamera(c: unknown): void;
@@ -105,6 +107,55 @@ test.describe
       expect(
         await page.evaluate(() => (window as unknown as { drawpane: Debug }).drawpane.s.selection),
       ).toEqual([]);
+    });
+
+    test("masks by alpha from the inspector: a fading mask fades what it masks", async () => {
+      await page.evaluate(
+        ({ id }) => {
+          const e = (window as unknown as { drawpane: Debug }).drawpane;
+          e.setProp(
+            [id],
+            "fills",
+            [
+              {
+                type: "linear",
+                from: { x: 0, y: 0.5 },
+                to: { x: 1, y: 0.5 },
+                stops: [
+                  { position: 0, color: "#000000" },
+                  { position: 1, color: "#00000000" },
+                ],
+              },
+            ],
+            "Fade",
+          );
+          e.select([id]);
+        },
+        { id: circle },
+      );
+      const left = await screenOf(page, { x: 115, y: 200 });
+      const right = await screenOf(page, { x: 285, y: 200 });
+      // By its outline (the default), the fill doesn't matter: the photo shows across it.
+      await expect.poll(() => canvasColor(page, right)).toBe(BLUE);
+
+      const inspector = page.getByRole("complementary", { name: "Inspector" });
+      await inspector.getByLabel("Mask type").selectOption("alpha");
+      await expect
+        .poll(() =>
+          page.evaluate(
+            (id) => (window as unknown as { drawpane: Debug }).drawpane.doc.get(id)?.props.maskType,
+            circle,
+          ),
+        )
+        .toBe("alpha");
+      // Where the mask is opaque the photo shows; where it has faded, hardly any of it.
+      const blueness = (hex: string) =>
+        Number.parseInt(hex.slice(5, 7), 16) - Number.parseInt(hex.slice(1, 3), 16);
+      await expect.poll(async () => blueness(await canvasColor(page, left))).toBeGreaterThan(150);
+      await expect.poll(async () => blueness(await canvasColor(page, right))).toBeLessThan(30);
+
+      await inspector.getByLabel("Mask type").selectOption("outline");
+      await expect.poll(() => canvasColor(page, right)).toBe(BLUE);
     });
 
     test("removes the mask from the menu", async () => {

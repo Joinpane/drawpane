@@ -15,6 +15,7 @@ type Debug = {
     props?: Record<string, unknown>,
   ): string | null;
   select(ids: string[]): void;
+  setProp(ids: string[], prop: string, value: unknown, label: string): void;
   toggleMask(): void;
   zoomToFit(): void;
 };
@@ -68,4 +69,31 @@ test("masks tour", async ({ browser }) => {
     circle,
   );
   await shot(page, "95-mask");
+
+  // Masking by alpha: a circle fading to the right fades the photo with it.
+  await page.evaluate(
+    (id) =>
+      (window as unknown as { drawpane: Debug }).drawpane.setProp(
+        [id],
+        "fills",
+        [
+          {
+            type: "linear",
+            from: { x: 0, y: 0.5 },
+            to: { x: 1, y: 0.5 },
+            stops: [
+              { position: 0, color: "#000000" },
+              { position: 1, color: "#00000000" },
+            ],
+          },
+        ],
+        "Fade",
+      ),
+    circle,
+  );
+  await page
+    .getByRole("complementary", { name: "Inspector" })
+    .getByLabel("Mask type")
+    .selectOption("alpha");
+  await shot(page, "173-mask-alpha");
 });

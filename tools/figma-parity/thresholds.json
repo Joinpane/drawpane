@@ -137,5 +137,14 @@
     "circle-y": 0.59,
     "pill-x": 0.49,
     "pill-y": 0.76
+  },
+  "masks": {
+    "alpha-fade": 0.56,
+    "luminance-fade": 0.57,
+    "outline-translucent": 0.37,
+    "alpha-translucent": 0.72,
+    "alpha-blurred": 1.32,
+    "alpha-opacity": 0.4,
+    "luminance-spot": 0.52
   }
 }

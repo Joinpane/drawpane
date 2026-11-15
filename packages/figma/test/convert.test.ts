@@ -299,6 +299,38 @@ describe("strokes", () => {
   });
 });
 
+describe("masks", () => {
+  it("keep how they mask: by alpha (Figma's default), luminance or outline", () => {
+    const mask = (id: string, name: string, extra: Partial<Figma.Node>) =>
+      node({
+        id,
+        type: "RECTANGLE",
+        name,
+        size: { x: 40, y: 40 },
+        relativeTransform: at(0, 0),
+        fills: [{ type: "SOLID", color: white }],
+        isMask: true,
+        ...extra,
+      });
+    const { nodes } = convertFile(
+      file(
+        mask("1:30", "Alpha", { maskType: "ALPHA" }),
+        mask("1:31", "Luminance", { maskType: "LUMINANCE" }),
+        mask("1:32", "Outline", { maskType: "VECTOR" }),
+        mask("1:33", "Old alpha", {}),
+        mask("1:34", "Old outline", { isMaskOutline: true }),
+      ),
+    );
+    validate(nodes);
+    const type = (name: string) => getProp(byName(nodes, name).props, "maskType");
+    expect(type("Alpha")).toBe("alpha");
+    expect(type("Luminance")).toBe("luminance");
+    expect(type("Outline")).toBe("outline");
+    expect(type("Old alpha")).toBe("alpha");
+    expect(type("Old outline")).toBe("outline");
+  });
+});
+
 describe("vectors", () => {
   it("draws an open vector network as path data", () => {
     expect(

@@ -1,0 +1,491 @@
+{
+  "suite": "masks",
+  "about": "Masks by outline, alpha and luminance: gradient fades, a translucent mask both ways, a blurred mask, a half-opacity mask layer and a radial luminance spot, over the same three layers.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#f4f3ef",
+  "cells": [
+    {
+      "id": "alpha-fade",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000ff"
+                },
+                {
+                  "position": 1,
+                  "color": "#00000000"
+                }
+              ]
+            }
+          ],
+          "isMask": true,
+          "maskType": "alpha"
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e8590c"
+            }
+          ]
+        },
+        {
+          "type": "ellipse",
+          "x": 110,
+          "y": 30,
+          "width": 100,
+          "height": 100,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#2b4fd6"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 70,
+          "width": 120,
+          "height": 24,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "luminance-fade",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#ffffff"
+                },
+                {
+                  "position": 1,
+                  "color": "#000000"
+                }
+              ]
+            }
+          ],
+          "isMask": true,
+          "maskType": "luminance"
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e8590c"
+            }
+          ]
+        },
+        {
+          "type": "ellipse",
+          "x": 110,
+          "y": 30,
+          "width": 100,
+          "height": 100,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#2b4fd6"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 70,
+          "width": 120,
+          "height": 24,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "outline-translucent",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#0000004d"
+            }
+          ],
+          "isMask": true,
+          "maskType": "outline"
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e8590c"
+            }
+          ]
+        },
+        {
+          "type": "ellipse",
+          "x": 110,
+          "y": 30,
+          "width": 100,
+          "height": 100,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#2b4fd6"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 70,
+          "width": 120,
+          "height": 24,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "alpha-translucent",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#0000004d"
+            }
+          ],
+          "isMask": true,
+          "maskType": "alpha"
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e8590c"
+            }
+          ]
+        },
+        {
+          "type": "ellipse",
+          "x": 110,
+          "y": 30,
+          "width": 100,
+          "height": 100,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#2b4fd6"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 70,
+          "width": 120,
+          "height": 24,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "alpha-blurred",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 50,
+          "y": 40,
+          "width": 140,
+          "height": 80,
+          "cornerRadius": 0,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#000000"
+            }
+          ],
+          "isMask": true,
+          "maskType": "alpha",
+          "effects": [
+            {
+              "type": "layer-blur",
+              "radius": 12
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e8590c"
+            }
+          ]
+        },
+        {
+          "type": "ellipse",
+          "x": 110,
+          "y": 30,
+          "width": 100,
+          "height": 100,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#2b4fd6"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 70,
+          "width": 120,
+          "height": 24,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "alpha-opacity",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#000000"
+            }
+          ],
+          "isMask": true,
+          "maskType": "alpha",
+          "opacity": 0.5
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e8590c"
+            }
+          ]
+        },
+        {
+          "type": "ellipse",
+          "x": 110,
+          "y": 30,
+          "width": 100,
+          "height": 100,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#2b4fd6"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 70,
+          "width": 120,
+          "height": 24,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "luminance-spot",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "cornerRadius": 0,
+          "fills": [
+            {
+              "type": "radial",
+              "from": {
+                "x": 0.5,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#ffffff"
+                },
+                {
+                  "position": 1,
+                  "color": "#000000"
+                }
+              ]
+            }
+          ],
+          "isMask": true,
+          "maskType": "luminance"
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e8590c"
+            }
+          ]
+        },
+        {
+          "type": "ellipse",
+          "x": 110,
+          "y": 30,
+          "width": 100,
+          "height": 100,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#2b4fd6"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 70,
+          "width": 120,
+          "height": 24,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

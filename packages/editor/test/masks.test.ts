@@ -96,6 +96,45 @@ describe("masks", () => {
     // The mask itself isn't drawn.
     expect(svg.match(/<ellipse/g)?.length).toBe(1);
   });
+
+  it("export by alpha or luminance as an SVG mask holding the mask layer itself", () => {
+    for (const maskType of ["alpha", "luminance"] as const) {
+      const editor = setup(
+        avatar().map((s) =>
+          s.id === "circle"
+            ? {
+                ...s,
+                maskType,
+                fills: [
+                  {
+                    type: "linear",
+                    from: { x: 0, y: 0.5 },
+                    to: { x: 1, y: 0.5 },
+                    stops: [
+                      { position: 0, color: "#ffffff" },
+                      { position: 1, color: "#ffffff00" },
+                    ],
+                  },
+                ],
+              }
+            : s,
+        ),
+      );
+      const svg = exportSvg(editor.scene, editor.measurer, ["g"], {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+      });
+      // The circle, drawn with its gradient, inside the <mask>; the card masked by it.
+      const id = new RegExp(
+        `<mask id="(\\w+)"[^>]*style="mask-type:${maskType}"><ellipse[^>]*fill="url\\(#`,
+      ).exec(svg)?.[1];
+      expect(id).toBeTruthy();
+      expect(svg).toContain(`<g mask="url(#${id})"><rect`);
+      expect(svg).not.toContain("<clipPath");
+    }
+  });
 });
 
 describe("use as mask", () => {

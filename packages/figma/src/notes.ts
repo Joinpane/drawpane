@@ -30,10 +30,6 @@ export const NOTE_TEXT = {
     "glass effects came in with default settings (Figma's API doesn't share them)",
   ],
   "blur-progressive": ["progressive blur became even", "progressive blurs became even"],
-  "mask-alpha": [
-    "alpha or luminance mask became an outline mask",
-    "alpha or luminance masks became outline masks",
-  ],
   "text-paragraphs": [
     "text's per-paragraph styles became one",
     "texts' per-paragraph styles became one",

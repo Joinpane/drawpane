@@ -570,6 +570,12 @@ export const PROPS = {
    * the next mask), and it isn't drawn itself, like Figma's "Use as mask".
    */
   isMask: prop(z.boolean(), false, MASKABLE),
+  /**
+   * How a mask masks, as in Figma: by its outline (a hard clip), by its
+   * alpha (fills, gradients, opacity and blur fade what's above), or by its
+   * luminance (light shows, dark hides).
+   */
+  maskType: prop(z.enum(["outline", "alpha", "luminance"]), "outline", MASKABLE),
 
   cornerRadius: prop(nonNegative, 0, ROUNDED),
 
