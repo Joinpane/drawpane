@@ -562,6 +562,25 @@ describe("LayerRow", () => {
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 
+  it("double-clicking the kind icon calls onIconDoubleClick instead of renaming", async () => {
+    const user = userEvent.setup();
+    const onIconDoubleClick = vi.fn();
+    const { container } = render(
+      <div role="tree" aria-label="Layers">
+        <LayerRow name="Hero card" onRename={vi.fn()} onIconDoubleClick={onIconDoubleClick} />
+      </div>,
+    );
+    const icon = container.querySelector(".dp-layer__icon");
+    if (!icon) throw new Error("no icon");
+    await user.dblClick(icon);
+    expect(onIconDoubleClick).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("textbox")).toBeNull();
+    // The rest of the row still renames.
+    await user.dblClick(screen.getByText("Hero card"));
+    expect(screen.getByRole("textbox", { name: "Layer name" })).toBeTruthy();
+    expect(onIconDoubleClick).toHaveBeenCalledTimes(1);
+  });
+
   it("toggles visibility without selecting the row", async () => {
     const user = userEvent.setup();
     const onToggleHidden = vi.fn();

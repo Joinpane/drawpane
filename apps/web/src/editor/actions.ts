@@ -817,7 +817,7 @@ export const ACTIONS: readonly Action[] = [
     icon: "search",
     defaultShortcut: { key: "2", shift: true },
     enabled: hasSelection,
-    run: ({ editor }) => editor.zoomToSelection(),
+    run: ({ editor }) => editor.zoomToSelection({ animate: true }),
   },
   {
     id: "view.focus",
