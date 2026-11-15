@@ -28,7 +28,17 @@ import { AssetsPanel } from "./AssetsPanel";
 import { roleChangeNotice } from "./access-notices";
 import { ACTIONS, type ActionContext, shortcutFor, triggers } from "./actions";
 import { loadBooleanEngine } from "./boolean-engine";
-import { BranchMenu, MergePane, ReviewPane, type ReviewRow, useBranchReview } from "./branches";
+import {
+  BranchMenu,
+  CompareBar,
+  CompareCanvases,
+  CompareView,
+  changedBounds,
+  MergePane,
+  ReviewPane,
+  type ReviewRow,
+  useBranchReview,
+} from "./branches";
 import { Canvas } from "./Canvas";
 import { CommandPalette } from "./CommandPalette";
 import { ContextMenus } from "./ContextMenus";
@@ -190,6 +200,43 @@ function FileEditor({ fileId }: { fileId: string }) {
       });
   });
   const canMerge = meta.data?.role !== undefined && meta.data.role !== "viewer";
+  // Main beside the branch while reviewing it, once review has read main.
+  const compare = useMemo(
+    () => new CompareView(editor, new Editor({ measurer: editor.measurer })),
+    [editor],
+  );
+  const comparing = reviewing && review.main !== null;
+  const compareMode = useSyncExternalStore(compare.state.subscribe, () => compare.s.mode);
+  const [activeChange, setActiveChange] = useState<string | null>(null);
+  useEffect(() => {
+    if (!comparing || !review.main) return;
+    compare.load(review.main);
+    return compare.link();
+  }, [comparing, review.main, compare]);
+  // On opening review, and on changing how the two are shown (the canvases move), show
+  // everything that changed on this page, once the canvases have their new size.
+  const fittedReview = useRef<string | null>(null);
+  const reviewRows = review.rows;
+  useEffect(() => {
+    if (!comparing) {
+      fittedReview.current = null;
+      return;
+    }
+    if (fittedReview.current === compareMode || !reviewRows) return;
+    fittedReview.current = compareMode;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        const bounds = changedBounds(
+          editor,
+          reviewRows.map((r) => r.id),
+        );
+        if (!bounds) editor.zoomToFit();
+        else
+          editor.setCamera(editor.s.camera.fit(bounds, editor.s.viewport, 96, 2, editor.s.insets));
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [comparing, compareMode, reviewRows, editor]);
   // What the room says about merges, read from the latest of these.
   const branchRef = useRef({ branch, mainFile, openMain });
   branchRef.current = { branch, mainFile, openMain };
@@ -239,7 +286,8 @@ function FileEditor({ fileId }: { fileId: string }) {
   useViewPreferences(editor);
   // Hints and tooltips across the editor show the person's own shortcuts: redraw when they change.
   useOverridesVersion();
-  const rulersOn = useEditorStateOutside(editor, (s) => s.rulers) && view === "design" && !viewing;
+  const rulersOn =
+    useEditorStateOutside(editor, (s) => s.rulers) && view === "design" && !viewing && !comparing;
   // Room for the floating panes (12px margin + pane width), so comment popovers open over the canvas.
   const insets = useMemo(
     () => ({
@@ -258,15 +306,29 @@ function FileEditor({ fileId }: { fileId: string }) {
   useEffect(() => {
     // Rulers take 20px plus a 4px gap, along the top and the left.
     const ruler = rulersOn ? RULER + RULER_GAP : 0;
+    // Side by side, each half sits between the panes already; the compare bar and labels are on top.
+    const between = comparing && compareMode === "side";
     const next = {
-      top: (viewing ? 104 : 60) + ruler,
+      top: comparing ? 148 : (viewing ? 104 : 60) + ruler,
       bottom: historyOpen ? 128 : 56,
-      left: rulersOn ? rulerLeft + ruler : insets.left,
-      right: insets.right,
+      left: between ? 0 : rulersOn ? rulerLeft + ruler : insets.left,
+      right: between ? 0 : insets.right,
     };
     editor.state.set({ insets: next });
     history.view.preview.state.set({ insets: next });
-  }, [editor, history.view, insets, historyOpen, viewing, rulersOn, rulerLeft]);
+    compare.main.state.set({ insets: next });
+  }, [
+    editor,
+    history.view,
+    compare,
+    insets,
+    historyOpen,
+    viewing,
+    rulersOn,
+    rulerLeft,
+    comparing,
+    compareMode,
+  ]);
 
   useEffect(
     () =>
@@ -452,21 +514,30 @@ function FileEditor({ fileId }: { fileId: string }) {
   );
   const ctxRef = useRef<ActionContext | null>(null);
   ctxRef.current = ctx;
-  /** Shows a reviewed change's layer on the canvas. */
+  /**
+   * Shows a reviewed change's layer: on the branch, or for a deletion, on
+   * main's side while comparing (the other side follows).
+   */
   const showChange = (row: ReviewRow) => {
-    const node = editor.doc.get(row.id);
-    if (!node) {
+    setActiveChange(row.key);
+    const where = editor.doc.has(row.id)
+      ? editor
+      : comparing && compare.main.doc.has(row.id)
+        ? compare.main
+        : null;
+    const node = where?.doc.get(row.id);
+    if (!where || !node) {
       editor.notify(`“${row.layer}” is deleted on this branch.`);
       return;
     }
     if (node.type === "page") {
-      editor.setPage(node.id);
+      where.setPage(node.id);
       return;
     }
-    const page = editor.doc.pageOf(row.id);
-    if (page && page.id !== editor.s.pageId) editor.setPage(page.id);
-    editor.select([row.id]);
-    requestAnimationFrame(() => editor.revealSelection());
+    const page = where.doc.pageOf(row.id);
+    if (page && page.id !== where.s.pageId) where.setPage(page.id);
+    where.select([row.id]);
+    requestAnimationFrame(() => where.revealSelection());
   };
 
   // Keyboard: shortcuts from the action registry, plus held keys (space to pan, Alt for X-ray) and arrows.
@@ -677,11 +748,27 @@ function FileEditor({ fileId }: { fileId: string }) {
         }
       >
         {/* Canvas, toolbar and layers show whichever document is on screen: now, or a version. */}
-        <EditorContext.Provider value={active}>
-          <Canvas key={viewing ? "version" : "live"} interaction={activeInteraction} />
-        </EditorContext.Provider>
+        {comparing && review.rows && branch && mainFile ? (
+          <CompareCanvases
+            compare={compare}
+            live={editor}
+            liveInteraction={interaction}
+            rows={review.rows}
+            active={activeChange}
+            labels={{
+              main: `${mainFile.name} · now`,
+              branch: `${branch.name} · ${count(review.rows.length, "change")}`,
+            }}
+            onPick={showChange}
+          />
+        ) : (
+          <EditorContext.Provider value={active}>
+            <Canvas key={viewing ? "version" : "live"} interaction={activeInteraction} />
+          </EditorContext.Provider>
+        )}
+        {comparing ? <CompareBar compare={compare} /> : null}
         {rulersOn ? <Rulers interaction={interaction} left={rulerLeft} right={rulerRight} /> : null}
-        {view === "design" && !viewing ? (
+        {view === "design" && !viewing && !comparing ? (
           <CommentsLayer
             store={comments.store}
             interaction={interaction}
@@ -750,6 +837,7 @@ function FileEditor({ fileId }: { fileId: string }) {
             main={mainFile}
             review={review}
             canMerge={canMerge}
+            active={activeChange}
             onSelect={showChange}
             onClose={() => setReviewing(false)}
           />
@@ -856,11 +944,12 @@ function FileEditor({ fileId }: { fileId: string }) {
             )}
           </aside>
         ) : null}
-        {view === "design" && !viewing ? <CropBar /> : null}
-        {view === "design" && !viewing ? <FollowOverlay /> : null}
-        {view === "design" && !viewing ? <ExplainCard /> : null}
-        {view === "design" && !viewing ? <XrayLegend /> : null}
-        {view === "design" && !viewing && !threadOpen ? (
+        {/* Anchored to the one full canvas: not while main and the branch share the screen. */}
+        {view === "design" && !viewing && !comparing ? <CropBar /> : null}
+        {view === "design" && !viewing && !comparing ? <FollowOverlay /> : null}
+        {view === "design" && !viewing && !comparing ? <ExplainCard /> : null}
+        {view === "design" && !viewing && !comparing ? <XrayLegend /> : null}
+        {view === "design" && !viewing && !threadOpen && !comparing ? (
           <Lens
             onOpenInspector={() => {
               comments.store.setPanel(false);
@@ -887,7 +976,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         ) : view === "design" ? (
           <>
             <EditorContext.Provider value={active}>
-              <Minimap />
+              {comparing ? null : <Minimap />}
               <ZoomControls />
             </EditorContext.Provider>
             <SyncStatus />
