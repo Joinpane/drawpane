@@ -4,7 +4,7 @@
  * color and opacity, and the selected stop's color in a full picker.
  */
 import { ColorPicker, IconButton, NumberField, SegmentedControl, toHex } from "@drawpane/ui";
-import { type KeyboardEvent, type PointerEvent, useRef, useState } from "react";
+import { type KeyboardEvent, type PointerEvent, useLayoutEffect, useRef, useState } from "react";
 import {
   angularHandles,
   CHECKER,
@@ -243,6 +243,23 @@ function HandlePreview({
   onEnd: () => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
+  // The handles sit in the preview's unit square, stretched to it as on a layer: the gradient
+  // under them is laid out for the preview's own size.
+  const [size, setSize] = useState({ width: 1, height: 1 });
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const measure = () => {
+      const width = el.clientWidth;
+      const height = el.clientHeight;
+      if (width > 0 && height > 0)
+        setSize((s) => (s.width === width && s.height === height ? s : { width, height }));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   const handle = (which: "from" | "to") => (
     <button
       type="button"
@@ -295,7 +312,7 @@ function HandlePreview({
     <div
       ref={box}
       className="gradient-editor__preview"
-      style={{ background: `${gradientCss(paint, true)}, ${CHECKER}` }}
+      style={{ background: `${gradientCss(paint, true, size)}, ${CHECKER}` }}
     >
       <svg
         className="gradient-editor__line"

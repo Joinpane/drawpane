@@ -64,6 +64,13 @@ test("inspector tour", async ({ browser }) => {
     .click();
   await expect(page.getByRole("button", { name: "Gradient start" })).toBeVisible();
   await shot(page, "63-picker-gradient");
+  // Radial: an ellipse on the preview, as on the layer, reaching its radius handle.
+  await page
+    .getByRole("dialog", { name: "Fill paint" })
+    .getByRole("radio", { name: "Radial" })
+    .click();
+  await expect(page.getByRole("button", { name: "Gradient radius" })).toBeVisible();
+  await shot(page, "181-picker-radial", page.getByRole("dialog", { name: "Fill paint" }));
   await page.keyboard.press("Escape");
 
   // Effects with a shadow open, and independent corners.

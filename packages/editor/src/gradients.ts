@@ -77,3 +77,62 @@ export function linearInPixels(
   const y0 = paint.from.y * h;
   return { x0, y0, x1: x0 + a / k, y1: y0 + b / k };
 }
+
+/**
+ * A gradient as CSS for a w × h box, laid out as the canvas draws it (the
+ * picker's preview and swatches, and code export). `color` writes one stop's
+ * color, opacity and all. Null when the handles meet, as the canvas then
+ * draws nothing.
+ *
+ * - Linear is exact: CSS spreads stops along a line through the box's centre
+ *   whose length depends on its angle and the box's corners, so the angle
+ *   and every stop's position are worked out for this box.
+ * - Radial is exact: the unit square's circle is an ellipse on the box, and
+ *   CSS's `ellipse x% y%` takes its percentages of the box's width and
+ *   height, just as the unit square does. (`circle` takes no percentage:
+ *   written that way, browsers drop the whole background.)
+ * - Angular starts toward `to`, as drawn. CSS sweeps evenly round the
+ *   centre, so on a box that isn't square its bands fall a little off the
+ *   canvas's, which sweeps evenly in the unit square.
+ */
+export function cssGradient(
+  paint: GradientPaint,
+  w: number,
+  h: number,
+  color: (hex: string) => string,
+): string | null {
+  const stops = [...paint.stops].sort((a, b) => a.position - b.position);
+  const list = (position: (p: number) => number) =>
+    stops.map((s) => `${color(s.color)} ${num(position(s.position) * 100)}%`).join(", ");
+  const at = `at ${num(paint.from.x * 100)}% ${num(paint.from.y * 100)}%`;
+  if (paint.type === "linear") {
+    const line = linearInPixels(paint, w, h);
+    if (!line) return null;
+    const vx = line.x1 - line.x0;
+    const vy = line.y1 - line.y0;
+    const length = Math.hypot(vx, vy);
+    const ux = vx / length;
+    const uy = vy / length;
+    // CSS: 0deg points up and turns clockwise; its line runs through the centre, corner to corner.
+    const angle = (Math.atan2(ux, -uy) * 180) / Math.PI;
+    const span = Math.abs(w * ux) + Math.abs(h * uy);
+    const centre = ((w / 2 - line.x0) * ux + (h / 2 - line.y0) * uy) / length;
+    return `linear-gradient(${num(((angle % 360) + 360) % 360)}deg, ${list((t) => 0.5 + ((t - centre) * length) / span)})`;
+  }
+  const dx = paint.to.x - paint.from.x;
+  const dy = paint.to.y - paint.from.y;
+  if (paint.type === "radial") {
+    const r = Math.hypot(dx, dy) * 100;
+    if (r < 1e-6) return null;
+    return `radial-gradient(ellipse ${num(r)}% ${num(r)}% ${at}, ${list((t) => t)})`;
+  }
+  if (Math.hypot(dx * w, dy * h) < 1e-9) return null;
+  // Canvas conic gradients start at 3 o'clock, CSS ones at 12: a quarter turn apart.
+  const start = (Math.atan2(dy * h, dx * w) * 180) / Math.PI + 90;
+  return `conic-gradient(from ${num(((start % 360) + 360) % 360)}deg ${at}, ${list((t) => t)})`;
+}
+
+/** At most two decimals, without trailing zeros. */
+function num(n: number): string {
+  return `${Math.round(n * 100) / 100}`;
+}

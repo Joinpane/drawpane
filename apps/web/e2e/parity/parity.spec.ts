@@ -149,6 +149,44 @@ function build(page: Page, suite: Suite) {
   );
 }
 
+/** The CSS font of each face the suite's text layers use: "800 96px Inter". */
+function textFaces(suite: Suite): string[] {
+  const faces = new Set<string>();
+  const visit = (layer: Layer) => {
+    if (layer.type === "text") {
+      const style = layer.fontStyle === "italic" ? "italic " : "";
+      const weight = typeof layer.fontWeight === "number" ? layer.fontWeight : 400;
+      const family = typeof layer.fontFamily === "string" ? layer.fontFamily : "Instrument Sans";
+      faces.add(`${style}${weight} 16px "${family}"`);
+    }
+    for (const child of layer.children ?? []) visit(child);
+  };
+  for (const cell of suite.cells) for (const layer of cell.layers) visit(layer);
+  return [...faces];
+}
+
+/**
+ * Waits for the faces the suite's text uses. Web fonts come from Google Fonts once the file uses
+ * them, and the canvas re-measures and redraws when one arrives: captured before that, text (and
+ * glass shaped by it) is in a fallback face or at the wrong width. On a slow CI runner that can
+ * take longer than any fixed wait. A face that never appears (a system font) stops the wait after
+ * a while, without failing it.
+ */
+async function waitForFonts(page: Page, suite: Suite): Promise<void> {
+  const faces = textFaces(suite);
+  if (faces.length === 0) return;
+  await page.evaluate(async (faces) => {
+    const deadline = performance.now() + 20_000;
+    const loaded = async (font: string) => (await document.fonts.load(font)).length > 0;
+    for (;;) {
+      const all = await Promise.all(faces.map(loaded));
+      if (all.every(Boolean) || performance.now() > deadline) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await document.fonts.ready;
+  }, faces);
+}
+
 /** Every cell's pixels on the canvas at 2× (RGBA, base64), in the suite's order. */
 /**
  * Every cell's pixels at 2×, each drawn centred in the view: a suite's grid
@@ -243,6 +281,7 @@ test.describe
         });
         await page.keyboard.press("ControlOrMeta+Shift+Backslash");
         await build(page, suite);
+        await waitForFonts(page, suite);
         await page.evaluate(
           ({ grid, scale }) => {
             const e = (window as unknown as W).drawpane;

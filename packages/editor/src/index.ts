@@ -15,6 +15,7 @@ export * from "./explain";
 export * from "./export";
 export * from "./geometry";
 export * from "./glass";
+export { cssGradient } from "./gradients";
 export * from "./grids";
 export * from "./history";
 export * from "./hit";
