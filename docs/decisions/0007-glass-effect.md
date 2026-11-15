@@ -69,3 +69,14 @@ The calibration cells are rounded rectangles held still in the middle of the vie
 - **Panning cost.** Redrawing glass whole on every pan step would cost a full lens per step. So each layer's glass, drawn whole on screen, is kept with what it depended on (the renderer's content generation, the transform up to a whole-pixel shift, the settings) and copied while those hold. A pan over glass costs about what it did before (p50 63 ms a step against 55 ms on this GPU-less VM), now without the seams.
 
 The glass suite's mean is 1.52. What's left is the deep-rim profile (Figma's loops, and much subtler colour fringes there than a share of the bend gives), and ellipses that bend the backdrop a little less near the rim than Figma's.
+
+## Measured: where Figma bends each ray (2026-11-15)
+
+To stop guessing at Figma's rim from pictures, the `glass-probe` parity suite draws glass with its light, frost and dispersion off over ramps that encode position (black to white across the glass's box, along x in one cell and y in the other), so each pixel's grey says where its ray landed. `tools/glass-calibration/displacement.mjs` turns a report of it into both bend fields. What it found, for whoever takes the deep rim on:
+
+- **The bend follows the distance in from the edge,** about `1.04 × refraction × depth × (1 − distance / depth)^n` with n between 2.7 and 3.5 (the deeper the rim, the higher), reaching nothing at the rim's depth: a band of even width all round, corners included. Ours follows the rim's slope, which peaks about a fifth lower at the edge and dies off sooner.
+- **The depth is clamped to the shape's inscribed radius:** `depth-80` on the 140-tall card fits only with a depth of 70, as the revision above found from pictures.
+- **Ellipses bend about half as much** as boxes at the same depth (a circle's peak is 0.56 of a card's), though a pill's round ends bend fully.
+- **Following the distance alone isn't enough.** Taking it from the blurred height overstates the bend at convex corners (deep-rim corner error 9 px to 14); an exact rounded-rectangle distance field fixes that and beats today's shader at depth 40 (field error 1.3 px against 1.6), but only ties it at 80 (4.8 px), where the difference is the bend's direction near corners, not its size.
+
+At Figma's default depth (20), the two fields already agree to the measurement's floor (about a pixel), so the shader is unchanged; the probe holds it there.

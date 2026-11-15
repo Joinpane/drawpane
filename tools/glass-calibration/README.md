@@ -28,7 +28,7 @@ After changing `scenes.json`, run `node tools/glass-calibration/build-plugin.mjs
    FIGMA_TOKEN=… node tools/glass-calibration/fetch-figma.mjs <file link> /tmp/glass-figma
    ```
 
-2. Build, then fit. It takes about 12 minutes for 6 rounds (`ROUNDS=0` only scores the current constants):
+2. Build, then fit. It takes about 12 minutes for 6 rounds (`ROUNDS=0` only scores the current constants; `TUNING='{"bend":0.9}'` scores or fits from a candidate's):
 
    ```sh
    pnpm build
@@ -48,6 +48,17 @@ After changing `scenes.json`, run `node tools/glass-calibration/build-plugin.mjs
 - **The largest gap left** is still a rim much deeper than the shape (`depth-80`): Figma bends the surroundings into closed loops there, a profile v3 doesn't model yet, and its colours fringe far less than a share of the bend.
 
 `apps/web/e2e/bench/glass.spec.ts` measures what glass costs to draw.
+
+## Where each ray lands
+
+The parity suite `glass-probe` (in `tools/figma-parity`) draws glass with its light, frost and dispersion off over position-encoding ramps, so a render says where each ray landed. To compare the bend itself rather than the look:
+
+```sh
+PARITY_OUT=/tmp/probe pnpm --filter @drawpane/web exec playwright test e2e/parity -g "glass-probe:"
+node tools/glass-calibration/displacement.mjs /tmp/probe/index.html
+```
+
+It prints the bend along each shape's centre lines, Figma's above Drawpane's, and how far apart the two fields are overall and in the corners (decision 0007 has what it found).
 
 Without `TARGET_DIR`, the harness tests itself: it renders the cells at a known tuning and fits back to it from the defaults. The first run took the error from 2.29 to 0.28 and recovered the constants that matter visibly (bend 0.72 against 0.70, profile 2.1 against 2.0, highlight 1.56 against 1.6).
 
