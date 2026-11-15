@@ -31,20 +31,24 @@ function invert([a, b, c, d, e, f]: Matrix): Matrix {
   return [d / det, -b / det, -c / det, a / det, (c * f - d * e) / det, (b * e - a * f) / det];
 }
 
-/** The layer's box (0, 0, w, h), in the gradient's space: what to fill there to cover it. */
+/**
+ * The layer's box (0, 0, w, h), in the gradient's space: what to fill there to cover it.
+ * With `reach`, the box grown by that much on every side (what a stroke or text paints past it).
+ */
 export function boxInGradientSpace(
   m: Matrix,
   w: number,
   h: number,
+  reach = 0,
 ): { x: number; y: number; width: number; height: number } {
   const [a, b, c, d, e, f] = invert(m);
   const xs: number[] = [];
   const ys: number[] = [];
   for (const [x, y] of [
-    [0, 0],
-    [w, 0],
-    [0, h],
-    [w, h],
+    [-reach, -reach],
+    [w + reach, -reach],
+    [-reach, h + reach],
+    [w + reach, h + reach],
   ] as const) {
     xs.push(a * x + c * y + e);
     ys.push(b * x + d * y + f);
