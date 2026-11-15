@@ -338,7 +338,7 @@ describe("exportSvg", () => {
     ]);
     const svg = svgOf(editor, ["f"]);
     expect(svg).toContain(
-      '<linearGradient id="gradient1" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="200" y2="0"><stop offset="0" stop-color="#000000"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>',
+      '<linearGradient id="gradient1" gradientUnits="userSpaceOnUse" gradientTransform="matrix(200 0 0 100 0 0)" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#000000"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>',
     );
     expect(svg).toContain(
       '<clipPath id="clip2"><rect transform="translate(100 100)" width="200" height="100"/></clipPath>',

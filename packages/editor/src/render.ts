@@ -9,14 +9,21 @@
 
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
+import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
 import { exportBounds } from "./export";
 import type { Matrix, Rect } from "./geometry";
 import { GlassPainter } from "./glass";
+import {
+  boxInGradientSpace,
+  type GradientPaint,
+  gradientMatrix,
+  linearInPixels,
+} from "./gradients";
 import { ImageCache, imagePlacement } from "./images";
 import { markerLength, markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
 import { NoiseTiles, paintNoise } from "./noise";
-import { type PostEffect, postEffects, postMargin, postReach } from "./post-effects";
+import { blurSigma, type PostEffect, postEffects, postMargin, postReach } from "./post-effects";
 import type { Scene } from "./scene";
 import {
   layoutText,
@@ -35,6 +42,59 @@ import { serializePath } from "./vector/svg";
 /** On screen it's a canvas element; exports and thumbnails draw into an OffscreenCanvas. */
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 type ImagePaint = Extract<Paint, { type: "image" }>;
+
+/** Whether a layer paints anything of its own: a visible fill or stroke that isn't fully clear. */
+function paintsSomething(node: NodeRecord): boolean {
+  const visible = (p: Paint) =>
+    p.visible !== false &&
+    (p.opacity ?? 1) > 0 &&
+    // A solid colour with zero alpha (#rrggbb00) paints nothing.
+    !(p.type === "solid" && p.color.length === 9 && p.color.endsWith("00"));
+  return getProp(node.props, "fills").some(visible) || getProp(node.props, "strokes").some(visible);
+}
+
+/**
+ * A dashed box's or ellipse's outline, piece by piece with the dash pattern
+ * fitted to each (dashes.ts); null for other shapes, which dash continuously.
+ */
+function dashedOutline(
+  node: NodeRecord,
+  w: number,
+  h: number,
+): Array<{ path: Path2D; dashes: number[]; offset: number }> | null {
+  let outline: OutlineSegment[];
+  if (node.type === "ellipse") outline = ellipseOutline(w, h);
+  else if (node.type === "rect" || node.type === "frame") {
+    const r = getProp(node.props, "cornerRadius");
+    outline = boxOutline(w, h, getProp(node.props, "cornerRadii") ?? [r, r, r, r]);
+  } else return null;
+  const pattern = getProp(node.props, "strokeDashes");
+  return outline.map((piece) => {
+    const path = new Path2D();
+    if (piece.kind === "line") {
+      path.moveTo(piece.x0, piece.y0);
+      path.lineTo(piece.x1, piece.y1);
+    } else path.ellipse(piece.cx, piece.cy, piece.rx, piece.ry, 0, piece.start, piece.end);
+    return { path, ...fitDashes(piece.length, pattern) };
+  });
+}
+
+/**
+ * Whether a see-through layer must be drawn as one picture and faded as a
+ * whole, as Figma does: when its parts overlap (shadows under a fill, a
+ * stroke over it, a frame's children), fading each would show them through
+ * one another.
+ */
+function fadesAsOne(node: NodeRecord, children: number): boolean {
+  if (getProp(node.props, "opacity") >= 1) return false;
+  if (children > 0) return true;
+  const shadows = getProp(node.props, "effects").some(
+    (e) => e.visible !== false && (e.type === "drop-shadow" || e.type === "inner-shadow"),
+  );
+  const fills = getProp(node.props, "fills").filter((p) => p.visible !== false).length;
+  const strokes = getProp(node.props, "strokes").filter((p) => p.visible !== false).length;
+  return shadows || fills + strokes > 1;
+}
 
 export interface CanvasRendererOptions {
   /** Shared decoded images. Pass the same cache to every renderer of one file. */
@@ -472,7 +532,7 @@ export class CanvasRenderer {
     const blend = own === "source-over" ? inheritedBlend : own;
 
     const post = isolated ? null : postEffects(getProp(node.props, "effects"));
-    if (post && post.length > 0) {
+    if (post && (post.length > 0 || fadesAsOne(node, this.#scene.doc.childIds(id).length))) {
       this.#drawProcessed(ctx, node, camera, dpr, visible, opacity, blend, post);
       return;
     }
@@ -642,7 +702,7 @@ export class CanvasRenderer {
         this.#texture.paint(layer, w, h, e, toCanvas, zs);
       } else if (i === post.length - 1) {
         // A blur last is applied as the picture goes on.
-        finalBlur = e.radius * z;
+        finalBlur = blurSigma(e.radius) * z;
       } else {
         // Partway through, the blurred picture is what the next effect works on.
         const into = this.#postCanvas(depth * 2 + 1, w, h);
@@ -650,7 +710,7 @@ export class CanvasRenderer {
         if (!into || !c) continue;
         resetState(c);
         c.clearRect(0, 0, into.width, into.height);
-        c.filter = `blur(${e.radius * zs}px)`;
+        c.filter = `blur(${blurSigma(e.radius) * zs}px)`;
         c.drawImage(layer, 0, 0, w, h, 0, 0, w, h);
         c.filter = "none";
         // The two swap: the blurred one is now the picture.
@@ -812,20 +872,35 @@ export class CanvasRenderer {
     }
   }
 
+  /**
+   * A paint as a canvas style, in the layer's units. Gradients are laid out
+   * in the layer's unit square, as in Figma: a linear gradient's bands run
+   * across its handles there (so, on a wide layer, at a slant on screen),
+   * which a pixel-space gradient reproduces exactly. Radial and angular ones
+   * are ellipses there; filled shapes get them exactly (#gradientFill), and
+   * strokes and text approximate them with circles.
+   */
   #paintStyle(ctx: Ctx, paint: Paint, w: number, h: number): string | CanvasGradient | null {
     if (paint.type === "solid") return hexToRgba(paint.color, paint.opacity ?? 1);
-    if (paint.type === "linear" || paint.type === "radial" || paint.type === "angular") {
+    if (paint.type === "linear") {
+      const line = linearInPixels(paint, w, h);
+      const gradient = line
+        ? ctx.createLinearGradient(line.x0, line.y0, line.x1, line.y1)
+        : ctx.createLinearGradient(0, 0, 0, 0);
+      for (const stop of paint.stops)
+        gradient.addColorStop(stop.position, hexToRgba(stop.color, paint.opacity ?? 1));
+      return gradient;
+    }
+    if (paint.type === "radial" || paint.type === "angular") {
       const fx = paint.from.x * w;
       const fy = paint.from.y * h;
       const tx = paint.to.x * w;
       const ty = paint.to.y * h;
       const gradient =
-        paint.type === "linear"
-          ? ctx.createLinearGradient(fx, fy, tx, ty)
-          : paint.type === "radial"
-            ? ctx.createRadialGradient(fx, fy, 0, fx, fy, Math.hypot(tx - fx, ty - fy))
-            : // Conic gradients start at 3 o'clock and turn clockwise: start toward `to`.
-              ctx.createConicGradient(Math.atan2(ty - fy, tx - fx), fx, fy);
+        paint.type === "radial"
+          ? ctx.createRadialGradient(fx, fy, 0, fx, fy, Math.hypot(tx - fx, ty - fy))
+          : // Conic gradients start at 3 o'clock and turn clockwise: start toward `to`.
+            ctx.createConicGradient(Math.atan2(ty - fy, tx - fx), fx, fy);
       for (const stop of paint.stops)
         gradient.addColorStop(stop.position, hexToRgba(stop.color, paint.opacity ?? 1));
       return gradient;
@@ -839,9 +914,13 @@ export class CanvasRenderer {
       this.#imageFill(ctx, shape, paint, w, h, node);
       return;
     }
+    const rule = node.type === "path" ? getProp(node.props, "windingRule") : "nonzero";
+    if (paint.type === "linear" || paint.type === "radial" || paint.type === "angular") {
+      this.#gradientFill(ctx, shape, paint, w, h, rule);
+      return;
+    }
     const style = this.#paintStyle(ctx, paint, w, h);
     if (!style) return;
-    const rule = node.type === "path" ? getProp(node.props, "windingRule") : "nonzero";
     ctx.fillStyle = style;
     if (!paint.blendMode) {
       ctx.fill(shape, rule);
@@ -851,6 +930,41 @@ export class CanvasRenderer {
     ctx.globalCompositeOperation = BLEND[paint.blendMode] ?? "source-over";
     ctx.fill(shape, rule);
     ctx.globalCompositeOperation = before;
+  }
+
+  /**
+   * A gradient fill, exact: drawn in the gradient's own space, where it's
+   * the unit gradient (linear along x, radial and angular around the
+   * origin), mapped onto the layer by its handles in the unit square.
+   */
+  #gradientFill(
+    ctx: Ctx,
+    shape: Path2D,
+    paint: GradientPaint,
+    w: number,
+    h: number,
+    rule: CanvasFillRule,
+  ): void {
+    const m = gradientMatrix(paint, w, h);
+    if (!m) return;
+    ctx.save();
+    if (paint.blendMode) ctx.globalCompositeOperation = BLEND[paint.blendMode] ?? "source-over";
+    ctx.clip(shape, rule);
+    ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+    const gradient =
+      paint.type === "linear"
+        ? ctx.createLinearGradient(0, 0, 1, 0)
+        : paint.type === "radial"
+          ? ctx.createRadialGradient(0, 0, 0, 0, 0, 1)
+          : // Conic gradients start at 3 o'clock and turn clockwise: here, toward `to`.
+            ctx.createConicGradient(0, 0, 0);
+    for (const stop of paint.stops)
+      gradient.addColorStop(stop.position, hexToRgba(stop.color, paint.opacity ?? 1));
+    ctx.fillStyle = gradient;
+    // The layer's box, in the gradient's space.
+    const box = boxInGradientSpace(m, w, h);
+    ctx.fillRect(box.x, box.y, box.width, box.height);
+    ctx.restore();
   }
 
   /** An image paint, placed by its scale mode and clipped to the shape. */
@@ -953,11 +1067,19 @@ export class CanvasRenderer {
     const markers = markersOf(node);
     const trimmed = markers ? trimmedStroke(node, markers.start.inset, markers.end.inset) : null;
     const line = trimmed ? new Path2D(serializePath(trimmed)) : shape;
+    // Dashed boxes and ellipses: the pattern fitted to each side and corner, as Figma does.
+    const pieces = dashes.length > 0 && !markers ? dashedOutline(node, w, h) : null;
     for (const paint of strokes) {
       const style = this.#paintStyle(ctx, paint, w, h);
       if (!style) continue;
       ctx.strokeStyle = style;
-      ctx.stroke(line);
+      if (pieces) {
+        for (const piece of pieces) {
+          ctx.setLineDash(piece.dashes);
+          ctx.lineDashOffset = piece.offset;
+          ctx.stroke(piece.path);
+        }
+      } else ctx.stroke(line);
       if (!markers) continue;
       ctx.save();
       ctx.setLineDash([]);
@@ -1060,12 +1182,14 @@ export class CanvasRenderer {
       (e) => e.type === "background-blur" && e.visible !== false,
     );
     if (blur?.type !== "background-blur" || blur.radius <= 0) return;
+    // As in Figma, it shows where the layer paints: a layer with nothing visible blurs nothing.
+    if (!paintsSomething(node)) return;
     ctx.save();
     ctx.clip(shape);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = "source-over";
-    ctx.filter = `blur(${blur.radius * scale}px)`;
+    ctx.filter = `blur(${blurSigma(blur.radius) * scale}px)`;
     ctx.drawImage(ctx.canvas, 0, 0);
     ctx.restore();
   }

@@ -1,0 +1,463 @@
+{
+  "suite": "shadows",
+  "about": "Drop and inner shadows on a white card: offset, blur, spread, colour, several at once, other shapes, and with layer opacity.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 5
+  },
+  "background": "#f4f3ef",
+  "cells": [
+    {
+      "id": "drop-soft",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#00000040",
+              "x": 0,
+              "y": 4,
+              "blur": 12,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-large",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#0000002e",
+              "x": 0,
+              "y": 12,
+              "blur": 32,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-hard",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#00000066",
+              "x": 8,
+              "y": 8,
+              "blur": 0,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-spread",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#3d7bf066",
+              "x": 0,
+              "y": 0,
+              "blur": 0,
+              "spread": 8
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-spread-blur",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#3d7bf080",
+              "x": 0,
+              "y": 0,
+              "blur": 16,
+              "spread": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-negative-spread",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#00000059",
+              "x": 0,
+              "y": 16,
+              "blur": 16,
+              "spread": -8
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-colored",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#ff5a1f80",
+              "x": 0,
+              "y": 6,
+              "blur": 20,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-layered",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#0000001a",
+              "x": 0,
+              "y": 1,
+              "blur": 2,
+              "spread": 0
+            },
+            {
+              "type": "drop-shadow",
+              "color": "#0000001f",
+              "x": 0,
+              "y": 8,
+              "blur": 24,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-ellipse",
+      "layers": [
+        {
+          "type": "ellipse",
+          "x": 80,
+          "y": 40,
+          "width": 80,
+          "height": 80,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#00000040",
+              "x": 0,
+              "y": 6,
+              "blur": 16,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-opacity",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "opacity": 0.5,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#00000080",
+              "x": 0,
+              "y": 6,
+              "blur": 16,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inner-soft",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e9e7e1"
+            }
+          ],
+          "effects": [
+            {
+              "type": "inner-shadow",
+              "color": "#00000040",
+              "x": 0,
+              "y": 2,
+              "blur": 6,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inner-spread",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e9e7e1"
+            }
+          ],
+          "effects": [
+            {
+              "type": "inner-shadow",
+              "color": "#3d7bf099",
+              "x": 0,
+              "y": 0,
+              "blur": 4,
+              "spread": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inner-offset",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "inner-shadow",
+              "color": "#00000059",
+              "x": 6,
+              "y": 6,
+              "blur": 10,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inner-and-drop",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#00000033",
+              "x": 0,
+              "y": 4,
+              "blur": 10,
+              "spread": 0
+            },
+            {
+              "type": "inner-shadow",
+              "color": "#ffffffcc",
+              "x": 0,
+              "y": 1,
+              "blur": 0,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inner-ellipse",
+      "layers": [
+        {
+          "type": "ellipse",
+          "x": 80,
+          "y": 40,
+          "width": 80,
+          "height": 80,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e9e7e1"
+            }
+          ],
+          "effects": [
+            {
+              "type": "inner-shadow",
+              "color": "#00000059",
+              "x": 0,
+              "y": 4,
+              "blur": 8,
+              "spread": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

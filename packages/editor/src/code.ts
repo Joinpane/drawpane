@@ -14,6 +14,7 @@ import {
 } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { layerName } from "./names";
+import { blurSigma } from "./post-effects";
 import { type RunStyle, textSpans } from "./rich-text";
 import { featureSettings, variationSettings } from "./svg";
 import { letterSpacingPx, lineHeightPx } from "./text";
@@ -326,9 +327,9 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
         `${e.type === "inner-shadow" ? "inset " : ""}${px(e.x)} ${px(e.y)} ${px(e.blur)} ${px(e.spread)} ${hex(e.color)}`,
       );
     } else if (e.type === "layer-blur")
-      out.push({ property: "filter", value: `blur(${px(e.radius)})` });
+      out.push({ property: "filter", value: `blur(${px(blurSigma(e.radius))})` });
     else if (e.type === "background-blur")
-      out.push({ property: "backdrop-filter", value: `blur(${px(e.radius)})` });
+      out.push({ property: "backdrop-filter", value: `blur(${px(blurSigma(e.radius))})` });
     // Glass, as near as CSS gets: its frost, with the backdrop's colour lifted.
     else if (e.type === "glass")
       out.push({

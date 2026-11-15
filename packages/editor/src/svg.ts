@@ -35,7 +35,7 @@ import { type Matrix, type Rect, round2 } from "./geometry";
 import { FULL_CROP, imagePlacement } from "./images";
 import { markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
-import { type PostEffect, postEffects, postMargin } from "./post-effects";
+import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { textSpans } from "./rich-text";
 import type { Scene } from "./scene";
 import {
@@ -134,7 +134,7 @@ export function postPrimitives(post: readonly PostEffect[], scale: number): stri
     const result = `post${i}`;
     if (e.type === "layer-blur") {
       parts.push(
-        `<feGaussianBlur in="${input}"${attr("stdDeviation", e.radius * scale)} result="${result}"/>`,
+        `<feGaussianBlur in="${input}"${attr("stdDeviation", blurSigma(e.radius) * scale)} result="${result}"/>`,
       );
     } else if (e.type === "noise") {
       // Grain about `size` across: thresholded, turbulence's features are about its lattice.
@@ -272,10 +272,13 @@ class SvgWriter {
     }
     if (paint.type === "linear" || paint.type === "radial") {
       const id = this.id("gradient");
-      const fx = paint.from.x * w;
-      const fy = paint.from.y * h;
-      const tx = paint.to.x * w;
-      const ty = paint.to.y * h;
+      // Laid out in the layer's unit square, as on the canvas (see gradients.ts): handles in
+      // unit coordinates, scaled onto the layer, so a radial gradient is an ellipse there.
+      const fx = paint.from.x;
+      const fy = paint.from.y;
+      const tx = paint.to.x;
+      const ty = paint.to.y;
+      const unit = ` gradientTransform="matrix(${round2(w)} 0 0 ${round2(h)} 0 0)"`;
       const stops = paint.stops
         .map((s) => {
           const { color, alpha } = splitColor(s.color);
@@ -284,8 +287,8 @@ class SvgWriter {
         .join("");
       this.defs.push(
         paint.type === "linear"
-          ? `<linearGradient id="${id}" gradientUnits="userSpaceOnUse"${attr("x1", fx)}${attr("y1", fy)}${attr("x2", tx)}${attr("y2", ty)}>${stops}</linearGradient>`
-          : `<radialGradient id="${id}" gradientUnits="userSpaceOnUse"${attr("cx", fx)}${attr("cy", fy)}${attr("r", Math.hypot(tx - fx, ty - fy))}>${stops}</radialGradient>`,
+          ? `<linearGradient id="${id}" gradientUnits="userSpaceOnUse"${unit}${attr("x1", fx)}${attr("y1", fy)}${attr("x2", tx)}${attr("y2", ty)}>${stops}</linearGradient>`
+          : `<radialGradient id="${id}" gradientUnits="userSpaceOnUse"${unit}${attr("cx", fx)}${attr("cy", fy)}${attr("r", Math.hypot(tx - fx, ty - fy))}>${stops}</radialGradient>`,
       );
       return ` ${kind}="url(#${id})"${opacity < 1 ? attr(`${kind}-opacity`, opacity) : ""}`;
     }

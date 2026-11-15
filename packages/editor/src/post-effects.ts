@@ -59,6 +59,15 @@ const BLUR_REACH = 3;
  * room the canvas they work on needs around it. Each works on what the one
  * before left, so their reaches add up.
  */
+/**
+ * A blur's Gaussian, from its radius: half of it, as in Figma, where a blur
+ * radius is twice the standard deviation (its CSS export writes half), as
+ * a canvas shadow's blur is. A CSS `blur()` takes the deviation itself.
+ */
+export function blurSigma(radius: number): number {
+  return radius / 2;
+}
+
 export function postMargin(post: readonly PostEffect[]): number {
   let margin = 0;
   for (const e of post) {
