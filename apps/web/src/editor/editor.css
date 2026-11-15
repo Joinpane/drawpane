@@ -351,6 +351,7 @@
 
 /* Pages */
 .pages {
+  position: relative;
   flex: none;
   padding-top: var(--space-100);
 }
@@ -358,8 +359,66 @@
   list-style: none;
   margin: 0;
   padding: 0 var(--space-200);
-  max-height: 160px;
   overflow-y: auto;
+}
+
+/*
+ * The line between the pages and the layers is the layers heading's top
+ * border; this grip (PagesList's Splitter) sits on it. It reaches 4px each
+ * side of the line, over the gap above it and the heading's empty top, so it
+ * never takes a click meant for a page or a button. Like the panels' edges,
+ * the line shows the signal colour while pointed at, focused or dragged.
+ */
+.pages-resizer {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  /* The border is 4px below the list (.pane__head--layers' margin): centre on it. */
+  bottom: -9px;
+  height: 8px;
+  cursor: row-resize;
+  touch-action: none;
+}
+.pages-resizer::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 2px;
+  background: var(--signal);
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+/* A short wait on hover: passing over the line on the way somewhere doesn't flash it. */
+.pages-resizer:hover::after {
+  opacity: 1;
+  transition-delay: 150ms;
+}
+.pages-resizer[data-dragging]::after,
+.pages-resizer:focus-visible::after {
+  opacity: 1;
+  transition-delay: 0ms;
+}
+.pages-resizer:focus-visible {
+  outline: none;
+}
+.pages-resizer:focus-visible::after {
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 4px var(--signal);
+}
+
+/* While a splitter is dragged its cursor goes everywhere, and nothing gets selected. */
+:root[data-resizing] * {
+  user-select: none !important;
+}
+:root[data-resizing="x"] * {
+  cursor: col-resize !important;
+}
+:root[data-resizing="y"] * {
+  cursor: row-resize !important;
 }
 .pages__item {
   display: flex;
