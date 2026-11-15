@@ -26,6 +26,7 @@ import { hasMask, maskScopes } from "./masks";
 import { NoiseTiles, paintNoise } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin, postReach } from "./post-effects";
 import type { Scene } from "./scene";
+import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
   layoutText,
   lineHeightPx,
@@ -228,6 +229,8 @@ export class CanvasRenderer {
   readonly #measurer: TextMeasurer;
   readonly #paths = new Map<string, { d: string; path: Path2D }>();
   readonly #shapes = new WeakMap<object, { w: number; h: number; path: Path2D }>();
+  /** Per-side strokes' regions, by the layer's props (a new object with every edit). */
+  readonly #sidePaths = new WeakMap<object, Path2D>();
   /** Shaped text as one outline at its origin, by letter spacing (see #shapedOutline). */
   readonly #shapedRuns = new WeakMap<ShapedText, Map<number, Path2D>>();
   /** Each outline where it was last placed: text that holds still costs nothing per frame. */
@@ -1225,8 +1228,14 @@ export class CanvasRenderer {
 
   #strokes(ctx: Ctx, node: NodeRecord, shape: Path2D, w: number, h: number): void {
     const strokes = getProp(node.props, "strokes").filter((s) => s.visible !== false);
-    const weight = getProp(node.props, "strokeWeight");
-    if (strokes.length === 0 || weight <= 0) return;
+    if (strokes.length === 0) return;
+    const sides = strokeWidths(node);
+    if (!isUniform(sides)) {
+      this.#sideStrokes(ctx, node, strokes, w, h);
+      return;
+    }
+    const weight = sides[0];
+    if (weight <= 0) return;
     // Open paths and lines stroke along their centre; closed paths honour alignment like any shape.
     const align =
       node.type === "line" ||
@@ -1281,6 +1290,31 @@ export class CanvasRenderer {
         if (marker.stroke) ctx.stroke(new Path2D(serializePath(marker.stroke)));
       }
       ctx.restore();
+    }
+    ctx.restore();
+  }
+  /** A stroke with a width per side (see stroke-sides.ts): its region, filled with each paint. */
+  #sideStrokes(ctx: Ctx, node: NodeRecord, strokes: readonly Paint[], w: number, h: number) {
+    let path = this.#sidePaths.get(node.props);
+    if (!path) {
+      const r = getProp(node.props, "cornerRadius");
+      const region = strokeRegion(
+        w,
+        h,
+        getProp(node.props, "cornerRadii") ?? [r, r, r, r],
+        strokeWidths(node),
+        getProp(node.props, "strokeAlign"),
+      );
+      path = new Path2D(strokeRegionPath(region));
+      this.#sidePaths.set(node.props, path);
+    }
+    ctx.save();
+    ctx.filter = "none";
+    for (const paint of strokes) {
+      const style = this.#paintStyle(ctx, paint, w, h);
+      if (!style) continue;
+      ctx.fillStyle = style;
+      ctx.fill(path, "evenodd");
     }
     ctx.restore();
   }

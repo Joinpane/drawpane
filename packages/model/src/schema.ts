@@ -554,6 +554,16 @@ export const PROPS = {
   markerEnd: prop(z.enum(STROKE_MARKERS), "none", OPEN_ENDS),
   strokeJoin: prop(z.enum(["miter", "round", "bevel"]), "miter", SHAPES),
   strokeDashes: prop(z.array(nonNegative).max(16), [], SHAPES),
+  /**
+   * Per-side stroke widths (top, right, bottom, left), like Figma's
+   * individual stroke weights: a row's bottom border, a sidebar's divider.
+   * Overrides `strokeWeight`, which the inspector keeps at the widest side.
+   */
+  strokeWeights: prop(
+    z.tuple([nonNegative, nonNegative, nonNegative, nonNegative]).nullable(),
+    null,
+    CORNERS,
+  ),
   effects: prop(z.array(Effect).max(32), [], LAYERS),
   /**
    * A mask: its outline clips the layers above it in the same parent (up to

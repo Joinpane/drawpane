@@ -1,7 +1,7 @@
 /**
  * Screenshots of the inspector in depth for design review: frame presets,
- * the color picker (solid and gradient), effects, per-corner radius, strokes,
- * constraints, text and selection colors, in both themes.
+ * the color picker (solid and gradient), effects, per-corner radius, strokes
+ * and their sides, constraints, text and selection colors, in both themes.
  * Run with `pnpm --filter @drawpane/web tour`.
  */
 import { expect, type Page } from "@playwright/test";
@@ -101,4 +101,17 @@ test("inspector tour", async ({ browser }) => {
   // Several layers: align and distribute.
   await select(page, [ids.home, ids.detail, ids.sheet]);
   await shot(page, "69-multi");
+
+  // A card's stroke on some sides only: the Sides control, custom widths showing.
+  await select(page, [ids.done]);
+  await commit(page, [
+    { op: "set", id: ids.done, prop: "strokes", value: [{ type: "solid", color: "#2b4fd6" }] },
+    { op: "set", id: ids.done, prop: "strokeWeight", value: 4 },
+    { op: "set", id: ids.done, prop: "strokeWeights", value: [4, 0, 1, 0] },
+  ]);
+  const sides = page.getByRole("group", { name: "Properties" }).getByLabel("Stroke sides");
+  await sides.selectOption("custom");
+  await page.keyboard.press("Shift+2");
+  await sides.scrollIntoViewIfNeeded();
+  await shot(page, "172-stroke-sides");
 });

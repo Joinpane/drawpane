@@ -322,9 +322,15 @@ function strokeProps(
   const sides = node.individualStrokeWeights;
   let weight = node.strokeWeight ?? 1;
   if (sides) {
-    const all = [sides.top, sides.right, sides.bottom, sides.left];
+    const all = [sides.top, sides.right, sides.bottom, sides.left].map((s) =>
+      round3(Math.max(0, s)),
+    ) as [number, number, number, number];
     weight = Math.max(...all);
-    if (!all.every((s) => s === all[0])) notes.add("stroke-sides");
+    if (!all.every((s) => s === all[0])) {
+      // Boxes keep a width per side; anything else gets the widest all round.
+      if (type === "rect" || type === "frame") props.strokeWeights = all;
+      else notes.add("stroke-sides");
+    }
   }
   props.strokeWeight = round3(Math.max(0, weight));
   if (node.strokeAlign && type !== "line")

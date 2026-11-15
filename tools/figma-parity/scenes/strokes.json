@@ -1,6 +1,6 @@
 {
   "suite": "strokes",
-  "about": "Strokes: inside, centre and outside at several weights, dashes, joins on sharp corners, per-corner radii, gradient and translucent strokes.",
+  "about": "Strokes: inside, centre and outside at several weights, dashes, joins on sharp corners, per-corner radii, gradient and translucent strokes, and a width per side (inside, centred and outside, square and rounded).",
   "cell": {
     "width": 240,
     "height": 160,
@@ -372,6 +372,118 @@
           ],
           "strokeWeight": 2,
           "strokeAlign": "inside"
+        }
+      ]
+    },
+    {
+      "id": "sides-bottom",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 0,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 4,
+          "strokeWeights": [0, 0, 4, 0],
+          "strokeAlign": "inside"
+        }
+      ]
+    },
+    {
+      "id": "sides-top-rounded",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#2b4fd6"
+            }
+          ],
+          "strokeWeight": 8,
+          "strokeWeights": [8, 2, 2, 2],
+          "strokeAlign": "inside"
+        }
+      ]
+    },
+    {
+      "id": "sides-center",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 0,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 6,
+          "strokeWeights": [0, 6, 0, 6],
+          "strokeAlign": "center"
+        }
+      ]
+    },
+    {
+      "id": "sides-outside-rounded",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 20,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#e8590c"
+            }
+          ],
+          "strokeWeight": 8,
+          "strokeWeights": [2, 2, 8, 2],
+          "strokeAlign": "outside"
         }
       ]
     }

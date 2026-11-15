@@ -10,6 +10,7 @@ import { markerLength } from "./markers";
 import { postEffects, postReach } from "./post-effects";
 import type { CanvasRenderer } from "./render";
 import type { Scene } from "./scene";
+import { strokeReach, strokeWidths } from "./stroke-sides";
 
 export type ExportFormat = "png" | "jpeg" | "webp" | "svg" | "pdf";
 /** Formats drawn into pixels; SVG and PDF stay vector, at 1×. */
@@ -61,12 +62,13 @@ export function paintOutset(node: NodeRecord): {
   };
   if (node.type !== "group" && node.type !== "page") {
     const strokes = getProp(node.props, "strokes").filter((s) => s.visible !== false);
-    const weight = getProp(node.props, "strokeWeight");
+    const sides = strokeWidths(node);
+    const weight = Math.max(...sides);
     if (strokes.length > 0 && weight > 0) {
       const centred = node.type === "line" || node.type === "path";
       const align = centred ? "center" : getProp(node.props, "strokeAlign");
-      const reach = align === "outside" ? weight : align === "center" ? weight / 2 : 0;
-      grow(reach, reach, reach, reach);
+      const [t, r, b, l] = strokeReach(sides, align);
+      grow(l, t, r, b);
       // End markers stick out past the ends of a line or path.
       if (
         centred &&

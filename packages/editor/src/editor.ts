@@ -3008,6 +3008,7 @@ export class Editor {
     "fills",
     "strokes",
     "strokeWeight",
+    "strokeWeights",
     "strokeAlign",
     "strokeCap",
     "strokeJoin",
