@@ -107,3 +107,39 @@ describe("focus mode", () => {
     expect(focused.strokes).not.toContain(lenaColor);
   });
 });
+
+describe("collaborators' selections", () => {
+  it("say whose they are, even with their cursor off the canvas", () => {
+    const { editor, interaction } = setup();
+    const lena = editor.s.peers.get("lena") as Peer;
+    // Lena's pointer is elsewhere (another panel, another window): only her selection shows.
+    editor.state.set({
+      peers: new Map([
+        ["lena", { ...lena, presence: { cursor: null, pageId: "p1", selection: ["card"] } }],
+      ]),
+    });
+    const drawn = recordingContext();
+    drawOverlay(drawn.ctx, editor, interaction, THEME, 1);
+    expect(drawn.strokes).toContain(THEME.presence[0]);
+    // An outline in someone's colour with no name reads as a stray line: it's labelled.
+    expect(drawn.texts).toEqual(["Lena Park"]);
+  });
+
+  it("are named once: by the cursor while it shows, by the selection once it has faded", () => {
+    const { editor, interaction } = setup();
+    // Her cursor is on the canvas and moving: its tag names her, the selection's doesn't too.
+    const moving = recordingContext();
+    drawOverlay(moving.ctx, editor, interaction, THEME, 1);
+    expect(moving.texts).toEqual(["Lena Park"]);
+    // Still for long enough, her cursor fades out and the selection's tag takes over.
+    const lena = editor.s.peers.get("lena") as Peer;
+    const cursor = lena.presence?.cursor as { x: number; y: number };
+    const later = Date.now() + 10_000;
+    const opacity = editor.cursors.opacity.bind(editor.cursors);
+    editor.cursors.opacity = (id, at) => opacity(id, at, later);
+    const still = recordingContext();
+    drawOverlay(still.ctx, editor, interaction, THEME, 1);
+    expect(editor.cursors.opacity("lena", cursor)).toBe(0);
+    expect(still.texts).toEqual(["Lena Park"]);
+  });
+});

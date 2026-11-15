@@ -60,6 +60,22 @@ export interface RoomClaim {
 
 export const CLAIM_HEADER = "x-drawpane-claim";
 
+/**
+ * Clients ping every 25 s (connection.ts); the runtime answers for the room
+ * (setWebSocketAutoResponse), so a ping doesn't wake it, and notes when.
+ */
+const PING = JSON.stringify({ t: "ping" });
+const PONG = JSON.stringify({ t: "pong" });
+/**
+ * A session that hasn't pinged for this long is gone (a laptop asleep, a
+ * network dropped without a goodbye): without it, its selection and cursor
+ * would stay on everyone's canvas. A hidden tab's timers can slow to once a
+ * minute, so this leaves room for a couple of those.
+ */
+export const STALE_MS = 150_000;
+/** How often, at most, a room looks for sessions that have gone quiet. */
+const PRUNE_EVERY_MS = 15_000;
+
 /** The author guests see on every change: nobody in particular. */
 const ANONYMOUS = { userId: "", sessionId: "" } as const;
 
@@ -76,6 +92,8 @@ interface Attachment {
   clientId: string | null;
   /** When their team membership was last confirmed in D1 (see #checkAccess). */
   checkedAt?: number;
+  /** When the socket was accepted. Missing on sockets from before rooms pruned quiet ones. */
+  joinedAt?: number;
 }
 
 const LOG_SCHEMA = `
@@ -165,6 +183,8 @@ export interface RestoredChange {
 export class FileRoom extends DurableObject<Env> {
   readonly #sql: SqlStorage;
   readonly #store: SqlNodeStore;
+  /** When this room last looked for quiet sessions (in memory: after a sleep it looks again). */
+  #prunedAt = 0;
   /** Live presence by session. Not persisted: after hibernation, peers resend on their next move. */
   readonly #presence = new Map<string, Presence>();
   #revn = 0;
@@ -173,6 +193,7 @@ export class FileRoom extends DurableObject<Env> {
     super(ctx, env);
     this.#sql = ctx.storage.sql;
     this.#store = new SqlNodeStore(this.#sql);
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
     ctx.blockConcurrencyWhile(async () => {
       this.#sql.exec(NODE_SCHEMA + LOG_SCHEMA);
       this.#revn = Number(this.#meta("revn") ?? 0);
@@ -206,6 +227,7 @@ export class FileRoom extends DurableObject<Env> {
       color: claim.guest ? 0 : this.#nextColor(),
       ...(claim.guest ? { guest: true } : {}),
       clientId: null,
+      joinedAt: Date.now(),
     };
     // So an access change can find this room (see accessChanged). Written before the socket is
     // accepted: a change made after this point always reaches it.
@@ -223,6 +245,13 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   override async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+    // Someone's here and active: a good moment to let go of anyone who has gone quiet.
+    const now = Date.now();
+    if (now - this.#prunedAt >= PRUNE_EVERY_MS) {
+      this.#prunedAt = now;
+      // Not the sender, though: whatever its pings did, it's talking now.
+      this.pruneQuiet(now, ws);
+    }
     const size = typeof raw === "string" ? raw.length : raw.byteLength;
     if (size > MAX_CLIENT_MESSAGE_BYTES) {
       this.#send(ws, {
@@ -244,7 +273,9 @@ export class FileRoom extends DurableObject<Env> {
       });
       return;
     }
-    const me = ws.deserializeAttachment() as Attachment;
+    const me = ws.deserializeAttachment() as Attachment | null;
+    // Let go (gone quiet, or the file deleted) while this was on its way: nothing more to do.
+    if (!me) return;
     switch (message.t) {
       case "hello":
         return this.#checkedHello(ws, me, message.clientId, message.revn);
@@ -285,7 +316,37 @@ export class FileRoom extends DurableObject<Env> {
     this.#left(ws);
   }
 
+  /**
+   * Closes sockets that haven't pinged for STALE_MS, and tells everyone else
+   * they've left. A socket can die without a close (a laptop shut, a network
+   * gone), and the runtime may not notice for a long while: until then its
+   * person's last selection and cursor stayed on everyone's canvas, looking
+   * like an outline from nowhere. Returns how many it closed. Public for tests.
+   */
+  pruneQuiet(now = Date.now(), except?: WebSocket): number {
+    let closed = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws === except) continue;
+      const me = ws.deserializeAttachment() as Attachment | null;
+      // Sockets from before this knew when they joined: left to close on their own.
+      if (!me || me.joinedAt === undefined) continue;
+      const pinged = this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0;
+      if (now - Math.max(me.joinedAt, pinged) <= STALE_MS) continue;
+      this.#left(ws);
+      // So #left doesn't run again when the close comes back.
+      ws.serializeAttachment(null);
+      try {
+        ws.close(4001, "Gone quiet");
+      } catch {
+        // Already closed.
+      }
+      closed++;
+    }
+    return closed;
+  }
+
   override async alarm(): Promise<void> {
+    this.pruneQuiet();
     const fileId = this.#meta("file_id");
     if (fileId) await this.#flushUsage(fileId);
     if (fileId && this.#meta("touched") === "1") {
@@ -1180,10 +1241,12 @@ export class FileRoom extends DurableObject<Env> {
     );
   }
 
+  /** Every socket still in the room (one that's been let go has no attachment). */
   #attachments(): Array<{ ws: WebSocket; me: Attachment }> {
     return this.ctx
       .getWebSockets()
-      .map((ws) => ({ ws, me: ws.deserializeAttachment() as Attachment }));
+      .map((ws) => ({ ws, me: ws.deserializeAttachment() as Attachment | null }))
+      .filter((a): a is { ws: WebSocket; me: Attachment } => a.me !== null);
   }
 
   #nextColor(): number {
