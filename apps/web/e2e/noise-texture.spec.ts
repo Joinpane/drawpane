@@ -56,7 +56,8 @@ function pixels(page: Page, points: Array<{ x: number; y: number }>): Promise<nu
 const BLUE = [0x2b, 0x4f, 0xd6];
 const near = (a: number[], b: number[], within = 40) =>
   a.every((v, i) => Math.abs(v - (b[i] ?? 0)) <= within);
-const isBlack = (c: number[]) => near(c, [0, 0, 0]);
+/** Grain darkens the blue: clearly darker than the layer, toward black. */
+const isGrain = (c: number[]) => (c[2] ?? 0) < BLUE[2] - 60 && !near(c, BLUE);
 const isWhite = (c: number[]) => near(c, [255, 255, 255]);
 const isBlue = (c: number[]) => near(c, BLUE);
 
@@ -108,18 +109,20 @@ test.describe
     });
 
     test("grains the layer only where it paints, and holds still as the view pans", async () => {
-      await set([NOISE]);
-      // The middle of each 4-unit cell, along a row and a column of the layer.
-      const cells = Array.from({ length: 40 }, (_, k) => ({
-        x: 102 + 4 * k,
-        y: 77 + 4 * (k % 30),
+      // Dense grain: blobs over about a third of the layer (Figma's coverage at 85%).
+      await set([{ ...NOISE, density: 85 }]);
+      // A grid of points over the layer, clear of its edges.
+      const cells = Array.from({ length: 300 }, (_, k) => ({
+        x: 103 + 7 * (k % 25) + 0.5,
+        y: 78 + 12 * Math.floor(k / 25) + 0.5,
       }));
       const before = await pixels(page, cells);
-      const black = before.filter(isBlack).length;
+      const grain = before.filter(isGrain).length;
       const blue = before.filter(isBlue).length;
-      expect(black).toBeGreaterThan(8);
-      expect(blue).toBeGreaterThan(8);
-      expect(black + blue).toBe(cells.length);
+      // Grain covers some, not most; everything else is the layer's own blue.
+      expect(grain).toBeGreaterThan(cells.length * 0.15);
+      expect(grain).toBeLessThan(cells.length * 0.6);
+      expect(blue).toBeGreaterThan(cells.length * 0.3);
       // Nothing outside the layer.
       const outside = await pixels(page, [
         { x: 60, y: 150 },
@@ -130,26 +133,26 @@ test.describe
       // Panned, the same page points have the same grain.
       await page.evaluate(() => (window as unknown as W).drawpane.centerOn({ x: 237, y: 131 }));
       await page.waitForTimeout(150);
-      expect((await pixels(page, cells)).map(isBlack)).toEqual(before.map(isBlack));
+      expect((await pixels(page, cells)).map(isGrain)).toEqual(before.map(isGrain));
       await page.evaluate(() => (window as unknown as W).drawpane.centerOn({ x: 200, y: 150 }));
     });
 
     test("roughens the edge past it, or only inward when clipped to the shape", async () => {
       const column = (x: number) => Array.from({ length: 70 }, (_, k) => ({ x, y: 80 + 2 * k }));
       await set([{ ...TEXTURE, visible: false }]);
-      // Plain: 3 units outside the left edge is all white, 3 inside all blue.
-      expect((await pixels(page, column(97))).every(isWhite)).toBe(true);
-      expect((await pixels(page, column(103))).every(isBlue)).toBe(true);
+      // Plain: 2 units outside the left edge is all white, 2 inside all blue.
+      expect((await pixels(page, column(98))).every(isWhite)).toBe(true);
+      expect((await pixels(page, column(102))).every(isBlue)).toBe(true);
 
       await set([TEXTURE]);
-      const spread = (await pixels(page, column(97))).filter(isBlue).length;
-      const eaten = (await pixels(page, column(103))).filter(isWhite).length;
+      const spread = (await pixels(page, column(98))).filter(isBlue).length;
+      const eaten = (await pixels(page, column(102))).filter(isWhite).length;
       expect(spread).toBeGreaterThan(3);
       expect(eaten).toBeGreaterThan(3);
 
       await set([{ ...TEXTURE, clipToShape: true }]);
-      expect((await pixels(page, column(97))).every(isWhite)).toBe(true);
-      expect((await pixels(page, column(103))).filter(isWhite).length).toBeGreaterThan(3);
+      expect((await pixels(page, column(98))).every(isWhite)).toBe(true);
+      expect((await pixels(page, column(102))).filter(isWhite).length).toBeGreaterThan(3);
     });
 
     test("are added from the effects menu and set in their editor", async () => {

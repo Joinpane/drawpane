@@ -11,7 +11,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
 import { exportBounds } from "../src/export";
-import { NOISE_TILE, noisePixels, seeded } from "../src/noise";
+import { noisePixels, seeded } from "../src/noise";
 import { postEffects, postMargin, postReach } from "../src/post-effects";
 import { exportSvg, noiseThreshold, postPrimitives } from "../src/svg";
 import type { TextMeasurer } from "../src/text";
@@ -46,10 +46,6 @@ const square = (effects: EffectValue[]): Op => ({
   },
 });
 
-/** Which cells of a tile are painted (alpha above 0). */
-const painted = (pixels: Uint8ClampedArray) =>
-  Array.from({ length: pixels.length / 4 }, (_, i) => (pixels[i * 4 + 3] ?? 0) > 0);
-
 describe("noise and texture in a file", () => {
   it("are valid with their defaults, and keep their values in range", () => {
     expect(Effect.safeParse(DEFAULT_NOISE).success).toBe(true);
@@ -78,48 +74,86 @@ describe("noise tiles", () => {
     expect([a(), a(), a()]).toEqual([b(), b(), b()]);
   });
 
-  it("cover about the density's share of cells, and none or all at the ends", () => {
-    const on = (density: number) => painted(noisePixels(look({ density }))).filter(Boolean).length;
-    const cells = NOISE_TILE * NOISE_TILE;
-    expect(on(0)).toBe(0);
-    expect(on(100)).toBe(cells);
-    expect(on(50) / cells).toBeCloseTo(0.5, 1);
-    expect(on(20) / cells).toBeCloseTo(0.2, 1);
+  /** How much of the tile is grain: the mean of each pixel's coverage (its alpha over the colour's). */
+  const coverage = (density: number) => {
+    const pixels = noisePixels(look({ color: "#000000ff", density }));
+    let sum = 0;
+    for (let i = 3; i < pixels.length; i += 4) sum += (pixels[i] as number) / 255;
+    return sum / (pixels.length / 4);
+  };
+
+  it("cover as much of the layer as Figma's does at each density", () => {
+    // Measured from Figma's renders (tools/figma-parity, grain suite).
+    expect(coverage(0)).toBe(0);
+    expect(coverage(20)).toBeCloseTo(0.013, 2);
+    expect(coverage(50)).toBeCloseTo(0.086, 1);
+    expect(coverage(85)).toBeCloseTo(0.335, 1);
+    expect(coverage(100)).toBeGreaterThan(0.4);
+    expect(coverage(100)).toBeLessThan(0.6);
   });
 
-  it("paint mono cells in its colour, straight (not premultiplied)", () => {
-    const pixels = noisePixels(look({ color: "#ff800040", density: 100 }), 4);
-    expect(Array.from(pixels.slice(0, 4))).toEqual([255, 128, 0, 64]);
+  it("make grain in blobs with soft edges, not square cells", () => {
+    const pixels = noisePixels(look({ color: "#000000ff", density: 85 }));
+    const alphas = new Set<number>();
+    for (let i = 3; i < pixels.length; i += 4) alphas.add(pixels[i] as number);
+    // Inside, outside, and every step of an edge between.
+    expect(alphas.has(0)).toBe(true);
+    expect(alphas.has(255)).toBe(true);
+    expect(alphas.size).toBeGreaterThan(50);
   });
 
-  it("paint duo's other cells in its second colour, so it covers the layer", () => {
+  it("paint mono grain in its colour, straight (not premultiplied)", () => {
+    const pixels = noisePixels(look({ color: "#ff800040", density: 100 }));
+    const full = [...Array(pixels.length / 4).keys()].find(
+      (i) => pixels[i * 4 + 3] === 64,
+    ) as number;
+    expect(Array.from(pixels.slice(full * 4, full * 4 + 4))).toEqual([255, 128, 0, 64]);
+  });
+
+  it("paint duo as two sets of grain, its second colour's between the first's", () => {
     const pixels = noisePixels(
-      look({ noiseType: "duo", color: "#000000ff", secondaryColor: "#ffffffff", density: 50 }),
+      look({ noiseType: "duo", color: "#000000ff", secondaryColor: "#ffffffff", density: 85 }),
     );
-    const colours = new Set<number>();
+    let first = 0;
+    let second = 0;
+    let clear = 0;
     for (let i = 0; i < pixels.length; i += 4) {
-      expect(pixels[i + 3]).toBe(255);
-      colours.add(pixels[i] ?? -1);
+      if ((pixels[i + 3] as number) === 0) clear++;
+      else if ((pixels[i] as number) === 0) first++;
+      else second++;
     }
-    expect([...colours].sort()).toEqual([0, 255]);
+    // About as much of each, and the layer showing through between them.
+    expect(first / second).toBeGreaterThan(0.7);
+    expect(first / second).toBeLessThan(1.4);
+    expect(clear).toBeGreaterThan(0);
   });
 
-  it("paint multi cells in many colours at its opacity", () => {
+  it("paint multi grain in many colours at its opacity", () => {
     const pixels = noisePixels(look({ noiseType: "multi", opacity: 50, density: 100 }));
     const reds = new Set<number>();
     for (let i = 0; i < pixels.length; i += 4) {
-      expect(pixels[i + 3]).toBe(128);
-      reds.add(pixels[i] ?? 0);
+      expect(pixels[i + 3]).toBeLessThanOrEqual(128);
+      if ((pixels[i + 3] as number) === 128) reds.add(pixels[i] ?? 0);
     }
-    expect(reds.size).toBeGreaterThan(200);
+    expect(reds.size).toBeGreaterThan(100);
   });
 
-  it("keep which cells are on whatever the kind or colour: only the density moves them", () => {
-    const mono = painted(noisePixels(look({ color: "#123456ff" })));
-    const multi = painted(noisePixels(look({ noiseType: "multi" })));
-    const other = painted(noisePixels(look({ color: "#abcdefff" })));
-    expect(multi).toEqual(mono);
-    expect(other).toEqual(mono);
+  it("keep where grain is whatever the kind or colour: only the density moves it", () => {
+    // Where grain is at least half there, by each look's own full strength.
+    const core = (pixels: Uint8ClampedArray) => {
+      let max = 0;
+      for (let i = 3; i < pixels.length; i += 4) max = Math.max(max, pixels[i] as number);
+      const out: boolean[] = [];
+      for (let i = 3; i < pixels.length; i += 4) out.push((pixels[i] as number) >= max / 2);
+      return out;
+    };
+    const mono = core(noisePixels(look({ color: "#123456ff" })));
+    const multi = core(noisePixels(look({ noiseType: "multi" })));
+    const other = core(noisePixels(look({ color: "#abcdefff" })));
+    // The same grain, but for pixels rounding differently right at the cut.
+    const differ = (a: boolean[], b: boolean[]) => a.filter((v, i) => v !== b[i]).length / a.length;
+    expect(differ(multi, mono)).toBeLessThan(0.005);
+    expect(differ(other, mono)).toBe(0);
   });
 });
 
@@ -200,12 +234,14 @@ describe("post effects", () => {
 });
 
 describe("post effects in SVG", () => {
-  it("thresholds turbulence so about the density's share of it is on", () => {
-    expect(noiseThreshold(50)).toBeCloseTo(0.5, 5);
+  it("thresholds turbulence to cover as much as Figma's grain does", () => {
+    // Half density covers about a tenth: the cut is 1.4 deviations up.
+    expect(noiseThreshold(50)).toBeCloseTo(0.5 + 0.12 * 1.395, 5);
     expect(noiseThreshold(20)).toBeGreaterThan(noiseThreshold(50));
     expect(noiseThreshold(80)).toBeLessThan(noiseThreshold(50));
+    // None at 0; about half (the cut at the mean) at 100.
     expect(noiseThreshold(0)).toBe(Number.POSITIVE_INFINITY);
-    expect(noiseThreshold(100)).toBe(Number.NEGATIVE_INFINITY);
+    expect(noiseThreshold(100)).toBeCloseTo(0.5, 2);
   });
 
   it("chains the effects in order, each working on what the last left", () => {

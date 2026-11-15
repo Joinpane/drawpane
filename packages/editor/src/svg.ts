@@ -35,6 +35,7 @@ import { type Matrix, type Rect, round2 } from "./geometry";
 import { FULL_CROP, imagePlacement } from "./images";
 import { markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
+import { noiseThresholdZ } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { textSpans } from "./rich-text";
 import type { Scene } from "./scene";
@@ -105,15 +106,13 @@ const attr = (name: string, value: string | number) =>
 const ANGULAR_WEDGES = 180;
 
 /**
- * Where turbulence's noise sits above `1 − density` of the time. One octave
- * of `fractalNoise` is close to normal around 0.5 (σ ≈ 0.12); the logistic
- * curve stands in for the normal quantile.
+ * Where to cut turbulence's noise for grain as dense as Figma's (see
+ * noise.ts): z(density) deviations above its mean. One octave of
+ * `fractalNoise` is close to normal around 0.5 (σ ≈ 0.12).
  */
 export function noiseThreshold(density: number): number {
-  const d = Math.min(1, Math.max(0, density / 100));
-  if (d <= 0) return Number.POSITIVE_INFINITY;
-  if (d >= 1) return Number.NEGATIVE_INFINITY;
-  return 0.5 + (0.12 * Math.log((1 - d) / d)) / 1.702;
+  if (density <= 0) return Number.POSITIVE_INFINITY;
+  return 0.5 + 0.12 * noiseThresholdZ(density);
 }
 
 /** Steps in the table that turns turbulence into on and off cells. */
