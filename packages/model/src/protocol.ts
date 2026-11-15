@@ -150,6 +150,13 @@ export type ServerMessage =
       readonly t: "merged";
       readonly by: { readonly id: string; readonly name: string };
     }
+  /** This file is a branch, and someone brought main's latest changes into it. Sent after the change. */
+  | {
+      readonly t: "updated-from-main";
+      readonly by: { readonly id: string; readonly name: string };
+      /** How many of main's changes came in. */
+      readonly changes: number;
+    }
   /** Someone merged a branch into this file. Sent after the change itself. */
   | {
       readonly t: "merged-in";

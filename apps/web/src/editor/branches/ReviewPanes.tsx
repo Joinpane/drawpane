@@ -5,7 +5,7 @@
  */
 import type { BranchInfo, Resolution } from "@drawpane/model";
 import { Badge, Button, Icon, IconButton, type IconName } from "@drawpane/ui";
-import { useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { isMac, modKey } from "../../app/format";
 import { count, revisionLabel, whenPhrase } from "../history/labels";
 import type { ChangeKind, ReviewRow } from "./review";
@@ -258,11 +258,24 @@ export function MergePane({
               <Check
                 ok
                 icon="history"
-                title={`${main.name} moved since you branched`}
-                detail={`${count(review.mainMoved, "revision")}: the merge goes onto the latest`}
+                title={`${main.name} has moved on`}
+                detail={`${count(review.mainMoved, "revision")} since this branch's starting point`}
+                action={
+                  canMerge ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      icon="arrow-down"
+                      disabled={review.updating || review.merging}
+                      onClick={review.update}
+                    >
+                      {review.updating ? "Updating…" : `Update from ${main.name}`}
+                    </Button>
+                  ) : undefined
+                }
               />
             ) : (
-              <Check ok icon="check" title={`${main.name} hasn't changed since you branched`} />
+              <Check ok icon="check" title={`Up to date with ${main.name}`} />
             )
           ) : null}
           {plan.undecided > 0 ? null : (
@@ -320,11 +333,14 @@ function Check({
   icon,
   title,
   detail,
+  action,
 }: {
   ok: boolean;
   icon: IconName;
   title: string;
   detail?: string | undefined;
+  /** Something to do about it. */
+  action?: ReactNode;
 }) {
   return (
     <li className="merge-check" data-ok={ok || undefined}>
@@ -332,6 +348,7 @@ function Check({
       <span className="merge-check__text">
         <span className="merge-check__title">{title}</span>
         {detail ? <span className="merge-check__detail">{detail}</span> : null}
+        {action ? <span className="merge-check__action">{action}</span> : null}
       </span>
     </li>
   );

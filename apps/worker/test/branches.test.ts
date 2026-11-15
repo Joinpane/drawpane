@@ -320,3 +320,79 @@ describe("file lists", () => {
     expect(await count()).toBe(0);
   });
 });
+
+describe("updating a branch from main", () => {
+  it("brings in main's changes, keeps the branch's, and starts review from main as it is", async () => {
+    const { browser, mainId, main, branch } = await mainWithBranch();
+    const onBranch = await join(browser, branch.id, "clientB");
+    await onBranch.edit([{ op: "set", id: "r1", prop: "width", value: 240 }]);
+    await main.edit([{ op: "set", id: "r1", prop: "name", value: "Pay now" }]);
+    await main.edit([rect("r3", main.page.id, { name: "Footer" })]);
+
+    const updated = await browser.json<{ branch: BranchInfo; changes: number; kept: number }>(
+      `/api/files/${branch.id}/branch/update`,
+      { method: "POST", json: {} },
+    );
+    expect(updated).toMatchObject({ changes: 2, kept: 0 });
+    expect(updated.branch.baseRevn).toBe((await roomOf(mainId).stats()).revn);
+    await onBranch.next("updated-from-main");
+    const nodes = (await roomOf(branch.id).allNodes()) as NodeRecord[];
+    expect(nodes.find((n) => n.id === "r1")?.props).toMatchObject({ name: "Pay now", width: 240 });
+    expect(nodes.some((n) => n.id === "r3")).toBe(true);
+
+    // Only the branch's own change is left to review.
+    const review = await browser.json<{
+      base: NodeRecord[];
+      branch: NodeRecord[];
+      main: NodeRecord[];
+    }>(`/api/files/${branch.id}/branch/review`);
+    const changes = branchChanges(
+      nodeReader(review.base),
+      nodeReader(review.branch),
+      nodeReader(review.main),
+    );
+    expect(changes).toEqual([
+      expect.objectContaining({ kind: "changed", field: "width", conflict: false }),
+    ]);
+  });
+
+  it("keeps the branch's side where both changed the same thing, as a change against main", async () => {
+    const { browser, main, branch } = await mainWithBranch();
+    const onBranch = await join(browser, branch.id, "clientB");
+    await onBranch.edit([{ op: "set", id: "r1", prop: "width", value: 240 }]);
+    await main.edit([{ op: "set", id: "r1", prop: "width", value: 300 }]);
+    const updated = await browser.json<{ changes: number; kept: number }>(
+      `/api/files/${branch.id}/branch/update`,
+      { method: "POST", json: {} },
+    );
+    expect(updated).toMatchObject({ changes: 0, kept: 1 });
+    const review = await browser.json<{
+      base: NodeRecord[];
+      branch: NodeRecord[];
+      main: NodeRecord[];
+    }>(`/api/files/${branch.id}/branch/review`);
+    const [change] = branchChanges(
+      nodeReader(review.base),
+      nodeReader(review.branch),
+      nodeReader(review.main),
+    );
+    // No longer a conflict: review shows main's value going to the branch's.
+    expect(change).toMatchObject({ field: "width", base: 300, branch: 240, conflict: false });
+  });
+
+  it("is for editors of an open branch", async () => {
+    const { browser, teamId, branch } = await mainWithBranch();
+    const viewer = await signedInUser("Vi", "viewer", teamId);
+    const denied = await viewer.browser.fetch(`/api/files/${branch.id}/branch/update`, {
+      method: "POST",
+      json: {},
+    });
+    expect(denied.status).toBe(403);
+    await browser.json(`/api/files/${branch.id}/branch/merge`, { method: "POST", json: {} });
+    const merged = await browser.fetch(`/api/files/${branch.id}/branch/update`, {
+      method: "POST",
+      json: {},
+    });
+    expect(merged.status).toBe(403);
+  });
+});

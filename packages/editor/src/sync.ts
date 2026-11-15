@@ -287,6 +287,7 @@ export class SyncEngine {
         this.#emit("role", "viewer");
         return;
       case "merged-in":
+      case "updated-from-main":
       case "pong":
         return;
       case "error":

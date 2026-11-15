@@ -269,6 +269,13 @@ export const api = {
       `/files/${branchId}/branch/merge`,
       body,
     ),
+  /** Brings main's changes since the branch's base into it, and moves the base forward. */
+  updateBranch: (branchId: string) =>
+    request<{ branch: BranchInfo; changes: number; kept: number }>(
+      "POST",
+      `/files/${branchId}/branch/update`,
+      {},
+    ),
   /** Deletes a branch for good. */
   deleteBranch: (branchId: string) => request<{ ok: true }>("DELETE", `/files/${branchId}/branch`),
   /** Restores the whole file. `sessionId` is this tab's, so the room doesn't also notify it. */

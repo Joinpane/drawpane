@@ -33,6 +33,9 @@ export interface BranchReviewState {
   include(key: string, included: boolean): void;
   merge(): void;
   readonly merging: boolean;
+  /** Brings main's latest changes into the branch, so review starts from main as it is. */
+  update(): void;
+  readonly updating: boolean;
   /** Why the last merge didn't go through. */
   readonly mergeError: string | null;
 }
@@ -43,6 +46,7 @@ export function useBranchReview(
   branch: BranchInfo | null,
   enabled: boolean,
   onMerged: (merged: { branch: BranchInfo; restorePoint: string }) => void,
+  onUpdated: (updated: { changes: number; kept: number }) => void,
 ): BranchReviewState {
   const queryClient = useQueryClient();
   const review = useQuery({
@@ -107,6 +111,15 @@ export function useBranchReview(
     },
   });
 
+  const updating = useMutation({
+    mutationFn: () => api.updateBranch(branch?.id as string),
+    onSuccess: (updated) => {
+      void queryClient.invalidateQueries({ queryKey: ["file", branch?.id] });
+      void review.refetch();
+      onUpdated(updated);
+    },
+  });
+
   return {
     rows,
     main: review.data?.main ?? null,
@@ -122,7 +135,11 @@ export function useBranchReview(
       if (plan?.ready && !mutation.isPending) mutation.mutate();
     },
     merging: mutation.isPending,
-    mergeError: mutation.error ? mutation.error.message : null,
+    update: () => {
+      if (!updating.isPending) updating.mutate();
+    },
+    updating: updating.isPending,
+    mergeError: (mutation.error ?? updating.error)?.message ?? null,
   };
 }
 
