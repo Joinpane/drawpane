@@ -142,8 +142,10 @@
 .account__method + .account__method {
   border-top: 1px solid var(--line);
 }
+/* Nothing listed yet: a row's height, its sentence centred in it like a row's text. */
 .account__method--empty {
-  display: block;
+  display: flex;
+  align-items: center;
   color: var(--ink-muted);
   font: 400 13px / 18px var(--font-ui);
 }
@@ -504,12 +506,16 @@
 }
 .tokens__form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 140px;
+  grid-template-columns: minmax(0, 1fr) 160px;
   align-items: end;
   gap: var(--space-300);
   padding: var(--space-400);
   border-radius: var(--radius-md);
   box-shadow: inset 0 0 0 1px var(--line);
+}
+/* A text field keeps a 220px minimum of its own: here the column sets the width. */
+.tokens__expiry {
+  min-width: 0;
 }
 .tokens__actions {
   grid-column: 1 / -1;
