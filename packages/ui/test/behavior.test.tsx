@@ -287,6 +287,12 @@ describe("NumberField", () => {
     expect(onChange).toHaveBeenLastCalledWith(80);
   });
 
+  it("shows its placeholder for a missing value, and still reads it out by its null label", () => {
+    const { input } = setup({ defaultValue: null, nullLabel: "None", placeholder: "–" });
+    expect(input.placeholder).toBe("–");
+    expect(input.getAttribute("aria-valuetext")).toBe("None");
+  });
+
   it("takes every key typed after Enter on an unchanged value", async () => {
     const user = userEvent.setup();
     const { input, onChange } = setup();
@@ -560,6 +566,25 @@ describe("LayerRow", () => {
     await user.type(screen.getByRole("textbox", { name: "Layer name" }), "x{Escape}");
     expect(onRename).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("double-clicking the kind icon calls onIconDoubleClick instead of renaming", async () => {
+    const user = userEvent.setup();
+    const onIconDoubleClick = vi.fn();
+    const { container } = render(
+      <div role="tree" aria-label="Layers">
+        <LayerRow name="Hero card" onRename={vi.fn()} onIconDoubleClick={onIconDoubleClick} />
+      </div>,
+    );
+    const icon = container.querySelector(".dp-layer__icon");
+    if (!icon) throw new Error("no icon");
+    await user.dblClick(icon);
+    expect(onIconDoubleClick).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("textbox")).toBeNull();
+    // The rest of the row still renames.
+    await user.dblClick(screen.getByText("Hero card"));
+    expect(screen.getByRole("textbox", { name: "Layer name" })).toBeTruthy();
+    expect(onIconDoubleClick).toHaveBeenCalledTimes(1);
   });
 
   it("toggles visibility without selecting the row", async () => {

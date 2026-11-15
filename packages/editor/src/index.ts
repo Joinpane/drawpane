@@ -1,5 +1,6 @@
 export * from "./accessibility";
 export * from "./camera";
+export * from "./camera-motion";
 export * from "./code";
 export * from "./components";
 export * from "./constraints";

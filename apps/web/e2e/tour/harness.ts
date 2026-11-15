@@ -40,6 +40,12 @@ export const test = base.extend({
 
 /** Screenshots the page (or just `target` in it) in the light theme, then the dark one. */
 export async function shot(page: Page, name: string, target?: Locator): Promise<void> {
+  // Zooming to a layer or the selection glides: shoot where it lands, not on the way.
+  await page.waitForFunction(
+    () =>
+      !(window as unknown as { drawpane?: { cameraAnimating?: boolean } }).drawpane
+        ?.cameraAnimating,
+  );
   for (const theme of ["light", "dark"] as const) {
     await page.evaluate((t) => {
       if (t === "dark") document.documentElement.dataset.theme = "dark";

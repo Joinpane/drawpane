@@ -281,9 +281,11 @@ test.describe
       })) as string;
       await select(page, [item]);
       await expect.poll(async () => (await props(page, item)).width).toBe(400);
-      // Only the axis that fills offers limits; empty means none.
-      const max = panel(page).getByRole("spinbutton", { name: "Max width" });
-      await expect(max).toHaveAttribute("placeholder", "None");
+      // Only the axis that fills offers limits, grouped under it; empty means none, shown as a dash.
+      const limits = panel(page).getByRole("group", { name: "Width limits" });
+      const max = limits.getByRole("spinbutton", { name: "Max width" });
+      await expect(max).toHaveAttribute("placeholder", "–");
+      await expect(max).toHaveAttribute("aria-valuetext", "None");
       await expect(panel(page).getByRole("spinbutton", { name: "Max height" })).toHaveCount(0);
       await max.fill("120");
       await max.press("Enter");
