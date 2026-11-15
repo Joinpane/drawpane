@@ -1,5 +1,6 @@
 import {
   type ComponentPropsWithRef,
+  type HTMLAttributes,
   type KeyboardEvent,
   type PointerEvent,
   useCallback,
@@ -211,6 +212,35 @@ export function NumberField({
   const scrubbable = !disabled && !token;
   const labelContent = icon ? <Icon name={icon} size={12} /> : label;
 
+  /** Dragging the label or the unit scrubs the value, as in Figma. */
+  const scrubHandle = {
+    onPointerDown: (event) => {
+      if (!scrubbable || event.button !== 0) return;
+      event.preventDefault();
+      commitDraft();
+      setDraft(null);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      scrub.current = {
+        pointerId: event.pointerId,
+        lastX: event.clientX,
+        exact: value ?? scrubFrom,
+      };
+      document.documentElement.classList.add("dp-scrubbing");
+      onScrubStart?.();
+    },
+    onPointerMove: (event) => {
+      const active = scrub.current;
+      if (!active || active.pointerId !== event.pointerId) return;
+      const delta = (event.clientX - active.lastX) * step * stepMultiplier(event);
+      active.lastX = event.clientX;
+      active.exact = Math.min(max, Math.max(min, active.exact + delta));
+      commitNumber(active.exact);
+    },
+    onPointerUp: endScrub,
+    onPointerCancel: endScrub,
+    onLostPointerCapture: endScrub,
+  } satisfies HTMLAttributes<HTMLSpanElement>;
+
   return (
     <div
       className={cx(
@@ -222,35 +252,7 @@ export function NumberField({
       {...(token ? { role: "group", "aria-label": name } : {})}
     >
       {labelContent !== undefined && (
-        <span
-          className="dp-field__label"
-          aria-hidden="true"
-          onPointerDown={(event) => {
-            if (!scrubbable || event.button !== 0) return;
-            event.preventDefault();
-            commitDraft();
-            setDraft(null);
-            event.currentTarget.setPointerCapture(event.pointerId);
-            scrub.current = {
-              pointerId: event.pointerId,
-              lastX: event.clientX,
-              exact: value ?? scrubFrom,
-            };
-            document.documentElement.classList.add("dp-scrubbing");
-            onScrubStart?.();
-          }}
-          onPointerMove={(event) => {
-            const active = scrub.current;
-            if (!active || active.pointerId !== event.pointerId) return;
-            const delta = (event.clientX - active.lastX) * step * stepMultiplier(event);
-            active.lastX = event.clientX;
-            active.exact = Math.min(max, Math.max(min, active.exact + delta));
-            commitNumber(active.exact);
-          }}
-          onPointerUp={endScrub}
-          onPointerCancel={endScrub}
-          onLostPointerCapture={endScrub}
-        >
+        <span className="dp-field__label" aria-hidden="true" {...scrubHandle}>
           {labelContent}
         </span>
       )}
@@ -293,7 +295,11 @@ export function NumberField({
           onKeyDown={handleKeyDown}
         />
       )}
-      {unit && !token && <span className="dp-field__unit">{unit}</span>}
+      {unit && !token && (
+        <span className="dp-field__unit" aria-hidden="true" {...scrubHandle}>
+          {unit}
+        </span>
+      )}
     </div>
   );
 }
