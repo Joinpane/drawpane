@@ -9,6 +9,7 @@ import type { AppContext, Env, Role } from "../env";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { badRequest, conflict, forbidden, notFound, rateLimited } from "../lib/http";
 import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
+import { branches, branchInfo, deleteBranchesOf } from "./branches";
 import { comments } from "./comments";
 import { fonts } from "./fonts";
 import { imports } from "./imports";
@@ -358,7 +359,7 @@ export const api = new Hono<AppContext>()
     await requireTeamRole(c.env, user.id, teamId, "viewer");
     const { results } = await c.env.DB.prepare(
       `SELECT p.id, p.team_id AS teamId, p.name, p.created_at AS createdAt, p.updated_at AS updatedAt,
-              (SELECT COUNT(*) FROM files f WHERE f.project_id = p.id AND f.deleted_at IS NULL) AS fileCount
+              (SELECT COUNT(*) FROM files f WHERE f.project_id = p.id AND f.deleted_at IS NULL AND f.branch_of IS NULL) AS fileCount
          FROM projects p WHERE p.team_id = ? ORDER BY p.created_at`,
     )
       .bind(teamId)
@@ -400,7 +401,7 @@ export const api = new Hono<AppContext>()
     const project = await projectTeam(c.env.DB, c.req.param("projectId"));
     await requireTeamRole(c.env, user.id, project.team_id, "owner");
     const live = await c.env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM files WHERE project_id = ? AND deleted_at IS NULL",
+      "SELECT COUNT(*) AS n FROM files WHERE project_id = ? AND deleted_at IS NULL AND branch_of IS NULL",
     )
       .bind(project.id)
       .first<{ n: number }>();
@@ -415,7 +416,8 @@ export const api = new Hono<AppContext>()
     const teamId = c.req.param("teamId");
     await requireTeamRole(c.env, user.id, teamId, "viewer");
     const trash = c.req.query("view") === "trash";
-    const deleted = `deleted_at IS ${trash ? "NOT NULL" : "NULL"}`;
+    // Main files only: a branch is reached from its main file (decision 0012).
+    const deleted = `deleted_at IS ${trash ? "NOT NULL" : "NULL"} AND branch_of IS NULL`;
     // With `q`: the team's files whose names match, best first (see search.ts).
     const search = fileSearch(c.req.query("q") ?? "");
     if (search) await backfillSearchNames(c.env.DB, teamId);
@@ -436,7 +438,7 @@ export const api = new Hono<AppContext>()
     const project = await projectTeam(c.env.DB, c.req.param("projectId"));
     await requireTeamRole(c.env, user.id, project.team_id, "viewer");
     const { results } = await c.env.DB.prepare(
-      "SELECT * FROM files WHERE project_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC",
+      "SELECT * FROM files WHERE project_id = ? AND deleted_at IS NULL AND branch_of IS NULL ORDER BY updated_at DESC",
     )
       .bind(project.id)
       .all<FileRow>();
@@ -521,7 +523,7 @@ export const api = new Hono<AppContext>()
     const teamId = c.req.param("teamId");
     await requireTeamRole(c.env, user.id, teamId, "viewer");
     const { results } = await c.env.DB.prepare(
-      `SELECT * FROM files WHERE team_id = ? AND is_template = 1 AND deleted_at IS NULL
+      `SELECT * FROM files WHERE team_id = ? AND is_template = 1 AND deleted_at IS NULL AND branch_of IS NULL
         ORDER BY name COLLATE NOCASE`,
     )
       .bind(teamId)
@@ -535,7 +537,14 @@ export const api = new Hono<AppContext>()
     const project = await c.env.DB.prepare("SELECT id, name FROM projects WHERE id = ?")
       .bind(file.project_id)
       .first<{ id: string; name: string }>();
-    return c.json({ file: toFile(file), role, project });
+    // A branch says what it branches, so the editor can lead back there.
+    const branch = file.branch_of ? await branchInfo(c.env, file.id) : null;
+    const main = file.branch_of
+      ? await c.env.DB.prepare("SELECT id, name FROM files WHERE id = ?")
+          .bind(file.branch_of)
+          .first<{ id: string; name: string }>()
+      : null;
+    return c.json({ file: toFile(file), role, project, branch, main });
   })
 
   .patch("/files/:fileId", async (c) => {
@@ -549,8 +558,11 @@ export const api = new Hono<AppContext>()
         isTemplate: z.boolean().optional(),
       }),
     );
-    if (body.projectId && body.projectId !== file.project_id) {
-      const target = await projectTeam(c.env.DB, body.projectId);
+    if (file.branch_of && (body.projectId !== undefined || body.isTemplate !== undefined))
+      throw badRequest("A branch stays with its main file. Move or share the main file instead.");
+    const moving = body.projectId !== undefined && body.projectId !== file.project_id;
+    if (moving) {
+      const target = await projectTeam(c.env.DB, body.projectId as string);
       if (target.team_id !== file.team_id)
         throw badRequest("Files can only move between projects on the same team.");
     }
@@ -568,6 +580,11 @@ export const api = new Hono<AppContext>()
         file.id,
       )
       .run();
+    // Its branches go where it goes.
+    if (moving)
+      await c.env.DB.prepare("UPDATE files SET project_id = ? WHERE branch_of = ?")
+        .bind(body.projectId, file.id)
+        .run();
     return c.json({ ok: true });
   })
 
@@ -580,9 +597,11 @@ export const api = new Hono<AppContext>()
       c.req.param("fileId"),
       permanent ? "owner" : "editor",
     );
+    if (file.branch_of) throw badRequest("Delete a branch from its main file's list of branches.");
     if (permanent) {
       if (file.deleted_at === null)
         throw conflict("Move the file to trash before deleting it for good.");
+      await deleteBranchesOf(c.env, file.id);
       await c.env.FILE_ROOM.get(c.env.FILE_ROOM.idFromName(file.id)).destroy();
       await c.env.FILES.delete(thumbnailKey(file.id));
       await c.env.DB.prepare("DELETE FROM files WHERE id = ?").bind(file.id).run();
@@ -610,6 +629,8 @@ export const api = new Hono<AppContext>()
   .route("/", media)
   .route("/", share)
   .route("/", versions)
+  // Branches (./branches.ts) --------------------------------------------------
+  .route("/", branches)
   // Team libraries (./libraries.ts) ------------------------------------------
   .route("/", libraries)
   // Filling a new file from an import (./imports.ts) ------------------------------

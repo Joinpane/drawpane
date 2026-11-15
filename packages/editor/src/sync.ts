@@ -281,6 +281,12 @@ export class SyncEngine {
         this.#role = message.role;
         this.#emit("role", message.role);
         return;
+      case "merged":
+        // A merged branch is read-only for everyone.
+        this.#role = "viewer";
+        this.#emit("role", "viewer");
+        return;
+      case "merged-in":
       case "pong":
         return;
       case "error":

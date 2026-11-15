@@ -142,6 +142,22 @@ export type ServerMessage =
       /** Who changed it: maybe you, in another tab. */
       readonly by: { readonly id: string; readonly name: string };
     }
+  /**
+   * This file is a branch, and someone merged it into its main file: it's
+   * read-only history from now on, and the room treats everyone as a viewer.
+   */
+  | {
+      readonly t: "merged";
+      readonly by: { readonly id: string; readonly name: string };
+    }
+  /** Someone merged a branch into this file. Sent after the change itself. */
+  | {
+      readonly t: "merged-in";
+      readonly by: { readonly id: string; readonly name: string };
+      readonly branch: { readonly id: string; readonly name: string };
+      /** How many changes it took. */
+      readonly changes: number;
+    }
   /** Someone restored the whole file to a saved version. Sent after the change itself. */
   | {
       readonly t: "restored";

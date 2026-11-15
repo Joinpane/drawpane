@@ -50,7 +50,12 @@ export function useThreadLink(
   useEffect(() => {
     if (!linked || !live || !loaded) return;
     openThread(editor, store, linked, insets.left);
-    void navigate({ to: "/f/$fileId", params: { fileId }, search: {}, replace: true });
+    void navigate({
+      to: "/f/$fileId",
+      params: { fileId },
+      search: ({ thread: _, ...rest }) => rest,
+      replace: true,
+    });
   }, [linked, live, loaded, store, editor, insets.left, navigate, fileId]);
 
   // Seen: a thread's notifications are read once it's open, and again when a
