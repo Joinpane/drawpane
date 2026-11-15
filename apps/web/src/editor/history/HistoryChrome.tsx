@@ -1,6 +1,7 @@
 import type { VersionInfo } from "@drawpane/model";
 import { Button, Icon } from "@drawpane/ui";
 import { Dialog } from "../../app/Dialog";
+import { PASS_GESTURES } from "../canvas-gestures";
 import { versionTitle, whenLabel, whenPhrase } from "./labels";
 
 /** The strip under the toolbar while a version is on screen. */
@@ -20,7 +21,7 @@ export function VersionBanner({
   const shown = loading ?? viewing;
   if (!shown && !error) return null;
   return (
-    <div className="version-banner" role="status" aria-live="polite">
+    <div className="version-banner" role="status" aria-live="polite" {...PASS_GESTURES}>
       <Icon name={error ? "warning" : "history"} size={16} />
       <span className="version-banner__text">
         {error ? (

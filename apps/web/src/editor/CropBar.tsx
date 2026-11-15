@@ -15,6 +15,7 @@ import {
 import { getProp } from "@drawpane/model";
 import { Button, SegmentedControl } from "@drawpane/ui";
 import { useState } from "react";
+import { PASS_GESTURES } from "./canvas-gestures";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 
 const PRESETS = [
@@ -50,6 +51,7 @@ export function CropBar() {
   return (
     <div
       className="crop-bar pane"
+      {...PASS_GESTURES}
       role="toolbar"
       aria-label="Crop"
       style={{ left: bottom.x, top: Math.max(64, y) }}

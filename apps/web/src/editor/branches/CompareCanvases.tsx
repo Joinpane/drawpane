@@ -12,6 +12,7 @@ import { EditorContext, useEditorStateOutside } from "../hooks";
 import type { CompareMode, CompareState, CompareView } from "./compare";
 import type { ReviewRow } from "./review";
 import "./branches.css";
+import { PASS_GESTURES } from "../canvas-gestures";
 
 function useCompare<T>(compare: CompareView, select: (s: CompareState) => T): T {
   return useSyncExternalStore(compare.state.subscribe, () => select(compare.state.get()));
@@ -186,7 +187,12 @@ export function CompareBar({ compare }: { compare: CompareView }) {
   const mode = useCompare(compare, (s) => s.mode);
   const highlight = useCompare(compare, (s) => s.highlight);
   return (
-    <div className="compare-bar pane" role="toolbar" aria-label="Compare with main">
+    <div
+      className="compare-bar pane"
+      role="toolbar"
+      aria-label="Compare with main"
+      {...PASS_GESTURES}
+    >
       <SegmentedControl
         label="Compare"
         options={MODES}

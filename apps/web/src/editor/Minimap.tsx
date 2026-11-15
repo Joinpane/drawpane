@@ -23,6 +23,7 @@ import {
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { PASS_GESTURES } from "./canvas-gestures";
 import { useEditor, useEditorState } from "./hooks";
 import type { Box } from "./lens-placement";
 import { useUi } from "./ui-state";
@@ -315,6 +316,7 @@ export function Minimap() {
   return (
     <section
       className="minimap pane"
+      {...PASS_GESTURES}
       style={{ left }}
       aria-label="Minimap"
       // Asleep, it's out of the way: faded, and not under the pointer or in the accessibility tree.
