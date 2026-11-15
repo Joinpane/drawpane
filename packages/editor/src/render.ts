@@ -1618,10 +1618,16 @@ export class CanvasRenderer {
     const inradius =
       node.type === "rect" || node.type === "frame" || node.type === "ellipse"
         ? Math.min(w, h) / 2
-        : this.#inradii.get(node.props, w, h, (c) => {
-            if (node.type === "text") this.#text(c, node, w, "#ffffff");
-            else c.fill(shape);
-          });
+        : this.#inradii.get(
+            node.props,
+            w,
+            h,
+            (c) => {
+              if (node.type === "text") this.#text(c, node, w, "#ffffff");
+              else c.fill(shape);
+            },
+            this.#measurer.generation ?? 0,
+          );
     // A box's rim is measured from its exact edge: square corners stay square.
     const box = node.type === "rect" || node.type === "frame";
     const r = box ? getProp(node.props, "cornerRadius") : 0;
@@ -1631,6 +1637,7 @@ export class CanvasRenderer {
       key,
       inradius,
       corners,
+      kind: node.type === "ellipse" ? "ellipse" : "other",
       ...(within ? { within } : {}),
     });
   }

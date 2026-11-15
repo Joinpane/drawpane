@@ -21,12 +21,36 @@ describe("glassParams", () => {
 
   it("bends a box's edge as far as its rim is deep at full refraction, as Figma does", () => {
     const k = DEFAULT_GLASS_TUNING;
-    const box = glassParams({ ...DEFAULT_GLASS, refraction: 100, depth: 50 }, 2, k, Infinity, true);
+    const box = glassParams(
+      { ...DEFAULT_GLASS, refraction: 100, depth: 50 },
+      2,
+      k,
+      Infinity,
+      "box",
+    );
     expect(box.refraction).toBeCloseTo(k.bend * 100, 5);
     // Figma's falloff steepens with depth.
-    const deep = glassParams({ ...DEFAULT_GLASS, depth: 100 }, 1, k, Infinity, true);
-    const shallow = glassParams({ ...DEFAULT_GLASS, depth: 20 }, 1, k, Infinity, true);
+    const deep = glassParams({ ...DEFAULT_GLASS, depth: 100 }, 1, k, Infinity, "box");
+    const shallow = glassParams({ ...DEFAULT_GLASS, depth: 20 }, 1, k, Infinity, "box");
     expect(deep.falloff).toBeGreaterThan(shallow.falloff);
+  });
+
+  it("bends an ellipse a share of that growing with the depth, as Figma's", () => {
+    const share = (depth: number) => {
+      const p = glassParams(
+        { ...DEFAULT_GLASS, refraction: 100, depth },
+        1,
+        undefined,
+        Infinity,
+        "ellipse",
+      );
+      return p.refraction / depth;
+    };
+    // Figma, measured on circles of every size: 0.38 at depth 10, 0.59 at 20, 0.78 at 40, 0.87 at 70.
+    expect(share(10)).toBeCloseTo(0.38, 1);
+    expect(share(20)).toBeCloseTo(0.59, 1);
+    expect(share(40)).toBeCloseTo(0.78, 1);
+    expect(share(70)).toBeCloseTo(0.87, 1);
   });
 
   it("takes depth and frost no further than Figma's 100", () => {
