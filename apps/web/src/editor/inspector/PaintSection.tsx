@@ -22,7 +22,14 @@ import { ImageChip } from "../ImageFill";
 import { Bindable } from "../tokens/Bindable";
 import { common, Num, Select, useDisclosure } from "./fields";
 import { PaintPicker } from "./PaintPicker";
-import { gradientAngle, rgbaOf, shownOpacity, swatchCss, withShownOpacity } from "./paint";
+import {
+  gradientAngle,
+  mixedSwatchCss,
+  rgbaOf,
+  shownOpacity,
+  swatchCss,
+  withShownOpacity,
+} from "./paint";
 import { moveItem, useReorder } from "./reorder";
 import { forMode, type SidesMode, sidesMode, withSide, withWeight } from "./stroke-sides";
 
@@ -192,6 +199,7 @@ export function PaintSwatch({
   onChange,
   side,
   onOpenChange,
+  mixed = null,
 }: {
   editor: Editor;
   nodes: NodeRecord[];
@@ -201,6 +209,8 @@ export function PaintSwatch({
   onChange: (next: Paint, label: string) => void;
   side?: PopoverSide;
   onOpenChange?: (open: boolean) => void;
+  /** The layers differ: another of their paints, shown beside `paint` across the swatch's diagonal. */
+  mixed?: Paint | null;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useDisclosure(onOpenChange);
@@ -210,10 +220,10 @@ export function PaintSwatch({
         ref={ref}
         type="button"
         className="paint-swatch"
-        aria-label={`Edit ${title.toLowerCase()}`}
+        aria-label={`Edit ${title.toLowerCase()}${mixed ? " (mixed)" : ""}`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        style={{ background: swatchCss(paint) }}
+        style={{ background: mixed ? mixedSwatchCss(paint, mixed) : swatchCss(paint) }}
         onClick={() => setOpen(!open)}
       >
         {paint.type === "image" ? <Icon name="image" size={12} /> : null}

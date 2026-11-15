@@ -143,3 +143,49 @@ describe("collaborators' selections", () => {
     expect(still.texts).toEqual(["Lena Park"]);
   });
 });
+
+describe("frame labels", () => {
+  it("read on a page background the file chose, in the other theme's ink when that reads better", () => {
+    const { editor, interaction } = setup();
+    editor.doc.apply([
+      {
+        op: "create",
+        id: "board",
+        type: "frame",
+        parent: "p1",
+        key: "a1",
+        props: { x: 400, y: 100, width: 200, height: 120, name: "Board" },
+      },
+    ]);
+    // Dark theme's label grey, and the light theme's as the other.
+    const dark = {
+      ...THEME,
+      inkMuted: "#a9a59d",
+      otherLabels: { inkMuted: "#5d5a54", componentInk: "#0a6f6b" },
+    };
+    const inks = (background: string | null) => {
+      if (background)
+        editor.doc.apply([{ op: "set", id: "p1", prop: "backgroundColor", value: background }]);
+      const fills: string[] = [];
+      const recording = recordingContext();
+      const ctx = new Proxy(recording.ctx, {
+        get(target, key) {
+          if (key === "fillText")
+            return () => fills.push(String((target as unknown as { fillStyle: string }).fillStyle));
+          return Reflect.get(target, key);
+        },
+        set(target, key, value) {
+          return Reflect.set(target, key, value);
+        },
+      });
+      drawOverlay(ctx, editor, interaction, dark, 1);
+      return fills;
+    };
+    // The theme's own canvas: its own ink.
+    expect(inks(null)).toContain("#a9a59d");
+    // A white page in dark theme: dark theme's light grey would be 2.4:1, the light theme's reads.
+    expect(inks("#ffffff")).toContain("#5d5a54");
+    // A dark page: the theme's own still reads.
+    expect(inks("#1c1b1a")).toContain("#a9a59d");
+  });
+});

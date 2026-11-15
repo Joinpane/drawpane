@@ -400,6 +400,33 @@ function FillControl({
         }
       />
     );
+  // Text whose runs are filled differently: as the inspector says, its fills are mixed. The
+  // swatch shows two of them; a paint picked here fills all of the text, as adding one there does.
+  const views = textViews(editor, [node]);
+  if (views.length > 1 && common(views, "fills") === null) {
+    const tops = views.map((v) => getProp(v.props, "fills").at(-1)).filter((p) => p !== undefined);
+    const [a, b] = tops;
+    return (
+      <PaintSwatch
+        editor={editor}
+        nodes={views}
+        title="Fill"
+        paint={a ?? (fills[fills.length - 1] as Paint)}
+        mixed={b ?? a ?? null}
+        bindKey={undefined}
+        side={ctx.side}
+        onOpenChange={ctx.hold}
+        onChange={(next, label) =>
+          editor.setProp(
+            views.map((v) => v.id),
+            "fills",
+            [next],
+            label,
+          )
+        }
+      />
+    );
+  }
   const index = fills.length - 1;
   const paint = fills[index] as Paint;
   const firstSolid = fills.findIndex((f) => f.type === "solid");

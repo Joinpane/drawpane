@@ -6,6 +6,7 @@
  */
 
 import { getProp, type NodeRecord } from "@drawpane/model";
+import { inkOn } from "./contrast";
 import { imageRect } from "./crop";
 import { croppingTarget } from "./crop-session";
 import type { Editor } from "./editor";
@@ -25,6 +26,11 @@ export interface OverlayTheme {
   signal: string;
   componentInk: string;
   onSignal: string;
+  /**
+   * The other theme's label inks, for a page whose own background they read
+   * better on (a light page in dark theme). Absent: labels keep this theme's.
+   */
+  otherLabels?: { readonly inkMuted: string; readonly componentInk: string };
   guide: string;
   component: string;
   inkMuted: string;
@@ -117,6 +123,14 @@ export function drawOverlay(
   }
 
   // Artboard labels: names above top-level frames (the one being renamed is an input instead).
+  // On a background the file chose, in whichever theme's inks read on it.
+  const pageBackground = getProp(doc.get(pageId)?.props ?? {}, "backgroundColor");
+  const labelInk = (own: "inkMuted" | "componentInk") =>
+    pageBackground && theme.otherLabels
+      ? inkOn(pageBackground, theme[own], theme.otherLabels[own])
+      : theme[own];
+  const mutedInk = labelInk("inkMuted");
+  const componentInk = labelInk("componentInk");
   ctx.font = LABEL_FONT;
   ctx.textBaseline = "alphabetic";
   for (const label of frameLabels(editor)) {
@@ -134,8 +148,7 @@ export function drawOverlay(
         theme.component,
       );
     }
-    ctx.fillStyle =
-      selected || hovered ? theme.signal : isComponentish ? theme.componentInk : theme.inkMuted;
+    ctx.fillStyle = selected || hovered ? theme.signal : isComponentish ? componentInk : mutedInk;
     if (label.text) ctx.fillText(label.text, label.textX, label.baseline);
   }
 

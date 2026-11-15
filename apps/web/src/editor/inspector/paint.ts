@@ -109,6 +109,19 @@ export function swatchCss(paint: Paint): string {
   return `${gradientCss(paint)}, ${CHECKER}`;
 }
 
+/** One colour standing for a paint: a solid's, a gradient's first stop's; an image's, none. */
+function standIn(paint: Paint): string {
+  if (paint.type === "solid") return cssColor(rgbaOf(paint.color, paint.opacity ?? 1));
+  if (paint.type === "image") return "var(--surface-sunken)";
+  const stop = [...paint.stops].sort((a, b) => a.position - b.position)[0];
+  return stop ? cssColor(rgbaOf(stop.color, paint.opacity ?? 1)) : "transparent";
+}
+
+/** The swatch for paints that differ: two of them, split across the diagonal, over a checkerboard. */
+export function mixedSwatchCss(a: Paint, b: Paint): string {
+  return `linear-gradient(135deg, ${standIn(a)} 50%, ${standIn(b)} 50%), ${CHECKER}`;
+}
+
 export function paintKind(paint: Paint): PaintKind {
   return paint.type === "solid" ? "solid" : paint.type === "image" ? "image" : "gradient";
 }
