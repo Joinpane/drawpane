@@ -426,21 +426,25 @@ function StrokeOptions({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
             />
           </PropertyRow>
           {mode === "custom" ? (
-            <div className="inspector__sides">
-              {SIDE_FIELDS.map(({ side, label, name }) => (
-                <NumberField
-                  key={side}
-                  label={label}
-                  ariaLabel={`${name} stroke weight`}
-                  min={0}
-                  placeholder="Mixed"
-                  value={shownSides ? shownSides[SIDE_AT[side]] : null}
-                  onChange={(v) =>
-                    applySides(`${name} stroke weight`, (n) => withSide(sidesOf(n), side, v))
-                  }
-                />
-              ))}
-            </div>
+            // The four widths hang from Sides, in its value column, as an axis's limits do.
+            <PropertyRow columns="label" className="inspector__sub">
+              <span className="inspector__branch" aria-hidden="true" />
+              <fieldset className="inspector__sides" aria-label="Stroke widths per side">
+                {SIDE_FIELDS.map(({ side, label, name }) => (
+                  <NumberField
+                    key={side}
+                    label={label}
+                    ariaLabel={`${name} stroke weight`}
+                    min={0}
+                    placeholder="Mixed"
+                    value={shownSides ? shownSides[SIDE_AT[side]] : null}
+                    onChange={(v) =>
+                      applySides(`${name} stroke weight`, (n) => withSide(sidesOf(n), side, v))
+                    }
+                  />
+                ))}
+              </fieldset>
+            </PropertyRow>
           ) : null}
         </>
       ) : null}

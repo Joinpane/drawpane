@@ -759,22 +759,24 @@
 .inspector__sizing .dp-seg__option {
   flex: 1;
 }
-/* An axis's limits hang from its row: a hairline runs from under its label
-   ("Width") into the Min field, so they read as part of it, not a row of their own. */
-/* Closer to its axis than the next axis is, so each pair reads as a group. */
-.inspector__limits {
+/*
+ * A detail of the row above, hanging from it (an axis's Min and Max, a stroke's per-side
+ * widths): no label of its own, a hairline from under the row's label into its first field,
+ * and closer to that row than the next row is, so the two read as one group.
+ */
+.inspector__sub {
   margin-top: calc(var(--space-100) - var(--space-200));
 }
-.inspector__limits .inspector__branch {
+.inspector__sub .inspector__branch {
   position: relative;
   align-self: stretch;
 }
-.inspector__limits .inspector__branch::before {
+.inspector__sub .inspector__branch::before {
   content: "";
   position: absolute;
-  /* From just under the label above (across the narrowed gap) to this row's middle. */
+  /* From just under the label above (across the narrowed gap) to the first field's middle. */
   top: calc(-1 * var(--space-100) - 3px);
-  bottom: 50%;
+  height: calc(var(--space-100) + 3px + var(--size-control-sm) / 2);
   left: 4px;
   /* Into the value column, stopping short of the field. */
   right: calc(-1 * var(--space-200) + 4px);
@@ -809,15 +811,30 @@
 .inspector__mixed {
   padding: 0;
 }
+/*
+ * The app's own chevron (icons/chevron-down) in muted ink, not the browser's heavier arrow, so a
+ * select reads like the pickers beside it. An image can't take a theme colour: one per theme.
+ */
+:root,
+[data-theme="light"] {
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%235d5a54' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5'/%3E%3C/svg%3E");
+}
+[data-theme="dark"] {
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23a9a59d' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5'/%3E%3C/svg%3E");
+}
 .inspector__select {
   width: 100%;
   height: var(--size-control-sm);
-  padding: 0 var(--space-200);
+  padding: 0 calc(var(--space-200) + 16px) 0 var(--space-200);
   border: 0;
   border-radius: var(--radius-sm);
-  background: var(--surface-sunken);
+  background:
+    var(--select-chevron) no-repeat right 6px center / 12px 12px,
+    var(--surface-sunken);
   color: var(--ink);
   font: 400 12px / 16px var(--font-ui);
+  appearance: none;
+  text-overflow: ellipsis;
 }
 .inspector__select:focus-visible {
   outline: none;
@@ -890,8 +907,12 @@
 .inspector__padding,
 .inspector__sides {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--space-100) var(--space-200);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 /* Selection Lens */
