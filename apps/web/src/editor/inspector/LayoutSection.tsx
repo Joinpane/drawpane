@@ -517,7 +517,7 @@ function Limits({
   if (sizing !== "hug" && sizing !== "fill" && !set) return null;
   const noun = axis === "width" ? "Width" : "Height";
   return (
-    <PropertyRow columns="label" className="inspector__limits">
+    <PropertyRow columns="label" className="inspector__sub">
       <span className="inspector__branch" aria-hidden="true" />
       <fieldset className="inspector__pair inspector__limit-pair" aria-label={`${noun} limits`}>
         <Limit
