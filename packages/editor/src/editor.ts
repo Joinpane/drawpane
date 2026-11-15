@@ -1311,6 +1311,62 @@ export class Editor {
     return ids;
   }
 
+  /**
+   * Creates layer trees inside `parentId`, before the child at `index`
+   * (on top by default), as one commit: what an agent's `render` builds
+   * (decision 0021). A root's own `x` and `y` place it in its parent; a root
+   * on the page without them goes to the right of what's already there, as
+   * new boards do. Children's boxes are in their parent's space; auto layout
+   * and text sizing settle them as they're committed. Returns the roots' ids,
+   * or [] when the parent can't take them.
+   */
+  createTrees(
+    parentId: string,
+    trees: readonly LayerTree[],
+    options: { index?: number; label?: string } = {},
+  ): string[] {
+    const parent = this.doc.get(parentId);
+    if (!parent || trees.length === 0) return [];
+    const siblings = this.doc.childIds(parentId);
+    const index = Math.max(0, Math.min(options.index ?? siblings.length, siblings.length));
+    const before = index > 0 ? (this.doc.get(siblings[index - 1] as string)?.key ?? null) : null;
+    const after =
+      index < siblings.length ? (this.doc.get(siblings[index] as string)?.key ?? null) : null;
+    const keys = keysBetween(before, after, trees.length);
+    // On the page, unplaced roots line up to the right of the page's content, 100 apart.
+    let nextX = 0;
+    let topY = 0;
+    if (parent.type === "page") {
+      const bounds = this.scene.unionBounds(siblings);
+      if (bounds) {
+        nextX = Math.round(bounds.x + bounds.width + 100);
+        topY = Math.round(bounds.y);
+      }
+    }
+    const ids: string[] = [];
+    const ops: Op[] = [];
+    const create = (tree: LayerTree, parent: string, key: string, props: Props): string => {
+      const id = newId();
+      ops.push({ op: "create", id, type: tree.type, parent, key, props });
+      const children = tree.children ?? [];
+      const childKeys = keysBetween(null, null, children.length);
+      children.forEach((child, i) => {
+        create(child, id, childKeys[i] as string, child.props);
+      });
+      return id;
+    };
+    trees.forEach((tree, i) => {
+      const props: Props = { ...tree.props };
+      if (parent.type === "page" && props.x === undefined && props.y === undefined) {
+        props.x = nextX;
+        props.y = topY;
+        nextX += Math.round(getProp(tree.props, "width")) + 100;
+      }
+      ids.push(create(tree, parentId, keys[i] as string, props));
+    });
+    return this.commit(ops, options.label ?? "Create layers") ? ids : [];
+  }
+
   /** Sets one property on several layers, skipping layers the property doesn't apply to. */
   setProp(ids: readonly string[], prop: PropName, value: unknown, label = "Change property"): void {
     const ops: Op[] = [];
