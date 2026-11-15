@@ -122,7 +122,7 @@ test.describe
     test("refuses files that aren't images, with a notice", async () => {
       await page.evaluate(() => {
         const data = new DataTransfer();
-        data.items.add(new File(["<svg/>"], "logo.svg", { type: "image/svg+xml" }));
+        data.items.add(new File(["not an image"], "notes.txt", { type: "text/plain" }));
         const target = document.querySelector(".canvas__overlay");
         const init = {
           dataTransfer: data,
@@ -134,7 +134,7 @@ test.describe
         target?.dispatchEvent(new DragEvent("drop", init));
       });
       await expect(page.getByRole("alert")).toContainText(
-        'Couldn\'t place "logo.svg". Drawpane takes PNG, JPEG, WebP and GIF images.',
+        'Couldn\'t place "notes.txt". Drawpane takes SVG, PNG, JPEG, WebP and GIF images.',
       );
     });
 

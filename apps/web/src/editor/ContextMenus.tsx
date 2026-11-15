@@ -28,7 +28,7 @@ export function ContextMenus({
     commentsShown,
     pasteAt: (point) => {
       void pasteFromClipboard(editor, fileId, point).then((pasted) => {
-        if (!pasted) editor.notify("The clipboard doesn't hold Drawpane layers or images.");
+        if (!pasted) editor.notify("The clipboard doesn't hold Drawpane layers, images or SVG.");
       });
     },
     renamePage: (pageId) => uiFor(editor).set({ renaming: pageId }),
