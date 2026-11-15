@@ -84,6 +84,11 @@ export interface LayerRowProps extends Omit<ComponentPropsWithRef<"div">, "child
   renaming?: boolean;
   /** Renaming started or ended, from inside the row. */
   onRenamingChange?: (renaming: boolean) => void;
+  /**
+   * Double-clicking the kind icon, as in Figma: the Layers panel zooms the
+   * canvas to the layer. Double-clicking the icon then doesn't rename.
+   */
+  onIconDoubleClick?: () => void;
 }
 
 /** The name with the first match of `query` wrapped in a mark. */
@@ -130,6 +135,7 @@ export function LayerRow({
   context = false,
   renaming: renamingProp,
   onRenamingChange,
+  onIconDoubleClick,
   className,
   style,
   onKeyDown,
@@ -206,9 +212,24 @@ export function LayerRow({
       ) : (
         <span className="dp-layer__caret">{caret}</span>
       )}
-      <span className="dp-layer__icon">
-        <Icon name={KIND_ICONS[kind]} />
-      </span>
+      {onIconDoubleClick ? (
+        // A mouse shortcut with a keyboard twin (Shift+2 on the selected row), so it adds no focus stop.
+        // biome-ignore lint/a11y/noStaticElementInteractions: the icon is not a control of its own
+        <span
+          className="dp-layer__icon has-action"
+          data-layer-icon=""
+          onDoubleClick={(event) => {
+            stop(event);
+            onIconDoubleClick();
+          }}
+        >
+          <Icon name={KIND_ICONS[kind]} />
+        </span>
+      ) : (
+        <span className="dp-layer__icon">
+          <Icon name={KIND_ICONS[kind]} />
+        </span>
+      )}
       {renaming ? (
         <input
           className="dp-layer__rename"

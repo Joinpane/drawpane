@@ -76,7 +76,7 @@ The props follow `design-system/components/index.d.ts`. Where they had to change
 - **CommandBar** `query` is controlled with `onQueryChange` (or uncontrolled with `defaultQuery`). Added `onRun`, `onComplete` (Tab), `onClose` (Escape), `autoFocus`, `emptyLabel`. The host filters `groups`; empty groups are hidden.
 - **Tooltip** with `children` wraps a trigger and handles hover, focus, Escape and `aria-describedby`. Without children it renders only the bubble, as before. Added `placement`, `delay`, `describe` and `disabled`.
 - **IconButton** shows its label and shortcut in a Tooltip instead of a native `title` (opt out with `tooltip={false}`).
-- **LayerRow** accepts div props and adds `onToggleExpanded`, `onToggleHidden`, `onToggleLocked`, `onRename` (double-click or F2) and `presenceLabel`. The tree owns roving focus: pass `tabIndex={0}` to the focused row.
+- **LayerRow** accepts div props and adds `onToggleExpanded`, `onToggleHidden`, `onToggleLocked`, `onRename` (double-click or F2), `onIconDoubleClick` (double-clicking the kind icon instead of renaming, for zoom to layer) and `presenceLabel`. The tree owns roving focus: pass `tabIndex={0}` to the focused row.
 - **AgentStep** renders an `<li>`; put steps in the new `AgentPlan` (`<ol>`).
 - **PromptField** `value` is controlled (`onValueChange`) or uncontrolled (`defaultValue`). Added `onSubmit`, `onStop`, `onAttach`, `onSkills`, `onTrigger("/" | "@")` and `textareaRef`. Send is disabled while the field is empty.
 - **PresenceStack** adds `onFollow` and `following`; `Person` takes an optional `id`.

@@ -1,7 +1,8 @@
 /**
  * Screenshots of the layers panel for design review, in both themes: row
  * states (auto layout, components, masks, hidden, locked), finding layers
- * with a filter, and the status line while dragging.
+ * with a filter, the status line while dragging, and the canvas zoomed to a
+ * layer by double-clicking its icon.
  * Run with `pnpm --filter @drawpane/web tour`.
  */
 import { expect } from "@playwright/test";
@@ -107,5 +108,13 @@ test("layers tour", async ({ browser }) => {
   await page.waitForTimeout(200);
   await shot(page, "112-layers-drag");
   await page.mouse.up();
+  await page.keyboard.press("ControlOrMeta+z");
+
+  // Double-clicking a row's icon glides the canvas to that layer (shot where it lands).
+  await tree
+    .getByRole("treeitem", { name: /^Greeting/ })
+    .locator(".dp-layer__icon")
+    .dblclick();
+  await shot(page, "179-layers-zoom-to-layer");
   await context.close();
 });

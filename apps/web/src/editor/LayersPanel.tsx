@@ -498,6 +498,12 @@ export function LayersPanel() {
                       }
                     : {})}
                   onClick={(e) => select(node.id, e)}
+                  // Double-clicking the icon zooms to the layer, as in Figma (Shift+2, gliding).
+                  onIconDoubleClick={() => {
+                    setFocusId(node.id);
+                    editor.select([node.id]);
+                    editor.zoomToLayers([node.id], { animate: true });
+                  }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     // Right-clicking outside the selection selects that row first.

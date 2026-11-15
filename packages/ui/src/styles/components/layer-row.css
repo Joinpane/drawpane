@@ -33,6 +33,11 @@
   flex: none;
   color: var(--icon);
 }
+/* Double-clicking the icon zooms to the layer: reach 2px past the glyph, into the row's gaps. */
+.dp-layer__icon.has-action {
+  margin: -2px;
+  padding: 2px;
+}
 .dp-layer__name {
   flex: 1;
   min-width: 0;
