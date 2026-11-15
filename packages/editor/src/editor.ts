@@ -2725,15 +2725,29 @@ export class Editor {
 
   /** Sets which mode of a collection applies inside a frame or page (null inherits). */
   setVariableMode(id: string, collectionId: string, modeId: string | null): void {
-    const node = this.doc.get(id);
-    if (!node || (node.type !== "frame" && node.type !== "page")) return;
-    const next = { ...getProp(node.props, "variableModes") };
-    if (modeId) next[collectionId] = modeId;
-    else delete next[collectionId];
-    this.commit(
-      [{ op: "set", id, prop: "variableModes", value: Object.keys(next).length > 0 ? next : null }],
-      "Change mode",
-    );
+    this.setVariableModes([id], collectionId, modeId);
+  }
+
+  /**
+   * Sets which mode of a collection applies inside frames and pages (null:
+   * back to what they inherit), as one undo step. Other layers are skipped.
+   */
+  setVariableModes(ids: readonly string[], collectionId: string, modeId: string | null): void {
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const node = this.doc.get(id);
+      if (!node || (node.type !== "frame" && node.type !== "page")) continue;
+      const next = { ...getProp(node.props, "variableModes") };
+      if (modeId) next[collectionId] = modeId;
+      else delete next[collectionId];
+      ops.push({
+        op: "set",
+        id,
+        prop: "variableModes",
+        value: Object.keys(next).length > 0 ? next : null,
+      });
+    }
+    if (ops.length > 0) this.commit(ops, modeId ? "Change mode" : "Stop using mode");
   }
 
   /** Imports W3C design tokens (DTCG JSON) as a new collection. Returns its id. */

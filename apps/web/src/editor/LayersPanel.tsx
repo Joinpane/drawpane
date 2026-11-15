@@ -3,7 +3,8 @@
  * reorder (⌥ to duplicate), hide and lock on each row, and rename in place.
  * Long trees stay fast: only the rows in view are drawn.
  */
-import { getProp, keyBetween, type Op } from "@drawpane/model";
+import { type Editor, modeTag } from "@drawpane/editor";
+import { getProp, keyBetween, type NodeRecord, type Op } from "@drawpane/model";
 import { Icon, IconButton, LayerRow, type PresenceSlot } from "@drawpane/ui";
 import {
   type KeyboardEvent,
@@ -442,6 +443,7 @@ export function LayersPanel() {
                   }
                   name={layerName(node)}
                   {...(row.note ? { note: row.note } : {})}
+                  {...modeBadge(editor, node)}
                   {...(active && query.trim() ? { highlight: query } : {})}
                   context={row.context === true}
                   kind={kindOf(node)}
@@ -663,4 +665,10 @@ function DragStatus({
       )}
     </div>
   );
+}
+
+/** The variable mode a frame sets itself ("Dark"), as a tag after its name. */
+function modeBadge(editor: Editor, node: NodeRecord): { badge?: string; badgeLabel?: string } {
+  const tag = modeTag(editor.doc, node);
+  return tag ? { badge: tag.text, badgeLabel: `Variable mode: ${tag.label}` } : {};
 }

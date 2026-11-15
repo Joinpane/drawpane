@@ -80,6 +80,12 @@ export interface LayerRowProps extends Omit<ComponentPropsWithRef<"div">, "child
   onRename?: (name: string) => void;
   /** A short muted tag after the name, such as "mask" or "clipped". */
   note?: string;
+  /**
+   * A short tag after the name, such as the variable mode a frame sets
+   * ("Dark"), with `badgeLabel` saying what it is for the tooltip and screen readers.
+   */
+  badge?: string;
+  badgeLabel?: string;
   /** Controls renaming from outside (a menu's Rename, ⌘R). Leave unset to let the row own it. */
   renaming?: boolean;
   /** Renaming started or ended, from inside the row. */
@@ -131,6 +137,8 @@ export function LayerRow({
   onToggleLocked,
   onRename,
   note,
+  badge,
+  badgeLabel,
   highlight,
   context = false,
   renaming: renamingProp,
@@ -252,6 +260,12 @@ export function LayerRow({
           {highlighted(name, highlight)}
         </span>
       )}
+      {badge && !renaming ? (
+        <span className="dp-layer__badge" title={badgeLabel ?? badge}>
+          {badge}
+          {badgeLabel ? <span className="dp-visually-hidden">, {badgeLabel}</span> : null}
+        </span>
+      ) : null}
       {note && !renaming ? <span className="dp-layer__note">{note}</span> : null}
       {presence !== undefined && (
         <span

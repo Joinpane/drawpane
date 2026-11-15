@@ -161,6 +161,29 @@ test("tour", async ({ browser }) => {
   await shot(page, "14-tokens");
   await page.keyboard.press("Alt+t");
 
+  // A board in the collection's Dark mode: Appearance's row, and the tag in the layers panel.
+  await page.evaluate(() => {
+    const e = (
+      window as unknown as {
+        drawpane: {
+          s: { pageId: string };
+          doc: { childIds(id: string): string[]; get(id: string): { type: string } | undefined };
+          select(ids: string[]): void;
+        };
+      }
+    ).drawpane;
+    const board = e.doc.childIds(e.s.pageId).find((id) => e.doc.get(id)?.type === "frame");
+    if (board) e.select([board]);
+  });
+  const properties = page.getByRole("group", { name: "Properties" });
+  await properties.getByRole("button", { name: "Apply variable mode" }).click();
+  await page
+    .getByRole("menu", { name: "Variable modes" })
+    .getByRole("menuitemcheckbox", { name: "Dark" })
+    .click();
+  await expect(properties.getByRole("button", { name: /^Stop using a/ })).toBeVisible();
+  await shot(page, "184-variable-mode");
+
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Recent files" })).toBeVisible();
   await shot(page, "08-dashboard");
