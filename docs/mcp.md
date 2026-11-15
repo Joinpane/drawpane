@@ -103,6 +103,7 @@ Agents can design only once your instance measures text the way the browser does
 | `get_comments` | Comment threads, where they're pinned, and their replies | `fileId`, `includeResolved`, `limit` |
 | `get_history` | Saved versions: named, automatic and restores, with who made them | `fileId`, `limit` |
 | `get_jsx` | A layer and what's inside it, as JSX with each layer's id | `fileId`, `id`, `depth` |
+| `export_image` | A layer, or a page by its id, as a PNG the model sees (MCP image content), with its size and anything drawn only approximately or left out. Without a `scale`, sized to about 1536 px on the longest side (up to 2×) | `fileId`, `id`, `scale`, `background` |
 
 ### Designing (read and write tokens)
 

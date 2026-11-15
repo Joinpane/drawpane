@@ -19,7 +19,7 @@
 import { getProp, type NodeRecord } from "@drawpane/model";
 import type { Face, FontBytesLoader, Rasteriser } from "@drawpane/raster";
 import type { Doc } from "./doc";
-import { ExportError, exportBounds, imageRefs, snapToPixels } from "./export";
+import { ExportError, exportBounds, fitScale, imageRefs, snapToPixels } from "./export";
 import type { Rect } from "./geometry";
 import { textSpans } from "./rich-text";
 import { Scene } from "./scene";
@@ -49,8 +49,14 @@ export interface HeadlessRenderDeps {
 }
 
 export interface PngOptions {
-  /** Output pixels per unit; 1 by default. */
+  /** Output pixels per unit; 1 by default, or what `fit` asks for. */
   readonly scale?: number;
+  /**
+   * Without a `scale`: the longest side in pixels to aim for, drawing at up
+   * to 2× (what a model looks at best: big enough to read, small enough to
+   * send).
+   */
+  readonly fit?: number;
   /** Painted behind the layer, as a CSS colour; transparent by default. */
   readonly background?: string | null;
 }
@@ -189,12 +195,20 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
       const node = doc.get(nodeId);
       if (!node) throw new ExportError("There's no layer with that id.");
       const ids = node.type === "page" ? doc.childIds(nodeId) : [nodeId];
-      const scale = options.scale ?? 1;
-      if (!(scale > 0) || !Number.isFinite(scale))
-        throw new ExportError("Scale must be a positive number.");
       const scene = new Scene(doc);
       const found = exportBounds(scene, ids);
       if (!found) throw new ExportError("Nothing visible to render. Show the layer and try again.");
+      const scale =
+        options.scale ??
+        (options.fit === undefined
+          ? 1
+          : // Two decimals, so the scale reads back cleanly.
+            Math.max(
+              0.01,
+              Math.floor(fitScale(found, { width: options.fit, height: options.fit }) * 100) / 100,
+            ));
+      if (!(scale > 0) || !Number.isFinite(scale))
+        throw new ExportError("Scale must be a positive number.");
       const bounds = snapToPixels(found, scale);
       const width = Math.round(bounds.width * scale);
       const height = Math.round(bounds.height * scale);

@@ -117,6 +117,7 @@ describe("the agent tools on MCP", () => {
     for (const name of [
       "start_session",
       "get_jsx",
+      "export_image",
       "render",
       "set_props",
       "move_nodes",
@@ -133,6 +134,7 @@ describe("the agent tools on MCP", () => {
     expect(render?.inputSchema.required).toEqual(expect.arrayContaining(["jsx", "sessionId"]));
     expect(Object.keys(render?.inputSchema.properties ?? {})).toContain("callId");
     expect(byName.get("get_jsx")?.annotations.readOnlyHint).toBe(true);
+    expect(byName.get("export_image")?.annotations.readOnlyHint).toBe(true);
     expect(byName.get("start_session")?.annotations.destructiveHint).toBe(false);
     // The instructions tell the model how to design.
     const init = await rpc(token, { jsonrpc: "2.0", id: 2, method: "initialize", params: {} });

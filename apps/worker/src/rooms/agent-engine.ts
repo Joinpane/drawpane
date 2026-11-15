@@ -19,6 +19,7 @@ import {
   type TextFace,
   ToolFailure,
   type ToolResult,
+  type ToolServices,
   textFaces,
 } from "@drawpane/editor";
 import type { NodeRecord, Op } from "@drawpane/model";
@@ -41,6 +42,11 @@ export class AgentEngine {
 
   constructor(measurer: HeadlessMeasurer) {
     this.#measurer = measurer;
+  }
+
+  /** What lays text out here: the renderer measures with it too. */
+  get measurer(): HeadlessMeasurer {
+    return this.#measurer;
   }
 
   get warm(): boolean {
@@ -117,11 +123,16 @@ export class AgentEngine {
    * let go (rebuilt next time), so nothing of it lingers. Something the
    * editor refused along the way (a notice) fails the whole call.
    */
-  async run(editor: Editor, name: string, input: unknown): Promise<EngineRun> {
+  async run(
+    editor: Editor,
+    name: string,
+    input: unknown,
+    services: ToolServices = {},
+  ): Promise<EngineRun> {
     const noticeBefore = editor.s.notice?.id ?? null;
     let result: ToolResult;
     try {
-      result = await runTool(editor, name, input);
+      result = await runTool(editor, name, input, services);
     } catch (error) {
       if (editor.sync.takeUnsent().length > 0) this.drop();
       throw error;

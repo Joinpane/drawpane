@@ -58,6 +58,8 @@ export function harfBuzzMeasurer(loadFile: FaceFileLoader): HeadlessMeasurer {
   const measurer = new HarfBuzzMeasurer(loadFile, { harfBuzz: loadHarfBuzz });
   return {
     width: (font, text, run) => measurer.width(font, text, run),
+    // Runs with OpenType features or axes, as glyphs: what the headless renderer outlines.
+    shape: (text, run) => measurer.shape(text, run),
     metrics: (font) => measurer.metrics(font),
     get generation() {
       return measurer.generation;
@@ -71,10 +73,10 @@ export function harfBuzzMeasurer(loadFile: FaceFileLoader): HeadlessMeasurer {
 }
 
 /**
- * A file's measurer: its team's fonts, then Google's and the app's own. The
- * team is looked up once, the first time a font is wanted.
+ * A file's font files: its team's fonts, then Google's and the app's own.
+ * The team is looked up once, the first time a font is wanted.
  */
-export function headlessMeasurer(env: Env, fileId: string): HeadlessMeasurer {
+export function fileFontLoader(env: Env, fileId: string): FaceFileLoader {
   let loader: Promise<ReturnType<typeof headlessFontLoader>> | null = null;
   const loaderFor = () => {
     loader ??= env.DB.prepare("SELECT team_id FROM files WHERE id = ?")
@@ -83,7 +85,12 @@ export function headlessMeasurer(env: Env, fileId: string): HeadlessMeasurer {
       .then((row) => headlessFontLoader({ env, teamId: row?.team_id ?? null }));
     return loader;
   };
-  return harfBuzzMeasurer(async (face) => (await loaderFor())(face));
+  return async (face) => (await loaderFor())(face);
+}
+
+/** A file's measurer, over its font files. */
+export function headlessMeasurer(env: Env, fileId: string): HeadlessMeasurer {
+  return harfBuzzMeasurer(fileFontLoader(env, fileId));
 }
 
 export const harfBuzzMeasurers: MeasurerFactory = headlessMeasurer;

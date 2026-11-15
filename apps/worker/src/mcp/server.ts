@@ -40,7 +40,7 @@ const WRITE_INSTRUCTIONS =
   ' To design, start_session on a file: mode "branch" (the default; a person reviews and merges it) or "live" ' +
   "(edits the file as people watch). Pass its sessionId to every change, and read the session's targetFileId. " +
   'Build with render (JSX: <Frame flex="col" gap={12} p={16}><Text size={20}>Title</Text></Frame>), read back ' +
-  "with get_jsx, adjust with set_props, move_nodes, delete_nodes, bind_token and set_variable_mode; prefer the " +
+  "with get_jsx, look at it with export_image, adjust with set_props, move_nodes, delete_nodes, bind_token and set_variable_mode; prefer the " +
   "file's components and tokens. undo and redo step over your own changes only. end_session when you're done.";
 
 // ---------------------------------------------------------------------------
@@ -387,7 +387,7 @@ function agentTool(t: AgentTool): Tool {
           input,
         )) as AgentCallResult;
         if (!out.ok) throw new ToolError(out.message);
-        return out.result;
+        return out.image ? new WithImage(out.result, out.image) : out.result;
       }) as Tool["run"],
     };
   }
@@ -613,12 +613,20 @@ async function handle(ctx: ToolContext, request: Request) {
   }
 }
 
-function toolResult(value: unknown, isError: boolean) {
-  return {
-    content: [{ type: "text", text: JSON.stringify(value) }],
-    structuredContent: value,
-    isError,
-  };
+/** A tool's answer with a picture for the model to see (export_image). */
+class WithImage {
+  constructor(
+    readonly value: unknown,
+    readonly image: { readonly mimeType: string; readonly base64: string },
+  ) {}
+}
+
+function toolResult(answer: unknown, isError: boolean) {
+  const value = answer instanceof WithImage ? answer.value : answer;
+  const content: Array<Record<string, string>> = [{ type: "text", text: JSON.stringify(value) }];
+  if (answer instanceof WithImage)
+    content.push({ type: "image", data: answer.image.base64, mimeType: answer.image.mimeType });
+  return { content, structuredContent: value, isError };
 }
 
 function parseRequest(body: unknown): Request | null {
