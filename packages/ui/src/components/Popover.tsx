@@ -22,6 +22,12 @@ export interface PopoverProps extends Omit<ComponentPropsWithRef<"div">, "childr
   anchor: HTMLElement;
   /** Accessible name of the dialog. */
   label: string;
+  /**
+   * What it opens beside, when not the anchor itself: a button at a panel's
+   * edge can open beside the whole panel, as Figma's type settings do. The
+   * anchor still takes focus back and Escape.
+   */
+  beside?: HTMLElement | undefined;
   /** Preferred side; flips to the opposite side when there's no room. Default "left". */
   side?: PopoverSide;
   /** Gap between anchor and popover, px. Default 8. */
@@ -105,6 +111,7 @@ export function useInPopover(ref: RefObject<HTMLElement | null>): void {
  */
 export function Popover({
   anchor,
+  beside,
   label,
   side = "left",
   offset = MARGIN,
@@ -147,7 +154,7 @@ export function Popover({
     const node = el.current;
     if (!node) return;
     const next = placePopover(
-      anchor.getBoundingClientRect(),
+      (beside ?? anchor).getBoundingClientRect(),
       { width: node.offsetWidth, height: node.offsetHeight },
       { width: window.innerWidth, height: window.innerHeight },
       side,
@@ -156,7 +163,7 @@ export function Popover({
     setPlace((p) =>
       p && p.left === next.left && p.top === next.top && p.side === next.side ? p : next,
     );
-  }, [anchor, side, offset]);
+  }, [anchor, beside, side, offset]);
 
   useLayoutEffect(() => {
     position();
@@ -164,6 +171,7 @@ export function Popover({
     const observer = new ResizeObserver(position);
     if (node) observer.observe(node);
     observer.observe(anchor);
+    if (beside) observer.observe(beside);
     window.addEventListener("resize", position);
     // Panes scroll: follow the anchor (capture catches scrolls of any ancestor).
     window.addEventListener("scroll", position, true);
@@ -172,7 +180,7 @@ export function Popover({
       window.removeEventListener("resize", position);
       window.removeEventListener("scroll", position, true);
     };
-  }, [anchor, position]);
+  }, [anchor, beside, position]);
 
   useEffect(() => {
     const inside = (target: EventTarget | null) => {

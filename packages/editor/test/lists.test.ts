@@ -140,6 +140,22 @@ describe("list commands", () => {
     expect(kinds()).toEqual(["none:0", "none:0", "none:0"]);
   });
 
+  it("set a list outright, whatever the touched paragraphs had: one step, or none if it's so already", () => {
+    const { editor, id, node, kinds } = setup();
+    editor.startTextEdit(id);
+    editor.setTextSelection(0, 9);
+    editor.toggleList("bullet");
+    editor.setTextSelection(6, 12);
+    // Mixed (a bullet and a plain paragraph): a list type makes both that, unlike a toggle.
+    editor.setList("number");
+    expect(kinds()).toEqual(["bullet:0", "number:0", "number:0"]);
+    const before = node().props;
+    editor.setList("number");
+    expect(node().props).toBe(before);
+    editor.setList("none");
+    expect(kinds()).toEqual(["bullet:0", "none:0", "none:0"]);
+  });
+
   it("nest list items, and leave paragraphs out of a list alone", () => {
     const { editor, id, kinds } = setup();
     editor.startTextEdit(id);

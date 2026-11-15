@@ -68,9 +68,11 @@
   outline: none;
   box-shadow: var(--shadow-focus);
 }
+/* Alignment across and down, then type settings. */
 .inspector__text-align {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr auto;
+  align-items: center;
   gap: var(--space-200);
 }
 .inspector__more {
@@ -1330,17 +1332,7 @@
   color: var(--warning);
 }
 
-/* OpenType features: the row, and its panel */
-.features-trigger__label {
-  flex: none;
-  color: var(--ink-muted);
-}
-.features-trigger__default {
-  color: var(--ink-muted);
-}
-.features {
-  width: 272px;
-}
+/* OpenType features and variable axes: type settings' Details and Variable tabs */
 .features__body {
   display: grid;
   gap: var(--space-200);
@@ -1493,6 +1485,161 @@
 .axes__auto:focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus);
+}
+
+/* Type settings (TypeSettings.tsx): the button, and its panel of tabs. */
+.type-settings-button {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: var(--size-control-sm);
+  height: var(--size-control-sm);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--icon);
+  cursor: pointer;
+  transition: background-color var(--duration-hover) ease-out;
+}
+.type-settings-button:hover {
+  background: var(--surface-active);
+}
+.type-settings-button:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.type-settings-button[aria-expanded="true"] {
+  background: var(--signal-soft);
+  color: var(--signal);
+}
+/* Something in the panel is set: a dot, as a reminder it's there. */
+.type-settings-button[data-set]::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-full);
+  background: var(--signal);
+  box-shadow: 0 0 0 1.5px var(--surface-sunken);
+}
+.type-settings-button[data-set]:hover::after {
+  box-shadow: 0 0 0 1.5px var(--surface-active);
+}
+.type-settings-button[aria-expanded="true"][data-set]::after {
+  box-shadow: 0 0 0 1.5px var(--signal-soft);
+}
+
+.type-settings {
+  width: 288px;
+  max-width: calc(100vw - 16px);
+}
+.type-settings__body {
+  display: grid;
+}
+.type-settings__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-200);
+  padding: var(--space-200);
+  border-bottom: 1px solid var(--line);
+}
+.type-settings__tabs {
+  display: flex;
+  gap: 2px;
+}
+.type-settings__tab-wrap {
+  display: inline-flex;
+}
+.type-settings__tab {
+  height: var(--size-control-sm);
+  padding: 0 var(--space-200);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  font: var(--type-ui-strong);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-hover) ease-out,
+    color var(--duration-hover) ease-out;
+}
+.type-settings__tab:hover:not(:disabled) {
+  color: var(--ink);
+}
+.type-settings__tab[aria-selected="true"] {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+.type-settings__tab:disabled {
+  color: var(--ink-disabled);
+  cursor: default;
+}
+.type-settings__tab:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+/* Basics: rows of a name and its control, in two groups. */
+.type-settings__group {
+  display: grid;
+  gap: var(--space-200);
+  padding: var(--space-300);
+}
+.type-settings__group + .type-settings__group {
+  border-top: 1px solid var(--line);
+}
+.type-settings__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-300);
+  min-height: var(--size-control-sm);
+}
+.type-settings__label {
+  overflow: hidden;
+  color: var(--ink-muted);
+  font: var(--type-ui-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.type-settings__control {
+  display: flex;
+  justify-content: flex-end;
+}
+/* Fields take a steady width, so the rows' controls line up on the right. */
+.type-settings__control > .dp-field,
+.type-settings__control > .inspector__select {
+  width: 116px;
+}
+/* Case as Figma writes it: AG, ag, Ag, each the width of an icon or so. */
+.type-settings__case .dp-seg__option {
+  min-width: 28px;
+  padding: 0 4px;
+  font: 500 11px / 14px var(--font-ui);
+  letter-spacing: 0.02em;
+}
+
+/* A text style's type settings: what's set, then the button. */
+.text-styles__settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-200);
+  min-height: var(--size-control-sm);
+}
+.text-styles__summary {
+  overflow: hidden;
+  color: var(--ink);
+  font: var(--type-ui-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.text-styles__summary.is-default {
+  color: var(--ink-muted);
 }
 
 /* Reordering paints, effects and layout grids by dragging (reorder.ts). */

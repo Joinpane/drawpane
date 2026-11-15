@@ -8,8 +8,6 @@ import type { NodeRecord, PropValues } from "@drawpane/model";
 import { evaluateNumericInput, Icon, PropertyRow, Tooltip } from "@drawpane/ui";
 import { useState } from "react";
 import { type FontFamily, fonts, WEIGHT_NAMES } from "../../fonts/fonts";
-import { FontAxesField } from "./FontAxes";
-import { FontFeaturesField } from "./FontFeatures";
 import { FontPicker, useFonts } from "./FontPicker";
 import { common, Num, Select } from "./fields";
 
@@ -149,9 +147,10 @@ function UnitField({
 }
 
 /**
- * The typography a text style shares with its layers: font, weight, italic,
- * size, line height, letter spacing, decoration and case. Used for text
- * layers and for editing a style itself.
+ * The typography a text style shares with its layers, as much as is set
+ * often: font, weight, italic, size, line height and letter spacing. The
+ * rest is in type settings (TypeSettings.tsx). Used for text layers and for
+ * editing a style itself.
  */
 export function TypographyFields({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
@@ -159,9 +158,7 @@ export function TypographyFields({ editor, nodes }: { editor: Editor; nodes: Nod
   const italic = common(nodes, "fontStyle") === "italic";
   useFonts();
   const info = family ? fonts.get(family) : null;
-  const set = <
-    K extends "fontStyle" | "textDecoration" | "textCase" | "lineHeight" | "letterSpacing",
-  >(
+  const set = <K extends "fontStyle" | "lineHeight" | "letterSpacing">(
     prop: K,
     value: PropValues[K] | null,
     label: string,
@@ -223,46 +220,6 @@ export function TypographyFields({ editor, nodes }: { editor: Editor; nodes: Nod
           }}
         />
       </PropertyRow>
-      <PropertyRow>
-        <Select
-          label="Decoration"
-          value={common(nodes, "textDecoration")}
-          options={[
-            { value: "none", label: "No decoration" },
-            { value: "underline", label: "Underline" },
-            { value: "strikethrough", label: "Strikethrough" },
-          ]}
-          onChange={(v) => set("textDecoration", v === "none" ? null : v, "Text decoration")}
-        />
-        <Select
-          label="Case"
-          value={common(nodes, "textCase")}
-          options={[
-            { value: "none", label: "As typed" },
-            { value: "upper", label: "UPPERCASE" },
-            { value: "lower", label: "lowercase" },
-            { value: "title", label: "Title Case" },
-          ]}
-          onChange={(v) => set("textCase", v === "none" ? null : v, "Text case")}
-        />
-      </PropertyRow>
-      {/* Figma's vertical trim: the box from the capitals' tops to the baseline. */}
-      <PropertyRow columns="label">
-        <span className="inspector__label">Trim</span>
-        <Select
-          label="Vertical trim"
-          value={common(nodes, "leadingTrim")}
-          options={[
-            { value: "none", label: "Standard" },
-            { value: "cap-height", label: "Cap height to baseline" },
-          ]}
-          onChange={(v) =>
-            editor.setProp(ids, "leadingTrim", v === "none" ? null : v, "Vertical trim")
-          }
-        />
-      </PropertyRow>
-      <FontFeaturesField editor={editor} nodes={nodes} />
-      <FontAxesField editor={editor} nodes={nodes} />
     </>
   );
 }

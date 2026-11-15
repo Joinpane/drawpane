@@ -6,8 +6,7 @@
  */
 import type { Editor } from "@drawpane/editor";
 import { type FontFeatures, getProp, type NodeRecord } from "@drawpane/model";
-import { Icon, Popover } from "@drawpane/ui";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { fonts } from "../../fonts/fonts";
 import { shaper } from "../shaping";
 import { featureGroups, featureOn, featureSummary, withFeature } from "./opentype";
@@ -61,50 +60,15 @@ function useOffered(
   return state.key === key ? state.offered : { status: "loading" };
 }
 
-export function FontFeaturesField({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
-  const trigger = useRef<HTMLButtonElement>(null);
-  const [open, setOpen] = useState(false);
+/** What the layers' OpenType features turn on or off, for a summary; null when it's the font's defaults. */
+export function featuresSummary(nodes: readonly NodeRecord[]): string | null {
   const maps = nodes.map((n) => getProp(n.props, "fontFeatures"));
   const first = maps[0] ?? {};
-  const mixed = !maps.every((m) => sameMap(m, first));
-  const summary = mixed ? "Mixed" : featureSummary(first);
-  return (
-    <>
-      <button
-        ref={trigger}
-        type="button"
-        className="font-trigger features-trigger"
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label={`OpenType features: ${summary ?? "as the font has them"}`}
-        onClick={() => setOpen(!open)}
-      >
-        <span className="features-trigger__label" aria-hidden="true">
-          OpenType
-        </span>
-        <span
-          className={`font-trigger__name${summary ? "" : " features-trigger__default"}`}
-          aria-hidden="true"
-        >
-          {summary ?? "Font defaults"}
-        </span>
-        <Icon name="chevron-down" size={12} />
-      </button>
-      {open && trigger.current ? (
-        <Popover
-          anchor={trigger.current}
-          label="OpenType features"
-          className="features dp-root"
-          onClose={() => setOpen(false)}
-        >
-          <FeaturesPanel editor={editor} nodes={nodes} />
-        </Popover>
-      ) : null}
-    </>
-  );
+  return maps.every((m) => sameMap(m, first)) ? featureSummary(first) : "Mixed features";
 }
 
-function FeaturesPanel({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
+/** The features the text's font offers, as checkboxes (Type settings, Details). */
+export function FeaturesPanel({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const lead = nodes[0];
   const face = lead
     ? {

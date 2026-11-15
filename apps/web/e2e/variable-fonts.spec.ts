@@ -111,10 +111,14 @@ test.describe
       await expect.poll(() => width(page, id)).toBeGreaterThan(100);
       const wide = await width(page, id);
       const inspector = page.getByRole("complementary", { name: "Inspector" });
-      const trigger = inspector.getByRole("button", { name: /^Variable axes/ });
-      await expect(trigger).toContainText("Font defaults");
+      const trigger = inspector.getByRole("button", { name: /^Type settings/ });
+      await expect(trigger).toHaveAccessibleName("Type settings");
       await trigger.click();
-      const panel = page.getByRole("dialog", { name: "Variable axes" });
+      await page
+        .getByRole("dialog", { name: "Type settings" })
+        .getByRole("tab", { name: "Variable" })
+        .click();
+      const panel = page.getByRole("tabpanel", { name: "Variable" });
       // The font's own axes, by its names for them.
       await expect(panel.getByRole("slider", { name: "Width" })).toBeVisible({ timeout: 15_000 });
       await expect(panel.getByRole("slider", { name: "Weight" })).toBeVisible();
@@ -123,16 +127,18 @@ test.describe
       await expect.poll(() => prop(page, id, "fontVariations")).toEqual({ wdth: 75 });
       // Measured from the shaped glyphs: condensed, the line is clearly narrower.
       await expect.poll(() => width(page, id), { timeout: 15_000 }).toBeLessThan(wide * 0.92);
-      await expect(trigger).toContainText("Width 75");
+      // The settings button says what's set in it.
+      await expect(trigger).toHaveAccessibleName(/Width 75/);
       await page.keyboard.press("Escape");
       await expect.poll(() => inked(page, id)).toBeGreaterThan(300);
     });
 
     test("sets the weight as the text's weight, and resets the axes", async () => {
       const inspector = page.getByRole("complementary", { name: "Inspector" });
-      const trigger = inspector.getByRole("button", { name: /^Variable axes/ });
+      const trigger = inspector.getByRole("button", { name: /^Type settings/ });
       await trigger.click();
-      const panel = page.getByRole("dialog", { name: "Variable axes" });
+      // It opens on the tab last shown.
+      const panel = page.getByRole("tabpanel", { name: "Variable" });
       const condensed = await width(page, id);
       await panel.getByLabel("Weight value").fill("700");
       await panel.getByLabel("Weight value").press("Enter");
@@ -143,6 +149,6 @@ test.describe
 
       await panel.getByRole("button", { name: "Back to the font’s defaults" }).click();
       await expect.poll(() => prop(page, id, "fontVariations")).toBeUndefined();
-      await expect(trigger).toContainText("Font defaults");
+      await expect(trigger).toHaveAccessibleName("Type settings");
     });
   });

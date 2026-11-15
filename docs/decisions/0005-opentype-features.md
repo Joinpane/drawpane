@@ -42,6 +42,6 @@ Text editing keeps working on characters: HarfBuzz reports which characters each
 - Model: `fontFeatures` on text, text styles and rich-text runs (a run's map replaces the layer's, like its other properties).
 - `packages/editor/src/shaping.ts`: `Shaper` (HarfBuzz via `harfbuzzjs`, a separate chunk and a 444 KB `.wasm`, imported on first use) and `ShapingMeasurer`. Layout passes each span's `FeatureRun` (now `ShapingRun`, which also carries variable axes: decision 0009) to the measurer, so line breaking, auto-size, the caret and hit-testing use shaped widths; the renderer fills the shaped glyphs' outlines as one path per run (so gradient and image fills line up with the box).
 - Font bytes: `apps/web/src/fonts/font-files.ts`, shared with PDF export (Google and built-in fonts as TrueType through the proxy; team fonts' TrueType and OpenType files).
-- Inspector: an "OpenType" row under decoration and case, opening the features the font offers; reading them loads HarfBuzz and the font only when the panel opens.
+- Inspector: type settings' Details tab (it was an "OpenType" row under decoration and case), showing the features the font offers; reading them loads HarfBuzz and the font only when the tab opens.
 - SVG export writes `font-feature-settings`, which SVG text honours.
 - PDF export draws runs with features as their shaped glyphs (`exportSvg`'s `outlineFeatures`): svg2pdf sets real text, which can't take features. Those runs aren't selectable text in the PDF; everything else still is.
