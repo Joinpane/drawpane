@@ -117,5 +117,21 @@
     "small": 0.81,
     "square-corners": 1.74,
     "overlap": 2.46
+  },
+  "glass-probe": {
+    "depth-20-x": 0.6,
+    "depth-20-y": 0.71,
+    "depth-40-x": 0.69,
+    "depth-40-y": 0.94,
+    "depth-80-x": 1.39,
+    "depth-80-y": 2.32,
+    "refraction-40-x": 0.57,
+    "refraction-40-y": 0.63,
+    "refraction-100-x": 0.62,
+    "refraction-100-y": 0.76,
+    "circle-x": 0.57,
+    "circle-y": 0.59,
+    "pill-x": 0.49,
+    "pill-y": 0.76
   }
 }

@@ -299,7 +299,11 @@ test("fit glass to its targets", async ({ browser }) => {
   await page.waitForTimeout(1500);
   const width = SCENES.cell.width * SCALE;
   const height = SCENES.cell.height * SCALE;
-  const defaults = await page.evaluate(() => (window as unknown as W).drawpaneGlass.get());
+  // The shipped constants, or a candidate's (`TUNING='{"bend":0.9}'`) to score or fit from.
+  const defaults: Tuning = {
+    ...(await page.evaluate(() => (window as unknown as W).drawpaneGlass.get())),
+    ...(JSON.parse(process.env.TUNING ?? "{}") as Tuning),
+  };
 
   // Targets: Figma's renders, or (self-test) Drawpane's own at a known tuning.
   let targets: Uint8Array[];
