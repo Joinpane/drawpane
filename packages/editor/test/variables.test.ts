@@ -2,7 +2,7 @@ import { getProp, ROOT_ID } from "@drawpane/model";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
 import type { TextMeasurer } from "../src/text";
-import { exportCss, exportDtcg, findVariable, resolveVariable } from "../src/variables";
+import { exportCss, exportDtcg, findVariable, modeTag, resolveVariable } from "../src/variables";
 
 const measurer: TextMeasurer = {
   width: (font, text) => text.length * Number(font.match(/(\d+(?:\.\d+)?)px/)?.[1] ?? 16) * 0.5,
@@ -95,6 +95,37 @@ describe("variables", () => {
     // Moving the card out of the dark board resolves it in the page's default mode.
     editor.commit(editor.reparentOps(card, "p", editor.topKey("p")));
     expect(fillOf(editor, card)).toBe("#ffffff");
+  });
+
+  it("sets a mode on several frames as one step, and tags each with it", () => {
+    const a = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 100 }, "p") as string;
+    const b = editor.createLayer("frame", { x: 200, y: 0, width: 100, height: 100 }, "p") as string;
+    const rect = editor.createLayer("rect", { x: 0, y: 300, width: 10, height: 10 }, "p") as string;
+    expect(modeTag(editor.doc, editor.doc.get(a) as never)).toBeNull();
+    // A rectangle can't set a mode: it's skipped.
+    editor.setVariableModes([a, b, rect], colors, dark);
+    expect(modeTag(editor.doc, editor.doc.get(a) as never)).toEqual({
+      text: "Dark",
+      label: "Color: Dark",
+    });
+    expect(getProp(props(editor, rect), "variableModes")).toEqual({});
+    // One undo step for both frames.
+    editor.undo();
+    expect(getProp(props(editor, a), "variableModes")).toEqual({});
+    expect(getProp(props(editor, b), "variableModes")).toEqual({});
+    editor.redo();
+    // A second collection's mode: the first, and how many more, with each in words.
+    const density = editor.createCollection("Density") as string;
+    const compact = editor.addMode(density, "Compact") as string;
+    editor.setVariableModes([a], density, compact);
+    expect(modeTag(editor.doc, editor.doc.get(a) as never)).toEqual({
+      text: "Dark +1",
+      label: "Color: Dark · Density: Compact",
+    });
+    // Back to inheriting: no tag.
+    editor.setVariableModes([a], colors, null);
+    editor.setVariableModes([a], density, null);
+    expect(modeTag(editor.doc, editor.doc.get(a) as never)).toBeNull();
   });
 
   it("follows aliases and refuses cycles", () => {

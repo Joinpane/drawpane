@@ -2059,19 +2059,18 @@
   box-shadow: inset var(--shadow-focus);
 }
 
-/* Modes */
-.mode-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  align-items: center;
-  gap: var(--space-200);
-}
+/* Variable modes: a collection's name, then its mode and a way to stop using it. */
 .mode-row__name {
-  color: var(--ink-muted);
-  font: 400 11px / 14px var(--font-ui);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.mode-row__value {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: var(--space-100);
+  min-width: 0;
 }
 
 /* Tokens workspace */

@@ -83,6 +83,30 @@ export function findVariable(doc: Doc, name: string, type?: VariableType): NodeR
 }
 
 /**
+ * What a frame or page sets itself, for a tag beside its name in the layers
+ * panel: the mode ("Dark"), or the first and how many more ("Dark +1"), and
+ * every one in words ("Theme: Dark · Density: Compact"). Null when it sets
+ * none (it inherits), or only modes that no longer exist.
+ */
+export function modeTag(doc: Doc, node: NodeRecord): { text: string; label: string } | null {
+  if (node.type !== "frame" && node.type !== "page") return null;
+  const set: Array<{ collection: string; mode: string }> = [];
+  for (const [collectionId, modeId] of Object.entries(getProp(node.props, "variableModes"))) {
+    const collection = doc.get(collectionId);
+    if (collection?.type !== "collection") continue;
+    const mode = getProp(collection.props, "modes").find((m) => m.id === modeId);
+    if (mode)
+      set.push({ collection: getProp(collection.props, "name") || "Collection", mode: mode.name });
+  }
+  const first = set[0];
+  if (!first) return null;
+  return {
+    text: set.length === 1 ? first.mode : `${first.mode} +${set.length - 1}`,
+    label: set.map((s) => `${s.collection}: ${s.mode}`).join(" · "),
+  };
+}
+
+/**
  * The mode of `collectionId` that applies at `nodeId`: the nearest frame or
  * page that sets one, else the collection's first mode.
  */

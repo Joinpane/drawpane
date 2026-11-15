@@ -48,6 +48,9 @@
 .dp-layer.is-component .dp-layer__icon {
   color: var(--component);
 }
+.dp-layer__name:has(+ .dp-layer__badge) {
+  flex: 0 1 auto;
+}
 .dp-layer.is-component .dp-layer__name {
   color: var(--component-ink);
 }
@@ -133,6 +136,22 @@
   margin: 2px;
 }
 
+/* A tag after the name (a frame's variable mode): a small outlined pill, quieter than the name. */
+.dp-layer__badge {
+  flex: none;
+  max-width: 72px;
+  /* Right after the name, as Figma and Open Pencil tag a frame's mode; the rest of the row stays right. */
+  margin-left: var(--space-100);
+  margin-right: auto;
+  padding: 0 5px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--ink-muted);
+  font: 500 10px / 14px var(--font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .dp-layer__note {
   flex: none;
   margin-left: var(--space-100);

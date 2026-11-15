@@ -12,6 +12,7 @@ import {
 } from "@drawpane/model";
 import { IconButton, NumberField, PropertyRow, PropertySection, Switch } from "@drawpane/ui";
 import { useState } from "react";
+import { ApplyModeButton, ModeRows } from "../tokens/ModesSection";
 import { common, Num, Select } from "./fields";
 
 const BLEND_LABEL: Record<BlendMode, string> = {
@@ -55,7 +56,11 @@ export function AppearanceSection({
     (n) => n.type === "polygon" || n.type === "star" || n.type === "frame" || n.type === "rect",
   );
   return (
-    <PropertySection title="Appearance">
+    <PropertySection
+      title="Appearance"
+      // Frames set which mode of a collection applies inside them, as in Figma.
+      actions={frames.length === nodes.length ? <ApplyModeButton nodes={frames} /> : null}
+    >
       <PropertyRow>
         <Num
           editor={editor}
@@ -143,6 +148,7 @@ export function AppearanceSection({
           />
         </PropertyRow>
       ) : null}
+      {frames.length === nodes.length ? <ModeRows nodes={frames} /> : null}
     </PropertySection>
   );
 }

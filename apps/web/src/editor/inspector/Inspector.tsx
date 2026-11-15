@@ -104,7 +104,6 @@ export function Inspector() {
       {frames.length > 0 && frames.length === nodes.length ? (
         <LayoutGridsSection editor={editor} nodes={frames} />
       ) : null}
-      {only === "frame" && first ? <ModesSection node={first} /> : null}
       <ShapeSection editor={editor} nodes={nodes} />
       <AppearanceSection editor={editor} nodes={nodes} corners={corners} frames={frames} />
       {texts.length > 0 && texts.length === nodes.length ? (
