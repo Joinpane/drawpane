@@ -166,6 +166,13 @@ export function strokes(
       break;
   }
   if (open) {
+    const plainCap = (v: unknown) => v === "round" || v === "square";
+    if (
+      plainCap(top.strokeCapStart) &&
+      plainCap(top.strokeCapEnd) &&
+      top.strokeCapStart !== top.strokeCapEnd
+    )
+      notes.add("stroke-caps");
     for (const [key, end] of [
       ["strokeCapStart", "markerStart"],
       ["strokeCapEnd", "markerEnd"],

@@ -9,7 +9,6 @@
  * can't come across exactly is counted in `notes` for the import summary.
  */
 import {
-  type GridArea,
   keysBetween,
   type LayoutGrid,
   type NodeRecord,
@@ -33,7 +32,7 @@ import {
   shapeSize,
   transformPath,
 } from "./geometry";
-import { childLayout, childOrder, containerLayout, gridAreas } from "./layout";
+import { childLayout, childOrder, containerLayout, type GridPlace, gridAreas } from "./layout";
 import { Notes } from "./notes";
 import type { PenpotFile, PenpotRecord } from "./read";
 import {
@@ -71,7 +70,7 @@ interface Place {
   readonly inGroup: boolean;
   /** Inside a copy of a component in this file: layers mirror the main's. */
   readonly inInstance: boolean;
-  readonly grid: ReadonlyMap<string, GridArea>;
+  readonly grid: ReadonlyMap<string, GridPlace>;
 }
 
 /** Penpot's override groups to the Drawpane properties a copy keeps as its own. */
@@ -101,8 +100,30 @@ const TOUCHED: Record<string, readonly string[]> = {
   "mask-group": ["isMask"],
 };
 
+/**
+ * Penpot features (a file's `features`) this importer reads as they are, or
+ * that change nothing it reads. Any other means a newer Penpot, worth a note.
+ */
+const KNOWN_FEATURES = new Set([
+  "components/v2",
+  "styles/v2",
+  "layout/grid",
+  "fdata/path-data",
+  "fdata/objects-map",
+  "fdata/pointer-map",
+  "fdata/shape-data-type",
+  "text-editor/v2",
+  "variants/v1",
+  "design-tokens/v1",
+  "render-wasm/v1",
+  "plugins/runtime",
+]);
+
 export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile {
   const notes = new Notes();
+  const features = Array.isArray(file.record.features) ? (file.record.features as unknown[]) : [];
+  if (features.some((f) => typeof f === "string" && !KNOWN_FEATURES.has(f)))
+    notes.add("unknown-features");
   const nodes: NodeRecord[] = [];
   const add = (node: NodeRecord) => nodes.push(node);
 
@@ -131,7 +152,11 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
     const keys = keysBetween(null, null, file.colors.size);
     [...file.colors.values()].forEach((c, i) => {
       const hex = color(c.color, num(c.opacity, 1));
-      if (!hex) return;
+      if (!hex) {
+        // A gradient or an image: Drawpane's colour variables are solid.
+        if (c.gradient || c.image) notes.add("library-color-paint");
+        return;
+      }
       add({
         id: c.id,
         type: "variable",
@@ -175,6 +200,7 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
     if (flowList.length > 0) pageProps.flows = flowList;
     const guides = pageGuides(page.record);
     if (guides.length > 0) pageProps.rulerGuides = guides;
+    const frameGuides = boardGuides(page.record);
     add({
       id: pageId,
       type: "page",
@@ -216,8 +242,14 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
       const inLayout = at.parent?.layout === "flex" || at.parent?.layout === "grid";
       if (inLayout) {
         Object.assign(props, childLayout(s, notes));
-        const area = at.grid.get(s.id);
-        if (area) props.gridArea = area;
+        const cell = at.grid.get(s.id);
+        if (cell) {
+          props.gridArea = cell.area;
+          if (cell.alignSelf) props.alignSelf = cell.alignSelf;
+          if (cell.justifySelf) props.justifySelf = cell.justifySelf;
+        }
+        // Out of the flow, it's placed by its constraints like anywhere else.
+        if (s.layoutItemAbsolute === true) Object.assign(props, constraints(s, at.inGroup));
       } else if (at.parent) Object.assign(props, constraints(s, at.inGroup));
 
       // Components: a main is a frame with isComponent; a copy points at its main.
@@ -240,6 +272,15 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
           Object.assign(props, containerLayout(s, notes));
           const grids = layoutGrids(s.grids);
           if (grids.length > 0) props.layoutGrids = grids;
+          const guides = frameGuides.get(s.id);
+          if (guides) {
+            // Penpot keeps a board's guides in page coordinates; Drawpane in the board's.
+            const sel = (s.selrect ?? {}) as Raw;
+            props.rulerGuides = guides.map((g) => ({
+              axis: g.axis,
+              offset: round(g.offset - num(g.axis === "x" ? sel.x : sel.y, num(s[g.axis]))),
+            }));
+          }
           if (isMain) {
             props.isComponent = true;
             const component = componentOf.get(s.id);
@@ -346,8 +387,19 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
           add({ id: s.id, type: "path", parent: parentId, key, props });
           return;
         }
+        case "svg-raw": {
+          // An imported SVG is a tree of these: its containers become groups, so their
+          // drawable children come across; leaves Drawpane can't draw are skipped.
+          const ids = Array.isArray(s.shapes) ? (s.shapes as string[]) : [];
+          if (ids.length === 0) {
+            notes.add("svg-raw-skipped");
+            return;
+          }
+          add({ id: s.id, type: "group", parent: parentId, key, props });
+          children(s.id, ids, { ...at, parent: s, inGroup: true, inInstance, grid: new Map() });
+          return;
+        }
         default:
-          if (type === "svg-raw") notes.add("svg-raw-skipped");
       }
     }
 
@@ -364,6 +416,7 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
       };
       if (box.rotation !== 0) props.rotation = box.rotation;
       if (box.flipX) props.flipX = true;
+      if (s.proportionLock === true) props.lockAspect = true;
       return { props, matrix: boxMatrix(at.space, box) };
     }
   }
@@ -379,8 +432,19 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
     // A fill tied to a library colour in this file stays tied to its variable.
     const list = Array.isArray(s.fills) ? (s.fills as Raw[]) : [];
     const ref = list.length === 1 ? list[0]?.fillColorRefId : undefined;
+    const bindings: Record<string, string> = {};
     if (typeof ref === "string" && colors.has(ref) && typeof list[0]?.fillColor === "string")
-      out.bindings = { fill: ref };
+      bindings.fill = ref;
+    // And a stroke tied to one.
+    const strokeList = Array.isArray(s.strokes) ? (s.strokes as Raw[]) : [];
+    const strokeRef = strokeList.length === 1 ? strokeList[0]?.strokeColorRefId : undefined;
+    if (
+      typeof strokeRef === "string" &&
+      colors.has(strokeRef) &&
+      typeof strokeList[0]?.strokeColor === "string"
+    )
+      bindings.stroke = strokeRef;
+    if (Object.keys(bindings).length > 0) out.bindings = bindings;
     return out;
   }
 
@@ -419,7 +483,7 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
           action = {
             type: "overlay",
             to,
-            position: overlayPosition(i.overlayPosType),
+            position: overlayPosition(i.overlayPosType, notes),
             closeOnOutside: i.closeClickOutside === true,
             dim: i.backgroundOverlay === true ? 0.4 : 0,
           };
@@ -445,7 +509,9 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
 
 function overlayPosition(
   v: unknown,
+  notes: Notes,
 ): "center" | "top-left" | "top-right" | "top" | "bottom-left" | "bottom-right" | "bottom" {
+  if (v === "manual") notes.add("overlay-position");
   switch (v) {
     case "top-left":
       return "top-left";
@@ -565,6 +631,18 @@ function layoutGrids(raw: unknown): LayoutGrid[] {
   return out.slice(0, 16);
 }
 
+/** Guides on boards, by board, in page coordinates (each board takes them into its own). */
+function boardGuides(page: Raw): Map<string, Array<{ axis: "x" | "y"; offset: number }>> {
+  const out = new Map<string, Array<{ axis: "x" | "y"; offset: number }>>();
+  for (const g of Object.values((page.guides ?? {}) as Record<string, Raw>)) {
+    if ((g.axis !== "x" && g.axis !== "y") || typeof g.frameId !== "string") continue;
+    const list = out.get(g.frameId) ?? [];
+    if (list.length < 200) list.push({ axis: g.axis, offset: num(g.position) });
+    out.set(g.frameId, list);
+  }
+  return out;
+}
+
 function pageGuides(page: Raw): RulerGuide[] {
   const guides = (page.guides ?? {}) as Record<string, Raw>;
   return Object.values(guides)
@@ -595,8 +673,10 @@ function tidy(nodes: NodeRecord[], colors: ReadonlySet<string>): NodeRecord[] {
       changed = true;
     }
     const bindings = props.bindings as Record<string, string> | undefined;
-    if (bindings?.fill && !colors.has(bindings.fill)) {
-      delete props.bindings;
+    if (bindings && Object.values(bindings).some((id) => !colors.has(id))) {
+      const kept = Object.fromEntries(Object.entries(bindings).filter(([, id]) => colors.has(id)));
+      if (Object.keys(kept).length > 0) props.bindings = kept;
+      else delete props.bindings;
       changed = true;
     }
     return changed ? { ...node, props: props as NodeRecord["props"] } : node;
