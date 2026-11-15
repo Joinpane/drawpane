@@ -47,9 +47,12 @@ export interface TestWorker {
 export async function startWorker({
   port,
   inspectorPort,
+  env = {},
 }: {
   port: number;
   inspectorPort: number;
+  /** More for server.mjs, e.g. `E2E_KIT_REGISTRY`. */
+  env?: Record<string, string>;
 }): Promise<TestWorker> {
   const url = `http://localhost:${port}`;
   // Something already answering there is no fresh instance: most often a Worker left
@@ -59,7 +62,12 @@ export async function startWorker({
       `Port ${port} is already serving: a test Worker left by an interrupted run? Stop it and try again.`,
     );
   const child = spawn("node", [resolve(import.meta.dirname, "server.mjs")], {
-    env: { ...process.env, E2E_PORT: String(port), E2E_INSPECTOR_PORT: String(inspectorPort) },
+    env: {
+      ...process.env,
+      ...env,
+      E2E_PORT: String(port),
+      E2E_INSPECTOR_PORT: String(inspectorPort),
+    },
     stdio: "inherit",
     detached: true,
   });
@@ -97,7 +105,7 @@ export async function addPasskey(context: BrowserContext, page: Page): Promise<v
 /** Starts a Worker on `port` and signs a new owner in with a virtual passkey. */
 export async function freshInstance(
   browser: Browser,
-  ports: { port: number; inspectorPort: number },
+  ports: { port: number; inspectorPort: number; env?: Record<string, string> },
 ): Promise<Instance> {
   const worker = await startWorker(ports);
   try {

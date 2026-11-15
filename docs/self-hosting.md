@@ -92,6 +92,14 @@ Teams can also upload their own fonts (TrueType, OpenType, WOFF or WOFF2) from *
 
 To keep the Worker from contacting Google at all, set `GOOGLE_FONTS` to `off`: in an installed instance, add `"vars": { "GOOGLE_FONTS": "off" }` to `drawpane.json` and run `npm create drawpane@latest upgrade -- --force` in its folder; installed by hand, put it in the `vars` of `wrangler.jsonc`. The picker then offers only the built-in fonts, system fonts and fonts installed on each person's computer.
 
+## Kit store
+
+**Kit store** in the dashboard lists UI kits, libraries and templates from a registry, by default [Joinpane/drawpane-kits](https://github.com/Joinpane/drawpane-kits): Penpot's community hub, passed through as Penpot publishes it, and kits hosted in the registry itself. Adding a kit downloads its file from where the registry says it's hosted (for Penpot's, `penpot.github.io`) and imports it into the team's **Kits** project.
+
+Browsers only ever talk to your server: the Worker fetches the registry's list, covers and kit files for them, only for kits the list names, and never stores a kit's file (it streams through). Your instance therefore contacts `raw.githubusercontent.com` when someone opens the store, and the kit's host when someone adds one.
+
+To use your own registry (a fork of drawpane-kits, say), set `KIT_REGISTRY` to the URL of its `index.json`; to turn the store off, set it to `off`. In an installed instance, add it to the `vars` in `drawpane.json` and run `npm create drawpane@latest upgrade -- --force`; installed by hand, put it in the `vars` of `wrangler.jsonc`.
+
 ## Signing in with GitHub or Google
 
 Passkeys work out of the box. To also offer **Continue with GitHub** and **Continue with Google**, create an OAuth app with each provider and give the Worker its client id and secret. Each button appears only once both values for that provider are set.

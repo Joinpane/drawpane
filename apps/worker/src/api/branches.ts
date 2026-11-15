@@ -125,7 +125,11 @@ export async function makeBranch(
   ]);
   try {
     await writeSnapshot(env.FILES, id, base.revn, now, base.nodes, branchBaseKey(id));
-    const copied = await room(env, id).importNodes({ userId: by.id, name: by.name }, base.nodes);
+    const copied = await room(env, id).importNodes(
+      { userId: by.id, name: by.name },
+      base.nodes,
+      id,
+    );
     if (!copied.ok) throw new Error(`couldn't copy into the branch: ${copied.reason}`);
     // The branch looks like its main file in the branch list straight away.
     const thumbnail = await env.FILES.get(thumbnailKey(main.id));

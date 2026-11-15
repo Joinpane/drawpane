@@ -40,6 +40,7 @@ export const imports = new Hono<AppContext>()
     const result = await room.importNodes(
       { userId: user.id, name: user.name },
       parsed.data.nodes as NodeRecord[],
+      file.id,
     );
     if (!result.ok) {
       if (result.reason === "not-empty")

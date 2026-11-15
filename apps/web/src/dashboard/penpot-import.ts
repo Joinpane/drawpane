@@ -6,6 +6,7 @@
  *
  * The Penpot reader and converter load only when someone imports.
  */
+import type { NodeRecord } from "@drawpane/model";
 import { api, type FileMeta } from "../api/client";
 
 export type ImportStage = "waiting" | "images" | "converting" | "saving" | "done" | "failed";
@@ -21,6 +22,8 @@ export interface FileImport {
   readonly fileId: string | null;
   /** What couldn't come across exactly, in words. */
   readonly notes: readonly string[];
+  /** Main components in the converted file: a file with some can be published as a library. */
+  readonly components: number;
   readonly error: string | null;
 }
 
@@ -41,13 +44,21 @@ async function upload(fileId: string, bytes: Uint8Array, mime: string): Promise<
   return ((await response.json()) as MediaInfo).sha;
 }
 
+export interface PenpotImportOptions {
+  /** Adds to a converted file's nodes before it's saved (the kit store's credit, say). */
+  readonly finish?: (nodes: NodeRecord[]) => Promise<NodeRecord[]>;
+}
+
 export async function importPenpot(
-  source: Blob,
+  source: Blob | Uint8Array,
   projectId: string,
   onChange: (files: readonly FileImport[]) => void,
+  options: PenpotImportOptions = {},
 ): Promise<readonly FileImport[]> {
   const penpot = await import("@drawpane/penpot");
-  const exp = await penpot.readPenpot(new Uint8Array(await source.arrayBuffer()));
+  const exp = await penpot.readPenpot(
+    source instanceof Uint8Array ? source : new Uint8Array(await source.arrayBuffer()),
+  );
   let files: FileImport[] = exp.files.map((f) => ({
     key: f.id,
     name: f.name,
@@ -57,6 +68,7 @@ export async function importPenpot(
     layers: penpot.layerCount(f),
     fileId: null,
     notes: [],
+    components: 0,
     error: null,
   }));
   const update = (key: string, patch: Partial<FileImport>) => {
@@ -84,8 +96,13 @@ export async function importPenpot(
 
       update(file.id, { stage: "converting" });
       const converted = penpot.convertFile(file, (id) => hashes.get(id));
-      update(file.id, { stage: "saving", notes: converted.notes.lines() });
-      await api.post(`/files/${fileId}/import`, { nodes: converted.nodes });
+      const nodes = options.finish ? await options.finish(converted.nodes) : converted.nodes;
+      update(file.id, {
+        stage: "saving",
+        notes: converted.notes.lines(),
+        components: nodes.filter((n) => n.props.isComponent === true).length,
+      });
+      await api.post(`/files/${fileId}/import`, { nodes });
       update(file.id, { stage: "done" });
     } catch (error) {
       // Nothing half-imported stays behind.

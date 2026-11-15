@@ -19,6 +19,7 @@ import { setTheme, useThemePreference } from "../app/theme";
 import { signOut } from "../auth/passkey";
 import { InboxView } from "../inbox/InboxView";
 import { useUnread } from "../inbox/inbox";
+import { KitStoreView } from "../kits/KitStore";
 import { FileThumbnail } from "./FileThumbnail";
 import { ImportDialog } from "./ImportDialog";
 import { InviteDialog } from "./InviteDialog";
@@ -42,8 +43,8 @@ export function DashboardPage() {
     queryKey: ["projects", teamId],
     queryFn: () => api.projects(teamId),
   });
-  // Fonts and Members are team pages of their own, with no files to list.
-  const showsFiles = view !== "fonts" && view !== "members" && view !== "inbox";
+  // Fonts, Members and Kits are team pages of their own, with no files to list.
+  const showsFiles = view !== "fonts" && view !== "members" && view !== "inbox" && view !== "kits";
   const unread = useUnread();
   const files = useQuery({
     queryKey: ["files", teamId, projectId ?? null, view ?? "recent"],
@@ -130,7 +131,10 @@ export function DashboardPage() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        searchRef.current?.focus();
+        // The files' search, or the search of the team page on screen (Kits).
+        (
+          searchRef.current ?? document.querySelector<HTMLInputElement>(".dash__search input")
+        )?.focus();
         return;
       }
       // N: a blank file, straight away (outside fields and dialogs).
@@ -292,6 +296,12 @@ export function DashboardPage() {
             label="Fonts"
           />
           <NavLink
+            active={view === "kits"}
+            icon="book"
+            to={{ teamId, view: "kits" }}
+            label="Kit store"
+          />
+          <NavLink
             active={view === "members"}
             icon="people"
             to={{ teamId, view: "members" }}
@@ -334,6 +344,10 @@ export function DashboardPage() {
       {view === "fonts" ? (
         <main className="dash__main" inert={behind}>
           <TeamFontsView teamId={teamId} canEdit={canEdit} />
+        </main>
+      ) : view === "kits" ? (
+        <main className="dash__main" inert={behind}>
+          <KitStoreView teamId={teamId} canEdit={canEdit} />
         </main>
       ) : view === "inbox" ? (
         <main className="dash__main" inert={behind}>

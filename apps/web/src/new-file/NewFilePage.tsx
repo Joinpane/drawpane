@@ -276,6 +276,21 @@ export function NewFilePage() {
             </div>
           )}
         </section>
+
+        <section className="new-file__kits" aria-labelledby="kits">
+          <Icon name="book" size={16} />
+          <p>
+            <strong id="kits">Kits from the community.</strong> UI kits, libraries and templates
+            from Penpot's hub, ready to add to your team.
+          </p>
+          <Button
+            onClick={() =>
+              void navigate({ to: "/t/$teamId", params: { teamId }, search: { view: "kits" } })
+            }
+          >
+            Browse kits
+          </Button>
+        </section>
       </main>
     </div>
   );

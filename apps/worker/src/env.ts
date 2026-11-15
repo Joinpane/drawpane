@@ -23,6 +23,11 @@ export interface Env {
   readonly DRAWPANE_VERSION?: string;
   /** `off` stops the health page from asking npm whether a newer release is out (api/updates.ts). */
   readonly UPDATE_CHECK?: string;
+  /**
+   * The kit store's registry: an index.json URL (by default Joinpane/drawpane-kits),
+   * or `off` to turn the store off (api/kits.ts).
+   */
+  readonly KIT_REGISTRY?: string;
   /** `off` stops the Worker from fetching Google Fonts (see api/fonts.ts). */
   readonly GOOGLE_FONTS?: string;
   /**

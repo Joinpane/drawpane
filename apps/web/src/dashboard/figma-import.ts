@@ -88,6 +88,7 @@ export async function importFigma(
     layers: 0,
     fileId: null,
     notes: [],
+    components: 0,
     error: null,
   };
   const update = (patch: Partial<FileImport>) => {

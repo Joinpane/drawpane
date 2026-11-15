@@ -20,6 +20,7 @@ import { branches, branchInfo, deleteBranchesOf } from "./branches";
 import { comments } from "./comments";
 import { fonts } from "./fonts";
 import { imports } from "./imports";
+import { kits } from "./kits";
 import { libraries } from "./libraries";
 import { media, thumbnailKey } from "./media";
 import { notifications } from "./notifications";
@@ -504,6 +505,7 @@ export const api = new Hono<AppContext>()
       const copied = await room(c.env, row.id).importNodes(
         { userId: user.id, name: user.name },
         nodes,
+        row.id,
       );
       if (!copied.ok) {
         await c.env.DB.prepare("DELETE FROM files WHERE id = ?").bind(row.id).run();
@@ -642,6 +644,8 @@ export const api = new Hono<AppContext>()
   .route("/", libraries)
   // Filling a new file from an import (./imports.ts) ------------------------------
   .route("/", imports)
+  // The kit store: its registry, through this origin, and what a team added (./kits.ts)
+  .route("/", kits)
   // Fonts a team uploads (./team-fonts.ts) ------------------------------------
   .route("/", teamFonts)
   // Google Fonts, copied to this server on first use (./fonts.ts) ------------

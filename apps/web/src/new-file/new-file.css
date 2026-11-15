@@ -287,3 +287,22 @@
     animation: none;
   }
 }
+
+/* Beside the templates: the kit store, for kits from the community. */
+.new-file__kits {
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  padding: var(--space-400) var(--space-500);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  color: var(--ink-muted);
+}
+.new-file__kits p {
+  flex: 1;
+  margin: 0;
+  font: 400 13px / 18px var(--font-ui);
+}
+.new-file__kits strong {
+  color: var(--ink);
+}
