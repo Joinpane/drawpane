@@ -69,5 +69,27 @@
     "gradient": 0.36,
     "translucent": 0.31,
     "no-fill": 0.32
+  },
+  "text": {
+    "regular-16": 3.14,
+    "medium-12": 1.26,
+    "bold-32": 1.07,
+    "black-64": 0.99,
+    "italic": 2.24,
+    "light-24": 3.64,
+    "wrap-auto": 12.97,
+    "line-height-px": 10.59,
+    "line-height-percent": 10.59,
+    "letter-spacing-px": 3.15,
+    "letter-spacing-tight": 1.06,
+    "align-center": 2.08,
+    "align-right": 2.1,
+    "justify": 15.51,
+    "box-middle": 3.36,
+    "upper": 4.77,
+    "underline": 5.14,
+    "strikethrough": 3.64,
+    "runs": 2.81,
+    "paragraphs": 5.36
   }
 }

@@ -149,7 +149,7 @@ describe("design to code", () => {
       color: "#16181d",
       "font-size": "20px",
       "font-weight": "600",
-      "line-height": "25px",
+      "line-height": "normal",
       "text-align": "center",
     });
     expect(jsxFor(editor.doc, editor.doc.get(frame) as never)).toContain(

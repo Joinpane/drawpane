@@ -27,6 +27,12 @@ export interface TextMeasurer {
    * still loading): the text then draws without them. See decision 0005.
    */
   shape?(text: string, run: ShapingRun): ShapedText | null;
+  /**
+   * The font's own ascent and descent in px (no leading), for a canvas `font`
+   * string: what "auto" line height and the baseline come from, as in Figma.
+   * Missing (or null) where fonts can't be measured; constants stand in.
+   */
+  metrics?(font: string): FontMetrics | null;
   /** Bumped whenever earlier widths stop being right (a web font arrived), so cached layouts go too. */
   readonly generation?: number;
 }
@@ -159,12 +165,30 @@ export function fontString(props: Props): string {
   return `${style}${getProp(props, "fontWeight")} ${getProp(props, "fontSize")}px "${name}", "${name} Variable", ${FALLBACKS}`;
 }
 
-export function lineHeightPx(props: Props): number {
+export interface FontMetrics {
+  readonly ascent: number;
+  readonly descent: number;
+}
+
+/** Where fonts can't be measured: a typical ascent and descent, in em. */
+const FALLBACK_ASCENT = 0.8;
+const FALLBACK_LINE = 1.25;
+
+/**
+ * A line's height in px. "Auto" is the font's own height, ascent plus
+ * descent, rounded to whole pixels (as in Figma), when the measurer knows
+ * the font's metrics.
+ */
+export function lineHeightPx(props: Props, measurer?: TextMeasurer | null): number {
   const size = getProp(props, "fontSize");
   const lh = getProp(props, "lineHeight");
   if (lh.unit === "px") return lh.value;
   if (lh.unit === "percent") return (size * lh.value) / 100;
-  return Math.round(size * 1.25 * 100) / 100;
+  const m = measurer?.metrics?.(fontString(props));
+  // Figma rounds a font's own height to whole pixels (19.36 → 19 for 16 px Inter).
+  return m
+    ? Math.max(1, Math.round(m.ascent + m.descent))
+    : Math.round(size * FALLBACK_LINE * 100) / 100;
 }
 
 export function letterSpacingPx(props: Props): number {
@@ -212,15 +236,18 @@ interface SpanStyle {
   readonly descent: number;
 }
 
-function spanStyles(node: NodeRecord): SpanStyle[] {
+function spanStyles(node: NodeRecord, measurer: TextMeasurer): SpanStyle[] {
   return textSpans(node).map((span) => {
     const size = getProp(span.props, "fontSize");
-    const lh = lineHeightPx(span.props);
-    // The em box centred in the line box, like CSS.
-    const ascent = (lh - size) / 2 + size * 0.8;
+    const font = fontString(span.props);
+    const lh = lineHeightPx(span.props, measurer);
+    // The font's own height centred in the line box, its baseline an ascent below that, as in
+    // Figma and CSS. Without the font's metrics, a typical ascent stands in.
+    const m = measurer.metrics?.(font) ?? { ascent: size * FALLBACK_ASCENT, descent: size * 0.2 };
+    const ascent = (lh - (m.ascent + m.descent)) / 2 + m.ascent;
     return {
       span,
-      font: fontString(span.props),
+      font,
       size,
       spacing: letterSpacingPx(span.props),
       run: shapingRun(span.props),
@@ -323,7 +350,7 @@ function computeLayout(
 ): TextLayout {
   const props = node.props;
   const text = getProp(props, "characters");
-  const styles = spanStyles(node);
+  const styles = spanStyles(node, measurer);
   const m = new RangeMeasure(text, styles, measurer);
   /** `para`: the line ends a paragraph that another follows (paragraph spacing goes after it). */
   const breaks: Array<{ start: number; end: number; next: number; para?: boolean }> = [];
@@ -484,7 +511,7 @@ function computeLayout(
   return {
     font: fontString(props),
     lines,
-    lineHeight: lineHeightPx(props),
+    lineHeight: lineHeightPx(props, measurer),
     width,
     height: top,
     letterSpacing: letterSpacingPx(props),
@@ -559,7 +586,7 @@ export function lineOf(layout: TextLayout, index: number): number {
 }
 
 function measureFor(node: NodeRecord, measurer: TextMeasurer): RangeMeasure {
-  return new RangeMeasure(getProp(node.props, "characters"), spanStyles(node), measurer);
+  return new RangeMeasure(getProp(node.props, "characters"), spanStyles(node, measurer), measurer);
 }
 
 /** The caret before character `index`. */
@@ -659,6 +686,7 @@ export function selectionBoxes(
 export class CanvasTextMeasurer implements TextMeasurer {
   readonly #ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   readonly #cache = new Map<string, number>();
+  readonly #metrics = new Map<string, FontMetrics | null>();
   #generation = 0;
 
   constructor() {
@@ -669,18 +697,51 @@ export class CanvasTextMeasurer implements TextMeasurer {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("2D canvas is not available");
     this.#ctx = ctx as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+    // Always kerned, as Figma sets type, and as the renderer draws it ("auto" lets the browser skip it).
+    this.#ctx.fontKerning = "normal";
   }
 
   width(font: string, text: string, _run?: ShapingRun | null): number {
     const key = `${font}\u0000${text}`;
     let w = this.#cache.get(key);
     if (w === undefined) {
-      this.#ctx.font = font;
-      w = this.#ctx.measureText(text).width;
+      // Where glyphs aren't positioned to fractions of a pixel (Linux, say), the browser
+      // rounds each advance at the size it measures, which adds up along a line: measured
+      // at 1000 px and scaled, the advances are the font's own, as Figma lays type out.
+      const size = /(\d+(?:\.\d+)?)px/.exec(font);
+      const px = size ? Number(size[1]) : 0;
+      if (size && px > 0 && px < 1000) {
+        this.#ctx.font = font.replace(size[0], "1000px");
+        w = (this.#ctx.measureText(text).width * px) / 1000;
+      } else {
+        this.#ctx.font = font;
+        w = this.#ctx.measureText(text).width;
+      }
       if (this.#cache.size > 20_000) this.#cache.clear();
       this.#cache.set(key, w);
     }
     return w;
+  }
+
+  metrics(font: string): FontMetrics | null {
+    // Browsers round a font's ascent and descent to whole pixels, so they're
+    // read at 1000 px and scaled to the size asked for, exact to 0.1%.
+    const size = /(\d+(?:\.\d+)?)px/.exec(font);
+    if (!size) return null;
+    const px = Number(size[1]);
+    const key = font.replace(size[0], "1000px");
+    let em = this.#metrics.get(key);
+    if (em === undefined) {
+      this.#ctx.font = key;
+      const t = this.#ctx.measureText("");
+      // The font's ascent and descent (as the browser reads them from its tables), not the glyphs'.
+      em =
+        typeof t.fontBoundingBoxAscent === "number" && t.fontBoundingBoxAscent > 0
+          ? { ascent: t.fontBoundingBoxAscent / 1000, descent: t.fontBoundingBoxDescent / 1000 }
+          : null;
+      this.#metrics.set(key, em);
+    }
+    return em ? { ascent: em.ascent * px, descent: em.descent * px } : null;
   }
 
   get generation(): number {
@@ -690,6 +751,7 @@ export class CanvasTextMeasurer implements TextMeasurer {
   /** Call after web fonts load: earlier measurements used fallback fonts. */
   invalidate(): void {
     this.#cache.clear();
+    this.#metrics.clear();
     this.#generation++;
   }
 }
