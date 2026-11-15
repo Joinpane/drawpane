@@ -596,3 +596,189 @@ describe("gaps the import used to drop", () => {
     );
   });
 });
+
+/**
+ * Real files from Penpot's hub (test/kits-compat.test.ts measures them all)
+ * taught these: each case is one way a converted file used to come apart.
+ */
+describe("matching Penpot's layout", () => {
+  it("never stretches with Penpot's stretch: only Fill resizes there", () => {
+    const { nodes } = convertFile(
+      fileOf([
+        {
+          id: "col",
+          type: "frame",
+          parentId: ROOT,
+          shapes: ["t"],
+          ...box(0, 0, 200, 100),
+          layout: "flex",
+          layoutFlexDir: "column",
+          layoutAlignItems: "stretch",
+          layoutItemHSizing: "auto",
+        },
+        {
+          id: "t",
+          type: "rect",
+          parentId: "col",
+          ...box(0, 0, 72, 30),
+          layoutItemAlignSelf: "stretch",
+          layoutItemHSizing: "fix",
+        },
+      ]),
+      noMedia,
+    );
+    const col = nodes.find((n) => n.id === "col") as NodeRecord;
+    const t = nodes.find((n) => n.id === "t") as NodeRecord;
+    // Penpot places stretched items at the start, at their own size.
+    expect(col.props.alignItems).toBeUndefined();
+    expect(t.props.alignSelf).toBeUndefined();
+    expect(t.props.width).toBe(72);
+  });
+
+  it("keeps the cells Penpot's grid put auto-placed items in", () => {
+    const { nodes } = convertFile(
+      fileOf([
+        {
+          id: "grid",
+          type: "frame",
+          parentId: ROOT,
+          // Layer order puts the text first; Penpot placed it in the second column.
+          shapes: ["text", "image"],
+          ...box(0, 0, 550, 180),
+          layout: "grid",
+          layoutGridColumns: [{ type: "auto" }, { type: "flex", value: 1 }],
+          layoutGridRows: [{ type: "auto" }],
+          layoutGridCells: {
+            c1: {
+              id: "c1",
+              position: "auto",
+              column: 1,
+              row: 1,
+              columnSpan: 1,
+              rowSpan: 1,
+              shapes: ["image"],
+            },
+            c2: {
+              id: "c2",
+              position: "auto",
+              column: 2,
+              row: 1,
+              columnSpan: 1,
+              rowSpan: 1,
+              shapes: ["text"],
+            },
+          },
+        },
+        {
+          id: "text",
+          type: "rect",
+          parentId: "grid",
+          ...box(228, 0, 322, 96),
+          layoutItemHSizing: "fill",
+        },
+        { id: "image", type: "rect", parentId: "grid", ...box(0, 0, 218, 180) },
+      ]),
+      noMedia,
+    );
+    const area = (id: string) => (nodes.find((n) => n.id === id) as NodeRecord).props.gridArea;
+    expect(area("image")).toMatchObject({ column: 1, row: 1 });
+    expect(area("text")).toMatchObject({ column: 2, row: 1 });
+  });
+
+  it("links a copy nested in a copy to the outer main, as Drawpane's nested instances are", () => {
+    const shapes = [
+      // Component C1: a main with one rect.
+      {
+        id: "m1",
+        type: "frame",
+        parentId: ROOT,
+        shapes: ["m1r"],
+        ...box(0, 0, 50, 50),
+        mainInstance: true,
+        componentId: "C1",
+      },
+      { id: "m1r", type: "rect", parentId: "m1", ...box(0, 0, 50, 50) },
+      // Component C2: a main holding a copy of C1.
+      {
+        id: "m2",
+        type: "frame",
+        parentId: ROOT,
+        shapes: ["m2n"],
+        ...box(100, 0, 60, 60),
+        mainInstance: true,
+        componentId: "C2",
+      },
+      {
+        id: "m2n",
+        type: "frame",
+        parentId: "m2",
+        shapes: ["m2nr"],
+        ...box(100, 0, 50, 50),
+        componentId: "C1",
+        shapeRef: "m1",
+      },
+      { id: "m2nr", type: "rect", parentId: "m2n", ...box(100, 0, 50, 50), shapeRef: "m1r" },
+      // A copy of C2, with its nested copy of C1.
+      {
+        id: "x",
+        type: "frame",
+        parentId: ROOT,
+        shapes: ["xn"],
+        ...box(200, 0, 60, 60),
+        componentId: "C2",
+        shapeRef: "m2",
+      },
+      {
+        id: "xn",
+        type: "frame",
+        parentId: "x",
+        shapes: ["xnr"],
+        ...box(200, 0, 50, 50),
+        componentId: "C1",
+        shapeRef: "m2n",
+      },
+      { id: "xnr", type: "rect", parentId: "xn", ...box(200, 0, 50, 50), shapeRef: "m2nr" },
+    ];
+    const components = new Map(
+      [
+        { id: "C1", mainInstanceId: "m1", mainInstancePage: "p1" },
+        { id: "C2", mainInstanceId: "m2", mainInstancePage: "p1" },
+      ].map((c) => [c.id, c as never]),
+    );
+    const { nodes } = convertFile(fileOf(shapes, { components }), noMedia);
+    const props = (id: string) => (nodes.find((n) => n.id === id) as NodeRecord).props;
+    expect(props("x")).toMatchObject({ instanceOf: "m2" });
+    expect(props("xn")).toMatchObject({ instanceOf: "m1", mirrors: "m2n" });
+    expect(props("xnr")).toMatchObject({ mirrors: "m2nr" });
+    validate(nodes);
+  });
+
+  it("gives a layer Penpot repeats on another page (a duplicated page) an id of its own there", () => {
+    const page = (id: string) => ({
+      record: { id, name: id, flows: { f: { id: "f", name: "Flow", startingFrame: "board" } } },
+      shapes: new Map(
+        [
+          { id: ROOT, type: "frame", shapes: ["board"] },
+          { id: "board", type: "frame", parentId: ROOT, shapes: ["r"], ...box(0, 0, 100, 100) },
+          { id: "r", type: "rect", parentId: "board", ...box(10, 10, 20, 20) },
+        ].map((s) => [s.id, s as never]),
+      ),
+    });
+    const file = { ...fileOf([]), pages: [page("p1"), page("p2")] };
+    const { nodes, idOf } = convertFile(file, noMedia);
+    validate(nodes);
+    expect(new Set(nodes.map((n) => n.id)).size).toBe(nodes.length);
+    // The first page keeps Penpot's ids; the second page's layers have their own, linked up.
+    expect(idOf("p1", "board")).toBe("board");
+    const board2 = idOf("p2", "board");
+    expect(board2).not.toBe("board");
+    expect(nodes.find((n) => n.id === board2)?.parent).toBe("p2");
+    expect(nodes.find((n) => n.id === idOf("p2", "r"))?.parent).toBe(board2);
+    const flows = (nodes.find((n) => n.id === "p2") as NodeRecord).props.flows as Array<{
+      start: string;
+    }>;
+    expect(flows[0]?.start).toBe(board2);
+    // The same every time: converting again gives the same ids.
+    expect(convertFile(file, noMedia).idOf("p2", "board")).toBe(board2);
+  });
+});

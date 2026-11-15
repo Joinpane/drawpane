@@ -5,7 +5,8 @@
  * typographies (as text styles), and prototype interactions and flows.
  *
  * Penpot ids are kept, so references inside the file (components, styles,
- * variables, prototype destinations) carry over as they are. Anything that
+ * variables, prototype destinations) carry over as they are; an id Penpot
+ * repeats on several pages gets a new one on all but one (`ids.ts`). Anything that
  * can't come across exactly is counted in `notes` for the import summary.
  */
 import {
@@ -32,6 +33,7 @@ import {
   shapeSize,
   transformPath,
 } from "./geometry";
+import { withUniqueIds } from "./ids";
 import { childLayout, childOrder, containerLayout, type GridPlace, gridAreas } from "./layout";
 import { Notes } from "./notes";
 import type { PenpotFile, PenpotRecord } from "./read";
@@ -58,6 +60,8 @@ export interface ConvertedFile {
   readonly name: string;
   readonly nodes: NodeRecord[];
   readonly notes: Notes;
+  /** The node id a Penpot shape on a page became (ids repeated across pages get new ones). */
+  idOf(pageId: string, shapeId: string): string;
 }
 
 /** Where a layer sits while converting: its frame's space and what contains it. */
@@ -119,7 +123,9 @@ const KNOWN_FEATURES = new Set([
   "plugins/runtime",
 ]);
 
-export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile {
+export function convertFile(source: PenpotFile, media: MediaLookup): ConvertedFile {
+  // Ids Penpot repeats across pages (a duplicated page keeps them) made unique.
+  const { file, idOf } = withUniqueIds(source);
   const notes = new Notes();
   const features = Array.isArray(file.record.features) ? (file.record.features as unknown[]) : [];
   if (features.some((f) => typeof f === "string" && !KNOWN_FEATURES.has(f)))
@@ -259,7 +265,10 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
       let inInstance = at.inInstance;
       if (isCopyHead && mainId === undefined) notes.add("library-component");
       if (at.inInstance || (isCopyHead && mainId !== undefined)) {
-        if (typeof s.shapeRef === "string" && !isCopyHead) props.mirrors = s.shapeRef;
+        // A copy's layers mirror their main's; so does a copy nested in a copy
+        // (it follows the outer copy, as Drawpane's nested instances do).
+        if (typeof s.shapeRef === "string" && (!isCopyHead || at.inInstance))
+          props.mirrors = s.shapeRef;
         const overrides = touched(s.touched);
         if (overrides.length > 0) props.overrides = overrides;
       }
@@ -421,7 +430,7 @@ export function convertFile(file: PenpotFile, media: MediaLookup): ConvertedFile
     }
   }
 
-  return { name: file.name, nodes: tidy(nodes, colors), notes };
+  return { name: file.name, nodes: tidy(nodes, colors), notes, idOf };
 
   function fillsAndStrokes(s: Raw, open: boolean): Record<string, unknown> {
     const out: Record<string, unknown> = {};

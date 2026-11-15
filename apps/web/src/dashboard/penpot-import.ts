@@ -55,7 +55,10 @@ export async function importPenpot(
   onChange: (files: readonly FileImport[]) => void,
   options: PenpotImportOptions = {},
 ): Promise<readonly FileImport[]> {
-  const penpot = await import("@drawpane/penpot");
+  const [penpot, { pinInstances }] = await Promise.all([
+    import("@drawpane/penpot"),
+    import("@drawpane/editor"),
+  ]);
   const exp = await penpot.readPenpot(
     source instanceof Uint8Array ? source : new Uint8Array(await source.arrayBuffer()),
   );
@@ -96,10 +99,12 @@ export async function importPenpot(
 
       update(file.id, { stage: "converting" });
       const converted = penpot.convertFile(file, (id) => hashes.get(id));
-      const nodes = options.finish ? await options.finish(converted.nodes) : converted.nodes;
+      // Copies open as Penpot shows them, not snapped back to their mains.
+      const pinned = pinInstances(converted.nodes);
+      const nodes = options.finish ? await options.finish(pinned.nodes) : pinned.nodes;
       update(file.id, {
         stage: "saving",
-        notes: converted.notes.lines(),
+        notes: [...converted.notes.lines(), ...detachedNote(pinned.detached)],
         components: nodes.filter((n) => n.props.isComponent === true).length,
       });
       await api.post(`/files/${fileId}/import`, { nodes });
@@ -119,3 +124,13 @@ export async function importPenpot(
 
 /** Whether a dropped or chosen file looks like a Penpot export. */
 export const isPenpotFile = (file: File) => /\.penpot$/i.test(file.name);
+
+/** How many copies were detached to keep them as they were: they differed from their components in structure. */
+export function detachedNote(count: number): string[] {
+  if (count === 0) return [];
+  return [
+    count === 1
+      ? "1 copy differed from its component in structure and was detached, so it looks as it did"
+      : `${count} copies differed from their components in structure and were detached, so they look as they did`,
+  ];
+}

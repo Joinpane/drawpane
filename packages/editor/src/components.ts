@@ -20,7 +20,7 @@ import {
   type PropName,
   type Props,
 } from "@drawpane/model";
-import type { Doc } from "./doc";
+import { type Doc, Doc as DocCtor } from "./doc";
 import { layerName } from "./names";
 
 /** Never copied from a main component: they link instances or describe the main itself. */
@@ -427,6 +427,82 @@ export function propagationOps(doc: Doc, ids: Iterable<string>): Op[] {
     }
   }
   return ops;
+}
+
+/**
+ * Instances as they are, kept: for files made elsewhere (Penpot, Figma),
+ * whose copies differ from their mains in ways Drawpane's sync would undo.
+ *
+ * - Properties: a copy resized, its layers placed by constraints or its own
+ *   auto layout, a text wrapping differently, none of it recorded as an
+ *   override there. Each property syncing would change is marked
+ *   overridden instead, so the copy keeps it and still follows its main's
+ *   other changes.
+ * - Structure: a copy whose layers can't be matched to its main's (one the
+ *   main doesn't have, a missing one, another order, a reference to a layer
+ *   the main no longer has). Sync would rebuild it from the main, so it's
+ *   detached instead: it keeps every layer as it is, without the link.
+ *
+ * Either way the file opens looking as it did where it was made.
+ */
+export function pinInstances(nodes: readonly NodeRecord[]): {
+  nodes: NodeRecord[];
+  /** Properties marked overridden. */
+  pinned: number;
+  /** Copies detached because their structure differs from their main's. */
+  detached: number;
+} {
+  const roots = (doc: Doc) =>
+    [...doc.nodes()].filter(
+      (node) => isInstanceRoot(node) && getProp(node.props, "mirrors") === null,
+    );
+
+  // Copies sync can't keep as they are lose their link, everything inside them too.
+  let doc = new DocCtor();
+  doc.reset(nodes);
+  const unlinked = new Set<string>();
+  let detached = 0;
+  for (const root of roots(doc)) {
+    if (!syncInstanceOps(doc, root.id).some((op) => op.op !== "set")) continue;
+    detached++;
+    const queue = [root.id];
+    for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
+      unlinked.add(id);
+      queue.push(...doc.childIds(id));
+    }
+  }
+  let out: NodeRecord[] = nodes.map((node) => {
+    if (!unlinked.has(node.id)) return node;
+    const props: Record<string, unknown> = { ...node.props };
+    delete props.instanceOf;
+    delete props.mirrors;
+    delete props.overrides;
+    return { ...node, props: props as Props };
+  });
+
+  // What syncing would still change on the rest is theirs: overridden.
+  doc = new DocCtor();
+  doc.reset(out);
+  const marks = new Map<string, Set<string>>();
+  for (const root of roots(doc)) {
+    for (const op of syncInstanceOps(doc, root.id)) {
+      if (op.op !== "set" || LINK_PROPS.has(op.prop)) continue;
+      let set = marks.get(op.id);
+      if (!set) {
+        set = new Set(getProp(doc.get(op.id)?.props ?? {}, "overrides"));
+        marks.set(op.id, set);
+      }
+      set.add(op.prop);
+    }
+  }
+  let pinned = 0;
+  out = out.map((node) => {
+    const set = marks.get(node.id);
+    if (!set) return node;
+    pinned += set.size - getProp(node.props, "overrides").length;
+    return { ...node, props: { ...node.props, overrides: [...set].sort() as PropName[] } };
+  });
+  return { nodes: out, pinned, detached };
 }
 
 /**

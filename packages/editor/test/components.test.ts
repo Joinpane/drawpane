@@ -5,6 +5,8 @@ import {
   instancesOf,
   isInstanceRoot,
   isMainComponent,
+  pinInstances,
+  propagationOps,
   swapTargets,
 } from "../src/components";
 import { Editor } from "../src/editor";
@@ -291,5 +293,76 @@ describe("components and instances", () => {
       "p",
     ) as string;
     expect(canMoveInto(editor.doc, [instance], other)).toBe(true);
+  });
+});
+
+describe("pinInstances (files made elsewhere)", () => {
+  const node = (
+    id: string,
+    type: NodeRecord["type"],
+    parent: string,
+    key: string,
+    props: Record<string, unknown>,
+  ): NodeRecord => ({ id, type, parent, key, props: props as NodeRecord["props"] });
+  /** A page with a main (a 100 × 40 button with a label) and a copy of it. */
+  const file = (copy: Record<string, unknown>, extra: NodeRecord[] = []) => [
+    node("p", "page", ROOT_ID, "a0", {}),
+    node("main", "frame", "p", "a0", { isComponent: true, width: 100, height: 40 }),
+    node("label", "rect", "main", "a0", { x: 10, y: 10, width: 80, height: 20 }),
+    node("copy", "frame", "p", "a1", {
+      instanceOf: "main",
+      x: 0,
+      y: 100,
+      width: 100,
+      height: 40,
+      ...copy,
+    }),
+    node("copyLabel", "rect", "copy", "a0", {
+      mirrors: "label",
+      x: 10,
+      y: 10,
+      width: 80,
+      height: 20,
+    }),
+    ...extra,
+  ];
+  const opened = (nodes: NodeRecord[]) => {
+    const editor = new Editor({ measurer: { width: (_f, t) => t.length * 6 }, clientId: "t" });
+    editor.doc.reset(nodes);
+    editor.state.set({ role: "editor" });
+    return editor;
+  };
+
+  it("keeps a copy as the file has it: what syncing would change is overridden", () => {
+    const { nodes, pinned, detached } = pinInstances(file({ width: 160, height: 56 }));
+    expect([pinned, detached]).toEqual([2, 0]);
+    const copy = nodes.find((n) => n.id === "copy") as NodeRecord;
+    expect(getProp(copy.props, "overrides")).toEqual(["height", "width"]);
+    // Syncing with its main changes nothing now…
+    const editor = opened(nodes);
+    expect(propagationOps(editor.doc, ["main", "label"])).toEqual([]);
+    // …and the copy still follows its main where it didn't differ.
+    editor.setProp(["label"], "opacity", 0.5);
+    expect(getProp((editor.doc.get("copyLabel") as NodeRecord).props, "opacity")).toBe(0.5);
+    expect(getProp((editor.doc.get("copy") as NodeRecord).props, "width")).toBe(160);
+  });
+
+  it("detaches a copy whose layers can't be matched to its main's, keeping every layer", () => {
+    // A layer the main doesn't have (Penpot lets copies differ in structure).
+    const extra = [node("badge", "rect", "copy", "a1", { x: 0, y: 0, width: 8, height: 8 })];
+    const { nodes, detached } = pinInstances(file({}, extra));
+    expect(detached).toBe(1);
+    const props = (id: string) => (nodes.find((n) => n.id === id) as NodeRecord).props;
+    expect(getProp(props("copy"), "instanceOf")).toBeNull();
+    expect(getProp(props("copyLabel"), "mirrors")).toBeNull();
+    // Nothing is rebuilt or lost when it opens.
+    const editor = opened(nodes);
+    expect(propagationOps(editor.doc, ["main", "label"])).toEqual([]);
+    expect(editor.doc.childIds("copy")).toEqual(["copyLabel", "badge"]);
+  });
+
+  it("leaves a file whose copies match their mains as it is", () => {
+    const nodes = file({});
+    expect(pinInstances(nodes)).toEqual({ nodes, pinned: 0, detached: 0 });
   });
 });

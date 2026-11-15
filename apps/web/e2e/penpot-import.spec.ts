@@ -56,6 +56,9 @@ test.describe
     });
 
     test("imports an export into a new file, and opens it", async () => {
+      const imported = page.waitForRequest(
+        (r) => r.method() === "POST" && /\/api\/files\/[^/]+\/import$/.test(r.url()),
+      );
       await openPenpotImport(page);
       await chooser(page).setInputFiles(fixture("showcase.penpot"));
       const row = dialog(page).getByRole("listitem").filter({ hasText: "Showcase" });
@@ -101,6 +104,26 @@ test.describe
         return null;
       });
       expect((await page.request.get(`/api/media/${ref}`)).status()).toBe(200);
+
+      // Opening it changes nothing: once its fonts have arrived, every layer is
+      // where the import put it (as Penpot had it).
+      const saved = JSON.parse((await imported).postData() ?? "{}") as {
+        nodes: Array<{ id: string; props: Record<string, unknown> }>;
+      };
+      const box = (props: Record<string, unknown>) =>
+        [props.x, props.y, props.width, props.height].map((v) => v ?? null).join(" ");
+      const want = Object.fromEntries(saved.nodes.map((n) => [n.id, box(n.props)]));
+      await page.evaluate(() => document.fonts.ready);
+      await page.waitForTimeout(1_000);
+      const have = await page.evaluate(() =>
+        Object.fromEntries(
+          [...(window as unknown as W).drawpane.doc.nodes()].map((n) => [
+            n.id,
+            [n.props.x, n.props.y, n.props.width, n.props.height].map((v) => v ?? null).join(" "),
+          ]),
+        ),
+      );
+      for (const [id, b] of Object.entries(want)) if (id in have) expect(have[id], id).toBe(b);
     });
 
     test("makes a file for each file in the export", async () => {
