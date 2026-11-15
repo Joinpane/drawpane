@@ -5,7 +5,13 @@
  * stay in this hook until the merge sends them.
  */
 import type { Editor } from "@drawpane/editor";
-import { type BranchInfo, branchChanges, nodeReader, type Resolution } from "@drawpane/model";
+import {
+  type BranchInfo,
+  branchChanges,
+  type NodeRecord,
+  nodeReader,
+  type Resolution,
+} from "@drawpane/model";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { ApiError, api } from "../../api/client";
@@ -13,6 +19,8 @@ import { type MergePlan, mergePlan, type ReviewRow, reviewRows } from "./review"
 
 export interface BranchReviewState {
   readonly rows: readonly ReviewRow[] | null;
+  /** Main as review read it, for comparing on screen. */
+  readonly main: readonly NodeRecord[] | null;
   readonly plan: MergePlan | null;
   readonly loading: boolean;
   readonly error: string | null;
@@ -101,6 +109,7 @@ export function useBranchReview(
 
   return {
     rows,
+    main: review.data?.main ?? null,
     plan,
     loading: review.isPending || (review.isSuccess && !live),
     error: review.error ? review.error.message : null,

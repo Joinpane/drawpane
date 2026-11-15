@@ -25,7 +25,8 @@ A file is one FileRoom (Durable Object) holding its nodes and transaction log. T
    - Merging sends those choices, not operations. Main's FileRoom works the changes out again against itself at that moment, so nothing main did since the reviewer looked is overwritten unseen: a conflict nobody decided stops the merge, and review shows main as it is now.
    - The room saves main as a named version first ("Before merging “name”"), which undoes the merge from History, then commits the chosen changes as one ordinary transaction: logged, attributed, and seen arriving by everyone in main. Instances, variables, text and auto layout fix themselves up as for any edit.
    - The API claims the branch before merging, so two people merging at once can't both apply it, and releases it if the merge doesn't go through. Once merged, the branch is read-only history: everyone in it becomes a viewer at once (`merged`), and the Worker reads merged branches as read-only from then on.
-5. **Updating a branch from main** (taking main's changes since the base) is the same machinery the other way round, and moves the base forward. It comes in a later step, as do visual diffs (side by side, overlay, swipe) and comments anchored to changes.
+5. **Review shows the difference on the canvas.** Main, as review read it, loads into a second read-only editor beside the live branch: side by side (each in half the open canvas), under a swipe, or overlaid. The two views pan, zoom and change page together, and what changed is outlined on each side in its kind's colour, numbered as the list numbers it; picking either selects the other. The branch side stays editable throughout.
+6. **Updating a branch from main** (taking main's changes since the base) is the same machinery the other way round, and moves the base forward. It comes in a later step, as do comments anchored to changes.
 
 ## Consequences
 

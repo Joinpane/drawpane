@@ -116,6 +116,18 @@ test.describe
       await expect(changes.getByText("Badge")).toBeVisible();
       const merge = page.getByRole("complementary", { name: "Merge" });
       await expect(merge.getByText("No conflicts with main")).toBeVisible();
+
+      // Main and the branch side by side, the changes numbered as listed: a change on both
+      // sides, an addition on the branch's only.
+      const compare = page.getByRole("toolbar", { name: "Compare with main" });
+      await expect(page.getByRole("button", { name: /^Change 1: Card/ })).toHaveCount(2);
+      await expect(page.getByRole("button", { name: /^Change 2: Badge/ })).toHaveCount(1);
+      await compare.getByRole("radio", { name: "Swipe" }).click();
+      const swipe = page.getByRole("slider", { name: "Swipe between main and the branch" });
+      await swipe.focus();
+      await page.keyboard.press("ArrowRight");
+      await expect(swipe).toHaveAttribute("aria-valuenow", "52");
+      await compare.getByRole("radio", { name: "Side by side" }).click();
       await merge.getByRole("button", { name: "Merge into Untitled" }).click();
 
       const toast = page

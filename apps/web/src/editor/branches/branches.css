@@ -382,13 +382,6 @@
   padding: 0 var(--space-200) var(--space-200) calc(var(--space-200) * 2 + 32px);
   border: 0;
 }
-.review-row__legend {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-}
 .review-side {
   display: flex;
   align-items: flex-start;
@@ -497,4 +490,215 @@
 .merge__button {
   width: 100%;
   justify-content: center;
+}
+
+/* Review: main and the branch on screen together */
+.compare {
+  --mid: calc((var(--canvas-left) + 100% - var(--canvas-right)) / 2);
+  position: absolute;
+  inset: 0;
+  background: var(--canvas);
+}
+.compare__pane {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+/* Side by side: each half of the open area between the panes. */
+.compare[data-mode="side"] .compare__pane--main {
+  left: var(--canvas-left);
+  right: auto;
+  width: calc(var(--mid) - var(--canvas-left));
+}
+.compare[data-mode="side"] .compare__pane--branch {
+  left: var(--mid);
+  right: var(--canvas-right);
+}
+.compare__divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--mid);
+  width: 1px;
+  background: var(--line-strong);
+  pointer-events: none;
+}
+/* Swipe: main over the branch, cut off at the handle. */
+.compare[data-mode="swipe"] .compare__pane--main {
+  clip-path: inset(0 calc((1 - var(--swipe)) * 100%) 0 0);
+}
+.compare__swipe {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--swipe) * 100%);
+  width: 24px;
+  transform: translateX(-50%);
+  cursor: ew-resize;
+  touch-action: none;
+}
+.compare__swipe::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--surface-raised);
+  box-shadow: 0 0 0 1px var(--line-strong);
+}
+.compare__grip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 24px;
+  height: 40px;
+  transform: translate(-50%, -50%);
+  border-radius: var(--radius-full);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+}
+.compare__grip::before,
+.compare__grip::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--icon);
+}
+.compare__grip::before {
+  left: 8px;
+}
+.compare__grip::after {
+  right: 8px;
+}
+.compare__swipe:focus-visible {
+  outline: none;
+}
+.compare__swipe:focus-visible .compare__grip {
+  box-shadow: var(--shadow-focus);
+}
+/* Overlay: main ghosted over the branch, which stays editable underneath. */
+.compare[data-mode="overlay"] .compare__pane--main {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.compare__label {
+  position: absolute;
+  z-index: 1;
+  top: 112px;
+  max-width: 40%;
+  overflow: hidden;
+  padding: 2px var(--space-200);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--canvas) 80%, transparent);
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.compare__label--main {
+  left: calc(var(--canvas-left) + var(--space-200));
+}
+.compare[data-mode="side"] .compare__label--branch {
+  left: calc(var(--mid) + var(--space-200));
+}
+.compare[data-mode="swipe"] .compare__label--branch {
+  right: calc(var(--canvas-right) + var(--space-200));
+}
+.compare__missing {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink-muted);
+  font: var(--type-ui-body);
+}
+
+/* What changed, outlined and numbered as the review lists it. */
+.diff-marks {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.diff-mark {
+  --kind: var(--info);
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px solid var(--kind);
+  border-radius: 2px;
+}
+.diff-mark[data-kind="added"] {
+  --kind: var(--success);
+}
+.diff-mark[data-kind="removed"] {
+  --kind: var(--danger);
+}
+.diff-mark[data-kind="conflict"] {
+  --kind: var(--warning);
+}
+.diff-mark[data-active] {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--kind) 25%, transparent);
+}
+.diff-mark__n {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--kind);
+  color: var(--surface);
+  font: 600 10px / 1 var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.diff-mark__n:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+.review-row[data-active] .review-row__main {
+  background: var(--surface-active);
+}
+
+/* How main and the branch are shown: under the toolbar, centred over the open canvas. */
+.compare-bar {
+  position: absolute;
+  z-index: 3;
+  top: 64px;
+  left: calc((var(--canvas-left) + 100% - var(--canvas-right)) / 2);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  height: 40px;
+  padding: 0 var(--space-300) 0 var(--space-100);
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+.compare-bar__divider {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+}
+/* Overlaid, the branch's marks sit over main's ghost, and main's own would only double them. */
+.compare[data-mode="overlay"] .compare__pane--branch .diff-marks {
+  z-index: 1;
+}
+.compare[data-mode="overlay"] .compare__pane--main .diff-marks {
+  display: none;
 }

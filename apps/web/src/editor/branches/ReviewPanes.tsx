@@ -5,7 +5,7 @@
  */
 import type { BranchInfo, Resolution } from "@drawpane/model";
 import { Badge, Button, Icon, IconButton, type IconName } from "@drawpane/ui";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { isMac, modKey } from "../../app/format";
 import { count, revisionLabel, whenPhrase } from "../history/labels";
 import type { ChangeKind, ReviewRow } from "./review";
@@ -24,6 +24,7 @@ export function ReviewPane({
   main,
   review,
   canMerge,
+  active,
   onSelect,
   onClose,
 }: {
@@ -31,6 +32,8 @@ export function ReviewPane({
   main: { readonly name: string };
   review: BranchReviewState;
   canMerge: boolean;
+  /** The change picked here or on the canvas. */
+  active: string | null;
   /** Shows a change's layer on the canvas. */
   onSelect: (row: ReviewRow) => void;
   onClose: () => void;
@@ -91,6 +94,7 @@ export function ReviewPane({
                 key={row.key}
                 row={row}
                 n={i + 1}
+                active={row.key === active}
                 included={!review.skipped.has(row.key)}
                 side={review.resolutions.get(row.key) ?? null}
                 canMerge={canMerge}
@@ -109,6 +113,7 @@ export function ReviewPane({
 function ReviewItem({
   row,
   n,
+  active,
   included,
   side,
   canMerge,
@@ -118,6 +123,7 @@ function ReviewItem({
 }: {
   row: ReviewRow;
   n: number;
+  active: boolean;
   included: boolean;
   side: Resolution | null;
   canMerge: boolean;
@@ -126,9 +132,16 @@ function ReviewItem({
   onResolve: (side: Resolution) => void;
 }) {
   const status = row.conflict ? (side ? "Decided" : "Conflict") : KIND_WORD[row.kind];
+  const item = useRef<HTMLLIElement>(null);
+  // Picked on the canvas: bring it into view in the list.
+  useEffect(() => {
+    if (active) item.current?.scrollIntoView({ block: "nearest" });
+  }, [active]);
   return (
     <li
+      ref={item}
       className="review-row"
+      data-active={active || undefined}
       data-kind={row.kind}
       data-conflict={row.conflict || undefined}
       data-skipped={!included || undefined}
@@ -156,7 +169,7 @@ function ReviewItem({
       </div>
       {row.conflict && row.sides && included ? (
         <fieldset className="review-row__sides" disabled={!canMerge}>
-          <legend className="review-row__legend">Keep which?</legend>
+          <legend className="dp-visually-hidden">Keep which?</legend>
           <SideOption
             label="Main"
             value={row.sides.main}

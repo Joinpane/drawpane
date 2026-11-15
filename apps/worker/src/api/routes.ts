@@ -8,7 +8,14 @@ import { emailSetup } from "../email/setup";
 import type { AppContext, Env, Role } from "../env";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { badRequest, conflict, forbidden, notFound, rateLimited } from "../lib/http";
-import { type FileRow, readBody, requireFileRole, requireTeamRole, toFile } from "./access";
+import {
+  type FileRow,
+  OPEN_BRANCHES,
+  readBody,
+  requireFileRole,
+  requireTeamRole,
+  toFile,
+} from "./access";
 import { branches, branchInfo, deleteBranchesOf } from "./branches";
 import { comments } from "./comments";
 import { fonts } from "./fonts";
@@ -423,11 +430,11 @@ export const api = new Hono<AppContext>()
     if (search) await backfillSearchNames(c.env.DB, teamId);
     const { results } = await (search
       ? c.env.DB.prepare(
-          `SELECT * FROM files WHERE team_id = ? AND ${deleted} AND ${search.where}
+          `SELECT *, ${OPEN_BRANCHES} FROM files WHERE team_id = ? AND ${deleted} AND ${search.where}
             ORDER BY ${search.order} LIMIT ${SEARCH_LIMIT}`,
         ).bind(teamId, ...search.binds)
       : c.env.DB.prepare(
-          `SELECT * FROM files WHERE team_id = ? AND ${deleted} ORDER BY updated_at DESC LIMIT 200`,
+          `SELECT *, ${OPEN_BRANCHES} FROM files WHERE team_id = ? AND ${deleted} ORDER BY updated_at DESC LIMIT 200`,
         ).bind(teamId)
     ).all<FileRow>();
     return c.json({ files: results.map(toFile) });
@@ -438,7 +445,7 @@ export const api = new Hono<AppContext>()
     const project = await projectTeam(c.env.DB, c.req.param("projectId"));
     await requireTeamRole(c.env, user.id, project.team_id, "viewer");
     const { results } = await c.env.DB.prepare(
-      "SELECT * FROM files WHERE project_id = ? AND deleted_at IS NULL AND branch_of IS NULL ORDER BY updated_at DESC",
+      `SELECT *, ${OPEN_BRANCHES} FROM files WHERE project_id = ? AND deleted_at IS NULL AND branch_of IS NULL ORDER BY updated_at DESC`,
     )
       .bind(project.id)
       .all<FileRow>();
