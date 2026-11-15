@@ -10,6 +10,7 @@ import { NumberField, PropertySection } from "@drawpane/ui";
 import { ColorRow } from "./ColorRow";
 import { common, Select } from "./fields";
 import { AddItemButton, ItemEditor, type ItemKind, ItemRow, useItemEditor } from "./ItemList";
+import { moveItem, remapIndex, useReorder } from "./reorder";
 
 type TrackGrid = Extract<LayoutGrid, { type: "columns" | "rows" }>;
 
@@ -60,6 +61,14 @@ export function LayoutGridsSection({ editor, nodes }: { editor: Editor; nodes: N
       label,
     );
   const current = items.open === null ? null : (grids?.[items.open] ?? null);
+  const { rowProps } = useReorder({
+    order: (grids ?? []).map((_, i) => i),
+    onMove: (from, to) => {
+      if (!grids) return;
+      set(moveItem(grids, from, to), "Reorder layout grids");
+      items.setOpen((open) => (open === null ? null : remapIndex(open, from, to)));
+    },
+  });
 
   return (
     <PropertySection
@@ -100,6 +109,7 @@ export function LayoutGridsSection({ editor, nodes }: { editor: Editor; nodes: N
               );
               items.setOpen(null);
             }}
+            reorder={rowProps(i)}
           />
         ))
       )}
