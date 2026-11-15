@@ -43,6 +43,9 @@ import { nodePath } from "./vector/shapes";
 import { serializePath } from "./vector/svg";
 import { type AnyCanvas, type Bounds, copyExtended, scratch } from "./webgl";
 
+/** The most pixels a side of a stroke's or text's radial or angular gradient is drawn at. */
+const PATTERN_MAX_SIDE = 2048;
+
 /** On screen it's a canvas element; exports and thumbnails draw into an OffscreenCanvas. */
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 type ImagePaint = Extract<Paint, { type: "image" }>;
@@ -301,6 +304,17 @@ export class CanvasRenderer {
   readonly #texture = new TexturePainter();
   /** Where a text stroke inside or outside its glyphs is drawn, then cut to one side (#textStrokes). */
   #strokeCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
+  /** Radial and angular gradients drawn for strokes and text (#gradientPattern), per paint. */
+  readonly #gradientRasters = new WeakMap<
+    Paint,
+    {
+      canvas: OffscreenCanvas | HTMLCanvasElement;
+      w: number;
+      h: number;
+      reach: number;
+      k: number;
+    }
+  >();
 
   constructor(scene: Scene, measurer: TextMeasurer, options: CanvasRendererOptions = {}) {
     this.#scene = scene;
@@ -1180,10 +1194,19 @@ export class CanvasRenderer {
    * in the layer's unit square, as in Figma: a linear gradient's bands run
    * across its handles there (so, on a wide layer, at a slant on screen),
    * which a pixel-space gradient reproduces exactly. Radial and angular ones
-   * are ellipses there; filled shapes get them exactly (#gradientFill), and
-   * strokes and text approximate them with circles.
+   * are an ellipse and an even sweep there, which no pixel-space gradient
+   * draws on a layer that isn't square: filled shapes get them exactly
+   * (#gradientFill), and strokes and text get a pattern of the same gradient
+   * (#gradientPattern). `reach` is how far past the box the style paints (a
+   * stroke's outer edge, text's overhang): the pattern covers that much.
    */
-  #paintStyle(ctx: Ctx, paint: Paint, w: number, h: number): string | CanvasGradient | null {
+  #paintStyle(
+    ctx: Ctx,
+    paint: Paint,
+    w: number,
+    h: number,
+    reach = Math.max(w, h) / 4,
+  ): string | CanvasGradient | CanvasPattern | null {
     if (paint.type === "solid") return hexToRgba(paint.color, paint.opacity ?? 1);
     if (paint.type === "linear") {
       const line = linearInPixels(paint, w, h);
@@ -1194,21 +1217,63 @@ export class CanvasRenderer {
         gradient.addColorStop(stop.position, hexToRgba(stop.color, paint.opacity ?? 1));
       return gradient;
     }
-    if (paint.type === "radial" || paint.type === "angular") {
-      const fx = paint.from.x * w;
-      const fy = paint.from.y * h;
-      const tx = paint.to.x * w;
-      const ty = paint.to.y * h;
+    if (paint.type === "radial" || paint.type === "angular")
+      return this.#gradientPattern(ctx, paint, w, h, reach);
+    return null; // Images arrive with the asset pipeline.
+  }
+
+  /**
+   * A radial or angular gradient as a pattern in the layer's units: the exact
+   * gradient (as #gradientFill draws it) drawn once into a canvas covering
+   * the box and `reach` around it, at the zoom rounded up to a power of two
+   * (so it's redrawn only as the zoom crosses one) and at most PATTERN_MAX_SIDE
+   * pixels a side. Kept per paint, so a frame only makes a pattern from it.
+   * Null when the handles meet, as the canvas then draws nothing.
+   */
+  #gradientPattern(
+    ctx: Ctx,
+    paint: GradientPaint,
+    w: number,
+    h: number,
+    reach: number,
+  ): CanvasPattern | null {
+    const m = gradientMatrix(paint, w, h);
+    if (!m) return null;
+    const t = ctx.getTransform();
+    const zoom = Math.sqrt(Math.abs(t.a * t.d - t.b * t.c)) || 1;
+    const fullW = w + 2 * reach;
+    const fullH = h + 2 * reach;
+    const k = Math.min(2 ** Math.ceil(Math.log2(zoom)), PATTERN_MAX_SIDE / Math.max(fullW, fullH));
+    let raster = this.#gradientRasters.get(paint);
+    if (!raster || raster.w !== w || raster.h !== h || raster.reach !== reach || raster.k !== k) {
+      const width = Math.max(1, Math.ceil(fullW * k));
+      const height = Math.max(1, Math.ceil(fullH * k));
+      const canvas =
+        typeof OffscreenCanvas !== "undefined"
+          ? new OffscreenCanvas(width, height)
+          : Object.assign(document.createElement("canvas"), { width, height });
+      const c = canvas.getContext("2d") as Ctx | null;
+      if (!c) return null;
+      // Layer units to the canvas's pixels, then the unit gradient onto the layer.
+      c.setTransform(k, 0, 0, k, reach * k, reach * k);
+      c.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
       const gradient =
         paint.type === "radial"
-          ? ctx.createRadialGradient(fx, fy, 0, fx, fy, Math.hypot(tx - fx, ty - fy))
-          : // Conic gradients start at 3 o'clock and turn clockwise: start toward `to`.
-            ctx.createConicGradient(Math.atan2(ty - fy, tx - fx), fx, fy);
+          ? c.createRadialGradient(0, 0, 0, 0, 0, 1)
+          : // Conic gradients start at 3 o'clock and turn clockwise: here, toward `to`.
+            c.createConicGradient(0, 0, 0);
       for (const stop of paint.stops)
         gradient.addColorStop(stop.position, hexToRgba(stop.color, paint.opacity ?? 1));
-      return gradient;
+      c.fillStyle = gradient;
+      const box = boxInGradientSpace(m, w, h, reach);
+      c.fillRect(box.x, box.y, box.width, box.height);
+      raster = { canvas, w, h, reach, k };
+      this.#gradientRasters.set(paint, raster);
     }
-    return null; // Images arrive with the asset pipeline.
+    const pattern = ctx.createPattern(raster.canvas, "no-repeat");
+    // The canvas's pixels back to layer units.
+    pattern?.setTransform({ a: 1 / k, b: 0, c: 0, d: 1 / k, e: -reach, f: -reach });
+    return pattern;
   }
 
   #fill(ctx: Ctx, shape: Path2D, paint: Paint, w: number, h: number, node: NodeRecord): void {
@@ -1379,7 +1444,8 @@ export class CanvasRenderer {
     // Dashed boxes and ellipses: the pattern fitted to each side and corner, as Figma does.
     const pieces = dashes.length > 0 && !markers ? dashedOutline(node, w, h) : null;
     for (const paint of strokes) {
-      const style = this.#paintStyle(ctx, paint, w, h);
+      // A miter can reach five weights past the edge (the canvas's limit of 10, halved).
+      const style = this.#paintStyle(ctx, paint, w, h, weight * 5 + 1);
       if (!style) continue;
       ctx.strokeStyle = style;
       if (pieces) {
@@ -1420,8 +1486,9 @@ export class CanvasRenderer {
     }
     ctx.save();
     ctx.filter = "none";
+    const reach = Math.max(...strokeWidths(node)) + 1;
     for (const paint of strokes) {
-      const style = this.#paintStyle(ctx, paint, w, h);
+      const style = this.#paintStyle(ctx, paint, w, h, reach);
       if (!style) continue;
       ctx.fillStyle = style;
       ctx.fill(path, "evenodd");
