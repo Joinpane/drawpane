@@ -591,6 +591,48 @@ export class FileRoom extends DurableObject<Env> {
     return { ok: true, revn, restorePoint: restorePoint.id, changes: changes.length };
   }
 
+  /**
+   * Brings main's changes since the base into this file, a branch (decision
+   * 0012). Worked out here, against the branch as it is at this moment:
+   * main's changes the branch didn't also make apply as one transaction;
+   * where both changed the same thing, the branch keeps its own, which
+   * review then shows as a change against main as it is now.
+   */
+  async updateFromMain(
+    by: Requester,
+    fileId: string,
+    snapshots: { readonly base: readonly NodeRecord[]; readonly main: readonly NodeRecord[] },
+  ): Promise<UpdateResult> {
+    this.#adopt(fileId);
+    const nodes: NodeRecord[] = [];
+    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) nodes.push(...page);
+    const here = nodeReader(nodes);
+    const main = nodeReader(snapshots.main);
+    // What main changed since the base, and where this branch changed the same.
+    const changes = branchChanges(nodeReader(snapshots.base), main, here);
+    const kept = changes.filter((c) => c.conflict).length;
+    // No resolutions: a conflict keeps the branch's side.
+    const ops = mergeOps(here, main, changes);
+    if (ops.length === 0) return { ok: true, revn: this.#revn, changes: 0, kept };
+    try {
+      applyTransaction(new MemoryStore(nodes), ops, { rollback: false });
+    } catch (error) {
+      if (error instanceof ModelError) return { ok: false, message: error.message };
+      throw error;
+    }
+    const author = { clientId: "update", seq: 0, userId: by.userId, sessionId: "update" };
+    const revn = this.#commit(ops, author);
+    this.#broadcastChange(revn, ops, author);
+    const taken = changes.length - kept;
+    this.#broadcast({
+      t: "updated-from-main",
+      by: { id: by.userId, name: by.name },
+      changes: taken,
+    });
+    void this.#scheduleAlarm();
+    return { ok: true, revn, changes: taken, kept };
+  }
+
   /** Every node in the file, for copying it into another (a duplicate, a file from a template). */
   async allNodes(): Promise<NodeRecord[]> {
     const out: NodeRecord[] = [];
@@ -1238,6 +1280,17 @@ export class FileRoom extends DurableObject<Env> {
     return sent;
   }
 }
+
+export type UpdateResult =
+  | {
+      readonly ok: true;
+      readonly revn: number;
+      /** Main's changes it brought in. */
+      readonly changes: number;
+      /** Main's changes to things the branch had changed too: the branch's stayed. */
+      readonly kept: number;
+    }
+  | { readonly ok: false; readonly message: string };
 
 export type MergeResult =
   | {

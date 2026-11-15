@@ -11,7 +11,7 @@ import { z } from "zod";
 import { requireUser } from "../auth/session";
 import type { AppContext, Env } from "../env";
 import { badRequest, conflict, notFound } from "../lib/http";
-import type { MergeResult } from "../rooms/file-room";
+import type { MergeResult, UpdateResult } from "../rooms/file-room";
 import { branchBaseKey, readSnapshot, writeSnapshot } from "../rooms/snapshots";
 import { type FileRow, readBody, requireFileRole } from "./access";
 import { thumbnailKey } from "./media";
@@ -261,6 +261,48 @@ export const branches = new Hono<AppContext>()
       branch: await branchInfo(c.env, file.id),
       revn: result.revn,
       restorePoint: result.restorePoint,
+    });
+  })
+
+  /**
+   * Brings main's changes since the branch was made (or last updated) into
+   * the branch (editors on the branch), and moves its base forward to main
+   * as it is now. Where both changed the same thing the branch keeps its
+   * own, which review then shows against main as it is now.
+   */
+  .post("/files/:fileId/branch/update", async (c) => {
+    const user = requireUser(c);
+    const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
+    if (!file.branch_of) throw notFound("That file isn't a branch.");
+    const base = await readSnapshot(c.env.FILES, branchBaseKey(file.id));
+    if (!base) throw conflict("This branch's starting point is missing, so it can't be updated.");
+    const main = (await room(c.env, file.branch_of).snapshot()) as {
+      revn: number;
+      nodes: NodeRecord[];
+    };
+    const result = (await room(c.env, file.id).updateFromMain(
+      { userId: user.id, name: user.name },
+      file.id,
+      { base, main: main.nodes },
+    )) as UpdateResult;
+    if (!result.ok)
+      throw conflict(`Main's changes can't be brought in as they are. ${result.message}`);
+    // The branch now starts from main as it is: that's its base from here on.
+    await writeSnapshot(
+      c.env.FILES,
+      file.id,
+      main.revn,
+      Date.now(),
+      main.nodes,
+      branchBaseKey(file.id),
+    );
+    await c.env.DB.prepare("UPDATE branches SET base_revn = ? WHERE file_id = ?")
+      .bind(main.revn, file.id)
+      .run();
+    return c.json({
+      branch: await branchInfo(c.env, file.id),
+      changes: result.changes,
+      kept: result.kept,
     });
   })
 

@@ -37,6 +37,7 @@ import {
   MergePane,
   ReviewPane,
   type ReviewRow,
+  updatedNotice,
   useBranchReview,
 } from "./branches";
 import { Canvas } from "./Canvas";
@@ -191,14 +192,20 @@ function FileEditor({ fileId }: { fileId: string }) {
     const id = meta.data?.main?.id;
     if (id) void navigate({ to: "/f/$fileId", params: { fileId: id } });
   }, [meta.data, navigate]);
-  const review = useBranchReview(editor, branch, reviewing, () => {
-    setReviewing(false);
-    if (branch && mainFile)
-      editor.notify(`Merged “${branch.name}” into ${mainFile.name}.`, {
-        label: `Open ${mainFile.name}`,
-        run: openMain,
-      });
-  });
+  const review = useBranchReview(
+    editor,
+    branch,
+    reviewing,
+    () => {
+      setReviewing(false);
+      if (branch && mainFile)
+        editor.notify(`Merged “${branch.name}” into ${mainFile.name}.`, {
+          label: `Open ${mainFile.name}`,
+          run: openMain,
+        });
+    },
+    ({ changes, kept }) => editor.notify(updatedNotice(mainFile?.name ?? "main", changes, kept)),
+  );
   const canMerge = meta.data?.role !== undefined && meta.data.role !== "viewer";
   // Main beside the branch while reviewing it, once review has read main.
   const compare = useMemo(
@@ -347,6 +354,13 @@ function FileEditor({ fileId }: { fileId: string }) {
               `${message.by.name} merged this branch into ${mainFile.name}. It's read-only now.`,
               { label: `Open ${mainFile.name}`, run: openMain },
             );
+        }
+        if (message.t === "updated-from-main" && message.by.id !== me?.id) {
+          void queryClient.invalidateQueries({ queryKey: ["file", fileId] });
+          void queryClient.invalidateQueries({ queryKey: ["branch-review", fileId] });
+          editor.notify(
+            `${message.by.name} brought ${count(message.changes, "change")} in from ${branchRef.current.mainFile?.name ?? "main"}.`,
+          );
         }
         if (message.t === "merged-in") {
           void queryClient.invalidateQueries({ queryKey: ["branches", fileId] });

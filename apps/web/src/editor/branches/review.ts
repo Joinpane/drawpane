@@ -12,6 +12,7 @@ import {
   POSITION,
   type Resolution,
 } from "@drawpane/model";
+import { count } from "../history/labels";
 
 export type ChangeKind = BranchChange["kind"];
 
@@ -238,4 +239,16 @@ export function kindCounts(rows: readonly ReviewRow[]): Record<ChangeKind, numbe
   const counts: Record<ChangeKind, number> = { added: 0, changed: 0, removed: 0 };
   for (const row of rows) counts[row.kind]++;
   return counts;
+}
+
+/** Said after bringing main's latest changes into a branch. */
+export function updatedNotice(main: string, changes: number, kept: number): string {
+  if (changes === 0 && kept === 0) return `Already up to date with ${main}.`;
+  const took =
+    changes > 0
+      ? `Brought in ${count(changes, "change")} from ${main}.`
+      : `Nothing new to bring in from ${main}.`;
+  return kept > 0
+    ? `${took} Where you'd both changed the same thing, this branch's version stays: review shows it against ${main}.`
+    : took;
 }

@@ -1,6 +1,6 @@
 import { branchChanges, type NodeRecord, nodeReader } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { kindCounts, mergePlan, reviewRows, valueText } from "./review";
+import { kindCounts, mergePlan, reviewRows, updatedNotice, valueText } from "./review";
 
 const node = (
   id: string,
@@ -103,5 +103,15 @@ describe("values", () => {
       "“A long line of text tha…”",
     );
     expect(valueText("effects", [])).toBe("none");
+  });
+});
+
+describe("updating from main", () => {
+  it("says what came in, and what the branch kept", () => {
+    expect(updatedNotice("Checkout", 0, 0)).toBe("Already up to date with Checkout.");
+    expect(updatedNotice("Checkout", 3, 0)).toBe("Brought in 3 changes from Checkout.");
+    expect(updatedNotice("Checkout", 1, 2)).toBe(
+      "Brought in 1 change from Checkout. Where you'd both changed the same thing, this branch's version stays: review shows it against Checkout.",
+    );
   });
 });

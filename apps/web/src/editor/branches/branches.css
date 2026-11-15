@@ -462,6 +462,9 @@
 .merge-check__title {
   font: var(--type-ui-strong);
 }
+.merge-check__action {
+  margin-top: var(--space-200);
+}
 .merge-check__detail {
   font: var(--type-ui-label);
   font-weight: 400;

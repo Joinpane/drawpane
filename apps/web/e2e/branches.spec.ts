@@ -175,4 +175,45 @@ test.describe
       await expect(other.getByRole("alert")).toContainText("merged “Green card” into this file");
       await other.close();
     });
+
+    test("brings main's latest changes into the branch", async () => {
+      await page.goto(mainUrl);
+      await live(page);
+      await makeBranch(page, "Purple card");
+      await setFill(page, card, "#8e4ec6");
+      await settled(page);
+
+      // Meanwhile, someone adds a footer on main.
+      const other = await instance.context.newPage();
+      await other.goto(mainUrl);
+      await live(other);
+      const footer = await other.evaluate(() => {
+        const e = (window as unknown as { drawpane: Debug }).drawpane;
+        return e.createLayer("rect", { x: 0, y: 200, width: 320, height: 40 }, e.s.pageId, {
+          name: "Footer",
+        }) as string;
+      });
+      await settled(other);
+      await other.close();
+
+      await page.getByRole("button", { name: "Merge", exact: true }).click();
+      const merge = page.getByRole("complementary", { name: "Merge" });
+      await expect(merge.getByText("Untitled has moved on")).toBeVisible();
+      await page.screenshot({ path: "/tmp/br-shot-update.png" }).catch(() => {});
+      await merge.getByRole("button", { name: "Update from Untitled" }).click();
+      await expect(page.getByRole("alert")).toContainText("Brought in 1 change from Untitled.");
+      await expect(merge.getByText("Up to date with Untitled")).toBeVisible();
+      // The footer is on the branch now, and the branch's own change is still its only one.
+      await expect
+        .poll(() =>
+          page.evaluate(
+            (id) => !!(window as unknown as { drawpane: Debug }).drawpane.doc.get(id),
+            footer,
+          ),
+        )
+        .toBe(true);
+      const changes = page.getByRole("complementary", { name: "Branch review" });
+      await expect(changes.getByText("Fill #30a46c → #8e4ec6")).toBeVisible();
+      await expect(changes.getByText("Footer")).toHaveCount(0);
+    });
   });
