@@ -13,6 +13,7 @@ import {
   type Props,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
+import { cssGradient } from "./gradients";
 import { layerName } from "./names";
 import { blurSigma } from "./post-effects";
 import { type RunStyle, textSpans } from "./rich-text";
@@ -42,27 +43,12 @@ function hex(color: string, opacity = 1): string {
   return `rgb(${r} ${g} ${b} / ${Math.round(a * 100)}%)`;
 }
 
-function paintCss(paint: Paint): string | null {
+/** A paint as a CSS color or gradient on a w × h box; null for an image or a hidden paint. */
+function paintCss(paint: Paint, w: number, h: number): string | null {
   if (paint.visible === false) return null;
   if (paint.type === "solid") return hex(paint.color, paint.opacity ?? 1);
-  if (paint.type === "linear" || paint.type === "radial" || paint.type === "angular") {
-    const stops = paint.stops
-      .map((s) => `${hex(s.color, paint.opacity ?? 1)} ${Math.round(s.position * 100)}%`)
-      .join(", ");
-    if (paint.type === "angular") {
-      // CSS conic angles start at 12 o'clock; ours start toward `to` from 3 o'clock.
-      const from = Math.round(
-        (Math.atan2(paint.to.y - paint.from.y, paint.to.x - paint.from.x) * 180) / Math.PI + 90,
-      );
-      return `conic-gradient(from ${((from % 360) + 360) % 360}deg at ${Math.round(paint.from.x * 100)}% ${Math.round(paint.from.y * 100)}%, ${stops})`;
-    }
-    if (paint.type === "radial")
-      return `radial-gradient(circle at ${Math.round(paint.from.x * 100)}% ${Math.round(paint.from.y * 100)}%, ${stops})`;
-    const angle = Math.round(
-      (Math.atan2(paint.to.y - paint.from.y, paint.to.x - paint.from.x) * 180) / Math.PI + 90,
-    );
-    return `linear-gradient(${angle}deg, ${stops})`;
-  }
+  if (paint.type === "linear" || paint.type === "radial" || paint.type === "angular")
+    return cssGradient(paint, w, h, (color) => hex(color, paint.opacity ?? 1));
   return null; // Images need an asset URL: exported separately.
 }
 
@@ -281,8 +267,9 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
     out.push({ property: "clip-path", value: `polygon(${points})` });
   }
 
+  const box = { w: getProp(p, "width") || 1, h: getProp(p, "height") || 1 };
   const fills = getProp(p, "fills")
-    .map(paintCss)
+    .map((paint) => paintCss(paint, box.w, box.h))
     .filter((v): v is string => v !== null);
   if (isText) {
     if (fills[0]) push("color", fills[0], "fill");
@@ -304,7 +291,7 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
   }
 
   const strokes = getProp(p, "strokes")
-    .map(paintCss)
+    .map((paint) => paintCss(paint, box.w, box.h))
     .filter((v): v is string => v !== null);
   const sides = strokeWidths(node);
   const weight = sides[0];

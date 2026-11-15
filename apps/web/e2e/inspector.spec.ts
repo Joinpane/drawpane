@@ -121,6 +121,18 @@ test.describe
       await expect
         .poll(async () => ((await props(page, card)).fills as Array<{ from: unknown }>)[0]?.from)
         .toEqual({ x: 0, y: 0.5 });
+      // Every kind paints its preview: a declaration the browser can't parse would leave it blank.
+      const preview = picker.locator(".gradient-editor__preview");
+      const painted = () =>
+        preview.evaluate((el) => getComputedStyle(el).backgroundImage.split("gradient(")[0]);
+      expect(await painted()).toBe("linear-");
+      for (const [kind, css] of [
+        ["Radial", "radial-"],
+        ["Angular", "conic-"],
+      ] as const) {
+        await picker.getByRole("radio", { name: kind }).click();
+        await expect.poll(painted).toBe(css);
+      }
       await page.keyboard.press("Escape");
       await expect(picker).toHaveCount(0);
       // Escape closed the picker, not the selection.

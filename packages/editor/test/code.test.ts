@@ -63,6 +63,26 @@ describe("design to code", () => {
     );
   });
 
+  it("writes gradients laid out as drawn: a radial one as its ellipse, a linear one between its handles", () => {
+    const editor = setup();
+    const stops = [
+      { position: 0, color: "#e8590c" },
+      { position: 1, color: "#e8590c00" },
+    ];
+    const glow = editor.createLayer("rect", { x: 0, y: 0, width: 240, height: 120 }, "p", {
+      fills: [{ type: "radial", from: { x: 0.5, y: 0.5 }, to: { x: 1, y: 0.5 }, stops }],
+    }) as string;
+    expect(decl(cssFor(editor.doc, editor.doc.get(glow) as never)).background).toBe(
+      "radial-gradient(ellipse 50% 50% at 50% 50%, #e8590c 0%, rgb(232 89 12 / 0%) 100%)",
+    );
+    const band = editor.createLayer("rect", { x: 0, y: 200, width: 240, height: 120 }, "p", {
+      fills: [{ type: "linear", from: { x: 0.25, y: 0.5 }, to: { x: 0.75, y: 0.5 }, stops }],
+    }) as string;
+    expect(decl(cssFor(editor.doc, editor.doc.get(band) as never)).background).toBe(
+      "linear-gradient(90deg, #e8590c 25%, rgb(232 89 12 / 0%) 75%)",
+    );
+  });
+
   it("refers to variables by name, with the value in a comment", () => {
     const editor = setup();
     const collection = editor.createCollection("Space") as string;

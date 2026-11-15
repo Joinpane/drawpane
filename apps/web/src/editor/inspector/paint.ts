@@ -3,7 +3,7 @@
  * gradient angles, converting a paint between kinds, the colors a file
  * already uses, and the color behind a layer (for contrast).
  */
-import type { Doc } from "@drawpane/editor";
+import { cssGradient, type Doc } from "@drawpane/editor";
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { composite, cssColor, parseHex, type Rgba, toHex } from "@drawpane/ui";
 
@@ -70,16 +70,6 @@ export function handlesForAngle(angle: number): Pick<GradientPaint, "from" | "to
   };
 }
 
-function stopsCss(paint: GradientPaint): string {
-  return [...paint.stops]
-    .sort((a, b) => a.position - b.position)
-    .map(
-      (s) =>
-        `${cssColor(rgbaOf(s.color, paint.opacity ?? 1))} ${Math.round(s.position * 1000) / 10}%`,
-    )
-    .join(", ");
-}
-
 /** Handles for an angular gradient around `centre`, starting at a CSS angle (0° up, clockwise). */
 export function angularHandles(
   centre: { x: number; y: number },
@@ -93,17 +83,20 @@ export function angularHandles(
   };
 }
 
-/** CSS for a gradient, as the swatch and the stop bar show it. */
-export function gradientCss(paint: GradientPaint, opaque = false): string {
-  const p = opaque ? { ...paint, opacity: 1 } : paint;
-  if (paint.type === "angular") {
-    return `conic-gradient(from ${gradientAngle(paint)}deg at ${paint.from.x * 100}% ${paint.from.y * 100}%, ${stopsCss(p)})`;
-  }
-  if (paint.type === "radial") {
-    const r = Math.hypot(paint.to.x - paint.from.x, paint.to.y - paint.from.y) * 100;
-    return `radial-gradient(circle ${Math.max(1, r)}% at ${paint.from.x * 100}% ${paint.from.y * 100}%, ${stopsCss(p)})`;
-  }
-  return `linear-gradient(${gradientAngle(paint)}deg, ${stopsCss(p)})`;
+/**
+ * CSS for a gradient as a box of `size` shows it: the picker's preview at
+ * its own size, swatches and the stop bar as the unit square they stand for.
+ * Laid out as the canvas draws it (see `cssGradient`).
+ */
+export function gradientCss(
+  paint: GradientPaint,
+  opaque = false,
+  size: { width: number; height: number } = { width: 1, height: 1 },
+): string {
+  const opacity = opaque ? 1 : (paint.opacity ?? 1);
+  return (
+    cssGradient(paint, size.width, size.height, (hex) => cssColor(rgbaOf(hex, opacity))) ?? "none"
+  );
 }
 
 /** The background of a paint's swatch: the paint over a checkerboard. */
