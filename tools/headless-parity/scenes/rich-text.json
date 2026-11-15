@@ -1,0 +1,363 @@
+{
+  "suite": "rich-text",
+  "about": "Styled runs: weight, italic, size, colour, underline and strikethrough, letter spacing, a second family, paragraphs and lists.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#ffffff",
+  "cells": [
+    {
+      "id": "weights",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Regular, bold and black in one line",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [
+            {
+              "start": 9,
+              "end": 13,
+              "fontWeight": 700
+            },
+            {
+              "start": 18,
+              "end": 23,
+              "fontWeight": 900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "italic",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Upright with an italic phrase inside",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [
+            {
+              "start": 15,
+              "end": 28,
+              "fontStyle": "italic"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sizes",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Big small big",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 3,
+              "fontSize": 32
+            },
+            {
+              "start": 10,
+              "end": 13,
+              "fontSize": 24
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "colours",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Red, blue and green words",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 3,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#e8590c"
+                }
+              ]
+            },
+            {
+              "start": 5,
+              "end": 9,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#2b4fd6"
+                }
+              ]
+            },
+            {
+              "start": 14,
+              "end": 19,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#2f9e44"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "decoration",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Underlined and struck through",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 10,
+              "textDecoration": "underline"
+            },
+            {
+              "start": 15,
+              "end": 29,
+              "textDecoration": "strikethrough"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tracking",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Tight and very wide letters",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 5,
+              "letterSpacing": {
+                "unit": "px",
+                "value": -1
+              }
+            },
+            {
+              "start": 10,
+              "end": 19,
+              "letterSpacing": {
+                "unit": "px",
+                "value": 4
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "families",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Inter beside Instrument Sans",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [
+            {
+              "start": 13,
+              "end": 28,
+              "fontFamily": "Instrument Sans",
+              "fontWeight": 600
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "paragraphs",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Heading\nA first paragraph of body text that wraps.",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 8,
+              "fontSize": 22,
+              "fontWeight": 700
+            }
+          ],
+          "paragraphSpacing": 8
+        }
+      ]
+    },
+    {
+      "id": "list",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Milk\nEggs\nBread",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [],
+          "listType": "bullet"
+        }
+      ]
+    },
+    {
+      "id": "centred",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Centred lines of text, wrapped across the box",
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 7,
+              "fontWeight": 700
+            }
+          ],
+          "textAlign": "center"
+        }
+      ]
+    }
+  ]
+}

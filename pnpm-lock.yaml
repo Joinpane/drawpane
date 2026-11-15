@@ -229,6 +229,9 @@ importers:
       '@drawpane/penpot':
         specifier: workspace:*
         version: link:../../packages/penpot
+      '@drawpane/raster':
+        specifier: workspace:*
+        version: link:../../packages/raster
       '@drawpane/svg':
         specifier: workspace:*
         version: link:../../packages/svg
@@ -296,6 +299,12 @@ importers:
       '@drawpane/model':
         specifier: workspace:*
         version: link:../../packages/model
+      '@drawpane/raster':
+        specifier: workspace:*
+        version: link:../../packages/raster
+      '@resvg/resvg-wasm':
+        specifier: 2.6.2
+        version: 2.6.2
       '@simplewebauthn/server':
         specifier: 14.1.0
         version: 14.1.0
@@ -352,6 +361,9 @@ importers:
       '@drawpane/model':
         specifier: workspace:*
         version: link:../model
+      '@drawpane/raster':
+        specifier: workspace:*
+        version: link:../raster
       harfbuzzjs:
         specifier: 1.6.4
         version: 1.6.4
@@ -434,6 +446,22 @@ importers:
       '@drawpane/editor':
         specifier: workspace:*
         version: link:../editor
+      '@types/node':
+        specifier: 26.6.6
+        version: 26.6.6
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 5.1.0(@types/node@26.6.6)(jsdom@31.0.0)(vite@8.3.8(@types/node@26.6.6)(esbuild@0.28.2))
+
+  packages/raster:
+    dependencies:
+      '@resvg/resvg-wasm':
+        specifier: 2.6.2
+        version: 2.6.2
+    devDependencies:
       '@types/node':
         specifier: 26.6.6
         version: 26.6.6
@@ -1116,6 +1144,10 @@ packages:
 
   '@poppinss/exception@1.2.3':
     resolution: {integrity: sha512-dCED+QRChTVatE9ibtoaxc+WkdzOSjYTKi/+uacHWIsfodVfpsueo3+DKpgU5Px8qXjgmXkSvhXvSCz3fnP9lw==}
+
+  '@resvg/resvg-wasm@2.6.2':
+    resolution: {integrity: sha512-FqALmHI8D4o6lk/LRWDnhw95z5eO+eAa6ORjVg09YRR7BkcM6oPHU9uyC0gtQG5vpFLvgpeU4+zEAz2H8APHNw==}
+    engines: {node: '>= 10'}
 
   '@rolldown/binding-android-arm-eabi@1.2.19':
     resolution: {integrity: sha512-e+Ebe0WT+9tbXmNKPIiC8YrWAHYwug3m6i4p3rZGGulfZri1jtI4HslT+OZnFf/OIHowWF71DTlHwXBP2SiA7A==}
@@ -2669,6 +2701,8 @@ snapshots:
       supports-color: 10.2.2
 
   '@poppinss/exception@1.2.3': {}
+
+  '@resvg/resvg-wasm@2.6.2': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.19':
     optional: true

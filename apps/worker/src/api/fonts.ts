@@ -35,7 +35,7 @@ const BROWSER_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 
 /** …and static TrueType files, one per weight, to anything else. */
-const PLAIN_UA = "Drawpane-Fonts/1.0";
+export const PLAIN_UA = "Drawpane-Fonts/1.0";
 
 const FAMILY = /^[A-Za-z0-9][A-Za-z0-9 ]{0,63}$/;
 const VARIANT = /^([1-9]00)(i?)$/;
@@ -283,3 +283,31 @@ export const fonts = new Hono<AppContext>()
     if (!bytes) throw notFound("Google Fonts doesn't have that file, or it isn't a font.");
     return new Response(bytes, { headers });
   });
+
+/**
+ * A Google font file's bytes, by its gstatic URL or this proxy's: from R2,
+ * or fetched and kept there as the proxy does, so the two share one copy.
+ * Null when it isn't a file we serve or Google hasn't it. For rendering and
+ * measuring text in the Worker (src/render/fonts.ts).
+ */
+export async function fontFileFromGoogle(
+  env: { FILES: R2Bucket },
+  href: string,
+): Promise<ArrayBuffer | null> {
+  const rest = href.startsWith(GSTATIC)
+    ? href.slice(GSTATIC.length)
+    : href.startsWith(GSTATIC_PROXY)
+      ? href.slice(GSTATIC_PROXY.length)
+      : null;
+  if (rest === null) return null;
+  const url = new URL(rest, "https://fonts.gstatic.com/");
+  const path = url.pathname.slice(1);
+  const key = fontFileKey(path, url.searchParams);
+  if (!key) return null;
+  const stored = await env.FILES.get(key);
+  if (stored) return stored.arrayBuffer();
+  const bytes = await copyFromGoogle(env, key, `${path}${url.search}`);
+  return bytes
+    ? (bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer)
+    : null;
+}

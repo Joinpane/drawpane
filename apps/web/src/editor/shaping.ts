@@ -6,15 +6,23 @@
  * sets axes; a family without readable files (system, local) draws without
  * its features and axes.
  */
-import { CanvasTextMeasurer, Shaper, ShapingMeasurer } from "@drawpane/editor";
+import {
+  CanvasTextMeasurer,
+  type FontBytesLoader,
+  Shaper,
+  ShapingMeasurer,
+} from "@drawpane/editor";
 import { faceFileUrl, variableFileUrl } from "../fonts/font-files";
 
-export const shaper = new Shaper(async (face) => {
+/** A face's TrueType or OpenType file, through the font proxy (Google, built-in) or the team's fonts. */
+export const fontBytes: FontBytesLoader = async (face) => {
   const url = face.variable ? await variableFileUrl(face) : await faceFileUrl(face, ["ttf", "otf"]);
   if (!url) return null;
   const response = await fetch(url);
   return response.ok ? response.arrayBuffer() : null;
-});
+};
+
+export const shaper = new Shaper(fontBytes);
 
 /** A measurer for an editor: the canvas, and the shaper for runs with features or axes. */
 export function textMeasurer(): ShapingMeasurer {

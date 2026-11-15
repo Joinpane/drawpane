@@ -19,24 +19,20 @@
  * local font) stays unavailable: the inspector says why.
  */
 import type { FontFeatures } from "@drawpane/model";
+import { type Face, type FontBytesLoader, faceKey } from "@drawpane/raster";
 import type { FontMetrics, ShapedGlyph, ShapedText, ShapingRun, TextMeasurer } from "./text";
 
 type HarfBuzz = typeof import("harfbuzzjs");
 type HbFont = InstanceType<HarfBuzz["Font"]>;
 type HbFace = InstanceType<HarfBuzz["Face"]>;
 
-/** A face text is set in. */
-export interface ShapingFace {
-  readonly family: string;
-  readonly weight: number;
-  readonly italic: boolean;
-  /**
-   * The family's variable file, rather than its file for this weight: for
-   * text that sets axes. One file covers every weight, so the weight only
-   * helps pick among a team's uploads.
-   */
-  readonly variable?: boolean;
-}
+/**
+ * A face text is set in, and the loader for its file: shared with the
+ * headless renderer and anything else that reads font files (see
+ * `@drawpane/raster`'s fonts.ts).
+ */
+export type ShapingFace = Face;
+export type { FontBytesLoader };
 
 /** One of a variable font's axes, as the font describes it. */
 export interface FontAxis {
@@ -47,9 +43,6 @@ export interface FontAxis {
   readonly default: number;
   readonly max: number;
 }
-
-/** The bytes of a face's font file (TrueType or OpenType), or null when there are none to have. */
-export type FontBytesLoader = (face: ShapingFace) => Promise<ArrayBuffer | null>;
 
 /** A feature a font offers, with its own name for it when it has one (stylistic sets usually do). */
 export interface OfferedFeature {
@@ -84,12 +77,6 @@ type FaceEntry =
 /** Strong right-to-left characters: Hebrew, Arabic, Syriac, Thaana, NKo and their presentation forms. */
 const RIGHT_TO_LEFT =
   /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]|[\u{10800}-\u{10fff}]|[\u{1e800}-\u{1efff}]/u;
-
-// A variable file covers every weight: one entry for all of them.
-const faceKey = (f: ShapingFace) =>
-  f.variable
-    ? `${f.family}\u0000variable\u0000${f.italic}`
-    : `${f.family}\u0000${f.weight}\u0000${f.italic}`;
 
 /** The face a run is shaped from: the variable file when it sets axes. */
 export function shapingFace(run: ShapingRun): ShapingFace {

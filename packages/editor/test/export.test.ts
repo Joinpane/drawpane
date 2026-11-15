@@ -368,6 +368,83 @@ describe("exportSvg", () => {
     );
   });
 
+  it("puts upright lines of text on whole output pixels when asked, for rasterising", () => {
+    const editor = makeEditor([
+      {
+        op: "create",
+        id: "t",
+        type: "text",
+        parent: "p",
+        key: "a0",
+        props: { x: 0, y: 10.3, width: 100, height: 20, characters: "Hi", fontSize: 16 },
+      },
+    ]);
+    const bounds = { x: 0, y: 0, width: 100, height: 40 };
+    const y = (svg: string) => Number(/<tspan x="0" y="([\d.]+)"/.exec(svg)?.[1]);
+    const exact = y(exportSvg(editor.scene, measurer, ["t"], bounds));
+    const snapped = y(exportSvg(editor.scene, measurer, ["t"], bounds, { raster: 2 }));
+    expect(Math.abs(snapped - exact)).toBeLessThanOrEqual(0.25);
+    // On the page, the baseline lands on a half unit: a whole pixel at 2×.
+    expect(((10.3 + snapped) * 2) % 1).toBeCloseTo(0, 5);
+  });
+
+  it("draws underlines as the canvas's bars when rasterising, and as text-decoration otherwise", () => {
+    const editor = makeEditor([
+      {
+        op: "create",
+        id: "t",
+        type: "text",
+        parent: "p",
+        key: "a0",
+        props: {
+          width: 100,
+          height: 20,
+          characters: "Hi",
+          fontSize: 16,
+          textDecoration: "underline",
+          fills: [{ type: "solid", color: "#ff0000" }],
+        },
+      },
+    ]);
+    const bounds = { x: 0, y: 0, width: 100, height: 40 };
+    const plain = exportSvg(editor.scene, measurer, ["t"], bounds);
+    expect(plain).toContain('text-decoration="underline"');
+    expect(plain).not.toContain("<rect");
+    const raster = exportSvg(editor.scene, measurer, ["t"], bounds, { raster: 2 });
+    expect(raster).not.toContain("text-decoration");
+    // As wide as the run, 1 unit thick (16 / 16), a tenth of an em under the baseline.
+    expect(raster).toMatch(
+      /<g fill="#ff0000"><rect x="0" y="[\d.]+" width="16" height="1"\/><\/g>/,
+    );
+  });
+
+  it("fits a dashed box's pattern to each side and corner, as the canvas does", () => {
+    const editor = makeEditor([
+      rect("r", {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 40,
+        cornerRadius: 10,
+        strokes: [{ type: "solid", color: "#000000" }],
+        strokeAlign: "center",
+        strokeDashes: [6, 4],
+      }),
+    ]);
+    const svg = svgOf(editor, ["r"]);
+    // Eight pieces: four sides and four corners, each its own whole number of dashes.
+    const pieces = [
+      ...svg.matchAll(
+        /<path d="([^"]+)" fill="none"[^>]*stroke-dasharray="([^"]+)" stroke-dashoffset="([^"]+)"/g,
+      ),
+    ];
+    expect(pieces).toHaveLength(8);
+    // The top edge, 80 long: eight of the 10-long pattern, a dash centred on each end.
+    expect(pieces[0]?.slice(1)).toEqual(["M10 0L90 0", "6 4", "3"]);
+    expect(pieces[1]?.[1]).toMatch(/^M90 0A10 10 0 0 1 100 10$/);
+    expect(svg).not.toContain('stroke-dasharray="6 4"/>');
+  });
+
   it("writes frames as clipped groups with children, and gradients as defs", () => {
     const editor = makeEditor([
       {
@@ -407,7 +484,10 @@ describe("exportSvg", () => {
     expect(svg).toContain(
       '<clipPath id="clip2"><rect transform="translate(100 100)" width="200" height="100"/></clipPath>',
     );
-    expect(svg).toContain('<g clip-path="url(#clip2)"><rect transform="translate(110 110)"');
+    // The frame's fill and its children share the clip, so children blend with the fill.
+    expect(svg).toContain(
+      '<g clip-path="url(#clip2)"><rect transform="translate(100 100)" width="200" height="100" fill="url(#gradient1)"/><rect transform="translate(110 110)"',
+    );
     // Children are positioned in page space.
     expect(svg).toContain(
       '<rect transform="translate(110 110)" width="20" height="20" fill="#123456"/>',

@@ -57,6 +57,7 @@ import { ExplainCard } from "./ExplainCard";
 import { ExportPanel } from "./ExportSection";
 import { FollowOverlay, People } from "./follow";
 import { type FrameStats, frameStatsFor } from "./frame-stats";
+import { headlessDebug } from "./headless-debug";
 import {
   HistoryPanel,
   NameVersionDialog,
@@ -401,10 +402,13 @@ function FileEditor({ fileId }: { fileId: string }) {
       drawpaneVersion?: Editor;
       /** Glass's constants, for calibration (tools/glass-calibration). */
       drawpaneGlass?: { set: typeof setGlassTuning; get: typeof glassTuning };
+      /** The canvas export and the headless renderer side by side (e2e/parity/headless.spec.ts). */
+      drawpaneHeadless?: ReturnType<typeof headlessDebug>;
       /** The canvas and HarfBuzz text measurers, for the text parity test. */
       drawpaneMeasurers?: () => Promise<typeof import("./measure-parity")>;
     };
     w.drawpane = editor;
+    w.drawpaneHeadless = headlessDebug(editor);
     w.drawpaneMeasurers = () => import("./measure-parity");
     w.drawpaneGlass = { set: setGlassTuning, get: glassTuning };
     w.drawpaneFrames = frameStatsFor(editor);
@@ -412,6 +416,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     return () => {
       delete w.drawpane;
       delete w.drawpaneFrames;
+      delete w.drawpaneHeadless;
       delete w.drawpaneVersion;
     };
   }, [editor, history.view]);

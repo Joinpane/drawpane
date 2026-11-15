@@ -128,7 +128,7 @@ describe("masks", () => {
       });
       // The circle, drawn with its gradient, inside the <mask>; the card masked by it.
       const id = new RegExp(
-        `<mask id="(\\w+)"[^>]*style="mask-type:${maskType}"><ellipse[^>]*fill="url\\(#`,
+        `<mask id="(\\w+)"[^>]*mask-type="${maskType}"><ellipse[^>]*fill="url\\(#`,
       ).exec(svg)?.[1];
       expect(id).toBeTruthy();
       expect(svg).toContain(`<g mask="url(#${id})"><rect`);
