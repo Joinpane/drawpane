@@ -33,9 +33,11 @@ export async function withFigma(link, work) {
   try {
     await page.goto(link, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(8000);
+    // Signed out: a login page, or the file open read-only with a banner asking to sign up.
     if (
       /\/login/.test(page.url()) ||
-      (await page.getByRole("button", { name: "Log in" }).count())
+      (await page.getByRole("button", { name: "Log in" }).count()) ||
+      (await page.getByRole("button", { name: "Sign up" }).count())
     ) {
       if (!email || !password)
         throw new Error("Not signed in: set FIGMA_EMAIL and FIGMA_PASSWORD.");

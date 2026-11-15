@@ -1,0 +1,329 @@
+{
+  "suite": "vertical-trim",
+  "about": "Vertical trim (Figma's cap height to baseline): auto-sized text, where the trim moves the glyphs up, and fixed boxes aligned to the bottom or middle, where the trimmed block's height places them; across sizes, line heights, mixed sizes, paragraph spacing and a second typeface, with an untrimmed control.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#ffffff",
+  "cells": [
+    {
+      "id": "auto-16",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "leadingTrim": "cap-height",
+          "fontSize": 16,
+          "characters": "Typography grows",
+          "width": 200,
+          "height": 120
+        }
+      ]
+    },
+    {
+      "id": "auto-48",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 600,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "leadingTrim": "cap-height",
+          "fontSize": 48,
+          "characters": "Hxg Type",
+          "width": 200,
+          "height": 120
+        }
+      ]
+    },
+    {
+      "id": "lh-150",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "leadingTrim": "cap-height",
+          "fontSize": 24,
+          "lineHeight": {
+            "unit": "percent",
+            "value": 150
+          },
+          "characters": "Two lines\nof type",
+          "width": 200,
+          "height": 120
+        }
+      ]
+    },
+    {
+      "id": "lh-px",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "leadingTrim": "cap-height",
+          "fontSize": 16,
+          "lineHeight": {
+            "unit": "px",
+            "value": 32
+          },
+          "characters": "One\nTwo\nThree",
+          "width": 200,
+          "height": 120
+        }
+      ]
+    },
+    {
+      "id": "bottom",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "none",
+          "leadingTrim": "cap-height",
+          "fontSize": 20,
+          "width": 200,
+          "height": 120,
+          "textAlignVertical": "bottom",
+          "characters": "Sits on\nthe bottom"
+        }
+      ]
+    },
+    {
+      "id": "bottom-standard",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "none",
+          "leadingTrim": "none",
+          "fontSize": 20,
+          "width": 200,
+          "height": 120,
+          "textAlignVertical": "bottom",
+          "characters": "Sits on\nthe bottom"
+        }
+      ]
+    },
+    {
+      "id": "middle",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "none",
+          "leadingTrim": "cap-height",
+          "fontSize": 32,
+          "width": 200,
+          "height": 120,
+          "textAlignVertical": "middle",
+          "characters": "Centred"
+        }
+      ]
+    },
+    {
+      "id": "middle-lh",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "none",
+          "leadingTrim": "cap-height",
+          "fontSize": 20,
+          "lineHeight": {
+            "unit": "percent",
+            "value": 180
+          },
+          "width": 200,
+          "height": 120,
+          "textAlignVertical": "middle",
+          "characters": "Loose\nleading"
+        }
+      ]
+    },
+    {
+      "id": "wrap",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "leadingTrim": "cap-height",
+          "fontSize": 18,
+          "width": 200,
+          "textAlignVertical": "bottom",
+          "characters": "A paragraph that wraps onto more lines",
+          "height": 120
+        }
+      ]
+    },
+    {
+      "id": "runs",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "leadingTrim": "cap-height",
+          "fontSize": 16,
+          "characters": "Big headline\nsmall print",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 12,
+              "fontSize": 40,
+              "fontWeight": 700
+            }
+          ],
+          "width": 200,
+          "height": 120
+        }
+      ]
+    },
+    {
+      "id": "paragraphs",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Inter",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "none",
+          "leadingTrim": "cap-height",
+          "fontSize": 16,
+          "paragraphSpacing": 12,
+          "width": 200,
+          "height": 120,
+          "textAlignVertical": "bottom",
+          "characters": "First paragraph\nSecond one"
+        }
+      ]
+    },
+    {
+      "id": "instrument",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "fontFamily": "Instrument Sans",
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "none",
+          "leadingTrim": "cap-height",
+          "fontSize": 40,
+          "width": 200,
+          "height": 120,
+          "textAlignVertical": "bottom",
+          "characters": "Ample"
+        }
+      ]
+    }
+  ]
+}

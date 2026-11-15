@@ -246,6 +246,21 @@ export function TypographyFields({ editor, nodes }: { editor: Editor; nodes: Nod
           onChange={(v) => set("textCase", v === "none" ? null : v, "Text case")}
         />
       </PropertyRow>
+      {/* Figma's vertical trim: the box from the capitals' tops to the baseline. */}
+      <PropertyRow columns="label">
+        <span className="inspector__label">Trim</span>
+        <Select
+          label="Vertical trim"
+          value={common(nodes, "leadingTrim")}
+          options={[
+            { value: "none", label: "Standard" },
+            { value: "cap-height", label: "Cap height to baseline" },
+          ]}
+          onChange={(v) =>
+            editor.setProp(ids, "leadingTrim", v === "none" ? null : v, "Vertical trim")
+          }
+        />
+      </PropertyRow>
       <FontFeaturesField editor={editor} nodes={nodes} />
       <FontAxesField editor={editor} nodes={nodes} />
     </>

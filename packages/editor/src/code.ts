@@ -386,6 +386,9 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
         property: "text-decoration",
         value: td === "strikethrough" ? "line-through" : "underline",
       });
+    // Vertical trim: CSS's own (text-box-trim), from the cap height to the alphabetic baseline.
+    if (getProp(p, "leadingTrim") === "cap-height")
+      out.push({ property: "text-box", value: "trim-both cap alphabetic" });
     // Truncation: the standard way to show at most N lines with an ellipsis.
     const maxLines = getProp(p, "maxLines");
     if (maxLines !== null)

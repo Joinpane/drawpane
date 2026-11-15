@@ -147,6 +147,8 @@ export interface TextLine {
   readonly marker: TextMarker | null;
   /** Its line height: the tallest of its characters'. Its baseline is this far below the last. */
   readonly step: number;
+  /** How far its tallest capitals rise above its baseline (for vertical trim). */
+  readonly cap: number;
 }
 
 /** A list item's bullet or number: drawn left of the text, at `x` from where the text starts. */
@@ -190,10 +192,13 @@ export function fontString(props: Props): string {
 export interface FontMetrics {
   readonly ascent: number;
   readonly descent: number;
+  /** How far capitals rise above the baseline, when known. */
+  readonly capHeight?: number;
 }
 
-/** Where fonts can't be measured: a typical ascent and descent, in em. */
+/** Where fonts can't be measured: a typical ascent, descent and cap height, in em. */
 const FALLBACK_ASCENT = 0.8;
+const FALLBACK_CAP = 0.7;
 const FALLBACK_LINE = 1.25;
 
 /**
@@ -258,6 +263,8 @@ interface SpanStyle {
   readonly descent: number;
   /** Its line height, in px. */
   readonly lineHeight: number;
+  /** Its font's cap height, in px. */
+  readonly cap: number;
 }
 
 function spanStyles(node: NodeRecord, measurer: TextMeasurer): SpanStyle[] {
@@ -278,6 +285,7 @@ function spanStyles(node: NodeRecord, measurer: TextMeasurer): SpanStyle[] {
       ascent,
       descent: lh - ascent,
       lineHeight: lh,
+      cap: m.capHeight ?? size * FALLBACK_CAP,
     };
   });
 }
@@ -546,6 +554,7 @@ function computeLayout(
     let ascent = 0;
     let descent = 0;
     let step = 0;
+    let cap = 0;
     const fragments: TextFragment[] = [];
     let x = 0;
     for (let k = first; k <= last; k++) {
@@ -553,6 +562,7 @@ function computeLayout(
       ascent = Math.max(ascent, s.ascent);
       descent = Math.max(descent, s.descent);
       step = Math.max(step, s.lineHeight);
+      cap = Math.max(cap, s.cap);
       const a = Math.max(br.start, s.span.start);
       const b = Math.min(br.end, s.span.end);
       if (b <= a) continue;
@@ -573,6 +583,7 @@ function computeLayout(
       indent: br.indent ?? 0,
       marker: br.marker ? markerOf(br.marker, br.start) : null,
       step,
+      cap,
     };
   };
 
@@ -592,16 +603,37 @@ function computeLayout(
     // Space after a paragraph, not after the last line shown.
     after = br.para && i < kept.length - 1 ? spacing : 0;
   }
-  const last = lines[lines.length - 1];
-  const top = last ? last.top + last.height : 0;
+  const trimmed = trim(lines, getProp(props, "leadingTrim"));
+  const last = trimmed.lines[trimmed.lines.length - 1];
   const width = lines.reduce((w, l) => Math.max(w, l.indent + l.width), 0);
   return {
     font: fontString(props),
-    lines,
+    lines: trimmed.lines,
     lineHeight: lineHeightPx(props, measurer),
     width,
-    height: top,
+    height: trimmed.height ?? (last ? last.top + last.height : 0),
     letterSpacing: letterSpacingPx(props),
+  };
+}
+
+/**
+ * Vertical trim, as Figma's "cap height to baseline": the box starts at the
+ * first line's cap height and ends at the last line's baseline, so what's
+ * above the capitals and below the baseline (descenders, half the leading)
+ * hangs outside it. The lines keep their spacing; they move up by the trim.
+ */
+function trim(
+  lines: TextLine[],
+  mode: "none" | "cap-height",
+): { lines: TextLine[]; height: number | null } {
+  const first = lines[0];
+  const last = lines[lines.length - 1];
+  if (mode !== "cap-height" || !first || !last) return { lines, height: null };
+  const by = first.baseline - first.cap;
+  return {
+    lines:
+      by === 0 ? lines : lines.map((l) => ({ ...l, top: l.top - by, baseline: l.baseline - by })),
+    height: last.baseline - by,
   };
 }
 
@@ -826,13 +858,25 @@ export class CanvasTextMeasurer implements TextMeasurer {
       this.#ctx.font = key;
       const t = this.#ctx.measureText("");
       // The font's ascent and descent (as the browser reads them from its tables), not the glyphs'.
+      // Its cap height, as the top of a flat capital: "H" rises to it in every Latin face.
+      const h = this.#ctx.measureText("H").actualBoundingBoxAscent;
       em =
         typeof t.fontBoundingBoxAscent === "number" && t.fontBoundingBoxAscent > 0
-          ? { ascent: t.fontBoundingBoxAscent / 1000, descent: t.fontBoundingBoxDescent / 1000 }
+          ? {
+              ascent: t.fontBoundingBoxAscent / 1000,
+              descent: t.fontBoundingBoxDescent / 1000,
+              ...(h > 0 ? { capHeight: h / 1000 } : {}),
+            }
           : null;
       this.#metrics.set(key, em);
     }
-    return em ? { ascent: em.ascent * px, descent: em.descent * px } : null;
+    return em
+      ? {
+          ascent: em.ascent * px,
+          descent: em.descent * px,
+          ...(em.capHeight !== undefined ? { capHeight: em.capHeight * px } : {}),
+        }
+      : null;
   }
 
   get generation(): number {

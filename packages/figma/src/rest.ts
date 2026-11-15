@@ -99,6 +99,7 @@ export interface TypeStyle {
   readonly lineHeightPercentFontSize?: number;
   readonly lineHeightUnit?: "PIXELS" | "FONT_SIZE_%" | "INTRINSIC_%";
   readonly paragraphSpacing?: number;
+  readonly leadingTrim?: "CAP_HEIGHT" | "NONE";
   readonly opentypeFlags?: Readonly<Record<string, number>>;
   readonly fills?: readonly Paint[];
 }
