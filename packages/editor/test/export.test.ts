@@ -214,6 +214,70 @@ describe("Editor.insertImages", () => {
   });
 });
 
+describe("Editor.insertLayers", () => {
+  const svgFrame = {
+    type: "frame" as const,
+    props: { name: "globe", x: 999, y: 999, width: 2000, height: 40, fills: [] },
+    children: [
+      {
+        type: "group" as const,
+        props: { name: "Icons" },
+        children: [
+          { type: "ellipse" as const, props: { x: 2, y: 2, width: 20, height: 20 } },
+          {
+            type: "path" as const,
+            props: { x: 0, y: 0, width: 10, height: 0, pathData: "M0 0 L10 0" },
+          },
+        ],
+      },
+    ],
+  };
+
+  it("places a tree whole, keeping an unscaled frame's size, beside images, in one undo step", () => {
+    const editor = makeEditor();
+    editor.setViewport(1000, 800);
+    const before = [...editor.doc.nodes()].length;
+    const ids = editor.insertLayers(
+      [
+        { tree: svgFrame },
+        {
+          fit: true,
+          tree: {
+            type: "rect",
+            props: {
+              name: "Photo",
+              width: 4000,
+              height: 2000,
+              fills: [{ type: "image", ref: SHA, scaleMode: "fill" }],
+            },
+          },
+        },
+      ],
+      { x: 0, y: 0 },
+      "Place images",
+    );
+    expect(ids).toHaveLength(2);
+    expect(editor.s.selection).toEqual(ids);
+    const frame = editor.doc.get(ids[0] ?? "");
+    // The SVG keeps its 2000 px; the image fits 80% of the viewport. 2000 + 24 + 800, centred on 0.
+    expect(frame?.props).toMatchObject({
+      name: "globe",
+      width: 2000,
+      height: 40,
+      x: -1412,
+      y: -200,
+    });
+    expect(editor.doc.get(ids[1] ?? "")?.props).toMatchObject({ width: 800, height: 400, x: 612 });
+    const [group] = editor.doc.childIds(ids[0] ?? "");
+    expect(editor.doc.get(group ?? "")?.props.name).toBe("Icons");
+    const leaves = editor.doc.childIds(group ?? "").map((id) => editor.doc.get(id)?.type);
+    expect(leaves).toEqual(["ellipse", "path"]);
+    expect([...editor.doc.nodes()].length).toBe(before + 5);
+    editor.undo();
+    expect([...editor.doc.nodes()].length).toBe(before);
+  });
+});
+
 describe("exportSvg", () => {
   const svgOf = (editor: Editor, ids: string[]) => {
     const bounds = exportBounds(editor.scene, ids);

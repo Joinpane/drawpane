@@ -5,9 +5,11 @@
  * Formats are recognised by their magic bytes, never by a file name or a
  * Content-Type header, so a renamed file can't smuggle in another format.
  *
- * TODO(svg): SVG is not accepted yet. An SVG is a document that can carry
- * scripts, external references and CSS, so it must be sanitized (or
- * converted to vector layers) before Drawpane stores or serves it.
+ * SVG is never stored as media (decision 0020). An SVG is a document that
+ * can carry scripts, external references and CSS, so the browser converts it
+ * instead: to editable layers when it's placed on the canvas, or to a PNG
+ * when it's an image fill. What reaches storage is always one of the
+ * formats below.
  */
 
 /** Largest image a file can hold, in bytes. */

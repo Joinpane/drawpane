@@ -249,6 +249,19 @@ export interface ConnectionDrag {
   readonly target: string | null;
 }
 
+/** Layers an importer made, a root and its children, before they're placed (see insertLayers). */
+export interface LayerTree {
+  readonly type: LayerType;
+  readonly props: Props;
+  readonly children?: readonly LayerTree[];
+}
+
+/** A tree to place, and whether it may be scaled down to fit the viewport (images may). */
+export interface PlacedTree {
+  readonly tree: LayerTree;
+  readonly fit?: boolean;
+}
+
 export interface CommitOptions {
   /**
    * Record edits to layers inside instances as overrides (the default, for
@@ -1094,40 +1107,80 @@ export class Editor {
     images: readonly { ref: string; width: number; height: number; name: string }[],
     at?: Point,
   ): string[] {
+    return this.insertLayers(
+      images.map((image) => ({
+        fit: true,
+        tree: {
+          type: "rect",
+          props: {
+            name: image.name.trim().slice(0, 256) || "Image",
+            width: image.width,
+            height: image.height,
+            fills: [{ type: "image", ref: image.ref, scaleMode: "fill" }],
+          },
+        },
+      })),
+      at,
+      images.length === 1 ? "Place image" : "Place images",
+    );
+  }
+
+  /**
+   * Places layer trees an importer made (an SVG's frame, an image's
+   * rectangle), side by side and centred on `at` (page coordinates; the
+   * viewport centre by default), inside the frame under that point. Each
+   * root's `width` and `height` are its size, its own `x` and `y` are
+   * ignored; children's boxes are in the root's space, as in any frame.
+   * Items marked `fit` (images) are scaled down to fit the viewport; the
+   * rest keep their size. One undo step; selects the roots and returns
+   * their ids, in order.
+   */
+  insertLayers(items: readonly PlacedTree[], at?: Point, label = "Place layers"): string[] {
     const { camera, viewport, pageId } = this.s;
-    if (images.length === 0 || !pageId) return [];
+    if (items.length === 0 || !pageId) return [];
     const center = at ?? camera.toPage({ x: viewport.width / 2, y: viewport.height / 2 });
     const fit = (px: number) => (px > 0 ? (px * 0.8) / camera.zoom : Number.POSITIVE_INFINITY);
-    const rects = layoutImageRow(images, center, {
-      width: fit(viewport.width),
-      height: fit(viewport.height),
+    const sizes = items.map(({ tree, fit: scaled }) => {
+      const width = getProp(tree.props, "width");
+      const height = getProp(tree.props, "height");
+      if (!scaled) return { width, height };
+      const k = Math.min(
+        1,
+        fit(viewport.width) / Math.max(1, width),
+        fit(viewport.height) / Math.max(1, height),
+      );
+      return { width: width * k, height: height * k };
     });
+    const unbounded = { width: Number.POSITIVE_INFINITY, height: Number.POSITIVE_INFINITY };
+    const rects = layoutImageRow(sizes, center, unbounded);
     const parent = this.dropTarget(center) ?? pageId;
     const last = this.doc.childIds(parent).at(-1);
-    const keys = keysBetween(last ? (this.doc.get(last)?.key ?? null) : null, null, images.length);
+    const keys = keysBetween(last ? (this.doc.get(last)?.key ?? null) : null, null, items.length);
     const ids: string[] = [];
-    const ops: Op[] = images.map((image, i) => {
+    const ops: Op[] = [];
+    const create = (tree: LayerTree, parentId: string, key: string, props: Props): string => {
       const id = newId();
-      ids.push(id);
+      ops.push({ op: "create", id, type: tree.type, parent: parentId, key, props });
+      const children = tree.children ?? [];
+      const childKeys = keysBetween(null, null, children.length);
+      children.forEach((child, i) => {
+        create(child, id, childKeys[i] as string, child.props);
+      });
+      return id;
+    };
+    items.forEach(({ tree, fit: scaled }, i) => {
       const rect = rects[i] as Rect;
       const origin = this.scene.toSpace(parent, { x: rect.x, y: rect.y });
-      return {
-        op: "create",
-        id,
-        type: "rect",
-        parent,
-        key: keys[i] as string,
-        props: {
-          name: image.name.trim().slice(0, 256) || "Image",
-          x: round2(origin.x),
-          y: round2(origin.y),
-          width: rect.width,
-          height: rect.height,
-          fills: [{ type: "image", ref: image.ref, scaleMode: "fill" }],
-        },
+      const props: Props = {
+        ...tree.props,
+        x: round2(origin.x),
+        y: round2(origin.y),
+        // Scaled items take the row's size; the rest keep theirs exactly.
+        ...(scaled ? { width: rect.width, height: rect.height } : {}),
       };
+      ids.push(create(tree, parent, keys[i] as string, props));
     });
-    if (!this.commit(ops, images.length === 1 ? "Place image" : "Place images")) return [];
+    if (!this.commit(ops, label)) return [];
     this.select(ids);
     return ids;
   }

@@ -1,0 +1,26 @@
+{
+  "name": "@drawpane/svg",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "Turns SVG documents into Drawpane layers: groups, rectangles, ellipses, vectors and text with their paints, strokes and transforms. Pure TypeScript over a parsed DOM: runs in the browser and, with jsdom, in tests.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@drawpane/import-kit": "workspace:*",
+    "@drawpane/model": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "jsdom": "31.0.0",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

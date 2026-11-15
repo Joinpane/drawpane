@@ -77,7 +77,13 @@ import { Lens } from "./Lens";
 import { BrowseLibrariesDialog } from "./libraries/LibrarySections";
 import { PublishDialog } from "./libraries/PublishDialog";
 import { Minimap } from "./Minimap";
-import { chooseImageFiles, filesFrom, importImageFiles, pasteFromClipboard } from "./media";
+import {
+  chooseImageFiles,
+  filesFrom,
+  importImageFiles,
+  pasteFromClipboard,
+  pasteSvgText,
+} from "./media";
 import { PaneResizer } from "./PaneResizer";
 import { clampPane, PANE, panelLayout, setPanelLayout, usePanelLayout } from "./panel-layout";
 import { PrototypePanel } from "./prototype/PrototypePanel";
@@ -520,7 +526,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       },
       paste: () => {
         void pasteFromClipboard(editor, fileId).then((pasted) => {
-          if (!pasted) editor.notify("The clipboard doesn't hold Drawpane layers or images.");
+          if (!pasted) editor.notify("The clipboard doesn't hold Drawpane layers, images or SVG.");
         });
       },
     }),
@@ -701,7 +707,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     };
     const onPaste = (e: ClipboardEvent) => {
       if (isTyping(e.target) || !editor.canEdit || versionView.s.viewing) return;
-      // Drawpane layers first, then image files, then layers sent as plain text.
+      // Drawpane layers first, then image and SVG files, then layers or SVG markup sent as text.
       const layers = e.clipboardData?.getData(CLIPBOARD_MIME) ?? "";
       if (layers && editor.paste(layers)) {
         e.preventDefault();
@@ -713,7 +719,9 @@ function FileEditor({ fileId }: { fileId: string }) {
         void importImageFiles(editor, fileId, files);
         return;
       }
-      if (editor.paste(e.clipboardData?.getData("text/plain") ?? "")) e.preventDefault();
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      const svg = e.clipboardData?.getData("image/svg+xml") || text;
+      if (editor.paste(text) || pasteSvgText(editor, svg)) e.preventDefault();
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
