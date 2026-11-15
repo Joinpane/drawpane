@@ -11,6 +11,7 @@ type W = {
   drawpane: {
     s: {
       pageId: string;
+      selection: string[];
       camera: { toScreen(p: { x: number; y: number }): { x: number; y: number } };
     };
     createLayer(
@@ -199,5 +200,20 @@ test.describe
       await expect
         .poll(effects)
         .toEqual([{ type: "texture", size: 2, radius: 4, clipToShape: true }]);
+    });
+
+    test("Escape closes an effect's editor and leaves the selection alone", async () => {
+      const inspector = page.getByRole("complementary", { name: "Inspector" });
+      await page.keyboard.press("Escape");
+      await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), layer);
+      // Opened from its row, the editor leaves focus there.
+      await inspector.getByRole("button", { name: /^Texture/ }).click();
+      await expect(page.getByRole("dialog", { name: "Texture" })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog", { name: "Texture" })).toHaveCount(0);
+      // Not also the canvas's Escape, which would select the layer's frame.
+      expect(await page.evaluate(() => (window as unknown as W).drawpane.s.selection)).toEqual([
+        layer,
+      ]);
     });
   });
