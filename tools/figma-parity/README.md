@@ -28,11 +28,13 @@ E2E_PORT=8943 UPDATE_THRESHOLDS=1 npx playwright test e2e/parity   # record new 
 
    Figma's web app can't import development plugins, but once any plugin has run in a session it exposes its plugin API to the page; the script runs one, then calls `figma-builder.js` there. Each suite gets a page "Parity: &lt;suite&gt;" of frames named "&lt;suite&gt;/&lt;id&gt;", replacing the old one. The session is kept in `FIGMA_PROFILE` (default `/tmp/figma-parity-profile`).
 
-3. Fetch Figma's renders into `goldens/`, with a token that can read file content:
+3. Export Figma's renders into `goldens/`, with Figma's own exporter in the same kind of session:
 
    ```sh
-   FIGMA_TOKEN=… node tools/figma-parity/fetch-goldens.mjs <file link> [suite…]
+   FIGMA_EMAIL=… FIGMA_PASSWORD=… node tools/figma-parity/export-in-figma.mjs <file link> [suite…]
    ```
+
+   Or fetch them through the REST API with a token that can read file content (`FIGMA_TOKEN=… node tools/figma-parity/fetch-goldens.mjs <file link> [suite…]`). The two give the same renders, but REST image reads are rationed: a file on Figma's free plan runs out after a few and then waits days. Both scripts share the browser session code in `figma-session.mjs`.
 
 4. Run the suite with `UPDATE_THRESHOLDS=1`, look at the report, and commit the scenes, goldens and thresholds together.
 

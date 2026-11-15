@@ -2,10 +2,12 @@
  * The texture effect (decision 0008): a layer's edges roughened, as if
  * printed on rough paper.
  *
- * A WebGL2 shader runs over the layer's picture, drawn alone. Each cell of
- * `size` units, anchored to the layer, moves its pixels by a random offset
- * of up to `radius`: edges break up into grain, and so does any detail
- * inside, while flat colour stays flat. With "clip to shape" the result is
+ * A WebGL2 shader runs over the layer's picture, drawn alone. A smooth
+ * field of offsets (three octaves of gradient noise, features about `size`
+ * units across, anchored to the layer) moves its pixels by up to `radius`,
+ * as Figma's does (decision 0013): edges roughen organically, ragged at
+ * finer scales too, and so does any detail inside, while flat colour stays
+ * flat. With "clip to shape" the result is
  * cut to the layer's own coverage, so nothing reaches past its edge but the
  * edge still roughens inward. Without WebGL2 the picture stays as it is.
  */
@@ -55,15 +57,41 @@ vec4 at(vec2 px) {
   return texture(source, t);
 }
 
+// A lattice point's gradient: a unit vector at a random angle.
+vec2 gradientAt(ivec2 c) {
+  vec2 r = vec2(hash(uvec2(c))) / 4294967295.0;
+  float turn = r.x * 6.2831853;
+  return vec2(cos(turn), sin(turn));
+}
+
+// Perlin's gradient noise: smooth, about -0.7 to 0.7.
+float perlin(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = p - i;
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  ivec2 c = ivec2(i);
+  float a = dot(gradientAt(c), f);
+  float b = dot(gradientAt(c + ivec2(1, 0)), f - vec2(1.0, 0.0));
+  float d = dot(gradientAt(c + ivec2(0, 1)), f - vec2(0.0, 1.0));
+  float e = dot(gradientAt(c + ivec2(1, 1)), f - vec2(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
+}
+
+// Three octaves: features about a cell across, ragged at finer scales.
+float fractal(vec2 p) {
+  return perlin(p) + 0.5 * perlin(p * 2.0) + 0.25 * perlin(p * 4.0);
+}
+
 void main() {
   // Canvases are uploaded top row first: flip so y runs down, as on screen.
   vec2 px = vec2(uv.x, 1.0 - uv.y) * size;
   vec2 local = (toLayer * vec3(px, 1.0)).xy;
-  vec2 r = vec2(hash(uvec2(ivec2(floor(local / cell))))) / 4294967295.0;
-  // A point spread evenly over the disc of the radius.
-  float turn = r.x * 6.2831853;
-  vec2 moved = px + vec2(cos(turn), sin(turn)) * sqrt(r.y) * radius;
-  color = at(moved);
+  // A smooth field of offsets, anchored to the layer, up to the radius.
+  vec2 q = local / cell;
+  vec2 offset = vec2(fractal(q), fractal(q + vec2(37.2, 91.7))) / 0.9;
+  float len = length(offset);
+  if (len > 1.0) offset /= len;
+  color = at(px + offset * radius);
   if (clip) color *= at(px).a;
 }`;
 

@@ -31,8 +31,17 @@ A text suite (20 cells in Inter: sizes and weights, italic, wrapping, line heigh
 
 The suite's mean went from 5.33 to 4.07; what's left is mostly the difference between two rasterisers drawing small glyphs (and, on Linux, Chromium snapping drawn glyphs to whole pixels).
 
+## Revision: noise and texture (2026-11-15)
+
+A grain suite (12 cells: noise of each kind at several sizes and densities, texture fine, coarse and clipped) is compared after a blur of 3, since grain is random on both sides and only its look can match, not its pixels. It found Figma's grain to be a different thing from Drawpane's, so both effects were remodelled on it (decision 0008):
+
+- **Noise is soft blobs, not square cells.** Figma thresholds a smooth noise field. Measured on its renders, density sets the cut so that grain covers 1.3% of the layer at 20%, 8.6% at 50% and a third at 85%, far less than the density's percentage. Drawpane's field is three octaves of periodic gradient noise, standardised and cut at z = 2.82 − 2.85 × density, with an edge a tenth of a deviation soft. Duo's second colour is a set of blobs of its own rather than every cell left over. SVG export uses the same law for its threshold.
+- **Texture is smooth displacement.** A fractal field of offsets, rather than one random offset per cell, so edges are ragged as Figma's are rather than stepped.
+
+The suite's mean went from 7.36 to 1.12. Goldens now come from Figma's own exporter in the browser (`export-in-figma.mjs`), not the REST API, whose image reads a file on Figma's free plan can spend in a few runs; the two were checked to agree (shadows score 0.25 against the exporter's goldens, 0.27 against REST's).
+
 ## Consequences
 
 - Documents that relied on the old drawing (circular radial gradients on wide layers, blurs half as strong) look different after this change. There are no published files yet; matching Figma now is cheaper than a migration later.
-- More suites follow the same pattern: text (needing the same fonts on both sides), noise and texture (compared after a blur, since their grain is random), images, and import fidelity (whole Figma files imported, rendered and compared frame by frame).
-- Refreshing goldens needs an editable Figma file, a Figma login for the browser automation, and a token to fetch renders (see the README).
+- More suites follow the same pattern: images, and import fidelity (whole Figma files imported, rendered and compared frame by frame).
+- Refreshing goldens needs an editable Figma file and a Figma login for the browser automation (see the README); a REST token is optional.

@@ -103,6 +103,25 @@ async function buildParity(figma, suites) {
           dispersion: e.dispersion / 100,
           radius: e.frost,
         };
+      case "noise":
+        return {
+          type: "NOISE",
+          noiseType: { mono: "MONOTONE", duo: "DUOTONE", multi: "MULTITONE" }[e.noiseType],
+          noiseSize: e.size,
+          density: e.density / 100,
+          color: rgba(e.color),
+          ...(e.noiseType === "duo" ? { secondaryColor: rgba(e.secondaryColor) } : {}),
+          ...(e.noiseType === "multi" ? { opacity: e.opacity / 100 } : {}),
+          visible,
+        };
+      case "texture":
+        return {
+          type: "TEXTURE",
+          noiseSize: e.size,
+          radius: e.radius,
+          clipToShape: e.clipToShape,
+          visible,
+        };
       default:
         throw new Error(`No Figma effect for ${e.type} yet.`);
     }

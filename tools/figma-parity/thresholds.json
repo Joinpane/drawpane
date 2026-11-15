@@ -39,21 +39,21 @@
     "blend-luminosity": 0.37
   },
   "shadows": {
-    "drop-soft": 0.63,
-    "drop-large": 0.86,
+    "drop-soft": 0.61,
+    "drop-large": 0.77,
     "drop-hard": 0.31,
-    "drop-spread": 0.31,
-    "drop-spread-blur": 0.91,
-    "drop-negative-spread": 0.6,
-    "drop-colored": 0.89,
-    "drop-layered": 0.62,
-    "drop-ellipse": 0.6,
+    "drop-spread": 0.34,
+    "drop-spread-blur": 0.84,
+    "drop-negative-spread": 0.57,
+    "drop-colored": 0.86,
+    "drop-layered": 0.56,
+    "drop-ellipse": 0.56,
     "drop-opacity": 0.75,
-    "inner-soft": 0.43,
+    "inner-soft": 0.42,
     "inner-spread": 0.53,
-    "inner-offset": 0.56,
-    "inner-and-drop": 0.49,
-    "inner-ellipse": 0.43
+    "inner-offset": 0.55,
+    "inner-and-drop": 0.47,
+    "inner-ellipse": 0.42
   },
   "strokes": {
     "inside-1": 0.33,
@@ -91,5 +91,19 @@
     "strikethrough": 3.64,
     "runs": 2.81,
     "paragraphs": 5.36
+  },
+  "grain": {
+    "noise-mono": 0.73,
+    "noise-mono-large": 2.19,
+    "noise-mono-sparse": 0.52,
+    "noise-mono-dense": 1.27,
+    "noise-mono-colour": 0.92,
+    "noise-duo": 1.38,
+    "noise-duo-strong": 4.32,
+    "noise-multi": 1.77,
+    "noise-on-dark": 1.09,
+    "texture-fine": 0.61,
+    "texture-coarse": 2.34,
+    "texture-clipped": 1.31
   }
 }

@@ -1,0 +1,365 @@
+{
+  "suite": "grain",
+  "about": "Noise (mono, duo and multi; size, density and colour) and texture (size, radius, clipped or not) on a flat card. The grain is random on both sides, so cells are compared after a blur: density, size and tone, not where each grain falls.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#f4f3ef",
+  "blur": 3,
+  "cells": [
+    {
+      "id": "noise-mono",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "noise",
+              "noiseType": "mono",
+              "size": 1,
+              "density": 50,
+              "color": "#00000040",
+              "secondaryColor": "#ffffff40",
+              "opacity": 25
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "noise-mono-large",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "noise",
+              "noiseType": "mono",
+              "size": 4,
+              "density": 50,
+              "color": "#00000040",
+              "secondaryColor": "#ffffff40",
+              "opacity": 25
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "noise-mono-sparse",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "noise",
+              "noiseType": "mono",
+              "size": 1,
+              "density": 20,
+              "color": "#00000040",
+              "secondaryColor": "#ffffff40",
+              "opacity": 25
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "noise-mono-dense",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "noise",
+              "noiseType": "mono",
+              "size": 1,
+              "density": 85,
+              "color": "#00000066",
+              "secondaryColor": "#ffffff40",
+              "opacity": 25
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "noise-mono-colour",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "noise",
+              "noiseType": "mono",
+              "size": 1,
+              "density": 50,
+              "color": "#ff5a1f80",
+              "secondaryColor": "#ffffff40",
+              "opacity": 25
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "noise-duo",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "noise",
+              "noiseType": "duo",
+              "size": 2,
+              "density": 50,
+              "color": "#00000040",
+              "secondaryColor": "#ffffff40",
+              "opacity": 25
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "noise-duo-strong",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "noise",
+              "noiseType": "duo",
+              "size": 3,
+              "density": 50,
+              "color": "#1c1b1a99",
+              "secondaryColor": "#ffffffcc",
+              "opacity": 25
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "noise-multi",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "noise",
+              "noiseType": "multi",
+              "size": 2,
+              "density": 50,
+              "color": "#00000040",
+              "secondaryColor": "#ffffff40",
+              "opacity": 50
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "noise-on-dark",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "effects": [
+            {
+              "type": "noise",
+              "noiseType": "mono",
+              "size": 1,
+              "density": 50,
+              "color": "#ffffff59",
+              "secondaryColor": "#ffffff40",
+              "opacity": 25
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "texture-fine",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "texture",
+              "size": 2,
+              "radius": 4,
+              "clipToShape": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "texture-coarse",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "texture",
+              "size": 6,
+              "radius": 12,
+              "clipToShape": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "texture-clipped",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#8fa7d9"
+            }
+          ],
+          "effects": [
+            {
+              "type": "texture",
+              "size": 4,
+              "radius": 10,
+              "clipToShape": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
