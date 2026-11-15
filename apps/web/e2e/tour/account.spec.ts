@@ -37,6 +37,13 @@ test("account tour", async ({ browser }) => {
   await page.goto("/settings?error=taken&provider=github");
   await expect(page.getByRole("alert")).toBeVisible();
   await shot(page, "134-account-error");
+  // Access tokens: none yet, and the form to make one, its fields inside its card.
+  await page.goto("/settings/tokens");
+  await expect(page.getByRole("heading", { name: "Access tokens" })).toBeVisible();
+  await page.getByRole("button", { name: "New token" }).click();
+  await expect(page.getByLabel("Expires")).toBeVisible();
+  await page.waitForTimeout(200);
+  await shot(page, "183-tokens-new");
 
   const guest = await (
     await browser.newContext({ viewport: { width: 1440, height: 900 } })
