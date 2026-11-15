@@ -214,5 +214,19 @@
     "circle-160-d10-y": 0.51,
     "circle-160-d70-x": 1.35,
     "circle-160-d70-y": 1.36
+  },
+  "vertical-trim": {
+    "auto-16": 3.14,
+    "auto-48": 3.99,
+    "lh-150": 5.42,
+    "lh-px": 0.89,
+    "bottom": 2.01,
+    "bottom-standard": 2.84,
+    "middle": 2.11,
+    "middle-lh": 1.92,
+    "wrap": 5.56,
+    "runs": 6.93,
+    "paragraphs": 1.93,
+    "instrument": 0.62
   }
 }

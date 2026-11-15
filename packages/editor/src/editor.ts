@@ -3160,6 +3160,7 @@ export class Editor {
     "textDecoration",
     "textCase",
     "paragraphSpacing",
+    "leadingTrim",
     "maxLines",
     "bindings",
   ];

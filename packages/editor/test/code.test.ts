@@ -111,6 +111,19 @@ describe("design to code", () => {
     expect(jsx).toMatch(/<p>First \*\*one\*\*<\/p>\n\s*<p>Second<\/p>/);
   });
 
+  it("writes vertical trim as CSS's text-box trim", () => {
+    const editor = setup();
+    const id = editor.createLayer("text", { x: 0, y: 0, width: 0, height: 0 }, "p", {
+      characters: "Title",
+      leadingTrim: "cap-height",
+    }) as string;
+    const node = () => editor.doc.get(id) as never;
+    expect(decl(cssFor(editor.doc, node()))).toMatchObject({
+      "text-box": "trim-both cap alphabetic",
+    });
+    expect(tailwindFor(editor.doc, node())).toContain("[text-box:trim-both_cap_alphabetic]");
+  });
+
   it("writes OpenType features and variable axes as their CSS", () => {
     const editor = setup();
     const id = editor.createLayer("text", { x: 0, y: 0, width: 0, height: 0 }, "p", {

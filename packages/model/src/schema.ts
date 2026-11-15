@@ -684,6 +684,12 @@ export const PROPS = {
   /** OpenType features (tabular figures, ligatures, stylistic sets…); see `FontFeatures`. */
   fontFeatures: prop(FontFeatures, {}, TYPOGRAPHY),
   fontVariations: prop(FontVariations, {}, TYPOGRAPHY),
+  /**
+   * Figma's vertical trim: "cap-height" fits the text's box from its first
+   * line's cap height to its last line's baseline, dropping the space above
+   * capitals and below the baseline, so the box aligns with what's seen.
+   */
+  leadingTrim: prop(z.enum(["none", "cap-height"]), "none", TYPOGRAPHY),
   /** Extra space after each paragraph (each hard line break), in px. */
   paragraphSpacing: prop(ranged(z.number().min(0).max(1000), { min: 0, max: 1000 }), 0, TYPOGRAPHY),
   /** Lists: the layer's own (its characters may differ, paragraph by paragraph; see `ListType`). */

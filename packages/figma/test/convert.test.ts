@@ -189,6 +189,25 @@ describe("text", () => {
   });
 });
 
+describe("vertical trim", () => {
+  it("brings Figma's cap height to baseline trim", () => {
+    const text = (name: string, leadingTrim?: "CAP_HEIGHT" | "NONE") =>
+      node({
+        id: name,
+        type: "TEXT",
+        name,
+        size: { x: 60, y: 12 },
+        relativeTransform: at(0, 0),
+        characters: "Title",
+        style: { fontFamily: "Inter", fontSize: 16, ...(leadingTrim ? { leadingTrim } : {}) },
+      });
+    const { nodes } = convertFile(file(text("Trimmed", "CAP_HEIGHT"), text("Standard", "NONE")));
+    validate(nodes);
+    expect(getProp(byName(nodes, "Trimmed").props, "leadingTrim")).toBe("cap-height");
+    expect(getProp(byName(nodes, "Standard").props, "leadingTrim")).toBe("none");
+  });
+});
+
 describe("auto layout and components", () => {
   it("renames auto layout, and links instances to their main component with what they change", () => {
     const label = node({

@@ -186,6 +186,7 @@ async function buildParity(figma, suites) {
       spec.textDecoration ?? "none"
     ];
     if (spec.paragraphSpacing) node.paragraphSpacing = spec.paragraphSpacing;
+    if (spec.leadingTrim === "cap-height") node.leadingTrim = "CAP_HEIGHT";
     node.fills = (spec.fills ?? [{ type: "solid", color: "#1c1b1a" }]).map(paint);
     for (const run of spec.textRuns ?? []) {
       if (run.fontWeight || run.fontStyle)

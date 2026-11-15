@@ -54,7 +54,7 @@ test("paragraphs and truncation tour", async ({ browser }) => {
       textAutoResize: "height",
     }) as string;
     e.zoomTo(1);
-    return { body, preview };
+    return { card, body, preview };
   });
   const prop = (id: string, name: string) =>
     page.evaluate(([id, name]) => (window as unknown as W).drawpane.doc.get(id)?.props[name], [
@@ -78,5 +78,22 @@ test("paragraphs and truncation tour", async ({ browser }) => {
   await expect.poll(() => prop(ids.preview, "maxLines")).toBe(2);
   await page.waitForTimeout(250);
   await shot(page, "151-truncate");
+
+  // A heading trimmed to its capitals and baseline: its box hugs what's seen.
+  const heading = await page.evaluate((card) => {
+    const e = (window as unknown as W).drawpane;
+    return e.createLayer("text", { x: 24, y: 196, width: 10, height: 10 }, card, {
+      characters: "Weekly plan",
+      fontSize: 40,
+      fontWeight: 600,
+    }) as string;
+  }, ids.card);
+  await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), heading);
+  const standard = (await prop(heading, "height")) as number;
+  await page.getByRole("combobox", { name: "Vertical trim" }).selectOption("cap-height");
+  await expect.poll(() => prop(heading, "leadingTrim")).toBe("cap-height");
+  await expect.poll(() => prop(heading, "height")).toBeLessThan(standard * 0.7);
+  await page.waitForTimeout(250);
+  await shot(page, "177-vertical-trim");
   await context.close();
 });
