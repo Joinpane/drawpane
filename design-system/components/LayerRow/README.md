@@ -6,4 +6,4 @@ One row in the Layers tree. Rows are 28px tall, indent 12px per level, and show 
 
 - Selected rows use `signal-soft` with semibold `ink` text. Components and instances use the `component` glyph and `component-ink` names, so they're recognisable without reading.
 - Hidden layers dim to `ink-muted`; they're never removed from the tree.
-- Double-click renames in place. Names are never truncated in the middle; long names truncate at the end and show in full in a tooltip.
+- Double-click renames in place, except on the kind icon: double-clicking that zooms the canvas to the layer, as in Figma, with no tooltip or hover state of its own. Names are never truncated in the middle; long names truncate at the end and show in full in a tooltip.
