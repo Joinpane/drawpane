@@ -34,6 +34,8 @@
   box-shadow: var(--shadow-focus);
 }
 .admin__main {
+  /* Between cards side by side, in every row, so their edges line up down the page. */
+  --admin-gutter: var(--space-400);
   display: grid;
   gap: var(--space-600);
   /* One column that may shrink below its content (a long command), so nothing pushes past the edge. */
@@ -126,7 +128,7 @@
 .admin__kpis {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: var(--space-300);
+  gap: var(--admin-gutter);
 }
 .admin__kpi {
   display: grid;
@@ -146,12 +148,12 @@
   width: 60%;
 }
 
-/* Panels */
+/* Panels: side by side they share one height, so their bottoms line up. */
 .admin__panels {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-400);
-  align-items: flex-start;
+  gap: var(--admin-gutter);
+  align-items: stretch;
 }
 .admin__panel {
   flex: 1 1 380px;

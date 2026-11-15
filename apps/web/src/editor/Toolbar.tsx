@@ -60,9 +60,17 @@ export function Toolbar({ onSearch, ctx }: { onSearch: () => void; ctx: ActionCo
       {canEdit ? <ShapeTools tool={tool} ctx={ctx} /> : null}
       {AFTER.filter((t) => canEdit || VIEWER_TOOLS.has(t.id)).map(button)}
       <span className="toolbar__sep" aria-hidden="true" />
-      <button type="button" className="toolbar__search" onClick={onSearch}>
-        <span>Search or set…</span>
-        <Kbd keys={capsFor("view.command")} />
+      <button
+        type="button"
+        className="toolbar__search"
+        aria-label="Search or set…"
+        onClick={onSearch}
+      >
+        <span className="toolbar__search-inner">
+          <Icon name="search" size={16} className="toolbar__search-icon" />
+          <span className="toolbar__search-label">Search or set…</span>
+          <Kbd keys={capsFor("view.command")} />
+        </span>
       </button>
     </div>
   );

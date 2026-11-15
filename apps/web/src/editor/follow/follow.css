@@ -185,10 +185,11 @@
   font: var(--type-ui-label);
 }
 
+/* On the canvas beside whatever is on the right (the inspector, comments, or the window's edge). */
 .spotlight-prompt {
   position: absolute;
   top: 64px;
-  right: 12px;
+  right: var(--canvas-right, 12px);
   z-index: 6;
   width: 264px;
   box-sizing: border-box;

@@ -11,6 +11,10 @@ const box = async (l: Locator) => {
   if (!b) throw new Error("Not on screen.");
   return b;
 };
+/** The debug handle (drawpane:debug), as far as these tests use it. */
+type W = {
+  drawpane: { s: { pageId: string }; state: { set(patch: { peers: Map<string, unknown> }): void } };
+};
 const scrollWidth = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth);
 
 test.describe
@@ -58,5 +62,67 @@ test.describe
       expect(right.x).toBeGreaterThanOrEqual(tools.x + tools.width + 8);
       expect(await scrollWidth(page)).toBeLessThanOrEqual(1024);
       await page.screenshot({ path: "test-results/fit-editor-1024.png" });
+    });
+
+    test("the tools stay clear of the people and Share, panel open or closed", async () => {
+      await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
+      await page.reload();
+      await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+        timeout: 15_000,
+      });
+      // Three people in the file widen the right side.
+      await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const pageId = e.s.pageId;
+        const person = (id: string, name: string, color: number) =>
+          [
+            id,
+            {
+              sessionId: id,
+              userId: id,
+              name,
+              color,
+              kind: "person",
+              presence: {
+                cursor: null,
+                pageId,
+                selection: [],
+                viewport: null,
+                following: null,
+                spotlight: false,
+              },
+            },
+          ] as const;
+        e.state.set({
+          peers: new Map([
+            person("bo", "Bo Chen", 3),
+            person("sam", "Sam Okafor", 6),
+            person("lena", "Lena Park", 2),
+          ]),
+        });
+      });
+      await expect(page.locator(".top-right .dp-avatar")).toHaveCount(3);
+      const layers = page.getByRole("complementary", { name: /Pages, layers/ });
+      for (const width of [1024, 1280, 1440]) {
+        await page.setViewportSize({ width, height: 768 });
+        for (const panel of ["open", "closed"]) {
+          if ((panel === "open") !== (await layers.isVisible())) {
+            await page.keyboard.press("ControlOrMeta+\\");
+          }
+          await expect(layers).toBeVisible({ visible: panel === "open" });
+          const title = await box(page.locator(".file-title"));
+          const tools = await box(page.locator(".toolbar"));
+          const right = await box(page.locator(".top-right"));
+          const where = `${width} wide, layers ${panel}`;
+          expect(tools.x, where).toBeGreaterThanOrEqual(title.x + title.width + 8);
+          expect(right.x, where).toBeGreaterThanOrEqual(tools.x + tools.width + 8);
+          // With room on both sides, the tools sit in the window's centre.
+          if (width >= 1280)
+            expect(Math.abs(tools.x + tools.width / 2 - width / 2), where).toBeLessThan(2);
+          expect(await scrollWidth(page)).toBeLessThanOrEqual(width);
+        }
+      }
+      await page.setViewportSize({ width: 1024, height: 768 });
+      await page.screenshot({ path: "test-results/fit-editor-1024-people.png" });
     });
   });

@@ -9,13 +9,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { dateLabel, timeLabel, versionTitle, whenLabel } from "./labels";
-
-type Range = "day" | "week" | "all";
-const RANGE_MS: Record<Exclude<Range, "all">, number> = {
-  day: 24 * 60 * 60_000,
-  week: 7 * 24 * 60 * 60_000,
-};
+import { versionTitle, whenLabel } from "./labels";
+import { axisLabels, type TimelineRange as Range, timelineStart } from "./timeline";
 
 /** A point on the track: a saved version, or now (null). */
 type Point = VersionInfo | null;
@@ -42,9 +37,7 @@ export function Scrubber({ versions, byId, selected, onPick }: ScrubberProps) {
     return () => clearInterval(id);
   }, []);
 
-  const oldest = versions.at(-1)?.createdAt ?? now - 60 * 60_000;
-  const start =
-    range === "all" ? oldest - Math.max(60_000, (now - oldest) * 0.02) : now - RANGE_MS[range];
+  const start = timelineStart(range, versions.at(-1)?.createdAt, now);
   const span = Math.max(1, now - start);
   const xOf = (ms: number) => Math.min(1, Math.max(0, (ms - start) / span));
 
@@ -112,9 +105,7 @@ export function Scrubber({ versions, byId, selected, onPick }: ScrubberProps) {
   const when = (p: Point) => (p ? whenLabel(p.createdAt) : "The file as it is now");
   const selectedX = selected ? xOf(selected.createdAt) : 1;
 
-  const mid = start + span / 2;
-  // Times for a span under a day and a half, dates beyond.
-  const axis = (ms: number) => (span < 36 * 60 * 60_000 ? timeLabel(ms) : dateLabel(ms));
+  const tipX = hover ? (hover.point ? xOf(hover.point.createdAt) : 1) : 0;
 
   return (
     <section className="scrubber pane" aria-label="Version timeline">
@@ -185,14 +176,8 @@ export function Scrubber({ versions, byId, selected, onPick }: ScrubberProps) {
         {hover ? (
           <span
             className="scrubber__tip"
-            style={{ left: `${(hover.point ? xOf(hover.point.createdAt) : 1) * 100}%` }}
-            data-edge={
-              (hover.point ? xOf(hover.point.createdAt) : 1) > 0.85
-                ? "end"
-                : (hover.point ? xOf(hover.point.createdAt) : 1) < 0.15
-                  ? "start"
-                  : undefined
-            }
+            style={{ left: `${tipX * 100}%` }}
+            data-edge={tipX > 0.85 ? "end" : tipX < 0.15 ? "start" : undefined}
             aria-hidden="true"
           >
             <b>{title(hover.point)}</b>
@@ -201,9 +186,9 @@ export function Scrubber({ versions, byId, selected, onPick }: ScrubberProps) {
         ) : null}
       </div>
       <div className="scrubber__axis" aria-hidden="true">
-        <span>{axis(start)}</span>
-        <span>{axis(mid)}</span>
-        <span>Now</span>
+        {axisLabels(start, now).map((label) => (
+          <span key={label}>{label}</span>
+        ))}
       </div>
     </section>
   );

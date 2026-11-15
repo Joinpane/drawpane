@@ -751,7 +751,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       <div
         className="editor"
         data-history={historyOpen || undefined}
-        data-minimized={layout.minimized || undefined}
+        data-left-closed={!leftShown || undefined}
         style={
           {
             "--pane-left": `${leftWidth}px`,
@@ -791,32 +791,34 @@ function FileEditor({ fileId }: { fileId: string }) {
             insets={insets}
           />
         ) : null}
-        <FileTitle
-          view={view}
-          minimized={layout.minimized}
-          onToggleMinimized={ctx.toggleMinimized}
-          onToggleTokens={() => setView((v) => (v === "tokens" ? "design" : "tokens"))}
-          fileId={fileId}
-          teamId={meta.data?.file.teamId ?? null}
-          name={fileName}
-          project={meta.data?.project?.name ?? ""}
-          main={mainFile}
-          branch={branch}
-        />
-        <EditorContext.Provider value={active}>
-          <Toolbar onSearch={() => setCommandOpen(true)} ctx={ctx} />
-        </EditorContext.Provider>
-        <TopRight
-          fileId={fileId}
-          fileName={fileName}
-          teamId={meta.data?.file.teamId ?? null}
-          branchOpen={branch !== null && !branch.merged}
-          onMerge={
-            branch && !branch.merged && !reviewing && canMerge ? () => setReviewing(true) : null
-          }
-          onPresent={ctx.present}
-          onOpenThread={(threadId) => openThread(editor, comments.store, threadId, insets.left)}
-        />
+        <div className="topbar">
+          <FileTitle
+            view={view}
+            minimized={layout.minimized}
+            onToggleMinimized={ctx.toggleMinimized}
+            onToggleTokens={() => setView((v) => (v === "tokens" ? "design" : "tokens"))}
+            fileId={fileId}
+            teamId={meta.data?.file.teamId ?? null}
+            name={fileName}
+            project={meta.data?.project?.name ?? ""}
+            main={mainFile}
+            branch={branch}
+          />
+          <EditorContext.Provider value={active}>
+            <Toolbar onSearch={() => setCommandOpen(true)} ctx={ctx} />
+          </EditorContext.Provider>
+          <TopRight
+            fileId={fileId}
+            fileName={fileName}
+            teamId={meta.data?.file.teamId ?? null}
+            branchOpen={branch !== null && !branch.merged}
+            onMerge={
+              branch && !branch.merged && !reviewing && canMerge ? () => setReviewing(true) : null
+            }
+            onPresent={ctx.present}
+            onOpenThread={(threadId) => openThread(editor, comments.store, threadId, insets.left)}
+          />
+        </div>
         {view === "tokens" ? (
           <TokensWorkspace
             onShowLayer={(id) => {
