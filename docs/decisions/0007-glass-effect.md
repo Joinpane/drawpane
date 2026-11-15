@@ -80,3 +80,9 @@ To stop guessing at Figma's rim from pictures, the `glass-probe` parity suite dr
 - **Following the distance alone isn't enough.** Taking it from the blurred height overstates the bend at convex corners (deep-rim corner error 9 px to 14); an exact rounded-rectangle distance field fixes that and beats today's shader at depth 40 (field error 1.3 px against 1.6), but only ties it at 80 (4.8 px), where the difference is the bend's direction near corners, not its size.
 
 At Figma's default depth (20), the two fields already agree to the measurement's floor (about a pixel), so the shader is unchanged; the probe holds it there.
+
+## Revision: square corners (2026-11-15)
+
+A rectangle with square or slightly rounded corners showed glass as if it had a large radius: a lit, rounded wedge in each corner, and the backdrop bent round a curve that wasn't there. The rim's distance in from the edge came from the blurred height (its inverse Gaussian), which reads short at a convex corner, so a corner pixel took itself for an edge pixel. Rectangles and frames now measure it exactly: the shader computes the rounded box's signed distance (square, rounded or per-corner, any rotation), and the bend's size and the light follow that distance, with the same Gaussian falloff a straight edge had (so sides look as calibrated). The direction still comes from the height's slope, smooth everywhere, so nothing creases along a corner's diagonal. Other shapes (paths, stars, text) keep the height's distance.
+
+The calibration's mean went from 2.84 to 2.70 (`depth-40` 4.32 to 3.74, `depth-80` 16.9 to 15.2, square corners 1.84 to 1.74, nothing worse), and the probe's bend field from 1.78 to 1.72 px off Figma's (the deepest rim's corners 9.2 to 6.5).

@@ -186,6 +186,25 @@ test.describe
       expect(lit.reduce((a, b) => a + b, 0)).toBeGreaterThan(left.reduce((a, b) => a + b, 0) + 120);
     });
 
+    test("keeps a square corner square: lit along its edges, not across a rounded wedge", async () => {
+      const corner = async (radius: number) => {
+        await page.evaluate(
+          ({ id, radius }) =>
+            (window as unknown as W).drawpane.setProp([id], "cornerRadius", radius, "Radius"),
+          { id: glass, radius },
+        );
+        await set({ ...BASE, angle: -45, intensity: 100, depth: 30 });
+        // Just inside the top-left corner, and as far inside the left edge halfway down.
+        const inCorner = (await pixel(page, 105, 80)).reduce((a, b) => a + b, 0);
+        const byEdge = (await pixel(page, 105, 150)).reduce((a, b) => a + b, 0);
+        return inCorner - byEdge;
+      };
+      // Square: the corner is no brighter than the edge beside it (the light is a fine line on
+      // the edge; a rim measured from a blurred outline lit a rounded wedge there instead).
+      expect(await corner(0)).toBeLessThan(80);
+      await corner(20);
+    });
+
     test("is added from the effects menu with Figma's defaults, and set with its sliders", async () => {
       await page.evaluate((id) => {
         const e = (window as unknown as W).drawpane;
