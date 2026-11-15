@@ -8,6 +8,8 @@
 import { env } from "cloudflare:test";
 import { keyBetween, type NodeRecord, type Op } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import { provideHarfBuzzMeasurer } from "../src/agent/harfbuzz";
+import { provideMeasurer } from "../src/agent/measurer";
 import type { Env } from "../src/env";
 import { offered } from "../src/mcp/server";
 import { type Browser, openSocket, signedInUser } from "./helpers";
@@ -138,12 +140,27 @@ describe("the agent tools on MCP", () => {
   });
 
   it("are off when no text measurer is configured", () => {
+    // The Worker registers the HarfBuzz measurer as it starts: take it away for this check.
+    provideMeasurer(null);
+    try {
+      const names = offered({ ...env, AGENT_MEASURER: undefined } as unknown as Env).map(
+        (t) => t.name,
+      );
+      expect(names).toContain("get_outline");
+      expect(names).not.toContain("render");
+      expect(names).not.toContain("start_session");
+    } finally {
+      provideHarfBuzzMeasurer();
+    }
+  });
+
+  it("are on with the HarfBuzz measurer the Worker registers", () => {
+    provideHarfBuzzMeasurer();
     const names = offered({ ...env, AGENT_MEASURER: undefined } as unknown as Env).map(
       (t) => t.name,
     );
-    expect(names).toContain("get_outline");
-    expect(names).not.toContain("render");
-    expect(names).not.toContain("start_session");
+    expect(names).toContain("render");
+    expect(names).toContain("start_session");
   });
 });
 
