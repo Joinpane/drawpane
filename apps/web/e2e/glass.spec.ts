@@ -178,11 +178,11 @@ test.describe
     });
 
     test("lights the rim on the light's side", async () => {
-      // Lit from the left (−90°), nothing bent: the left rim brightens, the middle doesn't.
+      // Lit from the left (−90°): a fine line along the left edge, as Figma draws it.
       await set({ ...BASE, angle: -90, visible: false });
-      const left = await pixel(page, 103, 150);
+      const left = await pixel(page, 101, 150);
       await set({ ...BASE, angle: -90, intensity: 100 });
-      const lit = await pixel(page, 103, 150);
+      const lit = await pixel(page, 101, 150);
       expect(lit.reduce((a, b) => a + b, 0)).toBeGreaterThan(left.reduce((a, b) => a + b, 0) + 120);
     });
 
