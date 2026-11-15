@@ -6,48 +6,7 @@ import { env } from "cloudflare:test";
 import type { NodeRecord, Op } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { Browser, openSocket, signedInUser } from "./helpers";
-
-interface Created {
-  token: string;
-  info: { id: string; name: string; prefix: string; expiresAt: number | null };
-}
-
-async function makeToken(
-  browser: Browser,
-  name = "Claude Code",
-  expiresInDays: number | null = 90,
-) {
-  return browser.json<Created>("/api/account/tokens", {
-    method: "POST",
-    json: { name, expiresInDays },
-  });
-}
-
-/** One JSON-RPC message to the MCP endpoint, as an MCP client sends it (no cookie, no Origin). */
-async function rpc(token: string | null, message: unknown, headers: Record<string, string> = {}) {
-  const res = await new Browser().fetch("/api/mcp", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...headers,
-    },
-    body: JSON.stringify(message),
-  });
-  const text = await res.text();
-  return { status: res.status, headers: res.headers, body: text ? JSON.parse(text) : null };
-}
-
-let nextId = 1;
-async function call(token: string, name: string, args: Record<string, unknown> = {}) {
-  const { body } = await rpc(token, {
-    jsonrpc: "2.0",
-    id: nextId++,
-    method: "tools/call",
-    params: { name, arguments: args },
-  });
-  return body.result as { isError: boolean; structuredContent: Record<string, unknown> };
-}
+import { call, makeToken, rpc } from "./mcp-helpers";
 
 /** A file with a page holding a card frame (with text), a component and an instance of it. */
 async function seededFile(browser: Browser, projectId: string) {
@@ -224,7 +183,7 @@ describe("the MCP endpoint", () => {
     expect(get.status).toBe(405);
   });
 
-  it("lists read-only tools with input schemas", async () => {
+  it("lists the read tools first, read-only, with input schemas", async () => {
     const ana = await signedInUser("Ana");
     const { token } = await makeToken(ana.browser);
     const { body } = await rpc(token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
@@ -233,7 +192,7 @@ describe("the MCP endpoint", () => {
       inputSchema: { type: string; properties: Record<string, unknown> };
       annotations: { readOnlyHint: boolean };
     }>;
-    expect(tools.map((t) => t.name)).toEqual([
+    expect(tools.slice(0, 8).map((t) => t.name)).toEqual([
       "list_files",
       "get_outline",
       "get_node",
@@ -243,10 +202,8 @@ describe("the MCP endpoint", () => {
       "get_comments",
       "get_history",
     ]);
-    for (const t of tools) {
-      expect(t.inputSchema.type).toBe("object");
-      expect(t.annotations.readOnlyHint).toBe(true);
-    }
+    for (const t of tools) expect(t.inputSchema.type).toBe("object");
+    for (const t of tools.slice(0, 8)) expect(t.annotations.readOnlyHint).toBe(true);
     expect(Object.keys(tools[1]?.inputSchema.properties ?? {})).toContain("fileId");
   });
 });

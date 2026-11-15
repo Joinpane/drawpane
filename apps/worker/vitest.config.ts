@@ -20,6 +20,8 @@ export default defineConfig(async () => {
             // Email is printed in tests, never sent.
             EMAIL_PROVIDER: "log",
             EMAIL_FROM: "Drawpane <design@example.com>",
+            // Agent tools on, with the deterministic stand-in measurer (agent/measurer.ts).
+            AGENT_MEASURER: "standin",
           },
         },
       }),

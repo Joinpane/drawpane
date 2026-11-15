@@ -167,6 +167,20 @@ export class SyncEngine {
     return inverse;
   }
 
+  /**
+   * Takes every edit not yet sent, as one transaction, and forgets it: for an
+   * engine that commits edits itself instead of sending them (the Worker's
+   * headless editor, decision 0021). Fix-ups are included, as they were
+   * committed. Empty when there's nothing unsent.
+   */
+  takeUnsent(): Op[] {
+    const unsent = this.#pending.filter((t) => t.seq === null);
+    if (unsent.length === 0) return [];
+    this.#pending = this.#pending.filter((t) => t.seq !== null);
+    this.#progress();
+    return compactOps(unsent.flatMap((t) => t.ops));
+  }
+
   #scheduleFlush(): void {
     if (this.#flushScheduled || !this.#send || this.#status !== "live") return;
     this.#flushScheduled = true;
