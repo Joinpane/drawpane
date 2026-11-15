@@ -108,7 +108,93 @@ async function buildParity(figma, suites) {
     }
   };
 
+  // Figma's style names for a weight, in the spellings fonts use for them.
+  const STYLES = {
+    100: ["Thin"],
+    200: ["Extra Light", "ExtraLight"],
+    300: ["Light"],
+    400: ["Regular"],
+    500: ["Medium"],
+    600: ["Semi Bold", "SemiBold"],
+    700: ["Bold"],
+    800: ["Extra Bold", "ExtraBold"],
+    900: ["Black"],
+  };
+  const fontFor = async (family, weight = 400, italic = false) => {
+    for (const name of STYLES[weight] ?? ["Regular"]) {
+      const style = italic ? (name === "Regular" ? "Italic" : `${name} Italic`) : name;
+      try {
+        await figma.loadFontAsync({ family, style });
+        return { family, style };
+      } catch {
+        // Try the next spelling.
+      }
+    }
+    throw new Error(`Figma has no ${family} ${weight}${italic ? " italic" : ""}.`);
+  };
+  const lineHeight = (lh) =>
+    !lh || lh.unit === "auto"
+      ? { unit: "AUTO" }
+      : { unit: lh.unit === "px" ? "PIXELS" : "PERCENT", value: lh.value };
+
+  const text = async (spec, parent) => {
+    const node = figma.createText();
+    parent.appendChild(node);
+    const family = spec.fontFamily ?? "Inter";
+    node.fontName = await fontFor(family, spec.fontWeight, spec.fontStyle === "italic");
+    node.characters = spec.characters ?? "";
+    node.fontSize = spec.fontSize ?? 16;
+    node.lineHeight = lineHeight(spec.lineHeight);
+    if (spec.letterSpacing)
+      node.letterSpacing = {
+        unit: spec.letterSpacing.unit === "px" ? "PIXELS" : "PERCENT",
+        value: spec.letterSpacing.value,
+      };
+    node.textAlignHorizontal = {
+      left: "LEFT",
+      center: "CENTER",
+      right: "RIGHT",
+      justify: "JUSTIFIED",
+    }[spec.textAlign ?? "left"];
+    node.textAlignVertical = { top: "TOP", middle: "CENTER", bottom: "BOTTOM" }[
+      spec.textAlignVertical ?? "top"
+    ];
+    node.textCase = { none: "ORIGINAL", upper: "UPPER", lower: "LOWER", title: "TITLE" }[
+      spec.textCase ?? "none"
+    ];
+    node.textDecoration = { none: "NONE", underline: "UNDERLINE", strikethrough: "STRIKETHROUGH" }[
+      spec.textDecoration ?? "none"
+    ];
+    if (spec.paragraphSpacing) node.paragraphSpacing = spec.paragraphSpacing;
+    node.fills = (spec.fills ?? [{ type: "solid", color: "#1c1b1a" }]).map(paint);
+    for (const run of spec.textRuns ?? []) {
+      if (run.fontWeight || run.fontStyle)
+        node.setRangeFontName(
+          run.start,
+          run.end,
+          await fontFor(
+            family,
+            run.fontWeight ?? spec.fontWeight ?? 400,
+            (run.fontStyle ?? spec.fontStyle) === "italic",
+          ),
+        );
+      if (run.fontSize) node.setRangeFontSize(run.start, run.end, run.fontSize);
+      if (run.fills) node.setRangeFills(run.start, run.end, run.fills.map(paint));
+      if (run.textDecoration)
+        node.setRangeTextDecoration(run.start, run.end, run.textDecoration.toUpperCase());
+    }
+    // Drawpane's "width" is Figma's width-and-height: the box follows the text.
+    const resize = spec.textAutoResize ?? "width";
+    node.textAutoResize = { width: "WIDTH_AND_HEIGHT", height: "HEIGHT", none: "NONE" }[resize];
+    if (resize === "height") node.resize(spec.width, node.height);
+    if (resize === "none") node.resize(spec.width, spec.height);
+    node.x = spec.x;
+    node.y = spec.y;
+    return node;
+  };
+
   const layer = async (spec, parent, origin) => {
+    if (spec.type === "text") return text(spec, parent);
     const node =
       spec.type === "ellipse"
         ? figma.createEllipse()

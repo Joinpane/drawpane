@@ -21,6 +21,16 @@ The glass calibration (decision 0007) showed the way: draw the same scene in bot
    - **Dashes fit each side and corner.** A box's or ellipse's outline is split into its sides, corners and quarters; each gets a whole number of the dash pattern, stretched or squeezed to fit, with a dash centred on each end. Paths still dash continuously.
 3. **Starting scores**, mean difference over each suite: strokes 1.11 → 0.03, fills 1.26 → 0.18, shadows 1.02 → 0.27, blurs 6.0 → 0.86.
 
+## Revision: text (2026-11-15)
+
+A text suite (20 cells in Inter: sizes and weights, italic, wrapping, line height, letter spacing, alignment, case, decoration, runs, paragraph spacing) found three ways Drawpane set type apart from Figma, all fixed:
+
+- **Auto line height is the font's own height,** ascent plus descent, rounded to whole pixels, and the baseline sits half the extra leading plus the ascent from the line's top. Drawpane had used 1.25 em and a 0.8 em ascent for every font, so Inter's text sat 0.044 em high and wrapped lines drifted apart. The measurer reads the font's metrics from the browser (`TextMeasurer.metrics`); CSS export says `line-height: normal` for auto.
+- **Metrics and widths are measured at 1000 px and scaled.** Browsers round a font's ascent and descent, and on Linux each glyph's advance, to whole pixels at the size measured; measured large, they're the font's own, as Figma uses them. Centred and right-aligned lines now land where Figma's do.
+- **Text is always kerned** where it's measured and drawn.
+
+The suite's mean went from 5.33 to 4.07; what's left is mostly the difference between two rasterisers drawing small glyphs (and, on Linux, Chromium snapping drawn glyphs to whole pixels).
+
 ## Consequences
 
 - Documents that relied on the old drawing (circular radial gradients on wide layers, blurs half as strong) look different after this change. There are no published files yet; matching Figma now is cheaper than a migration later.

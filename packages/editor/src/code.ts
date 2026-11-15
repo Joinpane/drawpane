@@ -17,7 +17,7 @@ import { layerName } from "./names";
 import { blurSigma } from "./post-effects";
 import { type RunStyle, textSpans } from "./rich-text";
 import { featureSettings, variationSettings } from "./svg";
-import { letterSpacingPx, lineHeightPx } from "./text";
+import { letterSpacingPx } from "./text";
 import { cssVariableName } from "./variables";
 import { shapeVertices } from "./vector/shapes";
 
@@ -358,7 +358,8 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
     out.push({
       property: "line-height",
       value:
-        lh.unit === "auto" ? px(lineHeightPx(p)) : lh.unit === "px" ? px(lh.value) : `${lh.value}%`,
+        // Auto is the font's own height: CSS's "normal".
+        lh.unit === "auto" ? "normal" : lh.unit === "px" ? px(lh.value) : `${lh.value}%`,
     });
     const ls = letterSpacingPx(p);
     if (ls !== 0) out.push({ property: "letter-spacing", value: px(ls) });

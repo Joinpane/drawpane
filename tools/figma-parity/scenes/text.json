@@ -1,0 +1,520 @@
+{
+  "suite": "text",
+  "about": "Text in Inter: sizes and weights, italic, wrapping, line height in px, percent and auto, letter spacing, alignment across and down, case, decoration, styled runs and paragraph spacing.",
+  "cell": {
+    "width": 280,
+    "height": 140,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#ffffff",
+  "cells": [
+    {
+      "id": "regular-16",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "The quick brown fox",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width"
+        }
+      ]
+    },
+    {
+      "id": "medium-12",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 12,
+          "fontWeight": 500,
+          "characters": "The quick brown fox",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width"
+        }
+      ]
+    },
+    {
+      "id": "bold-32",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 32,
+          "fontWeight": 700,
+          "characters": "Bold title",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width"
+        }
+      ]
+    },
+    {
+      "id": "black-64",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 64,
+          "fontWeight": 900,
+          "characters": "Ag",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width"
+        }
+      ]
+    },
+    {
+      "id": "italic",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "An italic line",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "fontStyle": "italic"
+        }
+      ]
+    },
+    {
+      "id": "light-24",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 24,
+          "fontWeight": 300,
+          "characters": "Light and airy",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width"
+        }
+      ]
+    },
+    {
+      "id": "wrap-auto",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 220,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "Designs move to Drawpane with their type intact: sizes, weights, spacing and wrapping.",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "line-height-px",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 220,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "Designs move to Drawpane with their type intact: sizes, weights, spacing and wrapping.",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "lineHeight": {
+            "unit": "px",
+            "value": 26
+          }
+        }
+      ]
+    },
+    {
+      "id": "line-height-percent",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 220,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "Designs move to Drawpane with their type intact: sizes, weights, spacing and wrapping.",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "lineHeight": {
+            "unit": "percent",
+            "value": 150
+          }
+        }
+      ]
+    },
+    {
+      "id": "letter-spacing-px",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "The quick brown fox",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "letterSpacing": {
+            "unit": "px",
+            "value": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "letter-spacing-tight",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 32,
+          "fontWeight": 700,
+          "characters": "Tight",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "letterSpacing": {
+            "unit": "percent",
+            "value": -4
+          }
+        }
+      ]
+    },
+    {
+      "id": "align-center",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 220,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "Centred in its box",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textAlign": "center"
+        }
+      ]
+    },
+    {
+      "id": "align-right",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 220,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "Right in its box",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textAlign": "right"
+        }
+      ]
+    },
+    {
+      "id": "justify",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 220,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "Designs move to Drawpane with their type intact: sizes, weights, spacing and wrapping.",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "textAlign": "justify"
+        }
+      ]
+    },
+    {
+      "id": "box-middle",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 220,
+          "height": 90,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "Middle of a fixed box",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "none",
+          "textAlignVertical": "middle",
+          "textAlign": "center"
+        }
+      ]
+    },
+    {
+      "id": "upper",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 13,
+          "fontWeight": 600,
+          "characters": "The quick brown fox",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "textCase": "upper",
+          "letterSpacing": {
+            "unit": "px",
+            "value": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "underline",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "The quick brown fox",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "textDecoration": "underline"
+        }
+      ]
+    },
+    {
+      "id": "strikethrough",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "The quick brown fox",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "textDecoration": "strikethrough"
+        }
+      ]
+    },
+    {
+      "id": "runs",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "Mixed bold and colour runs",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "textRuns": [
+            {
+              "start": 6,
+              "end": 10,
+              "fontWeight": 700
+            },
+            {
+              "start": 15,
+              "end": 21,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#e8590c"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "paragraphs",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 220,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "characters": "First paragraph.\nSecond paragraph, after a gap.",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "paragraphSpacing": 12
+        }
+      ]
+    }
+  ]
+}

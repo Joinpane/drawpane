@@ -19,7 +19,7 @@
  * local font) stays unavailable: the inspector says why.
  */
 import type { FontFeatures } from "@drawpane/model";
-import type { ShapedGlyph, ShapedText, ShapingRun, TextMeasurer } from "./text";
+import type { FontMetrics, ShapedGlyph, ShapedText, ShapingRun, TextMeasurer } from "./text";
 
 type HarfBuzz = typeof import("harfbuzzjs");
 type HbFont = InstanceType<HarfBuzz["Font"]>;
@@ -383,6 +383,10 @@ export class ShapingMeasurer implements TextMeasurer {
 
   shape(text: string, run: ShapingRun): ShapedText | null {
     return this.shaper.shape(text, run);
+  }
+
+  metrics(font: string): FontMetrics | null {
+    return this.base.metrics?.(font) ?? null;
   }
 
   get generation(): number {

@@ -1207,7 +1207,7 @@ export class CanvasRenderer {
   #greek(ctx: Ctx, node: NodeRecord, width: number, override?: string): void {
     const props = node.props;
     const size = getProp(props, "fontSize");
-    const lh = lineHeightPx(props);
+    const lh = lineHeightPx(props, this.#measurer);
     const height = getProp(props, "height");
     const lines = Math.max(1, Math.round(height / Math.max(1, lh)));
     const fills = getProp(props, "fills");
@@ -1257,6 +1257,7 @@ export class CanvasRenderer {
         for (const frag of line.fragments) {
           if (!frag.text) continue;
           c.font = frag.font;
+          c.fontKerning = "normal";
           if (spaced)
             (c as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
           paint(frag, x0 + frag.x, line.baseline + dy);
@@ -1439,6 +1440,7 @@ export class CanvasRenderer {
       const baseline = line.baseline + dy;
       for (const frag of line.fragments) {
         ctx.font = frag.font;
+        ctx.fontKerning = "normal";
         if (spaced)
           (ctx as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
         const paints = override
