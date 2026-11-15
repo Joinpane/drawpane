@@ -1,0 +1,25 @@
+{
+  "name": "@drawpane/figma",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "Converts Figma files, as Figma's REST API returns them, to Drawpane files. Pure TypeScript: runs in the browser, in Workers and in tests.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@drawpane/import-kit": "workspace:*",
+    "@drawpane/model": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1261,3 +1261,11 @@
   font-variant-numeric: tabular-nums;
   vertical-align: 1px;
 }
+/* Figma or Penpot: two halves of the dialog's width. */
+.import-source > .dp-seg {
+  display: flex;
+}
+.import-source > .dp-seg > .dp-seg__option {
+  flex: 1;
+  justify-content: center;
+}

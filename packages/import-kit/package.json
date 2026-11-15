@@ -1,0 +1,21 @@
+{
+  "name": "@drawpane/import-kit",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "What Drawpane's importers share: affines and boxes in a frame's space, SVG path data, and notes on what an import couldn't carry over exactly. Pure TypeScript.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

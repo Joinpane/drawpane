@@ -3,6 +3,8 @@
  * importing gets a short, honest summary ("3 boolean groups became paths")
  * instead of silent differences.
  */
+import { NoteBook } from "@drawpane/import-kit";
+
 export const NOTE_TEXT = {
   "boolean-flattened": ["boolean group became a path", "boolean groups became paths"],
   "svg-raw-skipped": ["raw SVG element wasn't imported", "raw SVG elements weren't imported"],
@@ -55,26 +57,9 @@ export const NOTE_TEXT = {
 
 export type NoteKind = keyof typeof NOTE_TEXT;
 
-export class Notes {
-  readonly #counts = new Map<NoteKind, number>();
-
-  add(kind: NoteKind, count = 1): void {
-    this.#counts.set(kind, (this.#counts.get(kind) ?? 0) + count);
-  }
-
-  merge(other: Notes): void {
-    for (const [kind, count] of other.entries()) this.add(kind, count);
-  }
-
-  entries(): Array<[NoteKind, number]> {
-    return [...this.#counts.entries()];
-  }
-
-  /** "2 boolean groups became paths", one line per kind. */
-  lines(): string[] {
-    return this.entries().map(([kind, count]) => {
-      const [one, many] = NOTE_TEXT[kind];
-      return count === 1 ? `1 ${one}` : `${count} ${many}`;
-    });
+/** Penpot's notes (see NoteBook). */
+export class Notes extends NoteBook<NoteKind> {
+  constructor() {
+    super(NOTE_TEXT);
   }
 }
