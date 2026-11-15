@@ -401,8 +401,11 @@ function FileEditor({ fileId }: { fileId: string }) {
       drawpaneVersion?: Editor;
       /** Glass's constants, for calibration (tools/glass-calibration). */
       drawpaneGlass?: { set: typeof setGlassTuning; get: typeof glassTuning };
+      /** The canvas and HarfBuzz text measurers, for the text parity test. */
+      drawpaneMeasurers?: () => Promise<typeof import("./measure-parity")>;
     };
     w.drawpane = editor;
+    w.drawpaneMeasurers = () => import("./measure-parity");
     w.drawpaneGlass = { set: setGlassTuning, get: glassTuning };
     w.drawpaneFrames = frameStatsFor(editor);
     w.drawpaneVersion = history.view.preview;
