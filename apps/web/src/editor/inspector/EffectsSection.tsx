@@ -33,6 +33,7 @@ import {
 import { ColorRow } from "./ColorRow";
 import { common } from "./fields";
 import { AddItemButton, ItemEditor, ItemRow, useItemEditor } from "./ItemList";
+import { moveItem, remapIndex, useReorder } from "./reorder";
 
 type Effect = PropValues["effects"][number];
 type EffectType = Effect["type"];
@@ -119,6 +120,15 @@ export function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeR
       label,
     );
   const current = items.open === null ? null : (effects?.[items.open] ?? null);
+  const { rowProps } = useReorder({
+    order: (effects ?? []).map((_, i) => i),
+    onMove: (from, to) => {
+      if (!effects) return;
+      set(moveItem(effects, from, to), "Reorder effects");
+      // An open editor stays with its effect.
+      items.setOpen((open) => (open === null ? null : remapIndex(open, from, to)));
+    },
+  });
 
   return (
     <PropertySection
@@ -157,6 +167,7 @@ export function EffectsSection({ editor, nodes }: { editor: Editor; nodes: NodeR
               );
               items.setOpen(null);
             }}
+            reorder={rowProps(i)}
           />
         ))
       )}

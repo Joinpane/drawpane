@@ -1494,3 +1494,59 @@
   outline: none;
   box-shadow: var(--shadow-focus);
 }
+
+/* Reordering paints, effects and layout grids by dragging (reorder.ts). */
+.paint-row[data-reorderable],
+.item-row[data-reorderable] {
+  position: relative;
+}
+/* A grip in the gutter while hovered: the row can be picked up. */
+.paint-row[data-reorderable]::before,
+.item-row[data-reorderable]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: -8px;
+  width: 6px;
+  height: 10px;
+  background: radial-gradient(circle, var(--icon) 0.8px, transparent 1.1px) 0 0 / 3px 3.33px;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity var(--duration-hover);
+  pointer-events: none;
+}
+.paint-row[data-reorderable]:hover::before,
+.item-row[data-reorderable]:hover::before,
+[data-reorder="dragging"]::before {
+  opacity: 0.7;
+}
+/* The others make room for it. */
+[data-reorder="shifting"] {
+  transition: transform var(--duration-popover) cubic-bezier(0.2, 0, 0, 1);
+}
+/* The row being dragged rides above them, under the pointer, on a card
+   that takes in its grip (the inspector's gutter is 12px). */
+[data-reorder="dragging"] {
+  z-index: 1;
+}
+[data-reorder="dragging"]::after {
+  content: "";
+  position: absolute;
+  inset: -4px -6px -4px -11px;
+  z-index: -1;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  pointer-events: none;
+}
+/* The pointer is captured by the dragged row, so its cursor is the one shown. */
+:root.dp-reordering {
+  cursor: grabbing;
+  user-select: none;
+}
+.paint-row[data-reorder="dragging"],
+.paint-row[data-reorder="dragging"] *,
+.item-row[data-reorder="dragging"],
+.item-row[data-reorder="dragging"] * {
+  cursor: grabbing;
+}

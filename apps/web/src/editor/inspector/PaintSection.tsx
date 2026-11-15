@@ -23,6 +23,7 @@ import { Bindable } from "../tokens/Bindable";
 import { common, Num, Select, useDisclosure } from "./fields";
 import { PaintPicker } from "./PaintPicker";
 import { gradientAngle, rgbaOf, shownOpacity, swatchCss, withShownOpacity } from "./paint";
+import { moveItem, useReorder } from "./reorder";
 import { forMode, type SidesMode, sidesMode, withSide, withWeight } from "./stroke-sides";
 
 export function PaintSection({
@@ -49,6 +50,10 @@ export function PaintSection({
     );
   // The topmost paint draws last; list it first, like the layers panel.
   const order = (paints ?? []).map((_, i) => i).reverse();
+  const { rowProps } = useReorder({
+    order,
+    onMove: (from, to) => paints && set(moveItem(paints, from, to), `Reorder ${lower}s`),
+  });
 
   return (
     <PropertySection
@@ -58,7 +63,7 @@ export function PaintSection({
       {paints === null ? (
         <p className="inspector__mixed">Mixed {lower}s. Add one to replace them.</p>
       ) : (
-        order.map((i) => {
+        order.map((i, position) => {
           const paint = paints[i] as Paint;
           const replace = (next: Paint, label: string) =>
             set(
@@ -66,7 +71,12 @@ export function PaintSection({
               label,
             );
           return (
-            <div key={i} className="paint-row" data-hidden={paint.visible === false || undefined}>
+            <div
+              key={i}
+              className="paint-row"
+              data-hidden={paint.visible === false || undefined}
+              {...rowProps(position)}
+            >
               <PaintSwatch
                 editor={editor}
                 nodes={nodes}
