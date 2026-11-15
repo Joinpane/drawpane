@@ -72,6 +72,7 @@ import { ImageDrop, UploadTray } from "./ImageDrop";
 import { InboxMenu } from "./InboxMenu";
 import { InspectPanel } from "./InspectPanel";
 import { Inspector } from "./inspector/Inspector";
+import { isTyping } from "./keymap";
 import { LayersPanel, PagesList } from "./LayersPanel";
 import { Lens } from "./Lens";
 import { BrowseLibrariesDialog } from "./libraries/LibrarySections";
@@ -79,6 +80,7 @@ import { PublishDialog } from "./libraries/PublishDialog";
 import { Minimap } from "./Minimap";
 import { chooseImageFiles, filesFrom, importImageFiles, pasteFromClipboard } from "./media";
 import { PaneResizer } from "./PaneResizer";
+import { usePageZoomLock } from "./page-zoom";
 import { clampPane, PANE, panelLayout, setPanelLayout, usePanelLayout } from "./panel-layout";
 import { PrototypePanel } from "./prototype/PrototypePanel";
 import { RULER, RULER_GAP, Rulers } from "./Rulers";
@@ -114,17 +116,6 @@ function isControl(target: EventTarget | null): boolean {
   );
 }
 
-function isTyping(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  return (
-    !!el &&
-    (el.isContentEditable ||
-      el.tagName === "INPUT" ||
-      el.tagName === "TEXTAREA" ||
-      el.tagName === "SELECT")
-  );
-}
-
 function FileEditor({ fileId }: { fileId: string }) {
   const navigate = useNavigate();
   const meta = useQuery({
@@ -136,6 +127,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     () => new Editor({ measurer: textMeasurer(), booleanEngine: loadBooleanEngine }),
   );
   const interaction = useMemo(() => new Interaction(editor), [editor]);
+  usePageZoomLock();
   const [commandOpen, setCommandOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [leftOpen, setLeftOpen] = useState(true);
