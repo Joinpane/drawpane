@@ -47,7 +47,8 @@ interface Scenes {
 /** One fitted constant: its range, and the first step the search takes. */
 const SEARCH: Record<string, { min: number; max: number; step: number }> = {
   bend: { min: 0.05, max: 1.2, step: 0.1 },
-  profile: { min: 1, max: 6, step: 0.5 },
+  rimSigma: { min: 0.1, max: 1.5, step: 0.1 },
+  profile: { min: 0.3, max: 4, step: 0.3 },
   dispersion: { min: 0, max: 0.8, step: 0.05 },
   frost: { min: 0.1, max: 3, step: 0.2 },
   angleOffset: { min: -180, max: 180, step: 45 },
