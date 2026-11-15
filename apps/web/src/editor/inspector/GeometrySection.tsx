@@ -6,7 +6,7 @@
 import type { Editor } from "@drawpane/editor";
 import { FRAME_PRESETS, framePreset, matchFramePreset } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { IconButton, PropertyRow, PropertySection, SegmentedControl } from "@drawpane/ui";
+import { IconButton, PropertySection, SegmentedControl } from "@drawpane/ui";
 import { shortcutFor } from "../actions";
 import { common, Num } from "./fields";
 
@@ -19,10 +19,10 @@ export function GeometrySection({ editor, nodes }: { editor: Editor; nodes: Node
       {only?.type === "frame" && getProp(only.props, "instanceOf") === null ? (
         <FrameSize editor={editor} frame={only} />
       ) : null}
-      <PropertyRow>
+      <div className="inspector__size">
         <Num editor={editor} nodes={nodes} prop="x" label="X" ariaLabel="X position" />
         <Num editor={editor} nodes={nodes} prop="y" label="Y" ariaLabel="Y position" />
-      </PropertyRow>
+      </div>
       <div className="inspector__size">
         <Num
           editor={editor}

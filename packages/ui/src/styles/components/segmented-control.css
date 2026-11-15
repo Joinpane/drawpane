@@ -1,5 +1,7 @@
+/* Border-box, so a control stretched to its column's width ends at the column's edge. */
 .dp-seg {
   display: inline-flex;
+  box-sizing: border-box;
   gap: 2px;
   padding: 2px;
   border-radius: var(--radius-sm);

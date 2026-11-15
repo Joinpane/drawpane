@@ -107,7 +107,7 @@ export function ComponentSection({ nodes }: { nodes: readonly NodeRecord[] }) {
           ) : null}
           {isRoot ? <SwapInstance instanceId={only.id} /> : null}
           {isRoot ? (
-            <Button size="sm" variant="ghost" onClick={() => editor.detachInstances()}>
+            <Button size="sm" onClick={() => editor.detachInstances()}>
               Detach
             </Button>
           ) : null}
@@ -129,7 +129,6 @@ function SwapInstance({ instanceId }: { instanceId: string }) {
       <Button
         ref={setButton}
         size="sm"
-        variant="ghost"
         icon="instance"
         aria-haspopup="menu"
         aria-expanded={open}
@@ -197,11 +196,7 @@ function MainComponent({ node }: { node: NodeRecord }) {
       />
       {uses > 0 ? (
         <div className="component-actions">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => editor.select([...instancesOf(editor.doc, node.id)])}
-          >
+          <Button size="sm" onClick={() => editor.select([...instancesOf(editor.doc, node.id)])}>
             Select instances
           </Button>
         </div>

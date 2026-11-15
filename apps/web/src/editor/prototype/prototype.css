@@ -9,7 +9,8 @@
 .easing > .dp-seg > .dp-seg__option {
   flex: 1;
 }
-.proto__intro {
+/* Scoped to the panel so it outranks .inspector__hint's padding, which loads later. */
+.proto > .proto__intro {
   padding-bottom: var(--space-300);
 }
 .proto__note {

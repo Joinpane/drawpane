@@ -1439,6 +1439,32 @@
 .pane__tabs .dp-seg {
   width: 100%;
 }
+/*
+ * The right pane scrolls as one; its tabs stay put, on the pane's surface,
+ * above what scrolls under them.
+ */
+.pane--right > .pane__tabs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface);
+}
+/* A hairline under the tabs once content has scrolled under them, where the browser ties animations to scrolling. */
+@supports (animation-timeline: scroll()) {
+  .pane--right > .pane__tabs {
+    animation: pane-tabs-edge linear both;
+    animation-timeline: scroll(nearest block);
+    animation-range: 0 var(--space-200);
+  }
+}
+@keyframes pane-tabs-edge {
+  from {
+    box-shadow: 0 1px 0 transparent;
+  }
+  to {
+    box-shadow: 0 1px 0 var(--line);
+  }
+}
 
 /* Assets */
 .assets {
