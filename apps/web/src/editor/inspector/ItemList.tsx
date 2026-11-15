@@ -10,6 +10,7 @@
  */
 import { DropdownMenu, Icon, IconButton, type IconName, MenuButton, Popover } from "@drawpane/ui";
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import type { ReorderRowProps } from "./reorder";
 
 export interface ItemKind<T extends string> {
   readonly type: T;
@@ -52,6 +53,7 @@ export function ItemRow({
   onOpen,
   onToggleHidden,
   onRemove,
+  reorder,
 }: {
   kind: ItemKind<string>;
   /** A glance at its values: "0 4 12 0", "12 · stretch". */
@@ -62,10 +64,17 @@ export function ItemRow({
   onOpen: () => void;
   onToggleHidden: () => void;
   onRemove: () => void;
+  /** From `useReorder`, when the list can be dragged into a new order. */
+  reorder?: ReorderRowProps | undefined;
 }) {
   const noun = kind.label.toLowerCase();
   return (
-    <div className="item-row" data-hidden={hidden || undefined} data-open={open || undefined}>
+    <div
+      className="item-row"
+      data-hidden={hidden || undefined}
+      data-open={open || undefined}
+      {...reorder}
+    >
       <button
         ref={buttonRef}
         type="button"
