@@ -108,6 +108,24 @@ export function AppearanceSection({
           />
         </PropertyRow>
       ) : null}
+      {maskable.length === nodes.length && common(maskable, "isMask") ? (
+        <PropertyRow columns="label">
+          <span className="inspector__label">Masks by</span>
+          <Select
+            label="Mask type"
+            value={common(maskable, "maskType")}
+            mixed={common(maskable, "maskType") === null}
+            options={[
+              { value: "outline", label: "Outline" },
+              { value: "alpha", label: "Alpha" },
+              { value: "luminance", label: "Luminance" },
+            ]}
+            onChange={(v) =>
+              editor.setProp(ids, "maskType", v === "outline" ? null : v, "Mask type")
+            }
+          />
+        </PropertyRow>
+      ) : null}
       {frames.length === nodes.length ? (
         <PropertyRow columns="label">
           <span className="inspector__label">Clip</span>

@@ -684,29 +684,46 @@ export function exportSvg(
     else into.push(...drawn);
   };
 
-  /** A parent's children; layers above a mask go in a group clipped to the mask's outline. */
+  /**
+   * A parent's children; layers above a mask go in a group clipped to the
+   * mask's outline, or masked by its own picture (its alpha, or luminance).
+   */
   const visitChildren = (parentId: string, into: string[]) => {
     if (!hasMask(scene.doc, parentId)) {
       for (const child of scene.doc.childIds(parentId)) visit(child, into);
       return;
     }
-    let clipped: string[] | null = null;
-    let clip = "";
+    let masked: string[] | null = null;
+    let wrapper = "";
     const flush = () => {
-      if (clipped && clipped.length > 0)
-        into.push(`<g clip-path="url(#${clip})">${clipped.join("")}</g>`);
-      clipped = null;
+      if (masked && masked.length > 0) into.push(`<g ${wrapper}>${masked.join("")}</g>`);
+      masked = null;
     };
     for (const { id, isMask } of maskScopes(scene.doc, parentId)) {
       if (!isMask) {
-        visit(id, clipped ?? into);
+        visit(id, masked ?? into);
         continue;
       }
       flush();
       const mask = scene.doc.get(id) as NodeRecord;
+      const type = getProp(mask.props, "maskType");
+      if (type !== "outline") {
+        // The mask layer drawn as itself inside a <mask>, over its whole reach.
+        const region = exportBounds(scene, [id]);
+        if (!region) continue;
+        const picture: string[] = [];
+        visit(id, picture);
+        const ref = out.id("mask");
+        out.defs.push(
+          `<mask id="${ref}" maskUnits="userSpaceOnUse"${attr("x", region.x)}${attr("y", region.y)}${attr("width", region.width)}${attr("height", region.height)} style="mask-type:${type}">${picture.join("")}</mask>`,
+        );
+        wrapper = `mask="url(#${ref})"`;
+        masked = [];
+        continue;
+      }
       const shape = shapeOf(mask, getProp(mask.props, "width"), getProp(mask.props, "height"));
       if (!shape) continue;
-      clip = out.id("mask");
+      const clip = out.id("mask");
       const rule =
         mask.type === "path" && getProp(mask.props, "windingRule") === "evenodd"
           ? ' clip-rule="evenodd"'
@@ -714,7 +731,8 @@ export function exportSvg(
       out.defs.push(
         `<clipPath id="${clip}"><${shape.tag}${transformAttr(scene.worldMatrix(id))}${shape.attrs}${rule}/></clipPath>`,
       );
-      clipped = [];
+      wrapper = `clip-path="url(#${clip})"`;
+      masked = [];
     }
     flush();
   };

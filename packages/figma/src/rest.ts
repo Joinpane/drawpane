@@ -126,6 +126,8 @@ export interface Node {
   readonly blendMode?: string;
   readonly isMask?: boolean;
   readonly maskType?: "ALPHA" | "VECTOR" | "LUMINANCE";
+  /** Older files' word for a mask by outline (a VECTOR mask). */
+  readonly isMaskOutline?: boolean;
   readonly relativeTransform?: Transform;
   readonly size?: Vector;
   readonly absoluteBoundingBox?: { x: number; y: number; width: number; height: number } | null;

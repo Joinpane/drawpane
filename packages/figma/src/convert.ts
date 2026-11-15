@@ -168,8 +168,10 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     if (effects.length > 0) props.effects = effects;
     if (node.isMask) {
       props.isMask = true;
-      if (node.maskType === "LUMINANCE" || (node.maskType !== "VECTOR" && softMask(node)))
-        notes.add("mask-alpha");
+      // Figma's masks mask by their alpha unless set otherwise (older files say so with
+      // isMaskOutline); Drawpane's default is the outline.
+      const type = node.maskType ?? (node.isMaskOutline ? "VECTOR" : "ALPHA");
+      if (type !== "VECTOR") props.maskType = type === "LUMINANCE" ? "luminance" : "alpha";
     }
 
     let type: NodeRecord["type"];
@@ -274,14 +276,6 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
 }
 
 /** A mask Figma draws by its alpha that Drawpane's outline mask would draw differently. */
-function softMask(node: Figma.Node): boolean {
-  return (node.fills ?? []).some(
-    (p) =>
-      p.visible !== false &&
-      (p.type !== "SOLID" || (p.opacity ?? 1) < 0.999 || (p.color?.a ?? 1) < 0.999),
-  );
-}
-
 /** An ellipse cut into an arc or a ring: Drawpane draws those as paths. */
 function isArc(node: Figma.Node): boolean {
   const a = node.arcData;

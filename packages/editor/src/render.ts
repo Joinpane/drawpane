@@ -21,6 +21,7 @@ import {
 } from "./gradients";
 import { ImageCache, imagePlacement } from "./images";
 import { Inradii } from "./inradius";
+import { LuminanceMask } from "./luminance";
 import { markerLength, markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
 import { NoiseTiles, paintNoise } from "./noise";
@@ -285,6 +286,11 @@ export class CanvasRenderer {
   readonly #postCanvases: Array<OffscreenCanvas | HTMLCanvasElement> = [];
   /** Draws glass effects, with its own canvases and (made on first use) WebGL context. */
   readonly #glass = new GlassPainter();
+  /** Canvases for layers masked by a mask's picture (see #drawMasked), and how deep that nests. */
+  readonly #maskCanvases: AnyCanvas[] = [];
+  #maskDepth = 0;
+  /** Turns a luminance mask's picture into alpha. */
+  readonly #luminance = new LuminanceMask();
   /** How thick glass layers' shapes are, measured once per version (see inradius.ts). */
   readonly #inradii = new Inradii();
   /** What's behind a background blur, read for it (see #backgroundBlur). */
@@ -936,8 +942,9 @@ export class CanvasRenderer {
   }
 
   /**
-   * Draws a parent's children bottom first. A mask isn't drawn: its outline
-   * clips the children above it, up to the next mask.
+   * Draws a parent's children bottom first. A mask isn't drawn itself: it
+   * masks the children above it, up to the next mask, by its outline (a
+   * clip) or by its alpha or luminance (see #drawMasked).
    */
   #drawChildren(
     ctx: Ctx,
@@ -955,13 +962,26 @@ export class CanvasRenderer {
       return;
     }
     let clipping = false;
+    // Layers above a mask that masks by its picture, gathered to draw together.
+    let scope: { mask: NodeRecord; ids: string[] } | null = null;
+    const flush = () => {
+      if (scope) this.#drawMasked(ctx, scope.mask, scope.ids, camera, dpr, alpha, blend);
+      scope = null;
+    };
     for (const { id, isMask } of maskScopes(doc, parentId)) {
       if (!isMask) {
-        this.#draw(ctx, id, camera, dpr, visible, alpha, blend);
+        if (scope) (scope as { ids: string[] }).ids.push(id);
+        else this.#draw(ctx, id, camera, dpr, visible, alpha, blend);
         continue;
       }
-      const mask = doc.get(id) as NodeRecord;
+      flush();
       if (clipping) ctx.restore();
+      clipping = false;
+      const mask = doc.get(id) as NodeRecord;
+      if (getProp(mask.props, "maskType") !== "outline") {
+        scope = { mask, ids: [] };
+        continue;
+      }
       ctx.save();
       clipping = true;
       const m = this.#scene.worldMatrix(id);
@@ -981,7 +1001,97 @@ export class CanvasRenderer {
       );
       ctx.clip(shape, mask.type === "path" ? getProp(mask.props, "windingRule") : "nonzero");
     }
+    flush();
     if (clipping) ctx.restore();
+  }
+
+  /**
+   * Layers masked by a mask's picture, as in Figma (decision 0016): they're
+   * drawn into a canvas of their own over the mask's reach (outside it,
+   * nothing of them shows), the mask layer into another (its fills,
+   * gradients, opacity and effects), and kept where the mask's alpha is (or
+   * its luminance, turned into alpha). Then that goes on the canvas.
+   */
+  #drawMasked(
+    ctx: Ctx,
+    mask: NodeRecord,
+    ids: readonly string[],
+    camera: Camera,
+    dpr: number,
+    alpha: number,
+    blend: GlobalCompositeOperation,
+  ): void {
+    if (ids.length === 0) return;
+    const region = exportBounds(this.#scene, [mask.id]);
+    if (!region) return;
+    const x0 = Math.max(0, Math.floor((region.x * camera.zoom + camera.x) * dpr));
+    const y0 = Math.max(0, Math.floor((region.y * camera.zoom + camera.y) * dpr));
+    const x1 = Math.min(
+      ctx.canvas.width,
+      Math.ceil(((region.x + region.width) * camera.zoom + camera.x) * dpr),
+    );
+    const y1 = Math.min(
+      ctx.canvas.height,
+      Math.ceil(((region.y + region.height) * camera.zoom + camera.y) * dpr),
+    );
+    if (x1 <= x0 || y1 <= y0) return;
+    const w = x1 - x0;
+    const h = y1 - y0;
+    const depth = this.#maskDepth;
+    const content = this.#maskCanvas(depth * 2, w, h);
+    const picture = this.#maskCanvas(depth * 2 + 1, w, h);
+    const cctx = content?.getContext("2d") as Ctx | null | undefined;
+    const mctx = picture?.getContext("2d") as Ctx | null | undefined;
+    if (!content || !picture || !cctx || !mctx) return;
+    for (const c of [cctx, mctx]) {
+      resetState(c);
+      c.clearRect(0, 0, w, h);
+    }
+    // The same camera, moved so the region's corner is the canvases' own.
+    const shifted = new Camera(camera.x - x0 / dpr, camera.y - y0 / dpr, camera.zoom);
+    const holds = {
+      x: -shifted.x / camera.zoom,
+      y: -shifted.y / camera.zoom,
+      width: w / dpr / camera.zoom,
+      height: h / dpr / camera.zoom,
+    };
+    // Drawn whole into canvases of their own: not the parts of a partial redraw.
+    const parts = this.#parts;
+    const fresh = this.#fresh;
+    this.#parts = null;
+    this.#fresh = null;
+    this.#maskDepth++;
+    try {
+      for (const id of ids) this.#draw(cctx, id, shifted, dpr, holds, alpha, blend);
+      this.#draw(mctx, mask.id, shifted, dpr, holds, 1, "source-over");
+    } finally {
+      this.#maskDepth--;
+      this.#parts = parts;
+      this.#fresh = fresh;
+    }
+    if (getProp(mask.props, "maskType") === "luminance") this.#luminance.apply(picture, w, h);
+    resetState(cctx);
+    cctx.globalCompositeOperation = "destination-in";
+    cctx.drawImage(picture, 0, 0, w, h, 0, 0, w, h);
+    cctx.globalCompositeOperation = "source-over";
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.filter = "none";
+    ctx.drawImage(content, 0, 0, w, h, x0, y0, w, h);
+    ctx.restore();
+  }
+
+  /** Canvases for masked layers and their masks: two per nesting depth, grown as needed. */
+  #maskCanvas(slot: number, w: number, h: number): AnyCanvas | null {
+    const canvas = scratch(
+      this.#maskCanvases[slot] ?? null,
+      Math.max(w, this.#maskCanvases[slot]?.width ?? 0),
+      Math.max(h, this.#maskCanvases[slot]?.height ?? 0),
+    );
+    if (canvas) this.#maskCanvases[slot] = canvas;
+    return canvas;
   }
 
   #effectReach(node: NodeRecord): number {
