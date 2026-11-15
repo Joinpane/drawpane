@@ -28,7 +28,7 @@ After changing `scenes.json`, run `node tools/glass-calibration/build-plugin.mjs
    FIGMA_TOKEN=… node tools/glass-calibration/fetch-figma.mjs <file link> /tmp/glass-figma
    ```
 
-2. Build, then fit. It takes about 12 minutes for 6 rounds:
+2. Build, then fit. It takes about 12 minutes for 6 rounds (`ROUNDS=0` only scores the current constants):
 
    ```sh
    pnpm build
@@ -44,7 +44,8 @@ After changing `scenes.json`, run `node tools/glass-calibration/build-plugin.mjs
 
 - **First fit** (November 2026): the mean difference went from 10.3 to 3.2 (of 255, over the glass and its rim). Capping the rim at the shape's inner radius, and fitting again, brought it to 2.7, but deep rims still creased at rounded corners.
 - **Glass v3** (decision 0007's smooth height field) traded a little of that mean for no creases, fans or shimmer anywhere: 3.0, with every cell but the deepest rim within 4.5 and most about 2.
-- **The largest gap left** is a rim much deeper than the shape (`depth-80`): Figma bends the surroundings into closed loops there, a profile v3 doesn't model yet.
+- **Rims no deeper than the shape is thick** (decision 0007's revision of 2026-11-15) took `depth-80` from 20.2 to 16.9 and the mean to 2.84.
+- **The largest gap left** is still a rim much deeper than the shape (`depth-80`): Figma bends the surroundings into closed loops there, a profile v3 doesn't model yet, and its colours fringe far less than a share of the bend.
 
 `apps/web/e2e/bench/glass.spec.ts` measures what glass costs to draw.
 

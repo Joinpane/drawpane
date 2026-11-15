@@ -21,6 +21,45 @@ export function scratch(existing: AnyCanvas | null, w: number, h: number): AnyCa
   return canvas;
 }
 
+/**
+ * Copies `src`'s pixels in the rect (x, y, w, h), which may reach past its
+ * edges, to the top left of `out`. Past them the edge pixels repeat, as a
+ * texture clamped to its edge does: a blur or a bent ray there sees the
+ * backdrop go on, not fade to nothing, so glass and background blur look the
+ * same at the edge of the screen as away from it. Leaves `out` unfiltered
+ * and unsmoothed.
+ */
+export function copyExtended(src: AnyCanvas, out: Ctx, x: number, y: number, w: number, h: number) {
+  const ix0 = Math.min(Math.max(x, 0), src.width);
+  const iy0 = Math.min(Math.max(y, 0), src.height);
+  const ix1 = Math.min(Math.max(x + w, 0), src.width);
+  const iy1 = Math.min(Math.max(y + h, 0), src.height);
+  out.save();
+  out.setTransform(1, 0, 0, 1, 0, 0);
+  out.globalCompositeOperation = "copy";
+  out.filter = "none";
+  out.imageSmoothingEnabled = false;
+  if (ix1 <= ix0 || iy1 <= iy0) {
+    out.clearRect(0, 0, w, h);
+    out.restore();
+    return;
+  }
+  const dx = ix0 - x;
+  const dy = iy0 - y;
+  const iw = ix1 - ix0;
+  const ih = iy1 - iy0;
+  out.drawImage(src, ix0, iy0, iw, ih, dx, dy, iw, ih);
+  out.globalCompositeOperation = "source-over";
+  const right = w - dx - iw;
+  const bottom = h - dy - ih;
+  // The edge columns stretched sideways, then the edge rows (corners included) up and down.
+  if (dx > 0) out.drawImage(out.canvas, dx, dy, 1, ih, 0, dy, dx, ih);
+  if (right > 0) out.drawImage(out.canvas, dx + iw - 1, dy, 1, ih, dx + iw, dy, right, ih);
+  if (dy > 0) out.drawImage(out.canvas, 0, dy, w, 1, 0, 0, w, dy);
+  if (bottom > 0) out.drawImage(out.canvas, 0, dy + ih - 1, w, 1, 0, dy + ih, w, bottom);
+  out.restore();
+}
+
 /** The vertex shader: one quad over the canvas, `uv` 0–1 from its bottom left. */
 const VERTEX = `#version 300 es
 in vec2 corner;

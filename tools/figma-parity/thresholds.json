@@ -105,5 +105,17 @@
     "texture-fine": 0.61,
     "texture-coarse": 2.34,
     "texture-clipped": 1.31
+  },
+  "glass": {
+    "text": 4.91,
+    "text-small": 1.8,
+    "star": 1.84,
+    "ellipse": 1.64,
+    "rotated": 1.57,
+    "polygon-path": 1.91,
+    "thin-bar": 1.08,
+    "small": 0.81,
+    "square-corners": 1.74,
+    "overlap": 2.46
   }
 }

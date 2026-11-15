@@ -4,7 +4,9 @@
  *
  * Drawn in device pixels, where the canvas has the backdrop:
  * 1. the backdrop under the layer (and a margin the bent rays reach into),
- *    blurred by the frost; and the layer's shape, as an anti-aliased mask;
+ *    blurred by the frost; and the layer's shape, as an anti-aliased mask.
+ *    Both reach past the canvas's edges, the backdrop's edge pixels
+ *    repeated there, so a layer the screen cuts has no rim along the cut;
  * 2. on the GPU, the rim's height: the shape blurred by a Gaussian as wide
  *    as the rim is deep, at a resolution the blur can spare, with its slope
  *    taken by derivative-of-Gaussian kernels in the same passes. The slope
@@ -25,6 +27,7 @@ import {
   begin,
   bindQuad,
   type Ctx,
+  copyExtended,
   draw,
   fits,
   type GlCanvas,
@@ -142,8 +145,10 @@ export function glassParams(
   glass: Glass,
   scale: number,
   tune: GlassTuning = glassTuning(),
+  /** The shape's largest inscribed radius, in its units: no rim is deeper (see inradius.ts). */
+  inradius = Number.POSITIVE_INFINITY,
 ): GlassParams {
-  const depth = Math.max(0, glass.depth) * scale;
+  const depth = Math.max(0, Math.min(glass.depth, inradius)) * scale;
   // Full refraction bends a ray a share of the rim's depth at its edge (never over less
   // than a few pixels). A rim deeper than the shape is wide fades into the one opposite.
   const refraction = (glass.refraction / 100) * tune.bend * Math.max(depth, 4 * scale);
@@ -413,9 +418,49 @@ function program(gl: WebGL2RenderingContext, fragment: string, label: string): P
 }
 
 /** Draws glass effects; keeps its canvases and WebGL context between frames. */
+/**
+ * What a layer's glass looked like the last time it was drawn whole on
+ * screen, and everything it depended on: on a pan, with nothing else
+ * changed, the same glass lands a whole number of pixels away and is copied
+ * rather than drawn again.
+ */
+interface Drawn {
+  /** The renderer's content generation: the backdrop and the layer as they were. */
+  readonly generation: number;
+  readonly look: Glass;
+  readonly tuning: GlassTuning;
+  /** The layer's device transform, less the whole-pixel offset of its region. */
+  readonly a: number;
+  readonly b: number;
+  readonly c: number;
+  readonly d: number;
+  readonly e: number;
+  readonly f: number;
+  readonly w: number;
+  readonly h: number;
+  readonly picture: AnyCanvas;
+}
+
+/** Pixels of glass kept for pans, at most (about 64 MB). */
+const KEPT_PIXELS = 16_000_000;
+
+/** A glass layer's shape: its outline, or what draws it in white into a mask (text's glyphs). */
+export type GlassShape = Path2D | ((mask: Ctx) => void);
+
+/** Where, and against what, a glass is drawn: for reusing what it drew (see `Drawn`). */
+export interface GlassKey {
+  readonly id: string;
+  readonly generation: number;
+}
+
 export class GlassPainter {
   #gl: Gl | null | undefined;
+  /** By layer, most recently drawn last. */
+  readonly #drawn = new Map<string, Drawn>();
+  #keptPixels = 0;
   #backdrop: AnyCanvas | null = null;
+  /** The backdrop before frosting. */
+  #plain: AnyCanvas | null = null;
   #shape: AnyCanvas | null = null;
 
   /** WebGL2 with half-float render targets, made on first use; null where there's none. */
@@ -462,12 +507,25 @@ export class GlassPainter {
 
   /**
    * Draws `glass` for a layer whose `shape` is in the context's current
-   * transform, over the box (0, 0, w, h). The context's opacity and
-   * blending apply to the result.
+   * transform, over the box (0, 0, w, h): a path, or what draws it in white
+   * (a text's glyphs, each a lens of its own, as in Figma). The context's opacity and
+   * blending apply to the result. With a `key`, what it draws whole on
+   * screen is kept, and drawn again by copying while nothing it depends on
+   * has changed.
    */
-  paint(ctx: Ctx, shape: Path2D, w: number, h: number, glass: Glass, scale: number): void {
+  paint(
+    ctx: Ctx,
+    shape: GlassShape,
+    w: number,
+    h: number,
+    glass: Glass,
+    scale: number,
+    key: GlassKey | null = null,
+    /** The shape's largest inscribed radius, in its units (see `glassParams`). */
+    inradius = Number.POSITIVE_INFINITY,
+  ): void {
     const t = ctx.getTransform();
-    const p = glassParams(glass, scale, glassTuning());
+    const p = glassParams(glass, scale, glassTuning(), inradius);
     // The layer's reach on the device, with the margin rays bend into, within the canvas.
     const xs: number[] = [];
     const ys: number[] = [];
@@ -480,54 +538,154 @@ export class GlassPainter {
       xs.push(t.a * px + t.c * py + t.e);
       ys.push(t.b * px + t.d * py + t.f);
     }
-    const x0 = Math.max(0, Math.floor(Math.min(...xs)) - p.margin);
-    const y0 = Math.max(0, Math.floor(Math.min(...ys)) - p.margin);
-    const x1 = Math.min(ctx.canvas.width, Math.ceil(Math.max(...xs)) + p.margin);
-    const y1 = Math.min(ctx.canvas.height, Math.ceil(Math.max(...ys)) + p.margin);
+    // Past the canvas's edges too, as far as the rim's shape and a ray's reach count for what's
+    // on it: cut at the edge, the shape would grow a rim along it, and the backdrop fade there.
+    const pad = p.margin + Math.ceil(3 * p.sigma);
+    const x0 = Math.max(-pad, Math.floor(Math.min(...xs)) - p.margin);
+    const y0 = Math.max(-pad, Math.floor(Math.min(...ys)) - p.margin);
+    const x1 = Math.min(ctx.canvas.width + pad, Math.ceil(Math.max(...xs)) + p.margin);
+    const y1 = Math.min(ctx.canvas.height + pad, Math.ceil(Math.max(...ys)) + p.margin);
     const rw = x1 - x0;
     const rh = y1 - y0;
     if (rw <= 0 || rh <= 0 || rw * rh > 24_000_000) return;
+    if (x1 <= 0 || y1 <= 0 || x0 >= ctx.canvas.width || y0 >= ctx.canvas.height) return;
     // The layer's centre, in the region's pixels with y up (as the shader works).
     const centre = {
       x: (Math.min(...xs) + Math.max(...xs)) / 2 - x0,
       y: rh - ((Math.min(...ys) + Math.max(...ys)) / 2 - y0),
     };
 
-    // The backdrop, frosted.
+    // All it reads is on the canvas: what it draws can be kept, or what was kept is good.
+    const whole = x0 >= 0 && y0 >= 0 && x1 <= ctx.canvas.width && y1 <= ctx.canvas.height;
+    const tune = glassTuning();
+    const kept = key ? this.#drawn.get(key.id) : undefined;
+    if (
+      key &&
+      kept &&
+      whole &&
+      kept.generation === key.generation &&
+      kept.look === glass &&
+      kept.tuning === tune &&
+      kept.a === t.a &&
+      kept.b === t.b &&
+      kept.c === t.c &&
+      kept.d === t.d &&
+      // The same within rounding: a pan moves it by whole pixels.
+      Math.abs(kept.e - (t.e - x0)) < 1e-6 &&
+      Math.abs(kept.f - (t.f - y0)) < 1e-6 &&
+      kept.w === w &&
+      kept.h === h &&
+      kept.picture.width === rw &&
+      kept.picture.height === rh
+    ) {
+      // Most recently used last.
+      this.#drawn.delete(key.id);
+      this.#drawn.set(key.id, kept);
+      this.#place(ctx, kept.picture, x0, y0, rw, rh);
+      return;
+    }
+
+    // The backdrop (its edge pixels repeated past the canvas's), frosted.
     this.#backdrop = scratch(this.#backdrop, rw, rh);
     const backdrop = this.#backdrop?.getContext("2d") as Ctx | null | undefined;
     if (!this.#backdrop || !backdrop) return;
-    backdrop.setTransform(1, 0, 0, 1, 0, 0);
-    backdrop.clearRect(0, 0, rw, rh);
-    backdrop.filter = p.frost > 0 ? `blur(${p.frost}px)` : "none";
-    backdrop.drawImage(ctx.canvas, x0, y0, rw, rh, 0, 0, rw, rh);
-    backdrop.filter = "none";
-
-    const gl = this.#webgl();
-    if (!gl || !fits(gl, rw, rh)) {
-      this.#fallback(ctx, shape, p, x0, y0, rw, rh);
-      return;
-    }
+    if (p.frost > 0) {
+      this.#plain = scratch(this.#plain, rw, rh);
+      const plain = this.#plain?.getContext("2d") as Ctx | null | undefined;
+      if (!this.#plain || !plain) return;
+      copyExtended(ctx.canvas, plain, x0, y0, rw, rh);
+      backdrop.setTransform(1, 0, 0, 1, 0, 0);
+      backdrop.globalCompositeOperation = "copy";
+      backdrop.filter = `blur(${p.frost}px)`;
+      backdrop.drawImage(this.#plain, 0, 0);
+      backdrop.filter = "none";
+      backdrop.globalCompositeOperation = "source-over";
+    } else copyExtended(ctx.canvas, backdrop, x0, y0, rw, rh);
 
     // The shape, anti-aliased.
     this.#shape = scratch(this.#shape, rw, rh);
     const mask = this.#shape?.getContext("2d") as Ctx | null | undefined;
     if (!this.#shape || !mask) return;
     mask.setTransform(1, 0, 0, 1, 0, 0);
+    mask.globalCompositeOperation = "source-over";
     mask.clearRect(0, 0, rw, rh);
     mask.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0);
     mask.fillStyle = "#fff";
-    mask.fill(shape);
+    if (typeof shape === "function") shape(mask);
+    else mask.fill(shape);
 
-    if (!this.#draw(gl, p, rw, rh, centre)) {
+    const gl = this.#webgl();
+    if (!gl || !fits(gl, rw, rh) || !this.#draw(gl, p, rw, rh, centre)) {
       this.#fallback(ctx, shape, p, x0, y0, rw, rh);
       return;
     }
+    this.#place(ctx, gl.canvas, x0, y0, rw, rh);
+    if (key && whole) this.#keep(key, glass, tune, t, x0, y0, w, h, gl.canvas, rw, rh);
+    else if (key) this.#forget(key.id);
+  }
+
+  /** Draws the top left rw × rh of `picture` at (x0, y0) on the device. */
+  #place(ctx: Ctx, picture: AnyCanvas, x0: number, y0: number, rw: number, rh: number) {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.filter = "none";
-    ctx.drawImage(gl.canvas, 0, 0, rw, rh, x0, y0, rw, rh);
+    ctx.drawImage(picture, 0, 0, rw, rh, x0, y0, rw, rh);
     ctx.restore();
+  }
+
+  /** Keeps what a layer's glass drew, within the budget, dropping the least recently drawn. */
+  #keep(
+    key: GlassKey,
+    look: Glass,
+    tuning: GlassTuning,
+    t: DOMMatrix,
+    x0: number,
+    y0: number,
+    w: number,
+    h: number,
+    from: AnyCanvas,
+    rw: number,
+    rh: number,
+  ) {
+    if (rw * rh > KEPT_PIXELS / 4) {
+      this.#forget(key.id);
+      return;
+    }
+    const old = this.#drawn.get(key.id);
+    this.#forget(key.id);
+    const picture = scratch(old?.picture ?? null, rw, rh);
+    const pctx = picture?.getContext("2d") as Ctx | null | undefined;
+    if (!picture || !pctx) return;
+    pctx.setTransform(1, 0, 0, 1, 0, 0);
+    pctx.globalCompositeOperation = "copy";
+    pctx.drawImage(from, 0, 0, rw, rh, 0, 0, rw, rh);
+    pctx.globalCompositeOperation = "source-over";
+    this.#drawn.set(key.id, {
+      generation: key.generation,
+      look,
+      tuning,
+      a: t.a,
+      b: t.b,
+      c: t.c,
+      d: t.d,
+      e: t.e - x0,
+      f: t.f - y0,
+      w,
+      h,
+      picture,
+    });
+    this.#keptPixels += rw * rh;
+    for (const id of this.#drawn.keys()) {
+      if (this.#keptPixels <= KEPT_PIXELS) break;
+      this.#forget(id);
+    }
+  }
+
+  #forget(id: string) {
+    const drawn = this.#drawn.get(id);
+    if (!drawn) return;
+    this.#keptPixels -= drawn.picture.width * drawn.picture.height;
+    this.#drawn.delete(id);
   }
 
   /**
@@ -641,7 +799,7 @@ export class GlassPainter {
   /** No WebGL2: the frosted backdrop inside the shape, and a highlight along the lit rim. */
   #fallback(
     ctx: Ctx,
-    shape: Path2D,
+    shape: GlassShape,
     p: GlassParams,
     x0: number,
     y0: number,
@@ -650,9 +808,25 @@ export class GlassPainter {
   ) {
     const backdrop = this.#backdrop;
     if (!backdrop) return;
-    ctx.save();
-    ctx.clip(shape);
     const t = ctx.getTransform();
+    ctx.save();
+    if (typeof shape === "function") {
+      // The frosted backdrop where the mask is: the mask with the backdrop drawn into it.
+      const mask = this.#shape?.getContext("2d") as Ctx | null | undefined;
+      if (!this.#shape || !mask) {
+        ctx.restore();
+        return;
+      }
+      mask.setTransform(1, 0, 0, 1, 0, 0);
+      mask.globalCompositeOperation = "source-in";
+      mask.drawImage(backdrop, 0, 0, rw, rh, 0, 0, rw, rh);
+      mask.globalCompositeOperation = "source-over";
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(this.#shape, 0, 0, rw, rh, x0, y0, rw, rh);
+      ctx.restore();
+      return;
+    }
+    ctx.clip(shape);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(backdrop, 0, 0, rw, rh, x0, y0, rw, rh);
     ctx.setTransform(t);
