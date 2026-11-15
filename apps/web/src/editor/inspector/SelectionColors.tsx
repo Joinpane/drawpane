@@ -7,7 +7,7 @@ import type { NodeRecord } from "@drawpane/model";
 import { ColorPicker, Popover, PropertySection } from "@drawpane/ui";
 import { useRef, useState } from "react";
 import { HexField } from "./PaintSection";
-import { swatchCss } from "./paint";
+import { rgbaOf, swatchCss } from "./paint";
 import { replaceColorOps, selectionColors } from "./selection-colors";
 
 const COLLAPSED = 8;
@@ -73,6 +73,8 @@ function SelectionColorRow({
         onClick={() => setOpen((o) => !o)}
       />
       <HexField label="Selection color" color={color} onChange={(to) => onReplace(color, to)} />
+      {/* Colours that differ only in alpha would otherwise read the same. */}
+      <span className="selection-colors__alpha">{Math.round(rgbaOf(color).a * 100)}%</span>
       <span className="selection-colors__count">
         {layers} {layers === 1 ? "layer" : "layers"}
       </span>

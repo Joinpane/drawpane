@@ -612,6 +612,8 @@
   border-top: 1px solid var(--line);
   color: var(--ink-muted);
   font: 400 11px / 14px var(--font-ui);
+  /* No lone word on a second line ("Moving into Hero / card"). */
+  text-wrap: pretty;
 }
 .layers__status > span:first-of-type {
   flex: 1;
