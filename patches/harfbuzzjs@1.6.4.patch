@@ -1,0 +1,34 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index ce7304d5c0655d1e1596e768635824b7041e501e..abc57ba6fe905bc551772bfa077a84c29dafe50d 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -20,9 +20,16 @@ function track(obj, destroy) {
+ function init(module) {
+ 	Module = module;
+ 	exports = Module.wasmExports;
+-	freeFuncPtr = Module.addFunction((ptr) => {
+-		exports.free(ptr);
+-	}, "vi");
++	// Drawpane: addFunction compiles a WebAssembly module at run time, which a Cloudflare Worker
++	// forbids. There, blobs get no destroy callback: their font data stays until the isolate ends
++	// (fonts are loaded once per isolate and cached anyway), rather than being freed under a face.
++	try {
++		freeFuncPtr = Module.addFunction((ptr) => {
++			exports.free(ptr);
++		}, "vi");
++	} catch {
++		freeFuncPtr = 0;
++	}
+ }
+ function hb_tag(s) {
+ 	return (s.charCodeAt(0) & 255) << 24 | (s.charCodeAt(1) & 255) << 16 | (s.charCodeAt(2) & 255) << 8 | (s.charCodeAt(3) & 255) << 0;
+@@ -2362,6 +2369,8 @@ function otTagsToScriptAndLanguage(scriptTag, languageTag) {
+ }
+ //#endregion
+ //#region src/index.ts
+-init(await createHarfBuzz());
++// Drawpane: a host without a filesystem or fetch for the module beside it (a Cloudflare Worker)
++// sets `globalThis.__drawpaneHarfBuzz` to Emscripten options (`instantiateWasm`) before importing.
++init(await createHarfBuzz(globalThis.__drawpaneHarfBuzz ?? {}));
+ //#endregion
+ export { AxisFlags, Blob, Buffer, BufferContentType, BufferFlag, BufferSerializeFlag, BufferSerializeFormat, ClusterLevel, ColorPaletteFlags, Direction, DrawFuncs, Face, Feature, Font, FontFuncs, GlyphClass, GlyphFlag, MetricsTag, PaintCompositeMode, PaintExtend, PaintFuncs, TracePhase, Variation, otTagToLanguage, otTagToScript, otTagsFromScriptAndLanguage, otTagsToScriptAndLanguage, shape, shapeWithTrace, version, versionString };

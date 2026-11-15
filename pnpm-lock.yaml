@@ -198,6 +198,9 @@ catalogs:
       specifier: 4.6.7
       version: 4.6.7
 
+patchedDependencies:
+  harfbuzzjs@1.6.4: 720762f2eee41eef232c7e4ef0f4970d68f7d5a08cd5bfd50a70fa2ce759b136
+
 importers:
 
   .:
@@ -308,6 +311,9 @@ importers:
       '@simplewebauthn/server':
         specifier: 14.1.0
         version: 14.1.0
+      harfbuzzjs:
+        specifier: 1.6.4
+        version: 1.6.4(patch_hash=720762f2eee41eef232c7e4ef0f4970d68f7d5a08cd5bfd50a70fa2ce759b136)
       hono:
         specifier: 4.13.18
         version: 4.13.18
@@ -366,7 +372,7 @@ importers:
         version: link:../raster
       harfbuzzjs:
         specifier: 1.6.4
-        version: 1.6.4
+        version: 1.6.4(patch_hash=720762f2eee41eef232c7e4ef0f4970d68f7d5a08cd5bfd50a70fa2ce759b136)
       pathkit-wasm:
         specifier: 1.0.0
         version: 1.0.0
@@ -3121,7 +3127,7 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
-  harfbuzzjs@1.6.4: {}
+  harfbuzzjs@1.6.4(patch_hash=720762f2eee41eef232c7e4ef0f4970d68f7d5a08cd5bfd50a70fa2ce759b136): {}
 
   hono@4.13.18: {}
 

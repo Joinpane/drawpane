@@ -40,7 +40,7 @@ await rm(out, { recursive: true, force: true });
 await mkdir(join(out, "worker"), { recursive: true });
 await cp(join(worker, "dist/index.js"), join(out, "worker/index.js"));
 await cp(join(worker, "dist/index.js.map"), join(out, "worker/index.js.map")).catch(() => {});
-// WebAssembly the Worker imports (the headless renderer's resvg) sits beside it as modules of its own.
+// WebAssembly the Worker imports (HarfBuzz, and the headless renderer's resvg) sits beside it as modules of its own.
 for (const name of await readdir(join(worker, "dist")))
   if (name.endsWith(".wasm")) await cp(join(worker, "dist", name), join(out, "worker", name));
 await cp(web, join(out, "assets"), { recursive: true });

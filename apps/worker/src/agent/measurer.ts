@@ -2,12 +2,13 @@
  * The text measurer the Worker's headless editor uses (decision 0021). Text
  * fixes itself up after every edit (it sizes to its content, and auto layout
  * follows), so an agent's edit needs text measured as the browser measures
- * it. That is the HarfBuzz measurer, reading the same font files the browser
- * uses; it plugs in here with `provideMeasurer` when it lands.
+ * it. That is the HarfBuzz measurer (`harfbuzz.ts`), reading the same font
+ * files the browser uses, registered with `provideMeasurer` when the Worker
+ * starts.
  *
- * Until then the agent tools are off, unless `AGENT_MEASURER=standin` asks
- * for a stand-in: fixed advances per character, deterministic, for tests and
- * local development only. Its text sizes are close, never exact.
+ * `AGENT_MEASURER=standin` asks for a stand-in instead: fixed advances per
+ * character, deterministic, for tests and local development only. Its text
+ * sizes are close, never exact.
  */
 import type { FontMetrics, TextFace, TextMeasurer } from "@drawpane/editor";
 import type { Env } from "../env";
@@ -32,8 +33,9 @@ export function provideMeasurer(factory: MeasurerFactory | null): void {
 
 /** The measurer for a file's room, or null when none is configured (the agent tools are then off). */
 export function agentMeasurer(env: Env, fileId: string): HeadlessMeasurer | null {
-  if (provided) return provided(env, fileId);
-  return env.AGENT_MEASURER === "standin" ? STANDIN : null;
+  // Asked for by name (tests, local development): the stand-in, even with the real one configured.
+  if (env.AGENT_MEASURER === "standin") return STANDIN;
+  return provided ? provided(env, fileId) : null;
 }
 
 /** Whether agents can design here: a measurer is configured. */
