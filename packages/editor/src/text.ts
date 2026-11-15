@@ -459,6 +459,8 @@ function computeLayout(
             let cut = end - 1;
             while (cut > start + 1 && m.width(start, cut) > room) cut--;
             if (cut > start + 1 && isLow(text.charCodeAt(cut))) cut--;
+            // One character wider than the line is left: it's the line (cutting before it would never end).
+            if (cut <= start) break;
             breaks.push({ start, end: cut, next: cut });
             start = cut;
           }

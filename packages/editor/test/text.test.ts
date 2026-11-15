@@ -102,3 +102,17 @@ describe("truncation", () => {
     expect((editor.doc.get(id) as NodeRecord).props.height).toBe(tall);
   });
 });
+
+describe("wrapping in a narrow box", () => {
+  it("ends when a character is wider than the line, a character a line", () => {
+    // 10px a character, in a box 4px wide: every character is too wide. (A
+    // line's first word is kept whole; the words after it break.)
+    const layout = layoutText(textNode("Kit store"), measurer, 4);
+    expect(layout.lines.map((l) => l.text)).toEqual(["Kit", "s", "t", "o", "r", "e"]);
+    expect(layoutText(textNode("a bc"), measurer, 1).lines.map((l) => l.text)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+});

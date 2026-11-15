@@ -158,6 +158,7 @@ export const branches = new Hono<AppContext>()
       const copied = await room(c.env, id).importNodes(
         { userId: user.id, name: user.name },
         base.nodes,
+        id,
       );
       if (!copied.ok) throw new Error(`couldn't copy into the branch: ${copied.reason}`);
       // The branch looks like its main file in the branch list straight away.

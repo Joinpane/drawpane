@@ -544,8 +544,15 @@ export class FileRoom extends DurableObject<Env> {
    * import replaces (removed once the imported pages are in). The nodes are checked as a whole first, so a bad one
    * leaves the file as it was; they're then committed in chunks that keep
    * each log row well under SQLite's row limit, parents before children.
+   * The room learns which file it is, so the file can be versioned and
+   * published before anyone opens it (a kit added and published at once).
    */
-  async importNodes(by: Requester, nodes: readonly NodeRecord[]): Promise<ImportResult> {
+  async importNodes(
+    by: Requester,
+    nodes: readonly NodeRecord[],
+    fileId: string,
+  ): Promise<ImportResult> {
+    this.#adopt(fileId);
     const roots = this.#store.childIds(ROOT_ID);
     const seed = roots.length === 1 ? this.#store.get(roots[0] as string) : undefined;
     if (seed?.type !== "page" || this.#store.childIds(seed.id).length > 0)
