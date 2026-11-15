@@ -146,8 +146,7 @@
   border-radius: var(--radius-sm);
   overflow: hidden;
   /* A checkerboard shows through transparent pixels. */
-  background:
-    repeating-conic-gradient(var(--surface-sunken) 0 25%, var(--surface) 0 50%) 0 0 / 12px 12px;
+  background: var(--checker);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .image-fill__preview canvas {
@@ -192,8 +191,7 @@
   place-items: center;
   height: 96px;
   border-radius: var(--radius-sm);
-  background:
-    repeating-conic-gradient(var(--surface-sunken) 0 25%, var(--surface) 0 50%) 0 0 / 12px 12px;
+  background: var(--checker);
   box-shadow: inset 0 0 0 1px var(--line);
   overflow: hidden;
 }

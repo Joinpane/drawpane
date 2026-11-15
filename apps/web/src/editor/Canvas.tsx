@@ -37,6 +37,7 @@ function readTheme(): OverlayTheme {
     signal: v("signal"),
     onSignal: v("on-signal"),
     guide: v("guide"),
+    onGuide: v("on-guide"),
     component: v("component"),
     componentInk: v("component-ink"),
     inkMuted: v("ink-muted"),

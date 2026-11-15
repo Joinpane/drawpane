@@ -25,6 +25,8 @@ export interface OverlayTheme {
   signal: string;
   componentInk: string;
   onSignal: string;
+  /** Text on a guide-coloured badge (X-ray distances). */
+  onGuide: string;
   guide: string;
   component: string;
   inkMuted: string;
@@ -542,7 +544,7 @@ function drawMeasurements(
     ctx.beginPath();
     ctx.roundRect(Math.round(spot.x - w / 2), Math.round(spot.y - h / 2), w, h, 3);
     ctx.fill();
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = theme.onGuide;
     ctx.fillText(label, Math.round(spot.x), Math.round(spot.y) + 0.5);
   }
   ctx.restore();

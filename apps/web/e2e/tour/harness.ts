@@ -13,9 +13,12 @@ export { addPasskey as passkey } from "../fresh-instance";
 
 export const OUT = process.env.TOUR_OUT ?? "tour-shots";
 
-/** Ports for tours' Workers, clear of the e2e specs' (8785–8831). */
-const PORT = 8851;
-const INSPECTOR_PORT = 9391;
+/**
+ * Ports for tours' Workers, clear of the e2e specs'. TOUR_PORT and TOUR_INSPECTOR_PORT move them,
+ * so two checkouts can run tours at once.
+ */
+const PORT = Number(process.env.TOUR_PORT) || 8851;
+const INSPECTOR_PORT = Number(process.env.TOUR_INSPECTOR_PORT) || 9391;
 
 export const test = base.extend({
   baseURL: [
@@ -51,10 +54,30 @@ export async function shot(page: Page, name: string, target?: Locator): Promise<
       if (t === "dark") document.documentElement.dataset.theme = "dark";
       else delete document.documentElement.dataset.theme;
     }, theme);
-    // Let theme transitions settle.
-    await page.waitForTimeout(300);
+    await settle(page);
     const path = `${OUT}/${name}-${theme}.png`;
     await (target ? target.screenshot({ path }) : page.screenshot({ path }));
   }
   await page.evaluate(() => delete document.documentElement.dataset.theme);
+}
+
+/**
+ * Waits for the screen to come to rest: past the Selection Lens's settle delay (it appears 350 ms
+ * after a selection stops changing), then until every finite animation and transition (theme
+ * changes, the Lens fading in, popovers opening) has finished. Endless ones (spinners) don't count.
+ */
+async function settle(page: Page): Promise<void> {
+  await page.waitForTimeout(450);
+  await page
+    .waitForFunction(
+      () =>
+        document
+          .getAnimations()
+          .every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity),
+      null,
+      { timeout: 3000 },
+    )
+    .catch(() => {
+      // Something keeps animating: shoot it as it is rather than fail the tour.
+    });
 }

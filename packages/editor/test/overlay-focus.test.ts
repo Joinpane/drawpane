@@ -10,6 +10,7 @@ const THEME: OverlayTheme = {
   componentInk: "#7a3fd1",
   onSignal: "#ffffff",
   guide: "#ff3366",
+  onGuide: "#ffffff",
   component: "#7a3fd1",
   inkMuted: "#6b6a66",
   surfaceRaised: "#ffffff",
