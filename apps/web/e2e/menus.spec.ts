@@ -283,6 +283,70 @@ test.describe
       await page.keyboard.press("Enter");
       await expect(input).toBeHidden();
       await expect.poll(async () => (await props(page, board)).name).toBe("Home screen");
+      // Clicking the canvas elsewhere keeps the new name too, as in Figma and Penpot.
+      await page.mouse.dblclick(label.x, label.y);
+      await expect(input).toBeFocused();
+      await page.keyboard.type("Lock screen");
+      await page.mouse.click(canvas.x + box.br.x + 120, canvas.y + box.br.y + 120);
+      await expect(input).toBeHidden();
+      await expect.poll(async () => (await props(page, board)).name).toBe("Lock screen");
+      // So does clicking a panel.
+      await page.mouse.dblclick(label.x, label.y);
+      await page.keyboard.type("Settings");
+      await page.getByRole("group", { name: "Properties" }).click({ position: { x: 8, y: 8 } });
+      await expect(input).toBeHidden();
+      await expect.poll(async () => (await props(page, board)).name).toBe("Settings");
+    });
+
+    test("zooms only the canvas: a pinch or ⌘+ over the panels never zooms the page", async () => {
+      // A trackpad pinch is a cancelable wheel with Ctrl held; the browser zooms the page unless
+      // it's prevented. Over a panel it's prevented; over the canvas it zooms the canvas.
+      const pinch = (selector: string) =>
+        page.evaluate((selector) => {
+          const el = document.querySelector(selector) as HTMLElement;
+          const r = el.getBoundingClientRect();
+          const event = new WheelEvent("wheel", {
+            deltaY: -10,
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+            clientX: r.left + r.width / 2,
+            clientY: r.top + r.height / 2,
+          });
+          el.dispatchEvent(event);
+          return event.defaultPrevented;
+        }, selector);
+      const zoom = () =>
+        page.evaluate(
+          () =>
+            (window as unknown as { drawpane: { s: { camera: { zoom: number } } } }).drawpane.s
+              .camera.zoom,
+        );
+      expect(await pinch(".layers")).toBe(true);
+      expect(await pinch(".toolbar")).toBe(true);
+      const before = await zoom();
+      expect(await pinch(".canvas__overlay")).toBe(true);
+      expect(await zoom()).toBeGreaterThan(before);
+      // Typing in a field, ⌘/Ctrl + = isn't a shortcut, and doesn't zoom the page either.
+      const field = page.getByRole("searchbox", { name: "Find layers" });
+      const prevented = page.evaluate(
+        () =>
+          new Promise<boolean>((resolve) =>
+            // Capturing, after the editor's own listener: fields may stop keys from bubbling.
+            window.addEventListener(
+              "keydown",
+              (e) => {
+                if (e.key === "=") resolve(e.defaultPrevented);
+              },
+              true,
+            ),
+          ),
+      );
+      await page.getByRole("button", { name: "Find layers" }).click();
+      await expect(field).toBeFocused();
+      await page.keyboard.press("ControlOrMeta+Equal");
+      expect(await prevented).toBe(true);
+      await page.keyboard.press("Escape");
     });
 
     test("swaps an instance for another component from its menu", async () => {
