@@ -11,7 +11,7 @@
  * The converter loads only when someone imports.
  */
 import { api, type FileMeta } from "../api/client";
-import type { FileImport } from "./penpot-import";
+import { detachedNote, type FileImport } from "./penpot-import";
 
 const FIGMA_API = "https://api.figma.com/v1";
 
@@ -97,8 +97,9 @@ export async function importFigma(
   };
   onChange([row]);
 
-  const [converter, file] = await Promise.all([
+  const [converter, { pinInstances }, file] = await Promise.all([
     import("@drawpane/figma"),
+    import("@drawpane/editor"),
     figma<import("@drawpane/figma").Figma.File>(`files/${key}?geometry=paths`, token),
   ]);
   let fileId: string | null = null;
@@ -138,12 +139,14 @@ export async function importFigma(
 
     update({ stage: "converting" });
     const converted = converter.convertFile(file, { images: (ref) => hashes.get(ref) ?? null });
+    // Copies open as Figma shows them, not snapped back to their mains.
+    const pinned = pinInstances(converted.nodes);
     update({
       stage: "saving",
-      notes: converted.notes.lines(),
+      notes: [...converted.notes.lines(), ...detachedNote(pinned.detached)],
       layers: converted.nodes.filter((n) => n.type !== "page").length,
     });
-    await api.post(`/files/${fileId}/import`, { nodes: converted.nodes });
+    await api.post(`/files/${fileId}/import`, { nodes: pinned.nodes });
     update({ stage: "done" });
   } catch (error) {
     // Nothing half-imported stays behind.

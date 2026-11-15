@@ -1,9 +1,16 @@
 /**
- * Penpot flex and grid layout to Drawpane auto layout. Two differences to
- * mind: Penpot's flex flows in reverse layer order (the topmost layer comes
- * first) unless the direction is reversed, while Drawpane flows in layer
- * order; and Penpot's row gap is between rows whatever the direction, while
- * Drawpane's `gap` runs along the main axis.
+ * Penpot flex and grid layout to Drawpane auto layout. Differences to
+ * mind:
+ * - Penpot's flex flows in reverse layer order (the topmost layer comes
+ *   first) unless the direction is reversed, while Drawpane flows in layer
+ *   order.
+ * - Penpot's row gap is between rows whatever the direction, while
+ *   Drawpane's `gap` runs along the main axis.
+ * - Penpot's `stretch` alignment never resizes anything: only Fill does
+ *   (its flex and grid layouts, common/geom/shapes/flex_layout and
+ *   grid_layout). Items aligned `stretch` sit at the start, and an item's
+ *   own `stretch` defers to its parent. Drawpane's Stretch makes a fixed
+ *   item take the parent's size, so it never comes across.
  */
 import type { GridArea, GridTrack } from "@drawpane/model";
 import type { Notes } from "./notes";
@@ -39,7 +46,8 @@ const ALIGN: Record<string, string> = {
   start: "start",
   center: "center",
   end: "end",
-  stretch: "stretch",
+  // Placed at the start, at its own size (see above).
+  stretch: "start",
 };
 
 function padding(frame: Raw): Record<string, number> {
@@ -111,7 +119,6 @@ export function containerLayout(frame: Raw, notes: Notes): Record<string, unknow
   return out;
 }
 
-/** Where each child of a grid frame sits, from its cells. */
 /** Where a grid board puts a child: its cell, and how it sits in it. */
 export interface GridPlace {
   readonly area: GridArea;
@@ -119,13 +126,17 @@ export interface GridPlace {
   readonly justifySelf?: string;
 }
 
+/**
+ * Where each child of a grid frame sits, from its cells. Every cell is kept,
+ * auto-placed ones too: Penpot records where its auto placement put each
+ * item, and Drawpane's would follow layer order instead.
+ */
 export function gridAreas(frame: Raw): Map<string, GridPlace> {
   const out = new Map<string, GridPlace>();
   if (frame.layout !== "grid") return out;
   const cells = (frame.layoutGridCells ?? {}) as Record<string, Raw>;
   const line = (n: unknown) => Math.min(256, Math.max(1, Math.round(num(n, 1))));
   for (const cell of Object.values(cells)) {
-    if (cell.position === "auto") continue;
     const shapes = Array.isArray(cell.shapes) ? (cell.shapes as string[]) : [];
     const alignSelf = SELF[String(cell.alignSelf)];
     const justifySelf = SELF[String(cell.justifySelf)];
@@ -145,11 +156,11 @@ export function gridAreas(frame: Raw): Map<string, GridPlace> {
 }
 
 const SIZING: Record<string, string> = { fill: "fill", fix: "fixed", auto: "hug" };
+/** An item's own alignment; `stretch` (and `auto`) defer to the parent's (see above). */
 const SELF: Record<string, string> = {
   start: "start",
   center: "center",
   end: "end",
-  stretch: "stretch",
 };
 
 /** A child's layout props, when its parent frame has a layout. */

@@ -435,6 +435,8 @@ export class Editor {
    */
   imageSize: (ref: string) => { width: number; height: number } | null = () => null;
   readonly #cameras = new Map<string, Camera>();
+  /** Text this editor has measured (sized after an edit): what a font arriving late can correct. */
+  readonly #measuredHere = new Set<string>();
   readonly #frames: FrameClock;
   readonly #reducedMotion: () => boolean;
   #motion: CameraMotion | null = null;
@@ -668,6 +670,7 @@ export class Editor {
       if (isLibraryCopy(this.doc, id)) continue;
       const size = autoSize(node, this.measurer);
       if (!size) continue;
+      this.#measuredHere.add(id);
       const width = round2(size.width);
       const height = round2(size.height);
       if (width !== round2(getProp(node.props, "width")))
@@ -703,12 +706,18 @@ export class Editor {
    * Re-measures text set in `families` (all text when omitted) and writes
    * corrected sizes, without an undo step: a web font arrived after the text
    * was measured with its fallback. Auto layout around it follows.
+   *
+   * Only text this editor measured: that's what could have been measured
+   * with a fallback. Text as the file has it keeps the size it was saved
+   * with, so opening a file doesn't change it (an import keeps the layout
+   * it came with, a teammate's text stays as they measured it).
    */
   refitText(families?: ReadonlySet<string>): void {
     if (!this.canEdit) return;
     const ids: string[] = [];
-    for (const node of this.doc.nodes()) {
-      if (node.type !== "text") continue;
+    for (const id of this.#measuredHere) {
+      const node = this.doc.get(id);
+      if (node?.type !== "text") continue;
       // Its own family or any of its runs' (a word in another font).
       if (families && !textFaces(node).some((face) => families.has(face.family))) continue;
       ids.push(node.id);

@@ -55,6 +55,30 @@ describe("fonts", () => {
     expect(editor.history.canUndo).toBe(undoable);
   });
 
+  it("leaves text it didn't measure as the file has it: opening a file doesn't change it", () => {
+    const { editor, load } = setup();
+    // Text as a file brings it (saved by someone whose font had loaded, or imported).
+    editor.doc.apply([
+      {
+        op: "create",
+        id: "saved",
+        type: "text",
+        parent: "p",
+        key: "a1",
+        props: { characters: "Hello", fontFamily: "Fraunces", width: 61.5, height: 19 },
+      },
+    ]);
+    const typed = editor.createLayer("text", { x: 0, y: 50, width: 10, height: 10 }, "p", {
+      characters: "Hello",
+      fontFamily: "Fraunces",
+    }) as string;
+    load();
+    editor.refitText(new Set(["Fraunces"]));
+    expect(width(editor, "saved")).toBe(61.5);
+    // What was measured here, with the fallback, is put right.
+    expect(width(editor, typed)).toBe(60);
+  });
+
   it("re-measures text whose styled run is in the font that loaded", () => {
     const { editor, load } = setup();
     // "Hello" in the layer's font, " world" in Fraunces.
