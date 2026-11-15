@@ -44,13 +44,28 @@
   font-variant-numeric: tabular-nums;
   caret-color: var(--signal);
 }
+/* No label before it: a little room on the left, as there is before a label's glyph. */
+.dp-field__input:first-child {
+  padding-left: var(--space-200);
+}
 .dp-field__input::placeholder {
   color: var(--ink-muted);
 }
+/* The unit is a scrub handle too, like the label: a comfortable target the field's full height. */
 .dp-field__unit {
-  padding-right: 6px;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  height: 100%;
+  padding: 0 6px 0 4px;
   color: var(--ink-muted);
   font: 400 11px / 14px var(--font-ui);
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+.dp-field--disabled .dp-field__unit {
+  cursor: not-allowed;
 }
 .dp-field--token {
   padding-right: 3px;
