@@ -146,5 +146,13 @@
     "alpha-blurred": 1.32,
     "alpha-opacity": 0.4,
     "luminance-spot": 0.52
+  },
+  "lists": {
+    "list-bullets": 4.94,
+    "list-numbers": 2.46,
+    "list-nested": 3.95,
+    "list-between": 4.49,
+    "list-wrapped": 7.56,
+    "list-large": 3.23
   }
 }

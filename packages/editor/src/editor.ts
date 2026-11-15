@@ -12,6 +12,7 @@ import {
   keyBetween,
   keysBetween,
   type LayerType,
+  type ListType,
   type NodeRecord,
   type NodeType,
   newId,
@@ -93,6 +94,8 @@ import {
 import { readingOrderOf } from "./reading-order";
 import {
   isRunProp,
+  paragraphList,
+  paragraphRanges,
   type RunPatch,
   type RunStyle,
   rangeProps,
@@ -315,6 +318,13 @@ function readingRows(nodes: readonly NodeRecord[]): NodeRecord[][] {
   return rows.map((r) => r.nodes.sort((a, b) => box(a).x - box(b).x));
 }
 
+/** What a list command acts on: a paragraph's characters (`range`), or a whole text layer. */
+interface ListItem {
+  readonly id: string;
+  readonly range: { readonly start: number; readonly end: number } | null;
+  readonly listType: ListType;
+  readonly listLevel: number;
+}
 export class Editor {
   readonly doc = new Doc();
   readonly scene = new Scene(this.doc);
@@ -2208,6 +2218,129 @@ export class Editor {
     };
     for (const id of this.s.selection) visit(id);
     return out;
+  }
+
+  /**
+   * Lists (decision 0017). While text is edited, they act on the paragraphs
+   * the caret or selection touches; otherwise on the selected text layers,
+   * whole. Puts them in a bulleted or numbered list, or takes them out when
+   * they all are in one of that kind already.
+   */
+  toggleList(type: "bullet" | "number"): void {
+    const items = this.#listItems();
+    if (items.length === 0) return;
+    const off = items.every((i) => i.listType === type);
+    this.#setLists(
+      items,
+      () => ({ listType: off ? "none" : type }),
+      off ? "Remove list" : type === "bullet" ? "Bulleted list" : "Numbered list",
+    );
+  }
+
+  /**
+   * Typing "- ", "* " or "1. " at the start of a paragraph that isn't in a
+   * list makes it a list item, as text editors do: the characters go and the
+   * list comes, together. Returns where the caret goes, or null when what's
+   * before the caret isn't that.
+   */
+  autoList(id: string): number | null {
+    const node = this.doc.get(id);
+    const sel = this.s.textSelection;
+    if (node?.type !== "text" || id !== this.s.editingText || !sel || sel.start !== sel.end)
+      return null;
+    const text = getProp(node.props, "characters");
+    const caret = sel.end;
+    const start = text.lastIndexOf("\n", caret - 1) + 1;
+    const prefix = text.slice(start, caret);
+    const type = /^[-*•] $/.test(prefix) ? "bullet" : /^1[.)] $/.test(prefix) ? "number" : null;
+    if (!type || paragraphList(node, start).listType !== "none") return null;
+    const characters = text.slice(0, start) + text.slice(caret);
+    const runs = remapRuns(node, characters, { edit: { start, end: caret, caret: start } });
+    const after = { ...node, props: { ...node.props, characters, textRuns: runs } as Props };
+    const paragraph = paragraphRanges(characters, start, start)[0];
+    const listed = paragraph
+      ? styleRange(after, paragraph.start, paragraph.end, { listType: type })
+      : runs;
+    this.commit(
+      [
+        { op: "set", id, prop: "characters", value: characters },
+        { op: "set", id, prop: "textRuns", value: listed.length > 0 ? listed : null },
+      ],
+      type === "bullet" ? "Bulleted list" : "Numbered list",
+    );
+    this.state.set({ textSelection: { start, end: start } });
+    return start;
+  }
+
+  /** Takes list items a level in (1) or out (−1). False when none of them is in a list. */
+  nestList(by: 1 | -1): boolean {
+    const items = this.#listItems().filter((i) => i.listType !== "none");
+    if (items.length === 0) return false;
+    this.#setLists(
+      items,
+      (i) => ({ listLevel: Math.max(0, Math.min(8, i.listLevel + by)) }),
+      by > 0 ? "Indent list" : "Outdent list",
+    );
+    return true;
+  }
+
+  /** The list the touched paragraphs (or selected text layers) share, or null when they differ. */
+  listState(): { listType: ListType | null; listLevel: number | null } {
+    const items = this.#listItems();
+    const type = items[0]?.listType ?? "none";
+    const level = items[0]?.listLevel ?? 0;
+    return {
+      listType: items.every((i) => i.listType === type) ? type : null,
+      listLevel: items.every((i) => i.listLevel === level) ? level : null,
+    };
+  }
+
+  /** What lists act on: paragraphs of the text being edited, or whole text layers. */
+  #listItems(): ListItem[] {
+    const editing = this.s.editingText ? this.doc.get(this.s.editingText) : undefined;
+    if (editing?.type === "text") {
+      const sel = this.s.textSelection ?? { start: 0, end: 0 };
+      const text = getProp(editing.props, "characters");
+      const ranges = paragraphRanges(text, sel.start, sel.end);
+      if (ranges.length > 0)
+        return ranges.map((r) => ({
+          id: editing.id,
+          range: { start: r.start, end: r.end },
+          ...paragraphList(editing, r.first),
+        }));
+      return [{ id: editing.id, range: null, ...paragraphList(editing, 0) }];
+    }
+    return this.#selectedTexts().flatMap((id) => {
+      const node = this.doc.get(id);
+      return node ? [{ id, range: null, ...paragraphList(node, 0) }] : [];
+    });
+  }
+
+  /** Sets list props on each item, in one step: a paragraph's characters, or a whole layer. */
+  #setLists(items: readonly ListItem[], change: (item: ListItem) => RunPatch, label: string): void {
+    const ops: Op[] = [];
+    const working = new Map<string, NodeRecord>();
+    for (const item of items) {
+      const node = working.get(item.id) ?? this.doc.get(item.id);
+      if (!node) continue;
+      const patch = change(item);
+      if (item.range) {
+        const runs = styleRange(node, item.range.start, item.range.end, patch);
+        working.set(item.id, { ...node, props: { ...node.props, textRuns: runs } as Props });
+        continue;
+      }
+      // A whole layer: its own props (and its characters' list props cleared with them).
+      for (const [prop, value] of Object.entries(patch) as Array<[PropName, unknown]>)
+        ops.push({ op: "set", id: item.id, prop, value });
+    }
+    for (const [id, node] of working) {
+      const runs = getProp(node.props, "textRuns");
+      if (
+        JSON.stringify(runs) !== JSON.stringify(getProp(this.doc.get(id)?.props ?? {}, "textRuns"))
+      )
+        ops.push({ op: "set", id, prop: "textRuns", value: runs.length > 0 ? runs : null });
+    }
+    if (ops.length > 0) this.commit(ops, label);
   }
 
   /**

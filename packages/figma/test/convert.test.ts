@@ -299,6 +299,33 @@ describe("strokes", () => {
   });
 });
 
+describe("lists", () => {
+  it("come in on each paragraph's characters, merged with the character styles", () => {
+    const text = node({
+      id: "1:40",
+      type: "TEXT",
+      name: "Todo",
+      size: { x: 200, y: 60 },
+      relativeTransform: at(0, 0),
+      characters: "Intro\nPlan\nBook",
+      style: { fontFamily: "Inter", fontWeight: 400, fontSize: 16 },
+      // "an" in "Plan" is bold, across nothing but the list item.
+      characterStyleOverrides: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
+      styleOverrideTable: { "1": { fontWeight: 700 } },
+      lineTypes: ["NONE", "UNORDERED", "ORDERED"],
+      lineIndentations: [0, 1, 2],
+    });
+    const { nodes } = convertFile(file(text));
+    validate(nodes);
+    expect(getProp(byName(nodes, "Todo").props, "textRuns")).toEqual([
+      { start: 6, end: 8, listType: "bullet" },
+      { start: 8, end: 10, fontWeight: 700, listType: "bullet" },
+      { start: 10, end: 11, listType: "bullet" },
+      { start: 11, end: 15, listType: "number", listLevel: 1 },
+    ]);
+  });
+});
+
 describe("masks", () => {
   it("keep how they mask: by alpha (Figma's default), luminance or outline", () => {
     const mask = (id: string, name: string, extra: Partial<Figma.Node>) =>

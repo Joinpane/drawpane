@@ -3,7 +3,7 @@
 /** One shape of an icon: an SVG element name and its React attributes. */
 export type IconNode = readonly [tag: string, attributes: Readonly<Record<string, string>>];
 
-/** Drawpane's 123 icons on a 16px grid; strokes and fills inherit currentColor. */
+/** Drawpane's 127 icons on a 16px grid; strokes and fills inherit currentColor. */
 export const iconData = {
   pointer: [
     [
@@ -1726,6 +1726,38 @@ export const iconData = {
       },
     ],
   ],
+  indent: [
+    [
+      "path",
+      {
+        d: "M2.5 3h11",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7.5 6.5h6",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7.5 9.5h6",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.5 13h11",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.5 6.25l2.25 1.75-2.25 1.75",
+      },
+    ],
+  ],
   "inner-shadow": [
     [
       "rect",
@@ -1781,6 +1813,90 @@ export const iconData = {
       "path",
       {
         d: "M7 9a2.5 2.5 0 0 0 3.54 0l2-2A2.5 2.5 0 0 0 9 3.46l-.75.75M9 7a2.5 2.5 0 0 0-3.54 0l-2 2A2.5 2.5 0 0 0 7 12.54l.75-.75",
+      },
+    ],
+  ],
+  "list-bullet": [
+    [
+      "circle",
+      {
+        cx: "3",
+        cy: "4",
+        r: "1",
+        fill: "currentColor",
+        stroke: "none",
+      },
+    ],
+    [
+      "circle",
+      {
+        cx: "3",
+        cy: "8",
+        r: "1",
+        fill: "currentColor",
+        stroke: "none",
+      },
+    ],
+    [
+      "circle",
+      {
+        cx: "3",
+        cy: "12",
+        r: "1",
+        fill: "currentColor",
+        stroke: "none",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M6.5 4h7",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M6.5 8h7",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M6.5 12h7",
+      },
+    ],
+  ],
+  "list-number": [
+    [
+      "path",
+      {
+        d: "M2.25 3l1-.5v4",
+        strokeWidth: "1.25",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.25 9.5c.25-.6.75-.75 1.1-.75.6 0 1 .4 1 .95 0 .9-2.1 1.7-2.1 2.8h2.1",
+        strokeWidth: "1.25",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7 4.25h6.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7 8h6.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7 11.75h6.5",
       },
     ],
   ],
@@ -1877,6 +1993,38 @@ export const iconData = {
         d: "M8 2.75a5.25 5.25 0 0 1 0 10.5z",
         fill: "currentColor",
         stroke: "none",
+      },
+    ],
+  ],
+  outdent: [
+    [
+      "path",
+      {
+        d: "M2.5 3h11",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7.5 6.5h6",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M7.5 9.5h6",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.5 13h11",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M4.75 6.25l-2.25 1.75 2.25 1.75",
       },
     ],
   ],

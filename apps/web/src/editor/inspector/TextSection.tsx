@@ -1,11 +1,12 @@
 /**
  * The Text section: the layer's text style, typography, alignment, box
- * sizing, paragraph spacing and truncation. Typography shows `views` (see `textViews`): the selected
+ * sizing, lists, paragraph spacing and truncation. Typography shows `views` (see `textViews`): the selected
  * characters while editing, every look in the layer otherwise.
  */
 import type { Editor } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { PropertyRow, PropertySection, SegmentedControl } from "@drawpane/ui";
+import { IconButton, PropertyRow, PropertySection, SegmentedControl } from "@drawpane/ui";
+import { shortcutFor } from "../actions";
 import { common, Num, Select } from "./fields";
 import { TextStyleRow } from "./TextStyles";
 import { TypographyFields } from "./TypographyFields";
@@ -58,6 +59,7 @@ export function TextSection({
           onChange={(v) => editor.setProp(ids, "textAlignVertical", v, "Vertical alignment")}
         />
       </div>
+      <ListRow editor={editor} />
       <SegmentedControl
         label="Text box sizing"
         options={[
@@ -88,5 +90,47 @@ export function TextSection({
         />
       </PropertyRow>
     </PropertySection>
+  );
+}
+
+/**
+ * Lists (decision 0017): bulleted or numbered, for the paragraphs being
+ * edited or the selected text layers whole, and a level in or out.
+ */
+function ListRow({ editor }: { editor: Editor }) {
+  const { listType } = editor.listState();
+  const listed = listType === "bullet" || listType === "number";
+  return (
+    <fieldset className="inspector__lists" aria-label="Lists">
+      <IconButton
+        icon="list-bullet"
+        label="Bulleted list"
+        shortcut={shortcutFor("text.bulletList")}
+        pressed={listType === "bullet"}
+        onClick={() => editor.toggleList("bullet")}
+      />
+      <IconButton
+        icon="list-number"
+        label="Numbered list"
+        shortcut={shortcutFor("text.numberList")}
+        pressed={listType === "number"}
+        onClick={() => editor.toggleList("number")}
+      />
+      <span className="inspector__lists-gap" />
+      <IconButton
+        icon="outdent"
+        label="Outdent"
+        shortcut="⇧Tab"
+        disabled={!listed}
+        onClick={() => editor.nestList(-1)}
+      />
+      <IconButton
+        icon="indent"
+        label="Indent"
+        shortcut="Tab"
+        disabled={!listed}
+        onClick={() => editor.nestList(1)}
+      />
+    </fieldset>
   );
 }

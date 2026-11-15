@@ -427,6 +427,16 @@ export type FontVariations = z.infer<typeof FontVariations>;
  * fill. A layer's runs are sorted and don't overlap; characters outside every
  * run use the layer's props. The editor keeps runs in step as text changes.
  */
+/**
+ * A paragraph's list (decision 0017): none, bulleted or numbered, and how
+ * deeply nested. They're set on characters like the rest of a run's style,
+ * so editing keeps them (a new line in a list continues it); a paragraph
+ * takes the list of its first character.
+ */
+export const ListType = z.enum(["none", "bullet", "number"]);
+export type ListType = z.infer<typeof ListType>;
+export const ListLevel = z.number().int().min(0).max(8);
+
 export const TextRun = z
   .object({
     start: z.number().int().min(0),
@@ -441,6 +451,8 @@ export const TextRun = z
     fontFeatures: FontFeatures.optional(),
     fontVariations: FontVariations.optional(),
     fills: z.array(Paint).max(8).optional(),
+    listType: ListType.optional(),
+    listLevel: ListLevel.optional(),
   })
   .refine((run) => run.end > run.start, "a run must end after it starts");
 export type TextRun = z.infer<typeof TextRun>;
@@ -672,6 +684,9 @@ export const PROPS = {
   fontVariations: prop(FontVariations, {}, TYPOGRAPHY),
   /** Extra space after each paragraph (each hard line break), in px. */
   paragraphSpacing: prop(ranged(z.number().min(0).max(1000), { min: 0, max: 1000 }), 0, TYPOGRAPHY),
+  /** Lists: the layer's own (its characters may differ, paragraph by paragraph; see `ListType`). */
+  listType: prop(ListType, "none", ["text"]),
+  listLevel: prop(ListLevel, 0, ["text"]),
   /** Show at most this many lines, the last ending in "…"; null shows them all. */
   maxLines: prop(z.number().int().min(1).max(1000).nullable(), null, ["text"]),
   /** Styled ranges of the characters (bold words, a coloured phrase); see `TextRun`. */

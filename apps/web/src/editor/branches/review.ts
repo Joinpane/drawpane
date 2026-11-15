@@ -37,6 +37,8 @@ const PROP_LABEL: Readonly<Record<string, string>> = {
   strokes: "Stroke",
   strokeWeight: "Stroke weight",
   strokeWeights: "Stroke sides",
+  listType: "List",
+  listLevel: "List level",
   effects: "Effects",
   cornerRadius: "Corner radius",
   cornerRadii: "Corners",

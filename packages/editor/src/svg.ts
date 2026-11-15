@@ -951,6 +951,16 @@ export function exportSvg(
               return own ? `<tspan${own}>${escapeXml(frag.text)}</tspan>` : escapeXml(frag.text);
             })
             .join("");
+          if (line.indent > 0) {
+            // A list item: its text where the layout put it, its bullet or number before it, in
+            // its first character's type.
+            const x0 = lineOffset(line, w, base);
+            const first = line.fragments[0];
+            const marker = line.marker
+              ? `<tspan${attr("x", round2(x0 + line.marker.x))}${attr("y", y)} text-anchor="start"${first ? typeOf(first) + fillOf(first) : ""}>${escapeXml(line.marker.text)}</tspan>`
+              : "";
+            return `${marker}<tspan${attr("x", round2(x0))}${attr("y", y)} text-anchor="start">${inner}</tspan>`;
+          }
           return `<tspan${attr("x", round2(lineX))}${attr("y", y)}>${inner}</tspan>`;
         })
         .join("");

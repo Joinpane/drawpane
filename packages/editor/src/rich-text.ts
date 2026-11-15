@@ -22,7 +22,7 @@ import {
 } from "@drawpane/model";
 import type { Doc } from "./doc";
 
-/** What a run can override: the typography that varies within a line, and the fill. */
+/** What a run can override: the typography that varies within a line, the fill, and lists. */
 export const RUN_PROPS = [
   "fontFamily",
   "fontWeight",
@@ -34,6 +34,8 @@ export const RUN_PROPS = [
   "fontFeatures",
   "fontVariations",
   "fills",
+  "listType",
+  "listLevel",
 ] as const satisfies readonly (keyof TextRun & PropName)[];
 export type RunProp = (typeof RUN_PROPS)[number];
 
@@ -305,8 +307,10 @@ export function rangeProps(node: NodeRecord, start: number, end: number): Props[
 /** Whether any of the layer's characters are styled differently from the layer. */
 export const hasRuns = (node: NodeRecord) => layerRuns(node).length > 0;
 
-/** Typography a text style sets; applying a style clears these from the runs (fills stay). */
-const STYLE_TYPOGRAPHY: readonly RunProp[] = RUN_PROPS.filter((p) => p !== "fills");
+/** Typography a text style sets; applying a style clears these from the runs (fills and lists stay). */
+const STYLE_TYPOGRAPHY: readonly RunProp[] = RUN_PROPS.filter(
+  (p) => p !== "fills" && p !== "listType" && p !== "listLevel",
+);
 
 /**
  * Keeping runs in step with a person's edit, derived in the same batch:
@@ -375,4 +379,43 @@ export function textFaces(node: NodeRecord): TextFace[] {
     out.set(`${face.family}\u0000${face.weight}\u0000${face.italic}`, face);
   }
   return [...out.values()];
+}
+
+/**
+ * The paragraphs [start, end) touches, as character ranges: each from its
+ * first character through the line break ending it. A list is set on these
+ * (decision 0017). The text's last paragraph, when empty, has no characters
+ * of its own: it reads the style at the end, the character before it, so it's
+ * set through that one.
+ */
+export function paragraphRanges(
+  text: string,
+  start: number,
+  end: number,
+): Array<{ start: number; end: number; first: number }> {
+  const a = Math.max(0, Math.min(start, end, text.length));
+  const b = Math.min(text.length, Math.max(start, end));
+  let from = text.lastIndexOf("\n", a - 1) + 1;
+  const out: Array<{ start: number; end: number; first: number }> = [];
+  for (;;) {
+    const nl = text.indexOf("\n", from);
+    const to = nl === -1 ? text.length : nl + 1;
+    if (to > from) out.push({ start: from, end: to, first: from });
+    else if (from > 0) out.push({ start: from - 1, end: from, first: from });
+    // A selection that ends where the next paragraph starts doesn't take that one in.
+    if (nl === -1 || nl + 1 >= b) break;
+    from = nl + 1;
+  }
+  return out;
+}
+
+/** The list the paragraph starting at `first` is in, read as layout reads it. */
+export function paragraphList(
+  node: NodeRecord,
+  first: number,
+): { listType: TextRun["listType"] & string; listLevel: number } {
+  const spans = textSpans(node);
+  const span = spans.find((s) => s.start <= first && first < s.end) ?? spans[spans.length - 1];
+  const props = span?.props ?? node.props;
+  return { listType: getProp(props, "listType"), listLevel: getProp(props, "listLevel") };
 }

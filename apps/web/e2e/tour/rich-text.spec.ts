@@ -1,7 +1,8 @@
 /**
  * Screenshots of rich text for design review, in both themes: a heading with
  * a bold, coloured word and a paragraph mixing sizes; editing with part of
- * it selected; the caret; and the inspector reading "Mixed" for the layer.
+ * it selected; the caret; the inspector reading "Mixed" for the layer; and a
+ * list (bullets, a nested item, numbers) with the caret in it.
  * Run with `pnpm --filter @drawpane/web tour`.
  */
 import { expect } from "@playwright/test";
@@ -84,5 +85,31 @@ test("rich text tour", async ({ browser }) => {
   await page.keyboard.press("ArrowLeft");
   await page.waitForTimeout(150);
   await shot(page, "128-rich-text-caret");
+
+  // A list: bullets with a nested item, then numbered steps, the caret in the nested one.
+  await page.keyboard.press("Escape");
+  const list = await page.evaluate(() => {
+    const e = (window as unknown as W).drawpane;
+    const characters = "Groceries\nApples\nPears\nCall the venue\nBook the hall\nSend invites";
+    const t = e.createLayer("text", { x: 520, y: 40, width: 10, height: 10 }, e.s.pageId, {
+      characters,
+      fontSize: 17,
+      lineHeight: { unit: "percent", value: 150 },
+      textRuns: [
+        { start: 0, end: 10, listType: "bullet" },
+        { start: 10, end: 23, listType: "bullet", listLevel: 1 },
+        { start: 23, end: characters.length, listType: "number" },
+      ],
+    }) as string;
+    e.select([t]);
+    return t;
+  });
+  // Zoomed to fit before editing: while editing, ⇧1 would type.
+  await page.keyboard.press("Shift+1");
+  await page.evaluate((id) => (window as unknown as W).drawpane.startTextEdit(id), list);
+  await textbox.evaluate((t: HTMLTextAreaElement) => t.setSelectionRange(15, 15));
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(150);
+  await shot(page, "174-lists");
   await context.close();
 });
