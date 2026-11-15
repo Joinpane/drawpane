@@ -27,9 +27,10 @@ A text suite (20 cells in Inter: sizes and weights, italic, wrapping, line heigh
 
 - **Auto line height is the font's own height,** ascent plus descent, rounded to whole pixels, and the baseline sits half the extra leading plus the ascent from the line's top. Drawpane had used 1.25 em and a 0.8 em ascent for every font, so Inter's text sat 0.044 em high and wrapped lines drifted apart. The measurer reads the font's metrics from the browser (`TextMeasurer.metrics`); CSS export says `line-height: normal` for auto.
 - **Metrics and widths are measured at 1000 px and scaled.** Browsers round a font's ascent and descent, and on Linux each glyph's advance, to whole pixels at the size measured; measured large, they're the font's own, as Figma uses them. Centred and right-aligned lines now land where Figma's do.
+- **Text is drawn at those same advances** (`textRendering: "geometricPrecision"`, where the browser has it). Drawn with the default, Linux Chromium rounded each advance at the size drawn, so a run came out wider or narrower than layout measured it, and styled runs collided ("Three thingson") or left double gaps. With it the text suite's mean went from 4.07 to 3.29 and text with styled runs from 2.55 to 1.72. Two cells read further from Figma than before (bold Inter at 32 px, and bottom-aligned lines in the vertical trim suite): the web's Inter and Figma's are slightly different versions, and the old rounding happened to hide it there.
 - **Text is always kerned** where it's measured and drawn.
 
-The suite's mean went from 5.33 to 4.07; what's left is mostly the difference between two rasterisers drawing small glyphs (and, on Linux, Chromium snapping drawn glyphs to whole pixels).
+The suite's mean went from 5.33 to 4.07, then to 3.29 with text drawn at exact advances; what's left is mostly the difference between two rasterisers drawing small glyphs, and between Inter's versions.
 
 ## Revision: noise and texture (2026-11-15)
 

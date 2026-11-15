@@ -822,6 +822,9 @@ export class CanvasTextMeasurer implements TextMeasurer {
     this.#ctx = ctx as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
     // Always kerned, as Figma sets type, and as the renderer draws it ("auto" lets the browser skip it).
     this.#ctx.fontKerning = "normal";
+    // At the font's own advances, as the renderer draws them (see `typeset` there).
+    if ("textRendering" in this.#ctx)
+      (this.#ctx as { textRendering: string }).textRendering = "geometricPrecision";
   }
 
   width(font: string, text: string, _run?: ShapingRun | null): number {

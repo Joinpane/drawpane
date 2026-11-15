@@ -46,6 +46,21 @@ import { type AnyCanvas, type Bounds, copyExtended, scratch } from "./webgl";
 /** The most pixels a side of a stroke's or text's radial or angular gradient is drawn at. */
 const PATTERN_MAX_SIDE = 2048;
 
+/**
+ * Sets a context to draw a design's text as it was laid out: kerned, as Figma sets type, and at
+ * the font's own advances. Where the platform rounds each glyph's advance to whole pixels at the
+ * size drawn (Linux, without subpixel positioning), default rendering drew a run wider or narrower
+ * than layout measured it (at 1000 px, scaled, as Figma does), so styled runs collided ("Three
+ * thingson") or gapped; geometric precision keeps the advances exact. Browsers without the setting
+ * position glyphs to fractions of a pixel anyway.
+ */
+function typeset(c: Ctx, font: string): void {
+  c.font = font;
+  c.fontKerning = "normal";
+  if ("textRendering" in c)
+    (c as Ctx & { textRendering: string }).textRendering = "geometricPrecision";
+}
+
 /** On screen it's a canvas element; exports and thumbnails draw into an OffscreenCanvas. */
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 type ImagePaint = Extract<Paint, { type: "image" }>;
@@ -1762,8 +1777,7 @@ export class CanvasRenderer {
         const x0 = lineOffset(line, width, node.props);
         for (const frag of line.fragments) {
           if (!frag.text) continue;
-          c.font = frag.font;
-          c.fontKerning = "normal";
+          typeset(c, frag.font);
           if (spaced)
             (c as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
           paint(frag, x0 + frag.x, line.baseline + dy);
@@ -1947,8 +1961,7 @@ export class CanvasRenderer {
       // A list item's bullet or number, in its first character's style.
       const marker = line.marker;
       if (marker && !(this.#detail && marker.fontSize * scale < GREEK_BELOW)) {
-        ctx.font = marker.font;
-        ctx.fontKerning = "normal";
+        typeset(ctx, marker.font);
         if (spaced) (ctx as Ctx & { letterSpacing: string }).letterSpacing = "0px";
         const paints = override
           ? black
@@ -1962,8 +1975,7 @@ export class CanvasRenderer {
         }
       }
       for (const frag of line.fragments) {
-        ctx.font = frag.font;
-        ctx.fontKerning = "normal";
+        typeset(ctx, frag.font);
         if (spaced)
           (ctx as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
         const paints = override
