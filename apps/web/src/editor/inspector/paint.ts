@@ -35,6 +35,23 @@ export function withPickerValue(paint: SolidPaint, hex: string): SolidPaint {
   return { ...rest, color: toHex({ ...c, a: 1 }), ...(a < 1 ? { opacity: a } : {}) };
 }
 
+/**
+ * The opacity a paint row shows, 0–1: for a solid, how see-through it
+ * actually is (its color's alpha with the paint's opacity), as in Figma, so
+ * a color that came with alpha (from an import, code or the API) never reads
+ * as 100%; for a gradient or image, the paint's opacity.
+ */
+export function shownOpacity(paint: Paint): number {
+  return paint.type === "solid" ? rgbaOf(paint.color, paint.opacity ?? 1).a : (paint.opacity ?? 1);
+}
+
+/** A paint with the opacity its row shows set to `opacity` (0–1): a solid's alpha moves into it. */
+export function withShownOpacity<P extends Paint>(paint: P, opacity: number): P {
+  if (paint.type !== "solid") return { ...paint, opacity };
+  const c = rgbaOf(paint.color);
+  return withPickerValue(paint, toHex({ ...c, a: opacity })) as P;
+}
+
 /** CSS angle (0° points up, clockwise) of a linear gradient's handles. */
 export function gradientAngle(paint: Pick<GradientPaint, "from" | "to">): number {
   const deg = (Math.atan2(paint.to.x - paint.from.x, -(paint.to.y - paint.from.y)) * 180) / Math.PI;

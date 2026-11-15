@@ -99,8 +99,8 @@ export function useInPopover(ref: RefObject<HTMLElement | null>): void {
 /**
  * A non-modal dialog anchored to a control: pickers and small editors. It
  * renders in a portal so panes never clip it, follows its anchor as layout
- * changes, closes on Escape or a pointer down outside, and returns focus to
- * the anchor. Popovers opened from inside another stay part of it, so using a
+ * changes, closes on Escape (in it, or on its anchor) or a pointer down
+ * outside, and returns focus to the anchor. Popovers opened from inside another stay part of it, so using a
  * nested color picker never closes the effect editor that opened it.
  */
 export function Popover({
@@ -186,6 +186,19 @@ export function Popover({
     };
     document.addEventListener("pointerdown", onDown, true);
     return () => document.removeEventListener("pointerdown", onDown, true);
+  }, [anchor]);
+
+  // Opened without taking focus (autoFocus off), the anchor keeps it: Escape there closes this
+  // too, and goes no further, so the canvas doesn't also take it (to deselect).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      e.stopPropagation();
+      close.current();
+    };
+    anchor.addEventListener("keydown", onKey);
+    return () => anchor.removeEventListener("keydown", onKey);
   }, [anchor]);
 
   // Focus in on open; back to the anchor on close if focus was inside.
