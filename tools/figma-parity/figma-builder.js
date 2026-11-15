@@ -102,6 +102,7 @@ async function buildParity(figma, suites) {
           depth: Math.max(1, e.depth),
           dispersion: e.dispersion / 100,
           radius: e.frost,
+          splay: e.splay / 100,
         };
       case "noise":
         return {

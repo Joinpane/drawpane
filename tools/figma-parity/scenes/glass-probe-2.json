@@ -1,0 +1,1625 @@
+{
+  "suite": "glass-probe-2",
+  "about": "Figma's glass taken apart, one setting at a time at the top of its range: the light alone over flat grey, the bend at refraction and depth 100 and with splay, each colour's bend at full dispersion, and frost across a sharp edge.",
+  "cell": {
+    "width": 360,
+    "height": 260,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#808080",
+  "cells": [
+    {
+      "id": "light-80-d20",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-100-d20",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 100,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-80-d60",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 0,
+              "depth": 60,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-80-a0",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": 0,
+              "intensity": 80,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-80-a90",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": 90,
+              "intensity": 80,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bend-r100-d100-x",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 100,
+              "depth": 100,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bend-r100-d100-y",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0.5,
+                "y": 0
+              },
+              "to": {
+                "x": 0.5,
+                "y": 1
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 100,
+              "depth": 100,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bend-r100-d50-x",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 100,
+              "depth": 50,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bend-r100-d50-y",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0.5,
+                "y": 0
+              },
+              "to": {
+                "x": 0.5,
+                "y": 1
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 100,
+              "depth": 50,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "splay-100-x",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 80,
+              "depth": 40,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 100
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "splay-100-y",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0.5,
+                "y": 0
+              },
+              "to": {
+                "x": 0.5,
+                "y": 1
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 80,
+              "depth": 40,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 100
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dispersion-100-x",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 80,
+              "depth": 40,
+              "dispersion": 100,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dispersion-100-y",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0.5,
+                "y": 0
+              },
+              "to": {
+                "x": 0.5,
+                "y": 1
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 80,
+              "depth": 40,
+              "dispersion": 100,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "frost-20",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 180,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#000000"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 180,
+          "y": 0,
+          "width": 180,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 20,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "frost-50",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 180,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#000000"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 180,
+          "y": 0,
+          "width": 180,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 50,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "frost-100",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 180,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#000000"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 180,
+          "y": 0,
+          "width": 180,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 100,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-80-r80-d20",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 80,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-80-r100-d100",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 100,
+              "depth": 100,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-100-r100-d100-f0",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 100,
+              "refraction": 100,
+              "depth": 100,
+              "dispersion": 100,
+              "frost": 0,
+              "splay": 100
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-80-frost-20",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 20,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-80-frost-100",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 100,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "all-100",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 100,
+              "depth": 100,
+              "dispersion": 100,
+              "frost": 100,
+              "splay": 100
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-80-a-15",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -15,
+              "intensity": 80,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-80-a-30",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -30,
+              "intensity": 80,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-40-d20",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 40,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "light-20-a-30",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#808080"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -30,
+              "intensity": 20,
+              "refraction": 0,
+              "depth": 20,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "base-r80-d40-x",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 80,
+              "depth": 40,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "base-r80-d40-y",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0.5,
+                "y": 0
+              },
+              "to": {
+                "x": 0.5,
+                "y": 1
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#000000"
+                },
+                {
+                  "position": 1,
+                  "color": "#ffffff"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 320,
+          "height": 220,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 80,
+              "depth": 40,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bleed-default",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 70,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1f7a7a"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 90,
+          "width": 280,
+          "height": 140,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 80,
+              "depth": 20,
+              "dispersion": 50,
+              "frost": 4,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bleed-frost-30",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 70,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1f7a7a"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 90,
+          "width": 280,
+          "height": 140,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 80,
+              "depth": 20,
+              "dispersion": 50,
+              "frost": 30,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bleed-refraction-only",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 260,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 360,
+          "height": 70,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1f7a7a"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 90,
+          "width": 280,
+          "height": 140,
+          "cornerRadius": 40,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff01"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 0,
+              "refraction": 100,
+              "depth": 60,
+              "dispersion": 0,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

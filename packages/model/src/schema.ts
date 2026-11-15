@@ -202,9 +202,10 @@ export const Glass = z.object({
   angle: finite,
   intensity: amount,
   refraction: amount,
+  // Figma's range is 0–100 (and the slider's); files from before still load, drawn at 100.
   depth: ranged(
     finite.refine((n) => n >= 0 && n <= 200, "must be between 0 and 200"),
-    { min: 0, max: 200 },
+    { min: 0, max: 100 },
   ),
   dispersion: amount,
   frost: ranged(

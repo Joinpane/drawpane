@@ -22,6 +22,18 @@ export function scratch(existing: AnyCanvas | null, w: number, h: number): AnyCa
 }
 
 /**
+ * A device-pixel box: [x0, x1) × [y0, y1). `fill`: what lies past it (a
+ * clipping frame's own fill, as Figma's glass sees it), else its edge repeats.
+ */
+export interface Bounds {
+  readonly x0: number;
+  readonly y0: number;
+  readonly x1: number;
+  readonly y1: number;
+  readonly fill?: string;
+}
+
+/**
  * Copies `src`'s pixels in the rect (x, y, w, h), which may reach past its
  * edges, to the top left of `out`. Past them the edge pixels repeat, as a
  * texture clamped to its edge does: a blur or a bent ray there sees the
@@ -29,11 +41,25 @@ export function scratch(existing: AnyCanvas | null, w: number, h: number): AnyCa
  * same at the edge of the screen as away from it. Leaves `out` unfiltered
  * and unsmoothed.
  */
-export function copyExtended(src: AnyCanvas, out: Ctx, x: number, y: number, w: number, h: number) {
-  const ix0 = Math.min(Math.max(x, 0), src.width);
-  const iy0 = Math.min(Math.max(y, 0), src.height);
-  const ix1 = Math.min(Math.max(x + w, 0), src.width);
-  const iy1 = Math.min(Math.max(y + h, 0), src.height);
+export function copyExtended(
+  src: AnyCanvas,
+  out: Ctx,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  /** What of `src` may be read (a clipping frame's box); the rest of the canvas is as if past its edge. */
+  within: Bounds = { x0: 0, y0: 0, x1: src.width, y1: src.height },
+) {
+  const lo = (v: number, a: number, b: number) => Math.min(Math.max(v, a), b);
+  const bx0 = Math.max(0, Math.floor(within.x0));
+  const by0 = Math.max(0, Math.floor(within.y0));
+  const bx1 = Math.min(src.width, Math.ceil(within.x1));
+  const by1 = Math.min(src.height, Math.ceil(within.y1));
+  const ix0 = lo(x, bx0, bx1);
+  const iy0 = lo(y, by0, by1);
+  const ix1 = lo(x + w, bx0, bx1);
+  const iy1 = lo(y + h, by0, by1);
   out.save();
   out.setTransform(1, 0, 0, 1, 0, 0);
   out.globalCompositeOperation = "copy";
@@ -57,6 +83,18 @@ export function copyExtended(src: AnyCanvas, out: Ctx, x: number, y: number, w: 
   if (right > 0) out.drawImage(out.canvas, dx + iw - 1, dy, 1, ih, dx + iw, dy, right, ih);
   if (dy > 0) out.drawImage(out.canvas, 0, dy, w, 1, 0, 0, w, dy);
   if (bottom > 0) out.drawImage(out.canvas, 0, dy + ih - 1, w, 1, 0, dy + ih, w, bottom);
+  // Past the bounds (not merely past the canvas): what lies there, when it's known.
+  if (within.fill) {
+    const fx0 = Math.max(0, Math.round(within.x0) - x);
+    const fy0 = Math.max(0, Math.round(within.y0) - y);
+    const fx1 = Math.min(w, Math.round(within.x1) - x);
+    const fy1 = Math.min(h, Math.round(within.y1) - y);
+    out.fillStyle = within.fill;
+    if (fy0 > 0) out.fillRect(0, 0, w, fy0);
+    if (fy1 < h) out.fillRect(0, fy1, w, h - fy1);
+    if (fx0 > 0) out.fillRect(0, fy0, fx0, fy1 - fy0);
+    if (fx1 < w) out.fillRect(fx1, fy0, w - fx1, fy1 - fy0);
+  }
   out.restore();
 }
 

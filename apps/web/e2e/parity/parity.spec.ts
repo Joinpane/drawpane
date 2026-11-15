@@ -150,16 +150,25 @@ function build(page: Page, suite: Suite) {
 }
 
 /** Every cell's pixels on the canvas at 2× (RGBA, base64), in the suite's order. */
+/**
+ * Every cell's pixels at 2×, each drawn centred in the view: a suite's grid
+ * can be bigger than any viewport.
+ */
 function capture(page: Page, suite: Suite): Promise<string[]> {
   return page.evaluate(
     async ({ rects, scale }) => {
       const w = window as unknown as W;
-      w.drawpaneFrames.redraw();
-      for (let i = 0; i < 4; i++) await new Promise((r) => requestAnimationFrame(() => r(null)));
+      const frames = async () => {
+        for (let i = 0; i < 4; i++) await new Promise((r) => requestAnimationFrame(() => r(null)));
+      };
       const canvas = document.querySelector(".canvas canvas") as HTMLCanvasElement;
       const ctx = canvas.getContext("2d") as CanvasRenderingContext2D;
       const ratio = canvas.width / canvas.getBoundingClientRect().width;
-      return rects.map((rect) => {
+      const out: string[] = [];
+      for (const rect of rects) {
+        w.drawpane.centerOn({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 });
+        w.drawpaneFrames.redraw();
+        await frames();
         const at = w.drawpane.s.camera.toScreen({ x: rect.x, y: rect.y });
         const data = ctx.getImageData(
           Math.round(at.x * ratio),
@@ -170,8 +179,9 @@ function capture(page: Page, suite: Suite): Promise<string[]> {
         let s = "";
         for (let i = 0; i < data.length; i += 0x8000)
           s += String.fromCharCode(...data.subarray(i, i + 0x8000));
-        return btoa(s);
-      });
+        out.push(btoa(s));
+      }
+      return out;
     },
     {
       rects: suite.cells.map((_, i) => ({

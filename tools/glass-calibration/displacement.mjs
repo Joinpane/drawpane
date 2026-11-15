@@ -2,7 +2,7 @@
 // report of the glass-probe suite (tools/figma-parity/scenes/glass-probe.json):
 //
 //   PARITY_OUT=/tmp/probe npx playwright test e2e/parity -g "glass-probe:"   (in apps/web)
-//   node tools/glass-calibration/displacement.mjs /tmp/probe/index.html
+//   node tools/glass-calibration/displacement.mjs /tmp/probe/index.html [suite]
 //
 // Each probe cell is glass with its light, frost and dispersion off, over a
 // ramp from black to white across the glass's box (along x in "-x" cells,
@@ -20,20 +20,19 @@ const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(join(here, "../../apps/web/package.json"));
 const { chromium } = require("@playwright/test");
 
-const [, , report] = process.argv;
+const [, , report, suite = "glass-probe"] = process.argv;
 if (!report) {
-  console.error("Usage: node displacement.mjs <parity report index.html>");
+  console.error("Usage: node displacement.mjs <parity report index.html> [suite]");
   process.exit(1);
 }
 
 const SCALE = 2;
-const scenes = JSON.parse(
-  readFileSync(join(here, "../figma-parity/scenes/glass-probe.json"), "utf8"),
-);
-// The glass's box in each cell, at 2×: the ramp spans it.
+const scenes = JSON.parse(readFileSync(join(here, `../figma-parity/scenes/${suite}.json`), "utf8"));
+// The glass's box in each ramp cell ("-x" or "-y"), at 2×: the ramp spans it.
 const boxes = new Map();
 for (const cell of scenes.cells) {
-  const ramp = cell.layers[0];
+  const ramp = cell.layers.find((l) => l.fills?.[0]?.type === "linear");
+  if (!ramp || !/-[xy]$/.test(cell.id)) continue;
   boxes.set(
     cell.id,
     [ramp.x, ramp.y, ramp.width, ramp.height].map((v) => v * SCALE),

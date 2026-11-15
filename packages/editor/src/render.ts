@@ -11,7 +11,7 @@ import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
 import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
 import { exportBounds } from "./export";
-import { type Matrix, type Rect, rectsIntersect } from "./geometry";
+import { apply, invert, type Matrix, type Rect, rectsIntersect } from "./geometry";
 import { GlassPainter, glassParams } from "./glass";
 import {
   boxInGradientSpace,
@@ -41,7 +41,7 @@ import { TexturePainter } from "./texture";
 import { isClosedPath } from "./vector/cache";
 import { nodePath } from "./vector/shapes";
 import { serializePath } from "./vector/svg";
-import { type AnyCanvas, copyExtended, scratch } from "./webgl";
+import { type AnyCanvas, type Bounds, copyExtended, scratch } from "./webgl";
 
 /** On screen it's a canvas element; exports and thumbnails draw into an OffscreenCanvas. */
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -1537,7 +1537,7 @@ export class CanvasRenderer {
     this.#blurBackdrop = scratch(this.#blurBackdrop, x1 - x0, y1 - y0);
     const behind = this.#blurBackdrop?.getContext("2d") as Ctx | null | undefined;
     if (!this.#blurBackdrop || !behind) return;
-    copyExtended(ctx.canvas, behind, x0, y0, x1 - x0, y1 - y0);
+    copyExtended(ctx.canvas, behind, x0, y0, x1 - x0, y1 - y0, this.#clipWithin(ctx, node));
     ctx.save();
     ctx.clip(shape);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1546,6 +1546,59 @@ export class CanvasRenderer {
     ctx.filter = `blur(${sigma}px)`;
     ctx.drawImage(this.#blurBackdrop, x0, y0);
     ctx.restore();
+  }
+
+  /**
+   * The device box of the frames that clip `node` (their boxes intersected),
+   * in `ctx`'s current transform, which is set for `node`: what its glass or
+   * background blur may see, as in Figma, which doesn't show them what's
+   * outside. Undefined when nothing clips it.
+   */
+  #clipWithin(ctx: Ctx, node: NodeRecord): Bounds | undefined {
+    const doc = this.#scene.doc;
+    const t = ctx.getTransform();
+    const toLocal = invert(this.#scene.worldMatrix(node.id));
+    let out: Bounds | undefined;
+    for (let a = doc.get(node.parent); a && a.type !== "page"; a = doc.get(a.parent)) {
+      if (a.type !== "frame" || !getProp(a.props, "clipContent")) continue;
+      const m = this.#scene.worldMatrix(a.id);
+      const w = getProp(a.props, "width");
+      const h = getProp(a.props, "height");
+      const xs: number[] = [];
+      const ys: number[] = [];
+      for (const [px, py] of [
+        [0, 0],
+        [w, 0],
+        [0, h],
+        [w, h],
+      ] as const) {
+        const local = apply(toLocal, apply(m, { x: px, y: py }));
+        xs.push(t.a * local.x + t.c * local.y + t.e);
+        ys.push(t.b * local.x + t.d * local.y + t.f);
+      }
+      // Past the nearest clipping frame lies its own fill (a solid one; else its edge repeats),
+      // as Figma's glass sees it.
+      const fill = [...getProp(a.props, "fills")]
+        .reverse()
+        .find((f) => f.visible !== false && f.type === "solid" && (f.opacity ?? 1) >= 1);
+      const box = {
+        x0: Math.min(...xs),
+        y0: Math.min(...ys),
+        x1: Math.max(...xs),
+        y1: Math.max(...ys),
+        ...(fill?.type === "solid" ? { fill: fill.color } : {}),
+      };
+      out = out
+        ? {
+            ...out,
+            x0: Math.max(out.x0, box.x0),
+            y0: Math.max(out.y0, box.y0),
+            x1: Math.min(out.x1, box.x1),
+            y1: Math.min(out.y1, box.y1),
+          }
+        : box;
+    }
+    return out;
   }
 
   /**
@@ -1573,7 +1626,13 @@ export class CanvasRenderer {
     const box = node.type === "rect" || node.type === "frame";
     const r = box ? getProp(node.props, "cornerRadius") : 0;
     const corners = box ? (getProp(node.props, "cornerRadii") ?? [r, r, r, r]) : null;
-    this.#glass.paint(ctx, outline, w, h, glass, scale, { key, inradius, corners });
+    const within = this.#clipWithin(ctx, node);
+    this.#glass.paint(ctx, outline, w, h, glass, scale, {
+      key,
+      inradius,
+      corners,
+      ...(within ? { within } : {}),
+    });
   }
 
   /** Text too small to read: a bar per line, the last one shorter, in the text's colour. */

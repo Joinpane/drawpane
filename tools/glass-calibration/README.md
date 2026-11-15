@@ -46,6 +46,7 @@ After changing `scenes.json`, run `node tools/glass-calibration/build-plugin.mjs
 - **Glass v3** (decision 0007's smooth height field) traded a little of that mean for no creases, fans or shimmer anywhere: 3.0, with every cell but the deepest rim within 4.5 and most about 2.
 - **Rims no deeper than the shape is thick** (decision 0007's revision of 2026-11-15) took `depth-80` from 20.2 to 16.9 and the mean to 2.84.
 - **Exact distance in boxes** (decision 0007's square-corners revision) took the mean to 2.70, `depth-80` to 15.2, with nothing worse.
+- **Measured setting by setting** (decision 0007's revision of the same name, the `glass-probe-2` suite): the mean to 2.32, every cell better or equal, `depth-80` to 11.4.
 - **The largest gap left** is still a rim much deeper than the shape (`depth-80`): Figma bends the surroundings into closed loops there, a profile v3 doesn't model yet, and its colours fringe far less than a share of the bend.
 
 `apps/web/e2e/bench/glass.spec.ts` measures what glass costs to draw.
@@ -56,7 +57,7 @@ The parity suite `glass-probe` (in `tools/figma-parity`) draws glass with its li
 
 ```sh
 PARITY_OUT=/tmp/probe pnpm --filter @drawpane/web exec playwright test e2e/parity -g "glass-probe:"
-node tools/glass-calibration/displacement.mjs /tmp/probe/index.html
+node tools/glass-calibration/displacement.mjs /tmp/probe/index.html [suite]
 ```
 
 It prints the bend along each shape's centre lines, Figma's above Drawpane's, and how far apart the two fields are overall and in the corners (decision 0007 has what it found).

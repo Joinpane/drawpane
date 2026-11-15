@@ -46,7 +46,8 @@ test.describe("Glass cost", () => {
   });
 
   test("redraws six glass layers", async () => {
-    test.setTimeout(180_000);
+    // Without a GPU (this VM, CI), each frame takes seconds.
+    test.setTimeout(600_000);
     const page = instance.page;
     await page.getByRole("button", { name: "New file" }).first().click();
     await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
