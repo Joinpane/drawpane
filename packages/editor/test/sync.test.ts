@@ -337,6 +337,31 @@ describe("compactOps", () => {
   });
 });
 
+describe("SyncEngine.takeUnsent", () => {
+  it("hands over every unsent edit as one transaction that applies to the starting state", () => {
+    const start: NodeRecord[] = [
+      { id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+    ] as NodeRecord[];
+    const doc = new Doc();
+    doc.reset(start);
+    // Never connected: like the Worker's headless editor, edits only queue.
+    const engine = new SyncEngine(doc, { clientId: "headless", setTimer: () => 0 });
+    engine.commit([
+      { op: "create", id: "r", type: "rect", parent: "p", key: "a0", props: { width: 10 } },
+    ]);
+    engine.commit([{ op: "set", id: "r", prop: "width", value: 20 }]);
+    engine.commit([{ op: "set", id: "r", prop: "width", value: 30 }]);
+    const ops = engine.takeUnsent();
+    expect(engine.pendingCount).toBe(0);
+    expect(engine.takeUnsent()).toEqual([]);
+    // The overridden width is compacted away; the rest replays to the same document.
+    expect(ops.filter((o) => o.op === "set")).toHaveLength(1);
+    const room = new MemoryStore(start);
+    applyTransaction(room, ops);
+    expect(room.get("r")?.props.width).toBe(30);
+  });
+});
+
 describe("SyncEngine room requests", () => {
   function live() {
     const doc = new Doc();

@@ -1,7 +1,8 @@
 /**
  * Access tokens (docs/decisions/0011-mcp-server.md): connect an MCP client
  * (an AI agent, an IDE) to this instance's MCP server. A token reads every
- * file you can, and changes none; it's shown once, when it's made.
+ * file you can; a read and write token also lets an agent design in them,
+ * in sessions (decision 0021). It's shown once, when it's made.
  */
 import { Button, Icon, IconButton, Logo, TextField } from "@drawpane/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -12,10 +13,13 @@ import { timeAgo } from "../app/format";
 import { SettingsNav } from "./SettingsNav";
 import "./account.css";
 
+type Scope = "read" | "write";
+
 interface ApiToken {
   readonly id: string;
   readonly name: string;
   readonly prefix: string;
+  readonly scope: Scope;
   readonly createdAt: number;
   readonly lastUsedAt: number | null;
   readonly expiresAt: number | null;
@@ -33,6 +37,19 @@ const EXPIRIES = [
   { value: "365", label: "A year" },
   { value: "never", label: "Never" },
 ] as const;
+
+const SCOPES: ReadonlyArray<{ value: Scope; label: string; hint: string }> = [
+  {
+    value: "read",
+    label: "Read only",
+    hint: "Reads your files, components, tokens, comments and history. Changes nothing.",
+  },
+  {
+    value: "write",
+    label: "Read and write",
+    hint: "Also designs in files you can edit: on a branch you review and merge, or live as you watch. Every change is attributed to it and can be undone.",
+  },
+];
 
 /** This instance's MCP endpoint, as a client reaches it. */
 const endpoint = () => `${window.location.origin}/api/mcp`;
@@ -66,6 +83,7 @@ export function TokensPage() {
   const [making, setMaking] = useState(false);
   const [name, setName] = useState("");
   const [expiry, setExpiry] = useState<(typeof EXPIRIES)[number]["value"]>("90");
+  const [scope, setScope] = useState<Scope>("read");
   const [made, setMade] = useState<{ token: string; name: string } | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
   const refresh = () => queries.invalidateQueries({ queryKey: ["api-tokens"] });
@@ -75,11 +93,13 @@ export function TokensPage() {
       api.post<{ token: string; info: ApiToken }>("/account/tokens", {
         name: name.trim(),
         expiresInDays: expiry === "never" ? null : Number(expiry),
+        scope,
       }),
     onSuccess: ({ token, info }) => {
       setMade({ token, name: info.name });
       setMaking(false);
       setName("");
+      setScope("read");
       void refresh();
     },
   });
@@ -111,7 +131,8 @@ export function TokensPage() {
         <h1 className="account__title">Access tokens</h1>
         <p className="account__lede">
           Connect an AI agent or another MCP client to Drawpane. With a token it reads every file
-          you can (outlines, components, tokens, comments, history) and changes none.
+          you can (outlines, components, tokens, comments, history). With a read and write token it
+          can also design in them, on a branch or live.
         </p>
 
         <section className="account__section" aria-labelledby="connect-title">
@@ -188,6 +209,27 @@ export function TokensPage() {
                   ))}
                 </select>
               </label>
+              <fieldset className="tokens__scope">
+                <legend className="dp-tf__label">Access</legend>
+                <div className="app-radio-row">
+                  {SCOPES.map((s) => (
+                    <label key={s.value} className="app-radio">
+                      <input
+                        type="radio"
+                        name="scope"
+                        value={s.value}
+                        checked={scope === s.value}
+                        aria-describedby="token-scope-hint"
+                        onChange={() => setScope(s.value)}
+                      />
+                      <span>{s.label}</span>
+                    </label>
+                  ))}
+                </div>
+                <p id="token-scope-hint" className="account__hint">
+                  {SCOPES.find((s) => s.value === scope)?.hint}
+                </p>
+              </fieldset>
               <div className="tokens__actions">
                 <Button
                   size="sm"
@@ -224,7 +266,8 @@ export function TokensPage() {
                   <span className="account__method-text">
                     <strong>{t.name}</strong>
                     <span>
-                      <code className="tokens__prefix">{t.prefix}…</code> · made{" "}
+                      <code className="tokens__prefix">{t.prefix}…</code> ·{" "}
+                      {t.scope === "write" ? "read and write" : "read only"} · made{" "}
                       {DATE.format(t.createdAt)} ·{" "}
                       {t.lastUsedAt ? `used ${timeAgo(t.lastUsedAt)}` : "never used"} ·{" "}
                       {t.expiresAt === null

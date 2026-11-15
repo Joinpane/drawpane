@@ -176,6 +176,17 @@ describe("/api/fonts", () => {
     expect((await browser.fetch("/api/fonts/google.css?family=Inter&format=otf")).status).toBe(400);
   });
 
+  it("keeps a family's TrueType and WOFF2 stylesheets apart in the cache", async () => {
+    // The same Google URL answers each user agent differently, so one mustn't stand in for the other.
+    stubGoogle();
+    const browser = new Browser();
+    await browser.fetch("/api/fonts/google.css?family=Gelasio&variants=400");
+    await browser.fetch("/api/fonts/google.css?family=Gelasio&variants=400&format=ttf");
+    expect(agents).toHaveLength(2);
+    expect(agents[0]).toMatch(/Chrome/);
+    expect(agents[1]).not.toMatch(/Chrome/);
+  });
+
   it("names a family's variable files, cached, for text that sets its axes", async () => {
     const calls = stubGoogle();
     const browser = new Browser();

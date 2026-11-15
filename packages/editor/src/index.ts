@@ -1,4 +1,6 @@
 export * from "./accessibility";
+export * from "./agent/jsx";
+export * from "./agent/tools";
 export * from "./camera";
 export * from "./camera-motion";
 export * from "./code";
@@ -17,6 +19,7 @@ export * from "./geometry";
 export * from "./glass";
 export { cssGradient } from "./gradients";
 export * from "./grids";
+export * from "./harfbuzz-measurer";
 export * from "./headless-render";
 export * from "./history";
 export * from "./hit";

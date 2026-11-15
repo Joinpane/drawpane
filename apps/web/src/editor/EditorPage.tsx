@@ -404,9 +404,12 @@ function FileEditor({ fileId }: { fileId: string }) {
       drawpaneGlass?: { set: typeof setGlassTuning; get: typeof glassTuning };
       /** The canvas export and the headless renderer side by side (e2e/parity/headless.spec.ts). */
       drawpaneHeadless?: ReturnType<typeof headlessDebug>;
+      /** The canvas and HarfBuzz text measurers, for the text parity test. */
+      drawpaneMeasurers?: () => Promise<typeof import("./measure-parity")>;
     };
     w.drawpane = editor;
     w.drawpaneHeadless = headlessDebug(editor);
+    w.drawpaneMeasurers = () => import("./measure-parity");
     w.drawpaneGlass = { set: setGlassTuning, get: glassTuning };
     w.drawpaneFrames = frameStatsFor(editor);
     w.drawpaneVersion = history.view.preview;

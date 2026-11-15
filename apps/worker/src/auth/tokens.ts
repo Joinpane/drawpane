@@ -2,7 +2,8 @@
  * Personal access tokens (docs/decisions/0011-mcp-server.md): created and
  * revoked from the account page, and accepted as `Authorization: Bearer` by
  * the MCP endpoint only. Only a token's SHA-256 is stored; the token itself
- * is shown once, when it's made.
+ * is shown once, when it's made. A token reads, or reads and writes
+ * (decision 0021): only a write token can start an agent session.
  */
 import { newId } from "@drawpane/model";
 import { Hono } from "hono";
@@ -21,12 +22,15 @@ const DAY = 86_400_000;
 /** Last use is recorded at most this often per token. */
 const LAST_USED_GRANULARITY = 60_000;
 
+/** What a token may do: `read` files, or also `write` to them through agent sessions. */
+export type TokenScope = "read" | "write";
+
 export interface ApiToken {
   readonly id: string;
   readonly name: string;
   /** The start of the token, to recognise it by. */
   readonly prefix: string;
-  readonly scope: "read";
+  readonly scope: TokenScope;
   readonly createdAt: number;
   readonly lastUsedAt: number | null;
   readonly expiresAt: number | null;
@@ -36,7 +40,7 @@ interface TokenRow {
   id: string;
   name: string;
   prefix: string;
-  scope: "read";
+  scope: TokenScope;
   created_at: number;
   last_used_at: number | null;
   expires_at: number | null;
@@ -74,6 +78,7 @@ export const tokens = new Hono<AppContext>()
       z.object({
         name: z.string().trim().min(1, "Name the token: what will use it?").max(80),
         expiresInDays: z.union([z.literal(30), z.literal(90), z.literal(365)]).nullable(),
+        scope: z.enum(["read", "write"]).default("read"),
       }),
     );
     const count = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM api_tokens WHERE user_id = ?")
@@ -87,7 +92,7 @@ export const tokens = new Hono<AppContext>()
       id: newId(),
       name: body.name,
       prefix: token.slice(0, TOKEN_PREFIX.length + 4),
-      scope: "read",
+      scope: body.scope,
       created_at: now,
       last_used_at: null,
       expires_at: body.expiresInDays === null ? null : now + body.expiresInDays * DAY,
@@ -121,21 +126,23 @@ export const tokens = new Hono<AppContext>()
   });
 
 /**
- * The person a bearer token acts as, or null for a missing, malformed,
- * unknown, revoked or expired token. Notes when it was last used.
+ * The person a bearer token acts as, with the token and its scope, or null
+ * for a missing, malformed, unknown, revoked or expired token. Notes when it
+ * was last used.
  */
 export async function userForBearer(env: Env, authorization: string | undefined) {
   const match = /^Bearer\s+(\S+)$/i.exec(authorization ?? "");
   const token = match?.[1];
   if (!token?.startsWith(TOKEN_PREFIX) || token.length > 128) return null;
   const row = await env.DB.prepare(
-    `SELECT t.id AS token_id, t.last_used_at, t.expires_at, u.id, u.email, u.name, u.is_admin
+    `SELECT t.id AS token_id, t.scope, t.last_used_at, t.expires_at, u.id, u.email, u.name, u.is_admin
        FROM api_tokens t JOIN users u ON u.id = t.user_id
       WHERE t.token_hash = ?`,
   )
     .bind(await sha256Hex(token))
     .first<{
       token_id: string;
+      scope: TokenScope;
       last_used_at: number | null;
       expires_at: number | null;
       id: string;
@@ -150,5 +157,5 @@ export async function userForBearer(env: Env, authorization: string | undefined)
       .bind(now, row.token_id)
       .run();
   const user: User = { id: row.id, email: row.email, name: row.name, isAdmin: row.is_admin === 1 };
-  return { user, tokenId: row.token_id };
+  return { user, tokenId: row.token_id, scope: row.scope };
 }

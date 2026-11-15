@@ -56,7 +56,7 @@ export interface PngOptions {
 }
 
 /** Effects a headless picture shows only roughly, or not at all. */
-export type Approximation = "glass" | "noise" | "texture" | "background-blur";
+export type RenderApproximation = "glass" | "noise" | "texture" | "background-blur";
 
 export interface HeadlessPng {
   readonly png: Uint8Array;
@@ -65,8 +65,8 @@ export interface HeadlessPng {
   /** The page rect drawn: the layer and whatever its strokes, shadows and blur paint outside it. */
   readonly bounds: Rect;
   readonly scale: number;
-  /** What differs from the canvas, if anything: see `Approximation`. */
-  readonly approximate: readonly Approximation[];
+  /** What differs from the canvas, if anything: see `RenderApproximation`. */
+  readonly approximate: readonly RenderApproximation[];
   /** Faces drawn in the fallback family instead ("Fraunces 700 italic"). */
   readonly missingFonts: readonly string[];
   /** Images left out because their files couldn't be had, by hash. */
@@ -104,8 +104,8 @@ export function facesUsed(doc: Doc, ids: readonly string[]): Face[] {
 }
 
 /** The effects in these layers that SVG approximates. */
-export function approximations(doc: Doc, ids: readonly string[]): Approximation[] {
-  const found = new Set<Approximation>();
+export function approximations(doc: Doc, ids: readonly string[]): RenderApproximation[] {
+  const found = new Set<RenderApproximation>();
   const visit = (id: string) => {
     const node = doc.get(id);
     if (!node || node.props.visible === false) return;
