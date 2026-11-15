@@ -25,8 +25,11 @@ test("penpot import tour", async ({ browser }) => {
   await shot(page, "129-dashboard-empty-import");
 
   await page.getByRole("button", { name: "Import", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Import from Penpot" });
+  const dialog = page.getByRole("dialog", { name: "Import" });
   await expect(dialog).toBeVisible();
+  await page.waitForTimeout(200);
+  await shot(page, "130-import-figma");
+  await dialog.getByRole("radio", { name: "Penpot" }).click();
   await page.waitForTimeout(200);
   await shot(page, "130-import-choose");
 
@@ -38,6 +41,7 @@ test("penpot import tour", async ({ browser }) => {
   await dialog.getByRole("button", { name: "Done" }).click();
 
   await page.getByRole("button", { name: "Import", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Penpot" }).click();
   await dialog.locator('input[type="file"]').setInputFiles(fixture("showcase.penpot"));
   const row = dialog.getByRole("listitem").filter({ hasText: "Showcase" });
   await row.getByRole("button", { name: "Open" }).click();

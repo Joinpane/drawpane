@@ -17,7 +17,12 @@ type W = { drawpane: Debug };
 
 const fixture = (name: string) =>
   resolve(import.meta.dirname, "../../../packages/penpot/test/fixtures", name);
-const dialog = (page: Page) => page.getByRole("dialog", { name: "Import from Penpot" });
+const dialog = (page: Page) => page.getByRole("dialog", { name: "Import" });
+/** Opens the Import dialog on its Penpot side. */
+async function openPenpotImport(page: Page) {
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  await dialog(page).getByRole("radio", { name: "Penpot" }).click();
+}
 const chooser = (page: Page) => dialog(page).locator('input[type="file"]');
 
 test.describe
@@ -39,7 +44,7 @@ test.describe
     });
 
     test("explains a file that isn't a Penpot export", async () => {
-      await page.getByRole("button", { name: "Import", exact: true }).click();
+      await openPenpotImport(page);
       await chooser(page).setInputFiles({
         name: "old.penpot",
         mimeType: "application/octet-stream",
@@ -51,7 +56,7 @@ test.describe
     });
 
     test("imports an export into a new file, and opens it", async () => {
-      await page.getByRole("button", { name: "Import", exact: true }).click();
+      await openPenpotImport(page);
       await chooser(page).setInputFiles(fixture("showcase.penpot"));
       const row = dialog(page).getByRole("listitem").filter({ hasText: "Showcase" });
       await expect(row).toContainText("2 pages", { timeout: 30_000 });
@@ -100,7 +105,7 @@ test.describe
 
     test("makes a file for each file in the export", async () => {
       await page.goBack();
-      await page.getByRole("button", { name: "Import", exact: true }).click();
+      await openPenpotImport(page);
       await chooser(page).setInputFiles(fixture("file-with-library.penpot"));
       await expect(dialog(page).getByRole("listitem")).toHaveCount(2);
       await expect(dialog(page).getByRole("button", { name: "Done" })).toBeEnabled({

@@ -865,7 +865,7 @@ function EmptyState({
           ) : null}
           {onImport ? (
             <Button size="lg" icon="import" onClick={onImport}>
-              Import from Penpot
+              Import from Figma or Penpot
             </Button>
           ) : null}
         </div>

@@ -36,4 +36,8 @@ E2E_PORT=8943 UPDATE_THRESHOLDS=1 npx playwright test e2e/parity   # record new 
 
 4. Run the suite with `UPDATE_THRESHOLDS=1`, look at the report, and commit the scenes, goldens and thresholds together.
 
+## Figma import
+
+`apps/web/e2e/parity/import.spec.ts` measures the Figma importer (decision 0014) on the same scenes: Figma's API response for the file the goldens came from is kept as a fixture (`packages/figma/test/fixtures/parity-file.json`), imported, drawn, and compared with the goldens, within `import-thresholds.json`. After rebuilding the scenes in Figma, refresh the fixture with one read of the file (`GET /v1/files/:key?geometry=paths`, minified, without `thumbnailUrl`).
+
 The glass effect has its own fitting harness, `tools/glass-calibration`, which searches the shader's constants against the same kind of renders.
