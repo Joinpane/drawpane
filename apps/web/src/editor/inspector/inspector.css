@@ -724,9 +724,15 @@
 }
 .selection-colors__row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
+  grid-template-columns: 24px minmax(0, 1fr) 36px auto;
   align-items: center;
   gap: var(--space-100);
+}
+.selection-colors__alpha {
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 .selection-colors__count {
   min-width: 52px;

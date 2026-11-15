@@ -103,7 +103,7 @@ export function Player({
     id: 0,
     text: touchFirst()
       ? "Tap to interact"
-      : "Click to interact · R restarts · ← → move between screens",
+      : "Click to interact · R restarts · Arrow keys move between screens",
   });
 
   // Flows on every page, for the picker.

@@ -70,6 +70,7 @@ export function TokensWorkspace({ onShowLayer }: { onShowLayer: (id: string) => 
             <IconButton icon="plus" label="New collection" onClick={createCollection} />
           ) : null}
         </div>
+        {collections.length === 0 ? <p className="tokens__hint">No collections yet.</p> : null}
         <ul className="tokens__collection-list">
           {collections.map((c) => (
             <li key={c.id}>
@@ -84,47 +85,51 @@ export function TokensWorkspace({ onShowLayer }: { onShowLayer: (id: string) => 
             </li>
           ))}
         </ul>
-        <div className="tokens__io">
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".json,application/json"
-            hidden
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void importFile(file);
-              e.target.value = "";
-            }}
-          />
-          {editor.canEdit ? (
-            <Button size="sm" icon="export" onClick={() => fileInput.current?.click()}>
-              Import tokens
-            </Button>
-          ) : null}
-          <div className="tokens__io-row">
-            <span className="tokens__io-label">Export as</span>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => download("tokens.css", exportCss(editor.doc), "text/css")}
-            >
-              CSS
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() =>
-                download(
-                  "tokens.json",
-                  `${JSON.stringify(exportDtcg(editor.doc), null, 2)}\n`,
-                  "application/json",
-                )
-              }
-            >
-              DTCG JSON
-            </Button>
+        {/* Here for both Import buttons: this pane's and the empty state's. */}
+        <input
+          ref={fileInput}
+          type="file"
+          accept=".json,application/json"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void importFile(file);
+            e.target.value = "";
+          }}
+        />
+        {/* With nothing made yet, the empty state offers import, and there's nothing to export. */}
+        {collections.length === 0 ? null : (
+          <div className="tokens__io">
+            {editor.canEdit ? (
+              <Button size="sm" icon="export" onClick={() => fileInput.current?.click()}>
+                Import tokens
+              </Button>
+            ) : null}
+            <div className="tokens__io-row">
+              <span className="tokens__io-label">Export as</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => download("tokens.css", exportCss(editor.doc), "text/css")}
+              >
+                CSS
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  download(
+                    "tokens.json",
+                    `${JSON.stringify(exportDtcg(editor.doc), null, 2)}\n`,
+                    "application/json",
+                  )
+                }
+              >
+                DTCG JSON
+              </Button>
+            </div>
           </div>
-        </div>
+        )}
       </aside>
 
       <main className="tokens__table pane" aria-label="Variables">
@@ -203,7 +208,13 @@ export function TokensWorkspace({ onShowLayer }: { onShowLayer: (id: string) => 
             onShowLayer={onShowLayer}
           />
         ) : (
-          <p className="tokens__hint">Select a variable to see where it's used and its code.</p>
+          <p className="tokens__hint">
+            {!collection
+              ? "A variable's details show here: where it's used, and its code."
+              : variables.length === 0
+                ? "Add a variable to see where it's used, and its code."
+                : "Select a variable to see where it's used, and its code."}
+          </p>
         )}
       </aside>
     </div>

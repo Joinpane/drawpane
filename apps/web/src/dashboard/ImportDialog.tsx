@@ -348,6 +348,7 @@ function ImportRow({ row, onOpen }: { row: FileImport; onOpen: (fileId: string) 
       {row.notes.length > 0 && stage === "done" ? (
         <details className="import-row__notes">
           <summary>
+            <Icon name="chevron-right" size={12} className="import-row__notes-chevron" />
             {row.notes.length === 1
               ? "1 thing came across differently"
               : `${row.notes.length} things came across differently`}
