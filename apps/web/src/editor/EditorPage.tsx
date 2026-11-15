@@ -102,6 +102,7 @@ import { uiFor } from "./ui-state";
 import { useViewPreferences } from "./view-preferences";
 import { XrayLegend } from "./XrayLegend";
 import "./editor.css";
+import { PASS_GESTURES } from "./canvas-gestures";
 import { useOverridesVersion } from "./shortcuts-store";
 
 const CLIPBOARD_MIME = "application/x-drawpane+json";
@@ -1268,7 +1269,7 @@ function ZoomControls() {
   const editor = useEditor();
   const zoom = useEditorState((s) => s.camera.zoom);
   return (
-    <fieldset className="zoom pane" aria-label="Zoom">
+    <fieldset className="zoom pane" aria-label="Zoom" {...PASS_GESTURES}>
       <IconButton
         icon="minus"
         label="Zoom out"
@@ -1317,7 +1318,12 @@ function SyncStatus() {
           : `Saved · revision ${revn}`
         : "Connecting…";
   return (
-    <div className={`sync pane sync--${status}`} role="status" aria-live="polite">
+    <div
+      className={`sync pane sync--${status}`}
+      role="status"
+      aria-live="polite"
+      {...PASS_GESTURES}
+    >
       <Icon name={status === "offline" ? "warning" : "check"} size={12} />
       <span>{text}</span>
     </div>

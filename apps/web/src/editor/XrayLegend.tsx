@@ -2,6 +2,7 @@ import { xrayFrames } from "@drawpane/editor";
 import { Kbd } from "@drawpane/ui";
 import { isMac } from "../app/format";
 import { capsFor } from "./actions";
+import { PASS_GESTURES } from "./canvas-gestures";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import { useUi } from "./ui-state";
 
@@ -22,7 +23,7 @@ export function XrayLegend() {
   if (!xray || xrayFrames(editor).length === 0) return null;
   const alt = isMac() ? "⌥" : "Alt";
   return (
-    <aside className="xray-legend pane" aria-label="Layout X-ray">
+    <aside className="xray-legend pane" aria-label="Layout X-ray" {...PASS_GESTURES}>
       <span className="xray-legend__item">
         <span className="xray-legend__swatch" data-kind="padding" />
         Padding

@@ -2,6 +2,7 @@ import type { ToolId } from "@drawpane/editor";
 import { ContextMenu, Icon, IconButton, type IconName, Kbd, Tooltip } from "@drawpane/ui";
 import { useRef, useState } from "react";
 import { ACTIONS, type ActionContext, capsFor, shortcutFor, shortcutProp } from "./actions";
+import { PASS_GESTURES } from "./canvas-gestures";
 import { useEditor, useEditorState } from "./hooks";
 
 interface Tool {
@@ -55,7 +56,7 @@ export function Toolbar({ onSearch, ctx }: { onSearch: () => void; ctx: ActionCo
     );
   };
   return (
-    <div className="toolbar pane" role="toolbar" aria-label="Tools">
+    <div className="toolbar pane" role="toolbar" aria-label="Tools" {...PASS_GESTURES}>
       {BEFORE.filter((t) => canEdit || VIEWER_TOOLS.has(t.id)).map(button)}
       {canEdit ? <ShapeTools tool={tool} ctx={ctx} /> : null}
       {AFTER.filter((t) => canEdit || VIEWER_TOOLS.has(t.id)).map(button)}

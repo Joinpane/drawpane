@@ -7,6 +7,7 @@
 import type { Editor, Interaction, PointerInput } from "@drawpane/editor";
 import { useEffect, useRef } from "react";
 import { isMac } from "../app/format";
+import { PASS_GESTURES } from "./canvas-gestures";
 import { useEditor } from "./hooks";
 
 /** Ruler thickness, and the gap between the two strips. */
@@ -230,7 +231,7 @@ export function Rulers({
 
   // Vertical guides come out of the left ruler, horizontal ones out of the top.
   return (
-    <div className="rulers" style={{ left, right }} aria-hidden="true">
+    <div className="rulers" style={{ left, right }} aria-hidden="true" {...PASS_GESTURES}>
       <canvas
         ref={top}
         className="rulers__top"

@@ -18,6 +18,7 @@ import {
 } from "@drawpane/ui";
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { shortcutFor } from "./actions";
+import { PASS_GESTURES } from "./canvas-gestures";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import { FontPicker } from "./inspector/FontPicker";
 import { common } from "./inspector/fields";
@@ -190,6 +191,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
     <div
       ref={ref}
       className="lens-anchor"
+      {...PASS_GESTURES}
       data-side={placement.side}
       style={{ left: placement.x, top: placement.y }}
     >

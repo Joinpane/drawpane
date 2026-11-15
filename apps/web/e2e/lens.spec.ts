@@ -8,7 +8,6 @@ import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
 
 type Debug = {
-  s: { pageId: string };
   createLayer(
     type: string,
     rect: { x: number; y: number; width: number; height: number },
@@ -17,6 +16,7 @@ type Debug = {
   ): string | null;
   select(ids: string[]): void;
   zoomTo(z: number): void;
+  s: { pageId: string; camera: { x: number; y: number; zoom: number } };
   doc: { get(id: string): { props: Record<string, unknown> } | undefined };
 };
 type W = { drawpane: Debug };
@@ -26,6 +26,11 @@ const props = (page: Page, id: string) =>
 const select = (page: Page, id: string) =>
   page.evaluate((id) => (window as unknown as W).drawpane.select([id]), id);
 const lens = (page: Page) => page.getByRole("toolbar", { name: "Selection Lens" });
+const camera = (page: Page) =>
+  page.evaluate(() => {
+    const { x, y, zoom } = (window as unknown as W).drawpane.s.camera;
+    return { x, y, zoom };
+  });
 
 test.describe
   .serial("Selection Lens", () => {
@@ -116,6 +121,66 @@ test.describe
       await radius.fill("12");
       await radius.press("Enter");
       await expect.poll(async () => (await props(page, swatch)).cornerRadius).toBe(12);
+    });
+
+    test("lets scrolls and pinches that start on it through to the canvas", async () => {
+      await select(page, swatch);
+      await expect(lens(page)).toBeVisible();
+      const box = await lens(page).getByText("Rectangle").boundingBox();
+      if (!box) throw new Error("No Lens");
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+
+      // A two-finger scroll pans.
+      const before = await camera(page);
+      await page.mouse.wheel(30, 60);
+      await expect.poll(async () => (await camera(page)).y).toBeLessThan(before.y - 30);
+      expect((await camera(page)).zoom).toBe(before.zoom);
+
+      // A pinch (a wheel with Ctrl held) zooms, about the pointer.
+      const panned = await camera(page);
+      await page.keyboard.down("Control");
+      await page.mouse.wheel(0, -40);
+      await page.keyboard.up("Control");
+      await expect.poll(async () => (await camera(page)).zoom).toBeGreaterThan(panned.zoom);
+
+      // Safari's own pinch gesture, from where it started on the Lens.
+      const pinched = await camera(page);
+      await lens(page)
+        .getByText("Rectangle")
+        .evaluate(
+          (el, at) => {
+            const fire = (type: string, scale: number) =>
+              el.dispatchEvent(
+                Object.assign(new Event(type, { bubbles: true, cancelable: true }), {
+                  scale,
+                  clientX: at.x,
+                  clientY: at.y,
+                }),
+              );
+            fire("gesturestart", 1);
+            fire("gesturechange", 1.5);
+          },
+          { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+        );
+      expect((await camera(page)).zoom).toBeCloseTo(pinched.zoom * 1.5, 3);
+      await page.evaluate(() => (window as unknown as W).drawpane.zoomTo(1));
+    });
+
+    test("still scrolls a list open in it, rather than the canvas", async () => {
+      await select(page, heading);
+      await lens(page).getByRole("button", { name: "Font: Instrument Sans" }).click();
+      const list = page.getByRole("listbox", { name: "Fonts" });
+      await expect(list).toBeVisible();
+      await expect.poll(() => list.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+      const box = await list.boundingBox();
+      if (!box) throw new Error("No font list");
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      const before = await camera(page);
+      await page.mouse.wheel(0, 120);
+      await expect.poll(() => list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+      expect(await camera(page)).toEqual(before);
+      await page.keyboard.press("Escape");
+      await expect(list).toBeHidden();
     });
 
     test("turns off and on from the command bar, and remembers", async () => {

@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
 import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
+import { passesToCanvas } from "./canvas-gestures";
 import { FrameNameEditor } from "./FrameNameEditor";
 import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
@@ -418,6 +419,35 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("gesturestart", onGestureStart);
     el.addEventListener("gesturechange", onGestureChange);
+
+    // Scrolls and pinches that start on chrome floating over this canvas
+    // (canvas-gestures.ts) move it too, when the pointer is over it: in
+    // compare mode, each canvas takes only its own half of the screen.
+    const under = (e: { clientX: number; clientY: number }) => {
+      const r = el.getBoundingClientRect();
+      return (
+        e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom
+      );
+    };
+    const fromChrome = (e: Event) => !(e.target instanceof Node && el.contains(e.target));
+    const onChromeWheel = (e: WheelEvent) => {
+      if (e.defaultPrevented && !e.ctrlKey) return; // Something on the way took it.
+      if (!fromChrome(e) || !under(e)) return;
+      if (!passesToCanvas(e.target, e.ctrlKey ? null : { x: e.deltaX, y: e.deltaY })) return;
+      onWheel(e);
+    };
+    let chromeGesture = false;
+    const onChromeGestureStart = (e: Event) => {
+      const g = e as Event & { clientX: number; clientY: number };
+      chromeGesture = fromChrome(e) && under(g) && passesToCanvas(e.target, null);
+      if (chromeGesture) onGestureStart(e);
+    };
+    const onChromeGestureChange = (e: Event) => {
+      if (chromeGesture && fromChrome(e)) onGestureChange(e);
+    };
+    window.addEventListener("wheel", onChromeWheel, { passive: false });
+    window.addEventListener("gesturestart", onChromeGestureStart);
+    window.addEventListener("gesturechange", onChromeGestureChange);
     // Tell collaborators when your selection, page or view changes, even without
     // moving the pointer: followers see what you see. (Sync throttles sending.)
     let last = editor.s;
@@ -452,6 +482,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("gesturestart", onGestureStart);
       el.removeEventListener("gesturechange", onGestureChange);
+      window.removeEventListener("wheel", onChromeWheel);
+      window.removeEventListener("gesturestart", onChromeGestureStart);
+      window.removeEventListener("gesturechange", onChromeGestureChange);
       offSelection();
     };
   }, [editor, interaction]);
