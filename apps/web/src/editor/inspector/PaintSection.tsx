@@ -23,6 +23,7 @@ import { Bindable } from "../tokens/Bindable";
 import { common, Num, Select, useDisclosure } from "./fields";
 import { PaintPicker } from "./PaintPicker";
 import { gradientAngle, rgbaOf, shownOpacity, swatchCss, withShownOpacity } from "./paint";
+import { forMode, type SidesMode, sidesMode, withSide, withWeight } from "./stroke-sides";
 
 export function PaintSection({
   editor,
@@ -273,8 +274,70 @@ const ALIGN_OPTIONS = [
   { value: "outside", label: "Outside" },
 ] as const;
 
+const SIDES_OPTIONS: ReadonlyArray<{ value: SidesMode; label: string }> = [
+  { value: "all", label: "All sides" },
+  { value: "top", label: "Top" },
+  { value: "bottom", label: "Bottom" },
+  { value: "left", label: "Left" },
+  { value: "right", label: "Right" },
+  { value: "custom", label: "Custom" },
+];
+
+const SIDE_FIELDS = [
+  { side: "left", label: "L", name: "Left" },
+  { side: "right", label: "R", name: "Right" },
+  { side: "top", label: "T", name: "Top" },
+  { side: "bottom", label: "B", name: "Bottom" },
+] as const;
+
+const SIDE_AT = { top: 0, right: 1, bottom: 2, left: 3 } as const;
+
 function StrokeOptions({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
+  // Boxes (rectangles, frames) can have a width per side, as in Figma.
+  const boxes = nodes.length > 0 && nodes.every((n) => n.type === "rect" || n.type === "frame");
+  const weights = boxes ? common(nodes, "strokeWeights") : null;
+  const sameSides =
+    boxes &&
+    nodes.every(
+      (n) =>
+        JSON.stringify(getProp(n.props, "strokeWeights")) ===
+        JSON.stringify(getProp((nodes[0] as NodeRecord).props, "strokeWeights")),
+    );
+  // Custom, once chosen for this selection, stays: even while the sides still read as one.
+  const selectionKey = ids.join(",");
+  const [customFor, setCustomFor] = useState<string | null>(null);
+  const mode: SidesMode | null = !sameSides
+    ? null
+    : customFor === selectionKey
+      ? "custom"
+      : sidesMode(weights);
+  const weight = common(nodes, "strokeWeight");
+  const shownSides = weights ?? (weight === null ? null : [weight, weight, weight, weight]);
+  /** Both stroke-width props on each layer, as one step. */
+  const applySides = (
+    label: string,
+    next: (node: NodeRecord) => { strokeWeights: unknown; strokeWeight: number },
+  ) => {
+    editor.beginGesture(label);
+    for (const node of nodes) {
+      const v = next(node);
+      editor.setProp([node.id], "strokeWeights", v.strokeWeights, label);
+      editor.setProp([node.id], "strokeWeight", v.strokeWeight, label);
+    }
+    editor.endGesture();
+  };
+  // The width field with sides: one side's width, or the width every side shares ("Mixed" else).
+  const sidesWeight =
+    mode && mode !== "custom" && shownSides
+      ? Math.max(...shownSides)
+      : shownSides?.every((w) => w === shownSides[0])
+        ? shownSides[0]
+        : null;
+  const sidesOf = (node: NodeRecord) => {
+    const w = getProp(node.props, "strokeWeight");
+    return getProp(node.props, "strokeWeights") ?? ([w, w, w, w] as const);
+  };
   const dashes = common(nodes, "strokeDashes");
   const capped = nodes.filter((n) => n.type === "line" || n.type === "path");
   // Open strokes (lines, unclosed paths) run along their centre and can have end markers.
@@ -291,14 +354,28 @@ function StrokeOptions({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
   return (
     <>
       <PropertyRow>
-        <Num
-          editor={editor}
-          nodes={nodes}
-          prop="strokeWeight"
-          icon="stroke-weight"
-          ariaLabel="Stroke weight"
-          min={0}
-        />
+        {boxes && mode !== "all" ? (
+          // One side shown: its width. Each side its own: "Mixed", and a value sets every side.
+          <NumberField
+            icon="stroke-weight"
+            ariaLabel="Stroke weight"
+            min={0}
+            placeholder="Mixed"
+            value={sidesWeight}
+            onChange={(v) =>
+              applySides("Stroke weight", (n) => withWeight(getProp(n.props, "strokeWeights"), v))
+            }
+          />
+        ) : (
+          <Num
+            editor={editor}
+            nodes={nodes}
+            prop="strokeWeight"
+            icon="stroke-weight"
+            ariaLabel="Stroke weight"
+            min={0}
+          />
+        )}
         {/* Lines and open paths always stroke along their centre. */}
         {open.length === nodes.length ? (
           <span />
@@ -311,6 +388,42 @@ function StrokeOptions({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] 
           />
         )}
       </PropertyRow>
+      {boxes ? (
+        <>
+          <PropertyRow columns="label">
+            <span className="inspector__label">Sides</span>
+            <Select
+              label="Stroke sides"
+              value={mode}
+              mixed={mode === null}
+              options={SIDES_OPTIONS}
+              onChange={(v) => {
+                setCustomFor(v === "custom" ? selectionKey : null);
+                applySides("Stroke sides", (n) =>
+                  forMode(v, getProp(n.props, "strokeWeight"), getProp(n.props, "strokeWeights")),
+                );
+              }}
+            />
+          </PropertyRow>
+          {mode === "custom" ? (
+            <div className="inspector__sides">
+              {SIDE_FIELDS.map(({ side, label, name }) => (
+                <NumberField
+                  key={side}
+                  label={label}
+                  ariaLabel={`${name} stroke weight`}
+                  min={0}
+                  placeholder="Mixed"
+                  value={shownSides ? shownSides[SIDE_AT[side]] : null}
+                  onChange={(v) =>
+                    applySides(`${name} stroke weight`, (n) => withSide(sidesOf(n), side, v))
+                  }
+                />
+              ))}
+            </div>
+          ) : null}
+        </>
+      ) : null}
       <PropertyRow columns="label">
         <span className="inspector__label">Dash</span>
         <span className="inspector__pair">

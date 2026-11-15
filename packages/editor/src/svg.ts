@@ -39,6 +39,7 @@ import { noiseThresholdZ } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { textSpans } from "./rich-text";
 import type { Scene } from "./scene";
+import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
   layoutText,
   lineOffset,
@@ -756,8 +757,28 @@ export function exportSvg(
     parts: string[],
   ) => {
     const paints = getProp(node.props, "strokes").filter((p) => p.visible !== false);
-    const weight = getProp(node.props, "strokeWeight");
-    if (paints.length === 0 || weight <= 0) return;
+    if (paints.length === 0) return;
+    const sides = strokeWidths(node);
+    if (!isUniform(sides)) {
+      // A width per side: the region between two boxes, filled (see stroke-sides.ts).
+      const r = getProp(node.props, "cornerRadius");
+      const d = strokeRegionPath(
+        strokeRegion(
+          w,
+          h,
+          getProp(node.props, "cornerRadii") ?? [r, r, r, r],
+          sides,
+          getProp(node.props, "strokeAlign"),
+        ),
+      );
+      for (const paint of paints) {
+        const fill = out.paint("fill", paint, w, h);
+        if (fill) parts.push(`<path${transform}${attr("d", d)} fill-rule="evenodd"${fill}/>`);
+      }
+      return;
+    }
+    const weight = sides[0];
+    if (weight <= 0) return;
     const open = node.type === "line" || node.type === "path";
     const align = open ? "center" : getProp(node.props, "strokeAlign");
     let style = attr("stroke-width", align === "center" ? weight : weight * 2);

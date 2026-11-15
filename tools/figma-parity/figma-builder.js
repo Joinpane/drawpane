@@ -264,6 +264,13 @@ async function buildParity(figma, suites) {
       node.strokeAlign = (spec.strokeAlign ?? "inside").toUpperCase();
       if (spec.strokeDashes) node.dashPattern = spec.strokeDashes;
       if (spec.strokeJoin) node.strokeJoin = spec.strokeJoin.toUpperCase();
+      if (spec.strokeWeights)
+        [
+          node.strokeTopWeight,
+          node.strokeRightWeight,
+          node.strokeBottomWeight,
+          node.strokeLeftWeight,
+        ] = spec.strokeWeights;
     }
     node.effects = (spec.effects ?? []).map(effect);
     if (spec.opacity !== undefined) node.opacity = spec.opacity;

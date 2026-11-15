@@ -66,9 +66,13 @@
     "join-bevel": 0.3,
     "corner-radii": 0.36,
     "ellipse-center": 0.42,
-    "gradient": 0.36,
-    "translucent": 0.31,
-    "no-fill": 0.32
+    "gradient": 0.34,
+    "translucent": 0.36,
+    "no-fill": 0.32,
+    "sides-bottom": 0.3,
+    "sides-top-rounded": 0.32,
+    "sides-center": 0.3,
+    "sides-outside-rounded": 0.55
   },
   "text": {
     "regular-16": 3.14,

@@ -265,6 +265,40 @@ describe("auto layout and components", () => {
   });
 });
 
+describe("strokes", () => {
+  it("keeps a box's width per side, and the widest as its one width", () => {
+    const row = node({
+      id: "1:20",
+      type: "RECTANGLE",
+      name: "Row",
+      size: { x: 320, y: 48 },
+      relativeTransform: at(0, 0),
+      fills: [{ type: "SOLID", color: white }],
+      strokes: [{ type: "SOLID", color: { r: 0, g: 0, b: 0, a: 0.12 } }],
+      strokeWeight: 1,
+      strokeAlign: "INSIDE",
+      individualStrokeWeights: { top: 0, right: 0, bottom: 1, left: 0 },
+    });
+    const even = node({
+      id: "1:21",
+      type: "RECTANGLE",
+      name: "Even",
+      size: { x: 40, y: 40 },
+      relativeTransform: at(0, 60),
+      strokes: [{ type: "SOLID", color: white }],
+      strokeWeight: 2,
+      individualStrokeWeights: { top: 2, right: 2, bottom: 2, left: 2 },
+    });
+    const { nodes, notes } = convertFile(file(row, even));
+    validate(nodes);
+    expect(getProp(byName(nodes, "Row").props, "strokeWeights")).toEqual([0, 0, 1, 0]);
+    expect(getProp(byName(nodes, "Row").props, "strokeWeight")).toBe(1);
+    // As wide all round: an ordinary stroke.
+    expect(getProp(byName(nodes, "Even").props, "strokeWeights")).toBeNull();
+    expect(notes.lines().some((n) => n.includes("per-side stroke"))).toBe(false);
+  });
+});
+
 describe("vectors", () => {
   it("draws an open vector network as path data", () => {
     expect(

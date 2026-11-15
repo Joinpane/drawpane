@@ -1,6 +1,6 @@
 /**
  * The inspector in depth, in a real browser: frame presets, the color picker
- * (solid, gradient, alpha), shadow color, per-corner radius, constraints that
+ * (solid, gradient, alpha), shadow color, per-corner radius, per-side strokes, constraints that
  * follow a resize, selection colors, and min/max limits on Hug and Fill.
  * Runs on its own throwaway instance.
  */
@@ -8,7 +8,11 @@ import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
 
 type Debug = {
-  s: { pageId: string; selection: string[] };
+  s: {
+    pageId: string;
+    selection: string[];
+    camera: { toScreen(p: { x: number; y: number }): { x: number; y: number } };
+  };
   createLayer(
     type: string,
     rect: { x: number; y: number; width: number; height: number },
@@ -16,8 +20,26 @@ type Debug = {
     props?: Record<string, unknown>,
   ): string | null;
   select(ids: string[]): void;
+  zoomTo(z: number): void;
+  centerOn(p: { x: number; y: number }): void;
   doc: { get(id: string): { props: Record<string, unknown> } | undefined };
 };
+
+/** The canvas's colour at a page point. */
+const pixel = (page: Page, point: { x: number; y: number }) =>
+  page.evaluate((point) => {
+    const e = (window as unknown as { drawpane: Debug }).drawpane;
+    const canvas = document.querySelector(".canvas canvas") as HTMLCanvasElement;
+    const ratio = canvas.width / canvas.getBoundingClientRect().width;
+    const p = e.s.camera.toScreen(point);
+    const d = (canvas.getContext("2d") as CanvasRenderingContext2D).getImageData(
+      Math.round(p.x * ratio),
+      Math.round(p.y * ratio),
+      1,
+      1,
+    ).data;
+    return (d[0] ?? 0) + (d[1] ?? 0) + (d[2] ?? 0);
+  }, point);
 
 const props = (page: Page, id: string) =>
   page.evaluate(
@@ -163,6 +185,40 @@ test.describe
       await panel(page).getByLabel("Bottom right radius").fill("24");
       await panel(page).getByLabel("Bottom right radius").press("Enter");
       await expect.poll(async () => (await props(page, card)).cornerRadii).toEqual([8, 8, 24, 8]);
+    });
+
+    test("strokes one side, or each side its own width", async () => {
+      const row = (await page.evaluate(() => {
+        const e = (window as unknown as { drawpane: Debug }).drawpane;
+        const id = e.createLayer("rect", { x: 2000, y: 2000, width: 200, height: 60 }, e.s.pageId, {
+          fills: [{ type: "solid", color: "#ffffff" }],
+          strokes: [{ type: "solid", color: "#000000" }],
+          strokeWeight: 4,
+        }) as string;
+        e.select([id]);
+        e.zoomTo(2);
+        e.centerOn({ x: 2100, y: 2030 });
+        return id;
+      })) as string;
+      const sides = panel(page).getByLabel("Stroke sides");
+      await sides.selectOption("bottom");
+      await expect.poll(async () => (await props(page, row)).strokeWeights).toEqual([0, 0, 4, 0]);
+      // A bottom border only: dark along the bottom edge, white along the top.
+      await expect.poll(() => pixel(page, { x: 2100, y: 2058 })).toBeLessThan(60);
+      expect(await pixel(page, { x: 2100, y: 2002 })).toBeGreaterThan(700);
+
+      await sides.selectOption("custom");
+      await panel(page).getByLabel("Left stroke weight").fill("6");
+      await panel(page).getByLabel("Left stroke weight").press("Enter");
+      await expect.poll(async () => (await props(page, row)).strokeWeights).toEqual([0, 0, 4, 6]);
+      expect((await props(page, row)).strokeWeight).toBe(6);
+      await expect.poll(() => pixel(page, { x: 2003, y: 2030 })).toBeLessThan(60);
+
+      // All sides again: the per-side widths cleared (back to the default), the widest kept.
+      await sides.selectOption("all");
+      await expect.poll(async () => (await props(page, row)).strokeWeights ?? null).toBeNull();
+      expect((await props(page, row)).strokeWeight).toBe(6);
+      await select(page, [card]);
     });
 
     test("moves a layer by its constraints when its frame resizes", async () => {

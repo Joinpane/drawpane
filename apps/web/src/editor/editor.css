@@ -719,7 +719,8 @@
   outline: none;
   box-shadow: var(--shadow-focus);
 }
-.inspector__padding {
+.inspector__padding,
+.inspector__sides {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-100) var(--space-200);

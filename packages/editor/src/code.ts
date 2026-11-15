@@ -16,6 +16,7 @@ import type { Doc } from "./doc";
 import { layerName } from "./names";
 import { blurSigma } from "./post-effects";
 import { type RunStyle, textSpans } from "./rich-text";
+import { isUniform, strokeWidths } from "./stroke-sides";
 import { featureSettings, variationSettings } from "./svg";
 import { letterSpacingPx } from "./text";
 import { cssVariableName } from "./variables";
@@ -305,13 +306,21 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
   const strokes = getProp(p, "strokes")
     .map(paintCss)
     .filter((v): v is string => v !== null);
-  const weight = getProp(p, "strokeWeight");
-  if (strokes[0] && weight > 0 && !isText) {
+  const sides = strokeWidths(node);
+  const weight = sides[0];
+  if (strokes[0] && Math.max(...sides) > 0 && !isText) {
     const align = getProp(p, "strokeAlign");
     const color = tokenName("stroke")
       ? `var(${cssVariableName(tokenName("stroke") as string)})`
       : strokes[0];
-    if (align === "outside")
+    if (!isUniform(sides)) {
+      // A width per side: borders (an outline can't vary by side). Outside, a border round
+      // the content box lies outside the layer's box, as the stroke does.
+      out.push({ property: "border-style", value: "solid" });
+      out.push({ property: "border-color", value: color });
+      out.push({ property: "border-width", value: sides.map(px).join(" ") });
+      if (align === "inside") out.push({ property: "box-sizing", value: "border-box" });
+    } else if (align === "outside")
       out.push({ property: "outline", value: `${px(weight)} solid ${color}` });
     else {
       out.push({ property: "border", value: `${px(weight)} solid ${color}` });

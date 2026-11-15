@@ -60,6 +60,7 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   markerEnd: "style",
   strokeJoin: "style",
   strokeDashes: "style",
+  strokeWeights: "style",
   effects: "style",
   cornerRadius: "style",
   pointCount: "geometry",
