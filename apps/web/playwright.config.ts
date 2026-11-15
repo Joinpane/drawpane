@@ -38,7 +38,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: /(tour|bench)\//,
+      testIgnore: /(tour|bench|calibration)\//,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1440, height: 900 },
@@ -57,6 +57,20 @@ export default defineConfig({
         viewport: { width: 1440, height: 900 },
         // A retina laptop: twice the pixels to fill.
         deviceScaleFactor: 2,
+        ...(process.env.CHROMIUM_PATH
+          ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
+          : {}),
+      },
+    },
+    {
+      // Fits glass to Figma's renders (tools/glass-calibration): run by hand, minutes long.
+      name: "calibration",
+      testMatch: /calibration\/.*\.spec\.ts/,
+      timeout: 60 * 60_000,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1440, height: 900 },
+        deviceScaleFactor: 1,
         ...(process.env.CHROMIUM_PATH
           ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
           : {}),

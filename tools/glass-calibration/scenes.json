@@ -1,0 +1,50 @@
+{
+  "about": "Glass calibration scenes, shared by the Figma plugin and Drawpane's harness. Each cell is a 360 × 240 frame with the same vector backdrop and one glass shape. Settings are Figma's (intensity, refraction and dispersion 0–1; depth and frost in px; angle in degrees).",
+  "cell": { "width": 360, "height": 240, "gap": 40, "columns": 4 },
+  "backdrop": {
+    "gradient": [
+      { "position": 0, "color": "#ff7a45" },
+      { "position": 0.5, "color": "#ffd166" },
+      { "position": 1, "color": "#3d7bf0" }
+    ],
+    "rows": { "every": 24, "height": 6, "colors": ["#1c1b1a", "#ffffff"], "opacity": 0.65 },
+    "columns": { "every": 30, "width": 4, "color": "#0b3d91", "opacity": 0.55 }
+  },
+  "glass": { "x": 70, "y": 50, "width": 220, "height": 140, "cornerRadius": 36 },
+  "defaults": {
+    "lightAngle": -45,
+    "lightIntensity": 0.8,
+    "refraction": 0.8,
+    "depth": 20,
+    "dispersion": 0.5,
+    "frost": 4
+  },
+  "cells": [
+    { "id": "base" },
+    { "id": "refraction-0", "refraction": 0 },
+    { "id": "refraction-40", "refraction": 0.4 },
+    { "id": "refraction-100", "refraction": 1 },
+    { "id": "depth-5", "depth": 5 },
+    { "id": "depth-40", "depth": 40 },
+    { "id": "depth-80", "depth": 80 },
+    { "id": "dispersion-0", "dispersion": 0 },
+    { "id": "dispersion-100", "dispersion": 1 },
+    { "id": "frost-0", "frost": 0 },
+    { "id": "frost-10", "frost": 10 },
+    { "id": "frost-24", "frost": 24 },
+    { "id": "light-0", "lightIntensity": 0 },
+    { "id": "light-100", "lightIntensity": 1 },
+    { "id": "angle-0", "lightAngle": 0 },
+    { "id": "angle-90", "lightAngle": 90 },
+    { "id": "angle-135", "lightAngle": 135 },
+    {
+      "id": "circle",
+      "shape": "ellipse",
+      "glass": { "x": 110, "y": 50, "width": 140, "height": 140 }
+    },
+    { "id": "pill", "glass": { "x": 50, "y": 80, "width": 260, "height": 80, "cornerRadius": 40 } },
+    { "id": "square-corners", "glass": { "cornerRadius": 0 } },
+    { "id": "lens-only", "lightIntensity": 0, "dispersion": 0, "frost": 0 },
+    { "id": "light-only", "refraction": 0, "dispersion": 0, "frost": 0, "lightIntensity": 1 }
+  ]
+}

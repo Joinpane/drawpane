@@ -38,3 +38,11 @@ The first version took the rim's slope from the shape's mask blurred by the 2D c
 - **Fringes subtly.** Dispersion parts the colours by up to a quarter of the bend.
 - **Lights the rim.** A fine specular line runs along the edge facing the light, with a softer line opposite (light inside the glass) and a gentle sheen across the lit side of the rim. The flat middle shows the backdrop as it is, frosted.
 
+
+## Revision: calibrated to Figma (2026-11-14)
+
+The shader's constants (`GlassTuning`) are now fitted to Figma's own glass, not set by eye. `tools/glass-calibration` draws the same 22 cells in both (one backdrop, one glass shape, one setting varied at a time), fetches Figma's renders through its REST API, and searches the constants by coordinate descent until Drawpane's renders match (see its README). The fit took the mean difference over the glass and its rim from 10.3 to 2.7 (of 255). What changed:
+
+- **The rim stays inside the shape.** A rim deeper than the shape's inner radius (half its smaller side) now stops there, so the bend fades to nothing where rims from opposite sides meet instead of flipping direction, which drew streaks along the corners' diagonals. Thicker glass still bends more.
+- **Figma's look, in numbers.** The bend is stronger (0.88 of the depth at full refraction), frost is about half as strong per pixel, dispersion subtler (0.11), and the light is a fine line right at the edge, with a softer line opposite and no broad glow, sheen or shade.
+- **What's left.** A rim far deeper than the shape (depth 80 on a 140-tall shape) still folds a little at rounded corners, where Figma bends smoothly.
