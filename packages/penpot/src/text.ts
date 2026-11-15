@@ -104,11 +104,14 @@ export function convertText(shape: Raw, media: MediaLookup, notes: Notes): TextP
   const aligns = new Set<string>();
   const lineHeights = new Set<number>();
   const defaults: Raw = { fontSize: "14", fontWeight: "400", lineHeight: "1.2" };
+  let rtl = false;
 
   paragraphs.forEach((paragraph, i) => {
     if (i > 0) characters += "\n";
     const inherited: Raw = { ...defaults, ...stripEmpty(root), ...stripEmpty(paragraph) };
     aligns.add(String(paragraph.textAlign ?? root.textAlign ?? "left"));
+    if ((paragraph.textDirection ?? root.textDirection ?? paragraph.direction) === "rtl")
+      rtl = true;
     lineHeights.add(num(paragraph.lineHeight ?? root.lineHeight, 1.2));
     const leaves = Array.isArray(paragraph.children) ? (paragraph.children as Raw[]) : [];
     for (const leaf of leaves) {
@@ -123,6 +126,7 @@ export function convertText(shape: Raw, media: MediaLookup, notes: Notes): TextP
     if (leaves.length > 0 && spans.length === 0 && i === paragraphs.length - 1)
       spans.push({ start: 0, end: 0, style: styleOf(leaves[0] as Raw, inherited, media, notes) });
   });
+  if (rtl) notes.add("text-rtl");
 
   // The style most of the characters have is the layer's own.
   const weight = new Map<string, { style: Style; count: number }>();

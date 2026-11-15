@@ -112,20 +112,33 @@ export function containerLayout(frame: Raw, notes: Notes): Record<string, unknow
 }
 
 /** Where each child of a grid frame sits, from its cells. */
-export function gridAreas(frame: Raw): Map<string, GridArea> {
-  const out = new Map<string, GridArea>();
+/** Where a grid board puts a child: its cell, and how it sits in it. */
+export interface GridPlace {
+  readonly area: GridArea;
+  readonly alignSelf?: string;
+  readonly justifySelf?: string;
+}
+
+export function gridAreas(frame: Raw): Map<string, GridPlace> {
+  const out = new Map<string, GridPlace>();
   if (frame.layout !== "grid") return out;
   const cells = (frame.layoutGridCells ?? {}) as Record<string, Raw>;
   const line = (n: unknown) => Math.min(256, Math.max(1, Math.round(num(n, 1))));
   for (const cell of Object.values(cells)) {
     if (cell.position === "auto") continue;
     const shapes = Array.isArray(cell.shapes) ? (cell.shapes as string[]) : [];
+    const alignSelf = SELF[String(cell.alignSelf)];
+    const justifySelf = SELF[String(cell.justifySelf)];
     for (const id of shapes)
       out.set(id, {
-        column: line(cell.column),
-        row: line(cell.row),
-        columnSpan: line(cell.columnSpan),
-        rowSpan: line(cell.rowSpan),
+        area: {
+          column: line(cell.column),
+          row: line(cell.row),
+          columnSpan: line(cell.columnSpan),
+          rowSpan: line(cell.rowSpan),
+        },
+        ...(alignSelf ? { alignSelf } : {}),
+        ...(justifySelf ? { justifySelf } : {}),
       });
   }
   return out;

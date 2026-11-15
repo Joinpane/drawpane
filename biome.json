@@ -13,7 +13,8 @@
       "!docs/diagrams",
       "!**/routeTree.gen.ts",
       "!**/*.md",
-      "!**/*.svg"
+      "!**/*.svg",
+      "!**/test/fixtures/*.json"
     ]
   },
   "formatter": {

@@ -3,6 +3,8 @@
  * importing gets a short, honest summary ("3 boolean groups became paths")
  * instead of silent differences.
  */
+import { NoteBook } from "@drawpane/import-kit";
+
 export const NOTE_TEXT = {
   "boolean-flattened": ["boolean group became a path", "boolean groups became paths"],
   "svg-raw-skipped": ["raw SVG element wasn't imported", "raw SVG elements weren't imported"],
@@ -51,30 +53,33 @@ export const NOTE_TEXT = {
     "prototype interactions weren't imported",
   ],
   tokens: ["design token set wasn't imported", "design token sets weren't imported"],
+  "library-color-paint": [
+    "library colour that's a gradient or an image wasn't kept as a variable",
+    "library colours that are gradients or images weren't kept as variables",
+  ],
+  "text-rtl": [
+    "right-to-left text is laid out left to right",
+    "right-to-left texts are laid out left to right",
+  ],
+  "stroke-caps": [
+    "line's two different end caps became one",
+    "lines' two different end caps became one",
+  ],
+  "overlay-position": [
+    "overlay's manual position became centred",
+    "overlays' manual positions became centred",
+  ],
+  "unknown-features": [
+    "file uses Penpot features this import doesn't know yet, so some of it may look different",
+    "files use Penpot features this import doesn't know yet, so some of them may look different",
+  ],
 } as const satisfies Record<string, readonly [string, string]>;
 
 export type NoteKind = keyof typeof NOTE_TEXT;
 
-export class Notes {
-  readonly #counts = new Map<NoteKind, number>();
-
-  add(kind: NoteKind, count = 1): void {
-    this.#counts.set(kind, (this.#counts.get(kind) ?? 0) + count);
-  }
-
-  merge(other: Notes): void {
-    for (const [kind, count] of other.entries()) this.add(kind, count);
-  }
-
-  entries(): Array<[NoteKind, number]> {
-    return [...this.#counts.entries()];
-  }
-
-  /** "2 boolean groups became paths", one line per kind. */
-  lines(): string[] {
-    return this.entries().map(([kind, count]) => {
-      const [one, many] = NOTE_TEXT[kind];
-      return count === 1 ? `1 ${one}` : `${count} ${many}`;
-    });
+/** Penpot's notes (see NoteBook). */
+export class Notes extends NoteBook<NoteKind> {
+  constructor() {
+    super(NOTE_TEXT);
   }
 }
