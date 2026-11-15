@@ -214,7 +214,7 @@ describe("post effects in SVG", () => {
       1,
     );
     expect(filter).toContain(
-      '<feGaussianBlur in="SourceGraphic" stdDeviation="2" result="post0"/>',
+      '<feGaussianBlur in="SourceGraphic" stdDeviation="1" result="post0"/>',
     );
     // Noise lands atop the blurred layer, only where it paints.
     expect(filter).toContain('in2="post0" operator="atop" result="post1"/>');

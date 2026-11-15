@@ -1,0 +1,379 @@
+{
+  "suite": "strokes",
+  "about": "Strokes: inside, centre and outside at several weights, dashes, joins on sharp corners, per-corner radii, gradient and translucent strokes.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 5
+  },
+  "background": "#f4f3ef",
+  "cells": [
+    {
+      "id": "inside-1",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 1,
+          "strokeAlign": "inside"
+        }
+      ]
+    },
+    {
+      "id": "inside-8",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 8,
+          "strokeAlign": "inside"
+        }
+      ]
+    },
+    {
+      "id": "center-8",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 8,
+          "strokeAlign": "center"
+        }
+      ]
+    },
+    {
+      "id": "outside-8",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 8,
+          "strokeAlign": "outside"
+        }
+      ]
+    },
+    {
+      "id": "outside-16-square",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 0,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 16,
+          "strokeAlign": "outside"
+        }
+      ]
+    },
+    {
+      "id": "dashes",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 3,
+          "strokeAlign": "center",
+          "strokeDashes": [10, 6]
+        }
+      ]
+    },
+    {
+      "id": "join-round",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 0,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 12,
+          "strokeAlign": "center",
+          "strokeJoin": "round"
+        }
+      ]
+    },
+    {
+      "id": "join-bevel",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 0,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 12,
+          "strokeAlign": "center",
+          "strokeJoin": "bevel"
+        }
+      ]
+    },
+    {
+      "id": "corner-radii",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 0,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 4,
+          "strokeAlign": "inside",
+          "cornerRadii": [0, 24, 8, 40]
+        }
+      ]
+    },
+    {
+      "id": "ellipse-center",
+      "layers": [
+        {
+          "type": "ellipse",
+          "x": 80,
+          "y": 40,
+          "width": 80,
+          "height": 80,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 6,
+          "strokeAlign": "center"
+        }
+      ]
+    },
+    {
+      "id": "gradient",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#ff7a45"
+                },
+                {
+                  "position": 1,
+                  "color": "#3d7bf0"
+                }
+              ]
+            }
+          ],
+          "strokeWeight": 8,
+          "strokeAlign": "inside"
+        }
+      ]
+    },
+    {
+      "id": "translucent",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#3d7bf080"
+            }
+          ],
+          "strokeWeight": 12,
+          "strokeAlign": "center"
+        }
+      ]
+    },
+    {
+      "id": "no-fill",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 40,
+          "width": 120,
+          "height": 80,
+          "cornerRadius": 12,
+          "fills": [],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "strokeWeight": 2,
+          "strokeAlign": "inside"
+        }
+      ]
+    }
+  ]
+}
