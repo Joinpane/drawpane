@@ -55,6 +55,13 @@ export interface GlassTuning {
   readonly falloffPerDepth: number;
   /** Other shapes (no exact distance to their edge): the bend's share of the depth, and slope^profile. */
   readonly slopeBend: number;
+  /**
+   * Ellipses: the bend's share of the depth is 1 − ellipseLoss / (depth +
+   * ellipseDepth), depth in units (Figma's, measured: 0.38 at depth 10, 0.59
+   * at 20, 0.78 at 40, 0.87 at 70, whatever the size), along the slope's profile.
+   */
+  readonly ellipseLoss: number;
+  readonly ellipseDepth: number;
   readonly profile: number;
   /** The rim's height is the shape blurred by a Gaussian this share of the depth wide. */
   readonly rimSigma: number;
@@ -90,6 +97,8 @@ export const DEFAULT_GLASS_TUNING: GlassTuning = {
   falloff: 2.55,
   falloffPerDepth: 0.0075,
   slopeBend: 0.86,
+  ellipseLoss: 12.1,
+  ellipseDepth: 9.5,
   profile: 1.6,
   rimSigma: 0.275,
   dispersion: 0.1,
@@ -150,23 +159,35 @@ export interface GlassParams {
  * A glass effect's values in device pixels at `scale` (device pixels per
  * unit). 0° is light from the top, turning clockwise: −45° is the top left.
  */
+/** How a glass layer's shape bends (see `glassParams`). */
+export type GlassKind = "box" | "ellipse" | "other";
+
 export function glassParams(
   glass: Glass,
   scale: number,
   tune: GlassTuning = glassTuning(),
   /** The shape's largest inscribed radius, in its units: no rim is deeper (see inradius.ts). */
   inradius = Number.POSITIVE_INFINITY,
-  /** The shape is a box, its exact distance in known: Figma's measured falloff applies. */
-  box = false,
+  /**
+   * What the shape is, for how it bends (each measured against Figma): a box
+   * (its exact distance in known), an ellipse, or anything else.
+   */
+  kind: GlassKind = "other",
 ): GlassParams {
   // Figma's ranges: depth and frost at most 100.
-  const depth = Math.max(0, Math.min(glass.depth, 100, inradius)) * scale;
-  // Full refraction bends a ray at the edge as far as the rim is deep (a box; other shapes,
-  // their slope's share, never over less than a few pixels). A rim deeper than the shape is
-  // wide fades into the one opposite.
-  const refraction = box
-    ? (glass.refraction / 100) * tune.bend * depth
-    : (glass.refraction / 100) * tune.slopeBend * Math.max(depth, 4 * scale);
+  const units = Math.max(0, Math.min(glass.depth, 100, inradius));
+  const depth = units * scale;
+  // Full refraction bends a ray at the edge as far as the rim is deep (a box); an ellipse, a
+  // share that grows with the depth; other shapes, the slope's share, never over less than a
+  // few pixels. A rim deeper than the shape is wide fades into the one opposite.
+  const share =
+    kind === "box"
+      ? tune.bend
+      : kind === "ellipse"
+        ? Math.max(0, 1 - tune.ellipseLoss / (units + tune.ellipseDepth))
+        : tune.slopeBend;
+  const refraction =
+    (glass.refraction / 100) * share * (kind === "box" ? depth : Math.max(depth, 4 * scale));
   // Red and blue part from green by a share of the bend.
   const dispersion = (glass.dispersion / 100) * tune.dispersion;
   const frost = Math.max(0, Math.min(glass.frost, 100)) * scale * tune.frost;
@@ -236,6 +257,9 @@ precision highp float;
 out vec4 color;
 uniform sampler2D src;
 uniform vec2 texSize;
+// What this draw wrote (the textures only grow): past it is outside the shape, never what an
+// earlier, larger glass left there.
+uniform vec2 valid;
 uniform float sigma;
 uniform int radius;
 void main() {
@@ -246,7 +270,8 @@ void main() {
     if (i < -radius || i > radius) continue;
     float x = float(i);
     float w = exp(-x * x * inv);
-    float m = texture(src, (p + vec2(x, 0.0)) / texSize).r;
+    vec2 q = p + vec2(x, 0.0);
+    float m = q.x < 0.0 || q.x > valid.x ? 0.0 : texture(src, q / texSize).r;
     h += w * m;
     dx += w * m * x / (sigma * sigma);
     total += w;
@@ -263,6 +288,7 @@ precision highp float;
 out vec4 color;
 uniform sampler2D src;
 uniform vec2 texSize;
+uniform vec2 valid;
 uniform float sigma;
 uniform int radius;
 void main() {
@@ -273,7 +299,8 @@ void main() {
     if (i < -radius || i > radius) continue;
     float y = float(i);
     float w = exp(-y * y * inv);
-    vec2 v = texture(src, (p + vec2(0.0, y)) / texSize).rg;
+    vec2 q = p + vec2(0.0, y);
+    vec2 v = q.y < 0.0 || q.y > valid.y ? vec2(0.0) : texture(src, q / texSize).rg;
     h += w * v.r;
     dx += w * v.g;
     dy += w * v.r * y / (sigma * sigma);
@@ -546,6 +573,8 @@ export interface GlassPaintOptions {
    * layer, on the device): past it, the edge repeats, as past the canvas's.
    */
   readonly within?: Bounds;
+  /** What the shape is, when it isn't a box with `corners` (an ellipse bends as Figma's do). */
+  readonly kind?: GlassKind;
 }
 
 /** Where, and against what, a glass is drawn: for reusing what it drew (see `Drawn`). */
@@ -630,9 +659,15 @@ export class GlassPainter {
     scale: number,
     options: GlassPaintOptions = {},
   ): void {
-    const { key = null, inradius = Number.POSITIVE_INFINITY, corners = null, within } = options;
+    const {
+      key = null,
+      inradius = Number.POSITIVE_INFINITY,
+      corners = null,
+      within,
+      kind = "other",
+    } = options;
     const t = ctx.getTransform();
-    const p = glassParams(glass, scale, glassTuning(), inradius, corners !== null);
+    const p = glassParams(glass, scale, glassTuning(), inradius, corners ? "box" : kind);
     // The layer's reach on the device, with the margin rays bend into, within the canvas.
     const xs: number[] = [];
     const ys: number[] = [];
@@ -946,6 +981,7 @@ export class GlassPainter {
       gl.useProgram(pass.program);
       gl.uniform1i(pass.u("src"), 3);
       gl.uniform2f(pass.u("texSize"), lowTexSize[0], lowTexSize[1]);
+      gl.uniform2f(pass.u("valid"), lw, lh);
       gl.uniform1f(pass.u("sigma"), sigmaLow);
       gl.uniform1i(pass.u("radius"), radius);
       draw(g);

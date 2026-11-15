@@ -114,13 +114,13 @@
     "text": 4.98,
     "text-small": 1.84,
     "star": 1.8,
-    "ellipse": 1.73,
+    "ellipse": 1.21,
     "rotated": 1.4,
     "polygon-path": 1.93,
     "thin-bar": 0.98,
     "small": 0.76,
     "square-corners": 1.51,
-    "overlap": 2.58
+    "overlap": 1.82
   },
   "glass-probe": {
     "depth-20-x": 0.59,
@@ -130,13 +130,13 @@
     "depth-80-x": 1.18,
     "depth-80-y": 1.85,
     "refraction-40-x": 0.59,
-    "refraction-40-y": 0.64,
+    "refraction-40-y": 0.63,
     "refraction-100-x": 0.61,
     "refraction-100-y": 0.73,
-    "circle-x": 0.57,
-    "circle-y": 0.59,
+    "circle-x": 0.49,
+    "circle-y": 0.49,
     "pill-x": 0.49,
-    "pill-y": 0.72
+    "pill-y": 0.73
   },
   "masks": {
     "alpha-fade": 0.56,
@@ -161,11 +161,11 @@
     "lh-percent": 4.58
   },
   "glass-probe-2": {
-    "light-80-d20": 0.55,
-    "light-100-d20": 0.57,
-    "light-80-d60": 0.84,
-    "light-80-a0": 0.54,
-    "light-80-a90": 0.49,
+    "light-80-d20": 0.5,
+    "light-100-d20": 0.53,
+    "light-80-d60": 0.69,
+    "light-80-a0": 0.48,
+    "light-80-a90": 0.42,
     "bend-r100-d100-x": 2.43,
     "bend-r100-d100-y": 3.45,
     "bend-r100-d50-x": 0.99,
@@ -183,14 +183,36 @@
     "light-80-frost-20": 0.5,
     "light-80-frost-100": 0.5,
     "all-100": 1.21,
-    "light-80-a-15": 0.56,
-    "light-80-a-30": 0.54,
-    "light-40-d20": 0.43,
-    "light-20-a-30": 0.39,
+    "light-80-a-15": 0.5,
+    "light-80-a-30": 0.5,
+    "light-40-d20": 0.41,
+    "light-20-a-30": 0.38,
     "base-r80-d40-x": 0.89,
     "base-r80-d40-y": 1.08,
     "bleed-default": 0.43,
     "bleed-frost-30": 0.45,
-    "bleed-refraction-only": 0.31
+    "bleed-refraction-only": 0.3
+  },
+  "glass-ellipses": {
+    "circle-80-d20-x": 0.38,
+    "circle-80-d20-y": 0.38,
+    "circle-80-d40-x": 0.53,
+    "circle-80-d40-y": 0.53,
+    "circle-160-d20-x": 0.51,
+    "circle-160-d20-y": 0.52,
+    "circle-160-d40-x": 0.63,
+    "circle-160-d40-y": 0.64,
+    "circle-240-d20-x": 0.73,
+    "circle-240-d20-y": 0.74,
+    "circle-240-d40-x": 0.81,
+    "circle-240-d40-y": 0.83,
+    "ellipse-300x140-d20-x": 0.6,
+    "ellipse-300x140-d20-y": 0.7,
+    "ellipse-300x140-d40-x": 0.64,
+    "ellipse-300x140-d40-y": 0.86,
+    "circle-160-d10-x": 0.51,
+    "circle-160-d10-y": 0.51,
+    "circle-160-d70-x": 1.35,
+    "circle-160-d70-y": 1.36
   }
 }

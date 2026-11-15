@@ -79,23 +79,26 @@ export function largestInscribedRadius(
 
 /** Measured thicknesses, by the layer's props (a new object with every edit). */
 export class Inradii {
-  readonly #measured = new WeakMap<object, number>();
+  readonly #measured = new WeakMap<object, { generation: number; radius: number }>();
 
   /**
    * The largest inscribed radius, in the layer's units, of what `draw` draws
    * (filled, in white, in units) over a w × h box. Infinite where nothing
-   * can measure it.
+   * can measure it. `generation` is the fonts' (see `TextMeasurer`): text
+   * drawn before its font arrived is measured again once it has, as its
+   * layout is.
    */
   get(
     props: object,
     w: number,
     h: number,
     draw: (ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D) => void,
+    generation = 0,
   ): number {
     const known = this.#measured.get(props);
-    if (known !== undefined) return known;
+    if (known && known.generation === generation) return known.radius;
     const radius = measure(w, h, draw);
-    this.#measured.set(props, radius);
+    this.#measured.set(props, { generation, radius });
     return radius;
   }
 }
