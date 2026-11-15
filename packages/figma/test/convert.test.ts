@@ -299,6 +299,34 @@ describe("strokes", () => {
   });
 });
 
+describe("line height", () => {
+  it("comes in on the characters that set their own, with nothing noted", () => {
+    const text = node({
+      id: "1:50",
+      type: "TEXT",
+      name: "Heading and body",
+      size: { x: 200, y: 60 },
+      relativeTransform: at(0, 0),
+      characters: "Title\nBody",
+      style: {
+        fontFamily: "Inter",
+        fontWeight: 400,
+        fontSize: 16,
+        lineHeightPx: 22,
+        lineHeightUnit: "PIXELS",
+      },
+      characterStyleOverrides: [1, 1, 1, 1, 1, 1],
+      styleOverrideTable: { "1": { fontSize: 28, lineHeightPx: 40, lineHeightUnit: "PIXELS" } },
+    });
+    const { nodes, notes } = convertFile(file(text));
+    validate(nodes);
+    expect(getProp(byName(nodes, "Heading and body").props, "textRuns")).toEqual([
+      { start: 0, end: 6, fontSize: 28, lineHeight: { unit: "px", value: 40 } },
+    ]);
+    expect(notes.lines()).toEqual([]);
+  });
+});
+
 describe("lists", () => {
   it("come in on each paragraph's characters, merged with the character styles", () => {
     const text = node({

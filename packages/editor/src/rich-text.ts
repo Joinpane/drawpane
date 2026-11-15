@@ -29,6 +29,7 @@ export const RUN_PROPS = [
   "fontStyle",
   "fontSize",
   "letterSpacing",
+  "lineHeight",
   "textCase",
   "textDecoration",
   "fontFeatures",

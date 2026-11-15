@@ -154,5 +154,10 @@
     "list-between": 4.49,
     "list-wrapped": 7.56,
     "list-large": 3.23
+  },
+  "text-ranges": {
+    "lh-paragraphs": 3.49,
+    "lh-same-line": 1.26,
+    "lh-percent": 4.58
   }
 }
