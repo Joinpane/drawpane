@@ -1,7 +1,15 @@
 import { getProp, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { AGENT_TOOLS, runTool, ToolFailure } from "../src/agent/tools";
+import {
+  AGENT_TOOLS,
+  EXPORT_IMAGE_FIT,
+  runTool,
+  ToolFailure,
+  type ToolServices,
+} from "../src/agent/tools";
 import { Editor } from "../src/editor";
+import { ExportError } from "../src/export";
+import type { PngOptions } from "../src/headless-render";
 import type { TextMeasurer } from "../src/text";
 
 const measurer: TextMeasurer = {
@@ -176,6 +184,53 @@ describe("agent tools", () => {
     await expect(
       runTool(editor, "bind_token", { ids: [rect], key: "glow", variableId: surface }),
     ).rejects.toThrow(/key/);
+  });
+
+  it("export_image asks the engine for the picture, and words what it couldn't draw", async () => {
+    const editor = setup();
+    const rect = editor.createLayer("rect", { x: 0, y: 0, width: 10, height: 10 }, "p") as string;
+    await expect(runTool(editor, "export_image", { id: rect })).rejects.toThrow(
+      /can't be rendered here/,
+    );
+    const asked: PngOptions[] = [];
+    const services: ToolServices = {
+      renderPng: async (_id, options) => {
+        asked.push(options);
+        return {
+          png: new Uint8Array([137, 80, 78, 71]),
+          width: 20,
+          height: 20,
+          bounds: { x: 0, y: 0, width: 10, height: 10 },
+          scale: 2,
+          approximate: ["glass"],
+          missingFonts: ["Fraunces 700"],
+          missingImages: ["abc"],
+        };
+      },
+    };
+    const out = await runTool(editor, "export_image", { id: rect }, services);
+    expect(asked[0]).toEqual({ fit: EXPORT_IMAGE_FIT, background: null });
+    expect(out.image).toEqual({ mimeType: "image/png", base64: "iVBORw==" });
+    expect(out.data).toMatchObject({ id: rect, width: 20, height: 20, scale: 2 });
+    expect((out.data as { approximate: string[] }).approximate).toEqual([
+      expect.stringContaining("glass"),
+      expect.stringContaining("Fraunces 700"),
+      expect.stringContaining("1 image(s)"),
+    ]);
+    await runTool(editor, "export_image", { id: rect, scale: 3, background: "#fff" }, services);
+    expect(asked[1]).toEqual({ scale: 3, background: "#fff" });
+    // The engine's own refusal (too large, nothing visible) reaches the model as worded.
+    const refusing: ToolServices = {
+      renderPng: async () => {
+        throw new ExportError("That render is too large (9000 × 9000).");
+      },
+    };
+    await expect(runTool(editor, "export_image", { id: rect }, refusing)).rejects.toThrow(
+      ToolFailure,
+    );
+    await expect(runTool(editor, "export_image", { id: "nope" }, services)).rejects.toThrow(
+      /no layer nope/,
+    );
   });
 
   it("checks input against the schema, and refuses to write for a viewer", async () => {

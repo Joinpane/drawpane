@@ -20,6 +20,8 @@ import {
 } from "@drawpane/model";
 import { z } from "zod";
 import type { Editor } from "../editor";
+import { ExportError } from "../export";
+import { base64, type HeadlessPng, type PngOptions } from "../headless-render";
 import { expandOne, JSX_TAGS, JsxError, type JsxTree, jsxToTrees, nodeToJsx, TAG_OF } from "./jsx";
 
 /** read: looks only; view: changes what's shown, not the file; write: changes the file. */
@@ -32,13 +34,23 @@ export interface ToolResult {
   readonly image?: { readonly mimeType: string; readonly base64: string };
 }
 
+/**
+ * What a tool needs from its engine besides the editor. Rendering is the
+ * engine's own: the open editor draws with its canvas, the headless one
+ * with resvg (decision 0023).
+ */
+export interface ToolServices {
+  /** Draws a layer, or every layer on a page, as a PNG. */
+  readonly renderPng?: (nodeId: string, options: PngOptions) => Promise<HeadlessPng>;
+}
+
 export interface AgentTool<I extends z.ZodType = z.ZodType> {
   readonly name: string;
   readonly title: string;
   readonly description: string;
   readonly level: ToolLevel;
   readonly input: I;
-  run(editor: Editor, input: z.infer<I>): ToolResult | Promise<ToolResult>;
+  run(editor: Editor, input: z.infer<I>, services: ToolServices): ToolResult | Promise<ToolResult>;
 }
 
 /** A tool's own failure, worded for the model: what was wrong and how to put it right. */
@@ -153,6 +165,68 @@ const getJsx = defineTool({
   run(editor, { id: nodeId, depth }) {
     need(editor, nodeId);
     return { data: { jsx: nodeToJsx(editor.doc, nodeId, depth === undefined ? {} : { depth }) } };
+  },
+});
+
+/** The longest side `export_image` aims for when not given a scale: what models read well. */
+export const EXPORT_IMAGE_FIT = 1536;
+
+const APPROXIMATE: Record<HeadlessPng["approximate"][number], string> = {
+  glass: "glass shows only its rim: what's behind it isn't refracted",
+  noise: "noise is drawn with a similar but different grain",
+  texture: "texture is drawn with a similar but different grain",
+  "background-blur": "background blur isn't drawn: what's behind it shows sharp",
+};
+
+const exportImage = defineTool({
+  name: "export_image",
+  title: "Look at layers",
+  level: "read",
+  description: [
+    "Renders a layer, or a whole page by its id, as a PNG you can see: look at your work after render or set_props,",
+    "and check spacing, alignment, contrast and text wrapping as a person would.",
+    `Without a scale, it's sized to about ${EXPORT_IMAGE_FIT} px on its longest side (up to 2×). Returns the image, its size,`,
+    "and anything drawn only approximately or left out (a font or image that couldn't be had).",
+  ].join(" "),
+  input: z.object({
+    id,
+    scale: z.number().min(0.05).max(4).optional(),
+    background: z
+      .string()
+      .regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/, "a hex colour, like #ffffff")
+      .optional(),
+  }),
+  async run(editor, { id: nodeId, scale, background }, services) {
+    need(editor, nodeId);
+    if (!services.renderPng) throw new ToolFailure("Images can't be rendered here.");
+    let png: HeadlessPng;
+    try {
+      png = await services.renderPng(nodeId, {
+        ...(scale === undefined ? { fit: EXPORT_IMAGE_FIT } : { scale }),
+        background: background ?? null,
+      });
+    } catch (error) {
+      if (error instanceof ExportError) throw new ToolFailure(error.message);
+      throw error;
+    }
+    const notes = [
+      ...png.approximate.map((a) => APPROXIMATE[a]),
+      ...png.missingFonts.map((f) => `${f} isn't available, so its text is drawn in the fallback`),
+      ...(png.missingImages.length > 0
+        ? [`${png.missingImages.length} image(s) couldn't be loaded and are left out`]
+        : []),
+    ];
+    return {
+      data: {
+        id: nodeId,
+        width: png.width,
+        height: png.height,
+        scale: png.scale,
+        bounds: png.bounds,
+        ...(notes.length > 0 ? { approximate: notes } : {}),
+      },
+      image: { mimeType: "image/png", base64: base64(png.png) },
+    };
   },
 });
 
@@ -292,6 +366,7 @@ const bindToken = defineTool({
 /** Every tool, in the order models see them. */
 export const AGENT_TOOLS: readonly AgentTool[] = [
   getJsx,
+  exportImage,
   render,
   setProps,
   moveNodes,
@@ -313,6 +388,7 @@ export async function runTool(
   editor: Editor,
   name: string,
   rawInput: unknown,
+  services: ToolServices = {},
 ): Promise<ToolResult> {
   const tool = findTool(name);
   if (!tool) throw new ToolFailure(`There's no tool called ${name}.`);
@@ -323,11 +399,11 @@ export async function runTool(
       `${name}: ${issue?.path.length ? `${issue.path.join(".")}: ` : ""}${issue?.message ?? "the input isn't valid"}`,
     );
   }
-  if (tool.level !== "write") return tool.run(editor, parsed.data);
+  if (tool.level !== "write") return tool.run(editor, parsed.data, services);
   if (!editor.canEdit) throw new ToolFailure("This file is view-only for you.");
   editor.beginGesture(tool.title);
   try {
-    const result = await tool.run(editor, parsed.data);
+    const result = await tool.run(editor, parsed.data, services);
     editor.endGesture();
     return result;
   } catch (error) {

@@ -9,7 +9,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { findTool, ToolFailure } from "@drawpane/editor";
+import { findTool, type HeadlessRenderer, ToolFailure, type ToolServices } from "@drawpane/editor";
 import {
   applyTransaction,
   branchChanges,
@@ -38,7 +38,9 @@ import {
   summarizeEdits,
   type VersionReason,
 } from "@drawpane/model";
+import { fileFontLoader } from "../agent/harfbuzz";
 import { agentMeasurer } from "../agent/measurer";
+import { headlessRenderer } from "../agent/render";
 import { FILE_ACCESS, FILE_ROLE } from "../api/access";
 import type { Env, Role } from "../env";
 import { verifyPayload } from "../lib/crypto";
@@ -179,6 +181,8 @@ export type AgentCallResult =
       /** The revision it committed; null when it changed nothing. */
       readonly revn: number | null;
       readonly result: unknown;
+      /** A picture the tool answered with (export_image), for the model to see. */
+      readonly image?: { readonly mimeType: string; readonly base64: string };
       /** True when the call id was seen before: this is the recorded answer, and nothing ran. */
       readonly replayed: boolean;
     }
@@ -223,6 +227,7 @@ export class FileRoom extends DurableObject<Env> {
   readonly #ledger: CallLedger;
   /** The warm headless editor agents' calls run on (decision 0021); made on the first call. */
   #engine: AgentEngine | null = null;
+  #rendering: Promise<HeadlessRenderer> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -801,8 +806,8 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * Runs an agent's read tool (get_jsx) on the headless editor: nothing is
-   * committed or recorded.
+   * Runs an agent's read tool (get_jsx, export_image) on the headless
+   * editor: nothing is committed or recorded.
    */
   async readAgentTool(fileId: string, name: string, input: unknown): Promise<AgentCallResult> {
     this.#adopt(fileId);
@@ -811,12 +816,42 @@ export class FileRoom extends DurableObject<Env> {
       return { ok: false, message: `There's no read tool ${name}.` };
     const engine = this.#agentEngine(fileId);
     if (!engine) return { ok: false, message: NO_ENGINE };
+    if (name === "export_image") {
+      // Text is laid out again to be drawn: in its own fonts, as the browser lays it out.
+      const missing = engine.missingFaces(this.#warmEditor(engine));
+      if (missing.length > 0) await engine.load(missing);
+    }
+    const editor = this.#warmEditor(engine);
+    const services: ToolServices = {
+      renderPng: async (id, options) =>
+        (await this.#renderer(fileId, engine)).renderPng(editor.doc, id, options),
+    };
     try {
-      const { result } = await engine.run(this.#warmEditor(engine), name, input);
-      return { ok: true, revn: null, result: result.data, replayed: false };
+      const { result } = await engine.run(editor, name, input, services);
+      return {
+        ok: true,
+        revn: null,
+        result: result.data,
+        ...(result.image ? { image: result.image } : {}),
+        replayed: false,
+      };
     } catch (error) {
       return failedRun(engine, name, error);
     }
+  }
+
+  /** The room's renderer, made the first time something is drawn. */
+  #renderer(fileId: string, engine: AgentEngine): Promise<HeadlessRenderer> {
+    this.#rendering ??= headlessRenderer(
+      this.env,
+      fileId,
+      engine.measurer,
+      fileFontLoader(this.env, fileId),
+    ).catch((error: unknown) => {
+      this.#rendering = null;
+      throw error;
+    });
+    return this.#rendering;
   }
 
   /**
