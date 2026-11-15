@@ -113,8 +113,8 @@ export function TypeSettingsButton({
       {open && button.current ? (
         <Popover
           anchor={button.current}
-          // Beside the section (or the popover) it belongs to, clear of the inspector, as in Figma.
-          beside={button.current.closest<HTMLElement>(".dp-section, .dp-popover") ?? undefined}
+          // Beside the section it belongs to, clear of the inspector, as in Figma (in a popover, beside that).
+          beside={button.current.closest<HTMLElement>(".dp-section") ?? undefined}
           label="Type settings"
           className="type-settings dp-root"
           onClose={() => setOpen(false)}
