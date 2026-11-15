@@ -5,15 +5,17 @@
  * Drawn in device pixels, where the canvas has the backdrop:
  * 1. the backdrop under the layer (and a margin the bent rays reach into),
  *    blurred by the frost; and the layer's shape, as an anti-aliased mask;
- * 2. on the GPU, every pixel's nearest point on the shape's edge, by jump
- *    flooding from sub-pixel edge points the mask gives (half-float, so
- *    exact to a fraction of a pixel): its distance in, and the direction
- *    out;
- * 3. a fragment shader that turns the distance into a smooth rim (steep at
- *    the edge, flat a depth in), bends the backdrop along the rim's normal
- *    (colour by colour for dispersion, fanned out for splay), and lights
- *    it: a fine specular line on the edge facing the light, a softer one
- *    opposite, and a sheen across the lit side of the rim.
+ * 2. on the GPU, the rim's height: the shape blurred by a Gaussian as wide
+ *    as the rim is deep, at a resolution the blur can spare, with its slope
+ *    taken by derivative-of-Gaussian kernels in the same passes. The slope
+ *    is smooth everywhere and for any shape: inner contours round off, rims
+ *    from opposite sides fade into each other, and nothing creases;
+ * 3. a fragment shader that bends the backdrop down the slope (colour by
+ *    colour for dispersion, fanned out for splay), reading it through
+ *    mipmaps so compressed content doesn't shimmer, and lights the edge
+ *    facing the light, and more softly the one opposite: a fine line,
+ *    placed by the distance in that the rim's height gives (for a blurred
+ *    edge, the height is a Gaussian's cumulative distribution of it).
  * Without WebGL2 (or rendering to half floats) it falls back to the frost
  * and a rim highlight in 2D.
  */
@@ -38,7 +40,9 @@ import {
 export interface GlassTuning {
   /** At full refraction, how far the edge looks in, as a share of the rim's depth. */
   readonly bend: number;
-  /** How fast the bend eases toward the flat middle: (1 − t)^profile. */
+  /** The rim's height is the shape blurred by a Gaussian this share of the depth wide. */
+  readonly rimSigma: number;
+  /** How the bend follows the rim's slope: slope^profile, the slope 1 at a straight edge. */
   readonly profile: number;
   /** At full dispersion, how far colours part, as a share of the bend. */
   readonly dispersion: number;
@@ -66,22 +70,26 @@ export interface GlassTuning {
   readonly shade: number;
 }
 
-/** Fitted to Figma's glass (tools/glass-calibration): mean difference 2.7 of 255 over 22 cells. */
+/**
+ * Fitted to Figma's glass (tools/glass-calibration): mean difference 3.0 of
+ * 255 over 22 cells, all but the deepest rim within 4.5.
+ */
 export const DEFAULT_GLASS_TUNING: GlassTuning = {
-  bend: 0.88,
-  profile: 3.24,
-  dispersion: 0.11,
+  bend: 0.86,
+  rimSigma: 0.275,
+  profile: 1.6,
+  dispersion: 0.2,
   frost: 0.45,
   angleOffset: -4.9,
   angleTurn: 1,
   lineWidth: 0.005,
-  lineMin: 0.92,
-  line: 1.62,
+  lineMin: 0.8,
+  line: 2.02,
   glowWidth: 0.25,
-  glowMin: 2.33,
+  glowMin: 2.55,
   glow: 0,
-  facing: 0.92,
-  backLine: 1.56,
+  facing: 1.58,
+  backLine: 1.23,
   backGlow: 0.2,
   backFacing: 1.12,
   sheen: 0,
@@ -108,12 +116,10 @@ export interface GlassParams {
    * itself only in a sliver at the edge, as thick glass does.
    */
   readonly refraction: number;
-  /**
-   * The rim's width, in px: where the glass curves before it's flat. Never
-   * more than the shape's inner radius, so the bend fades to nothing where
-   * rims from opposite sides meet, instead of flipping there.
-   */
+  /** The rim's width, in px: where the glass curves before it's flat. */
   readonly depth: number;
+  /** The Gaussian that makes the rim's height from the shape, in px. */
+  readonly sigma: number;
   /** Red moves this much further than green, blue this much less (0–0.25). */
   readonly dispersion: number;
   /** The backdrop's blur, in px. */
@@ -136,14 +142,11 @@ export function glassParams(
   glass: Glass,
   scale: number,
   tune: GlassTuning = glassTuning(),
-  /** The shape's inner radius in px (half its smaller side): how deep a rim can go. */
-  inner = Number.POSITIVE_INFINITY,
 ): GlassParams {
-  const thickness = Math.max(0, glass.depth) * scale;
-  const depth = Math.min(thickness, Math.max(inner, scale));
-  // Full refraction bends a ray a share of the glass's thickness at its edge (never over
-  // less than a few pixels): thicker glass bends more, even once its rim fills the shape.
-  const refraction = (glass.refraction / 100) * tune.bend * Math.max(thickness, 4 * scale);
+  const depth = Math.max(0, glass.depth) * scale;
+  // Full refraction bends a ray a share of the rim's depth at its edge (never over less
+  // than a few pixels). A rim deeper than the shape is wide fades into the one opposite.
+  const refraction = (glass.refraction / 100) * tune.bend * Math.max(depth, 4 * scale);
   // Colours part by a share of the bend: real glass fringes subtly.
   const dispersion = (glass.dispersion / 100) * tune.dispersion;
   const frost = Math.max(0, glass.frost) * scale * tune.frost;
@@ -152,6 +155,7 @@ export function glassParams(
   return {
     refraction,
     depth,
+    sigma: Math.max(0.5, Math.max(depth, 4 * scale) * tune.rimSigma),
     dispersion,
     frost,
     splay,
@@ -161,74 +165,112 @@ export function glassParams(
   };
 }
 
-/** The farthest step jump flooding starts from: past twice the rim, nothing changes. */
-export function floodSteps(depth: number): number[] {
-  let step = 1;
-  while (step < Math.ceil(depth) + 2) step *= 2;
-  step = Math.min(step, 2048);
-  const steps: number[] = [];
-  for (; step >= 1; step /= 2) steps.push(step);
-  // One more at 1 settles the last pixels jump flooding can miss.
-  steps.push(1);
-  return steps;
-}
-
-// Every pass works in the framebuffer's pixels: `p` is gl_FragCoord.xy, y up.
-// Canvases are uploaded top row first, so they're read with y flipped.
-
-/** Seeds: each pixel on or outside the edge, the offset to the edge from it (in px, y up). */
-const SEED = `#version 300 es
+/**
+ * The mask averaged over `k` × `k` pixels: what the rim's blur starts from,
+ * at a resolution it can spare. With `k` even, each tap sits between four
+ * pixels, so the texture's filtering averages them: a quarter of the reads.
+ */
+const DOWN = `#version 300 es
 precision highp float;
 out vec4 color;
 uniform sampler2D mask;
 uniform vec2 size;
+uniform int k;
 float alphaAt(vec2 p) { return texture(mask, vec2(p.x, size.y - p.y) / size).a; }
 void main() {
-  vec2 p = gl_FragCoord.xy;
-  float a = alphaAt(p);
-  // Wholly inside: no edge here (yet).
-  if (a >= 0.999) { color = vec4(1e4, 1e4, 0.0, 0.0); return; }
-  // Coverage rises inward: its gradient points in, and 0.5 coverage is the edge.
-  vec2 g = vec2(alphaAt(p + vec2(1.0, 0.0)) - alphaAt(p - vec2(1.0, 0.0)),
-                alphaAt(p + vec2(0.0, 1.0)) - alphaAt(p - vec2(0.0, 1.0)));
-  vec2 inward = length(g) > 1e-4 ? normalize(g) : vec2(0.0);
-  color = vec4(inward * (0.5 - a), 0.0, 0.0);
+  vec2 base = floor(gl_FragCoord.xy) * float(k);
+  float sum = 0.0;
+  float n = 0.0;
+  if (k % 2 == 0) {
+    // Even: taps between pixels, each one the average of four.
+    for (int j = 0; j < 4; j++) {
+      if (j >= k / 2) break;
+      for (int i = 0; i < 4; i++) {
+        if (i >= k / 2) break;
+        sum += alphaAt(base + vec2(float(i), float(j)) * 2.0 + 1.0);
+        n += 1.0;
+      }
+    }
+  } else {
+    // Odd: pixel by pixel, so nothing is read from the next cell.
+    for (int j = 0; j < 7; j++) {
+      if (j >= k) break;
+      for (int i = 0; i < 7; i++) {
+        if (i >= k) break;
+        sum += alphaAt(base + vec2(float(i), float(j)) + 0.5);
+        n += 1.0;
+      }
+    }
+  }
+  color = vec4(sum / n, 0.0, 0.0, 0.0);
 }`;
 
-/** One jump-flooding step: the nearest edge point any neighbour `step` away knows of. */
-const FLOOD = `#version 300 es
+/**
+ * The rim's blur across: the Gaussian of the (downsampled) mask, and its
+ * derivative across, as red and green.
+ */
+const BLUR_X = `#version 300 es
 precision highp float;
 out vec4 color;
-uniform sampler2D seeds;
-uniform vec2 size;
+uniform sampler2D src;
 uniform vec2 texSize;
-uniform float step;
+uniform float sigma;
+uniform int radius;
 void main() {
   vec2 p = gl_FragCoord.xy;
-  vec2 best = vec2(1e4);
-  float bestD = 1e12;
-  for (int j = -1; j <= 1; j++)
-    for (int i = -1; i <= 1; i++) {
-      vec2 q = p + vec2(float(i), float(j)) * step;
-      if (q.x < 0.0 || q.y < 0.0 || q.x >= size.x || q.y >= size.y) continue;
-      vec2 v = texture(seeds, q / texSize).xy;
-      if (v.x > 9e3) continue;
-      vec2 edge = q + v - p;
-      float d = dot(edge, edge);
-      if (d < bestD) { bestD = d; best = edge; }
-    }
-  color = vec4(best, 0.0, 0.0);
+  float h = 0.0, dx = 0.0, total = 0.0;
+  float inv = 1.0 / (2.0 * sigma * sigma);
+  for (int i = -64; i <= 64; i++) {
+    if (i < -radius || i > radius) continue;
+    float x = float(i);
+    float w = exp(-x * x * inv);
+    float m = texture(src, (p + vec2(x, 0.0)) / texSize).r;
+    h += w * m;
+    dx += w * m * x / (sigma * sigma);
+    total += w;
+  }
+  color = vec4(h / total, dx / total, 0.0, 0.0);
 }`;
 
-/** The glass itself, from the backdrop, the mask and each pixel's offset to the edge. */
+/**
+ * Then down: the rim's height (red), and its slope across (green) and up
+ * (blue), each per low-resolution pixel.
+ */
+const BLUR_Y = `#version 300 es
+precision highp float;
+out vec4 color;
+uniform sampler2D src;
+uniform vec2 texSize;
+uniform float sigma;
+uniform int radius;
+void main() {
+  vec2 p = gl_FragCoord.xy;
+  float h = 0.0, dx = 0.0, dy = 0.0, total = 0.0;
+  float inv = 1.0 / (2.0 * sigma * sigma);
+  for (int i = -64; i <= 64; i++) {
+    if (i < -radius || i > radius) continue;
+    float y = float(i);
+    float w = exp(-y * y * inv);
+    vec2 v = texture(src, (p + vec2(0.0, y)) / texSize).rg;
+    h += w * v.r;
+    dx += w * v.g;
+    dy += w * v.r * y / (sigma * sigma);
+    total += w;
+  }
+  color = vec4(h / total, dx / total, dy / total, 0.0);
+}`;
+
+/** The glass itself, from the backdrop, the mask, the rim's height and the distance to the edge. */
 const GLASS = `#version 300 es
 precision highp float;
 out vec4 color;
 uniform sampler2D backdrop;
 uniform sampler2D mask;
-uniform sampler2D seeds;
+uniform sampler2D height;
 uniform vec2 size;
-uniform vec2 texSize;
+uniform vec2 heightTexSize;
+uniform float k;
+uniform float sigma;
 uniform vec2 origin;
 uniform vec2 center;
 uniform float depth;
@@ -244,48 +286,79 @@ uniform vec4 tuneB;
 uniform vec4 tuneC;
 uniform vec4 tuneD;
 
-vec4 canvasAt(sampler2D t, vec2 p) { return texture(t, vec2(p.x, size.y - p.y) / size); }
+// The inverse error function (Giles' single-precision approximation).
+float erfinv(float x) {
+  float w = -log((1.0 - x) * (1.0 + x));
+  float q;
+  if (w < 5.0) {
+    w -= 2.5;
+    q = 2.81022636e-08;
+    q = 3.43273939e-07 + q * w;
+    q = -3.5233877e-06 + q * w;
+    q = -4.39150654e-06 + q * w;
+    q = 0.00021858087 + q * w;
+    q = -0.00125372503 + q * w;
+    q = -0.00417768164 + q * w;
+    q = 0.246640727 + q * w;
+    q = 1.50140941 + q * w;
+  } else {
+    w = sqrt(w) - 3.0;
+    q = -0.000200214257;
+    q = 0.000100950558 + q * w;
+    q = 0.00134934322 + q * w;
+    q = -0.00367342844 + q * w;
+    q = 0.00573950773 + q * w;
+    q = -0.0076224613 + q * w;
+    q = 0.00943887047 + q * w;
+    q = 1.00167406 + q * w;
+    q = 2.83297682 + q * w;
+  }
+  return q * x;
+}
+vec2 flipped(vec2 p) { return vec2(p.x, size.y - p.y) / size; }
+vec4 canvasAt(sampler2D t, vec2 p) { return texture(t, flipped(p)); }
+// The backdrop where a bent ray lands, filtered over the footprint of this
+// pixel's ray: where the lens compresses what's behind, mipmaps average it.
+float seenAt(vec2 p, int channel) {
+  vec2 uv = flipped(p);
+  return textureGrad(backdrop, uv, dFdx(uv), dFdy(uv))[channel];
+}
 
 void main() {
   vec2 p = gl_FragCoord.xy - origin;
   float a = canvasAt(mask, p).a;
   if (a <= 0.0) { color = vec4(0.0); return; }
-  vec2 toEdge = texture(seeds, p / texSize).xy;
-  bool far = toEdge.x > 9e3;
-  float d = far ? 1e4 : length(toEdge);
-  // Out, toward the nearest edge. Right at the edge that direction rests on
-  // one pixel's estimate; the anti-aliased mask's own slope is smoother there.
-  vec2 outward = d > 1e-3 ? toEdge / d : vec2(0.0);
-  if (d < 2.0) {
-    vec2 g = vec2(canvasAt(mask, p - vec2(1.0, 0.0)).a - canvasAt(mask, p + vec2(1.0, 0.0)).a,
-                  canvasAt(mask, p - vec2(0.0, 1.0)).a - canvasAt(mask, p + vec2(0.0, 1.0)).a);
-    if (length(g) > 1e-3) outward = normalize(mix(normalize(g), outward, d / 2.0));
-  }
-  float rimDepth = max(depth, 1.0);
-  float t = clamp(d / rimDepth, 0.0, 1.0);
-  // How far in the rim looks: most at the edge, easing (with its slope) to
-  // nothing a depth in, so the lens meets the flat middle without a crease.
-  float slope = pow(1.0 - t, tuneA.x);
+  // The rim: its slope, in full pixels, from the smooth height field.
+  vec3 hs = texture(height, (p / k) / heightTexSize).rgb;
+  vec2 grad = hs.gb / k;
+  float g = length(grad);
+  // 1 at a straight edge, falling smoothly to 0 in the flat middle.
+  float slope = clamp(g * sigma * 2.5066283, 0.0, 1.0);
+  vec2 inward = g > 1e-6 ? grad / g : vec2(0.0);
+  float rim = pow(slope, tuneA.x);
 
   vec2 fromCenter = p - center;
   vec2 fan = length(fromCenter) > 1e-3 ? normalize(fromCenter) : vec2(0.0);
   // A convex rim looks in: each pixel there sees the backdrop from further inside.
-  vec2 bend = (-outward + fan * splay) * slope * refraction;
+  vec2 bend = (inward + fan * splay) * rim * refraction;
   vec3 seen = vec3(
-    canvasAt(backdrop, p + bend * (1.0 + dispersion)).r,
-    canvasAt(backdrop, p + bend).g,
-    canvasAt(backdrop, p + bend * (1.0 - dispersion)).b);
+    seenAt(p + bend * (1.0 + dispersion), 0),
+    seenAt(p + bend, 1),
+    seenAt(p + bend * (1.0 - dispersion), 2));
+  // The distance in from the edge: near a straight edge the rim's height is the Gaussian's
+  // cumulative distribution of it, so its inverse gives it back (to a fraction of a pixel).
+  float d = max(0.0, 1.4142136 * sigma * erfinv(clamp(2.0 * hs.r - 1.0, -0.99999, 0.99999)));
   // Light (given y down) as y up. A fine specular line along the edge facing
   // it, a softer one along the edge opposite (light inside the glass), and a
   // sheen across the lit side of the rim.
   vec2 l = vec2(light.x, -light.y);
-  float facing = dot(outward, l);
+  float facing = dot(-inward, l);
   float line = exp(-d / max(tuneA.z, depth * tuneA.y));
   float glow = exp(-d / max(tuneB.y, depth * tuneB.x));
   float lit = pow(max(facing, 0.0), tuneB.w) * (tuneA.w * line + tuneB.z * glow)
             + pow(max(-facing, 0.0), tuneC.z) * (tuneC.x * line + tuneC.y * glow)
-            + tuneC.w * slope;
-  float shade = max(-facing, 0.0) * slope * tuneD.x;
+            + tuneC.w * rim;
+  float shade = max(-facing, 0.0) * rim * tuneD.x;
   seen = mix(seen, vec3(1.0), clamp(intensity * lit, 0.0, 1.0)) * (1.0 - intensity * shade);
   color = vec4(seen * a, a);
 }`;
@@ -296,15 +369,24 @@ type Program = {
 };
 
 interface Gl extends GlCanvas {
-  readonly seed: Program;
-  readonly flood: Program;
+  readonly down: Program;
+  readonly blurX: Program;
+  readonly blurY: Program;
   readonly glass: Program;
+  /** The frosted backdrop, mipmapped. */
   readonly backdrop: WebGLTexture;
   readonly mask: WebGLTexture;
-  /** Ping-pong offsets to the edge (RGBA16F), and the framebuffer that draws into them. */
-  readonly offsets: [WebGLTexture, WebGLTexture];
+  /** Ping-pong for the rim's height and slope, at reduced resolution (RGBA16F), and the framebuffer that draws into them. */
+  readonly low: [WebGLTexture, WebGLTexture];
   readonly framebuffer: WebGLFramebuffer;
-  offsetSize: { w: number; h: number };
+  lowSize: { w: number; h: number };
+}
+
+/** How much the rim's blur can be downsampled: its Gaussian stays at least 3 pixels wide there. */
+export function heightScale(sigma: number): number {
+  const k = Math.max(1, Math.min(8, Math.floor(sigma / 3)));
+  // Even, past 1: the downsample reads four pixels at a time.
+  return k > 1 ? k - (k % 2) : 1;
 }
 
 function texture(gl: WebGL2RenderingContext, filter: number): WebGLTexture {
@@ -346,30 +428,34 @@ export class GlassPainter {
       | null
       | undefined;
     if (!canvas || !gl) return null;
-    // Rendering to half floats: the offsets need fractions of a pixel.
+    // Rendering to half floats: the rim's height needs more than 8 bits.
     if (
       !gl.getExtension("EXT_color_buffer_float") &&
       !gl.getExtension("EXT_color_buffer_half_float")
     )
       return null;
-    const seed = program(gl, SEED, "glass seeds");
-    const flood = program(gl, FLOOD, "glass flood");
+    const down = program(gl, DOWN, "glass rim downsample");
+    const blurX = program(gl, BLUR_X, "glass rim blur across");
+    const blurY = program(gl, BLUR_Y, "glass rim blur down");
     const glass = program(gl, GLASS, "glass");
     const framebuffer = gl.createFramebuffer();
-    if (!seed || !flood || !glass || !framebuffer) return null;
+    if (!down || !blurX || !blurY || !glass || !framebuffer) return null;
+    const backdrop = texture(gl, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     bindQuad(gl);
     this.#gl = {
       canvas,
       gl,
       maxTexture: Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096,
-      seed,
-      flood,
+      down,
+      blurX,
+      blurY,
       glass,
-      backdrop: texture(gl, gl.LINEAR),
+      backdrop,
       mask: texture(gl, gl.LINEAR),
-      offsets: [texture(gl, gl.NEAREST), texture(gl, gl.NEAREST)],
+      low: [texture(gl, gl.LINEAR), texture(gl, gl.LINEAR)],
       framebuffer,
-      offsetSize: { w: 0, h: 0 },
+      lowSize: { w: 0, h: 0 },
     };
     return this.#gl;
   }
@@ -381,9 +467,7 @@ export class GlassPainter {
    */
   paint(ctx: Ctx, shape: Path2D, w: number, h: number, glass: Glass, scale: number): void {
     const t = ctx.getTransform();
-    // Half the smaller side, on the device: as deep as a rim can go.
-    const inner = (Math.min(w * Math.hypot(t.a, t.b), h * Math.hypot(t.c, t.d)) / 2) | 0;
-    const p = glassParams(glass, scale, glassTuning(), inner);
+    const p = glassParams(glass, scale, glassTuning());
     // The layer's reach on the device, with the margin rays bend into, within the canvas.
     const xs: number[] = [];
     const ys: number[] = [];
@@ -446,20 +530,26 @@ export class GlassPainter {
     ctx.restore();
   }
 
-  /** The GPU passes: seeds, flooding, then the glass into the canvas. False if it couldn't. */
+  /**
+   * The GPU passes: the rim's height and slope (downsample, blur across,
+   * blur down), then the glass into the canvas. False if it couldn't.
+   */
   #draw(g: Gl, p: GlassParams, rw: number, rh: number, centre: { x: number; y: number }): boolean {
     const { gl } = g;
-    // Offsets: half floats, grown to fit.
-    if (g.offsetSize.w < rw || g.offsetSize.h < rh) {
-      const w = Math.max(rw, g.offsetSize.w);
-      const h = Math.max(rh, g.offsetSize.h);
-      for (const tex of g.offsets) {
+    // The rim's height, at a resolution its blur can spare.
+    const k = heightScale(p.sigma);
+    const lw = Math.ceil(rw / k);
+    const lh = Math.ceil(rh / k);
+    if (g.lowSize.w < lw || g.lowSize.h < lh) {
+      const w = Math.max(lw, g.lowSize.w);
+      const h = Math.max(lh, g.lowSize.h);
+      for (const tex of g.low) {
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
       }
-      g.offsetSize = { w, h };
+      g.lowSize = { w, h };
     }
-    const texSize = [g.offsetSize.w, g.offsetSize.h] as const;
+    const lowTexSize = [g.lowSize.w, g.lowSize.h] as const;
     const bind = (unit: number, tex: WebGLTexture) => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -474,40 +564,46 @@ export class GlassPainter {
       gl.UNSIGNED_BYTE,
       this.#backdrop as AnyCanvas,
     );
+    // Bent rays can land where the lens compresses what's behind: read it through mipmaps.
+    gl.generateMipmap(gl.TEXTURE_2D);
     bind(1, g.mask);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.#shape as AnyCanvas);
 
-    // Seeds, then flooding, ping-ponging between the two offset textures.
-    gl.bindFramebuffer(gl.FRAMEBUFFER, g.framebuffer);
-    gl.viewport(0, 0, rw, rh);
-    let into = 0;
-    const target = (i: number) => {
+    // The rim: the mask averaged down, then blurred across and down with its slope.
+    const lowTarget = (i: number) => {
       gl.framebufferTexture2D(
         gl.FRAMEBUFFER,
         gl.COLOR_ATTACHMENT0,
         gl.TEXTURE_2D,
-        g.offsets[i] as WebGLTexture,
+        g.low[i] as WebGLTexture,
         0,
       );
     };
-    target(into);
+    const sigmaLow = p.sigma / k;
+    const radius = Math.min(64, Math.ceil(sigmaLow * 3));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, g.framebuffer);
+    gl.viewport(0, 0, lw, lh);
+    lowTarget(0);
     if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       return false;
     }
-    gl.useProgram(g.seed.program);
-    gl.uniform1i(g.seed.u("mask"), 1);
-    gl.uniform2f(g.seed.u("size"), rw, rh);
+    gl.useProgram(g.down.program);
+    gl.uniform1i(g.down.u("mask"), 1);
+    gl.uniform2f(g.down.u("size"), rw, rh);
+    gl.uniform1i(g.down.u("k"), k);
     draw(g);
-    gl.useProgram(g.flood.program);
-    gl.uniform2f(g.flood.u("size"), rw, rh);
-    gl.uniform2f(g.flood.u("texSize"), texSize[0], texSize[1]);
-    gl.uniform1i(g.flood.u("seeds"), 2);
-    for (const step of floodSteps(p.depth)) {
-      bind(2, g.offsets[into] as WebGLTexture);
-      into = 1 - into;
-      target(into);
-      gl.uniform1f(g.flood.u("step"), step);
+    for (const [pass, from, into] of [
+      [g.blurX, 0, 1],
+      [g.blurY, 1, 0],
+    ] as const) {
+      bind(3, g.low[from] as WebGLTexture);
+      lowTarget(into);
+      gl.useProgram(pass.program);
+      gl.uniform1i(pass.u("src"), 3);
+      gl.uniform2f(pass.u("texSize"), lowTexSize[0], lowTexSize[1]);
+      gl.uniform1f(pass.u("sigma"), sigmaLow);
+      gl.uniform1i(pass.u("radius"), radius);
       draw(g);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -517,12 +613,14 @@ export class GlassPainter {
     const origin = gl.drawingBufferHeight - rh;
     const u = g.glass.u;
     gl.useProgram(g.glass.program);
-    bind(2, g.offsets[into] as WebGLTexture);
+    bind(3, g.low[0] as WebGLTexture);
     gl.uniform1i(u("backdrop"), 0);
     gl.uniform1i(u("mask"), 1);
-    gl.uniform1i(u("seeds"), 2);
+    gl.uniform1i(u("height"), 3);
     gl.uniform2f(u("size"), rw, rh);
-    gl.uniform2f(u("texSize"), texSize[0], texSize[1]);
+    gl.uniform2f(u("heightTexSize"), lowTexSize[0], lowTexSize[1]);
+    gl.uniform1f(u("k"), k);
+    gl.uniform1f(u("sigma"), p.sigma);
     gl.uniform2f(u("origin"), 0, origin);
     gl.uniform2f(u("center"), centre.x, centre.y);
     gl.uniform1f(u("depth"), p.depth);
@@ -531,11 +629,11 @@ export class GlassPainter {
     gl.uniform1f(u("splay"), p.splay);
     gl.uniform2f(u("light"), p.light.x, p.light.y);
     gl.uniform1f(u("intensity"), p.intensity);
-    const k = glassTuning();
-    gl.uniform4f(u("tuneA"), k.profile, k.lineWidth, k.lineMin, k.line);
-    gl.uniform4f(u("tuneB"), k.glowWidth, k.glowMin, k.glow, k.facing);
-    gl.uniform4f(u("tuneC"), k.backLine, k.backGlow, k.backFacing, k.sheen);
-    gl.uniform4f(u("tuneD"), k.shade, 0, 0, 0);
+    const tune = glassTuning();
+    gl.uniform4f(u("tuneA"), tune.profile, tune.lineWidth, tune.lineMin, tune.line);
+    gl.uniform4f(u("tuneB"), tune.glowWidth, tune.glowMin, tune.glow, tune.facing);
+    gl.uniform4f(u("tuneC"), tune.backLine, tune.backGlow, tune.backFacing, tune.sheen);
+    gl.uniform4f(u("tuneD"), tune.shade, 0, 0, 0);
     draw(g);
     return true;
   }

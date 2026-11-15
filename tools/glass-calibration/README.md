@@ -42,7 +42,11 @@ After changing `scenes.json`, run `node tools/glass-calibration/build-plugin.mjs
 
 ## Results
 
-The first fit against Figma (November 2026) took the mean difference from 10.3 to 3.2 (of 255, over the glass and its rim). It showed that a rim deeper than the shape's inner radius flipped its bend where rims from opposite sides meet; capping the rim there, and fitting again, brought it to 2.7. Most cells now differ by about 2. The largest gap left is a rim much deeper than the shape (`depth-80`, 11): Figma bends the backdrop into smooth curves there, while ours still folds a little at the corners.
+- **First fit** (November 2026): the mean difference went from 10.3 to 3.2 (of 255, over the glass and its rim). Capping the rim at the shape's inner radius, and fitting again, brought it to 2.7, but deep rims still creased at rounded corners.
+- **Glass v3** (decision 0007's smooth height field) traded a little of that mean for no creases, fans or shimmer anywhere: 3.0, with every cell but the deepest rim within 4.5 and most about 2.
+- **The largest gap left** is a rim much deeper than the shape (`depth-80`): Figma bends the surroundings into closed loops there, a profile v3 doesn't model yet.
+
+`apps/web/e2e/bench/glass.spec.ts` measures what glass costs to draw.
 
 Without `TARGET_DIR`, the harness tests itself: it renders the cells at a known tuning and fits back to it from the defaults. The first run took the error from 2.29 to 0.28 and recovered the constants that matter visibly (bend 0.72 against 0.70, profile 2.1 against 2.0, highlight 1.56 against 1.6).
 

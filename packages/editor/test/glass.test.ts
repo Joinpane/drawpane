@@ -1,6 +1,6 @@
-import { DEFAULT_GLASS, Effect } from "@drawpane/model";
+import { DEFAULT_GLASS } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_GLASS_TUNING, floodSteps, glassParams } from "../src/glass";
+import { DEFAULT_GLASS_TUNING, glassParams, heightScale } from "../src/glass";
 
 describe("glassParams", () => {
   it("takes Figma's defaults to device pixels", () => {
@@ -30,13 +30,11 @@ describe("glassParams", () => {
     expect(at(-45).y).toBeLessThan(0);
   });
 
-  it("keeps the rim within the shape's inner radius, while thicker glass still bends more", () => {
-    const deep = { ...DEFAULT_GLASS, depth: 80 };
-    const inside = glassParams(deep, 2, DEFAULT_GLASS_TUNING, 140);
-    expect(inside.depth).toBe(140);
-    const deeper = glassParams({ ...deep, depth: 120 }, 2, DEFAULT_GLASS_TUNING, 140);
-    expect(deeper.depth).toBe(140);
-    expect(deeper.refraction).toBeGreaterThan(inside.refraction);
+  it("makes the rim's height with a Gaussian a share of its depth wide", () => {
+    const p = glassParams({ ...DEFAULT_GLASS, depth: 40 }, 2);
+    expect(p.sigma).toBeCloseTo(80 * DEFAULT_GLASS_TUNING.rimSigma, 5);
+    // A rim with no depth still has a little.
+    expect(glassParams({ ...DEFAULT_GLASS, depth: 0 }, 1).sigma).toBeGreaterThan(0);
   });
 
   it("still bends a little through a rim with no depth, so refraction stays visible", () => {
@@ -45,19 +43,13 @@ describe("glassParams", () => {
   });
 });
 
-describe("floodSteps", () => {
-  it("floods from just past the rim down to single pixels, then once more at 1", () => {
-    expect(floodSteps(20)).toEqual([32, 16, 8, 4, 2, 1, 1]);
-    expect(floodSteps(0)).toEqual([2, 1, 1]);
-    // A huge rim still stops at a step the GPU can take in a few passes.
-    expect(floodSteps(1e6)[0]).toBe(2048);
-  });
-});
-
-describe("the glass effect in a file", () => {
-  it("is valid with Figma's defaults, and keeps its values in range", () => {
-    expect(Effect.safeParse(DEFAULT_GLASS).success).toBe(true);
-    expect(Effect.safeParse({ ...DEFAULT_GLASS, refraction: 140 }).success).toBe(false);
-    expect(Effect.safeParse({ ...DEFAULT_GLASS, depth: -1 }).success).toBe(false);
+describe("heightScale", () => {
+  it("downsamples a wide rim's blur, keeping its Gaussian at least 3 pixels wide", () => {
+    expect(heightScale(1)).toBe(1);
+    expect(heightScale(5.9)).toBe(1);
+    expect(heightScale(12)).toBe(4);
+    // Even past 1, so the downsample can read four pixels at a time.
+    expect(heightScale(9)).toBe(2);
+    expect(heightScale(500)).toBe(8);
   });
 });

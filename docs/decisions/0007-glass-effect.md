@@ -46,3 +46,14 @@ The shader's constants (`GlassTuning`) are now fitted to Figma's own glass, not 
 - **The rim stays inside the shape.** A rim deeper than the shape's inner radius (half its smaller side) now stops there, so the bend fades to nothing where rims from opposite sides meet instead of flipping direction, which drew streaks along the corners' diagonals. Thicker glass still bends more.
 - **Figma's look, in numbers.** The bend is stronger (0.88 of the depth at full refraction), frost is about half as strong per pixel, dispersion subtler (0.11), and the light is a fine line right at the edge, with a softer line opposite and no broad glow, sheen or shade.
 - **What's left.** A rim far deeper than the shape (depth 80 on a 140-tall shape) still folds a little at rounded corners, where Figma bends smoothly.
+
+## Revision: a smooth height field (2026-11-15)
+
+The calibrated version still had defects Figma's glass doesn't: hairline fans at rounded corners, creases along the corners' diagonals once the rim was deep, and shimmer where the lens compressed the backdrop. Their causes were the rim's direction, taken from the nearest edge pixel the jump flooding found (quantised: a degree off becomes pixels off at a large bend), inner contours that sharpen at corners, and one texel read per pixel. It now:
+
+- **Takes the rim from a smooth height field.** The shape is blurred by a Gaussian a share of the depth wide (on the GPU, in half floats, at a resolution the blur can spare), and its slope comes from derivative-of-Gaussian kernels in the same two passes. The bend follows that slope: smooth everywhere and for any shape, rounding inner contours, and fading where rims from opposite sides meet.
+- **Reads the backdrop through mipmaps,** filtered over each bent ray's footprint, so compressed content averages instead of shimmering.
+- **Places the specular line by the height itself.** Near a straight edge a blurred shape's height is a Gaussian's cumulative distribution of the distance in, so its inverse gives the distance back. The jump flooding is gone.
+- **Costs less:** six glass layers redraw in about two thirds of the time they did (a software renderer without a GPU, so relative numbers only), from dropping the flooding passes and reading the downsampled mask four pixels at a time.
+
+Calibrated again (mean 3.0 of 255), every cell but the deepest rim is within 4.5 of Figma's (most about 2), and the deepest is smooth where it creased. Figma's deep rims bend the surroundings into the glass in closed loops; matching that profile exactly is the gap left.
