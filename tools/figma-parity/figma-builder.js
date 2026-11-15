@@ -209,26 +209,53 @@ async function buildParity(figma, suites) {
     if (resize === "none") node.resize(spec.width, spec.height);
     node.x = spec.x;
     node.y = spec.y;
+    node.effects = (spec.effects ?? []).map(effect);
+    if (spec.opacity !== undefined) node.opacity = spec.opacity;
+    place(node, spec);
     return node;
+  };
+
+  // Drawpane turns a layer clockwise about its box's centre; Figma's own rotation turns the
+  // other way about its top left, so the transform is set outright.
+  const place = (node, spec) => {
+    if (!spec.rotation) return;
+    const r = (spec.rotation * Math.PI) / 180;
+    const cos = Math.cos(r);
+    const sin = Math.sin(r);
+    const cx = node.width / 2;
+    const cy = node.height / 2;
+    node.relativeTransform = [
+      [cos, -sin, spec.x + cx - (cos * cx - sin * cy)],
+      [sin, cos, spec.y + cy - (sin * cx + cos * cy)],
+    ];
   };
 
   const layer = async (spec, parent, origin) => {
     if (spec.type === "text") return text(spec, parent);
-    const node =
-      spec.type === "ellipse"
-        ? figma.createEllipse()
-        : spec.type === "frame"
-          ? figma.createFrame()
-          : figma.createRectangle();
+    const make = {
+      ellipse: () => figma.createEllipse(),
+      frame: () => figma.createFrame(),
+      star: () => figma.createStar(),
+      polygon: () => figma.createPolygon(),
+      path: () => figma.createVector(),
+      rect: () => figma.createRectangle(),
+    }[spec.type];
+    if (!make) throw new Error(`No Figma layer for ${spec.type} yet.`);
+    const node = make();
     parent.appendChild(node);
-    node.resize(Math.max(0.01, spec.width), Math.max(0.01, spec.height));
+    if (spec.type === "path")
+      // Its box is the path's: scenes keep paths of straight lines filling their box.
+      node.vectorPaths = [{ windingRule: "NONZERO", data: spec.pathData }];
+    else node.resize(Math.max(0.01, spec.width), Math.max(0.01, spec.height));
+    if (spec.pointCount !== undefined) node.pointCount = spec.pointCount;
+    if (spec.innerRadius !== undefined) node.innerRadius = spec.innerRadius;
     node.x = spec.x;
     node.y = spec.y;
     if (spec.name) node.name = spec.name;
     if (spec.cornerRadii) {
       [node.topLeftRadius, node.topRightRadius, node.bottomRightRadius, node.bottomLeftRadius] =
         spec.cornerRadii;
-    } else if (spec.cornerRadius !== undefined && spec.type !== "ellipse")
+    } else if (spec.cornerRadius !== undefined && ["rect", "frame"].includes(spec.type))
       node.cornerRadius = spec.cornerRadius;
     node.fills = (spec.fills ?? []).map(paint);
     node.strokes = (spec.strokes ?? []).map(paint);
@@ -242,6 +269,7 @@ async function buildParity(figma, suites) {
     if (spec.opacity !== undefined) node.opacity = spec.opacity;
     if (spec.blendMode) node.blendMode = BLEND(spec.blendMode);
     for (const child of spec.children ?? []) await layer(child, node, origin);
+    place(node, spec);
     return node;
   };
 

@@ -43,5 +43,6 @@ The suite's mean went from 7.36 to 1.12. Goldens now come from Figma's own expor
 ## Consequences
 
 - Documents that relied on the old drawing (circular radial gradients on wide layers, blurs half as strong) look different after this change. There are no published files yet; matching Figma now is cheaper than a migration later.
+- A glass suite (decision 0007's revision of 2026-11-15) covers what the calibration's rounded rectangles don't: text, stars, paths, thin bars and overlapping lenses.
 - More suites follow the same pattern: images, and import fidelity (whole Figma files imported, rendered and compared frame by frame).
 - Refreshing goldens needs an editable Figma file and a Figma login for the browser automation (see the README); a REST token is optional.

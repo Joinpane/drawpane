@@ -2,7 +2,8 @@
  * The canvas's shortcuts draw what a full redraw would: a pan moves the last
  * frame and draws only the uncovered strips, and a zoom scales a snapshot
  * until it settles. After each, the pixels are compared with a frame drawn
- * from nothing at the same camera.
+ * from nothing at the same camera, over plain layers and over layers that
+ * read the pixels around them (glass, background blur, layer blur).
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -18,6 +19,7 @@ type W = {
     state: { set(patch: { camera: Camera }): void };
     createLayer(t: string, r: object, p: string, props?: object): string;
     zoomTo(z: number): void;
+    centerOn(p: { x: number; y: number }): void;
   };
   drawpaneFrames: { redraw(): void };
 };
@@ -44,8 +46,8 @@ async function pixels(page: Page): Promise<number[]> {
   });
 }
 
-/** Share of sampled pixels that differ noticeably between two frames. */
-function difference(a: number[], b: number[]): number {
+/** Share of sampled pixels that differ between two frames by more than `within` in a channel. */
+function difference(a: number[], b: number[], within = 24): number {
   let differ = 0;
   for (let i = 0; i < a.length; i++) {
     const x = a[i] as number;
@@ -55,7 +57,7 @@ function difference(a: number[], b: number[]): number {
       Math.abs(((x >> 8) & 255) - ((y >> 8) & 255)),
       Math.abs(((x >> 16) & 255) - ((y >> 16) & 255)),
     );
-    if (d > 24) differ++;
+    if (d > within) differ++;
   }
   return differ / a.length;
 }
@@ -105,6 +107,50 @@ test.describe
             fontWeight: 600,
           });
         }
+        // Below the cards: stripes under glass, a background blur and a layer blur.
+        for (let i = 0; i < 40; i++)
+          e.createLayer("rect", { x: i * 40, y: 900, width: 20, height: 600 }, e.s.pageId, {
+            fills: [{ type: "solid", color: i % 2 ? "#e8590c" : "#2b4fd6" }],
+          });
+        const GLASS = {
+          type: "glass",
+          angle: -45,
+          intensity: 80,
+          refraction: 80,
+          depth: 20,
+          dispersion: 50,
+          frost: 4,
+          splay: 0,
+        };
+        for (let i = 0; i < 5; i++)
+          e.createLayer(
+            "rect",
+            { x: 60 + i * 300, y: 960 + (i % 2) * 180, width: 240, height: 160 },
+            e.s.pageId,
+            {
+              cornerRadius: 36,
+              rotation: i * 9,
+              fills: [{ type: "solid", color: "#ffffff22" }],
+              effects: [{ ...GLASS, depth: 12 + i * 8 }],
+            },
+          );
+        e.createLayer("rect", { x: 200, y: 1300, width: 400, height: 140 }, e.s.pageId, {
+          cornerRadius: 24,
+          fills: [{ type: "solid", color: "#ffffff55" }],
+          effects: [{ type: "background-blur", radius: 24 }],
+        });
+        const blurred = e.createLayer(
+          "frame",
+          { x: 800, y: 1300, width: 400, height: 140 },
+          e.s.pageId,
+          {
+            fills: [{ type: "solid", color: "#ffffff" }],
+            effects: [{ type: "layer-blur", radius: 12 }],
+          },
+        );
+        e.createLayer("ellipse", { x: 40, y: 20, width: 100, height: 100 }, blurred, {
+          fills: [{ type: "solid", color: "#111111" }],
+        });
         e.zoomTo(1);
       });
       await page.waitForTimeout(800);
@@ -127,6 +173,31 @@ test.describe
       const panned = await pixels(page);
       const full = await redrawn(page);
       expect(difference(panned, full)).toBeLessThan(0.002);
+    });
+
+    test("a pan over glass and blurs draws what a full redraw would", async () => {
+      await page.evaluate(() => (window as unknown as W).drawpane.centerOn({ x: 500, y: 1150 }));
+      await redrawn(page);
+      await page.evaluate(async () => {
+        const e = (window as unknown as W).drawpane;
+        const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+        // Across the glass and back, in small steps and in big ones (a fast flick), so
+        // every layer is cut by an uncovered strip on the way.
+        for (const [dx, dy] of [
+          ...Array.from({ length: 12 }, (_, i) => [-17.3, i % 2 ? 6.1 : -9.7]),
+          [-310.4, 123.7],
+          [287.9, -201.3],
+          [-153.1, 77.7],
+          ...Array.from({ length: 12 }, (_, i) => [17.3, i % 2 ? -6.1 : 9.7]),
+        ] as const) {
+          e.state.set({ camera: e.s.camera.pan(dx, dy) });
+          await frame();
+        }
+      });
+      const panned = await pixels(page);
+      const full = await redrawn(page);
+      // Strict: a seam, or a rim along the screen's edge carried in by the pan, is faint.
+      expect(difference(panned, full, 8)).toBeLessThan(0.0005);
     });
 
     test("a zoom settles to what a full redraw would", async () => {

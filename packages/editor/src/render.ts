@@ -11,8 +11,8 @@ import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
 import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
 import { exportBounds } from "./export";
-import type { Matrix, Rect } from "./geometry";
-import { GlassPainter } from "./glass";
+import { type Matrix, type Rect, rectsIntersect } from "./geometry";
+import { GlassPainter, glassParams } from "./glass";
 import {
   boxInGradientSpace,
   type GradientPaint,
@@ -20,6 +20,7 @@ import {
   linearInPixels,
 } from "./gradients";
 import { ImageCache, imagePlacement } from "./images";
+import { Inradii } from "./inradius";
 import { markerLength, markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
 import { NoiseTiles, paintNoise } from "./noise";
@@ -38,6 +39,7 @@ import { TexturePainter } from "./texture";
 import { isClosedPath } from "./vector/cache";
 import { nodePath } from "./vector/shapes";
 import { serializePath } from "./vector/svg";
+import { type AnyCanvas, copyExtended, scratch } from "./webgl";
 
 /** On screen it's a canvas element; exports and thumbnails draw into an OffscreenCanvas. */
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -234,6 +236,24 @@ export class CanvasRenderer {
   #last: LastFrame | null = null;
   /** The last frame drew every layer (not a scaled stand-in). */
   #lastExact = false;
+  /** The page's layers that read the pixels around them, by document version (see #readers). */
+  #readerCache: { pageId: string; version: number; ids: string[] } | null = null;
+  /**
+   * Advances whenever a frame's content differs from the last one's (see
+   * `sameContent`), so glass drawn against one backdrop isn't reused over another.
+   */
+  #generation = 0;
+  /** The screen's canvas while a frame is drawn on it: glass drawn there is kept for pans. */
+  #screen: Ctx | null = null;
+  /** While redrawing parts of a frame: those parts, in page coordinates; layers touching none are skipped. */
+  #parts: Rect[] | null = null;
+  /**
+   * While redrawing parts of a frame: the layers reading the backdrop that
+   * paint in them, whose backdrop is all redrawn first. The others' glass
+   * and background blur would read the moved frame and paint nowhere new:
+   * they're skipped.
+   */
+  #fresh: ReadonlySet<string> | null = null;
   /** The last exact frame's pixels, scaled while zooming (see `#preview`). */
   #snapshot: OffscreenCanvas | HTMLCanvasElement | null = null;
   #snapshotFrame: LastFrame | null = null;
@@ -262,6 +282,10 @@ export class CanvasRenderer {
   readonly #postCanvases: Array<OffscreenCanvas | HTMLCanvasElement> = [];
   /** Draws glass effects, with its own canvases and (made on first use) WebGL context. */
   readonly #glass = new GlassPainter();
+  /** How thick glass layers' shapes are, measured once per version (see inradius.ts). */
+  readonly #inradii = new Inradii();
+  /** What's behind a background blur, read for it (see #backgroundBlur). */
+  #blurBackdrop: AnyCanvas | null = null;
   /** Noise tiles, made once per look. */
   readonly #noiseTiles = new NoiseTiles();
   /** Draws texture effects, with its own WebGL context (made on first use). */
@@ -321,17 +345,23 @@ export class CanvasRenderer {
       tx,
       ty,
     };
+    if (!this.#last || !sameContent(this.#last, frame)) this.#generation++;
     if (!exact && this.#preview(ctx, frame)) {
       this.stats.ms = performance.now() - start;
       return false;
     }
-    const reused = this.#reuse(ctx, frame, snapped, dpr);
-    this.#last = frame;
-    this.#lastExact = true;
-    if (!reused) {
-      ctx.fillStyle = background;
-      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-      this.#drawChildren(ctx, pageId, snapped, dpr, snapped.visibleRect(viewport));
+    this.#screen = ctx;
+    try {
+      const reused = this.#reuse(ctx, frame, snapped, dpr);
+      this.#last = frame;
+      this.#lastExact = true;
+      if (!reused) {
+        ctx.fillStyle = background;
+        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        this.#drawChildren(ctx, pageId, snapped, dpr, snapped.visibleRect(viewport));
+      }
+    } finally {
+      this.#screen = null;
     }
     this.stats.ms = performance.now() - start;
     return true;
@@ -421,25 +451,164 @@ export class CanvasRenderer {
     if (dx < 0) strips.push([width + dx, 0, -dx, height]);
     if (dy > 0) strips.push([0, 0, width, dy]);
     if (dy < 0) strips.push([0, height + dy, width, -dy]);
-    for (const [x, y, w, h] of strips) {
-      resetState(ctx);
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(x, y, w, h);
-      ctx.clip();
-      ctx.fillStyle = frame.background;
-      ctx.fillRect(x, y, w, h);
-      // The strip in page coordinates: only layers touching it are drawn.
-      const visible = {
-        x: (x / dpr - camera.x) / camera.zoom,
-        y: (y / dpr - camera.y) / camera.zoom,
-        width: w / dpr / camera.zoom,
-        height: h / dpr / camera.zoom,
-      };
-      this.#drawChildren(ctx, frame.pageId, camera, dpr, visible);
-      ctx.restore();
+    const rects = strips.map(([x, y, w, h]) => ({ x, y, width: w, height: h }));
+    const grown = this.#withReaders(rects, frame.pageId, camera, dpr, width, height);
+    if (grown.readers.size > 0) {
+      // Layers that read the backdrop around them (glass, background blur) and touch a strip
+      // are redrawn whole, with all they read, in one pass: drawn in a strip alone, they'd
+      // read the last frame's finished pixels past its edge, and leave a seam there.
+      this.#redraw(ctx, frame, camera, dpr, grown.rects, grown.readers);
+      return true;
     }
+    for (const rect of rects) this.#redraw(ctx, frame, camera, dpr, [rect], grown.readers);
     return true;
+  }
+
+  /**
+   * Clears `rects` (device pixels) to the background and draws every layer
+   * touching them, clipped; of the layers reading the backdrop, only `fresh` ones.
+   */
+  #redraw(
+    ctx: Ctx,
+    frame: LastFrame,
+    camera: Camera,
+    dpr: number,
+    rects: readonly Rect[],
+    fresh: ReadonlySet<string>,
+  ): void {
+    resetState(ctx);
+    ctx.save();
+    ctx.beginPath();
+    for (const r of rects) ctx.rect(r.x, r.y, r.width, r.height);
+    ctx.clip();
+    ctx.fillStyle = frame.background;
+    let x0 = Number.POSITIVE_INFINITY;
+    let y0 = Number.POSITIVE_INFINITY;
+    let x1 = Number.NEGATIVE_INFINITY;
+    let y1 = Number.NEGATIVE_INFINITY;
+    for (const r of rects) {
+      ctx.fillRect(r.x, r.y, r.width, r.height);
+      x0 = Math.min(x0, r.x);
+      y0 = Math.min(y0, r.y);
+      x1 = Math.max(x1, r.x + r.width);
+      y1 = Math.max(y1, r.y + r.height);
+    }
+    // What's redrawn, in page coordinates: only layers touching it are drawn.
+    const toPage = (x: number, y: number, w: number, h: number): Rect => ({
+      x: (x / dpr - camera.x) / camera.zoom,
+      y: (y / dpr - camera.y) / camera.zoom,
+      width: w / dpr / camera.zoom,
+      height: h / dpr / camera.zoom,
+    });
+    this.#parts = rects.length > 1 ? rects.map((r) => toPage(r.x, r.y, r.width, r.height)) : null;
+    this.#fresh = fresh;
+    try {
+      this.#drawChildren(ctx, frame.pageId, camera, dpr, toPage(x0, y0, x1 - x0, y1 - y0));
+    } finally {
+      this.#parts = null;
+      this.#fresh = null;
+    }
+    ctx.restore();
+  }
+
+  /**
+   * The strips grown by what's read by the layers that read around them and
+   * paint in them, and so on (what one reads may be where another paints),
+   * within the canvas; null when no such layer paints in them, so they're
+   * drawn as they are.
+   */
+  #withReaders(
+    strips: readonly Rect[],
+    pageId: string,
+    camera: Camera,
+    dpr: number,
+    width: number,
+    height: number,
+  ): { rects: Rect[]; readers: Set<string> } {
+    const readers = this.#readers(pageId);
+    const taken = new Set<string>();
+    if (readers.length === 0) return { rects: [...strips], readers: taken };
+    const areas: Array<{ id: string; paints: Rect; reads: Rect }> = [];
+    for (const id of readers) {
+      const area = this.#readerArea(id, camera, dpr, width, height);
+      if (area) areas.push({ id, ...area });
+    }
+    const dirty = [...strips];
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const area of areas) {
+        if (taken.has(area.id) || !dirty.some((d) => rectsIntersect(d, area.paints))) continue;
+        taken.add(area.id);
+        dirty.push(area.reads);
+        grew = true;
+      }
+    }
+    return { rects: dirty, readers: taken };
+  }
+
+  /**
+   * The page's layers that read the backdrop around them: glass and
+   * background blur. (Layer blur and texture spread only the layer, which
+   * is drawn whole into a canvas of its own.) Kept until the document changes.
+   */
+  #readers(pageId: string): string[] {
+    const doc = this.#scene.doc;
+    const cached = this.#readerCache;
+    if (cached?.pageId === pageId && cached.version === doc.version) return cached.ids;
+    const ids: string[] = [];
+    const stack = [pageId];
+    while (stack.length > 0) {
+      const id = stack.pop() as string;
+      for (const child of doc.childIds(id)) {
+        const node = doc.get(child);
+        if (!node || node.props.visible === false) continue;
+        stack.push(child);
+        if (
+          getProp(node.props, "effects").some(
+            (e) => e.visible !== false && (e.type === "glass" || e.type === "background-blur"),
+          )
+        )
+          ids.push(child);
+      }
+    }
+    this.#readerCache = { pageId, version: doc.version, ids };
+    return ids;
+  }
+
+  /**
+   * Where a layer that reads around it paints (its box and its effects'
+   * reach), and what it reads (that and the farthest its backdrop is read),
+   * in device pixels, within the canvas.
+   */
+  #readerArea(
+    id: string,
+    camera: Camera,
+    dpr: number,
+    width: number,
+    height: number,
+  ): { paints: Rect; reads: Rect } | null {
+    const node = this.#scene.doc.get(id);
+    const b = this.#scene.bounds(id);
+    if (!node || !b) return null;
+    const z = camera.zoom * dpr;
+    const paints = this.#effectReach(node) * z;
+    let reads = paints;
+    for (const e of getProp(node.props, "effects")) {
+      if (e.visible === false) continue;
+      if (e.type === "glass") reads = Math.max(reads, glassParams(e, z).margin);
+      if (e.type === "background-blur") reads = Math.max(reads, blurSigma(e.radius) * z * 3);
+    }
+    const rect = (reach: number): Rect | null => {
+      const r = Math.ceil(reach) + 2;
+      const x0 = Math.max(0, Math.floor((b.x * camera.zoom + camera.x) * dpr) - r);
+      const y0 = Math.max(0, Math.floor((b.y * camera.zoom + camera.y) * dpr) - r);
+      const x1 = Math.min(width, Math.ceil(((b.x + b.width) * camera.zoom + camera.x) * dpr) + r);
+      const y1 = Math.min(height, Math.ceil(((b.y + b.height) * camera.zoom + camera.y) * dpr) + r);
+      return x1 > x0 && y1 > y0 ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
+    };
+    const p = rect(paints);
+    const r = rect(reads);
+    return p && r ? { paints: p, reads: r } : null;
   }
 
   /**
@@ -504,7 +673,15 @@ export class CanvasRenderer {
       bounds.x - pad > visible.x + visible.width ||
       bounds.y - pad > visible.y + visible.height ||
       bounds.x + bounds.width + pad < visible.x ||
-      bounds.y + bounds.height + pad < visible.y
+      bounds.y + bounds.height + pad < visible.y ||
+      (this.#parts &&
+        !this.#parts.some(
+          (r) =>
+            bounds.x - pad <= r.x + r.width &&
+            bounds.y - pad <= r.y + r.height &&
+            bounds.x + bounds.width + pad >= r.x &&
+            bounds.y + bounds.height + pad >= r.y,
+        ))
     ) {
       this.stats.culled++;
       return;
@@ -533,7 +710,7 @@ export class CanvasRenderer {
 
     const post = isolated ? null : postEffects(getProp(node.props, "effects"));
     if (post && (post.length > 0 || fadesAsOne(node, this.#scene.doc.childIds(id).length))) {
-      this.#drawProcessed(ctx, node, camera, dpr, visible, opacity, blend, post);
+      this.#drawProcessed(ctx, node, camera, dpr, opacity, blend, post);
       return;
     }
 
@@ -609,7 +786,6 @@ export class CanvasRenderer {
     node: NodeRecord,
     camera: Camera,
     dpr: number,
-    visible: Rect,
     opacity: number,
     blend: GlobalCompositeOperation,
     post: readonly PostEffect[],
@@ -675,11 +851,25 @@ export class CanvasRenderer {
     lctx.clearRect(0, 0, layer.width, layer.height);
     // The same camera, moved so the region's corner is the canvas's, at the reduced resolution.
     const shifted = new Camera(camera.x - x0 / dpr, camera.y - y0 / dpr, camera.zoom);
+    // All of the layer that its canvas holds, even when only part of the screen is being
+    // redrawn: its blur or texture spreads what's there into the rest.
+    const holds = {
+      x: -shifted.x / camera.zoom,
+      y: -shifted.y / camera.zoom,
+      width: w / (dpr * scale) / camera.zoom,
+      height: h / (dpr * scale) / camera.zoom,
+    };
+    const parts = this.#parts;
+    const fresh = this.#fresh;
+    this.#parts = null;
+    this.#fresh = null;
     this.#isolated.add(id);
     try {
-      this.#draw(lctx, id, shifted, dpr * scale, visible, 1, "source-over");
+      this.#draw(lctx, id, shifted, dpr * scale, holds, 1, "source-over");
     } finally {
       this.#isolated.delete(id);
+      this.#parts = parts;
+      this.#fresh = fresh;
     }
 
     // The layer's units to that canvas's pixels.
@@ -1182,25 +1372,60 @@ export class CanvasRenderer {
       (e) => e.type === "background-blur" && e.visible !== false,
     );
     if (blur?.type !== "background-blur" || blur.radius <= 0) return;
+    if (this.#fresh && !this.#fresh.has(node.id)) return;
     // As in Figma, it shows where the layer paints: a layer with nothing visible blurs nothing.
     if (!paintsSomething(node)) return;
+    const sigma = blurSigma(blur.radius) * scale;
+    // The layer's box on the device, and as far around it as the blur reads.
+    const t = ctx.getTransform();
+    const w = getProp(node.props, "width");
+    const h = getProp(node.props, "height");
+    const xs = [t.e, t.a * w + t.e, t.c * h + t.e, t.a * w + t.c * h + t.e];
+    const ys = [t.f, t.b * w + t.f, t.d * h + t.f, t.b * w + t.d * h + t.f];
+    const reach = Math.ceil(sigma * 3) + 1;
+    const { width, height } = ctx.canvas;
+    const x0 = Math.max(-reach, Math.floor(Math.min(...xs)) - reach);
+    const y0 = Math.max(-reach, Math.floor(Math.min(...ys)) - reach);
+    const x1 = Math.min(width + reach, Math.ceil(Math.max(...xs)) + reach);
+    const y1 = Math.min(height + reach, Math.ceil(Math.max(...ys)) + reach);
+    if (x1 <= Math.max(0, x0) || y1 <= Math.max(0, y0) || x0 >= width || y0 >= height) return;
+    // What's behind, its edge pixels repeated past the canvas's so the blur doesn't fade there.
+    this.#blurBackdrop = scratch(this.#blurBackdrop, x1 - x0, y1 - y0);
+    const behind = this.#blurBackdrop?.getContext("2d") as Ctx | null | undefined;
+    if (!this.#blurBackdrop || !behind) return;
+    copyExtended(ctx.canvas, behind, x0, y0, x1 - x0, y1 - y0);
     ctx.save();
     ctx.clip(shape);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = "source-over";
-    ctx.filter = `blur(${blurSigma(blur.radius) * scale}px)`;
-    ctx.drawImage(ctx.canvas, 0, 0);
+    ctx.filter = `blur(${sigma}px)`;
+    ctx.drawImage(this.#blurBackdrop, x0, y0);
     ctx.restore();
   }
 
-  /** Glass (decision 0007): the backdrop through a curved rim, under the layer's fills. */
+  /**
+   * Glass (decision 0007): the backdrop through a curved rim, under the
+   * layer's fills. On text, as in Figma, each glyph is a lens of its own.
+   */
   #glassEffect(ctx: Ctx, node: NodeRecord, shape: Path2D, w: number, h: number, scale: number) {
     const glass = getProp(node.props, "effects").find(
       (e) => e.type === "glass" && e.visible !== false,
     );
     if (glass?.type !== "glass") return;
-    this.#glass.paint(ctx, shape, w, h, glass, scale);
+    if (this.#fresh && !this.#fresh.has(node.id)) return;
+    const key = ctx === this.#screen ? { id: node.id, generation: this.#generation } : null;
+    const outline =
+      node.type === "text" ? (mask: Ctx) => this.#text(mask, node, w, "#ffffff", scale) : shape;
+    // As in Figma, the rim is no deeper than the shape is thick.
+    const inradius =
+      node.type === "rect" || node.type === "frame" || node.type === "ellipse"
+        ? Math.min(w, h) / 2
+        : this.#inradii.get(node.props, w, h, (c) => {
+            if (node.type === "text") this.#text(c, node, w, "#ffffff");
+            else c.fill(shape);
+          });
+    this.#glass.paint(ctx, outline, w, h, glass, scale, key, inradius);
   }
 
   /** Text too small to read: a bar per line, the last one shorter, in the text's colour. */
