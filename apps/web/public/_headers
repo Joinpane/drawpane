@@ -1,5 +1,8 @@
+# connect-src: the app's own origin, and Figma for the Import dialog. Figma is called from the
+# page so a person's access token goes only to Figma: its API, and the hosts its image links
+# point at (figma-import.ts; e2e/figma-import.spec.ts proves both are reachable).
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.figma.com https://s3-alpha-sig.figma.com https://figma-alpha-api.s3.us-west-2.amazonaws.com https://s3-us-west-2.amazonaws.com/figma-alpha-api/; worker-src 'self' blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=()
