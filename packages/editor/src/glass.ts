@@ -284,6 +284,13 @@ uniform float dispersion;
 uniform float splay;
 uniform vec2 light;
 uniform float intensity;
+// A box (rect or frame): its exact distance in from the edge, region pixels to box units, its size
+// and corner radii (top-left, top-right, bottom-right, bottom-left) in units, and pixels per unit.
+uniform int box;
+uniform mat3 toBox;
+uniform vec2 boxSize;
+uniform vec4 boxRadii;
+uniform float unitPx;
 // GlassTuning: (profile, lineWidth, lineMin, line), (glowWidth, glowMin, glow, facing),
 // (backLine, backGlow, backFacing, sheen), (shade, -, -, -).
 uniform vec4 tuneA;
@@ -329,6 +336,16 @@ float seenAt(vec2 p, int channel) {
   return textureGrad(backdrop, uv, dFdx(uv), dFdy(uv))[channel];
 }
 
+// How far in from a box's edge a region pixel is, in pixels (negative outside): exact, square
+// corners and all, where the blurred height reads low at convex corners.
+float boxDistance(vec2 p) {
+  vec2 q = (toBox * vec3(p, 1.0)).xy - boxSize * 0.5;
+  // The radius of q's corner (y runs down in the box).
+  float r = q.x < 0.0 ? (q.y < 0.0 ? boxRadii.x : boxRadii.w) : (q.y < 0.0 ? boxRadii.y : boxRadii.z);
+  vec2 e = abs(q) - boxSize * 0.5 + r;
+  return -(min(max(e.x, e.y), 0.0) + length(max(e, 0.0)) - r) * unitPx;
+}
+
 void main() {
   vec2 p = gl_FragCoord.xy - origin;
   float a = canvasAt(mask, p).a;
@@ -337,8 +354,16 @@ void main() {
   vec3 hs = texture(height, (p / k) / heightTexSize).rgb;
   vec2 grad = hs.gb / k;
   float g = length(grad);
-  // 1 at a straight edge, falling smoothly to 0 in the flat middle.
-  float slope = clamp(g * sigma * 2.5066283, 0.0, 1.0);
+  // The distance in from the edge. A box knows it exactly. Otherwise, near a straight edge the
+  // rim's height is the Gaussian's cumulative distribution of it, so its inverse gives it back
+  // (to a fraction of a pixel), though it reads short at a convex corner.
+  float d = box == 1
+    ? max(0.0, boxDistance(p))
+    : max(0.0, 1.4142136 * sigma * erfinv(clamp(2.0 * hs.r - 1.0, -0.99999, 0.99999)));
+  // 1 at a straight edge, falling smoothly to 0 in the flat middle: for a box, the blurred
+  // edge's slope at that distance (the same along a side, and square at a square corner).
+  float slope = box == 1 ? exp(-0.5 * (d / sigma) * (d / sigma)) : clamp(g * sigma * 2.5066283, 0.0, 1.0);
+  // Which way is in: the height's slope, smooth everywhere (no crease along a corner's diagonal).
   vec2 inward = g > 1e-6 ? grad / g : vec2(0.0);
   float rim = pow(slope, tuneA.x);
 
@@ -350,9 +375,6 @@ void main() {
     seenAt(p + bend * (1.0 + dispersion), 0),
     seenAt(p + bend, 1),
     seenAt(p + bend * (1.0 - dispersion), 2));
-  // The distance in from the edge: near a straight edge the rim's height is the Gaussian's
-  // cumulative distribution of it, so its inverse gives it back (to a fraction of a pixel).
-  float d = max(0.0, 1.4142136 * sigma * erfinv(clamp(2.0 * hs.r - 1.0, -0.99999, 0.99999)));
   // Light (given y down) as y up. A fine specular line along the edge facing
   // it, a softer one along the edge opposite (light inside the glass), and a
   // sheen across the lit side of the rim.
@@ -447,6 +469,28 @@ const KEPT_PIXELS = 16_000_000;
 /** A glass layer's shape: its outline, or what draws it in white into a mask (text's glyphs). */
 export type GlassShape = Path2D | ((mask: Ctx) => void);
 
+/** A box's exact outline, for the shader (see `boxDistance`). */
+interface BoxUniforms {
+  readonly toBox: readonly number[];
+  readonly size: readonly [number, number];
+  readonly radii: readonly [number, number, number, number];
+  readonly unitPx: number;
+}
+
+/** What else `GlassPainter.paint` can know about the layer. */
+export interface GlassPaintOptions {
+  /** Where and against what it's drawn: what it draws whole on screen is kept for pans. */
+  readonly key?: GlassKey | null;
+  /** The shape's largest inscribed radius, in its units (see `glassParams`). */
+  readonly inradius?: number;
+  /**
+   * The shape is its box, (0, 0, w, h), with these corner radii (top-left,
+   * top-right, bottom-right, bottom-left, in its units): its rim is measured
+   * from the exact edge, square corners staying square.
+   */
+  readonly corners?: readonly [number, number, number, number] | null;
+}
+
 /** Where, and against what, a glass is drawn: for reusing what it drew (see `Drawn`). */
 export interface GlassKey {
   readonly id: string;
@@ -520,10 +564,9 @@ export class GlassPainter {
     h: number,
     glass: Glass,
     scale: number,
-    key: GlassKey | null = null,
-    /** The shape's largest inscribed radius, in its units (see `glassParams`). */
-    inradius = Number.POSITIVE_INFINITY,
+    options: GlassPaintOptions = {},
   ): void {
+    const { key = null, inradius = Number.POSITIVE_INFINITY, corners = null } = options;
     const t = ctx.getTransform();
     const p = glassParams(glass, scale, glassTuning(), inradius);
     // The layer's reach on the device, with the margin rays bend into, within the canvas.
@@ -615,7 +658,29 @@ export class GlassPainter {
     else mask.fill(shape);
 
     const gl = this.#webgl();
-    if (!gl || !fits(gl, rw, rh) || !this.#draw(gl, p, rw, rh, centre)) {
+    // A box: the map from the region's pixels (y up, as the shader works) to the box's units.
+    let box: BoxUniforms | null = null;
+    const det = t.a * t.d - t.b * t.c;
+    if (corners && w > 0 && h > 0 && Math.abs(det) > 1e-12) {
+      const [ia, ib, ic, id] = [t.d / det, -t.b / det, -t.c / det, t.a / det];
+      const ie = (t.c * t.f - t.d * t.e) / det;
+      const jf = (t.b * t.e - t.a * t.f) / det;
+      const top = y0 + rh;
+      const most = Math.min(w, h) / 2;
+      box = {
+        // Column-major: device (x0 + px, y0 + rh − py) taken back through the layer's transform.
+        toBox: [ia, ib, 0, -ic, -id, 0, ia * x0 + ic * top + ie, ib * x0 + id * top + jf, 1],
+        size: [w, h],
+        radii: corners.map((r) => Math.max(0, Math.min(r, most))) as unknown as readonly [
+          number,
+          number,
+          number,
+          number,
+        ],
+        unitPx: Math.sqrt(Math.abs(det)),
+      };
+    }
+    if (!gl || !fits(gl, rw, rh) || !this.#draw(gl, p, rw, rh, centre, box)) {
       this.#fallback(ctx, shape, p, x0, y0, rw, rh);
       return;
     }
@@ -692,7 +757,14 @@ export class GlassPainter {
    * The GPU passes: the rim's height and slope (downsample, blur across,
    * blur down), then the glass into the canvas. False if it couldn't.
    */
-  #draw(g: Gl, p: GlassParams, rw: number, rh: number, centre: { x: number; y: number }): boolean {
+  #draw(
+    g: Gl,
+    p: GlassParams,
+    rw: number,
+    rh: number,
+    centre: { x: number; y: number },
+    box: BoxUniforms | null,
+  ): boolean {
     const { gl } = g;
     // The rim's height, at a resolution its blur can spare.
     const k = heightScale(p.sigma);
@@ -787,6 +859,13 @@ export class GlassPainter {
     gl.uniform1f(u("splay"), p.splay);
     gl.uniform2f(u("light"), p.light.x, p.light.y);
     gl.uniform1f(u("intensity"), p.intensity);
+    gl.uniform1i(u("box"), box ? 1 : 0);
+    if (box) {
+      gl.uniformMatrix3fv(u("toBox"), false, box.toBox);
+      gl.uniform2f(u("boxSize"), box.size[0], box.size[1]);
+      gl.uniform4f(u("boxRadii"), ...box.radii);
+      gl.uniform1f(u("unitPx"), box.unitPx);
+    }
     const tune = glassTuning();
     gl.uniform4f(u("tuneA"), tune.profile, tune.lineWidth, tune.lineMin, tune.line);
     gl.uniform4f(u("tuneB"), tune.glowWidth, tune.glowMin, tune.glow, tune.facing);

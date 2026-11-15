@@ -1459,7 +1459,11 @@ export class CanvasRenderer {
             if (node.type === "text") this.#text(c, node, w, "#ffffff");
             else c.fill(shape);
           });
-    this.#glass.paint(ctx, outline, w, h, glass, scale, key, inradius);
+    // A box's rim is measured from its exact edge: square corners stay square.
+    const box = node.type === "rect" || node.type === "frame";
+    const r = box ? getProp(node.props, "cornerRadius") : 0;
+    const corners = box ? (getProp(node.props, "cornerRadii") ?? [r, r, r, r]) : null;
+    this.#glass.paint(ctx, outline, w, h, glass, scale, { key, inradius, corners });
   }
 
   /** Text too small to read: a bar per line, the last one shorter, in the text's colour. */
