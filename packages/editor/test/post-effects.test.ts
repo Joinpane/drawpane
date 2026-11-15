@@ -60,7 +60,7 @@ describe("noise and texture in a file", () => {
     expect(effectBounds("noise", "size")).toEqual({ min: 0.5, max: 50 });
     expect(effectBounds("noise", "density")).toEqual({ min: 0, max: 100 });
     expect(effectBounds("texture", "radius")).toEqual({ min: 0, max: 100 });
-    expect(effectBounds("glass", "depth")).toEqual({ min: 0, max: 200 });
+    expect(effectBounds("glass", "depth")).toEqual({ min: 0, max: 100 });
   });
 });
 

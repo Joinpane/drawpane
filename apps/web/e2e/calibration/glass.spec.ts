@@ -46,24 +46,22 @@ interface Scenes {
 
 /** One fitted constant: its range, and the first step the search takes. */
 const SEARCH: Record<string, { min: number; max: number; step: number }> = {
-  bend: { min: 0.05, max: 1.2, step: 0.1 },
-  rimSigma: { min: 0.1, max: 1.5, step: 0.1 },
+  bend: { min: 0.3, max: 1.5, step: 0.1 },
+  falloff: { min: 1, max: 5, step: 0.3 },
+  falloffPerDepth: { min: 0, max: 0.03, step: 0.003 },
+  slopeBend: { min: 0.05, max: 1.2, step: 0.1 },
   profile: { min: 0.3, max: 4, step: 0.3 },
-  dispersion: { min: 0, max: 0.8, step: 0.05 },
+  rimSigma: { min: 0.1, max: 1.5, step: 0.1 },
+  dispersion: { min: 0, max: 0.5, step: 0.03 },
+  splay: { min: 0, max: 1.5, step: 0.1 },
   frost: { min: 0.1, max: 3, step: 0.2 },
-  angleOffset: { min: -180, max: 180, step: 45 },
-  lineWidth: { min: 0.005, max: 0.3, step: 0.02 },
-  lineMin: { min: 0.5, max: 4, step: 0.5 },
-  line: { min: 0, max: 3, step: 0.2 },
-  glowWidth: { min: 0.05, max: 1.2, step: 0.1 },
-  glowMin: { min: 1, max: 12, step: 1 },
-  glow: { min: 0, max: 1.5, step: 0.1 },
-  facing: { min: 0.5, max: 5, step: 0.5 },
-  backLine: { min: 0, max: 2, step: 0.2 },
-  backGlow: { min: 0, max: 1, step: 0.1 },
-  backFacing: { min: 0.5, max: 5, step: 0.5 },
-  sheen: { min: 0, max: 0.4, step: 0.03 },
-  shade: { min: 0, max: 0.6, step: 0.05 },
+  hairline: { min: 0.1, max: 2, step: 0.1 },
+  front: { min: 0, max: 8, step: 0.5 },
+  frontStart: { min: 0, max: 0.9, step: 0.05 },
+  back: { min: 0, max: 8, step: 0.5 },
+  backStart: { min: 0, max: 0.9, step: 0.05 },
+  shade: { min: 0, max: 0.4, step: 0.02 },
+  shadeReach: { min: 0.1, max: 1.5, step: 0.1 },
 };
 
 type Tuning = Record<string, number>;
@@ -316,12 +314,11 @@ test("fit glass to its targets", async ({ browser }) => {
   } else {
     known = {
       ...defaults,
-      bend: 0.7,
-      profile: 2,
+      bend: 0.8,
+      falloff: 2.5,
       dispersion: 0.15,
-      line: 1.6,
-      glow: 0.5,
-      facing: 2,
+      front: 3,
+      shade: 0.15,
     };
     targets = (await render(page, known, cells)).map(bytes);
   }
@@ -421,13 +418,6 @@ test("fit glass to its targets", async ({ browser }) => {
     );
   }
   // The light's turning direction, tried once: Figma's angles may turn the other way.
-  const flipped = { ...best, angleTurn: -(best.angleTurn as number) };
-  const f = await score(flipped);
-  if (f.total < bestScore.total) {
-    best = flipped;
-    bestScore = f;
-  }
-
   bestScore = await score(best, true);
   writeFileSync(join(out, "tuning.json"), `${JSON.stringify(best, null, 2)}\n`);
   const rows: string[] = [];

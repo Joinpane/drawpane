@@ -4,7 +4,9 @@
  *
  * Drawn in device pixels, where the canvas has the backdrop:
  * 1. the backdrop under the layer (and a margin the bent rays reach into),
- *    blurred by the frost; and the layer's shape, as an anti-aliased mask.
+ *    and the layer's shape, as an anti-aliased mask; the backdrop frosted on
+ *    the GPU, read from its mipmaps at a level where what's left of the blur
+ *    is a few texels wide, so frost costs the same at any strength.
  *    Both reach past the canvas's edges, the backdrop's edge pixels
  *    repeated there, so a layer the screen cuts has no rim along the cut;
  * 2. on the GPU, the rim's height: the shape blurred by a Gaussian as wide
@@ -24,6 +26,7 @@
 import type { Glass } from "@drawpane/model";
 import {
   type AnyCanvas,
+  type Bounds,
   begin,
   bindQuad,
   type Ctx,
@@ -41,62 +44,64 @@ import {
  * values; nothing in the editor changes them.
  */
 export interface GlassTuning {
-  /** At full refraction, how far the edge looks in, as a share of the rim's depth. */
+  /** Boxes: at full refraction, how far the edge looks in, as a share of the rim's depth. */
   readonly bend: number;
+  /**
+   * Boxes: the bend falls off as (1 − distance in / depth)^n, n = falloff +
+   * falloffPerDepth × the depth in units (Figma's grows with depth: about 2.7
+   * at 20, 3.3 at 100).
+   */
+  readonly falloff: number;
+  readonly falloffPerDepth: number;
+  /** Other shapes (no exact distance to their edge): the bend's share of the depth, and slope^profile. */
+  readonly slopeBend: number;
+  readonly profile: number;
   /** The rim's height is the shape blurred by a Gaussian this share of the depth wide. */
   readonly rimSigma: number;
-  /** How the bend follows the rim's slope: slope^profile, the slope 1 at a straight edge. */
-  readonly profile: number;
-  /** At full dispersion, how far colours part, as a share of the bend. */
+  /** At full dispersion, how far red and blue part from green, as a share of the bend. */
   readonly dispersion: number;
+  /** At full splay, the pull along an edge toward its middle at its ends, as a share of the bend. */
+  readonly splay: number;
   /** Blur per unit of frost. */
   readonly frost: number;
-  /** Degrees added to the light's angle, and whether it turns the other way (−1). */
-  readonly angleOffset: number;
-  readonly angleTurn: 1 | -1;
-  /** The specular line on the lit edge: width (share of depth, at least `lineMin` px) and strength. */
-  readonly lineWidth: number;
-  readonly lineMin: number;
-  readonly line: number;
-  /** A broader glow inside the lit edge: width (share of depth, at least `glowMin` px) and strength. */
-  readonly glowWidth: number;
-  readonly glowMin: number;
-  readonly glow: number;
-  /** How tightly the light falls on edges facing it: cos^facing. */
-  readonly facing: number;
-  /** The edge opposite the light: its line and glow strength, and falloff power. */
-  readonly backLine: number;
-  readonly backGlow: number;
-  readonly backFacing: number;
-  /** A sheen across the whole rim, and shade on the side away from the light. */
-  readonly sheen: number;
+  /** The light's hairline: how far in from the edge it fades, in the layer's units. */
+  readonly hairline: number;
+  /** Its strength on an edge facing the light: front × (facing − frontStart), at least 0. */
+  readonly front: number;
+  readonly frontStart: number;
+  /** And on an edge facing away: back × (−facing − backStart). */
+  readonly back: number;
+  readonly backStart: number;
+  /** Shading across the rim, shade × facing (darker toward the light, lighter away), gone at shadeReach of the depth. */
   readonly shade: number;
+  readonly shadeReach: number;
 }
 
 /**
- * Fitted to Figma's glass (tools/glass-calibration): mean difference 3.0 of
- * 255 over 22 cells, all but the deepest rim within 4.5.
+ * Figma's glass, measured setting by setting (decision 0007's revision of
+ * 2026-11-15; `tools/figma-parity/scenes/glass-probe-2.json`): the bend at
+ * its edge is the depth times the refraction, falling off as the cube of
+ * the way in; red and blue part by a tenth of it at full dispersion; the
+ * light is a hairline on edges that face toward or away from it, and a faint
+ * shade across the rim.
  */
 export const DEFAULT_GLASS_TUNING: GlassTuning = {
-  bend: 0.86,
-  rimSigma: 0.275,
+  bend: 1.02,
+  falloff: 2.55,
+  falloffPerDepth: 0.0075,
+  slopeBend: 0.86,
   profile: 1.6,
-  dispersion: 0.2,
+  rimSigma: 0.275,
+  dispersion: 0.1,
+  splay: 0.58,
   frost: 0.45,
-  angleOffset: -4.9,
-  angleTurn: 1,
-  lineWidth: 0.005,
-  lineMin: 0.8,
-  line: 2.02,
-  glowWidth: 0.25,
-  glowMin: 2.55,
-  glow: 0,
-  facing: 1.58,
-  backLine: 1.23,
-  backGlow: 0.2,
-  backFacing: 1.12,
-  sheen: 0,
-  shade: 0,
+  hairline: 0.35,
+  front: 3.7,
+  frontStart: 0.45,
+  back: 2.4,
+  backStart: 0.42,
+  shade: 0.09,
+  shadeReach: 0.55,
 };
 
 let tuning: GlassTuning = DEFAULT_GLASS_TUNING;
@@ -135,6 +140,10 @@ export interface GlassParams {
   readonly intensity: number;
   /** Around the layer, how far the backdrop is read: as far as a ray bends, and the frost's reach. */
   readonly margin: number;
+  /** Device pixels per layer unit. */
+  readonly unitPx: number;
+  /** A box's bend falls off as (1 − distance in / depth)^falloff. */
+  readonly falloff: number;
 }
 
 /**
@@ -147,16 +156,22 @@ export function glassParams(
   tune: GlassTuning = glassTuning(),
   /** The shape's largest inscribed radius, in its units: no rim is deeper (see inradius.ts). */
   inradius = Number.POSITIVE_INFINITY,
+  /** The shape is a box, its exact distance in known: Figma's measured falloff applies. */
+  box = false,
 ): GlassParams {
-  const depth = Math.max(0, Math.min(glass.depth, inradius)) * scale;
-  // Full refraction bends a ray a share of the rim's depth at its edge (never over less
-  // than a few pixels). A rim deeper than the shape is wide fades into the one opposite.
-  const refraction = (glass.refraction / 100) * tune.bend * Math.max(depth, 4 * scale);
-  // Colours part by a share of the bend: real glass fringes subtly.
+  // Figma's ranges: depth and frost at most 100.
+  const depth = Math.max(0, Math.min(glass.depth, 100, inradius)) * scale;
+  // Full refraction bends a ray at the edge as far as the rim is deep (a box; other shapes,
+  // their slope's share, never over less than a few pixels). A rim deeper than the shape is
+  // wide fades into the one opposite.
+  const refraction = box
+    ? (glass.refraction / 100) * tune.bend * depth
+    : (glass.refraction / 100) * tune.slopeBend * Math.max(depth, 4 * scale);
+  // Red and blue part from green by a share of the bend.
   const dispersion = (glass.dispersion / 100) * tune.dispersion;
-  const frost = Math.max(0, glass.frost) * scale * tune.frost;
-  const splay = glass.splay / 100;
-  const radians = ((glass.angle * tune.angleTurn + tune.angleOffset) * Math.PI) / 180;
+  const frost = Math.max(0, Math.min(glass.frost, 100)) * scale * tune.frost;
+  const splay = (glass.splay / 100) * tune.splay;
+  const radians = (glass.angle * Math.PI) / 180;
   return {
     refraction,
     depth,
@@ -167,6 +182,8 @@ export function glassParams(
     light: { x: Math.sin(radians), y: -Math.cos(radians) },
     intensity: glass.intensity / 100,
     margin: Math.ceil(refraction * (1 + dispersion) * (1 + splay) + frost * 3 + 2),
+    unitPx: scale,
+    falloff: tune.falloff + tune.falloffPerDepth * Math.min(glass.depth, 100, inradius),
   };
 }
 
@@ -265,6 +282,33 @@ void main() {
   color = vec4(h / total, dx / total, dy / total, 0.0);
 }`;
 
+/**
+ * Frost: a Gaussian across or down, read from the backdrop's mipmaps at a
+ * level where what's left of the blur is a few texels wide, so frost costs
+ * about the same at any strength (decision 0007's revision of 2026-11-15).
+ */
+const FROST = `#version 300 es
+precision highp float;
+out vec4 color;
+uniform sampler2D src;
+uniform vec2 size;
+uniform float lod;
+uniform vec2 dir;
+uniform float sigma;
+uniform int radius;
+void main() {
+  vec2 p = gl_FragCoord.xy;
+  vec4 sum = vec4(0.0);
+  float total = 0.0;
+  for (int i = -64; i <= 64; i++) {
+    if (i < -radius || i > radius) continue;
+    float w = exp(-0.5 * float(i * i) / (sigma * sigma));
+    sum += textureLod(src, (p + dir * float(i)) / size, lod) * w;
+    total += w;
+  }
+  color = sum / total;
+}`;
+
 /** The glass itself, from the backdrop, the mask, the rim's height and the distance to the edge. */
 const GLASS = `#version 300 es
 precision highp float;
@@ -278,6 +322,8 @@ uniform float k;
 uniform float sigma;
 uniform vec2 origin;
 uniform vec2 center;
+// The layer's half width and height on the device: how far along an edge its middle is.
+uniform vec2 halfSize;
 uniform float depth;
 uniform float refraction;
 uniform float dispersion;
@@ -291,12 +337,11 @@ uniform mat3 toBox;
 uniform vec2 boxSize;
 uniform vec4 boxRadii;
 uniform float unitPx;
-// GlassTuning: (profile, lineWidth, lineMin, line), (glowWidth, glowMin, glow, facing),
-// (backLine, backGlow, backFacing, sheen), (shade, -, -, -).
+// GlassTuning: (profile, falloff, hairline px, -), (front, frontStart, back, backStart),
+// (shade, shadeReach, -, -), (-, -, -, -).
 uniform vec4 tuneA;
 uniform vec4 tuneB;
 uniform vec4 tuneC;
-uniform vec4 tuneD;
 
 // The inverse error function (Giles' single-precision approximation).
 float erfinv(float x) {
@@ -366,27 +411,30 @@ void main() {
   // Which way is in: the height's slope, smooth everywhere (no crease along a corner's diagonal).
   vec2 inward = g > 1e-6 ? grad / g : vec2(0.0);
   float rim = pow(slope, tuneA.x);
+  // How much of the bend this pixel gets: a box's measured falloff from its exact edge (as
+  // Figma's: the cube of the way in), else its slope's share.
+  float fall = box == 1 ? pow(clamp(1.0 - d / max(depth, 1.0), 0.0, 1.0), tuneA.y) : rim;
 
-  vec2 fromCenter = p - center;
-  vec2 fan = length(fromCenter) > 1e-3 ? normalize(fromCenter) : vec2(0.0);
+  // Splay pulls each ray along its edge toward the edge's middle, as far as it is from it.
+  vec2 along = vec2(-inward.y, inward.x);
+  float extent = abs(along.x) * halfSize.x + abs(along.y) * halfSize.y;
+  float off = extent > 0.0 ? dot(p - center, along) / extent : 0.0;
   // A convex rim looks in: each pixel there sees the backdrop from further inside.
-  vec2 bend = (inward + fan * splay) * rim * refraction;
+  vec2 bend = (inward - along * off * splay) * fall * refraction;
   vec3 seen = vec3(
     seenAt(p + bend * (1.0 + dispersion), 0),
     seenAt(p + bend, 1),
     seenAt(p + bend * (1.0 - dispersion), 2));
-  // Light (given y down) as y up. A fine specular line along the edge facing
-  // it, a softer one along the edge opposite (light inside the glass), and a
-  // sheen across the lit side of the rim.
+  // Light (given y down) as y up, as Figma lights its glass: a hairline along each edge facing
+  // toward the light or away from it (more the more squarely), and a faint shade across the
+  // rim, darker facing the light and lighter away, fading in toward the middle.
   vec2 l = vec2(light.x, -light.y);
   float facing = dot(-inward, l);
-  float line = exp(-d / max(tuneA.z, depth * tuneA.y));
-  float glow = exp(-d / max(tuneB.y, depth * tuneB.x));
-  float lit = pow(max(facing, 0.0), tuneB.w) * (tuneA.w * line + tuneB.z * glow)
-            + pow(max(-facing, 0.0), tuneC.z) * (tuneC.x * line + tuneC.y * glow)
-            + tuneC.w * rim;
-  float shade = max(-facing, 0.0) * rim * tuneD.x;
-  seen = mix(seen, vec3(1.0), clamp(intensity * lit, 0.0, 1.0)) * (1.0 - intensity * shade);
+  float hair = exp(-max(0.0, d - 0.5) / max(tuneA.z, 1e-3));
+  float edge = max(tuneB.x * (facing - tuneB.y), 0.0) + max(tuneB.z * (-facing - tuneB.w), 0.0);
+  float shading = intensity * tuneC.x * facing * max(0.0, 1.0 - d / max(tuneC.y * depth, 1.0));
+  seen = shading > 0.0 ? mix(seen, vec3(0.0), shading) : mix(seen, vec3(1.0), -shading);
+  seen = mix(seen, vec3(1.0), clamp(intensity * edge * hair, 0.0, 1.0));
   color = vec4(seen * a, a);
 }`;
 
@@ -400,8 +448,12 @@ interface Gl extends GlCanvas {
   readonly blurX: Program;
   readonly blurY: Program;
   readonly glass: Program;
-  /** The frosted backdrop, mipmapped. */
+  readonly frost: Program;
+  /** The backdrop, mipmapped. */
   readonly backdrop: WebGLTexture;
+  /** Frost across, then down: the second mipmapped, for the glass to read. */
+  readonly frosted: [WebGLTexture, WebGLTexture];
+  frostSize: { w: number; h: number };
   readonly mask: WebGLTexture;
   /** Ping-pong for the rim's height and slope, at reduced resolution (RGBA16F), and the framebuffer that draws into them. */
   readonly low: [WebGLTexture, WebGLTexture];
@@ -489,6 +541,11 @@ export interface GlassPaintOptions {
    * from the exact edge, square corners staying square.
    */
   readonly corners?: readonly [number, number, number, number] | null;
+  /**
+   * What of the canvas the backdrop may come from (the frames that clip the
+   * layer, on the device): past it, the edge repeats, as past the canvas's.
+   */
+  readonly within?: Bounds;
 }
 
 /** Where, and against what, a glass is drawn: for reusing what it drew (see `Drawn`). */
@@ -501,10 +558,10 @@ export class GlassPainter {
   #gl: Gl | null | undefined;
   /** By layer, most recently drawn last. */
   readonly #drawn = new Map<string, Drawn>();
+  /** The content generation each layer's glass was last drawn against. */
+  readonly #drawnAt = new Map<string, number>();
   #keptPixels = 0;
   #backdrop: AnyCanvas | null = null;
-  /** The backdrop before frosting. */
-  #plain: AnyCanvas | null = null;
   #shape: AnyCanvas | null = null;
 
   /** WebGL2 with half-float render targets, made on first use; null where there's none. */
@@ -527,9 +584,13 @@ export class GlassPainter {
     const blurX = program(gl, BLUR_X, "glass rim blur across");
     const blurY = program(gl, BLUR_Y, "glass rim blur down");
     const glass = program(gl, GLASS, "glass");
+    const frost = program(gl, FROST, "glass frost");
     const framebuffer = gl.createFramebuffer();
-    if (!down || !blurX || !blurY || !glass || !framebuffer) return null;
+    if (!down || !blurX || !blurY || !glass || !frost || !framebuffer) return null;
     const backdrop = texture(gl, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    const across = texture(gl, gl.LINEAR);
+    const frosted = texture(gl, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     bindQuad(gl);
     this.#gl = {
@@ -540,7 +601,10 @@ export class GlassPainter {
       blurX,
       blurY,
       glass,
+      frost,
       backdrop,
+      frosted: [across, frosted],
+      frostSize: { w: 0, h: 0 },
       mask: texture(gl, gl.LINEAR),
       low: [texture(gl, gl.LINEAR), texture(gl, gl.LINEAR)],
       framebuffer,
@@ -566,9 +630,9 @@ export class GlassPainter {
     scale: number,
     options: GlassPaintOptions = {},
   ): void {
-    const { key = null, inradius = Number.POSITIVE_INFINITY, corners = null } = options;
+    const { key = null, inradius = Number.POSITIVE_INFINITY, corners = null, within } = options;
     const t = ctx.getTransform();
-    const p = glassParams(glass, scale, glassTuning(), inradius);
+    const p = glassParams(glass, scale, glassTuning(), inradius, corners !== null);
     // The layer's reach on the device, with the margin rays bend into, within the canvas.
     const xs: number[] = [];
     const ys: number[] = [];
@@ -596,6 +660,11 @@ export class GlassPainter {
     const centre = {
       x: (Math.min(...xs) + Math.max(...xs)) / 2 - x0,
       y: rh - ((Math.min(...ys) + Math.max(...ys)) / 2 - y0),
+    };
+    // Its half width and height on the device: how far along an edge its middle is (for splay).
+    const halfSize = {
+      x: (Math.max(...xs) - Math.min(...xs)) / 2,
+      y: (Math.max(...ys) - Math.min(...ys)) / 2,
     };
 
     // All it reads is on the canvas: what it draws can be kept, or what was kept is good.
@@ -628,23 +697,11 @@ export class GlassPainter {
       return;
     }
 
-    // The backdrop (its edge pixels repeated past the canvas's), frosted.
+    // The backdrop, its edge pixels repeated past the canvas's (and the frames that clip it).
     this.#backdrop = scratch(this.#backdrop, rw, rh);
     const backdrop = this.#backdrop?.getContext("2d") as Ctx | null | undefined;
     if (!this.#backdrop || !backdrop) return;
-    if (p.frost > 0) {
-      this.#plain = scratch(this.#plain, rw, rh);
-      const plain = this.#plain?.getContext("2d") as Ctx | null | undefined;
-      if (!this.#plain || !plain) return;
-      copyExtended(ctx.canvas, plain, x0, y0, rw, rh);
-      backdrop.setTransform(1, 0, 0, 1, 0, 0);
-      backdrop.globalCompositeOperation = "copy";
-      backdrop.filter = `blur(${p.frost}px)`;
-      backdrop.drawImage(this.#plain, 0, 0);
-      backdrop.filter = "none";
-      backdrop.globalCompositeOperation = "source-over";
-    } else copyExtended(ctx.canvas, backdrop, x0, y0, rw, rh);
-
+    copyExtended(ctx.canvas, backdrop, x0, y0, rw, rh, within);
     // The shape, anti-aliased.
     this.#shape = scratch(this.#shape, rw, rh);
     const mask = this.#shape?.getContext("2d") as Ctx | null | undefined;
@@ -680,13 +737,69 @@ export class GlassPainter {
         unitPx: Math.sqrt(Math.abs(det)),
       };
     }
-    if (!gl || !fits(gl, rw, rh) || !this.#draw(gl, p, rw, rh, centre, box)) {
+    if (!gl || !fits(gl, rw, rh) || !this.#draw(gl, p, rw, rh, centre, halfSize, box)) {
       this.#fallback(ctx, shape, p, x0, y0, rw, rh);
       return;
     }
     this.#place(ctx, gl.canvas, x0, y0, rw, rh);
-    if (key && whole) this.#keep(key, glass, tune, t, x0, y0, w, h, gl.canvas, rw, rh);
+    // Kept only once it's been drawn twice against the same content (a pan, not a drag, whose
+    // every frame is new): copying it would cost every frame of a drag for nothing.
+    const steady = key !== null && this.#drawnAt.get(key.id) === key.generation;
+    if (key) this.#drawnAt.set(key.id, key.generation);
+    if (key && whole && steady) this.#keep(key, glass, tune, t, x0, y0, w, h, gl.canvas, rw, rh);
     else if (key) this.#forget(key.id);
+  }
+
+  /**
+   * The backdrop frosted by a Gaussian `sigma` pixels wide, in two passes
+   * (across, then down) read from its mipmap at a level where what's left of
+   * the blur is a few texels wide: a strong frost costs no more than a light
+   * one. The result is mipmapped, as the backdrop is, for compressed reads.
+   */
+  #frost(g: Gl, sigma: number, rw: number, rh: number): WebGLTexture | null {
+    const { gl } = g;
+    const level = Math.max(0, Math.min(6, Math.floor(Math.log2(Math.max(1, sigma / 3)))));
+    const f = 2 ** level;
+    const fw = Math.max(1, Math.ceil(rw / f));
+    const fh = Math.max(1, Math.ceil(rh / f));
+    if (g.frostSize.w !== fw || g.frostSize.h !== fh) {
+      for (const tex of g.frosted) {
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fw, fh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      }
+      g.frostSize = { w: fw, h: fh };
+    }
+    // What's left of the blur once the mip level has averaged f × f pixels (a box: variance
+    // f²/12 an axis), in its texels.
+    const left = Math.sqrt(Math.max(sigma * sigma - (f * f) / 12, 0.25)) / f;
+    const radius = Math.min(64, Math.ceil(left * 3));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, g.framebuffer);
+    gl.viewport(0, 0, fw, fh);
+    const u = g.frost.u;
+    gl.useProgram(g.frost.program);
+    for (const [src, lod, dir, into] of [
+      [g.backdrop, level, [1, 0], g.frosted[0]],
+      [g.frosted[0], 0, [0, 1], g.frosted[1]],
+    ] as const) {
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, into, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return null;
+      }
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D, src);
+      gl.uniform1i(u("src"), 4);
+      gl.uniform2f(u("size"), fw, fh);
+      gl.uniform1f(u("lod"), lod);
+      gl.uniform2f(u("dir"), dir[0], dir[1]);
+      gl.uniform1f(u("sigma"), left);
+      gl.uniform1i(u("radius"), radius);
+      draw(g);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindTexture(gl.TEXTURE_2D, g.frosted[1]);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    return g.frosted[1];
   }
 
   /** Draws the top left rw × rh of `picture` at (x0, y0) on the device. */
@@ -763,6 +876,7 @@ export class GlassPainter {
     rw: number,
     rh: number,
     centre: { x: number; y: number },
+    halfSize: { x: number; y: number },
     box: BoxUniforms | null,
   ): boolean {
     const { gl } = g;
@@ -838,6 +952,10 @@ export class GlassPainter {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
+    // Frost, on the GPU at a resolution its blur can spare; the glass reads the result.
+    const frosted = p.frost > 0.4 ? this.#frost(g, p.frost, rw, rh) : null;
+    bind(0, frosted ?? g.backdrop);
+
     // The glass, into the canvas's top left.
     if (!begin(g, rw, rh)) return false;
     const origin = gl.drawingBufferHeight - rh;
@@ -867,10 +985,10 @@ export class GlassPainter {
       gl.uniform1f(u("unitPx"), box.unitPx);
     }
     const tune = glassTuning();
-    gl.uniform4f(u("tuneA"), tune.profile, tune.lineWidth, tune.lineMin, tune.line);
-    gl.uniform4f(u("tuneB"), tune.glowWidth, tune.glowMin, tune.glow, tune.facing);
-    gl.uniform4f(u("tuneC"), tune.backLine, tune.backGlow, tune.backFacing, tune.sheen);
-    gl.uniform4f(u("tuneD"), tune.shade, 0, 0, 0);
+    gl.uniform4f(u("tuneA"), tune.profile, p.falloff, tune.hairline * p.unitPx, 0);
+    gl.uniform4f(u("tuneB"), tune.front, tune.frontStart, tune.back, tune.backStart);
+    gl.uniform4f(u("tuneC"), tune.shade, tune.shadeReach, 0, 0);
+    gl.uniform2f(u("halfSize"), halfSize.x, halfSize.y);
     draw(g);
     return true;
   }
@@ -898,7 +1016,10 @@ export class GlassPainter {
       }
       mask.setTransform(1, 0, 0, 1, 0, 0);
       mask.globalCompositeOperation = "source-in";
+      // Frost in 2D here: there's no GPU to do it.
+      mask.filter = p.frost > 0 ? `blur(${p.frost}px)` : "none";
       mask.drawImage(backdrop, 0, 0, rw, rh, 0, 0, rw, rh);
+      mask.filter = "none";
       mask.globalCompositeOperation = "source-over";
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.drawImage(this.#shape, 0, 0, rw, rh, x0, y0, rw, rh);
@@ -907,7 +1028,9 @@ export class GlassPainter {
     }
     ctx.clip(shape);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.filter = p.frost > 0 ? `blur(${p.frost}px)` : "none";
     ctx.drawImage(backdrop, 0, 0, rw, rh, x0, y0, rw, rh);
+    ctx.filter = "none";
     ctx.setTransform(t);
     if (p.intensity > 0 && p.depth > 0) {
       ctx.globalAlpha *= p.intensity * 0.6;
