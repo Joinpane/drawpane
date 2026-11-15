@@ -177,15 +177,40 @@ export function drawOverlay(
         peer.kind === "agent"
           ? theme.agent
           : (theme.presence[(peer.color - 1) % theme.presence.length] ?? theme.guide);
+      // Their name hangs under what they've picked: an outline in someone's colour with no
+      // name reads as a stray line. While their cursor shows, its tag names them; as it fades
+      // (they've gone still, or their pointer is off the canvas), this one takes over.
+      const cursor = presence.cursor;
+      const cursorShown = !cursor
+        ? 0
+        : editor.s.following === peer.sessionId
+          ? 1
+          : editor.cursors.opacity(peer.sessionId, cursor);
+      const tagOpacity = 1 - cursorShown;
+      let left = Number.POSITIVE_INFINITY;
+      let bottom = Number.NEGATIVE_INFINITY;
       for (const id of presence.selection) {
         const corners = scene.corners(id);
-        if (corners)
-          quad(
-            corners,
-            color,
-            peer.kind === "agent" ? 1.5 : 1,
-            peer.kind === "agent" ? [4, 3] : [],
-          );
+        if (!corners) continue;
+        quad(corners, color, peer.kind === "agent" ? 1.5 : 1, peer.kind === "agent" ? [4, 3] : []);
+        for (const corner of corners) {
+          const p = toScreen(corner);
+          left = Math.min(left, p.x);
+          bottom = Math.max(bottom, p.y);
+        }
+      }
+      if (tagOpacity > 0 && Number.isFinite(left) && Number.isFinite(bottom)) {
+        ctx.globalAlpha = tagOpacity;
+        drawNameTag(
+          ctx,
+          left - 0.5,
+          bottom + 4,
+          color,
+          peer.kind === "agent" ? theme.onAgent : theme.onPresence,
+          peer.name,
+          theme.fontUi,
+        );
+        ctx.globalAlpha = 1;
       }
     }
   }
@@ -792,15 +817,32 @@ function drawCursor(
   ctx.lineWidth = 1.25;
   ctx.fill();
   ctx.stroke();
+  drawNameTag(ctx, 10, 16, color, ink, name, font);
+  ctx.restore();
+}
+
+/** Someone's name on a tag of their colour, its top left at (x, y): by their cursor or selection. */
+function drawNameTag(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  color: string,
+  ink: string,
+  name: string,
+  font: string,
+): void {
+  ctx.save();
   ctx.font = `600 11px ${font}`;
   const w = ctx.measureText(name).width + 10;
+  const left = Math.round(x);
+  const top = Math.round(y);
   ctx.beginPath();
-  ctx.roundRect(10, 16, w, 18, 3);
+  ctx.roundRect(left, top, w, 18, 3);
   ctx.fillStyle = color;
   ctx.fill();
   ctx.fillStyle = ink;
   ctx.textBaseline = "middle";
-  ctx.fillText(name, 15, 25.5);
+  ctx.fillText(name, left + 5, top + 9.5);
   ctx.restore();
 }
 

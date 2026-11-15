@@ -46,6 +46,26 @@ test("follow tour", async ({ browser }) => {
   await bo.goto(new URL(fileUrl).pathname);
   await expect(bo.getByRole("status")).toContainText("Saved", { timeout: 15_000 });
 
+  // Lena picks a layer and moves on to the inspector: Sam sees her selection, and whose it is.
+  await ana.evaluate(() => {
+    const e = (
+      window as unknown as {
+        drawpane: {
+          doc: { nodes(): Iterable<{ id: string; type: string; props: { name?: string } }> };
+          select(ids: string[]): void;
+        };
+      }
+    ).drawpane;
+    const target = [...e.doc.nodes()].find(
+      (n) => n.type === "frame" && n.props.name === "Mark done",
+    );
+    if (target) e.select([target.id]);
+  });
+  await ana.mouse.move(720, 450);
+  await ana.mouse.move(1300, 500, { steps: 4 });
+  await bo.waitForTimeout(800);
+  await shot(bo, "182-collaborator-selection");
+
   // The people list.
   await bo.getByRole("button", { name: "People in this file" }).click();
   await expect(bo.getByRole("dialog", { name: "People in this file" })).toBeVisible();

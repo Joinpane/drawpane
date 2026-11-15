@@ -1,6 +1,8 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import type { NodeRecord, Op } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import type { FileRoom } from "../src/rooms/file-room";
+import { STALE_MS } from "../src/rooms/file-room";
 import { openSocket, signedInUser } from "./helpers";
 
 async function newFile() {
@@ -78,6 +80,40 @@ describe("FileRoom", () => {
     });
     const presence = await a.next<{ presence: { selection: string[] } }>("presence");
     expect(presence.presence.selection).toEqual(["r1"]);
+  });
+
+  it("lets go of a session that has gone quiet, so its selection doesn't linger", async () => {
+    const { browser, fileId, teamId } = await newFile();
+    const a = await join(browser, fileId, "clientA");
+    const page = a.nodes[0] as NodeRecord;
+    const teammate = await signedInUser("Bo", "editor", teamId);
+    const b = await join(teammate.browser, fileId, "clientB");
+    const bo = await a.next<{ peer: { sessionId: string } }>("peer");
+    b.send({ t: "presence", presence: { cursor: null, pageId: page.id, selection: ["r1"] } });
+    await a.next("presence");
+
+    // Pings are answered for the room, without waking it.
+    a.send({ t: "ping" });
+    await a.next("pong");
+
+    const stub = env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
+    // A moment later nobody is quiet yet.
+    expect(await runInDurableObject(stub, (room: FileRoom) => room.pruneQuiet())).toBe(0);
+    // Long after, both have been silent: with Ana's socket the one asking (it's talking), only
+    // Bo's goes, and Ana hears that Bo left (his selection with him).
+    const later = Date.now() + STALE_MS + 1000;
+    const closed = await runInDurableObject(stub, (room: FileRoom, state) => {
+      const ana = state
+        .getWebSockets()
+        .find((ws) => (ws.deserializeAttachment() as { name?: string } | null)?.name === "Ana");
+      return room.pruneQuiet(later, ana);
+    });
+    expect(closed).toBe(1);
+    const left = await a.next<{ sessionId: string }>("peer-left");
+    expect(left.sessionId).toBe(bo.peer.sessionId);
+    // Ana carries on as before.
+    a.send({ t: "ping" });
+    await a.next("pong");
   });
 
   it("rejects invalid transactions atomically and returns the current state", async () => {
