@@ -113,10 +113,14 @@ test.describe
       // Proportional "1"s: 382 units each at 1000 per em.
       await expect.poll(() => width(page, id)).toBeLessThan(70);
       const inspector = page.getByRole("complementary", { name: "Inspector" });
-      const trigger = inspector.getByRole("button", { name: /^OpenType features/ });
-      await expect(trigger).toContainText("Font defaults");
+      const trigger = inspector.getByRole("button", { name: /^Type settings/ });
+      await expect(trigger).toHaveAccessibleName("Type settings");
       await trigger.click();
-      const panel = page.getByRole("dialog", { name: "OpenType features" });
+      await page
+        .getByRole("dialog", { name: "Type settings" })
+        .getByRole("tab", { name: "Details" })
+        .click();
+      const panel = page.getByRole("tabpanel", { name: "Details" });
       const tabular = panel.getByRole("checkbox", { name: /Tabular figures/ });
       await expect(tabular).not.toBeChecked({ timeout: 15_000 });
       // Ligatures are on unless turned off.
@@ -124,7 +128,8 @@ test.describe
       await tabular.check();
       // 600 units each, 4 × 40px × 0.6: measured from the shaped glyphs.
       await expect.poll(() => width(page, id), { timeout: 15_000 }).toBe(96);
-      await expect(trigger).toContainText("Tabular figures");
+      // The settings button says what's set in it.
+      await expect(trigger).toHaveAccessibleName(/Tabular figures/);
       await page.keyboard.press("Escape");
       await expect.poll(() => inked(page, id)).toBeGreaterThan(200);
 
@@ -136,7 +141,7 @@ test.describe
       await expect.poll(() => width(page, id)).toBe(96);
       await panel.getByRole("button", { name: "Back to the font’s defaults" }).click();
       await expect.poll(() => width(page, id)).toBeLessThan(70);
-      await expect(trigger).toContainText("Font defaults");
+      await expect(trigger).toHaveAccessibleName("Type settings");
       await page.keyboard.press("Escape");
     });
 
@@ -209,9 +214,13 @@ test.describe
       }, id);
       await page
         .getByRole("complementary", { name: "Inspector" })
-        .getByRole("button", { name: /^OpenType features/ })
+        .getByRole("button", { name: /^Type settings/ })
         .click();
-      await expect(page.getByRole("dialog", { name: "OpenType features" })).toContainText(
+      await page
+        .getByRole("dialog", { name: "Type settings" })
+        .getByRole("tab", { name: "Details" })
+        .click();
+      await expect(page.getByRole("tabpanel", { name: "Details" })).toContainText(
         "Georgia isn’t a Google, team or built-in font",
       );
       await page.keyboard.press("Escape");

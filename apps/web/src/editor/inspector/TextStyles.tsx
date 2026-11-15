@@ -10,6 +10,7 @@ import { Button, Icon, IconButton, Popover, type PopoverSide } from "@drawpane/u
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { uiFor, useUi } from "../ui-state";
 import { useDisclosure } from "./fields";
+import { TypeSettingsButton, typeSettingsSummary } from "./TypeSettings";
 import { TypographyFields } from "./TypographyFields";
 
 /** The style's own type, for its "Ag" sample (capped so big headings fit a row). */
@@ -440,6 +441,7 @@ function EditStyle({
         />
         <div className="text-styles__fields">
           <TypographyFields editor={editor} nodes={[style]} />
+          <TypeSettingsRow editor={editor} style={style} />
         </div>
         {from && getProp(from.props, "textStyle") !== style.id ? (
           <button
@@ -467,6 +469,21 @@ function EditStyle({
           Delete style
         </Button>
       </footer>
+    </div>
+  );
+}
+
+/** A style's type settings, with what's set in them in words: the editor has room to say it. */
+function TypeSettingsRow({ editor, style }: { editor: Editor; style: NodeRecord }) {
+  const summary = typeSettingsSummary(editor, [style], [style], "style");
+  return (
+    <div className="text-styles__settings">
+      <span
+        className={summary.length > 0 ? "text-styles__summary" : "text-styles__summary is-default"}
+      >
+        {summary.length > 0 ? summary.join(", ") : "No decoration, case or trim"}
+      </span>
+      <TypeSettingsButton editor={editor} nodes={[style]} scope="style" />
     </div>
   );
 }

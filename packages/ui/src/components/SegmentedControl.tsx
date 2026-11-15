@@ -9,7 +9,10 @@ export interface SegmentedOption<V extends string = string> {
   value: V;
   label?: string;
   icon?: IconName;
-  /** Required for icon-only options: the accessible name and tooltip. */
+  /**
+   * Required for icon-only options: the accessible name and tooltip. With a
+   * label ("AG"), a tooltip that describes it ("Uppercase").
+   */
   title?: string;
   disabled?: boolean;
 }
@@ -114,8 +117,8 @@ export function SegmentedControl<V extends string = string>({
             {option.label}
           </button>
         );
-        return iconOnly && option.title ? (
-          <Tooltip key={option.value} label={option.title} describe={false}>
+        return option.title ? (
+          <Tooltip key={option.value} label={option.title} describe={!iconOnly}>
             {radio}
           </Tooltip>
         ) : (

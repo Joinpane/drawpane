@@ -188,6 +188,28 @@ describe("Popover", () => {
     document.removeEventListener("keydown", onPageKey);
   });
 
+  it("opens beside another element when asked, keeping its anchor for focus", () => {
+    const panel = document.createElement("section");
+    const button = document.createElement("button");
+    panel.append(button);
+    document.body.append(panel);
+    const box = (left: number, top: number, width: number, height: number) =>
+      ({ left, top, right: left + width, bottom: top + height, width, height }) as DOMRect;
+    panel.getBoundingClientRect = () => box(700, 200, 260, 300);
+    button.getBoundingClientRect = () => box(930, 420, 24, 24);
+    const { unmount } = render(
+      <Popover anchor={button} beside={panel} label="Settings" onClose={() => {}}>
+        <p>Inside</p>
+      </Popover>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    // Left of the panel, its top level with the panel's (less the margin), not the button's.
+    expect(dialog.style.top).toBe("192px");
+    expect(Number.parseFloat(dialog.style.left)).toBeLessThan(700);
+    unmount();
+    panel.remove();
+  });
+
   it("flips to the other side and stays inside the viewport", () => {
     const viewport = { width: 1000, height: 800 };
     const size = { width: 240, height: 400 };

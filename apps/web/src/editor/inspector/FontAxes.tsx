@@ -6,8 +6,8 @@
  */
 import type { Editor, FontAxis } from "@drawpane/editor";
 import { type FontVariations, getProp, type NodeRecord } from "@drawpane/model";
-import { Icon, Popover, SliderField } from "@drawpane/ui";
-import { useEffect, useRef, useState } from "react";
+import { SliderField } from "@drawpane/ui";
+import { useEffect, useState } from "react";
 import { fonts } from "../../fonts/fonts";
 import { shaper } from "../shaping";
 import { axisName, axisStep, onAxis, variationSummary, withAxis } from "./variable-axes";
@@ -61,54 +61,24 @@ function useAxes(
   return state.key === key ? state.axes : ({ status: "loading" } as const);
 }
 
-export function FontAxesField({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
-  const trigger = useRef<HTMLButtonElement>(null);
-  const [open, setOpen] = useState(false);
-  const maps = nodes.map((n) => getProp(n.props, "fontVariations"));
-  const first = maps[0] ?? {};
+/** Whether the layers' text can vary: a variable family, or axes set already. */
+export function canVary(nodes: readonly NodeRecord[]): boolean {
   const lead = nodes[0];
-  const family = lead ? getProp(lead.props, "fontFamily") : "";
-  // Shown where axes can be: a variable family, or text that sets some already.
-  if (!mayVary(family) && maps.every((m) => Object.keys(m).length === 0)) return null;
-  const mixed = !maps.every((m) => sameAxes(m, first));
-  const summary = mixed ? "Mixed" : variationSummary(first);
   return (
-    <>
-      <button
-        ref={trigger}
-        type="button"
-        className="font-trigger features-trigger"
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label={`Variable axes: ${summary ?? "as the font has them"}`}
-        onClick={() => setOpen(!open)}
-      >
-        <span className="features-trigger__label" aria-hidden="true">
-          Variable
-        </span>
-        <span
-          className={`font-trigger__name${summary ? "" : " features-trigger__default"}`}
-          aria-hidden="true"
-        >
-          {summary ?? "Font defaults"}
-        </span>
-        <Icon name="chevron-down" size={12} />
-      </button>
-      {open && trigger.current ? (
-        <Popover
-          anchor={trigger.current}
-          label="Variable axes"
-          className="features dp-root"
-          onClose={() => setOpen(false)}
-        >
-          <AxesPanel editor={editor} nodes={nodes} />
-        </Popover>
-      ) : null}
-    </>
+    (!!lead && mayVary(getProp(lead.props, "fontFamily"))) ||
+    nodes.some((n) => Object.keys(getProp(n.props, "fontVariations")).length > 0)
   );
 }
 
-function AxesPanel({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
+/** Where the layers' axes are set, for a summary; null when it's the font's defaults. */
+export function axesSummary(nodes: readonly NodeRecord[]): string | null {
+  const maps = nodes.map((n) => getProp(n.props, "fontVariations"));
+  const first = maps[0] ?? {};
+  return maps.every((m) => sameAxes(m, first)) ? variationSummary(first) : "Mixed axes";
+}
+
+/** The font's axes, as sliders (Type settings, Variable). */
+export function AxesPanel({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const lead = nodes[0];
   const face = lead
     ? {

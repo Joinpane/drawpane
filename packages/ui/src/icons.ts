@@ -3,7 +3,7 @@
 /** One shape of an icon: an SVG element name and its React attributes. */
 export type IconNode = readonly [tag: string, attributes: Readonly<Record<string, string>>];
 
-/** Drawpane's 127 icons on a 16px grid; strokes and fills inherit currentColor. */
+/** Drawpane's 136 icons on a 16px grid; strokes and fills inherit currentColor. */
 export const iconData = {
   pointer: [
     [
@@ -1482,6 +1482,34 @@ export const iconData = {
       },
     ],
   ],
+  "align-justify": [
+    [
+      "path",
+      {
+        d: "M2.5 2v12M13.5 2v12",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5",
+        y: "4",
+        width: "6",
+        height: "3",
+        rx: "0.75",
+      },
+    ],
+    [
+      "rect",
+      {
+        x: "5",
+        y: "9",
+        width: "6",
+        height: "3",
+        rx: "0.75",
+      },
+    ],
+  ],
   "align-left": [
     [
       "path",
@@ -2163,6 +2191,26 @@ export const iconData = {
       },
     ],
   ],
+  strikethrough: [
+    [
+      "path",
+      {
+        d: "M11.1 4.4c-.4-1.05-1.5-1.65-3-1.65-1.85 0-3.1.95-3.1 2.25 0 .95.55 1.6 1.7 2",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M2.75 8h10.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M10.55 9.75c.45.4.7.9.7 1.5 0 1.3-1.3 2-3.2 2-1.65 0-2.85-.65-3.3-1.75",
+      },
+    ],
+  ],
   "stroke-weight": [
     [
       "path",
@@ -2202,6 +2250,52 @@ export const iconData = {
       },
     ],
   ],
+  "text-auto-height": [
+    [
+      "path",
+      {
+        d: "M4.5 2.5h7M4.5 13.5h7",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M8 5v6M6.5 6.5 8 5l1.5 1.5M6.5 9.5 8 11l1.5-1.5",
+      },
+    ],
+  ],
+  "text-auto-width": [
+    [
+      "path",
+      {
+        d: "M2.5 4.5v7M13.5 4.5v7",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5 8h6M6.5 6.5 5 8l1.5 1.5M9.5 6.5 11 8l-1.5 1.5",
+      },
+    ],
+  ],
+  "text-fixed": [
+    [
+      "rect",
+      {
+        x: "2.5",
+        y: "2.5",
+        width: "11",
+        height: "11",
+        rx: "1.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5.5 6h5M8 6v4.5",
+      },
+    ],
+  ],
   texture: [
     [
       "path",
@@ -2215,6 +2309,72 @@ export const iconData = {
       "path",
       {
         d: "M2.75 4.5h10.5M6.25 4.5V3h3.5v1.5M4.25 4.5l.65 8.1a1 1 0 0 0 1 .9h4.2a1 1 0 0 0 1-.9l.65-8.1",
+      },
+    ],
+  ],
+  "trim-cap": [
+    [
+      "path",
+      {
+        d: "M2 4.25h12M2 11.75h12",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5 11.75 8 4.25l3 7.5M6.1 9.25h3.8",
+      },
+    ],
+  ],
+  "trim-standard": [
+    [
+      "path",
+      {
+        d: "M2 2.25h12M2 13.75h12",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M5.25 11 8 5l2.75 6M6.25 9h3.5",
+      },
+    ],
+  ],
+  "type-settings": [
+    [
+      "path",
+      {
+        d: "M5 2.5v5.75M5 11.75v1.75M11 2.5v1.75M11 7.75v5.75",
+      },
+    ],
+    [
+      "circle",
+      {
+        cx: "5",
+        cy: "10",
+        r: "1.75",
+      },
+    ],
+    [
+      "circle",
+      {
+        cx: "11",
+        cy: "6",
+        r: "1.75",
+      },
+    ],
+  ],
+  underline: [
+    [
+      "path",
+      {
+        d: "M4.75 2.75v4.5a3.25 3.25 0 0 0 6.5 0v-4.5",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M3.5 13.25h9",
       },
     ],
   ],

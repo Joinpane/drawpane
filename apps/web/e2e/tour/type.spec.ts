@@ -20,7 +20,7 @@ type W = {
   };
 };
 
-test("paragraphs and truncation tour", async ({ browser }) => {
+test("type settings tour", async ({ browser }) => {
   test.setTimeout(120_000);
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
@@ -62,10 +62,14 @@ test("paragraphs and truncation tour", async ({ browser }) => {
       name,
     ] as const);
 
-  // Paragraph spacing, from the inspector.
+  // Paragraph spacing, from type settings.
   await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), ids.body);
   await page.keyboard.press("Shift+1");
-  const spacing = page.getByLabel("Paragraph spacing");
+  const settings = page.getByRole("button", { name: /^Type settings/ });
+  const panel = page.getByRole("dialog", { name: "Type settings" });
+  await settings.click();
+  await panel.getByRole("tab", { name: "Basics" }).click();
+  const spacing = panel.getByLabel("Paragraph spacing");
   await spacing.fill("12");
   await spacing.press("Enter");
   await expect.poll(() => prop(ids.body, "paragraphSpacing")).toBe(12);
@@ -74,10 +78,13 @@ test("paragraphs and truncation tour", async ({ browser }) => {
 
   // Truncate the preview to two lines.
   await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), ids.preview);
-  await page.getByRole("combobox", { name: "Truncate" }).selectOption("2");
+  await panel.getByRole("combobox", { name: "Truncate" }).selectOption("2");
   await expect.poll(() => prop(ids.preview, "maxLines")).toBe(2);
   await page.waitForTimeout(250);
   await shot(page, "151-truncate");
+  await page.keyboard.press("Escape");
+  // Closed, the button marks that something in it is set.
+  await expect(settings).toHaveAccessibleName(/Max 2 lines/);
 
   // A heading trimmed to its capitals and baseline: its box hugs what's seen.
   const heading = await page.evaluate((card) => {
@@ -90,10 +97,22 @@ test("paragraphs and truncation tour", async ({ browser }) => {
   }, ids.card);
   await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), heading);
   const standard = (await prop(heading, "height")) as number;
-  await page.getByRole("combobox", { name: "Vertical trim" }).selectOption("cap-height");
+  await settings.click();
+  await panel.getByRole("radio", { name: "Cap height to baseline" }).click();
   await expect.poll(() => prop(heading, "leadingTrim")).toBe("cap-height");
   await expect.poll(() => prop(heading, "height")).toBeLessThan(standard * 0.7);
+  await page.keyboard.press("Escape");
   await page.waitForTimeout(250);
   await shot(page, "177-vertical-trim");
+
+  // Details: the font's OpenType features.
+  await settings.click();
+  await panel.getByRole("tab", { name: "Details" }).click();
+  await expect(
+    page.getByRole("tabpanel", { name: "Details" }).getByRole("checkbox").first(),
+  ).toBeVisible({
+    timeout: 15_000,
+  });
+  await shot(page, "178-type-settings-details");
   await context.close();
 });

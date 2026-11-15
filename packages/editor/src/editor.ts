@@ -2228,12 +2228,17 @@ export class Editor {
    */
   toggleList(type: "bullet" | "number"): void {
     const items = this.#listItems();
-    if (items.length === 0) return;
-    const off = items.every((i) => i.listType === type);
+    this.setList(items.length > 0 && items.every((i) => i.listType === type) ? "none" : type);
+  }
+
+  /** Makes the touched paragraphs (or selected text layers) a list of `type`, or no list. */
+  setList(type: ListType): void {
+    const items = this.#listItems();
+    if (items.length === 0 || items.every((i) => i.listType === type)) return;
     this.#setLists(
       items,
-      () => ({ listType: off ? "none" : type }),
-      off ? "Remove list" : type === "bullet" ? "Bulleted list" : "Numbered list",
+      () => ({ listType: type }),
+      type === "none" ? "Remove list" : type === "bullet" ? "Bulleted list" : "Numbered list",
     );
   }
 
