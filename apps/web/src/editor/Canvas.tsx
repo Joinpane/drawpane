@@ -43,6 +43,7 @@ function readTheme(): OverlayTheme {
       return { inkMuted: colors["ink-muted"][other], componentInk: colors["component-ink"][other] };
     })(),
     guide: v("guide"),
+    onGuide: v("on-guide"),
     component: v("component"),
     componentInk: v("component-ink"),
     inkMuted: v("ink-muted"),

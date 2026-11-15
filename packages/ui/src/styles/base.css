@@ -4,6 +4,12 @@
   --duration-toggle: 120ms;
   --duration-popover: 160ms;
   --layer-popover: 1000;
+  /*
+   * Behind artwork with transparency (export and image previews): one light checkerboard in both
+   * themes, as the colour picker's, so dark artwork never sinks into a dark one.
+   */
+  --checker:
+    repeating-conic-gradient(var(--checker-dark) 0 25%, var(--checker-light) 0 50%) 0 0 / 12px 12px;
 }
 
 /* Replace movement with an instant change. */

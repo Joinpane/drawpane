@@ -161,7 +161,8 @@ export function lensObstacles(doc: Doc, scene: Scene, id: string): Box[] {
       const node = doc.get(sibling);
       if (!node || node.type === "textStyle" || node.type === "collection") continue;
       const bounds = scene.bounds(sibling);
-      if (bounds && bounds.width > 0 && bounds.height > 0) out.push(bounds);
+      // Lines and arrows are flat (no height, or no width) but still in the way.
+      if (bounds && (bounds.width > 0 || bounds.height > 0)) out.push(bounds);
     }
   }
   return out;

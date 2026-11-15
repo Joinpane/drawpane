@@ -1,5 +1,7 @@
+import { Editor } from "@drawpane/editor";
+import { type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { type Box, type LensPlacementInput, placeLens } from "./lens-placement";
+import { type Box, type LensPlacementInput, lensObstacles, placeLens } from "./lens-placement";
 
 const area: Box = { x: 300, y: 64, width: 800, height: 776 };
 const size = { width: 240, height: 36 };
@@ -106,5 +108,32 @@ describe("placeLens with a popover open", () => {
   it("moves anyway when its side no longer fits", () => {
     const target = { x: 600, y: 700, width: 200, height: 120 };
     expect(place({ target, sides: ["below"] })?.side).toBe("above");
+  });
+});
+
+describe("lensObstacles", () => {
+  const node = (id: string, type: NodeRecord["type"], key: string, props = {}): NodeRecord =>
+    ({ id, type, parent: id === "p1" ? ROOT_ID : "p1", key, props }) as NodeRecord;
+
+  it("counts flat layers like lines and arrows, not just ones with an area", () => {
+    const editor = new Editor({ measurer: { width: (_: string, t: string) => t.length * 8 } });
+    editor.loadStatic([
+      node("p1", "page", "a0", { name: "Page 1" }),
+      node("star", "star", "a0", { x: 0, y: 0, width: 100, height: 100 }),
+      node("arrow", "line", "a1", { x: 0, y: 140, width: 560, height: 0 }),
+      node("rule", "line", "a2", { x: 600, y: 0, width: 0, height: 200 }),
+    ]);
+    editor.setPage("p1");
+    const boxes = lensObstacles(editor.doc, editor.scene, "star");
+    expect(boxes).toContainEqual(expect.objectContaining({ y: 140, width: 560, height: 0 }));
+    expect(boxes).toContainEqual(expect.objectContaining({ x: 600, width: 0, height: 200 }));
+  });
+
+  it("keeps the Lens off a line right under the selection", () => {
+    const target = { x: 400, y: 300, width: 200, height: 100 };
+    // An arrow where the Lens would sit below.
+    const arrow = { x: 300, y: 450, width: 600, height: 0 };
+    expect(place({ target })?.side).toBe("below");
+    expect(place({ target, obstacles: [arrow] })?.side).not.toBe("below");
   });
 });

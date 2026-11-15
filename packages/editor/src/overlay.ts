@@ -26,6 +26,8 @@ export interface OverlayTheme {
   signal: string;
   componentInk: string;
   onSignal: string;
+  /** Text on a guide-coloured badge (X-ray distances). */
+  onGuide: string;
   /**
    * The other theme's label inks, for a page whose own background they read
    * better on (a light page in dark theme). Absent: labels keep this theme's.
@@ -555,7 +557,7 @@ function drawMeasurements(
     ctx.beginPath();
     ctx.roundRect(Math.round(spot.x - w / 2), Math.round(spot.y - h / 2), w, h, 3);
     ctx.fill();
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = theme.onGuide;
     ctx.fillText(label, Math.round(spot.x), Math.round(spot.y) + 0.5);
   }
   ctx.restore();

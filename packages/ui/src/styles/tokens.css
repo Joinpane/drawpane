@@ -9,6 +9,7 @@
   --surface-hover: #ebe9e5;
   --surface-active: #e2dfd9;
   --surface-inverse: #1c1b1a;
+  --scrim: rgb(28 27 26 / 0.32);
   --line: #e3e1dc;
   --line-strong: #d2cfc8;
   --line-control: #8b8880;
@@ -26,6 +27,10 @@
   --component-ink: #0a6f6b;
   --component-soft: #d9f0ee;
   --guide: #2a5fe0;
+  --on-guide: #ffffff;
+  --knob: #ffffff;
+  --checker-light: #ffffff;
+  --checker-dark: #d9d6cf;
   --xray-padding: #f3c94a;
   --xray-gap: #e65f9d;
   --success: #1d7a52;
@@ -61,6 +66,7 @@
   --surface-hover: #2a2927;
   --surface-active: #34322f;
   --surface-inverse: #f2f0eb;
+  --scrim: rgb(0 0 0 / 0.55);
   --line: #302e2b;
   --line-strong: #3d3b37;
   --line-control: #77736b;
@@ -78,6 +84,10 @@
   --component-ink: #4fd3cb;
   --component-soft: #123634;
   --guide: #6b95ff;
+  --on-guide: #0b1733;
+  --knob: #ffffff;
+  --checker-light: #ffffff;
+  --checker-dark: #d9d6cf;
   --xray-padding: #f3c94a;
   --xray-gap: #e65f9d;
   --success: #4cc38a;

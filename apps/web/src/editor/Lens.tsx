@@ -7,8 +7,16 @@ import {
   variantProperties,
 } from "@drawpane/editor";
 import { getProp, type NodeRecord, type Paint, type PropName, propBounds } from "@drawpane/model";
-import { IconButton, type IconName, KIND_ICONS, NumberField, SelectionLens } from "@drawpane/ui";
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  IconButton,
+  type IconName,
+  KIND_ICONS,
+  NumberField,
+  type PopoverRoom,
+  PopoverRoomContext,
+  SelectionLens,
+} from "@drawpane/ui";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { shortcutFor } from "./actions";
 import { useDocVersion, useEditor, useEditorState } from "./hooks";
 import { FontPicker } from "./inspector/FontPicker";
@@ -20,14 +28,17 @@ import { layerKind } from "./layer-kinds";
 import { kindOf } from "./layer-tree";
 import { type Box, hasLabelAbove, type LensSide, lensObstacles, placeLens } from "./lens-placement";
 import { minimapBox } from "./Minimap";
+import { selectionRect } from "./popover-room";
 import { textViews } from "./text-views";
 import { useUi } from "./ui-state";
 
-/** Clear of the top bar (file title, tools, share) at 12–52px. */
-const TOP = 64;
-/** Clear of the zoom bar at the bottom. */
-const BOTTOM = 56;
+/**
+ * How far inside the editor's insets (the panes, the top bar, the rulers and
+ * the zoom bar, set in EditorPage) it keeps: the panes' insets end at their
+ * edge; the top one already leaves a gap below the top bar or the rulers.
+ */
 const MARGIN = 8;
+const MARGIN_TOP = 4;
 /** Until the Lens has been measured. */
 const ESTIMATE = { width: 280, height: 40 };
 
@@ -43,7 +54,9 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   useDocVersion();
   const enabled = useUi(editor, (ui) => ui.lens);
   const minimapShown = useUi(editor, (ui) => ui.minimap);
-  const insetLeft = useEditorState((s) => s.insets.left);
+  const insets = useEditorState((s) => s.insets);
+  // One of the inspector's popovers is open: step aside, as Figma's on-canvas toolbars do.
+  const inspectorPopover = useUi(editor, (ui) => ui.inspectorPopovers > 0);
   const selection = useEditorState((s) => s.selection);
   const camera = useEditorState((s) => s.camera);
   const viewport = useEditorState((s) => s.viewport);
@@ -64,7 +77,6 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const [holding, setHolding] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState(ESTIMATE);
-  const [bounds, setBounds] = useState({ left: 0, right: Number.POSITIVE_INFINITY });
   const previous = useRef<LensSide | null>(null);
   // Appear once the selection has settled, so a quick follow-up click (like a
   // Shift-click on the layer just below) lands on the canvas, not the Lens.
@@ -91,7 +103,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
       window.removeEventListener("blur", blur);
     };
   }, []);
-  // Measure the Lens and the side panes; placement runs on the next render (before paint).
+  // Measure the Lens; placement runs on the next render (before paint).
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -100,13 +112,24 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
       Math.abs(el.offsetHeight - size.height) > 0.5
     )
       setSize({ width: el.offsetWidth, height: el.offsetHeight });
-    const host = (el.offsetParent ?? document.body).getBoundingClientRect();
-    const leftPane = document.querySelector(".pane--left")?.getBoundingClientRect();
-    const rightPane = document.querySelector(".pane--right")?.getBoundingClientRect();
-    const left = leftPane ? leftPane.right - host.left : 0;
-    const right = rightPane ? rightPane.left - host.left : Number.POSITIVE_INFINITY;
-    if (left !== bounds.left || right !== bounds.right) setBounds({ left, right });
   });
+  // Its popovers keep to the canvas between the panes too, and off the selection.
+  const room = useMemo<PopoverRoom>(
+    () => ({
+      bounds: () => {
+        const host = ref.current?.offsetParent?.getBoundingClientRect();
+        if (!host) return null;
+        return {
+          left: host.left + insets.left,
+          top: host.top + insets.top,
+          right: host.left + viewport.width - insets.right,
+          bottom: host.top + viewport.height - insets.bottom,
+        };
+      },
+      avoid: () => selectionRect(editor),
+    }),
+    [editor, insets, viewport],
+  );
 
   // Hide during canvas gestures, but not while scrubbing one of our own
   // fields or using one of our popovers: unmounting then would lose the
@@ -115,7 +138,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const hidden =
     !enabled ||
     selection.length !== 1 ||
-    (!held && (gesture || !settled || shift || measuring)) ||
+    (!held && (gesture || !settled || shift || measuring || inspectorPopover)) ||
     editing !== null ||
     vectorEdit ||
     !canEdit ||
@@ -133,15 +156,14 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
     const b = camera.toScreen({ x: r.x + r.width, y: r.y + r.height });
     return { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y };
   };
-  const right = Math.min(bounds.right, viewport.width);
   const area: Box = {
-    x: bounds.left + MARGIN,
-    y: TOP,
-    width: right - MARGIN - (bounds.left + MARGIN),
-    height: viewport.height - BOTTOM - TOP,
+    x: insets.left + MARGIN,
+    y: insets.top + MARGIN_TOP,
+    width: viewport.width - insets.right - insets.left - MARGIN * 2,
+    height: viewport.height - insets.bottom - insets.top - MARGIN_TOP,
   };
   // Only a pinned minimap stays put; one showing while you move around comes and goes.
-  const minimap = minimapBox(minimapShown === "always", insetLeft, viewport);
+  const minimap = minimapBox(minimapShown === "always", insets.left, viewport);
   // While a popover or a scrub is in use, keep to the same side so nothing jumps under the pointer.
   const placement = placeLens({
     target: toScreen(world),
@@ -171,14 +193,16 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
       data-side={placement.side}
       style={{ left: placement.x, top: placement.y }}
     >
-      <SelectionLens
-        kind={kind}
-        kindIcon={icon}
-        onOpenInspector={onOpenInspector}
-        inspectorShortcut={shortcutFor("view.rightPane") ?? ""}
-      >
-        {controls}
-      </SelectionLens>
+      <PopoverRoomContext.Provider value={room}>
+        <SelectionLens
+          kind={kind}
+          kindIcon={icon}
+          onOpenInspector={onOpenInspector}
+          inspectorShortcut={shortcutFor("view.rightPane") ?? ""}
+        >
+          {controls}
+        </SelectionLens>
+      </PopoverRoomContext.Provider>
     </div>
   );
 }
