@@ -57,7 +57,7 @@ const BLUE = [0x2b, 0x4f, 0xd6];
 const near = (a: number[], b: number[], within = 40) =>
   a.every((v, i) => Math.abs(v - (b[i] ?? 0)) <= within);
 /** Grain darkens the blue: clearly darker than the layer, toward black. */
-const isGrain = (c: number[]) => (c[2] ?? 0) < BLUE[2] - 60 && !near(c, BLUE);
+const isGrain = (c: number[]) => (c[2] ?? 0) < (BLUE[2] ?? 0) - 60 && !near(c, BLUE);
 const isWhite = (c: number[]) => near(c, [255, 255, 255]);
 const isBlue = (c: number[]) => near(c, BLUE);
 
