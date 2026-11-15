@@ -174,6 +174,9 @@ export interface Node {
   readonly characters?: string;
   readonly style?: TypeStyle;
   readonly characterStyleOverrides?: readonly number[];
+  /** Per line (paragraph): its list, and its indentation (a list's first level is 1). */
+  readonly lineTypes?: readonly ("NONE" | "ORDERED" | "UNORDERED")[];
+  readonly lineIndentations?: readonly number[];
   readonly styleOverrideTable?: Readonly<Record<string, TypeStyle>>;
   // Components
   readonly componentId?: string;

@@ -195,8 +195,19 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
         aria-label="Text"
         spellCheck
         onChange={(e) => {
-          setValue(e.target.value);
-          editor.updateText(nodeId, e.target.value, e.target.selectionEnd);
+          const t = e.target;
+          setValue(t.value);
+          editor.updateText(nodeId, t.value, t.selectionEnd);
+          // "- " or "1. " at a paragraph's start: a list item (decision 0017).
+          report();
+          const caret = editor.autoList(nodeId);
+          if (caret !== null) {
+            const next = getProp(editor.doc.get(nodeId)?.props ?? {}, "characters");
+            t.value = next;
+            t.setSelectionRange(caret, caret);
+            setValue(next);
+            report();
+          }
         }}
         onSelect={report}
         onKeyDown={(e) => {
@@ -214,6 +225,40 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
             e.preventDefault();
             editor.toggleTextStyle(toggle);
             return;
+          }
+          // Lists (decision 0017): ⌘⇧8 bullets, ⌘⇧7 numbers, as in Figma.
+          if (mod && e.shiftKey && !e.altKey && (e.code === "Digit8" || e.code === "Digit7")) {
+            e.preventDefault();
+            editor.toggleList(e.code === "Digit8" ? "bullet" : "number");
+            return;
+          }
+          // In a list, Tab nests an item and ⇧Tab takes it out a level.
+          if (e.key === "Tab" && !mod && !e.altKey && editor.nestList(e.shiftKey ? -1 : 1)) {
+            e.preventDefault();
+            return;
+          }
+          if (
+            (e.key === "Enter" || e.key === "Backspace") &&
+            !mod &&
+            !e.shiftKey &&
+            !e.altKey &&
+            t.selectionStart === t.selectionEnd
+          ) {
+            const { listType } = editor.listState();
+            const at = t.selectionStart;
+            const start = t.value.lastIndexOf("\n", at - 1) + 1;
+            const nl = t.value.indexOf("\n", at);
+            const empty = start === at && (nl === -1 ? t.value.length : nl) === at;
+            // Enter on an empty item ends the list; Backspace at an item's start takes it out
+            // of the list before it joins the line above, as text editors do.
+            if (
+              (listType === "bullet" || listType === "number") &&
+              (e.key === "Enter" ? empty : start === at)
+            ) {
+              e.preventDefault();
+              editor.toggleList(listType);
+              return;
+            }
           }
           if (e.key === "Escape" || (e.key === "Enter" && mod)) {
             e.preventDefault();

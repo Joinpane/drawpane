@@ -1,0 +1,250 @@
+{
+  "suite": "lists",
+  "about": "Bulleted and numbered lists: plain, nested a level, between ordinary paragraphs, wrapping in a fixed width, and large.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 3
+  },
+  "background": "#ffffff",
+  "cells": [
+    {
+      "id": "list-bullets",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 120,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "characters": "Plan the week\nBook the venue\nSend invites",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 14,
+              "listType": "bullet"
+            },
+            {
+              "start": 14,
+              "end": 29,
+              "listType": "bullet"
+            },
+            {
+              "start": 29,
+              "end": 41,
+              "listType": "bullet"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "list-numbers",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 120,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "characters": "Draft\nReview\nShip",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 6,
+              "listType": "number"
+            },
+            {
+              "start": 6,
+              "end": 13,
+              "listType": "number"
+            },
+            {
+              "start": 13,
+              "end": 17,
+              "listType": "number"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "list-nested",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 120,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "characters": "Fruit\nApples\nPears\nVegetables",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 6,
+              "listType": "bullet"
+            },
+            {
+              "start": 6,
+              "end": 13,
+              "listType": "bullet",
+              "listLevel": 1
+            },
+            {
+              "start": 13,
+              "end": 19,
+              "listType": "bullet",
+              "listLevel": 1
+            },
+            {
+              "start": 19,
+              "end": 29,
+              "listType": "bullet"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "list-between",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 120,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "characters": "Intro\nFirst point\nSecond point\nOutro",
+          "textRuns": [
+            {
+              "start": 6,
+              "end": 18,
+              "listType": "number"
+            },
+            {
+              "start": 18,
+              "end": 31,
+              "listType": "number"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "list-wrapped",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 120,
+          "fontFamily": "Inter",
+          "fontSize": 16,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height",
+          "characters": "A list item long enough to wrap onto a second line\nShort",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 51,
+              "listType": "bullet"
+            },
+            {
+              "start": 51,
+              "end": 56,
+              "listType": "bullet"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "list-large",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 120,
+          "fontFamily": "Inter",
+          "fontSize": 28,
+          "fontWeight": 600,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "width",
+          "characters": "Draft\nReview\nShip",
+          "textRuns": [
+            {
+              "start": 0,
+              "end": 6,
+              "listType": "number"
+            },
+            {
+              "start": 6,
+              "end": 13,
+              "listType": "number"
+            },
+            {
+              "start": 13,
+              "end": 17,
+              "listType": "number"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -95,7 +95,7 @@ export function textProps(node: Figma.Node, images: ImageLookup, notes: Notes): 
     props.maxLines = Math.max(1, Math.min(1000, s.maxLines ?? 1));
   if (s.paragraphSpacing) props.paragraphSpacing = Math.min(1000, round2(s.paragraphSpacing));
   props.fills = convertPaints(node.fills, images, notes);
-  const runs = textRuns(node, images, notes);
+  const runs = withLists(textRuns(node, images, notes), node);
   if (runs.length > 0) props.textRuns = runs;
   return props;
 }
@@ -134,4 +134,53 @@ export function textRuns(node: Figma.Node, images: ImageLookup, notes: Notes): T
   }
   if (paragraphStyles) notes.add("text-paragraphs");
   return runs.slice(0, 10_000);
+}
+
+/**
+ * Figma's lists, a list type and indentation per line (paragraph), as list
+ * props on each paragraph's characters (decision 0017), merged into the
+ * character runs: where a run and a paragraph overlap, the overlap has both.
+ */
+export function withLists(runs: readonly TextRun[], node: Figma.Node): TextRun[] {
+  const types = node.lineTypes ?? [];
+  if (!types.some((t) => t !== "NONE")) return [...runs];
+  const text = node.characters ?? "";
+  const paragraphs: Array<{ start: number; end: number; props: Partial<TextRun> }> = [];
+  let start = 0;
+  text.split("\n").forEach((line, i) => {
+    const end = Math.min(text.length, start + line.length + 1);
+    const type = types[i] ?? "NONE";
+    if (type !== "NONE" && end > start) {
+      const level = Math.max(0, Math.min(8, (node.lineIndentations?.[i] ?? 1) - 1));
+      paragraphs.push({
+        start,
+        end,
+        props: {
+          listType: type === "ORDERED" ? "number" : "bullet",
+          ...(level > 0 ? { listLevel: level } : {}),
+        },
+      });
+    }
+    start = end;
+  });
+  // Every boundary of either, then each stretch between two with what covers it.
+  const cuts = [...new Set([...runs, ...paragraphs].flatMap((r) => [r.start, r.end]))].sort(
+    (a, b) => a - b,
+  );
+  const out: TextRun[] = [];
+  for (let k = 0; k + 1 < cuts.length; k++) {
+    const a = cuts[k] as number;
+    const b = cuts[k + 1] as number;
+    const run = runs.find((r) => r.start <= a && b <= r.end);
+    const para = paragraphs.find((p) => p.start <= a && b <= p.end);
+    if (!run && !para) continue;
+    const { start: _s, end: _e, ...style } = run ?? { start: a, end: b };
+    const merged = { start: a, end: b, ...style, ...para?.props } as TextRun;
+    const last = out[out.length - 1];
+    const { start: _ls, end: le, ...lastStyle } = last ?? { start: 0, end: -1 };
+    const { start: _ms, end: _me, ...mergedStyle } = merged;
+    if (last && le === a && same(lastStyle, mergedStyle)) out[out.length - 1] = { ...last, end: b };
+    else out.push(merged);
+  }
+  return out;
 }

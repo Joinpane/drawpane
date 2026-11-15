@@ -1811,6 +1811,23 @@ export class CanvasRenderer {
     for (const line of layout.lines) {
       const x0 = lineOffset(line, width, node.props);
       const baseline = line.baseline + dy;
+      // A list item's bullet or number, in its first character's style.
+      const marker = line.marker;
+      if (marker && !(this.#detail && marker.fontSize * scale < GREEK_BELOW)) {
+        ctx.font = marker.font;
+        ctx.fontKerning = "normal";
+        if (spaced) (ctx as Ctx & { letterSpacing: string }).letterSpacing = "0px";
+        const paints = override
+          ? black
+          : (marker.fills ?? (layerFills.length > 0 ? layerFills : black));
+        for (const paint of paints) {
+          if (paint.visible === false) continue;
+          const style = override ?? styleOf(paint);
+          if (!style) continue;
+          ctx.fillStyle = style;
+          ctx.fillText(marker.text, x0 + marker.x, baseline);
+        }
+      }
       for (const frag of line.fragments) {
         ctx.font = frag.font;
         ctx.fontKerning = "normal";

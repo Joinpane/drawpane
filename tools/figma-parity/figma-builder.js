@@ -202,6 +202,16 @@ async function buildParity(figma, suites) {
       if (run.textDecoration)
         node.setRangeTextDecoration(run.start, run.end, run.textDecoration.toUpperCase());
     }
+    // Lists: Drawpane keeps a paragraph's list on its characters, Figma per paragraph.
+    for (const run of spec.textRuns ?? []) {
+      if (run.listType)
+        node.setRangeListOptions(run.start, run.end, {
+          type: { none: "NONE", bullet: "UNORDERED", number: "ORDERED" }[run.listType],
+        });
+      // Figma counts a list's first level as indentation 1.
+      if (run.listType && run.listType !== "none")
+        node.setRangeIndentation(run.start, run.end, (run.listLevel ?? 0) + 1);
+    }
     // Drawpane's "width" is Figma's width-and-height: the box follows the text.
     const resize = spec.textAutoResize ?? "width";
     node.textAutoResize = { width: "WIDTH_AND_HEIGHT", height: "HEIGHT", none: "NONE" }[resize];

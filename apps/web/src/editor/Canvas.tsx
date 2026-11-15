@@ -497,8 +497,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     >
       <canvas ref={content} className="canvas__layer" />
       <canvas ref={overlay} className="canvas__layer canvas__overlay" />
+      {/* Keyed: editing another layer starts afresh, never with the last one's text. */}
       {editingNode && getProp(editingNode.props, "visible") ? (
-        <TextEditor nodeId={editingNode.id} />
+        <TextEditor key={editingNode.id} nodeId={editingNode.id} />
       ) : null}
       <VectorHints />
       <FrameNameEditor />

@@ -206,6 +206,24 @@ test.describe
       await expect(editing(page)).toBeFocused();
     });
 
+    test("editing another layer straight from this one types into that one's own text", async () => {
+      const before = (await props(page, id)).characters;
+      const other = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        return e.createLayer("text", { x: 40, y: 200, width: 10, height: 10 }, e.s.pageId, {
+          characters: "Other",
+        }) as string;
+      });
+      await page.evaluate((id) => (window as unknown as W).drawpane.startTextEdit(id), other);
+      await expect(editing(page)).toBeFocused();
+      await page.keyboard.press("End");
+      await page.keyboard.type("!");
+      await expect.poll(async () => (await props(page, other)).characters).toBe("Other!");
+      expect((await props(page, id)).characters).toBe(before);
+      await page.evaluate((id) => (window as unknown as W).drawpane.startTextEdit(id), id);
+      await expect(editing(page)).toBeFocused();
+    });
+
     test("reads Mixed for the layer once editing ends", async () => {
       await page.keyboard.press("Escape");
       await expect

@@ -141,7 +141,27 @@ export interface TextLine {
   /** Where the next line starts (after trailing spaces or the line break). */
   readonly next: number;
   readonly fragments: readonly TextFragment[];
+  /** How far its text starts in from the box's left (a list's indent), before alignment. */
+  readonly indent: number;
+  /** A list item's bullet or number, on its paragraph's first line. */
+  readonly marker: TextMarker | null;
 }
+
+/** A list item's bullet or number: drawn left of the text, at `x` from where the text starts. */
+export interface TextMarker {
+  readonly text: string;
+  readonly x: number;
+  readonly width: number;
+  readonly font: string;
+  readonly fontSize: number;
+  readonly fills: readonly Paint[] | null;
+  readonly run: ShapingRun | null;
+}
+
+/** A list level's indent, in its first character's font size (Figma's, measured). */
+export const LIST_INDENT_EM = 1.5;
+/** The gap between a number and its item's text, in the same (measured: 0.375 at 16 and 28 px). */
+export const LIST_NUMBER_GAP_EM = 0.375;
 
 export interface TextLayout {
   /** The layer's own font (rich text may use others; see each fragment). */
@@ -352,8 +372,21 @@ function computeLayout(
   const text = getProp(props, "characters");
   const styles = spanStyles(node, measurer);
   const m = new RangeMeasure(text, styles, measurer);
-  /** `para`: the line ends a paragraph that another follows (paragraph spacing goes after it). */
-  const breaks: Array<{ start: number; end: number; next: number; para?: boolean }> = [];
+  /**
+   * `para`: the line ends a paragraph that another follows (paragraph spacing goes after it).
+   * `indent`: its paragraph's list indent; `marker`: the bullet or number its first line has.
+   */
+  type Break = {
+    start: number;
+    end: number;
+    next: number;
+    para?: boolean;
+    indent?: number;
+    marker?: string | null;
+  };
+  const breaks: Break[] = [];
+  // Numbered lists count per level; a paragraph out of the list starts them over.
+  const counters: number[] = [];
 
   const trimEnd = (a: number, b: number) => {
     while (b > a && /\s/.test(text[b - 1] as string)) b--;
@@ -365,7 +398,21 @@ function computeLayout(
     const pEnd = nl === -1 ? text.length : nl;
     const after = nl === -1 ? text.length + 1 : nl + 1;
     const para = nl !== -1;
-    if (maxWidth === null || pEnd === paragraph) {
+    // A list item: indented a level at a time, its first line marked (decision 0017).
+    const first = styles[m.styleAt(paragraph)] as SpanStyle;
+    const listType = getProp(first.span.props, "listType");
+    const level = listType === "none" ? 0 : getProp(first.span.props, "listLevel");
+    const indent = listType === "none" ? 0 : (level + 1) * LIST_INDENT_EM * first.size;
+    let marker: string | null = null;
+    if (listType === "none") counters.length = 0;
+    else {
+      counters.length = level + 1;
+      counters[level] = listType === "number" ? (counters[level] ?? 0) + 1 : 0;
+      marker = listType === "number" ? `${counters[level]}.` : "•";
+    }
+    const room = maxWidth === null ? null : Math.max(1, maxWidth - indent);
+    const lines = breaks.length;
+    if (room === null || pEnd === paragraph) {
       breaks.push({ start: paragraph, end: trimEnd(paragraph, pEnd), next: after, para });
     } else {
       let start = paragraph;
@@ -383,7 +430,7 @@ function computeLayout(
         const space = /\s/.test(match[0]);
         const tokenWidth = m.width(a, b);
         // Spaces never push a line over: trailing spaces don't count.
-        if (end === start || space || lineWidth + tokenWidth <= maxWidth) {
+        if (end === start || space || lineWidth + tokenWidth <= room) {
           end = b;
           lineWidth += tokenWidth;
           continue;
@@ -394,10 +441,10 @@ function computeLayout(
         end = b;
         lineWidth = space ? 0 : tokenWidth;
         // Break words that don't fit on a line of their own.
-        if (lineWidth > maxWidth) {
-          while (end > start && m.width(start, end) > maxWidth) {
+        if (lineWidth > room) {
+          while (end > start && m.width(start, end) > room) {
             let cut = end - 1;
-            while (cut > start + 1 && m.width(start, cut) > maxWidth) cut--;
+            while (cut > start + 1 && m.width(start, cut) > room) cut--;
             if (cut > start + 1 && isLow(text.charCodeAt(cut))) cut--;
             breaks.push({ start, end: cut, next: cut });
             start = cut;
@@ -406,6 +453,11 @@ function computeLayout(
         }
       }
       breaks.push({ start, end: trimEnd(start, end), next: after, para });
+    }
+    for (let k = lines; k < breaks.length; k++) {
+      const br = breaks[k] as Break;
+      br.indent = indent;
+      br.marker = k === lines ? marker : null;
     }
     paragraph = after;
   }
@@ -435,8 +487,8 @@ function computeLayout(
    * The last line shown of truncated text: as much of it as fits with "…"
    * after it (in the style of the last character kept), within `maxWidth`.
    */
-  const ellipsize = (br: { start: number; end: number; next: number }, top: number): TextLine => {
-    const room = maxWidth ?? Number.POSITIVE_INFINITY;
+  const ellipsize = (br: Break, top: number): TextLine => {
+    const room = maxWidth === null ? Number.POSITIVE_INFINITY : maxWidth - (br.indent ?? 0);
     const dots = (at: number) => {
       const s = styles[m.styleAt(Math.max(br.start, at - 1))] as SpanStyle;
       return { s, width: measurer.width(s.font, "…", s.run) + s.spacing };
@@ -448,7 +500,7 @@ function computeLayout(
     }
     // No dangling space before the dots.
     while (cut > br.start && /\s/.test(text[cut - 1] as string)) cut--;
-    const line = makeLine({ start: br.start, end: cut, next: br.next }, top);
+    const line = makeLine({ ...br, end: cut }, top);
     const { s, width } = dots(cut);
     const fragment = fragmentOf(s, cut, cut, "…", line.width, width);
     return {
@@ -461,8 +513,28 @@ function computeLayout(
     };
   };
 
+  /** A list item's marker, in the style of its paragraph's first character. */
+  const markerOf = (text: string, at: number): TextMarker => {
+    const s = styles[m.styleAt(at)] as SpanStyle;
+    const width = measurer.width(s.font, text, s.run);
+    // A bullet centred in the last level's indent; a number ending a little before the text.
+    const x =
+      text === "•"
+        ? -(LIST_INDENT_EM / 2) * s.size - width / 2
+        : -LIST_NUMBER_GAP_EM * s.size - width;
+    return {
+      text,
+      x,
+      width,
+      font: s.font,
+      fontSize: s.size,
+      fills: s.span.own.fills ?? null,
+      run: s.run,
+    };
+  };
+
   /** A line's fragments and box for the characters [start, end), its top at `top`. */
-  const makeLine = (br: { start: number; end: number; next: number }, top: number): TextLine => {
+  const makeLine = (br: Break, top: number): TextLine => {
     // The styles on this line (an empty line takes the style at its start).
     const first = m.styleAt(br.start);
     const last = br.end > br.start ? m.styleAt(br.end - 1) : first;
@@ -491,6 +563,8 @@ function computeLayout(
       end: br.end,
       next: Math.min(br.next, text.length + 1),
       fragments,
+      indent: br.indent ?? 0,
+      marker: br.marker ? markerOf(br.marker, br.start) : null,
     };
   };
 
@@ -507,7 +581,7 @@ function computeLayout(
     // Space after a paragraph, not after the last line shown.
     if (br.para && i < kept.length - 1) top += spacing;
   }
-  const width = lines.reduce((w, l) => Math.max(w, l.width), 0);
+  const width = lines.reduce((w, l) => Math.max(w, l.indent + l.width), 0);
   return {
     font: fontString(props),
     lines,
@@ -520,10 +594,14 @@ function computeLayout(
 
 const isLow = (c: number) => c >= 0xdc00 && c <= 0xdfff;
 
-/** Where a line starts in a box `width` wide, for the layer's alignment. */
+/** Where a line's text starts in a box `width` wide: past its list indent, then aligned. */
 export function lineOffset(line: TextLine, width: number, props: Props): number {
   const align = getProp(props, "textAlign");
-  return align === "center" ? (width - line.width) / 2 : align === "right" ? width - line.width : 0;
+  const room = width - line.indent;
+  return (
+    line.indent +
+    (align === "center" ? (room - line.width) / 2 : align === "right" ? room - line.width : 0)
+  );
 }
 
 /** The width and height a text node should have after its content or style changed. */

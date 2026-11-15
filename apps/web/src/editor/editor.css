@@ -719,6 +719,21 @@
   outline: none;
   box-shadow: var(--shadow-focus);
 }
+.inspector__lists {
+  display: flex;
+  align-items: center;
+  gap: var(--space-100);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.inspector__lists-gap {
+  width: 1px;
+  height: 16px;
+  margin: 0 var(--space-100);
+  background: var(--line);
+}
 .inspector__padding,
 .inspector__sides {
   display: grid;
