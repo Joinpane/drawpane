@@ -114,9 +114,11 @@ test.describe
       const { now, fit } = await cameras(page, far);
       // Lands exactly on what Shift+2 fits, not a float's breadth off.
       expect(now).toEqual(fit);
-      // ...after several frames on the way.
+      // ...by way of the cameras in between, not a jump. (How many depends on how fast frames
+      // come: the glide takes its time, not a number of frames.)
       const path = await recorded(page);
-      expect(path.length).toBeGreaterThanOrEqual(5);
+      expect(path.length).toBeGreaterThanOrEqual(2);
+      expect(path[0]).not.toEqual(fit);
       expect(path.at(-1)).toEqual(fit);
       expect(await page.evaluate(() => (window as unknown as W).drawpane.s.selection)).toEqual([
         far,
@@ -135,13 +137,35 @@ test.describe
     test("a wheel mid-glide stops it where it is", async () => {
       await home(page);
       await recorded(page);
+      // Two frames in, the canvas is scrolled: sent from the page, so it lands mid-glide however
+      // busy the machine is (from the test, the glide can be over before the wheel arrives).
+      const wheeled = page.evaluate(
+        () =>
+          new Promise<boolean>((resolve) => {
+            const e = (window as unknown as W).drawpane;
+            let frames = 0;
+            const off = e.state.subscribe(() => {
+              if (!e.cameraAnimating || ++frames < 2) return;
+              off();
+              queueMicrotask(() => {
+                const canvas = document.querySelector(".canvas__overlay") as HTMLElement;
+                const r = canvas.getBoundingClientRect();
+                canvas.dispatchEvent(
+                  new WheelEvent("wheel", {
+                    deltaY: 120,
+                    clientX: r.left + r.width / 2,
+                    clientY: r.top + r.height / 2,
+                    bubbles: true,
+                    cancelable: true,
+                  }),
+                );
+                resolve(e.cameraAnimating);
+              });
+            });
+          }),
+      );
       await icon(page, far).dblclick();
-      // A couple of frames in, scroll the canvas.
-      await page.waitForFunction(() => ((window as unknown as W).cameras?.length ?? 0) >= 2);
-      expect(await animating(page)).toBe(true);
-      await page.mouse.move(720, 450);
-      await page.mouse.wheel(0, 120);
-      await expect.poll(() => animating(page)).toBe(false);
+      expect(await wheeled).toBe(false);
       const stopped = (await cameras(page, far)).now;
       // Nothing moves it after that.
       await page.waitForTimeout(700);
@@ -160,7 +184,9 @@ test.describe
       await settled(page);
       const { now, fit } = await cameras(page, far);
       expect(now).toEqual(fit);
-      expect((await recorded(page)).length).toBeGreaterThanOrEqual(5);
+      const path = await recorded(page);
+      expect(path.length).toBeGreaterThanOrEqual(2);
+      expect(path[0]).not.toEqual(fit);
     });
 
     test("with reduced motion it jumps straight there", async () => {

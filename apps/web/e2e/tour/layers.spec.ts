@@ -1,8 +1,9 @@
 /**
  * Screenshots of the layers panel for design review, in both themes: row
  * states (auto layout, components, masks, hidden, locked), finding layers
- * with a filter, the status line while dragging, and the canvas zoomed to a
- * layer by double-clicking its icon.
+ * with a filter, the status line while dragging, the canvas zoomed to a
+ * layer by double-clicking its icon, and the line between the pages and the
+ * layers mid-drag.
  * Run with `pnpm --filter @drawpane/web tour`.
  */
 import { expect } from "@playwright/test";
@@ -116,5 +117,26 @@ test("layers tour", async ({ browser }) => {
     .locator(".dp-layer__icon")
     .dblclick();
   await shot(page, "179-layers-zoom-to-layer");
+
+  // Many pages, and the line below them dragged down to show more.
+  await page.evaluate(() => {
+    const e = (window as unknown as W).drawpane as unknown as {
+      s: { pageId: string };
+      doc: { pageIds(): string[] };
+      addPage(): void;
+      setPage(id: string): void;
+    };
+    const first = e.s.pageId;
+    while (e.doc.pageIds().length < 14) e.addPage();
+    e.setPage(first);
+  });
+  const line = page.getByRole("separator", { name: "Resize the pages list" });
+  const box = (await line.boundingBox()) as { x: number; y: number; width: number };
+  await page.mouse.move(box.x + box.width / 2, box.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + 124, { steps: 6 });
+  await page.waitForTimeout(200);
+  await shot(page, "113-pages-resize", page.getByRole("complementary", { name: /^Pages, layers/ }));
+  await page.mouse.up();
   await context.close();
 });

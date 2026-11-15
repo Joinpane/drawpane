@@ -1,6 +1,7 @@
 /**
  * How the editor's side panels are laid out, in this browser: each one's
- * width (dragged at its inner edge) and whether the UI is minimized (the
+ * width (dragged at its inner edge), how tall the pages list is above the
+ * layers (dragged at the line between them) and whether the UI is minimized (the
  * layers panel tucked away, the inspector only while something is selected,
  * like Figma's ⇧⌘\). One store for every editor, remembered between files.
  */
@@ -12,6 +13,8 @@ export type PaneSide = "left" | "right";
 export interface PanelLayout {
   readonly left: number;
   readonly right: number;
+  /** The pages list's chosen height, below the Pages heading. */
+  readonly pages: number;
   readonly minimized: boolean;
 }
 
@@ -24,11 +27,27 @@ export const PANE = {
   gutter: 12,
 } as const;
 
+export const PAGES = {
+  /** The list's height before it's dragged: five pages and a bit. */
+  default: 160,
+  /** About one and a half rows, so it still reads as a list. */
+  min: 42,
+  /** The most that's remembered, whatever the window. */
+  max: 2000,
+  /** The layers below always keep this much height, heading included. */
+  layersMin: 120,
+} as const;
+
 /** The canvas keeps at least this much width between two open panes. */
 const MIN_CANVAS = 360;
 
 const KEY = "drawpane:panels";
-const DEFAULTS: PanelLayout = { left: PANE.default, right: PANE.default, minimized: false };
+const DEFAULTS: PanelLayout = {
+  left: PANE.default,
+  right: PANE.default,
+  pages: PAGES.default,
+  minimized: false,
+};
 
 /**
  * A pane's width as it can be shown: within its range, and narrow enough to
@@ -39,6 +58,25 @@ export function clampPane(width: number, viewportWidth: number, other: number): 
   const room = viewportWidth - other - MIN_CANVAS - PANE.gutter * (other > 0 ? 4 : 3);
   const max = Math.max(PANE.min, Math.min(PANE.max, room));
   return Math.round(Math.min(max, Math.max(PANE.min, width)));
+}
+
+/**
+ * The heights the pages list can be shown at: never taller than all the
+ * pages (`content`) or than leaves the layers their room (`room`: the
+ * height the list and the layers share), and at least about one
+ * and a half rows, or all of them when there are fewer.
+ */
+export function pagesRange(content: number, room: number): { min: number; max: number } {
+  const fit = Math.max(0, Math.round(content));
+  const least = Math.min(PAGES.min, fit);
+  const max = Math.max(least, Math.min(fit, Math.round(room - PAGES.layersMin)));
+  return { min: least, max };
+}
+
+/** The pages list's height as shown: the chosen one, kept within `pagesRange`. */
+export function clampPages(height: number, content: number, room: number): number {
+  const { min, max } = pagesRange(content, room);
+  return Math.round(Math.min(max, Math.max(min, height)));
 }
 
 /** What's stored, keeping only well-formed values. */
@@ -52,6 +90,10 @@ export function readPanelLayout(raw: string | null): PanelLayout {
     return {
       left: width(parsed?.left),
       right: width(parsed?.right),
+      pages:
+        typeof parsed?.pages === "number" && Number.isFinite(parsed.pages)
+          ? Math.round(Math.min(PAGES.max, Math.max(PAGES.min, parsed.pages)))
+          : PAGES.default,
       minimized: parsed?.minimized === true,
     };
   } catch {
