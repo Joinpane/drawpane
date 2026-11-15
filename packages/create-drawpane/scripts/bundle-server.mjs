@@ -3,7 +3,7 @@
 // the D1 migrations, and the Worker's configuration as a template. The
 // template comes from apps/worker/wrangler.jsonc, so bindings, Durable Object
 // migrations and compatibility settings have one source of truth.
-import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,6 +40,9 @@ await rm(out, { recursive: true, force: true });
 await mkdir(join(out, "worker"), { recursive: true });
 await cp(join(worker, "dist/index.js"), join(out, "worker/index.js"));
 await cp(join(worker, "dist/index.js.map"), join(out, "worker/index.js.map")).catch(() => {});
+// WebAssembly the Worker imports (the headless renderer's resvg) sits beside it as modules of its own.
+for (const name of await readdir(join(worker, "dist")))
+  if (name.endsWith(".wasm")) await cp(join(worker, "dist", name), join(out, "worker", name));
 await cp(web, join(out, "assets"), { recursive: true });
 await cp(join(worker, "migrations"), join(out, "migrations"), { recursive: true });
 await writeFile(join(out, "wrangler.template.json"), `${JSON.stringify(config, null, 2)}\n`);

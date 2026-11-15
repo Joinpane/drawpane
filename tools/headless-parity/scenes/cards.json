@@ -1,0 +1,867 @@
+{
+  "suite": "cards",
+  "about": "Auto layout cards and type in Inter and Instrument Sans: several sizes and weights, upper case with tracking, wrapping.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#ffffff",
+  "cells": [
+    {
+      "id": "inter-card-16",
+      "layers": [
+        {
+          "type": "frame",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 128,
+          "clipContent": true,
+          "layoutMode": "column",
+          "gap": 6,
+          "paddingTop": 14,
+          "paddingRight": 16,
+          "paddingBottom": 14,
+          "paddingLeft": 16,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#f6f4ef"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#d9d4c7"
+            }
+          ],
+          "strokeWeight": 1,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#1c1b1a29",
+              "x": 0,
+              "y": 4,
+              "blur": 12,
+              "spread": 0
+            }
+          ],
+          "children": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Weekly report",
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": 600,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#e8590c"
+                }
+              ],
+              "textAutoResize": "width",
+              "letterSpacing": {
+                "unit": "px",
+                "value": 0.4
+              },
+              "textCase": "upper"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Sales up 12%",
+              "fontFamily": "Inter",
+              "fontSize": 16,
+              "fontWeight": 600,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#1c1b1a"
+                }
+              ],
+              "textAutoResize": "width"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Since last week, across all regions.",
+              "fontFamily": "Inter",
+              "fontSize": 12,
+              "fontWeight": 400,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#5c5850"
+                }
+              ],
+              "textAutoResize": "width"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inter-card-24",
+      "layers": [
+        {
+          "type": "frame",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 128,
+          "clipContent": true,
+          "layoutMode": "column",
+          "gap": 6,
+          "paddingTop": 14,
+          "paddingRight": 16,
+          "paddingBottom": 14,
+          "paddingLeft": 16,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#f6f4ef"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#d9d4c7"
+            }
+          ],
+          "strokeWeight": 1,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#1c1b1a29",
+              "x": 0,
+              "y": 4,
+              "blur": 12,
+              "spread": 0
+            }
+          ],
+          "children": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Weekly report",
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": 600,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#2b4fd6"
+                }
+              ],
+              "textAutoResize": "width",
+              "letterSpacing": {
+                "unit": "px",
+                "value": 0.4
+              },
+              "textCase": "upper"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Sales up 12%",
+              "fontFamily": "Inter",
+              "fontSize": 24,
+              "fontWeight": 700,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#1c1b1a"
+                }
+              ],
+              "textAutoResize": "width"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Since last week, across all regions.",
+              "fontFamily": "Inter",
+              "fontSize": 13,
+              "fontWeight": 400,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#5c5850"
+                }
+              ],
+              "textAutoResize": "width"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inter-card-32",
+      "layers": [
+        {
+          "type": "frame",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 128,
+          "clipContent": true,
+          "layoutMode": "column",
+          "gap": 6,
+          "paddingTop": 14,
+          "paddingRight": 16,
+          "paddingBottom": 14,
+          "paddingLeft": 16,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#f6f4ef"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#d9d4c7"
+            }
+          ],
+          "strokeWeight": 1,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#1c1b1a29",
+              "x": 0,
+              "y": 4,
+              "blur": 12,
+              "spread": 0
+            }
+          ],
+          "children": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Weekly report",
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": 600,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#2f9e44"
+                }
+              ],
+              "textAutoResize": "width",
+              "letterSpacing": {
+                "unit": "px",
+                "value": 0.4
+              },
+              "textCase": "upper"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Sales up 12%",
+              "fontFamily": "Inter",
+              "fontSize": 32,
+              "fontWeight": 500,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#1c1b1a"
+                }
+              ],
+              "textAutoResize": "width"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Since last week, across all regions.",
+              "fontFamily": "Inter",
+              "fontSize": 14,
+              "fontWeight": 400,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#5c5850"
+                }
+              ],
+              "textAutoResize": "width"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inter-12-400",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Inter",
+          "fontSize": 12,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "inter-14-500",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Inter",
+          "fontSize": 14,
+          "fontWeight": 500,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "inter-20-600",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Inter",
+          "fontSize": 20,
+          "fontWeight": 600,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "inter-28-700",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Inter",
+          "fontSize": 28,
+          "fontWeight": 700,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "inter-40-800",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Inter",
+          "fontSize": 40,
+          "fontWeight": 800,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "instrument-card-16",
+      "layers": [
+        {
+          "type": "frame",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 128,
+          "clipContent": true,
+          "layoutMode": "column",
+          "gap": 6,
+          "paddingTop": 14,
+          "paddingRight": 16,
+          "paddingBottom": 14,
+          "paddingLeft": 16,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#f6f4ef"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#d9d4c7"
+            }
+          ],
+          "strokeWeight": 1,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#1c1b1a29",
+              "x": 0,
+              "y": 4,
+              "blur": 12,
+              "spread": 0
+            }
+          ],
+          "children": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Weekly report",
+              "fontFamily": "Instrument Sans",
+              "fontSize": 11,
+              "fontWeight": 600,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#e8590c"
+                }
+              ],
+              "textAutoResize": "width",
+              "letterSpacing": {
+                "unit": "px",
+                "value": 0.4
+              },
+              "textCase": "upper"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Sales up 12%",
+              "fontFamily": "Instrument Sans",
+              "fontSize": 16,
+              "fontWeight": 600,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#1c1b1a"
+                }
+              ],
+              "textAutoResize": "width"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Since last week, across all regions.",
+              "fontFamily": "Instrument Sans",
+              "fontSize": 12,
+              "fontWeight": 400,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#5c5850"
+                }
+              ],
+              "textAutoResize": "width"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "instrument-card-24",
+      "layers": [
+        {
+          "type": "frame",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 128,
+          "clipContent": true,
+          "layoutMode": "column",
+          "gap": 6,
+          "paddingTop": 14,
+          "paddingRight": 16,
+          "paddingBottom": 14,
+          "paddingLeft": 16,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#f6f4ef"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#d9d4c7"
+            }
+          ],
+          "strokeWeight": 1,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#1c1b1a29",
+              "x": 0,
+              "y": 4,
+              "blur": 12,
+              "spread": 0
+            }
+          ],
+          "children": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Weekly report",
+              "fontFamily": "Instrument Sans",
+              "fontSize": 11,
+              "fontWeight": 600,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#2b4fd6"
+                }
+              ],
+              "textAutoResize": "width",
+              "letterSpacing": {
+                "unit": "px",
+                "value": 0.4
+              },
+              "textCase": "upper"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Sales up 12%",
+              "fontFamily": "Instrument Sans",
+              "fontSize": 24,
+              "fontWeight": 700,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#1c1b1a"
+                }
+              ],
+              "textAutoResize": "width"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Since last week, across all regions.",
+              "fontFamily": "Instrument Sans",
+              "fontSize": 13,
+              "fontWeight": 400,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#5c5850"
+                }
+              ],
+              "textAutoResize": "width"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "instrument-card-32",
+      "layers": [
+        {
+          "type": "frame",
+          "x": 20,
+          "y": 16,
+          "width": 200,
+          "height": 128,
+          "clipContent": true,
+          "layoutMode": "column",
+          "gap": 6,
+          "paddingTop": 14,
+          "paddingRight": 16,
+          "paddingBottom": 14,
+          "paddingLeft": 16,
+          "cornerRadius": 12,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#f6f4ef"
+            }
+          ],
+          "strokes": [
+            {
+              "type": "solid",
+              "color": "#d9d4c7"
+            }
+          ],
+          "strokeWeight": 1,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#1c1b1a29",
+              "x": 0,
+              "y": 4,
+              "blur": 12,
+              "spread": 0
+            }
+          ],
+          "children": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Weekly report",
+              "fontFamily": "Instrument Sans",
+              "fontSize": 11,
+              "fontWeight": 600,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#2f9e44"
+                }
+              ],
+              "textAutoResize": "width",
+              "letterSpacing": {
+                "unit": "px",
+                "value": 0.4
+              },
+              "textCase": "upper"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Sales up 12%",
+              "fontFamily": "Instrument Sans",
+              "fontSize": 32,
+              "fontWeight": 500,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#1c1b1a"
+                }
+              ],
+              "textAutoResize": "width"
+            },
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 10,
+              "height": 10,
+              "characters": "Since last week, across all regions.",
+              "fontFamily": "Instrument Sans",
+              "fontSize": 14,
+              "fontWeight": 400,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#5c5850"
+                }
+              ],
+              "textAutoResize": "width"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "instrument-12-400",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Instrument Sans",
+          "fontSize": 12,
+          "fontWeight": 400,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "instrument-14-500",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Instrument Sans",
+          "fontSize": 14,
+          "fontWeight": 500,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "instrument-20-600",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Instrument Sans",
+          "fontSize": 20,
+          "fontWeight": 600,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "instrument-28-700",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Instrument Sans",
+          "fontSize": 28,
+          "fontWeight": 700,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    },
+    {
+      "id": "instrument-40-800",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 10,
+          "characters": "Grumpy wizards make toxic brew",
+          "fontFamily": "Instrument Sans",
+          "fontSize": 40,
+          "fontWeight": 800,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#1c1b1a"
+            }
+          ],
+          "textAutoResize": "height"
+        }
+      ]
+    }
+  ]
+}

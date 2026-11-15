@@ -84,7 +84,11 @@ export async function facesOffered(
   const variants = new Set(
     wanted.map((face) => {
       const available = face.italic && info.italics.length > 0 ? info.italics : info.weights;
-      const weight = info.variable ? face.weight : nearestWeight(available, face.weight);
+      // A variable family has every weight in its range; Google refuses one outside it.
+      const weight =
+        info.variable && available.length > 0
+          ? Math.min(Math.max(face.weight, Math.min(...available)), Math.max(...available))
+          : nearestWeight(available, face.weight);
       return `${weight}${face.italic && info.italics.length > 0 ? "i" : ""}`;
     }),
   );

@@ -259,13 +259,16 @@ describe("post effects in SVG", () => {
     expect(filter).toContain('in2="post1" operator="in" result="post2"/>');
   });
 
-  it("gives duo noise its second colour on the cells the first leaves", () => {
+  it("gives duo noise's second colour grain of its own, between the first's", () => {
     const filter = postPrimitives(
       [{ ...DEFAULT_NOISE, noiseType: "duo", secondaryColor: "#ff000080" }],
       1,
     );
     expect(filter).toContain('flood-color="#ff0000" flood-opacity="0.502"');
-    expect(filter).toContain('operator="out"');
+    // Two fields, the second's cells kept only where the first's aren't.
+    expect(filter.match(/<feTurbulence /g)).toHaveLength(2);
+    expect(filter).toContain('<feComposite in="off0" in2="second0" operator="in"');
+    expect(filter).toContain('<feComposite in="off0" in2="cells0" operator="out"');
     expect(filter).toContain("<feMerge");
   });
 

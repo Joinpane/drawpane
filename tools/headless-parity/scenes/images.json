@@ -1,0 +1,177 @@
+{
+  "suite": "images",
+  "about": "An image fill (a photo-like gradient picture, 320 \u00d7 200) placed each way: fill, fit, stretch, crop and tile, with corner radius, opacity and an ellipse.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#ffffff",
+  "image": {
+    "width": 320,
+    "height": 200
+  },
+  "cells": [
+    {
+      "id": "fill",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "fills": [
+            {
+              "type": "image",
+              "ref": "$IMAGE",
+              "scaleMode": "fill"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fit",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "fills": [
+            {
+              "type": "image",
+              "ref": "$IMAGE",
+              "scaleMode": "fit"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stretch",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "fills": [
+            {
+              "type": "image",
+              "ref": "$IMAGE",
+              "scaleMode": "stretch"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "crop",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "fills": [
+            {
+              "type": "image",
+              "ref": "$IMAGE",
+              "scaleMode": "crop",
+              "crop": {
+                "x": 0.25,
+                "y": 0.2,
+                "width": 0.5,
+                "height": 0.6
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tile",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "fills": [
+            {
+              "type": "image",
+              "ref": "$IMAGE",
+              "scaleMode": "tile"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rounded",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "fills": [
+            {
+              "type": "image",
+              "ref": "$IMAGE",
+              "scaleMode": "fill"
+            }
+          ],
+          "cornerRadius": 24
+        }
+      ]
+    },
+    {
+      "id": "faded",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "fills": [
+            {
+              "type": "image",
+              "ref": "$IMAGE",
+              "scaleMode": "fill",
+              "opacity": 0.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ellipse",
+      "layers": [
+        {
+          "type": "ellipse",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "fills": [
+            {
+              "type": "image",
+              "ref": "$IMAGE",
+              "scaleMode": "fill"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

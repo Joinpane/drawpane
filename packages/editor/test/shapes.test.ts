@@ -153,7 +153,9 @@ describe("export", () => {
     ]);
     const out = svg(editor, "s");
     expect(out).toContain("<pattern");
-    expect(out.match(/<path d="M50 50L/g)?.length).toBe(180);
+    // Wedges about the centre of the layer's unit square, scaled onto the layer.
+    expect(out.match(/<path d="M0.5 0.5L/g)?.length).toBe(180);
+    expect(out).toContain('patternTransform="matrix(100 0 0 100 0 0)"');
     // The star's outline starts at its top point.
     expect(out).toContain('<path d="M50 0L');
     expect(

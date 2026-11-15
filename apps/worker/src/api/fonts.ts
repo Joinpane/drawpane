@@ -35,7 +35,7 @@ const BROWSER_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 
 /** …and static TrueType files, one per weight, to anything else. */
-const PLAIN_UA = "Drawpane-Fonts/1.0";
+export const PLAIN_UA = "Drawpane-Fonts/1.0";
 
 const FAMILY = /^[A-Za-z0-9][A-Za-z0-9 ]{0,63}$/;
 const VARIANT = /^([1-9]00)(i?)$/;
@@ -235,14 +235,64 @@ export const fonts = new Hono<AppContext>()
 
     const stored = await c.env.FILES.get(key);
     if (stored) return new Response(stored.body, { headers });
-
-    const response = await fetch(`${GSTATIC}${path}${url.search}`, {
-      headers: { "user-agent": BROWSER_UA },
-    });
-    if (!response.ok) throw notFound("Google Fonts doesn't have that file.");
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (fontFormat(bytes) !== expected || bytes.byteLength > FONT_MAX_BYTES)
-      throw notFound("That isn't a font file.");
-    await c.env.FILES.put(key, bytes, { httpMetadata: { contentType: MIME[expected] } });
+    const bytes = await copyFromGoogle(c.env, key, path, url.search, expected);
     return new Response(bytes, { headers });
   });
+
+/**
+ * Fetches a font file from Google and keeps it in R2 under `key`. Refuses
+ * (404) what isn't a font of the format its name says, or is too large.
+ */
+async function copyFromGoogle(
+  env: { FILES: R2Bucket },
+  key: string,
+  path: string,
+  search: string,
+  expected: "ttf" | "woff2",
+): Promise<Uint8Array> {
+  const response = await fetch(`${GSTATIC}${path}${search}`, {
+    headers: { "user-agent": BROWSER_UA },
+  });
+  if (!response.ok) throw notFound("Google Fonts doesn't have that file.");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (fontFormat(bytes) !== expected || bytes.byteLength > FONT_MAX_BYTES)
+    throw notFound("That isn't a font file.");
+  await env.FILES.put(key, bytes, { httpMetadata: { contentType: MIME[expected] } });
+  return bytes;
+}
+
+/**
+ * A Google font file's bytes, by its gstatic URL or this proxy's: from R2,
+ * or fetched and kept there as the proxy does, so the two share one copy.
+ * Null when it isn't a file we serve or Google hasn't it. For rendering and
+ * measuring text in the Worker (src/render/fonts.ts).
+ */
+export async function fontFileFromGoogle(
+  env: { FILES: R2Bucket },
+  href: string,
+): Promise<ArrayBuffer | null> {
+  const rest = href.startsWith(GSTATIC)
+    ? href.slice(GSTATIC.length)
+    : href.startsWith(GSTATIC_PROXY)
+      ? href.slice(GSTATIC_PROXY.length)
+      : null;
+  if (rest === null) return null;
+  const url = new URL(rest, "https://fonts.gstatic.com/");
+  const path = url.pathname.slice(1);
+  const key = fontFileKey(path, url.searchParams);
+  if (!key) return null;
+  const stored = await env.FILES.get(key);
+  if (stored) return stored.arrayBuffer();
+  try {
+    const bytes = await copyFromGoogle(
+      env,
+      key,
+      path,
+      url.search,
+      path.endsWith(".ttf") ? "ttf" : "woff2",
+    );
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  } catch {
+    return null;
+  }
+}

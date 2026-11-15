@@ -7,8 +7,9 @@
  * groups. Each layer keeps its rotation and flips (as a transform matrix),
  * its opacity and blend mode, solid and gradient fills (one element per
  * paint, bottom first; angular gradients as a pattern of fine wedges), and solid or gradient strokes with weight, position
- * (inside and outside are emulated with a clip path or mask), dashes, joins
- * and caps.
+ * (inside and outside are emulated with a clip path or mask), dashes (fitted
+ * to each side and corner of a box or ellipse, as on the canvas), joins and
+ * caps.
  *
  * Image fills are drawn when the caller supplies the image (`options.images`:
  * a URL, such as a data: URL for a self-contained file, and its natural
@@ -30,6 +31,7 @@
  *   flexbox
  */
 import { getProp, type NodeRecord, type Paint, type Props } from "@drawpane/model";
+import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
 import { exportBounds } from "./export";
 import { type Matrix, type Rect, round2 } from "./geometry";
 import { FULL_CROP, imagePlacement } from "./images";
@@ -167,9 +169,14 @@ export function postPrimitives(post: readonly PostEffect[], scale: number): stri
           `<feComposite in="${grain}" in2="${cells}" operator="in" result="${grain}"/>`,
         );
         if (e.noiseType === "duo") {
+          // The second colour is grain of its own, as dense, between the first's (see noise.ts).
           const off = `off${i}`;
+          const second = `second${i}`;
           parts.push(
+            `<feTurbulence type="fractalNoise"${attr("baseFrequency", frequency)} numOctaves="1" seed="${31 + i}" result="${second}"/>`,
+            `<feComponentTransfer in="${second}" result="${second}"><feFuncA type="discrete" tableValues="${table}"/></feComponentTransfer>`,
             flood(e.secondaryColor, off),
+            `<feComposite in="${off}" in2="${second}" operator="in" result="${off}"/>`,
             `<feComposite in="${off}" in2="${cells}" operator="out" result="${off}"/>`,
             `<feMerge result="duo${i}"><feMergeNode in="${off}"/><feMergeNode in="${grain}"/></feMerge>`,
           );
@@ -240,33 +247,37 @@ class SvgWriter {
     }
     if (paint.type === "angular") {
       // SVG has no conic gradient: a pattern of thin wedges, each the colour
-      // at its middle, reads the same at any size people export.
+      // at its middle, reads the same at any size people export. Their edges
+      // aren't smoothed, so neighbours don't show seams where they overlap.
+      // Laid out in the layer's unit square and scaled onto it, as on the
+      // canvas (gradients.ts): on a wide layer the wedges fan out unevenly.
       const id = this.id("angular");
-      const cx = paint.from.x * w;
-      const cy = paint.from.y * h;
-      const start = Math.atan2(paint.to.y * h - cy, paint.to.x * w - cx);
+      const cx = paint.from.x;
+      const cy = paint.from.y;
+      const start = Math.atan2(paint.to.y - cy, paint.to.x - cx);
       const r = Math.max(
         Math.hypot(cx, cy),
-        Math.hypot(w - cx, cy),
-        Math.hypot(cx, h - cy),
-        Math.hypot(w - cx, h - cy),
-        1,
+        Math.hypot(1 - cx, cy),
+        Math.hypot(cx, 1 - cy),
+        Math.hypot(1 - cx, 1 - cy),
+        0.01,
       );
       const wedges: string[] = [];
       const n = ANGULAR_WEDGES;
       // Each wedge overlaps the next by a hair so no seams show.
       const overlap = (Math.PI * 2) / n / 4;
+      const p = (v: number) => String(Math.round(v * 1e5) / 1e5);
       for (let i = 0; i < n; i++) {
         const a0 = start + (i / n) * Math.PI * 2;
         const a1 = start + ((i + 1) / n) * Math.PI * 2 + overlap;
         const { color, alpha } = splitColor(stopColorAt(paint.stops, (i + 0.5) / n));
-        const d = `M${svgNumber(cx)} ${svgNumber(cy)}L${svgNumber(cx + Math.cos(a0) * r)} ${svgNumber(cy + Math.sin(a0) * r)}L${svgNumber(cx + Math.cos(a1) * r)} ${svgNumber(cy + Math.sin(a1) * r)}Z`;
+        const d = `M${p(cx)} ${p(cy)}L${p(cx + Math.cos(a0) * r)} ${p(cy + Math.sin(a0) * r)}L${p(cx + Math.cos(a1) * r)} ${p(cy + Math.sin(a1) * r)}Z`;
         wedges.push(
-          `<path d="${d}"${attr("fill", color)}${alpha < 1 ? attr("fill-opacity", alpha) : ""}/>`,
+          `<path d="${d}"${attr("fill", color)}${alpha < 1 ? attr("fill-opacity", alpha) : ""} shape-rendering="crispEdges"/>`,
         );
       }
       this.defs.push(
-        `<pattern id="${id}" patternUnits="userSpaceOnUse"${attr("width", Math.max(w, 1))}${attr("height", Math.max(h, 1))}>${wedges.join("")}</pattern>`,
+        `<pattern id="${id}" patternUnits="userSpaceOnUse" width="1" height="1" patternTransform="matrix(${round2(Math.max(w, 0.01))} 0 0 ${round2(Math.max(h, 0.01))} 0 0)">${wedges.join("")}</pattern>`,
       );
       return ` ${kind}="url(#${id})"${opacity < 1 ? attr(`${kind}-opacity`, opacity) : ""}`;
     }
@@ -342,6 +353,37 @@ function shapeOf(node: NodeRecord, w: number, h: number): { tag: string; attrs: 
 }
 
 type Corners = readonly [tl: number, tr: number, br: number, bl: number];
+
+/**
+ * A dashed box's or ellipse's outline, piece by piece (each side, corner or
+ * quarter) with the dash pattern fitted to it, as the canvas dashes it
+ * (dashes.ts); null for other shapes, which dash continuously.
+ */
+export function dashedPieces(
+  node: NodeRecord,
+  w: number,
+  h: number,
+  pattern: readonly number[],
+): Array<{ d: string; dashes: number[]; offset: number }> | null {
+  let outline: OutlineSegment[];
+  if (node.type === "ellipse") outline = ellipseOutline(w, h);
+  else if (node.type === "rect" || node.type === "frame") {
+    const r = getProp(node.props, "cornerRadius");
+    outline = boxOutline(w, h, getProp(node.props, "cornerRadii") ?? [r, r, r, r]);
+  } else return null;
+  const n = svgNumber;
+  return outline.map((piece) => {
+    let d: string;
+    if (piece.kind === "line") d = `M${n(piece.x0)} ${n(piece.y0)}L${n(piece.x1)} ${n(piece.y1)}`;
+    else {
+      // A corner or a quarter: never more than half a turn, clockwise (y down).
+      const at = (t: number) =>
+        `${n(piece.cx + piece.rx * Math.cos(t))} ${n(piece.cy + piece.ry * Math.sin(t))}`;
+      d = `M${at(piece.start)}A${n(piece.rx)} ${n(piece.ry)} 0 0 1 ${at(piece.end)}`;
+    }
+    return { d, ...fitDashes(piece.length, pattern) };
+  });
+}
 
 /** A rectangle at (x, y) with its own radius per corner, as path data. */
 function roundedRectPath(x: number, y: number, w: number, h: number, corners: Corners): string {
@@ -443,6 +485,14 @@ export interface SvgExportOptions {
    * PDF, whose text can't take features. Other text stays text.
    */
   readonly outlineFeatures?: boolean;
+  /**
+   * Output pixels per unit, for SVG that's about to be rasterised (the
+   * headless renderer): text is drawn as the canvas draws it, each upright
+   * line on a whole output pixel and underlines and strikethroughs as the
+   * canvas's own bars rather than `text-decoration`, which a rasteriser
+   * places by the font's metrics. Left out, text is exact and semantic.
+   */
+  readonly raster?: number;
 }
 
 export function exportSvg(
@@ -669,7 +719,12 @@ export function exportSvg(
               out.defs.push(
                 `<clipPath id="${clip}"><${shape.tag}${transform}${shape.attrs}/></clipPath>`,
               );
-              children.push(`<g clip-path="url(#${clip})">${inside.join("")}</g>`);
+              // The frame's fills go inside the clip too (where they are anyway): a clip path makes
+              // a group of its own, and children blend with what's in it, as on the canvas.
+              const backdrop = [...below.splice(0), ...inner.splice(0)];
+              children.push(
+                `<g clip-path="url(#${clip})">${backdrop.join("")}${inside.join("")}</g>`,
+              );
             } else {
               children.push(...inside);
             }
@@ -715,7 +770,7 @@ export function exportSvg(
         visit(id, picture);
         const ref = out.id("mask");
         out.defs.push(
-          `<mask id="${ref}" maskUnits="userSpaceOnUse"${attr("x", region.x)}${attr("y", region.y)}${attr("width", region.width)}${attr("height", region.height)} style="mask-type:${type}">${picture.join("")}</mask>`,
+          `<mask id="${ref}" maskUnits="userSpaceOnUse"${attr("x", region.x)}${attr("y", region.y)}${attr("width", region.width)}${attr("height", region.height)}${attr("mask-type", type)}>${picture.join("")}</mask>`,
         );
         wrapper = `mask="url(#${ref})"`;
         masked = [];
@@ -807,7 +862,12 @@ export function exportSvg(
       if (cap !== "none") style += attr("stroke-linecap", cap);
     }
     const dashes = getProp(node.props, "strokeDashes");
-    if (dashes.length > 0) style += attr("stroke-dasharray", dashes.map(svgNumber).join(" "));
+    // End markers: the line stops short under filled ones; markers are solid, never dashed.
+    const markers = markersOf(node);
+    // Dashed boxes and ellipses: the pattern fitted to each side and corner, as the canvas draws it.
+    const pieces = dashes.length > 0 && !markers ? dashedPieces(node, w, h, dashes) : null;
+    if (dashes.length > 0 && !pieces)
+      style += attr("stroke-dasharray", dashes.map(svgNumber).join(" "));
     // SVG strokes are centred: draw double width and keep only the inside or outside half.
     let wrap = (s: string) => s;
     if (align === "inside") {
@@ -826,14 +886,17 @@ export function exportSvg(
       );
       wrap = (s) => `<g mask="url(#${mask})">${s}</g>`;
     }
-    // End markers: the line stops short under filled ones; markers are solid, never dashed.
-    const markers = markersOf(node);
     const trimmed = markers ? trimmedStroke(node, markers.start.inset, markers.end.inset) : null;
     const line = trimmed ? { tag: "path", attrs: attr("d", serializePath(trimmed)) } : shape;
     const elements: string[] = [];
     for (const paint of paints) {
       const stroke = out.paint("stroke", paint, w, h);
-      if (stroke)
+      if (stroke && pieces)
+        for (const piece of pieces)
+          elements.push(
+            `<path${transform}${attr("d", piece.d)} fill="none"${stroke}${style}${attr("stroke-dasharray", piece.dashes.map(svgNumber).join(" "))}${attr("stroke-dashoffset", piece.offset)}/>`,
+          );
+      else if (stroke)
         elements.push(`<${line.tag}${transform}${line.attrs} fill="none"${stroke}${style}/>`);
       if (!markers) continue;
       for (const marker of [markers.start, markers.end]) {
@@ -855,6 +918,13 @@ export function exportSvg(
     const mode = getProp(node.props, "textAutoResize");
     const layout = layoutText(node, measurer, mode === "width" ? null : w);
     const dy = textBlockOffset(node, layout);
+    const [ma, mb, mc, md, , mf] = scene.worldMatrix(node.id);
+    const grid = options.raster;
+    /** A baseline, on the output's pixel grid when there is one and the text is upright. */
+    const baselineY = (y: number) =>
+      grid && ma === 1 && mb === 0 && mc === 0 && md === 1
+        ? Math.round((mf + y) * grid) / grid - mf
+        : y;
     const base = node.props;
     const align = getProp(base, "textAlign");
     const anchor = align === "center" ? "middle" : align === "right" ? "end" : null;
@@ -869,7 +939,7 @@ export function exportSvg(
       style += attr("font-weight", getProp(base, "fontWeight"));
     if (getProp(base, "fontStyle") === "italic") style += attr("font-style", "italic");
     if (layout.letterSpacing !== 0) style += attr("letter-spacing", layout.letterSpacing);
-    if (getProp(base, "textDecoration") !== "none")
+    if (!grid && getProp(base, "textDecoration") !== "none")
       style += attr("text-decoration", decorationOf(getProp(base, "textDecoration")));
     if (anchor) style += attr("text-anchor", anchor);
     // OpenType features and variable axes as CSS, which SVG text honours (decisions 0005, 0009).
@@ -913,7 +983,7 @@ export function exportSvg(
         own += attr("font-style", getProp(p, "fontStyle"));
       if (frag.letterSpacing !== layout.letterSpacing)
         own += attr("letter-spacing", frag.letterSpacing);
-      if (frag.decoration !== getProp(base, "textDecoration"))
+      if (!grid && frag.decoration !== getProp(base, "textDecoration"))
         own += attr("text-decoration", decorationOf(frag.decoration));
       if (fontCss(p, base)) own += attr("style", fontCss(p, base));
       return own;
@@ -932,7 +1002,7 @@ export function exportSvg(
             const fill = pass === 0 && top ? out.paint("fill", top, w, h) : null;
             return fill ?? ' fill="none"';
           };
-          const y = round2(line.baseline + dy);
+          const y = round2(baselineY(line.baseline + dy));
           // A line with outlined runs (PDF): its other fragments are placed one by one, where
           // the layout put them, since the viewer measures text without the outlined runs' features.
           if (line.fragments.some((f) => outlined.has(f))) {
@@ -1011,6 +1081,21 @@ export function exportSvg(
       .map(([frag, shaped]) => glyphs(frag, shaped))
       .join("");
 
+    /** Rasterising: the canvas's underline and strikethrough bars, under fragments drawn as text. */
+    const bars = (frag: TextFragment) => {
+      const line = layout.lines.find((l) => l.fragments.includes(frag));
+      if (!grid || !line || frag.decoration === "none" || outlined.has(frag)) return "";
+      const size = frag.fontSize;
+      const baseline = line.baseline + dy;
+      const y = frag.decoration === "underline" ? baseline + size * 0.1 : baseline - size * 0.3;
+      return `<rect${attr("x", round2(lineOffset(line, w, base) + frag.x))}${attr("y", round2(y))}${attr("width", round2(frag.width))}${attr("height", round2(Math.max(1, size / 16)))}/>`;
+    };
+    const fragments = layout.lines.flatMap((l) => l.fragments);
+    const layerBars = fragments
+      .filter((f) => !f.fills)
+      .map(bars)
+      .join("");
+
     const fills = getProp(base, "fills");
     const paints: Paint[] = fills.length > 0 ? fills : [{ type: "solid", color: "#000000" }];
     let pass = 0;
@@ -1020,6 +1105,14 @@ export function exportSvg(
       if (!fill) continue;
       parts.push(`<text${transform}${style}${fill} xml:space="preserve">${lines(pass++)}</text>`);
       if (layerOutlines) parts.push(`<g${transform}${fill}>${layerOutlines}</g>`);
+      if (layerBars) parts.push(`<g${transform}${fill}>${layerBars}</g>`);
+    }
+    // Bars under fragments with fills of their own, in their topmost visible fill.
+    for (const frag of fragments) {
+      const bar = frag.fills ? bars(frag) : "";
+      const top = bar ? [...(frag.fills ?? [])].reverse().find((f) => f.visible !== false) : null;
+      const fill = top ? out.paint("fill", top, w, h) : null;
+      if (fill) parts.push(`<g${transform}${fill}>${bar}</g>`);
     }
     // Outlined runs with their own fills: drawn once, in their topmost visible fill.
     for (const [frag, shaped] of ownOutlines) {
