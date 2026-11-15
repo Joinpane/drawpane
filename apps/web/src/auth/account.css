@@ -517,6 +517,21 @@
 .tokens__expiry {
   min-width: 0;
 }
+.tokens__scope {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--space-200);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.tokens__scope > legend {
+  padding: 0;
+}
+.tokens__scope > .account__hint {
+  margin: 0;
+}
 .tokens__actions {
   grid-column: 1 / -1;
   display: flex;

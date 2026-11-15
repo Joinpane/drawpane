@@ -44,6 +44,10 @@ test("account tour", async ({ browser }) => {
   await expect(page.getByLabel("Expires")).toBeVisible();
   await page.waitForTimeout(200);
   await shot(page, "183-tokens-new");
+  // Read and write: what an agent may then do, in a sentence.
+  await page.getByRole("radio", { name: "Read and write" }).check();
+  await expect(page.getByText("Also designs in files you can edit")).toBeVisible();
+  await shot(page, "183-tokens-new-write");
 
   const guest = await (
     await browser.newContext({ viewport: { width: 1440, height: 900 } })

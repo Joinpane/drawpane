@@ -73,6 +73,7 @@ test.describe
       const row = page.getByRole("list", { name: "Your tokens" }).getByRole("listitem");
       await expect(row).toContainText("Claude Code");
       await expect(row).toContainText(token.slice(0, 11));
+      await expect(row).toContainText("read only");
       await expect(page.locator("body")).not.toContainText(token);
     });
 

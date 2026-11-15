@@ -34,6 +34,8 @@ const vars = {
   // Email is printed by the test Worker, never sent.
   EMAIL_PROVIDER: "log",
   EMAIL_FROM: "Drawpane <design@example.com>",
+  // Agent tools on, with the stand-in text measurer (decision 0021; worker agent/measurer.ts).
+  AGENT_MEASURER: "standin",
 };
 const child = spawn(
   wrangler,

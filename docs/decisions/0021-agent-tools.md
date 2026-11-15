@@ -77,3 +77,12 @@ Decision 0011 gave agents a read-only MCP server. The PRD makes agents collabora
   4. headless rendering and the render parity suite;
   5. running calls in open editors, with handover;
   6. agent presence.
+
+## Notes from step 2 (MCP write tools on the headless engine)
+
+- **Tokens** carry a scope, `read` or `write`; tokens made before scopes stay `read`. The MCP server lists the write tools to every token and refuses them for read tokens with a message saying how to make a write token.
+- **Sessions** live in D1 (`agent_sessions`): the person, the token (only it may use the session), the file, the target file and the name ("Claude, for Ana"). Branch sessions are the default. Each call checks the person can still edit the target, as the API does.
+- **The room's engine.** `FileRoom.runAgentTool` loads fonts first (all the async work), then runs the tool on a warm `Editor` and commits the operations its sync engine queued (`SyncEngine.takeUnsent`, fix-ups included) as one transaction, with no await between taking the editor and the commit. The warm editor follows every commit and is rebuilt when it falls out of step. Something the editor refuses along the way (a notice) fails the whole call.
+- **The call ledger** (`agent_calls` in the room's SQLite) is written in the commit's storage transaction. Calls are kept for a day rather than an hour, because the session's undo reaches back as far as the ledger does. A call's label is its tool's title, kept in the ledger beside the revision it committed.
+- **Agent undo** applies a call's recorded inverse as a new transaction. It refuses when anyone else's logged operations since then changed one of the call's layers, or put a layer inside one.
+- **Measurer.** The agent tools are listed only once a real `TextMeasurer` is configured (`provideMeasurer`, for the HarfBuzz measurer of step 3). `AGENT_MEASURER=standin` turns on a fixed-advance stand-in for tests and local development.
