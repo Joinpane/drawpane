@@ -17,6 +17,7 @@ export * from "./geometry";
 export * from "./glass";
 export { cssGradient } from "./gradients";
 export * from "./grids";
+export * from "./harfbuzz-measurer";
 export * from "./history";
 export * from "./hit";
 export * from "./images";

@@ -158,6 +158,76 @@ function fontFormat(bytes: Uint8Array): "woff2" | "ttf" | null {
 
 const MIME = { woff2: "font/woff2", ttf: "font/ttf" } as const;
 
+/** Where stylesheets and manifests are kept at the edge, by what was asked of Google. */
+const edgeKey = (kind: string, upstream: string) =>
+  new Request(`https://fonts.drawpane.internal/${kind}?${encodeURIComponent(upstream)}`);
+
+/**
+ * A Google stylesheet pointed at this origin, from the edge cache or from
+ * Google (null when Google has no such family). The two formats are asked
+ * for with different user agents from the same URL, so they're kept apart.
+ */
+export async function googleStylesheet(
+  upstream: string,
+  format: "woff2" | "ttf",
+  waitUntil: (promise: Promise<unknown>) => void,
+): Promise<Response | null> {
+  const cache = caches.default;
+  const cacheKey = edgeKey(format === "ttf" ? "ttf" : "", upstream);
+  const hit = await cache.match(cacheKey);
+  if (hit) return fromCache(hit);
+  const response = await fetch(upstream, {
+    headers: { "user-agent": format === "ttf" ? PLAIN_UA : BROWSER_UA },
+  });
+  if (!response.ok) return null;
+  const out = new Response(rewriteStylesheet(await response.text()), {
+    headers: { "content-type": "text/css; charset=utf-8", "cache-control": STYLESHEET_CACHE },
+  });
+  waitUntil(cache.put(cacheKey, out.clone()));
+  return out;
+}
+
+/** A family's variable files as `{ files }` JSON, from the edge cache or Google's manifest (null when there's no such family). */
+export async function googleVariableFiles(
+  family: string,
+  waitUntil: (promise: Promise<unknown>) => void,
+): Promise<Response | null> {
+  const upstream = `${GOOGLE_DOWNLOAD_LIST}?family=${encodeURIComponent(family)}`;
+  const cache = caches.default;
+  const cacheKey = edgeKey("variable", upstream);
+  const hit = await cache.match(cacheKey);
+  if (hit) return fromCache(hit);
+  const response = await fetch(upstream, { headers: { "user-agent": PLAIN_UA } });
+  if (!response.ok) return null;
+  const out = Response.json(
+    { files: variableFiles(await response.text()) },
+    { headers: { "cache-control": STYLESHEET_CACHE } },
+  );
+  waitUntil(cache.put(cacheKey, out.clone()));
+  return out;
+}
+
+/**
+ * Copies a gstatic file (`s/inter/v20/….ttf`, with any query) into R2 at
+ * `key`, and answers its bytes; null when Google doesn't have it, or it
+ * isn't a font of the format its name says, or it's too big.
+ */
+export async function copyFromGoogle(
+  env: { FILES: R2Bucket },
+  key: string,
+  pathAndQuery: string,
+): Promise<Uint8Array | null> {
+  const expected = /\.ttf(\?|$)/.test(pathAndQuery) ? "ttf" : "woff2";
+  const response = await fetch(`${GSTATIC}${pathAndQuery}`, {
+    headers: { "user-agent": BROWSER_UA },
+  });
+  if (!response.ok) return null;
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (fontFormat(bytes) !== expected || bytes.byteLength > FONT_MAX_BYTES) return null;
+  await env.FILES.put(key, bytes, { httpMetadata: { contentType: MIME[expected] } });
+  return bytes;
+}
+
 export const fonts = new Hono<AppContext>()
   /** What the font picker may offer on this server. */
   .get("/config", (c) =>
@@ -179,22 +249,8 @@ export const fonts = new Hono<AppContext>()
     const format = c.req.query("format") ?? "woff2";
     if (format !== "woff2" && format !== "ttf") throw badRequest("Formats are woff2 and ttf.");
     const upstream = googleStylesheetUrl(family, variants, text);
-
-    const cache = caches.default;
-    const cacheKey = new Request(
-      `https://fonts.drawpane.internal/?${encodeURIComponent(upstream)}`,
-    );
-    const hit = await cache.match(cacheKey);
-    if (hit) return fromCache(hit);
-
-    const response = await fetch(upstream, {
-      headers: { "user-agent": format === "ttf" ? PLAIN_UA : BROWSER_UA },
-    });
-    if (!response.ok) throw notFound(`Google Fonts has no family called ${family}.`);
-    const out = new Response(rewriteStylesheet(await response.text()), {
-      headers: { "content-type": "text/css; charset=utf-8", "cache-control": STYLESHEET_CACHE },
-    });
-    c.executionCtx.waitUntil(cache.put(cacheKey, out.clone()));
+    const out = await googleStylesheet(upstream, format, (p) => c.executionCtx.waitUntil(p));
+    if (!out) throw notFound(`Google Fonts has no family called ${family}.`);
     return out;
   })
 
@@ -207,20 +263,8 @@ export const fonts = new Hono<AppContext>()
     requireEnabled(c.env);
     const family = c.req.query("family") ?? "";
     if (!FAMILY.test(family)) throw badRequest("Name a font family.");
-    const upstream = `${GOOGLE_DOWNLOAD_LIST}?family=${encodeURIComponent(family)}`;
-    const cache = caches.default;
-    const cacheKey = new Request(
-      `https://fonts.drawpane.internal/variable?${encodeURIComponent(upstream)}`,
-    );
-    const hit = await cache.match(cacheKey);
-    if (hit) return fromCache(hit);
-    const response = await fetch(upstream, { headers: { "user-agent": PLAIN_UA } });
-    if (!response.ok) throw notFound(`Google Fonts has no family called ${family}.`);
-    const out = Response.json(
-      { files: variableFiles(await response.text()) },
-      { headers: { "cache-control": STYLESHEET_CACHE } },
-    );
-    c.executionCtx.waitUntil(cache.put(cacheKey, out.clone()));
+    const out = await googleVariableFiles(family, (p) => c.executionCtx.waitUntil(p));
+    if (!out) throw notFound(`Google Fonts has no family called ${family}.`);
     return out;
   })
 
@@ -235,14 +279,7 @@ export const fonts = new Hono<AppContext>()
 
     const stored = await c.env.FILES.get(key);
     if (stored) return new Response(stored.body, { headers });
-
-    const response = await fetch(`${GSTATIC}${path}${url.search}`, {
-      headers: { "user-agent": BROWSER_UA },
-    });
-    if (!response.ok) throw notFound("Google Fonts doesn't have that file.");
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (fontFormat(bytes) !== expected || bytes.byteLength > FONT_MAX_BYTES)
-      throw notFound("That isn't a font file.");
-    await c.env.FILES.put(key, bytes, { httpMetadata: { contentType: MIME[expected] } });
+    const bytes = await copyFromGoogle(c.env, key, `${path}${url.search}`);
+    if (!bytes) throw notFound("Google Fonts doesn't have that file, or it isn't a font.");
     return new Response(bytes, { headers });
   });
