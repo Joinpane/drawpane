@@ -26,6 +26,11 @@ function applyTheme(): void {
 }
 
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+// The theme showing is the root's data-theme, whoever set it (this module, an extension,
+// devtools, a test): code drawing in resolved colours hears every change to it.
+new MutationObserver(() => {
+  for (const listener of listeners) listener();
+}).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
 export function setTheme(pref: ThemePreference): void {
   try {

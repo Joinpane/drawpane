@@ -39,7 +39,8 @@
   height: 14px;
   margin-top: -5px;
   border-radius: 50%;
-  background: var(--on-signal);
+  /* A white knob with a ring in both themes, as the colour picker's: it stands out on any popover. */
+  background: var(--knob);
   box-shadow:
     0 0 0 1px var(--line-strong),
     0 1px 3px color-mix(in srgb, var(--ink) 30%, transparent);
@@ -49,7 +50,8 @@
   height: 14px;
   border: 0;
   border-radius: 50%;
-  background: var(--on-signal);
+  /* A white knob with a ring in both themes, as the colour picker's: it stands out on any popover. */
+  background: var(--knob);
   box-shadow:
     0 0 0 1px var(--line-strong),
     0 1px 3px color-mix(in srgb, var(--ink) 30%, transparent);

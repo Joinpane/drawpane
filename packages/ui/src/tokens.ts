@@ -35,6 +35,10 @@ export const colors = {
     light: "#1c1b1a",
     dark: "#f2f0eb",
   },
+  scrim: {
+    light: "rgb(28 27 26 / 0.32)",
+    dark: "rgb(0 0 0 / 0.55)",
+  },
   line: {
     light: "#e3e1dc",
     dark: "#302e2b",
@@ -102,6 +106,22 @@ export const colors = {
   guide: {
     light: "#2a5fe0",
     dark: "#6b95ff",
+  },
+  "on-guide": {
+    light: "#ffffff",
+    dark: "#0b1733",
+  },
+  knob: {
+    light: "#ffffff",
+    dark: "#ffffff",
+  },
+  "checker-light": {
+    light: "#ffffff",
+    dark: "#ffffff",
+  },
+  "checker-dark": {
+    light: "#d9d6cf",
+    dark: "#d9d6cf",
   },
   "xray-padding": {
     light: "#f3c94a",

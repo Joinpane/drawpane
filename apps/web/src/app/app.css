@@ -72,7 +72,7 @@ body {
   width: min(600px, calc(100vw - 32px));
 }
 .app-dialog::backdrop {
-  background: color-mix(in srgb, var(--surface-inverse) 32%, transparent);
+  background: var(--scrim);
 }
 .app-dialog[open] {
   animation: app-pop 160ms ease-out;
