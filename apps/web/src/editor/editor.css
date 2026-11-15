@@ -188,7 +188,8 @@
  */
 .topbar {
   position: absolute;
-  z-index: 2;
+  /* Over the tokens workspace's backdrop, which covers the whole window. */
+  z-index: 3;
   top: 12px;
   left: 12px;
   right: 12px;
@@ -2055,10 +2056,11 @@
 /* Tokens workspace */
 .tokens {
   position: absolute;
-  /* An opaque backdrop below the top bar, so the canvas never shows between
-     panes; the bottom strip stays free for the sync status. */
-  inset: 52px 0 0;
-  padding: 12px 12px 52px;
+  /* An opaque backdrop over the whole window, the top bar floating on it, so
+     the canvas never shows around the bar or between panes; the bottom strip
+     stays free for the sync status. */
+  inset: 0;
+  padding: 64px 12px 52px;
   box-sizing: border-box;
   background: var(--canvas);
   display: grid;

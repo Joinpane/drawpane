@@ -113,6 +113,21 @@ test.describe
     test("creates tokens and binds one with the command bar", async () => {
       await page.keyboard.press("Alt+t");
       await expect(page.getByText("Tokens start here.")).toBeVisible();
+      // The workspace covers the whole window, top bar floating on it: no design shows around the bar.
+      const underBar = await page.evaluate(() => {
+        const title = document.querySelector(".file-title")?.getBoundingClientRect();
+        const tools = document.querySelector(".toolbar")?.getBoundingClientRect();
+        if (!title || !tools) return null;
+        // Between the file title and the tools, and above them, where the bar lets the page show.
+        const spots = [
+          [(title.right + tools.left) / 2, title.top + title.height / 2],
+          [tools.left + tools.width / 2, 4],
+        ];
+        return spots.map(
+          ([x, y]) => !!document.elementFromPoint(x as number, y as number)?.closest(".tokens"),
+        );
+      });
+      expect(underBar).toEqual([true, true]);
       await page.getByRole("button", { name: "New collection" }).first().click();
       await page.getByRole("button", { name: "Token", exact: true }).click();
       const value = page.getByRole("textbox", { name: "Value" }).first();
