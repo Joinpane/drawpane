@@ -13,11 +13,15 @@
   justify-content: flex-end;
   gap: 2px;
 }
+/*
+ * X and Y, then W and H: two fields and a 24px column for the aspect lock
+ * (empty on the X and Y row), so H sits exactly under Y.
+ */
 .inspector__size {
   display: grid;
-  grid-template-columns: 1fr 1fr 24px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 24px;
   align-items: center;
-  gap: var(--space-100);
+  gap: var(--space-200);
 }
 .inspector__rotation {
   display: grid;
@@ -320,9 +324,10 @@
 }
 
 /* Gradient editor */
+/* The type, then the angle in the room left (Reverse sits with the stops below). */
 .gradient-editor__head {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: var(--space-200);
 }
@@ -400,9 +405,12 @@
 .gradient-editor__stops-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 2px;
   color: var(--ink-muted);
   font: var(--type-ui-label);
+}
+.gradient-editor__stops-head > span {
+  flex: 1;
 }
 .gradient-editor__stops {
   display: grid;
@@ -1056,11 +1064,14 @@
 }
 
 /* Text styles: the row in the Text section */
+/* Flex, not a grid: with no Detach button the trigger runs to the column's edge. */
 .text-style-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
   gap: var(--space-100);
+}
+.text-style-row > .text-style-trigger {
+  flex: 1;
 }
 .text-style-trigger {
   display: flex;

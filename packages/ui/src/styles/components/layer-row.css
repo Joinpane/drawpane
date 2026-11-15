@@ -114,6 +114,13 @@
 .dp-layer__toggle:hover {
   color: var(--ink);
 }
+/*
+ * A clickable caret takes the same 12px slot as an empty one, so leaf rows line
+ * up with their siblings; it reaches 2px past each side for a 16px target.
+ */
+.dp-layer__caret.dp-layer__toggle {
+  margin-inline: -2px;
+}
 /* Locking is offered on hover; a locked layer's lock stays pinned. */
 .dp-layer__actions.is-pinned .dp-layer__toggle.is-offer {
   visibility: hidden;

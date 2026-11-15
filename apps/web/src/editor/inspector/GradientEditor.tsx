@@ -84,9 +84,7 @@ export function GradientEditor({
           value={paint.type}
           onChange={(type) => onChange(convertPaint(paint, type) as GradientPaint, "Gradient type")}
         />
-        {paint.type === "radial" ? (
-          <span />
-        ) : (
+        {paint.type === "radial" ? null : (
           <NumberField
             icon="rotate"
             ariaLabel="Gradient angle"
@@ -108,7 +106,6 @@ export function GradientEditor({
             onScrubEnd={onChangeEnd}
           />
         )}
-        <IconButton icon="flip-horizontal" label="Reverse stops" onClick={reverse} />
       </div>
       <HandlePreview
         paint={paint}
@@ -130,6 +127,7 @@ export function GradientEditor({
       />
       <div className="gradient-editor__stops-head">
         <span>Stops</span>
+        <IconButton icon="flip-horizontal" label="Reverse stops" onClick={reverse} />
         <IconButton icon="plus" label="Add stop" onClick={() => addStop(0.5)} />
       </div>
       <div className="gradient-editor__stops" role="listbox" aria-label="Gradient stops">
