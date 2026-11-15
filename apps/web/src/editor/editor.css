@@ -635,9 +635,42 @@
   color: var(--ink-muted);
   font: 400 11px / 14px var(--font-ui);
 }
-/* A detail of the row above it (Width → Limits): set in a step. */
-.inspector__label--sub {
-  padding-left: var(--space-200);
+/* Width and Height: Fixed, Hug and Fill share the track evenly, so it reads as one control. */
+.inspector__sizing .dp-seg__option {
+  flex: 1;
+}
+/* An axis's limits hang from its row: a hairline runs from under its label
+   ("Width") into the Min field, so they read as part of it, not a row of their own. */
+/* Closer to its axis than the next axis is, so each pair reads as a group. */
+.inspector__limits {
+  margin-top: calc(var(--space-100) - var(--space-200));
+}
+.inspector__limits .inspector__branch {
+  position: relative;
+  align-self: stretch;
+}
+.inspector__limits .inspector__branch::before {
+  content: "";
+  position: absolute;
+  /* From just under the label above (across the narrowed gap) to this row's middle. */
+  top: calc(-1 * var(--space-100) - 3px);
+  bottom: 50%;
+  left: 4px;
+  /* Into the value column, stopping short of the field. */
+  right: calc(-1 * var(--space-200) + 4px);
+  border-left: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  border-bottom-left-radius: var(--radius-sm);
+  pointer-events: none;
+}
+.inspector__limit-pair {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+/* An unset limit: a faint dash, quieter than the "Min" beside it. */
+.inspector__limit--unset .dp-field__input::placeholder {
+  color: var(--ink-disabled);
 }
 /* Two fields side by side in a label row's value column. */
 .inspector__pair {

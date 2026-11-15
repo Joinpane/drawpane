@@ -287,6 +287,12 @@ describe("NumberField", () => {
     expect(onChange).toHaveBeenLastCalledWith(80);
   });
 
+  it("shows its placeholder for a missing value, and still reads it out by its null label", () => {
+    const { input } = setup({ defaultValue: null, nullLabel: "None", placeholder: "–" });
+    expect(input.placeholder).toBe("–");
+    expect(input.getAttribute("aria-valuetext")).toBe("None");
+  });
+
   it("takes every key typed after Enter on an unchanged value", async () => {
     const user = userEvent.setup();
     const { input, onChange } = setup();

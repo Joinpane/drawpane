@@ -52,7 +52,8 @@ export interface NumberFieldProps
   onTokenClick?: () => void;
   /**
    * What a null value reads as. "Mixed" (the default) for a multi-selection
-   * whose values differ; "None" for an optional value that isn't set.
+   * whose values differ; "None" for an optional value that isn't set. It's
+   * also shown, unless a `placeholder` says what to show instead.
    */
   nullLabel?: string;
   /** For an optional value: emptying the field and committing clears it. */
@@ -280,7 +281,7 @@ export function NumberField({
           aria-valuetext={value === null ? nullLabel : undefined}
           aria-valuemin={Number.isFinite(min) ? min : undefined}
           aria-valuemax={Number.isFinite(max) ? max : undefined}
-          placeholder={value === null ? nullLabel : placeholder}
+          placeholder={value === null ? (placeholder ?? nullLabel) : placeholder}
           value={draft ?? (value === null ? "" : formatNumber(value, precision))}
           onChange={(event) => setDraft(event.target.value)}
           onFocus={(event) => {

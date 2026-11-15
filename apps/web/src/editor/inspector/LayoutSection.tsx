@@ -6,6 +6,7 @@
 import { type Editor, type GridCell, gridGeometry, layerName } from "@drawpane/editor";
 import { type GridTrack, getProp, type NodeRecord, type PropName } from "@drawpane/model";
 import {
+  cx,
   IconButton,
   NumberField,
   PropertyRow,
@@ -318,6 +319,7 @@ function TrackList({
             <NumberField
               ariaLabel={`${noun} ${i + 1} size`}
               value={track.unit === "auto" ? null : track.value}
+              nullLabel="Auto"
               placeholder={sizes[i] !== undefined ? `${Math.round(sizes[i] ?? 0)}` : "Auto"}
               disabled={track.unit === "auto"}
               min={track.unit === "fr" ? 0.01 : 0}
@@ -448,7 +450,7 @@ export function SizingSection({
         </p>
       ) : (
         <>
-          <PropertyRow columns="label">
+          <PropertyRow columns="label" className="inspector__sizing">
             <span className="inspector__label">Width</span>
             <SegmentedControl
               label="Horizontal resizing"
@@ -458,7 +460,7 @@ export function SizingSection({
             />
           </PropertyRow>
           <Limits editor={editor} nodes={nodes} axis="width" sizing={h} />
-          <PropertyRow columns="label">
+          <PropertyRow columns="label" className="inspector__sizing">
             <span className="inspector__label">Height</span>
             <SegmentedControl
               label="Vertical resizing"
@@ -493,7 +495,9 @@ const LIMITS = {
 /**
  * Min and max for one axis, as CSS min-width and max-width: how far Hug and
  * Fill may shrink or grow. Shown when the axis hugs or fills, or a limit is
- * already set; an empty field means no limit.
+ * already set. They hang from the axis's row (a line runs from its label into
+ * them), so they read as a detail of Width or Height, not a setting of their
+ * own. An unset limit shows a faint dash, so it never reads as a second label.
  */
 function Limits({
   editor,
@@ -511,13 +515,28 @@ function Limits({
     (n) => getProp(n.props, props.min) !== null || getProp(n.props, props.max) !== null,
   );
   if (sizing !== "hug" && sizing !== "fill" && !set) return null;
+  const noun = axis === "width" ? "Width" : "Height";
   return (
-    <PropertyRow columns="label">
-      <span className="inspector__label inspector__label--sub">Limits</span>
-      <span className="inspector__pair">
-        <Limit editor={editor} nodes={nodes} prop={props.min} label="Min" name={`Min ${axis}`} />
-        <Limit editor={editor} nodes={nodes} prop={props.max} label="Max" name={`Max ${axis}`} />
-      </span>
+    <PropertyRow columns="label" className="inspector__limits">
+      <span className="inspector__branch" aria-hidden="true" />
+      <fieldset className="inspector__pair inspector__limit-pair" aria-label={`${noun} limits`}>
+        <Limit
+          editor={editor}
+          nodes={nodes}
+          prop={props.min}
+          label="Min"
+          name={`Min ${axis}`}
+          hint={`Hug and Fill never make it ${axis === "width" ? "narrower" : "shorter"} than this`}
+        />
+        <Limit
+          editor={editor}
+          nodes={nodes}
+          prop={props.max}
+          label="Max"
+          name={`Max ${axis}`}
+          hint={`Hug and Fill never make it ${axis === "width" ? "wider" : "taller"} than this`}
+        />
+      </fieldset>
     </PropertyRow>
   );
 }
@@ -528,27 +547,34 @@ function Limit({
   prop,
   label,
   name,
+  hint,
 }: {
   editor: Editor;
   nodes: NodeRecord[];
   prop: "minWidth" | "maxWidth" | "minHeight" | "maxHeight";
   label: string;
   name: string;
+  hint: string;
 }) {
   const ids = nodes.map((n) => n.id);
   const values = nodes.map((n) => getProp(n.props, prop));
   const same = values.every((v) => v === values[0]);
+  const value = same ? (values[0] ?? null) : null;
   // Scrubbing a limit that isn't set starts from the layer's size, not from 0 (which would collapse it).
   const first = nodes[0];
   const size = first ? getProp(first.props, prop.endsWith("Width") ? "width" : "height") : 0;
   return (
     <NumberField
+      className={cx("inspector__limit", same && value === null && "inspector__limit--unset")}
       label={label}
       ariaLabel={name}
+      title={`${name}: ${hint}. Empty for no limit.`}
       min={0}
       scrubFrom={size}
-      value={same ? (values[0] ?? null) : null}
+      value={value}
+      // Read out as "None"; shown as a dash, which can't be mistaken for the "Min" beside it.
       nullLabel={same ? "None" : "Mixed"}
+      placeholder={same ? "–" : "Mixed"}
       onChange={(value) => editor.setProp(ids, prop, value, name)}
       onClear={() => editor.setProp(ids, prop, null, `Remove ${name.toLowerCase()}`)}
       onScrubStart={() => editor.beginGesture(name)}
