@@ -6,7 +6,9 @@
  * loaded into the editor the way opening a file loads it (one document
  * reset), then measured:
  *
- * - **load**: the reset, then the first frame of its largest page;
+ * - **load**: the reset, then the first frame of its largest page, and
+ *   how long until that page is drawn exactly (a large page shows a
+ *   stand-in first and is drawn a few tiles a frame, decision 0028);
  * - **memory**: the JS heap after a collection, file loaded;
  * - **canvas**: panning the largest page whole, at 25% and at 100%, and
  *   zooming it (content and overlay time per frame, as the canvas bench);
@@ -37,7 +39,7 @@ interface Result {
   layers: number;
   bytes: number;
   copies: number;
-  load: { resetMs: number; firstFrameMs: number };
+  load: { resetMs: number; firstFrameMs: number; exactMs: number };
   heapMb: number;
   canvas: Record<string, Summary>;
   editMain: { ms: number; commitMs: number; copies: number };
@@ -81,16 +83,23 @@ async function stored(page: Page): Promise<{ nodes: number; bytes: number }> {
   });
 }
 
-/** Shows `pageId`, whole, and returns how long until its first frame was drawn. */
-async function firstFrame(page: Page, pageId: string): Promise<number> {
+/** Shows `pageId`, whole: how long until its first frame was drawn, and until it was exact. */
+async function firstFrame(page: Page, pageId: string): Promise<{ first: number; exact: number }> {
   return page.evaluate(async (pageId) => {
-    const e = (window as unknown as { drawpane: { setPage(id: string): void; zoomToFit(): void } })
-      .drawpane;
+    const w = window as unknown as {
+      drawpane: { setPage(id: string): void; zoomToFit(): void };
+      drawpaneFrames: { exact: boolean };
+    };
+    const e = w.drawpane;
+    const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
     const t = performance.now();
     e.setPage(pageId);
     e.zoomToFit();
-    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
-    return performance.now() - t;
+    await frame();
+    await frame();
+    const first = performance.now() - t;
+    while (!w.drawpaneFrames.exact) await frame();
+    return { first, exact: performance.now() - t };
   }, pageId);
 }
 
@@ -174,7 +183,7 @@ test.describe("Scale", () => {
       const resetMs = await load(page, chunks.length);
       chunks.length = 0;
       const storedNow = await stored(page);
-      const firstFrameMs = await firstFrame(page, largestPage(kit.nodes));
+      const shown = await firstFrame(page, largestPage(kit.nodes));
       // Let fonts and the first full paint settle.
       await page.waitForTimeout(1500);
       const heap = (await heapMb(cdp)) - before;
@@ -194,7 +203,11 @@ test.describe("Scale", () => {
         layers: kit.stats.layers,
         bytes: kit.stats.bytes,
         copies: kit.stats.instances,
-        load: { resetMs: Math.round(resetMs), firstFrameMs: Math.round(firstFrameMs) },
+        load: {
+          resetMs: Math.round(resetMs),
+          firstFrameMs: Math.round(shown.first),
+          exactMs: Math.round(shown.exact),
+        },
         heapMb: heap,
         canvas,
         editMain: {
@@ -209,7 +222,7 @@ test.describe("Scale", () => {
         [
           `\nScale: ${result.layers.toLocaleString("en")} layers, ${(result.bytes / 1048576).toFixed(0)} MB of nodes, ${result.copies.toLocaleString("en")} copies${COMPACT ? ", compact copies" : ""}`,
           `stored      ${result.stored.nodes.toLocaleString("en")} nodes, ${(result.stored.bytes / 1048576).toFixed(0)} MB`,
-          `load        reset ${result.load.resetMs} ms · first frame of the largest page ${result.load.firstFrameMs} ms`,
+          `load        reset ${result.load.resetMs} ms · first frame of the largest page ${result.load.firstFrameMs} ms, exact after ${result.load.exactMs} ms`,
           `memory      ${result.heapMb} MB of JS heap for the file`,
           ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),
           `edit main   ${result.editMain.ms} ms to change a fill on a main with ${result.editMain.copies.toLocaleString("en")} copies, drawn (the commit ${result.editMain.commitMs} ms)`,

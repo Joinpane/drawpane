@@ -26,8 +26,17 @@ export class FrameStats {
   #at = 0;
   drawn = 0;
   culled = 0;
+  /** Whether the last content frame was exact (not a stand-in, nor drawn in part). */
+  exact = true;
   /** Draws the next frame in full, from nothing (set by the canvas; for checks and debugging). */
   redraw: () => void = () => {};
+  /**
+   * Draws the view afresh, whole, with a renderer of its own, and compares
+   * it with the canvas: how many pixels differ and by how much at most (set
+   * by the canvas; e2e/canvas-scale.spec.ts checks that a frame drawn a
+   * little at a time ends up exactly that).
+   */
+  compare: () => { pixels: number; differing: number; max: number } | null = () => null;
 
   record(content: number, overlay: number): void {
     this.#content[this.#at] = content;

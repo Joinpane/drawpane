@@ -1,6 +1,6 @@
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { type Point, type Rect, rectContains, rectsIntersect } from "./geometry";
-import { hasMask, maskScopes } from "./masks";
+import { maskScopes } from "./masks";
 import type { Scene } from "./scene";
 import { flattenPath, hitPathData, hitRings } from "./vector/hit";
 import { nodePath } from "./vector/shapes";
@@ -60,12 +60,20 @@ export function hitsNode(scene: Scene, node: NodeRecord, p: Point, tolerance: nu
 }
 
 /**
- * A parent's children topmost first, leaving out those a mask clips away at
- * `p` (layers above a mask only show inside it).
+ * A parent's children that may be hit at `p`, topmost first: those whose
+ * extent comes within `tolerance` of it (the scene's index finds them),
+ * leaving out those a mask clips away at `p` (layers above a mask only
+ * show inside it).
  */
-function reachable(scene: Scene, parentId: string, p: Point): string[] {
+function reachable(scene: Scene, parentId: string, p: Point, tolerance: number): string[] {
   const doc = scene.doc;
-  if (!hasMask(doc, parentId)) return [...doc.childIds(parentId)].reverse();
+  if (!scene.hasMask(parentId)) {
+    // A tolerance in a rotated layer's own units reaches past its upright bounds by up to √2 times.
+    const t = tolerance * 1.5;
+    return [
+      ...scene.childrenIn(parentId, { x: p.x - t, y: p.y - t, width: t * 2, height: t * 2 }),
+    ].reverse();
+  }
   const out: string[] = [];
   const inside = new Map<string, boolean>();
   for (const { id, mask } of maskScopes(doc, parentId).reverse()) {
@@ -102,7 +110,7 @@ export function hitTest(
       return null;
     if (node.type === "frame" && getProp(node.props, "clipContent") && !hitsNode(scene, node, p, 0))
       return null;
-    for (const child of reachable(scene, id, p)) {
+    for (const child of reachable(scene, id, p, tolerance)) {
       const hit = visit(child);
       if (hit) return hit;
     }
@@ -112,7 +120,7 @@ export function hitTest(
     }
     return hitsNode(scene, node, p, tolerance) ? id : null;
   };
-  for (const id of reachable(scene, pageId, p)) {
+  for (const id of reachable(scene, pageId, p, tolerance)) {
     const hit = visit(id);
     if (hit) return hit;
   }
@@ -133,7 +141,7 @@ export function hitAll(scene: Scene, pageId: string, p: Point, tolerance: number
     if (node.type === "frame" && getProp(node.props, "clipContent") && !hitsNode(scene, node, p, 0))
       return false;
     let any = false;
-    for (const child of reachable(scene, id, p)) if (visit(child)) any = true;
+    for (const child of reachable(scene, id, p, tolerance)) if (visit(child)) any = true;
     const self =
       node.type === "group"
         ? any
@@ -141,7 +149,7 @@ export function hitAll(scene: Scene, pageId: string, p: Point, tolerance: number
     if (self) out.push(id);
     return self;
   };
-  for (const id of reachable(scene, pageId, p)) visit(id);
+  for (const id of reachable(scene, pageId, p, tolerance)) visit(id);
   return out;
 }
 
@@ -243,7 +251,8 @@ export function childToward(scene: Scene, container: string, leaf: string): stri
  */
 export function marqueeHits(scene: Scene, container: string, rect: Rect): string[] {
   const out: string[] = [];
-  for (const id of scene.doc.childIds(container)) {
+  // Only children whose extent touches the marquee can count (the scene's index finds them).
+  for (const id of scene.childrenIn(container, rect)) {
     const node = scene.doc.get(id);
     if (!node || node.props.visible === false || node.props.locked === true) continue;
     const b = scene.bounds(id);

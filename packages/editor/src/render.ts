@@ -2,9 +2,15 @@
  * Canvas renderer for page content.
  *
  * It draws only what intersects the viewport, in document order, with each
- * node's world matrix. It knows nothing about selection or tools; the overlay
- * draws those on a separate canvas so hover and drag feedback never repaint
- * the design.
+ * node's world matrix, finding what's near through the scene's index. It
+ * knows nothing about selection or tools; the overlay draws those on a
+ * separate canvas so hover and drag feedback never repaint the design.
+ *
+ * On screen it redraws as little as it can (decision 0028): a pan moves the
+ * last frame and draws the strips it uncovered, an edit draws where the
+ * changed layers were and are, and a frame that would take longer than the
+ * caller's budget shows a stand-in and is drawn a tile at a time over the
+ * next frames, until it's exact.
  */
 
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
@@ -22,10 +28,11 @@ import {
 import { ImageCache, imagePlacement } from "./images";
 import { Inradii } from "./inradius";
 import { LuminanceMask } from "./luminance";
-import { markerLength, markersOf, trimmedStroke } from "./markers";
-import { hasMask, maskScopes } from "./masks";
+import { markersOf, trimmedStroke } from "./markers";
+import { maskScopes } from "./masks";
 import { NoiseTiles, paintNoise } from "./noise";
-import { blurSigma, type PostEffect, postEffects, postMargin, postReach } from "./post-effects";
+import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
+import { effectReach } from "./reach";
 import type { Scene } from "./scene";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
@@ -38,6 +45,7 @@ import {
   textBlockOffset,
 } from "./text";
 import { TexturePainter } from "./texture";
+import { coverRects, TileWork } from "./tiles";
 import { isClosedPath } from "./vector/cache";
 import { nodePath } from "./vector/shapes";
 import { serializePath } from "./vector/svg";
@@ -122,6 +130,9 @@ export interface CanvasRendererOptions {
   /** Shared decoded images. Pass the same cache to every renderer of one file. */
   readonly images?: ImageCache;
 }
+
+/** No layer reading the backdrop is drawn afresh (see `#redraw`). */
+const NO_READERS: ReadonlySet<string> = new Set();
 
 /** Two neutral greys in device pixels, the same in both themes: an image that is still loading. */
 const PLACEHOLDER = { light: "#ececea", dark: "#dfdfdc", cell: 8 };
@@ -213,19 +224,73 @@ interface LastFrame {
 
 /** Two frames show the same document the same way (the camera aside). */
 function sameContent(a: LastFrame, b: LastFrame): boolean {
+  return a.version === b.version && sameCanvas(a, b) && sameLook(a, b);
+}
+
+/** Two frames are drawn on the same canvas, of the same page, at the same size. */
+function sameCanvas(a: LastFrame, b: LastFrame): boolean {
   return (
     a.ctx === b.ctx &&
     a.pageId === b.pageId &&
     a.dpr === b.dpr &&
     a.width === b.width &&
-    a.height === b.height &&
-    a.version === b.version &&
+    a.height === b.height
+  );
+}
+
+/** Nothing outside the document changed how two frames look (images, fonts, the theme, text being edited). */
+function sameLook(a: LastFrame, b: LastFrame): boolean {
+  return (
     a.epoch === b.epoch &&
     a.fonts === b.fonts &&
     a.background === b.background &&
     a.hidden === b.hidden &&
     a.whole === b.whole
   );
+}
+
+/**
+ * A frame kept as a stand-in (decision 0028): a canvas holding what a
+ * frame showed, at `scale` of its device pixels, and the document version
+ * it showed (its places that changed since are cleared before it's shown).
+ */
+interface Raster {
+  canvas: OffscreenCanvas | HTMLCanvasElement;
+  frame: LastFrame;
+  scale: number;
+}
+
+/** How many frames are kept as stand-ins, for all pages together. */
+const RASTERS = 4;
+
+/** Above this many layers, a page's first frame is drawn a little at a time until it's known to be cheap. */
+const LARGE_FILE = 30_000;
+
+/** Tiles' sides, in device pixels: chosen per pass so a tile costs about half the budget. */
+const TILE_MIN = 64;
+const TILE_MAX = 512;
+
+/**
+ * How far past its extent (in page units) a layer may still paint, which
+ * culling allows for: type overhanging its box and the like, which scale
+ * with the page, so 64 units, but never more than 64 screen pixels (as
+ * before decision 0028), and two device pixels for antialiasing.
+ */
+function cullPad(zoom: number, dpr: number): number {
+  return Math.min(64, 64 / zoom) + 2 / (zoom * dpr);
+}
+
+/** Options for `CanvasRenderer.render`. */
+export interface RenderOptions {
+  /** Draw exactly now: no scaled stand-in for a zoom. */
+  readonly exact?: boolean;
+  /**
+   * Milliseconds this call may spend drawing. Without one the frame is drawn
+   * whole. With one, a frame that would take longer is drawn a few tiles at
+   * a time over the next calls (see `pending`), a stand-in showing until
+   * each tile is drawn.
+   */
+  readonly budget?: number;
 }
 
 /** How far a zoom may stray from the snapshot it scales before it's drawn exactly. */
@@ -258,8 +323,28 @@ export class CanvasRenderer {
   #last: LastFrame | null = null;
   /** The last frame drew every layer (not a scaled stand-in). */
   #lastExact = false;
-  /** The page's layers that read the pixels around them, by document version (see #readers). */
-  #readerCache: { pageId: string; version: number; ids: string[] } | null = null;
+  /** Parts of the canvas still to draw exactly, in zoomed page pixels at the last frame's zoom (tiles.ts). */
+  #work = new TileWork();
+  /** Whether the work is a whole frame (not just changed places): its cost is the frame's. */
+  #workWhole = false;
+  #workMs = 0;
+  /** Device pixels drawn in the work so far. */
+  #workArea = 0;
+  /**
+   * How long each page last took to draw, in milliseconds per device pixel,
+   * at each zoom (by powers of two: zoomed out, a pixel holds far more):
+   * whether a frame or a change is drawn at once or a tile at a time, and
+   * how big the tiles are.
+   */
+  readonly #density = new Map<string, Map<number, number>>();
+  /** Frames kept as stand-ins (see `#standIn`), most recent last. */
+  #rasters: Raster[] = [];
+  /**
+   * The last call left work: call again next frame (with the same camera,
+   * or a pan) to draw more of it. False after a scaled zoom stand-in, which
+   * waits for the camera to settle instead.
+   */
+  pending = false;
   /**
    * Advances whenever a frame's content differs from the last one's (see
    * `sameContent`), so glass drawn against one backdrop isn't reused over another.
@@ -340,9 +425,10 @@ export class CanvasRenderer {
   }
 
   /**
-   * Draws the page. Returns false when the frame is a quick stand-in (a
-   * zoom drawn by scaling the last exact frame): draw again with `exact`
-   * once the camera settles.
+   * Draws the page. Returns false when the frame isn't exact yet: a zoom
+   * drawn by scaling the last frame (draw again with `exact` once the camera
+   * settles), or, with a `budget`, a frame drawn partly, a stand-in showing
+   * where it isn't (`pending`: draw again next frame).
    */
   render(
     ctx: Ctx,
@@ -350,7 +436,7 @@ export class CanvasRenderer {
     camera: Camera,
     viewport: { width: number; height: number },
     dpr: number,
-    { exact = false }: { exact?: boolean } = {},
+    { exact = false, budget = Number.POSITIVE_INFINITY }: RenderOptions = {},
   ): boolean {
     const start = performance.now();
     this.stats = { drawn: 0, culled: 0, ms: 0 };
@@ -359,10 +445,12 @@ export class CanvasRenderer {
     resetState(ctx);
     if (!page) {
       this.#last = null;
+      this.#work.clear();
+      this.pending = false;
       ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
       return true;
     }
-    // Whole device pixels, so a pan can move the last frame exactly (see `#reuse`).
+    // Whole device pixels, so a pan can move the last frame exactly (see `#moved`).
     const tx = Math.round(camera.x * dpr);
     const ty = Math.round(camera.y * dpr);
     const snapped = new Camera(tx / dpr, ty / dpr, camera.zoom);
@@ -385,24 +473,310 @@ export class CanvasRenderer {
     };
     if (!this.#last || !sameContent(this.#last, frame)) this.#generation++;
     if (!exact && this.#preview(ctx, frame)) {
+      this.#work.clear();
+      this.pending = false;
       this.stats.ms = performance.now() - start;
       return false;
     }
     this.#screen = ctx;
+    let done: boolean;
     try {
-      const reused = this.#reuse(ctx, frame, snapped, dpr);
-      this.#last = frame;
-      this.#lastExact = true;
-      if (!reused) {
-        ctx.fillStyle = background;
-        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-        this.#drawChildren(ctx, pageId, snapped, dpr, snapped.visibleRect(viewport));
-      }
+      done = this.#paint(ctx, frame, snapped, viewport, dpr, start, budget);
     } finally {
       this.#screen = null;
     }
+    this.pending = !done;
     this.stats.ms = performance.now() - start;
+    return done;
+  }
+
+  /**
+   * Brings the canvas to `frame`: by moving the last frame and drawing what
+   * a pan uncovered and what changed, when it can, else afresh; at once, or
+   * (with a budget, for a frame that costs more) a tile at a time. True when
+   * the canvas is exact.
+   */
+  #paint(
+    ctx: Ctx,
+    frame: LastFrame,
+    camera: Camera,
+    viewport: { width: number; height: number },
+    dpr: number,
+    start: number,
+    budget: number,
+  ): boolean {
+    const last = this.#last;
+    const lastExact = this.#lastExact;
+    const kept =
+      last !== null &&
+      lastExact &&
+      last.zoom === frame.zoom &&
+      sameCanvas(last, frame) &&
+      sameLook(last, frame);
+    // Layers that read the backdrop (glass, background blur) read what's drawn around them, so
+    // a page with any is drawn whole at once: in tiles, they'd read tiles not drawn yet.
+    const tiles = Number.isFinite(budget) && this.#scene.backdropReaders(frame.pageId).length === 0;
+    // What to draw now (device pixels); null for all of it.
+    let fresh: Rect[] | null = kept ? this.#moved(ctx, last, frame) : null;
+    if (fresh && last && last.version !== frame.version) {
+      const dirty = this.#dirtyRects(last.version, frame, camera, dpr);
+      if (!dirty) fresh = null;
+      else if (
+        tiles &&
+        this.#costly(
+          frame.pageId,
+          frame.zoom,
+          dirty.reduce((sum, r) => sum + r.width * r.height, 0),
+          budget,
+        )
+      ) {
+        // A change that takes longer to draw than a frame has: the old picture stays until each
+        // place is drawn again.
+        if (this.#work.empty)
+          this.#work = new TileWork(this.#tileSide(frame.pageId, frame.zoom, budget));
+        for (const r of dirty)
+          this.#work.add({
+            x: r.x - frame.tx,
+            y: r.y - frame.ty,
+            width: r.width,
+            height: r.height,
+          });
+      } else fresh.push(...dirty);
+    }
+    const showing = last;
+    this.#last = frame;
+    this.#lastExact = true;
+    const view = { x: -frame.tx, y: -frame.ty, width: frame.width, height: frame.height };
+    // Stand-ins still showing, and tiles no longer allowed: all of it, now.
+    if (fresh && !this.#work.empty && !tiles) fresh = null;
+    if (!fresh) {
+      this.#work.clear();
+      const area = frame.width * frame.height;
+      if (!tiles || !this.#costly(frame.pageId, frame.zoom, area, budget)) {
+        this.#workWhole = false;
+        const t = performance.now();
+        ctx.fillStyle = frame.background;
+        ctx.fillRect(0, 0, frame.width, frame.height);
+        this.#drawChildren(ctx, frame.pageId, camera, dpr, camera.visibleRect(viewport));
+        this.#measured(frame.pageId, frame.zoom, (performance.now() - t) / Math.max(1, area));
+        return true;
+      }
+      this.#standIn(ctx, frame, showing, lastExact);
+      this.#work = new TileWork(this.#tileSide(frame.pageId, frame.zoom, budget));
+      this.#work.add(view);
+      this.#workWhole = true;
+      this.#workMs = 0;
+      this.#workArea = 0;
+    } else if (fresh.length > 0) this.#drawFresh(ctx, frame, camera, dpr, fresh);
+    if (this.#work.empty) return true;
+    // A tile at a time, centre first, while the budget lasts: at least one when nothing else was
+    // drawn, so it always gets on, but none past the budget while a pan's strips fill it.
+    const centre = { x: view.x + view.width / 2, y: view.y + view.height / 2 };
+    const idle = !fresh || fresh.length === 0;
+    for (let first = idle; first || performance.now() - start < budget; first = false) {
+      const area = this.#work.take(view, centre);
+      if (!area) break;
+      const t = performance.now();
+      const rect = {
+        x: area.x + frame.tx,
+        y: area.y + frame.ty,
+        width: area.width,
+        height: area.height,
+      };
+      this.#redraw(ctx, frame, camera, dpr, [rect], NO_READERS);
+      this.#workMs += performance.now() - t;
+      this.#workArea += area.width * area.height;
+    }
+    if (!this.#work.empty) return false;
+    if (this.#workWhole) {
+      this.#measured(frame.pageId, frame.zoom, this.#workMs / Math.max(1, this.#workArea));
+      this.#keep(ctx, frame);
+    }
+    this.#workWhole = false;
     return true;
+  }
+
+  #measured(pageId: string, zoom: number, density: number): void {
+    let byZoom = this.#density.get(pageId);
+    if (!byZoom) {
+      byZoom = new Map();
+      this.#density.set(pageId, byZoom);
+    }
+    byZoom.set(Math.round(Math.log2(zoom)), density);
+  }
+
+  /**
+   * How long a device pixel of the page takes to draw at `zoom`: as measured
+   * there, else from the nearest zoom measured, halved for each doubling of
+   * the zoom (a pixel holds less). Undefined when nothing's measured yet.
+   */
+  #densityAt(pageId: string, zoom: number): number | undefined {
+    const byZoom = this.#density.get(pageId);
+    if (!byZoom) return undefined;
+    const at = Math.round(Math.log2(zoom));
+    const exact = byZoom.get(at);
+    if (exact !== undefined) return exact;
+    let estimate: number | undefined;
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const [level, density] of byZoom)
+      if (Math.abs(level - at) < nearest) {
+        nearest = Math.abs(level - at);
+        estimate = density * 2 ** (level - at);
+      }
+    return estimate;
+  }
+
+  /** Whether drawing `area` device pixels of the page is likely to take longer than `budget`. */
+  #costly(pageId: string, zoom: number, area: number, budget: number): boolean {
+    const density = this.#densityAt(pageId, zoom);
+    if (density === undefined) return this.#scene.doc.size > LARGE_FILE;
+    return density * area > budget;
+  }
+
+  /** A tile's side for the page: a power of two that takes about half the budget to draw. */
+  #tileSide(pageId: string, zoom: number, budget: number): number {
+    const density = this.#densityAt(pageId, zoom);
+    if (density === undefined || density <= 0) return 128;
+    const side = Math.sqrt((budget * 0.5) / density);
+    let tile = TILE_MIN;
+    while (tile * 2 <= Math.min(side, TILE_MAX)) tile *= 2;
+    return tile;
+  }
+
+  /**
+   * Where the document changed since `version`, on the canvas (device
+   * pixels, merged into a few rects); null when that can't be told, so
+   * everything is drawn again.
+   */
+  #dirtyRects(version: number, frame: LastFrame, camera: Camera, dpr: number): Rect[] | null {
+    const dirty = this.#scene.dirtySince(version);
+    if (!dirty || dirty.full) return null;
+    // The cull's margin for strokes and type past a layer's bounds, and a pixel for antialiasing.
+    const pad = cullPad(camera.zoom, dpr);
+    const z = camera.zoom * dpr;
+    const rects: Rect[] = [];
+    for (const { rect, page } of dirty.rects) {
+      if (page !== null && page !== frame.pageId) continue;
+      const x0 = Math.floor((rect.x - pad) * z + frame.tx);
+      const y0 = Math.floor((rect.y - pad) * z + frame.ty);
+      const x1 = Math.ceil((rect.x + rect.width + pad) * z + frame.tx);
+      const y1 = Math.ceil((rect.y + rect.height + pad) * z + frame.ty);
+      if (x1 <= 0 || y1 <= 0 || x0 >= frame.width || y0 >= frame.height) continue;
+      rects.push({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+    }
+    return coverRects(rects, { x: 0, y: 0, width: frame.width, height: frame.height });
+  }
+
+  /**
+   * What shows until the exact frame is drawn: the frames kept for this
+   * page (coarsest first), then the last frame, each scaled to this one's
+   * camera. Or, when only the look changed (an image decoded, a font
+   * loaded), the canvas as it is.
+   */
+  #standIn(ctx: Ctx, frame: LastFrame, showing: LastFrame | null, exact: boolean): void {
+    const same = showing !== null && sameCanvas(showing, frame);
+    if (
+      same &&
+      showing.zoom === frame.zoom &&
+      showing.tx === frame.tx &&
+      showing.ty === frame.ty &&
+      showing.background === frame.background
+    )
+      return;
+    // The canvas as it is, unless it's already a scaled snapshot: that snapshot is kept.
+    if (same && exact) {
+      const snapshot = this.#snapshotFor(frame.width, frame.height);
+      const sctx = snapshot?.getContext("2d") as Ctx | null | undefined;
+      if (snapshot && sctx) {
+        sctx.globalCompositeOperation = "copy";
+        sctx.drawImage(ctx.canvas, 0, 0);
+        sctx.globalCompositeOperation = "source-over";
+        this.#snapshotFrame = showing;
+      }
+    }
+    resetState(ctx);
+    ctx.fillStyle = frame.background;
+    ctx.fillRect(0, 0, frame.width, frame.height);
+    const sources: Raster[] = this.#rasters
+      .filter((r) => r.frame.pageId === frame.pageId && r.frame.dpr === frame.dpr)
+      .sort((a, b) => a.frame.zoom - b.frame.zoom);
+    const shot = this.#snapshotFrame;
+    if (this.#snapshot && shot && sameCanvas(shot, frame))
+      sources.push({ canvas: this.#snapshot, frame: shot, scale: 1 });
+    ctx.imageSmoothingQuality = "low";
+    for (const source of sources) {
+      if (source.frame.background !== frame.background || !this.#refresh(source, frame)) continue;
+      const ratio = frame.zoom / source.frame.zoom;
+      const k = ratio / source.scale;
+      ctx.setTransform(
+        k,
+        0,
+        0,
+        k,
+        frame.tx - ratio * source.frame.tx,
+        frame.ty - ratio * source.frame.ty,
+      );
+      ctx.drawImage(source.canvas, 0, 0);
+    }
+    resetState(ctx);
+  }
+
+  /**
+   * Brings a kept frame up to the document: the places changed since it was
+   * drawn are cleared to the background (the exact frame draws them soon).
+   * False when that can't be told: the frame is dropped.
+   */
+  #refresh(source: Raster, frame: LastFrame): boolean {
+    if (source.frame.version === frame.version) return true;
+    const dirty = this.#scene.dirtySince(source.frame.version);
+    if (!dirty || dirty.full) {
+      this.#rasters = this.#rasters.filter((r) => r !== source);
+      if (source.canvas === this.#snapshot) this.#snapshotFrame = null;
+      return false;
+    }
+    const c = source.canvas.getContext("2d") as Ctx | null;
+    if (!c) return false;
+    const old = source.frame;
+    const z = old.zoom * old.dpr * source.scale;
+    resetState(c);
+    c.fillStyle = old.background;
+    const pad = cullPad(old.zoom, old.dpr);
+    for (const { rect, page } of dirty.rects) {
+      if (page !== null && page !== old.pageId) continue;
+      c.fillRect(
+        Math.floor((rect.x - pad) * z + old.tx * source.scale),
+        Math.floor((rect.y - pad) * z + old.ty * source.scale),
+        Math.ceil((rect.width + pad * 2) * z) + 2,
+        Math.ceil((rect.height + pad * 2) * z) + 2,
+      );
+    }
+    source.frame = { ...old, version: frame.version };
+    return true;
+  }
+
+  /** Keeps a copy of an exact frame drawn a little at a time, at half size, as a stand-in for later. */
+  #keep(ctx: Ctx, frame: LastFrame): void {
+    const scale = Math.min(1, 1024 / Math.max(frame.width, frame.height, 1));
+    const w = Math.max(1, Math.round(frame.width * scale));
+    const h = Math.max(1, Math.round(frame.height * scale));
+    const same = this.#rasters.findIndex(
+      (r) => r.frame.pageId === frame.pageId && r.frame.zoom === frame.zoom,
+    );
+    const reuse = same !== -1 ? this.#rasters.splice(same, 1)[0] : undefined;
+    let canvas = reuse?.canvas ?? null;
+    if (!canvas) {
+      if (this.#rasters.length >= RASTERS) canvas = (this.#rasters.shift() as Raster).canvas;
+      else canvas = scratch(null, w, h);
+    }
+    if (!canvas) return;
+    canvas.width = w;
+    canvas.height = h;
+    const c = canvas.getContext("2d") as Ctx | null;
+    if (!c) return;
+    resetState(c);
+    c.imageSmoothingQuality = "medium";
+    c.drawImage(ctx.canvas, 0, 0, w, h);
+    this.#rasters.push({ canvas, frame, scale: w / frame.width });
   }
 
   /**
@@ -465,21 +839,18 @@ export class CanvasRenderer {
   }
 
   /**
-   * A pan with nothing else changed: move the last frame by the camera's
-   * whole-pixel step and draw only the strips it uncovered. Panning then
-   * costs what the new edge holds, not what the whole view holds.
+   * A pan: moves the last frame by the camera's whole-pixel step and returns
+   * the strips it uncovered (device pixels), to draw. Panning then costs what
+   * the new edge holds, not what the whole view holds. Null when it moved
+   * more than a screen.
    */
-  #reuse(ctx: Ctx, frame: LastFrame, camera: Camera, dpr: number): boolean {
-    const last = this.#last;
-    // Only from an exact frame: a zoom stand-in isn't worth moving.
-    if (!last || !this.#lastExact || last.zoom !== frame.zoom || !sameContent(last, frame))
-      return false;
+  #moved(ctx: Ctx, last: LastFrame, frame: LastFrame): Rect[] | null {
     const dx = frame.tx - last.tx;
     const dy = frame.ty - last.ty;
     const { width, height } = frame;
-    if (dx === 0 && dy === 0) return true;
-    // Moved more than a screen: nothing to keep.
-    if (Math.abs(dx) >= width || Math.abs(dy) >= height) return false;
+    if (dx === 0 && dy === 0) return [];
+    if (Math.abs(dx) >= width || Math.abs(dy) >= height) return null;
+    resetState(ctx);
     ctx.globalCompositeOperation = "copy";
     ctx.drawImage(ctx.canvas, dx, dy);
     ctx.globalCompositeOperation = "source-over";
@@ -489,17 +860,20 @@ export class CanvasRenderer {
     if (dx < 0) strips.push([width + dx, 0, -dx, height]);
     if (dy > 0) strips.push([0, 0, width, dy]);
     if (dy < 0) strips.push([0, height + dy, width, -dy]);
-    const rects = strips.map(([x, y, w, h]) => ({ x, y, width: w, height: h }));
-    const grown = this.#withReaders(rects, frame.pageId, camera, dpr, width, height);
+    return strips.map(([x, y, w, h]) => ({ x, y, width: w, height: h }));
+  }
+
+  /** Draws these parts of the canvas (device pixels) exactly: what a pan uncovered, what changed. */
+  #drawFresh(ctx: Ctx, frame: LastFrame, camera: Camera, dpr: number, rects: Rect[]): void {
+    const grown = this.#withReaders(rects, frame.pageId, camera, dpr, frame.width, frame.height);
     if (grown.readers.size > 0) {
-      // Layers that read the backdrop around them (glass, background blur) and touch a strip
-      // are redrawn whole, with all they read, in one pass: drawn in a strip alone, they'd
+      // Layers that read the backdrop around them (glass, background blur) and touch a part
+      // are redrawn whole, with all they read, in one pass: drawn in a part alone, they'd
       // read the last frame's finished pixels past its edge, and leave a seam there.
       this.#redraw(ctx, frame, camera, dpr, grown.rects, grown.readers);
-      return true;
+      return;
     }
     for (const rect of rects) this.#redraw(ctx, frame, camera, dpr, [rect], grown.readers);
-    return true;
   }
 
   /**
@@ -563,7 +937,9 @@ export class CanvasRenderer {
     width: number,
     height: number,
   ): { rects: Rect[]; readers: Set<string> } {
-    const readers = this.#readers(pageId);
+    // Glass and background blur. (Layer blur and texture spread only the layer, which is drawn
+    // whole into a canvas of its own.)
+    const readers = this.#scene.backdropReaders(pageId);
     const taken = new Set<string>();
     if (readers.length === 0) return { rects: [...strips], readers: taken };
     const areas: Array<{ id: string; paints: Rect; reads: Rect }> = [];
@@ -585,35 +961,6 @@ export class CanvasRenderer {
   }
 
   /**
-   * The page's layers that read the backdrop around them: glass and
-   * background blur. (Layer blur and texture spread only the layer, which
-   * is drawn whole into a canvas of its own.) Kept until the document changes.
-   */
-  #readers(pageId: string): string[] {
-    const doc = this.#scene.doc;
-    const cached = this.#readerCache;
-    if (cached?.pageId === pageId && cached.version === doc.version) return cached.ids;
-    const ids: string[] = [];
-    const stack = [pageId];
-    while (stack.length > 0) {
-      const id = stack.pop() as string;
-      for (const child of doc.childIds(id)) {
-        const node = doc.get(child);
-        if (!node || node.props.visible === false) continue;
-        stack.push(child);
-        if (
-          getProp(node.props, "effects").some(
-            (e) => e.visible !== false && (e.type === "glass" || e.type === "background-blur"),
-          )
-        )
-          ids.push(child);
-      }
-    }
-    this.#readerCache = { pageId, version: doc.version, ids };
-    return ids;
-  }
-
-  /**
    * Where a layer that reads around it paints (its box and its effects'
    * reach), and what it reads (that and the farthest its backdrop is read),
    * in device pixels, within the canvas.
@@ -629,7 +976,7 @@ export class CanvasRenderer {
     const b = this.#scene.bounds(id);
     if (!node || !b) return null;
     const z = camera.zoom * dpr;
-    const paints = this.#effectReach(node) * z;
+    const paints = effectReach(node) * z;
     let reads = paints;
     for (const e of getProp(node.props, "effects")) {
       if (e.visible === false) continue;
@@ -704,21 +1051,26 @@ export class CanvasRenderer {
     const node = this.#scene.doc.get(id);
     if (!node || node.props.visible === false || this.hidden.has(id)) return;
     const bounds = this.#scene.bounds(id);
-    // Effects (shadows, blur) can paint outside the box: pad the cull test.
-    const pad = 64 / camera.zoom + this.#effectReach(node);
+    // Culled by its extent: its box and what it paints outside it (strokes, shadows, blur), and
+    // its children where they overflow a frame that doesn't clip them, so a part of the canvas
+    // redrawn on its own gets every layer a whole frame would draw there. A margin holds what
+    // type may paint past even that (see `cullPad`).
+    const extent = this.#scene.extent(id);
+    const pad = cullPad(camera.zoom, dpr);
     if (
       !bounds ||
-      bounds.x - pad > visible.x + visible.width ||
-      bounds.y - pad > visible.y + visible.height ||
-      bounds.x + bounds.width + pad < visible.x ||
-      bounds.y + bounds.height + pad < visible.y ||
+      !extent ||
+      extent.x - pad > visible.x + visible.width ||
+      extent.y - pad > visible.y + visible.height ||
+      extent.x + extent.width + pad < visible.x ||
+      extent.y + extent.height + pad < visible.y ||
       (this.#parts &&
         !this.#parts.some(
           (r) =>
-            bounds.x - pad <= r.x + r.width &&
-            bounds.y - pad <= r.y + r.height &&
-            bounds.x + bounds.width + pad >= r.x &&
-            bounds.y + bounds.height + pad >= r.y,
+            extent.x - pad <= r.x + r.width &&
+            extent.y - pad <= r.y + r.height &&
+            extent.x + extent.width + pad >= r.x &&
+            extent.y + extent.height + pad >= r.y,
         ))
     ) {
       this.stats.culled++;
@@ -985,9 +1337,17 @@ export class CanvasRenderer {
     blend: GlobalCompositeOperation = "source-over",
   ): void {
     const doc = this.#scene.doc;
-    if (!hasMask(doc, parentId)) {
-      for (const child of doc.childIds(parentId))
-        this.#draw(ctx, child, camera, dpr, visible, alpha, blend);
+    if (!this.#scene.hasMask(parentId)) {
+      // Only children that can reach the view: the scene's index finds them, so this costs what's
+      // near the view, not what the parent holds. The margin is the cull's (see `#draw`).
+      const margin = cullPad(camera.zoom, dpr);
+      const near = this.#scene.childrenIn(parentId, {
+        x: visible.x - margin,
+        y: visible.y - margin,
+        width: visible.width + margin * 2,
+        height: visible.height + margin * 2,
+      });
+      for (const child of near) this.#draw(ctx, child, camera, dpr, visible, alpha, blend);
       return;
     }
     let clipping = false;
@@ -1121,21 +1481,6 @@ export class CanvasRenderer {
     );
     if (canvas) this.#maskCanvases[slot] = canvas;
     return canvas;
-  }
-
-  #effectReach(node: NodeRecord): number {
-    let reach = 0;
-    const effects = getProp(node.props, "effects");
-    for (const e of effects)
-      if (e.visible !== false && e.type === "drop-shadow")
-        reach = Math.max(reach, Math.abs(e.x) + Math.abs(e.y) + e.blur * 2 + Math.max(0, e.spread));
-    if (
-      (node.type === "line" || node.type === "path") &&
-      (getProp(node.props, "markerStart") !== "none" || getProp(node.props, "markerEnd") !== "none")
-    )
-      reach = Math.max(reach, markerLength(getProp(node.props, "strokeWeight")));
-    // Blur and texture spread everything above: their reach adds.
-    return reach + postReach(postEffects(effects));
   }
 
   #shapePath(node: NodeRecord, w: number, h: number): Path2D {

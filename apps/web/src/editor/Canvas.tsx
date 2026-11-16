@@ -31,6 +31,13 @@ import { VectorHints } from "./VectorHints";
 
 /** How long a zoom rests before its stand-in frames give way to an exact one. */
 const SETTLE_MS = 120;
+/**
+ * Milliseconds a frame may spend drawing the design. A frame that would take
+ * longer (a large page, whole) is drawn a few tiles a frame instead, its
+ * stand-in showing meanwhile (decision 0028); the overlay has the rest of
+ * the frame.
+ */
+const CONTENT_BUDGET = 8;
 
 function readTheme(): OverlayTheme {
   const css = getComputedStyle(document.documentElement);
@@ -103,6 +110,28 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       contentDirty = true;
       schedule();
     };
+    timing.compare = () => {
+      const s = editor.s;
+      if (!s.pageId) return null;
+      const { width, height } = contentCanvas;
+      // Drawn again on the same canvas (another canvas may rasterise differently), whole, at once.
+      const shown = cctx.getImageData(0, 0, width, height).data;
+      renderer.invalidate();
+      renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr, { exact: true });
+      const whole = cctx.getImageData(0, 0, width, height).data;
+      let differing = 0;
+      let max = 0;
+      for (let i = 0; i < shown.length; i += 4) {
+        const d = Math.max(
+          Math.abs((shown[i] ?? 0) - (whole[i] ?? 0)),
+          Math.abs((shown[i + 1] ?? 0) - (whole[i + 1] ?? 0)),
+          Math.abs((shown[i + 2] ?? 0) - (whole[i + 2] ?? 0)),
+        );
+        if (d > 0) differing++;
+        if (d > max) max = d;
+      }
+      return { pixels: width * height, differing, max };
+    };
     // A zoom draws quick stand-in frames; once it pauses, one exact frame follows.
     let exact = false;
     let settle = 0;
@@ -114,18 +143,26 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       if (contentDirty && s.pageId) {
         // Truncated text shows all its lines while it's being edited.
         renderer.whole = s.editingText;
-        const done = renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr, { exact });
+        const done = renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr, {
+          exact,
+          budget: CONTENT_BUDGET,
+        });
         exact = false;
         clearTimeout(settle);
-        if (!done)
+        contentDirty = false;
+        if (renderer.pending) {
+          // Drawn in part: the next frame draws more.
+          contentDirty = true;
+          schedule();
+        } else if (!done)
           settle = window.setTimeout(() => {
             exact = true;
             contentDirty = true;
             schedule();
           }, SETTLE_MS);
-        contentDirty = false;
         timing.drawn = renderer.stats.drawn;
         timing.culled = renderer.stats.culled;
+        timing.exact = done;
       }
       const t1 = performance.now();
       if (overlayDirty) {
