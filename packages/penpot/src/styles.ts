@@ -121,12 +121,19 @@ const MARKERS: Record<string, StrokeProps["markerEnd"]> = {
 };
 
 /**
+ * What a layer's stroke can have at its ends: an open path takes caps and
+ * markers, a closed path caps (its dashes have ends), and anything else
+ * neither (Drawpane caps only lines and paths).
+ */
+export type StrokeEnds = "open" | "closed" | "none";
+
+/**
  * Penpot strokes to Drawpane's: paints for each, and one weight, alignment,
  * dash pattern and set of ends (from the topmost stroke) for them all.
  */
 export function strokes(
   raw: unknown,
-  open: boolean,
+  ends: StrokeEnds,
   media: MediaLookup,
   notes: Notes,
 ): StrokeProps {
@@ -155,8 +162,16 @@ export function strokes(
         : "center";
   switch (top.strokeStyle) {
     case "dotted":
-      out.strokeDashes = [0, width + 5];
-      out.strokeCap = "round";
+      // Penpot's dots are zero-length dashes with round caps. Where there
+      // are no caps, a dash as long as the stroke is wide: square dots, on
+      // the same spacing.
+      if (ends === "none") {
+        out.strokeDashes = [width, 5];
+        notes.add("dotted-square");
+      } else {
+        out.strokeDashes = [0, width + 5];
+        out.strokeCap = "round";
+      }
       break;
     case "dashed":
       out.strokeDashes = [num(top.strokeDash, width + 10), num(top.strokeGap, width + 10)];
@@ -165,7 +180,7 @@ export function strokes(
       out.strokeDashes = [width + 5, width + 5, width + 1, width + 5];
       break;
   }
-  if (open) {
+  if (ends === "open") {
     const plainCap = (v: unknown) => v === "round" || v === "square";
     if (
       plainCap(top.strokeCapStart) &&

@@ -31,6 +31,14 @@ export const NOTE_TEXT = {
     "layer's auto layout margins were dropped",
     "layers' auto layout margins were dropped",
   ],
+  "group-fill": [
+    "group set to Fill in an auto layout keeps its own size",
+    "groups set to Fill in auto layouts keep their own size",
+  ],
+  "dotted-square": [
+    "dotted border's round dots became square",
+    "dotted borders' round dots became square",
+  ],
   "grid-percent": ["grid track in percent became a share", "grid tracks in percent became shares"],
   "library-component": [
     "copy of a component from another file was detached",

@@ -229,6 +229,72 @@ describe("converting shapes", () => {
     expect((nodes.find((n) => n.id === "a") as NodeRecord).props.sizingH).toBe("fill");
   });
 
+  it("keeps a group's own size in an auto layout, where Drawpane groups have no sizing", () => {
+    const { nodes, notes } = convertFile(
+      fileOf([
+        {
+          id: "row",
+          type: "frame",
+          parentId: ROOT,
+          shapes: ["g"],
+          ...box(0, 0, 200, 40),
+          layout: "flex",
+          layoutFlexDir: "row",
+        },
+        {
+          id: "g",
+          type: "group",
+          parentId: "row",
+          shapes: ["r"],
+          ...box(0, 0, 200, 40),
+          layoutItemHSizing: "fill",
+          layoutItemVSizing: "auto",
+          layoutItemMinW: 50,
+          layoutItemAlignSelf: "center",
+        },
+        { id: "r", type: "rect", parentId: "g", ...box(0, 0, 200, 40) },
+      ]),
+      noMedia,
+    );
+    const group = nodes.find((n) => n.id === "g") as NodeRecord;
+    expect(group.props).not.toHaveProperty("sizingH");
+    expect(group.props).not.toHaveProperty("sizingV");
+    expect(group.props).not.toHaveProperty("minWidth");
+    expect(group.props.alignSelf).toBe("center");
+    expect(notes.lines()).toEqual(["1 group set to Fill in an auto layout keeps its own size"]);
+    validate(nodes);
+  });
+
+  it("draws dotted borders as dots, square where Drawpane has no caps", () => {
+    const dotted = {
+      strokeStyle: "dotted",
+      strokeWidth: 2,
+      strokeColor: "#000000",
+      strokeOpacity: 1,
+    };
+    const { nodes, notes } = convertFile(
+      fileOf([
+        { id: "r", type: "rect", parentId: ROOT, ...box(0, 0, 40, 40), strokes: [dotted] },
+        {
+          id: "b",
+          type: "frame",
+          parentId: ROOT,
+          shapes: [],
+          ...box(50, 0, 40, 40),
+          strokes: [dotted],
+        },
+      ]),
+      noMedia,
+    );
+    for (const id of ["r", "b"]) {
+      const node = nodes.find((n) => n.id === id) as NodeRecord;
+      expect(node.props.strokeDashes).toEqual([2, 5]);
+      expect(node.props).not.toHaveProperty("strokeCap");
+    }
+    expect(notes.lines()).toEqual(["2 dotted borders' round dots became square"]);
+    validate(nodes);
+  });
+
   it("turns rich text into characters, a base style and runs", () => {
     const leaf = (text: string, extra: Record<string, unknown> = {}) => ({
       text,

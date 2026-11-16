@@ -5,7 +5,9 @@
  * page (`points`, after its own layout); the converted layer's corners must
  * match them. Off unless $PENPOT_KITS names a folder of `.penpot` files
  * (the kit store's are at github.com/penpot/penpot-files); a report of
- * every mismatch, grouped by kind, goes to $PENPOT_KITS/report.json.
+ * every mismatch, grouped by kind, goes to $PENPOT_KITS/report-<phase>.json.
+ * Every converted file must also pass the checks the server runs on an
+ * import (`invalid` in the report), or adding the kit fails.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +22,7 @@ import {
   Scene,
   textFaces,
 } from "@drawpane/editor";
+import { applyTransaction, MemoryStore, type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { convertFile, readPenpot } from "../src";
 
@@ -89,6 +92,32 @@ async function opened(nodes: ReturnType<typeof convertFile>["nodes"]): Promise<D
   return editor.doc;
 }
 
+/** Why the server would refuse these nodes, as an import's ops (parents first), or null. */
+function refusal(nodes: ReturnType<typeof convertFile>["nodes"]): string | null {
+  const byParent = new Map<string, typeof nodes>();
+  for (const n of nodes) byParent.set(n.parent, [...(byParent.get(n.parent) ?? []), n]);
+  const ops: Op[] = [];
+  const queue = [...(byParent.get(ROOT_ID) ?? [])];
+  for (let n = queue.shift(); n; n = queue.shift()) {
+    ops.push({
+      op: "create",
+      id: n.id,
+      type: n.type,
+      parent: n.parent,
+      key: n.key,
+      props: n.props,
+    });
+    queue.push(...(byParent.get(n.id) ?? []));
+  }
+  if (ops.length !== nodes.length) return `${nodes.length - ops.length} layers have no parent`;
+  try {
+    applyTransaction(new MemoryStore([]), ops, { rollback: false });
+    return null;
+  } catch (error) {
+    return (error as Error).message;
+  }
+}
+
 type Raw = Record<string, unknown>;
 interface Point {
   x: number;
@@ -149,6 +178,7 @@ describe.skipIf(!DIR)("Penpot kits: layers land where Penpot put them", () => {
     const totals = {
       kits: 0,
       failedKits: [] as string[],
+      invalid: [] as string[],
       shapes: 0,
       missing: 0,
       off1: 0,
@@ -174,6 +204,8 @@ describe.skipIf(!DIR)("Penpot kits: layers land where Penpot put them", () => {
           totals.failedKits.push(`${kit} / ${file.name}: ${(error as Error).message}`);
           continue;
         }
+        const refused = refusal(nodes);
+        if (refused) totals.invalid.push(`${kit} / ${file.name}: ${refused}`);
         let doc: Doc;
         if (OPENED) doc = await opened(nodes);
         else {
@@ -267,5 +299,6 @@ describe.skipIf(!DIR)("Penpot kits: layers land where Penpot put them", () => {
     console.log(JSON.stringify({ ...totals, refitFailures: refitFailures.length }, null, 1));
     console.table(kinds.slice(0, 40));
     expect(totals.kits).toBeGreaterThan(0);
+    expect(totals.invalid).toEqual([]);
   }, 3_600_000);
 });
