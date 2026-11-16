@@ -57,6 +57,40 @@ export interface DocReader {
    * find them without walking every layer (the Worker's reader over SQLite).
    */
   componentMains?(): NodeRecord[];
+  /**
+   * A node's child ids in order, read a page at a time as they're asked
+   * for, when the reader can (SQLite): what a walk over a large file reads
+   * instead of `childIds`, so it never holds every child of a wide node.
+   */
+  children?(parent: string): Iterable<string>;
+}
+
+/** A node's child ids in order, a page at a time where the reader can. */
+function childrenOf(doc: DocReader, parent: string): Iterable<string> {
+  return doc.children ? doc.children(parent) : doc.childIds(parent);
+}
+
+/**
+ * A node and everything inside it, parents first, children in order, one at
+ * a time: what's held is the path down to the node it's at, not the subtree.
+ */
+export function* walkSubtree(doc: DocReader, id: string): Generator<NodeRecord> {
+  const root = doc.get(id);
+  if (!root) return;
+  yield root;
+  const stack: Iterator<string>[] = [childrenOf(doc, id)[Symbol.iterator]()];
+  while (stack.length > 0) {
+    const next = (stack[stack.length - 1] as Iterator<string>).next();
+    if (next.done) {
+      stack.pop();
+      continue;
+    }
+    const node = doc.get(next.value);
+    // A child that isn't there is left out, with whatever it holds.
+    if (!node) continue;
+    yield node;
+    stack.push(childrenOf(doc, node.id)[Symbol.iterator]());
+  }
 }
 
 /** A reader over a snapshot's nodes (in the Worker, which has no editor). */
@@ -98,41 +132,69 @@ function setOf(doc: DocReader, id: string): NodeRecord | undefined {
 function mains(doc: DocReader): NodeRecord[] {
   if (doc.componentMains) return doc.componentMains();
   const out: NodeRecord[] = [];
-  const walk = (parent: string) => {
-    for (const id of doc.childIds(parent)) {
-      const node = doc.get(id);
-      if (!node) continue;
-      if (isMain(node)) out.push(node);
-      walk(id);
-    }
-  };
-  for (const page of doc.pageIds()) walk(page);
+  for (const page of doc.pageIds())
+    for (const node of walkSubtree(doc, page)) if (node.id !== page && isMain(node)) out.push(node);
   return out;
 }
 
 // ---------------------------------------------------------------------------
 // Hashing
 
-/** cyrb53: a fast, well-mixed 53-bit hash of a string. */
-function cyrb53(text: string, seed: number): number {
-  let h1 = 0xdeadbeef ^ seed;
-  let h2 = 0x41c6ce57 ^ seed;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
+/**
+ * cyrb53, a fast, well-mixed 53-bit hash of a string, taken a piece at a
+ * time: the hash of pieces fed in turn is the hash of their concatenation.
+ */
+class Cyrb53 {
+  #h1: number;
+  #h2: number;
+
+  constructor(seed: number) {
+    this.#h1 = 0xdeadbeef ^ seed;
+    this.#h2 = 0x41c6ce57 ^ seed;
   }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
-  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
-  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+
+  update(text: string): void {
+    let h1 = this.#h1;
+    let h2 = this.#h2;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    this.#h1 = h1;
+    this.#h2 = h2;
+  }
+
+  digest(): number {
+    let h1 = this.#h1;
+    let h2 = this.#h2;
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
+    h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
+    h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+  }
 }
 
-/** 64 bits of hash, as 16 hex digits. */
+/** 64 bits of hash (two cyrb53 seeds), as 16 hex digits, taken a piece at a time. */
+class Hash64 {
+  readonly #a = new Cyrb53(1);
+  readonly #b = new Cyrb53(2);
+
+  update(text: string): this {
+    this.#a.update(text);
+    this.#b.update(text);
+    return this;
+  }
+
+  digest(): string {
+    const hex = (n: number) => (n % 4294967296).toString(16).padStart(8, "0");
+    return hex(this.#a.digest()) + hex(this.#b.digest());
+  }
+}
+
 function hash64(text: string): string {
-  const hex = (n: number) => (n % 4294967296).toString(16).padStart(8, "0");
-  return hex(cyrb53(text, 1)) + hex(cyrb53(text, 2));
+  return new Hash64().update(text).digest();
 }
 
 /** JSON with object keys sorted, so equal values hash (and compare) alike. */
@@ -191,17 +253,12 @@ function references(doc: DocReader, node: NodeRecord): string[] {
   return out;
 }
 
-/** A node and everything inside it, parents first, children in order. */
+/**
+ * A node and everything inside it, parents first, children in order, as an
+ * array (for the editor; a walk over a file of any size uses `walkSubtree`).
+ */
 export function subtree(doc: DocReader, id: string): NodeRecord[] {
-  const out: NodeRecord[] = [];
-  const visit = (nodeId: string) => {
-    const node = doc.get(nodeId);
-    if (!node) return;
-    out.push(node);
-    for (const child of doc.childIds(nodeId)) visit(child);
-  };
-  visit(id);
-  return out;
+  return [...walkSubtree(doc, id)];
 }
 
 /**
@@ -211,14 +268,21 @@ export function subtree(doc: DocReader, id: string): NodeRecord[] {
  */
 export function dependencyRoots(doc: DocReader, assetIds: Iterable<string>): string[] {
   const roots: string[] = [];
-  const seen = new Set<string>();
-  const queue = [...assetIds];
-  while (queue.length > 0) {
-    const id = queue.shift() as string;
-    if (seen.has(id) || !doc.get(id)) continue;
-    seen.add(id);
+  // Each id queued once, in the order first found: the queue holds what's referenced, not
+  // every reference (a large component's copies all naming the same few mains).
+  const queue: string[] = [];
+  const queued = new Set<string>();
+  const enqueue = (id: string) => {
+    if (queued.has(id)) return;
+    queued.add(id);
+    queue.push(id);
+  };
+  for (const id of assetIds) enqueue(id);
+  for (let i = 0; i < queue.length; i++) {
+    const id = queue[i] as string;
+    if (!doc.get(id)) continue;
     roots.push(id);
-    for (const node of subtree(doc, id)) queue.push(...references(doc, node));
+    for (const node of walkSubtree(doc, id)) for (const ref of references(doc, node)) enqueue(ref);
   }
   const rootSet = new Set(roots);
   const insideAnother = (id: string) => {
@@ -238,16 +302,20 @@ const PLACEMENT = new Set(["x", "y", "positioning", "constraintH", "constraintV"
  * doesn't count.
  */
 export function assetHash(doc: DocReader, assetId: string): string {
-  const parts: string[] = [];
+  // A line per node, hashed as it's read: the same hash as the lines joined, without the join.
+  const hash = new Hash64();
+  let first = true;
   for (const root of dependencyRoots(doc, [assetId]))
-    for (const node of subtree(doc, root)) {
+    for (const node of walkSubtree(doc, root)) {
       const props =
         node.id === root
           ? Object.fromEntries(Object.entries(node.props).filter(([k]) => !PLACEMENT.has(k)))
           : node.props;
-      parts.push(stableJson([node.id, node.type, node.id === root ? "" : node.key, props]));
+      if (!first) hash.update("\n");
+      first = false;
+      hash.update(stableJson([node.id, node.type, node.id === root ? "" : node.key, props]));
     }
-  return hash64(parts.join("\n"));
+  return hash.digest();
 }
 
 /** What a library file offers: its components, a set of variants as one, in file order. */

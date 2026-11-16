@@ -121,6 +121,29 @@ describe("applyOp", () => {
     expectCode(() => applyOp(store, { op: "move", id: "f1", parent: "f1", key: "a0" }), "cycle");
   });
 
+  it("refuses a move that would put a layer inside the moved one too deep", () => {
+    // A chain of frames down to level 127 (the page is level 1).
+    let parent = "p1";
+    for (let i = 0; i < 126; i++) {
+      applyOp(store, frame(`c${i}`, parent));
+      parent = `c${i}`;
+    }
+    applyOp(store, frame("g", "p1", "a5"));
+    applyOp(store, rect("h", "g"));
+    // g would land at level 128, the deepest allowed, but h inside it at 129.
+    expectCode(
+      () => applyOp(store, { op: "move", id: "g", parent: "c125", key: "a0" }),
+      "too_deep",
+    );
+    expect(store.get("g")?.parent).toBe("p1");
+    // One level up, both fit.
+    applyOp(store, { op: "move", id: "g", parent: "c124", key: "a1" });
+    expect(store.get("g")?.parent).toBe("c124");
+    // Moving it back up is always fine.
+    applyOp(store, { op: "move", id: "g", parent: "p1", key: "a5" });
+    expect(store.get("g")?.parent).toBe("p1");
+  });
+
   it("deletes whole subtrees and restores them with the inverse", () => {
     applyOp(store, frame("f2", "f1", "a1"));
     applyOp(store, rect("r2", "f2"));

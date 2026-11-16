@@ -117,12 +117,28 @@ export function countRows(sql: SqlStorage, table: string): number {
 
 /** Inserts nodes, a statement per 20 rows; throws on an id already there. */
 export function insertNodes(sql: SqlStorage, table: string, nodes: readonly NodeRecord[]): void {
+  insertRows(sql, table, nodes.map(toRow));
+}
+
+/** A node as a row: its props as the JSON text stored. */
+export function toRow(node: NodeRecord): NodeRow {
+  return {
+    id: node.id,
+    parent: node.parent,
+    key: node.key,
+    type: node.type,
+    props: JSON.stringify(node.props),
+  };
+}
+
+/** Inserts rows, a statement per 20; throws on an id already there. */
+export function insertRows(sql: SqlStorage, table: string, rows: readonly NodeRow[]): void {
   const t = checkName(table);
   const per = Math.floor(MAX_PARAMS / 5);
-  for (let i = 0; i < nodes.length; i += per) {
-    const batch = nodes.slice(i, i + per);
+  for (let i = 0; i < rows.length; i += per) {
+    const batch = rows.slice(i, i + per);
     const params: SqlStorageValue[] = [];
-    for (const n of batch) params.push(n.id, n.parent, n.key, n.type, JSON.stringify(n.props));
+    for (const n of batch) params.push(n.id, n.parent, n.key, n.type, n.props);
     sql.exec(
       `INSERT INTO ${t} (${NODE_COLUMNS}) VALUES ${batch.map(() => "(?, ?, ?, ?, ?)").join(", ")}`,
       ...params,
@@ -170,33 +186,42 @@ export function* tablePages(
 
 /**
  * Sets each node's `depth`, level by level from the root (pages are 1), in
- * SQL, as far as MAX_DEPTH. Nodes left without one aren't under the root:
+ * SQL, as far as `maxDepth` (MAX_DEPTH unless given; `Infinity` numbers
+ * every level there is). Nodes left without one aren't under the root:
  * inside themselves, under a parent that isn't there, or too deep. Returns
  * how many got one, and whether some were too deep.
  */
-export function fillDepths(sql: SqlStorage, table: string): { placed: number; tooDeep: boolean } {
+export function fillDepths(
+  sql: SqlStorage,
+  table: string,
+  maxDepth = MAX_DEPTH,
+): { placed: number; tooDeep: boolean } {
   const t = checkName(table);
   sql.exec(`UPDATE ${t} SET depth = NULL WHERE depth IS NOT NULL`);
   sql.exec(`UPDATE ${t} SET depth = 1 WHERE parent = ?`, ROOT_ID);
+  let deepest = 1;
   // rowsWritten counts index entries too: it says whether a level had any, not how many.
-  for (let depth = 1; depth < MAX_DEPTH; depth++) {
+  for (let depth = 1; depth < maxDepth; depth++) {
     const written = sql.exec(
       `UPDATE ${t} SET depth = ? WHERE depth IS NULL AND parent IN (SELECT id FROM ${t} WHERE depth = ?)`,
       depth + 1,
       depth,
     ).rowsWritten;
     if (written === 0) break;
+    deepest = depth + 1;
   }
   const placed = sql
     .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${t} WHERE depth IS NOT NULL`)
     .one().n;
-  const deeper = sql
-    .exec(
-      `SELECT 1 FROM ${t} WHERE depth IS NULL AND parent IN (SELECT id FROM ${t} WHERE depth = ?) LIMIT 1`,
-      MAX_DEPTH,
-    )
-    .toArray();
-  return { placed, tooDeep: deeper.length > 0 };
+  const deeper =
+    deepest >= maxDepth &&
+    sql
+      .exec(
+        `SELECT 1 FROM ${t} WHERE depth IS NULL AND parent IN (SELECT id FROM ${t} WHERE depth = ?) LIMIT 1`,
+        deepest,
+      )
+      .toArray().length > 0;
+  return { placed, tooDeep: deeper };
 }
 
 /** Which kinds of node each kind may hold, as a SQL table expression to join against. */
@@ -211,15 +236,15 @@ export function allowedChildrenSql(): string {
  * A `DocReader` over a node table, for code that walks a document (a
  * library's manifest, the MCP tools): it reads rows as they're asked for and
  * keeps at most `limit` of them, so a walk over a large file stays small.
- * Reading a node's children reads their rows too, so a walk down the tree
- * costs a query per node that has children.
+ * Children are read a page of rows at a time (`children`, `childNodes`), so
+ * a node with any number of them is never read whole; `childIds` reads ids
+ * only, for the few callers that want a list.
  */
 export class TableReader implements DocReader {
   readonly #sql: SqlStorage;
   readonly #table: string;
   readonly #limit: number;
   readonly #nodes = new Map<string, NodeRecord | null>();
-  readonly #children = new Map<string, readonly string[]>();
 
   constructor(sql: SqlStorage, table: string, limit = 10_000) {
     this.#sql = sql;
@@ -238,27 +263,78 @@ export class TableReader implements DocReader {
     return node ?? undefined;
   }
 
+  /** Every child id of `parent`, in order, without their properties. */
   childIds(parent: string): readonly string[] {
-    const cached = this.#children.get(parent);
-    if (cached) return cached;
-    // Kinds that hold nothing are answered without asking.
-    const node = parent === ROOT_ID ? null : this.#nodes.get(parent);
-    if (node && (CHILD_TYPES[node.type] ?? []).length === 0) return [];
-    const rows = this.#sql
-      .exec<NodeRow>(
-        `SELECT ${NODE_COLUMNS} FROM ${this.#table} WHERE parent = ? ORDER BY key, id`,
+    if (this.#holdsNothing(parent)) return [];
+    return this.#sql
+      .exec<{ id: string }>(
+        `SELECT id FROM ${this.#table} WHERE parent = ? ORDER BY key, id`,
         parent,
       )
-      .toArray();
-    const ids = rows.map((row) => row.id);
-    for (const row of rows) if (!this.#nodes.has(row.id)) this.#remember(row.id, toRecord(row));
-    if (this.#children.size >= this.#limit) this.#children.clear();
-    this.#children.set(parent, ids);
-    return ids;
+      .toArray()
+      .map((row) => row.id);
+  }
+
+  /** How many children `parent` has. */
+  childCount(parent: string): number {
+    if (this.#holdsNothing(parent)) return 0;
+    return this.#sql
+      .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${this.#table} WHERE parent = ?`, parent)
+      .one().n;
+  }
+
+  /** `parent`'s children in order, a page of rows at a time as they're asked for. */
+  *childNodes(parent: string, size = PAGE_ROWS): Generator<NodeRecord> {
+    if (this.#holdsNothing(parent)) return;
+    let after: [string, string] | null = null;
+    for (;;) {
+      const rows: NodeRow[] = (
+        after
+          ? this.#sql.exec<NodeRow>(
+              `SELECT ${NODE_COLUMNS} FROM ${this.#table}
+                WHERE parent = ? AND (key, id) > (?, ?)
+                ORDER BY key, id LIMIT ?`,
+              parent,
+              after[0],
+              after[1],
+              size,
+            )
+          : this.#sql.exec<NodeRow>(
+              `SELECT ${NODE_COLUMNS} FROM ${this.#table} WHERE parent = ? ORDER BY key, id LIMIT ?`,
+              parent,
+              size,
+            )
+      ).toArray();
+      for (const row of rows) {
+        const node = toRecord(row);
+        this.#remember(row.id, node);
+        yield node;
+      }
+      if (rows.length < size) return;
+      const last = rows[rows.length - 1] as NodeRow;
+      after = [last.key, last.id];
+    }
+  }
+
+  /** `parent`'s child ids in order, a page at a time (their rows kept for `get`). */
+  *children(parent: string): Generator<string> {
+    for (const node of this.childNodes(parent)) yield node.id;
+  }
+
+  /** Kinds that hold nothing are answered without asking. */
+  #holdsNothing(parent: string): boolean {
+    const node = parent === ROOT_ID ? null : this.#nodes.get(parent);
+    return !!node && (CHILD_TYPES[node.type] ?? []).length === 0;
   }
 
   pageIds(): readonly string[] {
-    return this.childIds(ROOT_ID).filter((id) => this.get(id)?.type === "page");
+    return this.#sql
+      .exec<{ id: string }>(
+        `SELECT id FROM ${this.#table} WHERE parent = ? AND type = 'page' ORDER BY key, id`,
+        ROOT_ID,
+      )
+      .toArray()
+      .map((row) => row.id);
   }
 
   /**

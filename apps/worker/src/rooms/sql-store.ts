@@ -115,6 +115,25 @@ export class SqlNodeStore implements NodeStore {
     this.#cache.set(id, null);
   }
 
+  /** Whether anything lies more than `levels` levels below `id`, in one statement. */
+  deeperThan(id: string, levels: number): boolean {
+    return (
+      this.#sql
+        .exec(
+          `WITH RECURSIVE sub(id, level) AS (
+             SELECT id, 1 FROM nodes WHERE parent = ?
+             UNION ALL
+             SELECT n.id, sub.level + 1 FROM nodes n JOIN sub ON n.parent = sub.id WHERE sub.level <= ?
+           )
+           SELECT 1 FROM sub WHERE level > ? LIMIT 1`,
+          id,
+          levels,
+          levels,
+        )
+        .toArray().length > 0
+    );
+  }
+
   count(): number {
     return this.#sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM nodes").one().n;
   }

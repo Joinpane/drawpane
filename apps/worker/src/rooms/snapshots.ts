@@ -35,9 +35,18 @@ export function snapshotKey(fileId: string, revn: number): string {
   return `files/${fileId}/snapshots/${String(revn).padStart(12, "0")}.json.gz`;
 }
 
-/** A branch's base: its main file's nodes at the revision it was made from. */
+/**
+ * A branch's first base: its main file's nodes at the revision it was made
+ * from. Each update from main writes the next base under a key of its own
+ * (`nextBranchBaseKey`), and the branch's room keeps which is current.
+ */
 export function branchBaseKey(branchId: string): string {
   return `files/${branchId}/branch-base.json.gz`;
+}
+
+/** A new key for a branch's base as of main's revision `revn`, never one used before. */
+export function nextBranchBaseKey(branchId: string, revn: number): string {
+  return `files/${branchId}/branch-bases/${String(revn).padStart(12, "0")}-${crypto.randomUUID()}.json.gz`;
 }
 
 const METADATA = (revn: number) => ({
@@ -227,14 +236,15 @@ export async function openSnapshotStream(
   const ready: string[] = [];
   let ended = false;
   try {
-    ready.push(...splitter.push(buffer));
+    // Pushed one at a time: a chunk may hold any number of nodes, too many to spread.
+    for (const line of splitter.push(buffer)) ready.push(line);
     while (!splitter.inNodes && !splitter.finished) {
       const next = await text.next();
       if (next.done) {
         ended = true;
         break;
       }
-      ready.push(...splitter.push(next.value));
+      for (const line of splitter.push(next.value)) ready.push(line);
     }
   } catch {
     await text.return(undefined);

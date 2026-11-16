@@ -11,7 +11,7 @@ import {
   type PropName,
   propAllowed,
 } from "./schema";
-import type { NodeStore } from "./store";
+import { deeperThan, type NodeStore } from "./store";
 
 export type ModelErrorCode =
   | "not_found"
@@ -216,6 +216,12 @@ function applyMove(store: NodeStore, op: MoveOp): Op[] {
     if (++depth > MAX_DEPTH) {
       throw new ModelError("too_deep", `Layers can't nest deeper than ${MAX_DEPTH} levels.`);
     }
+  }
+  // What's inside it moves down as far as it does: none of that may pass the limit either.
+  // A move that doesn't take it deeper is always allowed, so a file holding layers past the
+  // limit (moves didn't use to check this) can still be tidied.
+  if (depth > depthOf(store, op.id) && deeperThan(store, op.id, MAX_DEPTH - depth)) {
+    throw new ModelError("too_deep", `Layers can't nest deeper than ${MAX_DEPTH} levels.`);
   }
   const inverse: MoveOp = { op: "move", id: op.id, parent: node.parent, key: node.key };
   store.move(op.id, op.parent, op.key);

@@ -4,17 +4,43 @@
  * outline, one node, a search, its components, its tokens. Bounded, so a
  * big file can't flood a model's context.
  */
-import { type DocReader, getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import type { TableReader } from "../rooms/node-tables";
 
 /** What the views below read a document through. */
 export interface DocView {
   get(id: string): NodeRecord | undefined;
-  children(id: string): readonly NodeRecord[];
+  /** A node's children in order, read as they're asked for (a wide node is never read whole). */
+  children(id: string): Iterable<NodeRecord>;
+  childCount(id: string): number;
   pages(): NodeRecord[];
   /** The page a node is on, when it's on one (library copies and tokens aren't). */
   pageOf(id: string): NodeRecord | undefined;
   /** Every node on a page, parents first. */
   onPages(): Generator<NodeRecord>;
+}
+
+/** Children listed in full by `get_node`; past this they're counted. */
+export const DETAIL_CHILDREN = 500;
+
+/** Every node under the pages, parents first, holding only the path down to where it is. */
+function* walkPages(doc: DocView): Generator<NodeRecord> {
+  const stack: Iterator<NodeRecord>[] = [doc.pages()[Symbol.iterator]()];
+  while (stack.length > 0) {
+    const next = (stack[stack.length - 1] as Iterator<NodeRecord>).next();
+    if (next.done) {
+      stack.pop();
+      continue;
+    }
+    yield next.value;
+    stack.push(doc.children(next.value.id)[Symbol.iterator]());
+  }
+}
+
+function pageOf(doc: DocView, id: string): NodeRecord | undefined {
+  for (let node = doc.get(id); node; node = doc.get(node.parent))
+    if (node.type === "page") return node;
+  return undefined;
 }
 
 /** A document held in memory: for tests, and files small enough to read whole. */
@@ -41,37 +67,32 @@ export class FileDoc implements DocView {
     return this.#children.get(id) ?? [];
   }
 
+  childCount(id: string): number {
+    return this.children(id).length;
+  }
+
   pages(): NodeRecord[] {
     return this.children(ROOT_ID).filter((n) => n.type === "page");
   }
 
-  /** The page a node is on, when it's on one (library copies and tokens aren't). */
   pageOf(id: string): NodeRecord | undefined {
-    for (let node = this.get(id); node; node = this.get(node.parent))
-      if (node.type === "page") return node;
-    return undefined;
+    return pageOf(this, id);
   }
 
-  /** Every node on a page, parents first. */
-  *onPages(): Generator<NodeRecord> {
-    const stack = [...this.pages()].reverse();
-    while (stack.length > 0) {
-      const node = stack.pop() as NodeRecord;
-      yield node;
-      stack.push(...[...this.children(node.id)].reverse());
-    }
+  onPages(): Generator<NodeRecord> {
+    return walkPages(this);
   }
 }
 
 /**
  * A document read from SQLite as the views ask (the FileRoom's, through a
  * `TableReader`), so a large file is never read whole: an outline reads the
- * layers it lists, a search walks the pages a node's children at a time.
+ * layers it lists, a search walks the pages a page of children at a time.
  */
 export class SqlFileDoc implements DocView {
-  readonly #reader: DocReader;
+  readonly #reader: TableReader;
 
-  constructor(reader: DocReader) {
+  constructor(reader: TableReader) {
     this.#reader = reader;
   }
 
@@ -79,32 +100,29 @@ export class SqlFileDoc implements DocView {
     return this.#reader.get(id);
   }
 
-  children(id: string): readonly NodeRecord[] {
+  children(id: string): Iterable<NodeRecord> {
+    return this.#reader.childNodes(id);
+  }
+
+  childCount(id: string): number {
+    return this.#reader.childCount(id);
+  }
+
+  pages(): NodeRecord[] {
     const out: NodeRecord[] = [];
-    for (const child of this.#reader.childIds(id)) {
-      const node = this.#reader.get(child);
-      if (node) out.push(node);
+    for (const id of this.#reader.pageIds()) {
+      const page = this.#reader.get(id);
+      if (page) out.push(page);
     }
     return out;
   }
 
-  pages(): NodeRecord[] {
-    return this.children(ROOT_ID).filter((n) => n.type === "page");
-  }
-
   pageOf(id: string): NodeRecord | undefined {
-    for (let node = this.get(id); node; node = this.get(node.parent))
-      if (node.type === "page") return node;
-    return undefined;
+    return pageOf(this, id);
   }
 
-  *onPages(): Generator<NodeRecord> {
-    const stack = [...this.pages()].reverse();
-    while (stack.length > 0) {
-      const node = stack.pop() as NodeRecord;
-      yield node;
-      stack.push(...[...this.children(node.id)].reverse());
-    }
+  onPages(): Generator<NodeRecord> {
+    return walkPages(this);
   }
 }
 
@@ -203,20 +221,21 @@ export function outline(doc: DocView, rootId: string, depth: number, limit: numb
       entry.height = round(getProp(node.props, "height"));
     }
     if (node.type === "text") entry.text = getProp(node.props, "characters").slice(0, 200);
-    const kids = doc.children(node.id);
-    if (kids.length > 0) {
+    const count = doc.childCount(node.id);
+    if (count > 0) {
       if (level >= depth) {
-        entry.more = kids.length;
+        entry.more = count;
         truncated = true;
       } else {
         const shown: OutlineEntry[] = [];
-        for (const child of kids) {
-          if (budget <= 0) break;
-          shown.push(visit(child, level + 1));
-        }
+        if (budget > 0)
+          for (const child of doc.children(node.id)) {
+            shown.push(visit(child, level + 1));
+            if (budget <= 0) break;
+          }
         entry.children = shown;
-        if (shown.length < kids.length) {
-          entry.more = kids.length - shown.length;
+        if (shown.length < count) {
+          entry.more = count - shown.length;
           truncated = true;
         }
       }
@@ -229,10 +248,19 @@ export function outline(doc: DocView, rootId: string, depth: number, limit: numb
 
 const round = (n: number) => Math.round(n * 100) / 100;
 
-/** A node in full: its props (defaults left out, as stored), parent and children. */
+/**
+ * A node in full: its props (defaults left out, as stored), parent and
+ * children, the first DETAIL_CHILDREN of them listed and the rest counted.
+ */
 export function nodeDetail(doc: DocView, id: string) {
   const node = doc.get(id);
   if (!node) return null;
+  const children: Array<{ id: string; kind: string; name: string }> = [];
+  for (const c of doc.children(id)) {
+    if (children.length >= DETAIL_CHILDREN) break;
+    children.push({ id: c.id, kind: kindOf(c), name: displayName(c) });
+  }
+  const count = children.length < DETAIL_CHILDREN ? children.length : doc.childCount(id);
   return {
     id: node.id,
     kind: kindOf(node),
@@ -240,7 +268,8 @@ export function nodeDetail(doc: DocView, id: string) {
     parent: node.parent,
     page: doc.pageOf(id)?.id ?? null,
     props: node.props,
-    children: doc.children(id).map((c) => ({ id: c.id, kind: kindOf(c), name: displayName(c) })),
+    children,
+    ...(count > children.length ? { moreChildren: count - children.length } : {}),
   };
 }
 
@@ -296,10 +325,10 @@ export function components(doc: DocView) {
       instances: uses.get(node.id) ?? 0,
     };
     if (kind === "component set") {
-      entry.variants = doc
-        .children(node.id)
-        .filter((c) => kindOf(c) === "component")
-        .map((c) => ({ id: c.id, name: displayName(c), instances: uses.get(c.id) ?? 0 }));
+      entry.variants = [];
+      for (const c of doc.children(node.id))
+        if (kindOf(c) === "component")
+          entry.variants.push({ id: c.id, name: displayName(c), instances: uses.get(c.id) ?? 0 });
       entry.instances = entry.variants.reduce((n, v) => n + v.instances, 0);
     }
     out.push(entry);
@@ -309,8 +338,7 @@ export function components(doc: DocView) {
 
 /** The file's tokens: variable collections (values by mode name) and text styles. */
 export function tokens(doc: DocView) {
-  const collections = doc
-    .children(ROOT_ID)
+  const collections = [...doc.children(ROOT_ID)]
     .filter((n) => n.type === "collection")
     .map((collection) => {
       const modes = getProp(collection.props, "modes");
@@ -319,8 +347,7 @@ export function tokens(doc: DocView) {
         id: collection.id,
         name: displayName(collection),
         modes: modes.map((m) => m.name),
-        variables: doc
-          .children(collection.id)
+        variables: [...doc.children(collection.id)]
           .filter((v) => v.type === "variable")
           .map((v) => ({
             id: v.id,
@@ -342,8 +369,7 @@ export function tokens(doc: DocView) {
           })),
       };
     });
-  const textStyles = doc
-    .children(ROOT_ID)
+  const textStyles = [...doc.children(ROOT_ID)]
     .filter((n) => n.type === "textStyle")
     .map((style) => ({
       id: style.id,

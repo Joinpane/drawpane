@@ -202,10 +202,15 @@ export const branches = new Hono<AppContext>()
   .get("/files/:fileId/branch/review", async (c) => {
     const user = requireUser(c);
     const { file } = await requireBranch(c.env, user.id, c.req.param("fileId"));
-    const base = await openSnapshot(c.env.FILES, branchBaseKey(file.id));
-    if (!base) throw conflict("This branch's starting point is missing, so it can't be reviewed.");
-    // Each file is copied aside in its room and streamed from there (decision 0026).
-    const branch = await openSnapshotStream(await room(c.env, file.id).exportSnapshot());
+    // Each file is copied aside in its room and streamed from there (decision 0026); the
+    // branch's room says which base its nodes are a change from.
+    const exported = await room(c.env, file.id).exportBranch();
+    const base = await openSnapshot(c.env.FILES, exported.baseKey);
+    if (!base) {
+      await exported.nodes.cancel();
+      throw conflict("This branch's starting point is missing, so it can't be reviewed.");
+    }
+    const branch = await openSnapshotStream(exported.nodes);
     const main = await openSnapshotStream(await room(c.env, file.branch_of).exportSnapshot());
     if (!branch || !main) throw conflict("The files couldn't be read. Try again.");
     return new Response(reviewStream(base, branch, main), {
@@ -247,7 +252,7 @@ export const branches = new Hono<AppContext>()
     let result: MergeResult;
     try {
       // Main's room reads the base from R2 and the branch as it streams from the branch's room.
-      const branch = await room(c.env, file.id).exportSnapshot();
+      const branch = await room(c.env, file.id).exportBranch();
       result = (await room(c.env, file.branch_of).mergeBranch(
         { userId: user.id, name: user.name },
         file.branch_of,

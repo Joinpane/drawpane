@@ -20,7 +20,6 @@ import {
   type LibraryAsset,
   libraryAssets,
   MAX_CLIENT_MESSAGE_BYTES,
-  MAX_IMPORT_NODES,
   MAX_LIBRARY_ASSETS,
   ModelError,
   type NodeRecord,
@@ -48,8 +47,11 @@ import { CALL_SCHEMA, CallLedger, changedIds, overlap, type StepCall } from "./c
 import {
   beginStaging,
   checkStaged,
+  dropStaging,
   fillFromStaged,
+  IMPORT_LIMITS,
   IMPORT_TABLE,
+  type ImportLimits,
   stageNodes,
 } from "./import-stage";
 import {
@@ -64,10 +66,11 @@ import {
   tempTables,
 } from "./node-tables";
 import { OpChunks } from "./op-chunks";
-import { loadSnapshot, restoreFromTable } from "./restore";
+import { loadSnapshot, restoreFromTable, SnapshotError } from "./restore";
 import {
   AUTOSAVE_RETENTION_MS,
   branchBaseKey,
+  nextBranchBaseKey,
   openSnapshot,
   openSnapshotStream,
   type SnapshotSource,
@@ -149,6 +152,9 @@ const LOG_SCHEMA = `
     at INTEGER NOT NULL
   ) STRICT;
   CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
+  -- Objects in R2 this room no longer points at (a branch's old bases), deleted by the
+  -- alarm once nothing that read the pointer before can still be reading them.
+  CREATE TABLE IF NOT EXISTS stale_objects (key TEXT PRIMARY KEY, at INTEGER NOT NULL) STRICT;
   -- Usage not yet reported to D1 (see #flushUsage): counted here so it
   -- survives the room going to sleep, and moved out by the alarm.
   CREATE TABLE IF NOT EXISTS usage (
@@ -182,6 +188,11 @@ const MAX_CATCHUP_BYTES = 1 << 20;
 const MAX_BROADCAST_BYTES = 1 << 20;
 /** A transient table older than this was let go of by whatever read it. */
 const STALE_TABLE_MS = 60 * 60_000;
+/** A copy of a file this server already holds is taken whatever its size. */
+const UNLIMITED: ImportLimits = {
+  nodes: Number.POSITIVE_INFINITY,
+  bytes: Number.POSITIVE_INFINITY,
+};
 /**
  * The most nodes a file may have for agents to work on it: the headless
  * editor (decision 0021) holds the whole file in memory: its document alone
@@ -242,7 +253,9 @@ export interface SavedVersion {
 export type RestoreResult =
   | ({ readonly ok: true } & RestoredChange)
   /** The version's snapshot isn't in R2 (deleted by hand, or a failed write). */
-  | { readonly ok: false; readonly reason: "missing" };
+  | { readonly ok: false; readonly reason: "missing" }
+  /** Its snapshot doesn't hold together, or can't be applied: nothing changed. */
+  | { readonly ok: false; readonly reason: "invalid"; readonly message: string };
 
 export interface RestoredChange {
   /** The revision the restore created, or the current one when nothing changed. */
@@ -256,6 +269,8 @@ export interface RestoredChange {
 }
 
 export class FileRoom extends DurableObject<Env> {
+  /** What one import may bring in all its parts (tests lower it to reach it with a few nodes). */
+  importLimits: ImportLimits = IMPORT_LIMITS;
   readonly #sql: SqlStorage;
   readonly #store: SqlNodeStore;
   readonly #room: RoomSql;
@@ -268,6 +283,8 @@ export class FileRoom extends DurableObject<Env> {
   /** The warm headless editor agents' calls run on (decision 0021); made on the first call. */
   #engine: AgentEngine | null = null;
   #rendering: Promise<HeadlessRenderer> | null = null;
+  /** The update from main under way, which the next waits for: one at a time. */
+  #updating: Promise<unknown> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -448,10 +465,15 @@ export class FileRoom extends DurableObject<Env> {
     this.#sql.exec("DELETE FROM log WHERE revn <= ?", this.#revn - LOG_RETENTION);
     this.#ledger.sweep();
     this.#sweepStaging();
-    // Keep going while there are edits no version holds yet, or an import waits for its commit.
-    const next = [this.#autosaveDue(), this.#importExpiry(), this.#staleTablesDue()].filter(
-      (n) => n !== null,
-    );
+    await this.#sweepStaleObjects();
+    // Keep going while there are edits no version holds yet, an import waits for its commit,
+    // or something left behind waits to be cleared away.
+    const next = [
+      this.#autosaveDue(),
+      this.#importExpiry(),
+      this.#staleTablesDue(),
+      this.#staleObjectsDue(),
+    ].filter((n) => n !== null);
     if (next.length > 0) {
       await this.ctx.storage.setAlarm(Math.max(Math.min(...next), Date.now() + ALARM_DELAY_MS));
     }
@@ -466,6 +488,28 @@ export class FileRoom extends DurableObject<Env> {
       if (tempTableAge(table, now) > STALE_TABLE_MS) dropTable(this.#sql, table);
     const expiry = this.#importExpiry();
     if (expiry !== null && expiry <= now) this.#dropImport();
+  }
+
+  /** Deletes the R2 objects this room stopped pointing at an hour or more ago (a branch's old bases). */
+  async #sweepStaleObjects(now = Date.now()): Promise<void> {
+    const due = this.#sql
+      .exec<{ key: string }>(
+        "SELECT key FROM stale_objects WHERE at <= ? ORDER BY at LIMIT 1000",
+        now - STALE_TABLE_MS,
+      )
+      .toArray()
+      .map((row) => row.key);
+    if (due.length === 0) return;
+    await this.env.FILES.delete(due);
+    for (const key of due) this.#sql.exec("DELETE FROM stale_objects WHERE key = ?", key);
+  }
+
+  /** When the oldest object this room stopped pointing at can go; null when there's none. */
+  #staleObjectsDue(): number | null {
+    const at = this.#sql
+      .exec<{ at: number | null }>("SELECT MIN(at) AS at FROM stale_objects")
+      .one().at;
+    return at === null ? null : at + STALE_TABLE_MS;
   }
 
   /** When the oldest transient table left behind is old enough to drop; null when there's none. */
@@ -616,7 +660,13 @@ export class FileRoom extends DurableObject<Env> {
     // The version goes into a table beside the file's, a batch at a time.
     const table = tempTable("version");
     try {
-      await loadSnapshot(this.#sql, table, source, this.#room.transact);
+      try {
+        await loadSnapshot(this.#sql, table, source, this.#room.transact);
+      } catch (error) {
+        if (error instanceof SnapshotError)
+          return { ok: false, reason: "invalid", message: error.message };
+        throw error;
+      }
       const restorePoint = await this.#saveVersion(fileId, {
         reason: "restore",
         by: by.userId,
@@ -625,11 +675,16 @@ export class FileRoom extends DurableObject<Env> {
       // From here to the commit nothing awaits, so the diff and the store agree.
       const author = { clientId: "restore", seq: 0, userId: by.userId, sessionId: "restore" };
       const except = this.#attachments().find(({ me }) => me.sessionId === sessionId)?.ws;
-      const {
-        revn,
-        count,
-        result: dropped,
-      } = this.#commitChunks(author, (out) => restoreFromTable(this.#sql, table, out));
+      let committed: { revn: number; count: number; result: number };
+      try {
+        committed = this.#commitChunks(author, (out) => restoreFromTable(this.#sql, table, out));
+      } catch (error) {
+        // The whole restore applies, or none of it.
+        if (error instanceof ModelError)
+          return { ok: false, reason: "invalid", message: error.message };
+        throw error;
+      }
+      const { revn, count, result: dropped } = committed;
       if (count > 0) {
         this.#broadcast(
           { t: "restored", by, version: { id: version.id, name: version.name, at: version.at } },
@@ -701,6 +756,8 @@ export class FileRoom extends DurableObject<Env> {
     beginStaging(this.#sql, IMPORT_TABLE);
     this.#setMeta("import_id", importId);
     this.#setMeta("import_at", String(Date.now()));
+    // The commit replaces the file as it is now; an edit in between refuses it (see the commit).
+    this.#setMeta("import_revn", String(this.#revn));
     // So an import nobody commits is thrown away.
     void this.#scheduleAlarm();
     return { ok: true, importId };
@@ -715,12 +772,8 @@ export class FileRoom extends DurableObject<Env> {
     this.#adopt(fileId);
     if (this.#meta("import_id") !== importId) return { ok: false, reason: "gone" };
     try {
-      const staged = stageNodes(this.#room, nodes, IMPORT_TABLE);
-      if (staged > MAX_IMPORT_NODES)
-        throw new ModelError(
-          "invalid_value",
-          `An import can bring at most ${MAX_IMPORT_NODES.toLocaleString("en")} layers.`,
-        );
+      // Held to the import's limits in all, in the same transaction that keeps the part.
+      const staged = stageNodes(this.#room, nodes, IMPORT_TABLE, this.importLimits);
       this.#setMeta("import_at", String(Date.now()));
       return { ok: true, staged };
     } catch (error) {
@@ -737,10 +790,15 @@ export class FileRoom extends DurableObject<Env> {
    * leaves the file as it was (the import is thrown away).
    */
   async commitImport(by: Requester, fileId: string, importId: string): Promise<ImportResult> {
+    return this.#commitImport(by, fileId, importId, false);
+  }
+
+  /** A copy of a file this server holds (`importSnapshot`) isn't held to an import's limits. */
+  #commitImport(by: Requester, fileId: string, importId: string, copy: boolean): ImportResult {
     this.#adopt(fileId);
     if (this.#meta("import_id") !== importId) return { ok: false, reason: "gone" };
     try {
-      return this.#fillFromStaging(by);
+      return this.#fillFromStaging(by, copy);
     } finally {
       this.#dropImport();
     }
@@ -793,7 +851,7 @@ export class FileRoom extends DurableObject<Env> {
     try {
       for await (const nodes of snapshotNodes(source)) {
         if (this.#meta("import_id") !== begun.importId) return { ok: false, reason: "gone" };
-        stageNodes(this.#room, nodes, IMPORT_TABLE);
+        stageNodes(this.#room, nodes, IMPORT_TABLE, UNLIMITED);
       }
     } catch (error) {
       this.#dropImport();
@@ -801,7 +859,7 @@ export class FileRoom extends DurableObject<Env> {
         return { ok: false, reason: "invalid", message: error.message };
       throw error;
     }
-    return this.commitImport(by, fileId, begun.importId);
+    return this.#commitImport(by, fileId, begun.importId, true);
   }
 
   /** The starting page, when it's all the file has (and still empty). */
@@ -814,16 +872,29 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   #dropImport(): void {
-    dropTable(this.#sql, IMPORT_TABLE);
-    for (const k of ["import_id", "import_at"]) this.#sql.exec("DELETE FROM meta WHERE k = ?", k);
+    dropStaging(this.#sql, IMPORT_TABLE);
+    for (const k of ["import_id", "import_at", "import_revn"])
+      this.#sql.exec("DELETE FROM meta WHERE k = ?", k);
   }
 
-  /** Checks the staged import and moves it into `nodes`, replacing the starting page. */
-  #fillFromStaging(by: Requester): ImportResult {
+  /**
+   * Checks the staged import and moves it into `nodes`, replacing the
+   * starting page. Refused when the file changed since the import began:
+   * someone renamed the starting page, say, and the import would replace
+   * that acknowledged edit unseen.
+   */
+  #fillFromStaging(by: Requester, copy: boolean): ImportResult {
     const seed = this.#seedPage();
     if (!seed) return { ok: false, reason: "not-empty" };
+    if (this.#meta("import_revn") !== String(this.#revn)) return { ok: false, reason: "changed" };
     try {
-      checkStaged(this.#sql, IMPORT_TABLE);
+      checkStaged(
+        this.#sql,
+        IMPORT_TABLE,
+        copy
+          ? { limits: UNLIMITED, maxDepth: Number.POSITIVE_INFINITY }
+          : { limits: this.importLimits },
+      );
     } catch (error) {
       if (error instanceof ModelError)
         return { ok: false, reason: "invalid", message: error.message };
@@ -833,9 +904,9 @@ export class FileRoom extends DurableObject<Env> {
     const revn = this.ctx.storage.transactionSync(() => {
       fillFromStaged(this.#sql, seed.id, IMPORT_TABLE);
       // Not logged: one change of the whole file. Clients behind it load the file instead of
-      // catching up, which an empty log makes them do.
-      this.#sql.exec("DELETE FROM log");
+      // catching up (see #hello); the log before it stays, for who edited what.
       const next = this.#revn + 1;
+      this.#setMeta("catchup_from", String(next));
       const now = Date.now();
       this.#count(now, by.userId);
       this.#setMeta("revn", String(next));
@@ -865,6 +936,21 @@ export class FileRoom extends DurableObject<Env> {
     return snapshotStream({ fileId, revn, at: Date.now() }, tablePages(this.#sql, table), () =>
       dropTable(this.#sql, table),
     );
+  }
+
+  /**
+   * A branch's nodes as `exportSnapshot` streams them, and the key of the
+   * base they're a change from, read together: an update from main moves
+   * both at once (see `updateFromMain`).
+   */
+  async exportBranch(): Promise<{ baseKey: string; nodes: ReadableStream<Uint8Array> }> {
+    const baseKey = this.#baseKey(this.#requireFileId());
+    return { baseKey, nodes: await this.exportSnapshot() };
+  }
+
+  /** Where this branch's current base is in R2. */
+  #baseKey(fileId: string): string {
+    return this.#meta("base_key") ?? branchBaseKey(fileId);
   }
 
   /** Writes the file as it is now to `key` in R2 (a branch's base); returns its revision. */
@@ -906,7 +992,8 @@ export class FileRoom extends DurableObject<Env> {
     by: Requester,
     fileId: string,
     branch: { readonly id: string; readonly name: string },
-    branchNodes: ReadableStream<Uint8Array>,
+    /** The branch's nodes, and the key of its base, from `exportBranch`. */
+    from: { readonly baseKey: string; readonly nodes: ReadableStream<Uint8Array> },
     choices: {
       /** Each conflict's side, by change key (see changeKey). */
       readonly resolutions: Readonly<Record<string, Resolution>>;
@@ -919,7 +1006,7 @@ export class FileRoom extends DurableObject<Env> {
       resolutions: new Map(Object.entries(choices.resolutions)),
       skip: new Set(choices.skip),
     };
-    return this.#threeWay(branchBaseKey(branch.id), branchNodes, async (tables) => {
+    return this.#threeWay(from.baseKey, from.nodes, async (tables) => {
       // Checked before the restore point is saved, and again after (that awaits).
       const first = planThreeWay(this.#sql, tables, decided);
       if (first.undecided > 0)
@@ -966,50 +1053,89 @@ export class FileRoom extends DurableObject<Env> {
    * where both changed the same thing, the branch keeps its own, which
    * review then shows as a change against main as it is now. Main as it was
    * read becomes the branch's base.
+   *
+   * The two move together or not at all: main as read is written to R2
+   * first, under a key of its own, and the branch's changes and the pointer
+   * to its new base are then committed in one storage transaction. A failed
+   * write or commit leaves the branch and its base as they were, so trying
+   * again works. Updates run one at a time, and one bringing main as it was
+   * before the current base changes nothing. The base replaced is deleted
+   * later (by the alarm), as a review or merge may still be reading it.
    */
   async updateFromMain(
     by: Requester,
     fileId: string,
     mainNodes: ReadableStream<Uint8Array>,
   ): Promise<UpdateResult> {
+    const run = this.#updating.then(() => this.#updateFromMain(by, fileId, mainNodes));
+    this.#updating = run.catch(() => {});
+    return run;
+  }
+
+  async #updateFromMain(
+    by: Requester,
+    fileId: string,
+    mainNodes: ReadableStream<Uint8Array>,
+  ): Promise<UpdateResult> {
     this.#adopt(fileId);
     const none = { resolutions: new Map<string, Resolution>(), skip: new Set<string>() };
+    const oldKey = this.#baseKey(fileId);
     const result = await this.#threeWay(
-      branchBaseKey(fileId),
+      oldKey,
       mainNodes,
-      async (tables, mainRevn): Promise<UpdateResult> => {
+      async (tables, mainRevn, baseRevn): Promise<UpdateResult> => {
+        // Main as read is no newer than the base: there's nothing to bring in, and the base stays.
+        if (mainRevn <= baseRevn)
+          return { ok: true, revn: this.#revn, changes: 0, kept: 0, mainRevn: baseRevn };
+        const newKey = nextBranchBaseKey(fileId, mainRevn);
+        try {
+          await writeSnapshot(
+            this.env.FILES,
+            newKey,
+            { fileId, revn: mainRevn, at: Date.now() },
+            tablePages(this.#sql, tables.other),
+          );
+        } catch (error) {
+          console.error(`couldn't store the new base of branch ${fileId}`, error);
+          await this.env.FILES.delete(newKey).catch(() => {});
+          return { ok: false, message: "Main as it is now couldn't be stored. Try again." };
+        }
+        // From here to the commit nothing awaits, so the plan and the store agree.
         const plan = planThreeWay(this.#sql, tables, none);
         const author = { clientId: "update", seq: 0, userId: by.userId, sessionId: "update" };
         let count: number;
         try {
-          ({ count } = this.#commitChunks(author, (out) =>
-            applyThreeWay(this.#sql, tables, none, out),
-          ));
+          ({ count } = this.#commitChunks(author, (out) => {
+            applyThreeWay(this.#sql, tables, none, out);
+            out.flush();
+            // In the same transaction as the changes: the branch and its base move together.
+            this.#setMeta("base_key", newKey);
+            this.#sql.exec(
+              "INSERT OR REPLACE INTO stale_objects (key, at) VALUES (?, ?)",
+              oldKey,
+              Date.now(),
+            );
+          }));
         } catch (error) {
+          await this.env.FILES.delete(newKey).catch(() => {});
           if (error instanceof ModelError) return { ok: false, message: error.message };
           throw error;
         }
+        void this.#scheduleAlarm();
         const kept = plan.conflicts;
         const taken = plan.changes - kept;
-        if (count > 0) {
+        if (count > 0)
           this.#broadcast({
             t: "updated-from-main",
             by: { id: by.userId, name: by.name },
             changes: taken,
           });
-          void this.#scheduleAlarm();
-        }
-        // The branch now starts from main as it is: that's its base from here on.
-        await writeSnapshot(
-          this.env.FILES,
-          branchBaseKey(fileId),
-          { fileId, revn: mainRevn, at: Date.now() },
-          tablePages(this.#sql, tables.other),
-        );
         return { ok: true, revn: this.#revn, changes: taken, kept, mainRevn };
       },
     );
-    return "missing" in result ? { ok: false, message: result.missing } : result;
+    if ("missing" in result) return { ok: false, message: result.missing };
+    if ("reason" in result) return { ok: false, message: result.message };
+    return result;
   }
 
   /**
@@ -1019,8 +1145,12 @@ export class FileRoom extends DurableObject<Env> {
   async #threeWay<R>(
     baseKey: string,
     otherNodes: ReadableStream<Uint8Array>,
-    work: (tables: ThreeWayTables, otherRevn: number) => Promise<R>,
-  ): Promise<R | { readonly ok: false; readonly reason: "missing"; readonly missing: string }> {
+    work: (tables: ThreeWayTables, otherRevn: number, baseRevn: number) => Promise<R>,
+  ): Promise<
+    | R
+    | { readonly ok: false; readonly reason: "missing"; readonly missing: string }
+    | { readonly ok: false; readonly reason: "invalid"; readonly message: string }
+  > {
     const tables: ThreeWayTables = {
       base: tempTable("base"),
       other: tempTable("other"),
@@ -1039,9 +1169,15 @@ export class FileRoom extends DurableObject<Env> {
           missing: "This branch's starting point is missing.",
         };
       }
-      await loadSnapshot(this.#sql, tables.base, base, this.#room.transact);
-      await loadSnapshot(this.#sql, tables.other, other, this.#room.transact);
-      return await work(tables, other.header.revn ?? 0);
+      try {
+        await loadSnapshot(this.#sql, tables.base, base, this.#room.transact);
+        await loadSnapshot(this.#sql, tables.other, other, this.#room.transact);
+      } catch (error) {
+        if (error instanceof SnapshotError)
+          return { ok: false, reason: "invalid", message: `It can't be read. ${error.message}` };
+        throw error;
+      }
+      return await work(tables, other.header.revn ?? 0, base.header.revn ?? 0);
     } finally {
       for (const table of Object.values(tables)) dropTable(this.#sql, table);
     }
@@ -1315,6 +1451,8 @@ export class FileRoom extends DurableObject<Env> {
     ids: ReadonlySet<string>,
   ): { userId: string; ids: string[] } | "unknown" | null {
     if (since >= this.#revn) return null;
+    // An import since then replaced the file without logging it.
+    if (since < this.#catchupFrom()) return "unknown";
     const oldest = this.#sql
       .exec<{ revn: number | null }>("SELECT MIN(revn) AS revn FROM log")
       .one().revn;
@@ -1465,6 +1603,7 @@ export class FileRoom extends DurableObject<Env> {
     const canCatchUp =
       revn !== null &&
       revn <= this.#revn &&
+      revn >= this.#catchupFrom() &&
       (revn === this.#revn ||
         (oldest !== null &&
           oldest <= revn + 1 &&
@@ -2001,6 +2140,11 @@ export class FileRoom extends DurableObject<Env> {
     return fileId;
   }
 
+  /** The oldest revision a client can catch up from: none before the last import. */
+  #catchupFrom(): number {
+    return Number(this.#meta("catchup_from") ?? 0);
+  }
+
   #meta(k: string): string | null {
     return (
       this.#sql.exec<{ v: string }>("SELECT v FROM meta WHERE k = ?", k).toArray()[0]?.v ?? null
@@ -2164,6 +2308,8 @@ export type MergeResult =
 export type ImportResult =
   | { readonly ok: true; readonly revn: number; readonly nodes: number }
   | { readonly ok: false; readonly reason: "not-empty" }
+  /** The file changed after the import began: nothing was imported. */
+  | { readonly ok: false; readonly reason: "changed" }
   /** No such import: never begun, committed, given up, or replaced by another. */
   | { readonly ok: false; readonly reason: "gone" }
   | { readonly ok: false; readonly reason: "invalid"; readonly message: string };

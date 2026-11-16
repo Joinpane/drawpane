@@ -217,6 +217,56 @@ describe("versions", () => {
     expect(same.changed).toBe(0);
   });
 
+  it("restores a version unchanged without losing layers deeper than new edits may go", async () => {
+    const { browser, fileId } = await newFile();
+    const a = await join(browser, fileId, "clientA");
+    // A chain of 130 groups: deeper than the 128 levels an edit may make now, as a file
+    // could hold from before moves checked the layers they carry down.
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      for (let i = 0; i < 130; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a0', 'group', '{}')",
+          `D${i}`,
+          i === 0 ? a.page.id : `D${i - 1}`,
+        );
+    });
+    const v1 = await name(browser, fileId, "Deep");
+    const restored = await browser.json<{ changed: number }>(
+      `/api/files/${fileId}/versions/${v1.id}/restore`,
+      { method: "POST", json: {} },
+    );
+    expect(restored.changed).toBe(0);
+    expect((await roomOf(fileId).stats()).nodes).toBe(131);
+  });
+
+  it("refuses a version it can't make sense of, changing nothing", async () => {
+    const { browser, fileId } = await newFile();
+    const a = await join(browser, fileId, "clientA");
+    await a.edit([rect("card", a.page.id), rect("other", a.page.id)]);
+    const v1 = await name(browser, fileId, "V1");
+    // Its snapshot names a parent it doesn't have, and a pair of groups each inside the other.
+    const nodes = [
+      { ...a.page },
+      { id: "card", type: "rect", parent: "nowhere", key: "a0", props: {} },
+      { id: "G1", type: "group", parent: "G2", key: "a0", props: {} },
+      { id: "G2", type: "group", parent: "G1", key: "a0", props: {} },
+    ];
+    const v1Json = `{"format":"drawpane.snapshot","version":1,"fileId":"${fileId}","revn":${v1.revn},"at":1,"nodes":${JSON.stringify(nodes)}}`;
+    const gz = await new Response(
+      new Blob([v1Json]).stream().pipeThrough(new CompressionStream("gzip")),
+    ).arrayBuffer();
+    await env.FILES.put(snapshotKey(fileId, v1.revn), gz);
+    const before = await roomOf(fileId).stats();
+    const response = await browser.fetch(`/api/files/${fileId}/versions/${v1.id}/restore`, {
+      method: "POST",
+      json: {},
+    });
+    expect(response.status).toBe(409);
+    expect(JSON.stringify(await response.json())).toContain("can't be restored");
+    const after = await roomOf(fileId).stats();
+    expect(after).toMatchObject({ revn: before.revn, nodes: before.nodes });
+  });
+
   it("refuses to restore a version whose snapshot is gone", async () => {
     const { browser, fileId } = await newFile();
     const a = await join(browser, fileId, "clientA");

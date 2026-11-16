@@ -468,6 +468,25 @@ describe(`a file of ${TOTAL.toLocaleString("en")} layers`, { timeout: 3_600_000 
     expect(assets).toBe(PAGES * (FRAMES / 25));
   });
 
+  it("publishes a component whose dependencies cover the whole file", async () => {
+    let hash = "";
+    await measure("Library manifest, one component holding every layer", () => {
+      copyNodes(sql, "nodes", "tmp_frozen");
+      sql.exec(
+        `INSERT INTO tmp_frozen (id, parent, key, type, props)
+           VALUES ('Everything', 'P0', 'zz', 'frame', '{"name":"Everything","isComponent":true}')`,
+      );
+      // Every frame of every page moves inside it: hashing it reads the whole file.
+      sql.exec(
+        "UPDATE tmp_frozen SET parent = 'Everything' WHERE type = 'frame' AND id != 'Everything'",
+      );
+      const assets = libraryAssets(new TableReader(sql, "tmp_frozen"));
+      hash = assets.find((a) => a.id === "Everything")?.hash ?? "";
+      dropTable(sql, "tmp_frozen");
+    });
+    expect(hash).toMatch(/^[0-9a-f]{16}$/);
+  });
+
   it("answers MCP reads, walking every page", async () => {
     let total = 0;
     await measure("MCP find_nodes (every layer)", () => {

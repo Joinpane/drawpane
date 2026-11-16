@@ -11,7 +11,7 @@
  * notes which deletions go ahead; `applyThreeWay` then pushes the
  * operations in the order `mergeOps` gives them: added nodes parents
  * first, changed fields (parents first, so a move never makes a cycle),
- * then deletions.
+ * then deletions, less those inside another being deleted.
  */
 import {
   addedChange,
@@ -205,6 +205,7 @@ export function planThreeWay(
 
 /** Whether the room changed anything in `id`'s subtree since the base (or added to it). */
 function editedInRoom(sql: SqlStorage, base: string, id: string): boolean {
+  // Only rows that differ from the base byte for byte come back, to be parsed and compared.
   const cursor = sql.exec<
     NodeRow & {
       b_id: string | null;
@@ -217,18 +218,20 @@ function editedInRoom(sql: SqlStorage, base: string, id: string): boolean {
     `WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
      SELECT n.id, n.parent, n.key, n.type, n.props,
             b.id AS b_id, b.parent AS b_parent, b.key AS b_key, b.type AS b_type, b.props AS b_props
-       FROM sub JOIN nodes n ON n.id = sub.id LEFT JOIN ${base} b ON b.id = n.id`,
+       FROM sub JOIN nodes n ON n.id = sub.id LEFT JOIN ${base} b ON b.id = n.id
+      WHERE b.id IS NULL OR b.props != n.props OR b.parent != n.parent OR b.key != n.key
+         OR b.type != n.type`,
     id,
   );
+  let edited = false;
   for (const row of cursor) {
-    if (row.b_id === null) return true;
-    if (
-      row.b_props === row.props &&
-      row.b_parent === row.parent &&
-      row.b_key === row.key &&
-      row.b_type === row.type
-    )
+    // Read to the end even once it's known: a statement left open locks its tables, and the
+    // tables are dropped when the merge is done.
+    if (edited) continue;
+    if (row.b_id === null) {
+      edited = true;
       continue;
+    }
     const was = toRecord({
       id: row.id,
       parent: row.b_parent as string,
@@ -236,9 +239,9 @@ function editedInRoom(sql: SqlStorage, base: string, id: string): boolean {
       type: row.b_type as string,
       props: row.b_props as string,
     });
-    if (editedSince(was, toRecord(row))) return true;
+    if (editedSince(was, toRecord(row))) edited = true;
   }
-  return false;
+  return edited;
 }
 
 /**
@@ -300,7 +303,20 @@ export function applyThreeWay(
       }
     }
 
-  // Deleted, as planned.
+  // Deleted, as planned, against the tree as it is now: main may have moved one deletion inside
+  // another since the base, and the outer one takes the inner with it. The moves above are
+  // committed first, so the tree is the one the deletions apply to.
+  out.flush();
+  sql.exec(`DELETE FROM ${t.removals} WHERE id NOT IN (SELECT id FROM nodes)`);
+  sql.exec(
+    `WITH RECURSIVE up(id, ancestor) AS (
+       SELECT r.id, n.parent FROM ${t.removals} r JOIN nodes n ON n.id = r.id
+       UNION
+       SELECT up.id, n.parent FROM up JOIN nodes n ON n.id = up.ancestor
+     )
+     DELETE FROM ${t.removals}
+      WHERE id IN (SELECT up.id FROM up JOIN ${t.removals} r ON r.id = up.ancestor)`,
+  );
   let last = "";
   for (;;) {
     const ids = sql

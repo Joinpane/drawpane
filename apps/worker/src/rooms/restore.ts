@@ -8,8 +8,9 @@
  *   a move never makes a cycle);
  * - then the topmost of the file's nodes the version doesn't have, deleted.
  */
-import { isNodeType, type NodeRecord, ROOT_ID, restoreNodeOps } from "@drawpane/model";
+import { NODE_TYPES, type NodeRecord, ROOT_ID, restoreNodeOps } from "@drawpane/model";
 import {
+  countRows,
   createNodeTable,
   fillDepths,
   insertNodes,
@@ -20,10 +21,19 @@ import {
 import type { OpChunks } from "./op-chunks";
 import { type SnapshotSource, snapshotNodes } from "./snapshots";
 
+/** A snapshot whose nodes don't hold together: nothing is done with it. */
+export class SnapshotError extends Error {
+  override name = "SnapshotError";
+}
+
 /**
- * Reads a snapshot into `table`, a batch at a time, then numbers its levels.
- * Nodes of a kind this schema doesn't know are left out (and with them,
- * whatever they held), as a restore leaves them out.
+ * Reads a snapshot into `table`, a batch at a time, then numbers its levels,
+ * however deep (a file may hold layers deeper than an edit may make now).
+ * Every node must be reachable from the root: one that isn't (inside
+ * itself, under a parent the snapshot lacks) throws `SnapshotError`, since
+ * treating it as absent would delete it from the file. Then nodes of a kind
+ * this schema doesn't know are left out, with whatever they hold, as a
+ * restore leaves them out.
  */
 export async function loadSnapshot(
   sql: SqlStorage,
@@ -32,14 +42,45 @@ export async function loadSnapshot(
   transact: <T>(fn: () => T) => T,
 ): Promise<number> {
   createNodeTable(sql, table);
-  let loaded = 0;
-  for await (const batch of snapshotNodes(source)) {
-    const known = batch.filter((node) => isNodeType(node.type));
-    transact(() => insertNodes(sql, table, known));
-    loaded += known.length;
+  for await (const batch of snapshotNodes(source))
+    try {
+      transact(() => insertNodes(sql, table, batch));
+    } catch (error) {
+      if (String(error).includes("UNIQUE")) throw new SnapshotError("A layer is in it twice.");
+      throw error;
+    }
+  const total = countRows(sql, table);
+  const { placed } = fillDepths(sql, table, Number.POSITIVE_INFINITY);
+  if (placed < total) {
+    const stray = sql
+      .exec<{ id: string; parent: string }>(
+        `SELECT id, parent FROM ${table} WHERE depth IS NULL ORDER BY id LIMIT 1`,
+      )
+      .one();
+    throw new SnapshotError(
+      `Its layer ${stray.id} isn't in the file: its parent ${stray.parent} is missing, or it's inside itself.`,
+    );
   }
-  fillDepths(sql, table);
-  return loaded;
+  return total - dropUnknownKinds(sql, table);
+}
+
+/** Leaves out nodes of kinds this schema doesn't know, and what's inside them. Returns how many. */
+function dropUnknownKinds(sql: SqlStorage, table: string): number {
+  const known = NODE_TYPES.map((t) => `'${t}'`).join(", ");
+  const unknown = sql.exec(`SELECT 1 FROM ${table} WHERE type NOT IN (${known}) LIMIT 1`).toArray();
+  if (unknown.length === 0) return 0;
+  const deepest = sql.exec<{ d: number }>(`SELECT MAX(depth) AS d FROM ${table}`).one().d;
+  sql.exec(`UPDATE ${table} SET depth = NULL WHERE type NOT IN (${known})`);
+  // Top down, so each level's dropped parents are marked before their children.
+  for (let depth = 2; depth <= deepest; depth++)
+    sql.exec(
+      `UPDATE ${table} SET depth = NULL
+        WHERE depth = ? AND parent IN (SELECT id FROM ${table} WHERE depth IS NULL)`,
+      depth,
+    );
+  const before = countRows(sql, table);
+  sql.exec(`DELETE FROM ${table} WHERE depth IS NULL`);
+  return before - countRows(sql, table);
 }
 
 interface JoinedRow extends NodeRow {

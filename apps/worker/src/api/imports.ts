@@ -25,6 +25,7 @@ import type { AppContext, Env } from "../env";
 import { readCapped } from "../lib/body";
 import { badRequest, conflict, notFound } from "../lib/http";
 import type { ImportPartResult, ImportResult } from "../rooms/file-room";
+import { NO_COMPACT_COPIES } from "../rooms/import-stage";
 import { requireFileRole } from "./access";
 
 /** The most one request sends: a part, or a whole one-request import. */
@@ -58,8 +59,6 @@ async function readNodes(request: Request): Promise<NodeRecord[]> {
   return parsed.data.nodes as NodeRecord[];
 }
 
-const NO_COMPACT_COPIES = "This server doesn't store compact copies yet.";
-
 const GONE =
   "That import isn't there any more (it was finished, given up, or left too long). Start again.";
 
@@ -69,6 +68,10 @@ async function committed(env: Env, fileId: string, result: ImportResult) {
     if (result.reason === "not-empty")
       throw conflict("This file already has content; import into a new file.");
     if (result.reason === "gone") throw notFound(GONE);
+    if (result.reason === "changed")
+      throw conflict(
+        "This file changed while the import was under way, so nothing was imported. Import into a new file.",
+      );
     throw badRequest(result.message);
   }
   await env.DB.prepare("UPDATE files SET updated_at = ? WHERE id = ?")

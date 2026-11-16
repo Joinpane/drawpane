@@ -1,7 +1,9 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { keyBetween, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { openSocket, signedInUser } from "./helpers";
+import type { FileRoom } from "../src/rooms/file-room";
+import { IMPORT_TABLE } from "../src/rooms/import-stage";
+import { type Browser, openSocket, signedInUser } from "./helpers";
 
 async function newFile() {
   const owner = await signedInUser("Ana");
@@ -28,6 +30,48 @@ const rect = (id: string, parent: string, key = "a0"): NodeRecord => ({
 });
 
 const roomOf = (fileId: string) => env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
+
+/** An import begun in parts, and how to send a part and commit it. */
+async function inParts(browser: Browser, fileId: string) {
+  const { importId } = await browser.json<{ importId: string }>(`/api/files/${fileId}/imports`, {
+    method: "POST",
+    json: {},
+  });
+  const part = (nodes: unknown[]) =>
+    browser.fetch(`/api/files/${fileId}/imports/${importId}/parts`, {
+      method: "POST",
+      json: { nodes },
+    });
+  const commit = () =>
+    browser.fetch(`/api/files/${fileId}/imports/${importId}/commit`, { method: "POST", json: {} });
+  return { importId, part, commit };
+}
+
+/** Lowers the room's import limits, so a test can reach them with a few nodes. */
+async function lowerLimits(fileId: string, limits: { nodes: number; bytes: number }) {
+  await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
+    room.importLimits = limits;
+  });
+}
+
+/** Someone with the file open: its nodes, and a way to send an edit and wait for the ack. */
+async function editor(browser: Browser, fileId: string) {
+  const socket = await openSocket(browser, fileId);
+  socket.send({ t: "hello", protocol: 1, clientId: "c-editor", revn: null });
+  await socket.next("welcome");
+  const nodes: NodeRecord[] = [];
+  for (;;) {
+    const chunk = await socket.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot");
+    nodes.push(...chunk.nodes);
+    if (chunk.done) break;
+  }
+  let seq = 0;
+  const edit = async (ops: unknown[]) => {
+    socket.send({ t: "txn", seq: ++seq, ops });
+    return (await socket.next<{ revn: number }>("ack")).revn;
+  };
+  return { socket, nodes, page: nodes.find((n) => n.type === "page") as NodeRecord, edit };
+}
 
 describe("importing into a new file", () => {
   it("replaces the starting page with the imported nodes", async () => {
@@ -239,6 +283,104 @@ describe("importing into a new file", () => {
       json: {},
     });
     expect(gone.status).toBe(404);
+    expect((await roomOf(fileId).stats()).nodes).toBe(1);
+  });
+  it("refuses a commit when the file changed after the import began, keeping that edit", async () => {
+    const { browser, fileId } = await newFile();
+    const { part, commit } = await inParts(browser, fileId);
+    expect((await part([page("P1", "Cover", "a0"), rect("R1", "P1")])).status).toBe(200);
+    // Someone renames the starting page and gives it a background while the import is under way.
+    const someone = await editor(browser, fileId);
+    await someone.edit([{ op: "set", id: someone.page.id, prop: "name", value: "Notes" }]);
+    await someone.edit([
+      { op: "set", id: someone.page.id, prop: "backgroundColor", value: "#ffeeaa" },
+    ]);
+    const response = await commit();
+    expect(response.status).toBe(409);
+    expect(JSON.stringify(await response.json())).toContain("changed");
+    // The edits are still there, and nothing was imported.
+    const nodes = (await roomOf(fileId).allNodes()) as NodeRecord[];
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]?.props).toMatchObject({ name: "Notes", backgroundColor: "#ffeeaa" });
+  });
+
+  it("keeps the log after an import, while clients behind it still load the file", async () => {
+    const { browser, fileId } = await newFile();
+    const before = await editor(browser, fileId);
+    // An edit that leaves the starting page empty: the file can still take an import.
+    await before.edit([{ op: "create", ...rect("T1", before.page.id) }]);
+    await before.edit([{ op: "delete", id: "T1" }]);
+    before.socket.ws.close();
+    const { revn } = await roomOf(fileId).stats();
+    const { part, commit } = await inParts(browser, fileId);
+    await part([page("P1", "Cover", "a0")]);
+    expect((await commit()).status).toBe(200);
+    const logged = await runInDurableObject(
+      roomOf(fileId),
+      (_room, state) =>
+        state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM log").one().n,
+    );
+    // The starting page and the two edits, still there for who edited what.
+    expect(logged).toBe(revn);
+    const behind = await openSocket(browser, fileId);
+    behind.send({ t: "hello", protocol: 1, clientId: "c2", revn: revn - 1 });
+    expect((await behind.next<{ mode: string }>("welcome")).mode).toBe("snapshot");
+  });
+
+  it("holds the whole import to its limits, part by part and at the commit", async () => {
+    const { browser, fileId } = await newFile();
+    await lowerLimits(fileId, { nodes: 3, bytes: 1_000_000 });
+    const first = await inParts(browser, fileId);
+    expect((await first.part([page("P1", "Cover", "a0"), rect("R1", "P1")])).status).toBe(200);
+    // Past the count: refused, and not kept.
+    const over = await first.part([rect("R2", "P1", "a1"), rect("R3", "P1", "a2")]);
+    expect(over.status).toBe(400);
+    expect(JSON.stringify(await over.json())).toContain("at most 3");
+    const done = await first.commit();
+    expect(done.status).toBe(200);
+    expect(((await done.json()) as { nodes: number }).nodes).toBe(2);
+
+    // Past the bytes, in all though not in any one part.
+    const second = await newFile();
+    await lowerLimits(second.fileId, { nodes: 1_000, bytes: 250 });
+    const bytes = await inParts(second.browser, second.fileId);
+    expect((await bytes.part([page("P1", "Cover", "a0"), rect("R1", "P1")])).status).toBe(200);
+    const tooMuch = await bytes.part([rect("R2", "P1", "a1"), rect("R3", "P1", "a2")]);
+    expect(tooMuch.status).toBe(400);
+    expect(JSON.stringify(await tooMuch.json())).toContain("MB");
+
+    // Limits checked again at the commit.
+    const third = await newFile();
+    const late = await inParts(third.browser, third.fileId);
+    expect((await late.part([page("P1", "Cover", "a0"), rect("R1", "P1")])).status).toBe(200);
+    await lowerLimits(third.fileId, { nodes: 1, bytes: 1_000_000 });
+    const refused = await late.commit();
+    expect(refused.status).toBe(400);
+    expect((await roomOf(third.fileId).stats()).nodes).toBe(1);
+  });
+
+  it("refuses override records in each part and at the commit of an import in parts", async () => {
+    const { browser, fileId } = await newFile();
+    const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
+    const record = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["X1"] } };
+    const { importId, part, commit } = await inParts(browser, fileId);
+    expect((await part([page("P1", "Cover", "a0"), copy])).status).toBe(200);
+    // Through the API.
+    const refused = await part([record]);
+    expect(refused.status).toBe(400);
+    expect(JSON.stringify(await refused.json())).toContain("compact copies");
+    // And by the room itself, for a caller that doesn't go through the API (a copy, a branch).
+    const direct = await roomOf(fileId).importPart(fileId, importId, [record as NodeRecord]);
+    expect(direct).toMatchObject({ ok: false, reason: "invalid" });
+    // A record that got into the staged import some other way is refused at the commit.
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO ${IMPORT_TABLE} (id, parent, key, type, props) VALUES ('O1', 'I1', 'a0', 'override', '{"path":["X1"]}')`,
+      );
+    });
+    const response = await commit();
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(await response.json())).toContain("compact copies");
     expect((await roomOf(fileId).stats()).nodes).toBe(1);
   });
 });
