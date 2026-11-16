@@ -15,6 +15,7 @@ import {
   ClientMessage,
   type CommentEvent,
   IMPORT_TTL_MS,
+  INLINE_SNAPSHOT_NODES,
   keyBetween,
   LATENCY_BUCKETS_MS,
   type LibraryAsset,
@@ -40,7 +41,7 @@ import { agentMeasurer } from "../agent/measurer";
 import { headlessRenderer } from "../agent/render";
 import { FILE_ACCESS, FILE_ROLE } from "../api/access";
 import type { Env, Role } from "../env";
-import { verifyPayload } from "../lib/crypto";
+import { signPayload, verifyPayload } from "../lib/crypto";
 import { answerDocument, type DocumentRequest, SqlFileDoc } from "../mcp/document";
 import { AgentEngine, type EngineRun } from "./agent-engine";
 import { CALL_SCHEMA, CallLedger, changedIds, overlap, type StepCall } from "./call-ledger";
@@ -100,6 +101,30 @@ export interface RoomClaim {
 export const CLAIM_HEADER = "x-drawpane-claim";
 
 /**
+ * What a room hands a client, in its welcome, to download a file too large
+ * to send through the socket (`GET /api/files/:id/document?ticket=`).
+ */
+export interface DocumentTicket {
+  readonly purpose: "document";
+  readonly fid: string;
+  /**
+   * The saved version to read, from R2, the transactions after it sent
+   * through the socket; null for the file as it is when downloaded.
+   */
+  readonly revn: number | null;
+  readonly exp: number;
+}
+
+/** A download ticket is good for this long: it is used at once, and asked for again on a retry. */
+export const DOCUMENT_TICKET_TTL_MS = 5 * 60_000;
+/**
+ * A client that downloads a saved version is sent the transactions after it
+ * through the socket: this much of them at most (JSON bytes). Past that it
+ * downloads the file as it is instead.
+ */
+const MAX_REPLAY_BYTES = 8 << 20;
+
+/**
  * Clients ping every 25 s (connection.ts); the runtime answers for the room
  * (setWebSocketAutoResponse), so a ping doesn't wake it, and notes when.
  */
@@ -117,6 +142,12 @@ const PRUNE_EVERY_MS = 15_000;
 
 /** The author guests see on every change: nobody in particular. */
 const ANONYMOUS = { userId: "", sessionId: "" } as const;
+
+/** Download tickets signed for a hello (see #documentTickets). */
+interface DocumentTickets {
+  readonly live: string;
+  readonly saved: { readonly revn: number; readonly ticket: string } | null;
+}
 
 /** Per-socket state that survives hibernation. */
 interface Attachment {
@@ -379,7 +410,13 @@ export class FileRoom extends DurableObject<Env> {
     if (!me) return;
     switch (message.t) {
       case "hello":
-        return this.#checkedHello(ws, me, message.clientId, message.revn);
+        return this.#checkedHello(
+          ws,
+          me,
+          message.clientId,
+          message.revn,
+          message.download === true,
+        );
       case "txn": {
         // Edits from someone whose access hasn't been confirmed lately wait for a check first.
         const current = await this.#checkAccess(ws, me);
@@ -1545,9 +1582,84 @@ export class FileRoom extends DurableObject<Env> {
     me: Attachment,
     clientId: string,
     revn: number | null,
+    download: boolean,
   ): Promise<void> {
     const current = await this.#checkAccess(ws, me, true);
-    if (current) this.#hello(ws, current, clientId, revn);
+    if (!current) return;
+    const tickets = download ? await this.#documentTickets(current) : null;
+    // The file may have moved on while they were signed: #hello reads it as it is now.
+    this.#hello(ws, current, clientId, revn, tickets);
+  }
+
+  /**
+   * Download tickets, signed ahead (signing waits): one for the file as it is
+   * when downloaded, and one for the latest saved version (not for guests,
+   * who see only the file as it is). #hello picks.
+   */
+  async #documentTickets(me: Attachment): Promise<DocumentTickets | null> {
+    const fid = this.#meta("file_id");
+    if (fid === null) return null;
+    const exp = Date.now() + DOCUMENT_TICKET_TTL_MS;
+    const sign = (revn: number | null) =>
+      signPayload(this.env.SESSION_SECRET, {
+        purpose: "document",
+        fid,
+        revn,
+        exp,
+      } satisfies DocumentTicket);
+    const saved = me.guest ? null : this.#meta("snapshot_revn");
+    const [live, fromSaved] = await Promise.all([
+      sign(null),
+      saved === null ? null : sign(Number(saved)),
+    ]);
+    return {
+      live,
+      saved:
+        saved === null || fromSaved === null ? null : { revn: Number(saved), ticket: fromSaved },
+    };
+  }
+
+  /** Whether the file has more than `count` nodes, reading no more than that many and one. */
+  #moreNodesThan(count: number): boolean {
+    return (
+      this.#sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM (SELECT 1 FROM nodes LIMIT ?)", count + 1)
+        .one().n > count
+    );
+  }
+
+  /**
+   * Whether a client can load the saved version at `revn` and then catch up
+   * on what came after it: every transaction since is in the log, none before
+   * the last import, and not too many bytes of them.
+   */
+  #canReplayFrom(revn: number): boolean {
+    if (!Number.isInteger(revn) || revn > this.#revn || revn < this.#catchupFrom()) return false;
+    if (revn === this.#revn) return true;
+    const after = this.#sql
+      .exec<{ n: number; bytes: number }>(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(ops)), 0) AS bytes FROM log WHERE revn > ?",
+        revn,
+      )
+      .one();
+    return after.n === this.#revn - revn && after.bytes <= MAX_REPLAY_BYTES;
+  }
+
+  /** Sends the logged transactions after `revn`, in order. */
+  #sendLog(ws: WebSocket, me: Attachment, revn: number): void {
+    for (const row of this.#sql.exec<{
+      revn: number;
+      ops: string;
+      user_id: string;
+      session_id: string;
+    }>("SELECT revn, ops, user_id, session_id FROM log WHERE revn > ? ORDER BY revn", revn)) {
+      this.#send(ws, {
+        t: "txn",
+        revn: row.revn,
+        ops: JSON.parse(row.ops) as Op[],
+        author: me.guest ? ANONYMOUS : { userId: row.user_id, sessionId: row.session_id },
+      });
+    }
   }
 
   /**
@@ -1600,7 +1712,13 @@ export class FileRoom extends DurableObject<Env> {
     }
   }
 
-  #hello(ws: WebSocket, me: Attachment, clientId: string, revn: number | null): void {
+  #hello(
+    ws: WebSocket,
+    me: Attachment,
+    clientId: string,
+    revn: number | null,
+    tickets: DocumentTickets | null,
+  ): void {
     me.clientId = clientId;
     ws.serializeAttachment(me);
     const lastSeq =
@@ -1624,6 +1742,17 @@ export class FileRoom extends DurableObject<Env> {
             )
             .one().bytes <= MAX_CATCHUP_BYTES));
 
+    // A file larger than a snapshot chunk is downloaded, by a client that can: a socket has no
+    // backpressure, so sending it here would hold all of it, and a room has 128 MB. From the
+    // latest saved version and the log after it when they meet (nothing to copy, and R2 serves
+    // it); else the file as it is, copied aside when it's downloaded (exportSnapshot).
+    const download =
+      !canCatchUp && tickets !== null && this.#moreNodesThan(INLINE_SNAPSHOT_NODES)
+        ? tickets.saved && this.#canReplayFrom(tickets.saved.revn)
+          ? { ticket: tickets.saved.ticket, after: tickets.saved.revn }
+          : { ticket: tickets.live, after: null }
+        : null;
+
     const peers = me.guest ? [] : this.#peers().filter((p) => p.sessionId !== me.sessionId);
     this.#send(ws, {
       t: "welcome",
@@ -1631,24 +1760,14 @@ export class FileRoom extends DurableObject<Env> {
       revn: this.#revn,
       role: me.role,
       peers,
-      mode: canCatchUp ? "catchup" : "snapshot",
+      mode: canCatchUp ? "catchup" : download ? "download" : "snapshot",
       lastSeq,
+      ...(download ? { ticket: download.ticket } : {}),
     });
     if (canCatchUp) {
-      const rows = this.#sql
-        .exec<{ revn: number; ops: string; user_id: string; session_id: string }>(
-          "SELECT revn, ops, user_id, session_id FROM log WHERE revn > ? ORDER BY revn",
-          revn,
-        )
-        .toArray();
-      for (const row of rows) {
-        this.#send(ws, {
-          t: "txn",
-          revn: row.revn,
-          ops: JSON.parse(row.ops) as Op[],
-          author: me.guest ? ANONYMOUS : { userId: row.user_id, sessionId: row.session_id },
-        });
-      }
+      this.#sendLog(ws, me, revn ?? 0);
+    } else if (download) {
+      if (download.after !== null) this.#sendLog(ws, me, download.after);
     } else {
       for (const nodes of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) {
         this.#send(ws, { t: "snapshot", nodes, done: false });

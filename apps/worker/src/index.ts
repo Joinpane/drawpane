@@ -14,11 +14,12 @@ import { requireUser, session } from "./auth/session";
 import { tokens } from "./auth/tokens";
 import { sendNotificationEmails } from "./email/notify";
 import type { AppContext } from "./env";
-import { signPayload } from "./lib/crypto";
+import { signPayload, verifyPayload } from "./lib/crypto";
 import { HttpError } from "./lib/http";
 import { sameOrigin } from "./lib/same-origin";
 import { mcp } from "./mcp/server";
-import { CLAIM_HEADER, type RoomClaim } from "./rooms/file-room";
+import { CLAIM_HEADER, type DocumentTicket, type RoomClaim } from "./rooms/file-room";
+import { snapshotKey } from "./rooms/snapshots";
 
 export { FileRoom } from "./rooms/file-room";
 
@@ -44,6 +45,52 @@ app.route("/api/admin", admin);
 app.route("/api/email", email);
 // The MCP server (decision 0011): bearer tokens, not the session.
 app.route("/api/mcp", mcp);
+/**
+ * A file too large to send through its room's socket, downloaded with the
+ * ticket the room gave in its welcome (protocol mode `download`): the room
+ * already let this person in, so the ticket is all it takes. It's version 2
+ * snapshot text, gzipped and streamed as read: a saved version from R2 (the
+ * room sends the transactions after it through the socket), or the file as
+ * it is now, copied aside in the room (also when that version is missing).
+ */
+app.get("/api/files/:fileId/document", async (c) => {
+  const ticket = await verifyPayload<DocumentTicket>(
+    c.env.SESSION_SECRET,
+    c.req.query("ticket") ?? "",
+  );
+  if (
+    ticket?.purpose !== "document" ||
+    ticket.fid !== c.req.param("fileId") ||
+    !(ticket.exp > Date.now())
+  )
+    throw new HttpError(403, "forbidden", "That download has expired. Open the file again.");
+  const file = await c.env.DB.prepare("SELECT deleted_at FROM files WHERE id = ?")
+    .bind(ticket.fid)
+    .first<{ deleted_at: number | null }>();
+  if (!file || file.deleted_at !== null)
+    throw new HttpError(404, "not_found", "This file was deleted.");
+  const gzip = (body: ReadableStream<Uint8Array>, size?: number) =>
+    new Response(body, {
+      headers: {
+        "content-type": "application/x-ndjson",
+        "content-encoding": "gzip",
+        ...(size === undefined ? {} : { "content-length": String(size) }),
+        "cache-control": "private, no-store",
+      },
+      // Gzip already: not compressed again.
+      encodeBody: "manual",
+    });
+  if (typeof ticket.revn === "number") {
+    const object = await c.env.FILES.get(snapshotKey(ticket.fid, ticket.revn));
+    const revn = object?.customMetadata?.revn;
+    if (object && (revn === undefined || revn === String(ticket.revn)))
+      return gzip(object.body, object.size);
+    await object?.body.cancel();
+  }
+  const room = c.env.FILE_ROOM.get(c.env.FILE_ROOM.idFromName(ticket.fid));
+  return gzip(await room.exportSnapshot());
+});
+
 app.route("/api", api);
 
 app.get("/ws/files/:fileId", async (c) => {

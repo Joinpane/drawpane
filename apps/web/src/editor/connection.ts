@@ -43,9 +43,13 @@ export function connectFile(
     socket.addEventListener("open", () => {
       opened = true;
       attempt = 0;
-      editor.sync.connected((message) => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
-      });
+      editor.sync.connected(
+        (message) => {
+          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+        },
+        // A large file comes over HTTP, streamed, not through the socket.
+        { download: (ticket) => api.downloadDocument(fileId, ticket) },
+      );
       ping = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ t: "ping" }));
       }, PING_MS);

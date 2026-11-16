@@ -14,13 +14,38 @@ import { describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
 import { compactOps, SyncEngine } from "../src/sync";
 
-/** A FileRoom stand-in with the same ordering, dedupe and catch-up rules. */
+/** A client further behind than this loads the file again (the room's MAX_CATCHUP_BYTES). */
+const MAX_BEHIND = 3;
+/** Files of more nodes than this are downloaded by clients that can (INLINE_SNAPSHOT_NODES). */
+const INLINE_NODES = 3;
+
+const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+/** A FileRoom stand-in with the same ordering, dedupe, catch-up and download rules. */
 class FakeRoom {
   readonly store = new MemoryStore();
   revn = 0;
   readonly log: Array<{ revn: number; ops: Op[] }> = [];
   readonly lastSeq = new Map<string, { seq: number; revn: number }>();
   readonly sockets = new Set<FakeSocket>();
+  /** Saved versions (R2 snapshots), by revision. */
+  readonly saved = new Map<number, NodeRecord[]>();
+  latestSaved: number | null = null;
+
+  save(): void {
+    this.saved.set(this.revn, clone([...this.store.nodes()]));
+    this.latestSaved = this.revn;
+  }
+
+  /** What `GET /api/files/:id/document` answers for a ticket. */
+  download(ticket: string): { revn: number; nodes: NodeRecord[] } {
+    const saved = /^saved:(\d+)$/.exec(ticket);
+    if (saved) {
+      const revn = Number(saved[1]);
+      return { revn, nodes: clone(this.saved.get(revn) as NodeRecord[]) };
+    }
+    return { revn: this.revn, nodes: clone([...this.store.nodes()]) };
+  }
 
   constructor(seed: Op[]) {
     applyTransaction(this.store, seed);
@@ -31,19 +56,27 @@ class FakeRoom {
   handle(socket: FakeSocket, message: ClientMessage): void {
     if (message.t === "hello") {
       socket.clientId = message.clientId;
-      const catchup = message.revn !== null && message.revn <= this.revn;
+      const catchup =
+        message.revn !== null &&
+        message.revn <= this.revn &&
+        this.revn - message.revn <= MAX_BEHIND;
+      const download =
+        !catchup && message.download === true && [...this.store.nodes()].length > INLINE_NODES;
+      const from = this.latestSaved;
       socket.deliver({
         t: "welcome",
         sessionId: socket.clientId,
         revn: this.revn,
         role: "editor",
         peers: [],
-        mode: catchup ? "catchup" : "snapshot",
+        mode: catchup ? "catchup" : download ? "download" : "snapshot",
         lastSeq: this.lastSeq.get(message.clientId)?.seq ?? 0,
+        ...(download ? { ticket: from === null ? "live" : `saved:${from}` } : {}),
       });
-      if (catchup) {
+      const after = catchup ? (message.revn ?? 0) : download && from !== null ? from : null;
+      if (after !== null) {
         for (const entry of this.log) {
-          if (entry.revn > (message.revn ?? 0)) {
+          if (entry.revn > after) {
             socket.deliver({
               t: "txn",
               revn: entry.revn,
@@ -52,7 +85,7 @@ class FakeRoom {
             });
           }
         }
-      } else {
+      } else if (!download) {
         socket.deliver({ t: "snapshot", nodes: [...this.store.nodes()], done: false });
         socket.deliver({ t: "snapshot", nodes: [], done: true });
       }
@@ -116,19 +149,54 @@ class Client {
   readonly doc = new Doc();
   readonly engine: SyncEngine;
   socket: FakeSocket | null = null;
+  /** Downloads asked for and not yet answered, oldest first, from this and earlier connections. */
+  readonly downloads: Array<{
+    ticket: string;
+    resolve: (file: { revn: number; nodes: NodeRecord[] }) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  /** Timers the engine set; they fire only when the test runs them. */
+  timers: Array<() => void> = [];
   constructor(
     readonly room: FakeRoom,
     readonly id: string,
+    readonly canDownload = false,
   ) {
-    // Timers never fire on their own: the test flushes explicitly.
-    this.engine = new SyncEngine(this.doc, { clientId: id, setTimer: () => 0 });
+    this.engine = new SyncEngine(this.doc, {
+      clientId: id,
+      setTimer: (fn) => this.timers.push(fn),
+    });
   }
   connect(): void {
     const socket = new FakeSocket(this.room);
     this.socket = socket;
-    this.engine.connected((m) => {
-      if (socket.open) socket.up.push(JSON.parse(JSON.stringify(m)) as ClientMessage);
-    });
+    this.engine.connected(
+      (m) => {
+        if (socket.open) socket.up.push(JSON.parse(JSON.stringify(m)) as ClientMessage);
+      },
+      this.canDownload
+        ? {
+            download: (ticket) =>
+              new Promise((resolve, reject) => this.downloads.push({ ticket, resolve, reject })),
+          }
+        : {},
+    );
+  }
+  /** Answers the oldest download (the file as the room has it now, or a saved version), or fails it. */
+  async answerDownload(fail: boolean): Promise<boolean> {
+    const next = this.downloads.shift();
+    if (!next) return false;
+    if (fail) next.reject(new Error("network"));
+    else next.resolve(this.room.download(next.ticket));
+    // The engine hears of it a microtask or two later.
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    return true;
+  }
+  runTimers(): boolean {
+    const timers = this.timers;
+    this.timers = [];
+    for (const fn of timers) fn();
+    return timers.length > 0;
   }
   disconnect(): void {
     this.socket?.close();
@@ -165,7 +233,10 @@ type Action =
   | { kind: "edit"; client: number; choice: number; value: number }
   | { kind: "flush"; client: number }
   | { kind: "pump"; client: number; direction: "up" | "down" }
-  | { kind: "reconnect"; client: number };
+  | { kind: "reconnect"; client: number }
+  | { kind: "save" }
+  | { kind: "download"; client: number; fail: boolean }
+  | { kind: "timers"; client: number };
 
 /** Builds a plausible edit from the client's current view of the document. */
 function makeEdit(doc: Doc, choice: number, value: number, counter: { n: number }): Op[] | null {
@@ -211,7 +282,7 @@ function makeEdit(doc: Doc, choice: number, value: number, counter: { n: number 
 }
 
 describe("SyncEngine convergence", () => {
-  it("every client ends equal to the room, whatever the interleaving", () => {
+  it("every client ends equal to the room, whatever the interleaving", async () => {
     const action: fc.Arbitrary<Action> = fc.oneof(
       {
         weight: 4,
@@ -238,60 +309,90 @@ describe("SyncEngine convergence", () => {
         weight: 1,
         arbitrary: fc.record({ kind: fc.constant("reconnect" as const), client: fc.nat(2) }),
       },
+      { weight: 1, arbitrary: fc.record({ kind: fc.constant("save" as const) }) },
+      {
+        weight: 2,
+        arbitrary: fc.record({
+          kind: fc.constant("download" as const),
+          client: fc.nat(2),
+          fail: fc.boolean(),
+        }),
+      },
+      {
+        weight: 1,
+        arbitrary: fc.record({ kind: fc.constant("timers" as const), client: fc.nat(2) }),
+      },
     );
 
-    fc.assert(
-      fc.property(fc.array(action, { minLength: 60, maxLength: 240, size: "max" }), (actions) => {
-        const room = new FakeRoom(seed);
-        const clients = [0, 1, 2].map((i) => new Client(room, `client${i}`));
-        for (const client of clients) {
-          client.connect();
-          while (client.pump("up") || client.pump("down")) {}
-        }
-        const counter = { n: 0 };
-        for (const a of actions) {
-          const client = clients[a.client] as Client;
-          switch (a.kind) {
-            case "edit": {
-              const ops = makeEdit(client.doc, a.choice, a.value, counter);
-              if (ops) {
-                try {
-                  client.engine.commit(ops);
-                } catch (error) {
-                  if (!(error instanceof ModelError)) throw error;
-                }
-              }
-              break;
-            }
-            case "flush":
-              client.engine.flush();
-              break;
-            case "pump":
-              client.pump(a.direction);
-              break;
-            case "reconnect":
-              client.disconnect();
-              client.connect();
-              break;
-          }
-        }
-        // Quiesce: flush and deliver until nothing moves.
-        for (let round = 0; round < 50; round++) {
-          let moved = false;
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(action, { minLength: 60, maxLength: 240, size: "max" }),
+        async (actions) => {
+          const room = new FakeRoom(seed);
+          // Two clients download a large file, one is sent it through the socket.
+          const clients = [0, 1, 2].map((i) => new Client(room, `client${i}`, i > 0));
           for (const client of clients) {
-            client.engine.flush();
-            while (client.pump("up")) moved = true;
+            client.connect();
+            while (client.pump("up") || client.pump("down")) {}
           }
-          for (const client of clients) while (client.pump("down")) moved = true;
-          if (!moved) break;
-        }
-        const expected = snapshot(room.store.nodes());
-        for (const client of clients) {
-          expect(client.engine.pendingCount).toBe(0);
-          expect(snapshot(client.doc.nodes())).toEqual(expected);
-          expect(client.engine.revn).toBe(room.revn);
-        }
-      }),
+          const counter = { n: 0 };
+          for (const a of actions) {
+            const client = clients["client" in a ? a.client : 0] as Client;
+            switch (a.kind) {
+              case "edit": {
+                const ops = makeEdit(client.doc, a.choice, a.value, counter);
+                if (ops) {
+                  try {
+                    client.engine.commit(ops);
+                  } catch (error) {
+                    if (!(error instanceof ModelError)) throw error;
+                  }
+                }
+                break;
+              }
+              case "flush":
+                client.engine.flush();
+                break;
+              case "pump":
+                client.pump(a.direction);
+                break;
+              case "reconnect":
+                client.disconnect();
+                client.connect();
+                break;
+              case "save":
+                room.save();
+                break;
+              case "download":
+                await client.answerDownload(a.fail);
+                break;
+              case "timers":
+                client.runTimers();
+                break;
+            }
+          }
+          // Quiesce: flush, deliver, answer downloads and run timers until nothing moves.
+          for (let round = 0; round < 50; round++) {
+            let moved = false;
+            for (const client of clients) {
+              client.engine.flush();
+              while (client.pump("up")) moved = true;
+            }
+            for (const client of clients) while (client.pump("down")) moved = true;
+            for (const client of clients) {
+              while (await client.answerDownload(false)) moved = true;
+              if (client.runTimers()) moved = true;
+            }
+            if (!moved) break;
+          }
+          const expected = snapshot(room.store.nodes());
+          for (const client of clients) {
+            expect(client.engine.pendingCount).toBe(0);
+            expect(snapshot(client.doc.nodes())).toEqual(expected);
+            expect(client.engine.revn).toBe(room.revn);
+          }
+        },
+      ),
       { numRuns: 400 },
     );
   }, 30_000); // 400 random interleavings: CPU-heavy, and slower when the whole repo tests at once.
@@ -380,6 +481,39 @@ describe("SyncEngine room requests", () => {
     engine.receive({ t: "snapshot", nodes: [], done: true });
     return { doc, engine, sent };
   }
+
+  it("after losing the connection while a file loads, says the revision it had, not the one it was loading", () => {
+    // What happened to a 500,000-layer file: the room was reset partway through sending it.
+    const doc = new Doc();
+    const engine = new SyncEngine(doc, { clientId: "c1", setTimer: () => 0 });
+    const sent: ClientMessage[] = [];
+    const download = () => new Promise<never>(() => {});
+    engine.connected((m) => sent.push(m), { download });
+    expect(sent).toEqual([{ t: "hello", protocol: 1, clientId: "c1", revn: null, download: true }]);
+    const welcome = (mode: "snapshot" | "download") =>
+      engine.receive({
+        t: "welcome",
+        sessionId: "s1",
+        revn: 9,
+        role: "editor",
+        peers: [],
+        mode,
+        lastSeq: 0,
+        ...(mode === "download" ? { ticket: "t" } : {}),
+      });
+    for (const mode of ["snapshot", "download"] as const) {
+      welcome(mode);
+      if (mode === "snapshot")
+        engine.receive({ t: "snapshot", nodes: [doc.get(ROOT_ID) as NodeRecord], done: false });
+      engine.disconnected();
+      sent.length = 0;
+      engine.connected((m) => sent.push(m), { download });
+      expect(sent).toEqual([
+        { t: "hello", protocol: 1, clientId: "c1", revn: null, download: true },
+      ]);
+      expect(engine.revn).toBeNull();
+    }
+  });
 
   it("reloads quietly when the room asks, keeping pending edits", () => {
     const { engine, sent } = live();
