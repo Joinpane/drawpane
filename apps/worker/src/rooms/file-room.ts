@@ -15,7 +15,6 @@ import {
   ClientMessage,
   type CommentEvent,
   type CopiesFormat,
-  CopyView,
   heldNodeIds,
   IMPORT_TTL_MS,
   keyBetween,
@@ -38,7 +37,6 @@ import {
   renameHeldIds,
   type ServerMessage,
   SNAPSHOT_CHUNK_SIZE,
-  samePropValue,
   snapshotCopies,
   summarizeEdits,
   type VersionReason,
@@ -80,6 +78,7 @@ import {
   NO_COMPACT_COPIES,
   stageNodes,
 } from "./import-stage";
+import { MainRemoval, RemovalNeedsLooks } from "./main-removal";
 import {
   copyNodes,
   countRows,
@@ -99,6 +98,7 @@ import {
   loadPinMap,
   PIN_MAP_KEEP_MS,
   pinMapKey,
+  pinRenamedInR2,
   pinsRenamed,
   savePinMap,
 } from "./pin-map";
@@ -216,22 +216,43 @@ interface Attachment {
   stale?: boolean;
 }
 
-/**
- * What a main an edit deletes or unmakes gave its instances, read before it
- * applies: the values an instance root takes from it, and whether it
- * presents layers (stored, or built when it's an instance itself).
- */
-interface RemovedMain {
-  readonly base: Readonly<Record<string, unknown>>;
-  readonly layers: boolean;
-}
-
 /** What an edit to a file stored compact is checked for, once it has applied (see #checkCompact). */
 interface CompactCheck {
-  /** Mains it deleted or unmade, and what each gave its instances. */
-  readonly removed: Map<string, RemovedMain>;
+  /** Mains it removes, and what their instances show before and after (main-removal.ts). */
+  readonly removal: MainRemoval;
   /** Nodes that may now be an instance of a live main storing layers. */
   readonly candidates: Set<string>;
+}
+
+/** What a storage transaction that removes a main looks at first, when it's run again. */
+interface LookFirst {
+  readonly mains: ReadonlySet<string>;
+  readonly deleted: ReadonlySet<string>;
+}
+
+/**
+ * Runs `attempt` (one storage transaction) again while the main-removal
+ * check asks to look at instances first (it rolled back), at most three
+ * times: the second time skipping what the first deleted, the third
+ * looking at everything.
+ */
+function withLooks<R>(first: LookFirst, attempt: (look: LookFirst) => R): R {
+  let look = first;
+  for (let tries = 0; ; tries++) {
+    try {
+      return attempt(look);
+    } catch (error) {
+      if (!(error instanceof RemovalNeedsLooks) || tries >= 2) {
+        if (error instanceof RemovalNeedsLooks)
+          throw new ModelError("conflict", "The file changed while that was saved. Try again.");
+        throw error;
+      }
+      look = {
+        mains: new Set([...look.mains, ...error.mains]),
+        deleted: tries === 0 && error.deleted ? error.deleted : new Set(),
+      };
+    }
+  }
 }
 
 const LOG_SCHEMA = `
@@ -943,13 +964,51 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * A comment's pin as the file names its layer now: a copy layer's id in
-   * the form the file had before it changed (a tab that hasn't reloaded) is
-   * translated while the room keeps the map (pin-map.ts). Ids it doesn't
-   * know stay as they are.
+   * The layer a comment written now is pinned to, as the file names it now,
+   * or null to pin it to its point on the page (decision 0029):
+   *
+   * - an id the file has (a stored layer, or a copy layer built on the
+   *   comment's page) stays as it is;
+   * - a copy layer's id in the form the file had before it changed (a tab
+   *   that hasn't reloaded) is translated, through the map the room keeps
+   *   for a week (pin-map.ts), or after that the copy of it in R2;
+   * - anything else (a layer deleted since, an id the maps don't name) is
+   *   null: a comment is never pinned to a layer the file doesn't have.
    */
-  async pinTarget(nodeId: string): Promise<string> {
-    return pinsRenamed(this.#sql, [nodeId], this.#copies === "compact").get(nodeId) ?? nodeId;
+  async pinTarget(nodeId: string, pageId: string | null = null): Promise<string | null> {
+    const toCompact = this.#copies === "compact";
+    if (this.#hasLayer(nodeId, pageId)) return nodeId;
+    const local = pinsRenamed(this.#sql, [nodeId], toCompact).get(nodeId);
+    if (local !== undefined) return this.#hasLayer(local, pageId) ? local : null;
+    const key = this.#meta("pins_key");
+    if (key === null || hasPinMap(this.#sql)) return null;
+    const archived = await pinRenamedInR2(this.env.FILES, key, nodeId, toCompact);
+    // Asked as the file is now: it may have changed while R2 answered.
+    return archived !== null && this.#hasLayer(archived, pageId) ? archived : null;
+  }
+
+  /**
+   * Whether the file has the layer `id` as people see it: stored, or, in a
+   * file stored compact, a copy layer (one with a record is built from its
+   * instance; one without is looked for on `pageId`, an instance at a time,
+   * as the MCP tools read them).
+   */
+  #hasLayer(id: string, pageId: string | null): boolean {
+    const stored = this.#store.get(id);
+    const page = pageId === null ? undefined : this.#store.get(pageId);
+    this.#store.clearCache();
+    if (stored && stored.type !== "override") return true;
+    if (this.#copies !== "compact") return false;
+    const reader = new PresentedReader(new TableReader(this.#sql, "nodes"), this.#sql, "nodes");
+    if (stored) return reader.get(id) !== undefined;
+    if (page?.type !== "page") return false;
+    const stack = [page.id];
+    for (let at = stack.pop(); at !== undefined; at = stack.pop())
+      for (const child of reader.children(at)) {
+        if (child === id) return true;
+        stack.push(child);
+      }
+    return false;
   }
 
   /**
@@ -2063,7 +2122,10 @@ export class FileRoom extends DurableObject<Env> {
       if (error instanceof ModelError)
         return {
           ok: false,
-          message: `Can't ${direction} “${target.label}”: the layers it changed have changed since.`,
+          message:
+            error.code === "conflict"
+              ? `Can't ${direction} “${target.label}”: ${error.message}`
+              : `Can't ${direction} “${target.label}”: the layers it changed have changed since.`,
         };
       throw error;
     }
@@ -2666,18 +2728,29 @@ export class FileRoom extends DurableObject<Env> {
     } = {},
   ): number {
     try {
-      const revn = this.ctx.storage.transactionSync(() => {
-        const next = this.#revn + 1;
-        // An edit to a file stored compact is checked as a whole (decision 0029).
-        const check = this.#compactCheck();
-        const inverse = this.#applyLogged(ops, author, next, {
-          inverse: options.also !== undefined,
-          check,
-        });
-        if (check) this.#checkCompact(check);
-        options.also?.(next, inverse);
-        return next;
-      });
+      // A main it removes: what its instances show is looked at first (main-removal.ts).
+      const first: LookFirst =
+        this.#copies === "compact"
+          ? {
+              mains: MainRemoval.predicted(this.#sql, this.#store, ops),
+              deleted: new Set(ops.flatMap((op) => (op.op === "delete" ? [op.id] : []))),
+            }
+          : { mains: new Set(), deleted: new Set() };
+      const revn = withLooks(first, (look) =>
+        this.ctx.storage.transactionSync(() => {
+          const next = this.#revn + 1;
+          // An edit to a file stored compact is checked as a whole (decision 0029).
+          const check = this.#compactCheck(look);
+          const inverse = this.#applyLogged(ops, author, next, {
+            inverse: options.also !== undefined,
+            check,
+          });
+          // Checked before `also` writes anything: a check that asks to run it again rolls back.
+          if (check) this.#checkCompact(check);
+          options.also?.(next, inverse);
+          return next;
+        }),
+      );
       this.#revn = revn;
       if (options.fromEngine) this.#engine?.committed(revn);
       else this.#engine?.follow(ops, revn);
@@ -2691,16 +2764,20 @@ export class FileRoom extends DurableObject<Env> {
    * What an edit to a file stored compact is checked for (decision 0029),
    * gathered as its operations apply (a restore's or a merge's in chunks),
    * then checked once, before its storage transaction ends; null when the
-   * file stores copies materialized.
+   * file stores copies materialized. Call inside the storage transaction,
+   * before anything applies: what the instances of `look.mains` show is
+   * read then.
    */
-  #compactCheck(): CompactCheck | null {
-    return this.#copies === "compact" ? { removed: new Map(), candidates: new Set() } : null;
+  #compactCheck(look: LookFirst): CompactCheck | null {
+    if (this.#copies !== "compact") return null;
+    const removal = new MainRemoval(this.#sql, this.#store);
+    removal.lookFirst(look.mains, look.deleted);
+    return { removal, candidates: new Set() };
   }
 
-  /** Before operations apply: the mains they delete or unmake, and what each gave its instances. */
+  /** Before operations apply: the mains they may remove. */
   #noteRemovedMains(ops: readonly Op[], check: CompactCheck): void {
-    for (const [id, gave] of this.#mainsRemoved(ops))
-      if (!check.removed.has(id)) check.removed.set(id, gave);
+    check.removal.note(ops);
   }
 
   /** After operations apply: the nodes that may now be an instance storing layers. */
@@ -2720,56 +2797,15 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * The mains an edit is about to delete or unmake, read before it applies,
-   * with what each gives its instances as presented (decision 0029): the
-   * values an instance root takes from it (all but root-local ones, from
-   * the main as it presents itself, so a main that's an instance itself
-   * counts what it takes from its own), and whether it presents layers.
-   * Their instances must keep exactly that.
-   */
-  #mainsRemoved(ops: readonly Op[]): Map<string, RemovedMain> {
-    const out = new Map<string, RemovedMain>();
-    let view: CopyView | null = null;
-    const gave = (id: string): RemovedMain => {
-      view ??= new CopyView(
-        {
-          get: (at) => this.#store.get(at),
-          childIds: (at) => this.#store.childIds(at),
-          nodes: () => [],
-        },
-        { lazy: true },
-      );
-      return { base: view.rootBase(id) ?? {}, layers: view.childIds(id).length > 0 };
-    };
-    for (const op of ops) {
-      if (op.op === "set" && op.prop === "isComponent" && !op.value) {
-        const node = this.#store.get(op.id);
-        if (node?.type === "frame" && node.props.isComponent && !out.has(op.id))
-          out.set(op.id, gave(op.id));
-      } else if (op.op === "delete") {
-        for (const row of this.#sql
-          .exec<{ id: string }>(
-            `WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
-             SELECT n.id FROM nodes n JOIN sub ON sub.id = n.id
-              WHERE n.type = 'frame' AND json_extract(n.props, '$.isComponent') = 1`,
-            op.id,
-          )
-          .toArray())
-          if (!out.has(row.id)) out.set(row.id, gave(row.id));
-      }
-    }
-    return out;
-  }
-
-  /**
    * What an edit to a file stored compact must leave (decision 0029), so a
    * client's mistake or a race can't lose a copy's look: no stored layers
-   * under an instance of a live main (its layers come from the main), and an
-   * instance of a main the edit removed keeps its look as its own layers
-   * (the editor stores them before removing a main; one someone added
-   * meanwhile hasn't, and the edit is refused, to be made again).
+   * under an instance of a live main (its layers come from the main), and
+   * every instance of a main the edit removed showing exactly what it
+   * showed (main-removal.ts: the editor stores each instance's layers
+   * before removing a main; a client behind the file stores what it saw,
+   * and is refused, to make the change again).
    */
-  #checkCompact({ removed, candidates }: CompactCheck): void {
+  #checkCompact({ removal, candidates }: CompactCheck): void {
     this.#store.clearCache();
     const isMain = (id: string) => {
       const main = this.#store.get(id);
@@ -2790,46 +2826,7 @@ export class FileRoom extends DurableObject<Env> {
           "invalid_parent",
           "Layers inside an instance come from its main component: detach it to change them.",
         );
-    const used = () =>
-      new ModelError(
-        "invalid_value",
-        "This removes a component an instance takes its look from, and that instance doesn't keep it yet (someone placed it meanwhile, or the change is older than it). Detach the instance first, or keep the component.",
-      );
-    for (const [main, gave] of removed) {
-      if (isMain(main)) continue;
-      const roots = this.#sql
-        .exec<{ id: string }>(
-          "SELECT id FROM nodes WHERE type = 'frame' AND json_extract(props, '$.instanceOf') = ?",
-          main,
-        )
-        .toArray();
-      for (const { id } of roots) {
-        const kids = this.#sql
-          .exec<{ type: string }>("SELECT type FROM nodes WHERE parent = ?", id)
-          .toArray();
-        const records = kids.some((k) => k.type === "override");
-        const layers = kids.some((k) => k.type !== "override");
-        if (records || (gave.layers && !layers)) throw used();
-        // Without its main it shows only what it stores: every value it took from the main
-        // (one that isn't a default) must be its own now, as the editor stores it before.
-        const own = (this.#store.get(id)?.props ?? {}) as Record<string, unknown>;
-        const unset = Array.isArray(own.unset) ? (own.unset as string[]) : [];
-        for (const [prop, value] of Object.entries(gave.base))
-          if (
-            own[prop] === undefined &&
-            !unset.includes(prop) &&
-            !samePropValue(prop, undefined, value)
-          )
-            throw used();
-      }
-      const swapped = this.#sql
-        .exec(
-          "SELECT 1 FROM nodes WHERE type = 'override' AND json_extract(props, '$.instanceOf') = ? LIMIT 1",
-          main,
-        )
-        .toArray();
-      if (swapped.length > 0) throw used();
-    }
+    removal.check();
   }
 
   /**
@@ -2912,24 +2909,34 @@ export class FileRoom extends DurableObject<Env> {
     let tooBig = false;
     let outcome: { result: R; count: number };
     try {
-      outcome = this.ctx.storage.transactionSync(() => {
-        // Checked as one edit, whatever order its chunks come in (decision 0029).
-        const check = this.#compactCheck();
-        const out = new OpChunks((ops) => {
-          next++;
-          this.#applyLogged(ops, author, next, { inverse: false, held, check });
-          this.#store.clearCache();
-          if (tooBig) return;
-          sentChars += JSON.stringify(ops).length;
-          if (sentChars > MAX_BROADCAST_BYTES) {
-            tooBig = true;
-            sent.length = 0;
-          } else sent.push({ revn: next, ops });
+      // Which mains it removes is known once it has applied: when it removes any, it's run
+      // again, looking at their instances first (main-removal.ts).
+      const none: LookFirst = { mains: new Set(), deleted: new Set() };
+      outcome = withLooks(none, (look) => {
+        next = this.#revn;
+        sent.length = 0;
+        sentChars = 0;
+        tooBig = false;
+        this.#store.clearCache();
+        return this.ctx.storage.transactionSync(() => {
+          // Checked as one edit, whatever order its chunks come in (decision 0029).
+          const check = this.#compactCheck(look);
+          const out = new OpChunks((ops) => {
+            next++;
+            this.#applyLogged(ops, author, next, { inverse: false, held, check });
+            this.#store.clearCache();
+            if (tooBig) return;
+            sentChars += JSON.stringify(ops).length;
+            if (sentChars > MAX_BROADCAST_BYTES) {
+              tooBig = true;
+              sent.length = 0;
+            } else sent.push({ revn: next, ops });
+          });
+          const result = produce(out);
+          out.flush();
+          if (check) this.#checkCompact(check);
+          return { result, count: out.count };
         });
-        const result = produce(out);
-        out.flush();
-        if (check) this.#checkCompact(check);
-        return { result, count: out.count };
       });
     } catch (error) {
       this.#engine?.drop();

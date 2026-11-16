@@ -23,7 +23,9 @@ export type ModelErrorCode =
   | "too_deep"
   | "invalid_prop"
   | "invalid_value"
-  | "last_page";
+  | "last_page"
+  /** The change would undo or lose another that was made meanwhile: catch up, then make it again. */
+  | "conflict";
 
 export class ModelError extends Error {
   override name = "ModelError";

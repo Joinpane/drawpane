@@ -94,6 +94,14 @@ function presented(nodes: readonly NodeRecord[], copies: "materialized" | "compa
 }
 
 const kit = generateKit({ layers: 3_000, seed: 3 });
+const kitById = new Map(kit.nodes.map((n) => [n.id, n]));
+
+/** The kit's page a layer is on: where a comment pinned to it is (the page it's posted with). */
+function kitPageOf(id: string): NodeRecord {
+  let at = kitById.get(id);
+  while (at && at.type !== "page") at = kitById.get(at.parent);
+  return at as NodeRecord;
+}
 
 describe("converting a file stored materialized", { timeout: 120_000 }, () => {
   it("converts when the room loads, after a version to undo it with, and opens as it was", async () => {
@@ -705,7 +713,7 @@ describe("what the review of the conversion found", { timeout: 120_000 }, () => 
       (n) => n.type === "frame" && n.props.instanceOf && kit.nodes.some((c) => c.parent === n.id),
     ) as NodeRecord;
     const target = kit.nodes.find((n) => n.parent === root.id) as NodeRecord;
-    const page = kit.nodes.find((n) => n.type === "page") as NodeRecord;
+    const page = kitPageOf(target.id);
     const { browser, fileId } = await materializedFile(kit.nodes);
     const pin = (nodeId: string) =>
       browser.json<{ thread: { id: string } }>(`/api/files/${fileId}/comments`, {
@@ -874,7 +882,7 @@ describe("what the second review of the conversion found", { timeout: 120_000 },
         placeInstance("Placed", page, "RedMain"),
       ]);
       socket.send({ t: "txn", seq: 2, ops: [op as Op] });
-      expect((await socket.next<{ code: string }>("reject")).code).toBe("invalid_value");
+      expect((await socket.next<{ code: string }>("reject")).code).toBe("conflict");
       expect((await shows(fileId, "Placed")).node?.props.fills).toEqual(RED);
       // As the editor removes a main, its instance stored first as it shows: kept.
       const shown = (await shows(fileId, "Placed")).node as NodeRecord;
@@ -914,13 +922,12 @@ describe("what the second review of the conversion found", { timeout: 120_000 },
     ]);
     expect((await shows(fileId, "Placed")).layers).toHaveLength(1);
     socket.send({ t: "txn", seq: 2, ops: [{ op: "delete", id: "WrapMain" }] });
-    expect((await socket.next<{ code: string }>("reject")).code).toBe("invalid_value");
+    expect((await socket.next<{ code: string }>("reject")).code).toBe("conflict");
     expect((await shows(fileId, "Placed")).layers).toHaveLength(1);
     void page;
   });
 
   describe("ids held in values, from a tab that loaded the file before it converted", () => {
-    const kitById = new Map(kit.nodes.map((n) => [n.id, n]));
     const plainChain = (n: NodeRecord | undefined): boolean => {
       for (let at = n; at; at = kitById.get(at.parent))
         if (at.props.instanceOf || at.props.mirrors || at.props.isComponent) return false;
@@ -1126,7 +1133,7 @@ describe("what the second review of the conversion found", { timeout: 120_000 },
       (n) => n.type === "frame" && n.props.instanceOf && kit.nodes.some((c) => c.parent === n.id),
     ) as NodeRecord;
     const target = kit.nodes.find((n) => n.parent === root.id) as NodeRecord;
-    const page = kit.nodes.find((n) => n.type === "page") as NodeRecord;
+    const page = kitPageOf(target.id);
     const { browser, fileId } = await materializedFile(kit.nodes);
     const { thread } = await browser.json<{ thread: { id: string } }>(
       `/api/files/${fileId}/comments`,
@@ -1170,5 +1177,388 @@ describe("what the second review of the conversion found", { timeout: 120_000 },
     for (let i = 0; i < 4; i++) await runDurableObjectAlarm(roomOf(fileId));
     expect((await roomOf(fileId).copiesFormat()).copies).toBe("materialized");
     expect(await pinned()).toBe(target.id);
+  });
+});
+
+describe("what the third review of the conversion found", { timeout: 120_000 }, () => {
+  const BLUE = [{ type: "solid" as const, color: "#0000ff" }];
+  /** A card main of one rectangle, red, and an instance of it placed on the page. */
+  const card = (page: string): Op[] => [
+    {
+      op: "create",
+      id: "CardMain",
+      type: "frame",
+      parent: page,
+      key: at(0),
+      props: { name: "Card", isComponent: true, width: 40, height: 40 },
+    },
+    {
+      op: "create",
+      id: "CardRect",
+      type: "rect",
+      parent: "CardMain",
+      key: at(0),
+      props: { name: "Fill", width: 10, height: 10, fills: RED },
+    },
+    placeInstance("Placed", page, "CardMain"),
+  ];
+
+  /** What `id` shows, layer by layer, without ids or link values: its look. */
+  async function looks(fileId: string, id: string) {
+    const doc = new Doc();
+    doc.resetStored(await stored(fileId), "compact");
+    const out: unknown[] = [];
+    const walk = (at: string, depth: number) => {
+      const node = doc.get(at) as NodeRecord;
+      const props = { ...(node.props as Record<string, unknown>) };
+      for (const prop of ["mirrors", "overrides", "unset", "instanceOf"]) delete props[prop];
+      out.push([depth, node.type, props]);
+      for (const child of doc.childIds(at)) walk(child, depth + 1);
+    };
+    walk(id, 0);
+    return out;
+  }
+
+  for (const [what, change, shows] of [
+    [
+      "added a layer to the main",
+      (): Op[] => [
+        {
+          op: "create",
+          id: "CardRect2",
+          type: "rect",
+          parent: "CardMain",
+          key: at(1),
+          props: { name: "Second", width: 5, height: 5 },
+        },
+      ],
+      (look: unknown[]) => expect(look).toHaveLength(3),
+    ],
+    [
+      "changed the main's fill",
+      (): Op[] => [{ op: "set", id: "CardRect", prop: "fills", value: BLUE }],
+      (look: unknown[]) => expect(JSON.stringify(look)).toContain("#0000ff"),
+    ],
+  ] as const)
+    it(`refuses deleting a main from a view from before another tab ${what}, then takes it made again`, async () => {
+      const { browser, fileId, socket } = await fileWith(card);
+      // A tab that loaded the file now, and deletes the main after someone else's change.
+      const stale = new Doc();
+      stale.resetStored(await stored(fileId), "compact");
+      socket.send({ t: "txn", seq: 2, ops: change() });
+      await socket.next("ack");
+      const before = await looks(fileId, "Placed");
+      shows(before);
+      stale.apply([{ op: "delete", id: "CardMain" }]);
+      const old = await open(browser, fileId);
+      old.socket.send({ t: "txn", seq: 1, ops: [...stale.lastStoredOps] });
+      const refused = await old.socket.next<{ code: string; message: string }>("reject");
+      expect(refused.code).toBe("conflict");
+      expect(refused.message).toBe(
+        "Removing the component “Card” would change how its instance “Card” looks, so nothing was changed. If someone just changed that instance or the component, try again; otherwise detach the instance first.",
+      );
+      expect(await looks(fileId, "Placed")).toEqual(before);
+      // Caught up, the same deletion stores the instance as it shows now: taken.
+      const fresh = new Doc();
+      fresh.resetStored(await stored(fileId), "compact");
+      fresh.apply([{ op: "delete", id: "CardMain" }]);
+      old.socket.send({ t: "txn", seq: 2, ops: [...fresh.lastStoredOps] });
+      await old.socket.next("ack");
+      expect((await stored(fileId)).some((n) => n.id === "CardMain")).toBe(false);
+      expect(await looks(fileId, "Placed")).toEqual(before);
+    });
+
+  it("takes the editor's deletion of a main whose instance stores a default (unset fills)", async () => {
+    const { fileId, socket } = await fileWith(card);
+    // The instance shows no fill where its main's root is red: it stores `unset`.
+    socket.send({
+      t: "txn",
+      seq: 2,
+      ops: [
+        { op: "set", id: "CardMain", prop: "fills", value: RED },
+        { op: "set", id: "Placed", prop: "unset", value: ["fills"] },
+      ],
+    });
+    await socket.next("ack");
+    const before = await looks(fileId, "Placed");
+    expect(JSON.stringify(before[0])).not.toContain("#ff0000");
+    const doc = new Doc();
+    doc.resetStored(await stored(fileId), "compact");
+    doc.apply([{ op: "delete", id: "CardMain" }]);
+    // The editor drops `unset` and leaves the fills absent: the same look.
+    expect(doc.lastStoredOps).toContainEqual({
+      op: "set",
+      id: "Placed",
+      prop: "unset",
+      value: null,
+    });
+    socket.send({ t: "txn", seq: 3, ops: [...doc.lastStoredOps] });
+    await socket.next("ack");
+    expect(await looks(fileId, "Placed")).toEqual(before);
+  });
+
+  /** A button main holding an icon instance; an instance of the button; a card main holding one. */
+  const nested = (page: string): Op[] => [
+    {
+      op: "create",
+      id: "Icon",
+      type: "frame",
+      parent: page,
+      key: at(0),
+      props: { name: "Icon", isComponent: true, width: 10, height: 10 },
+    },
+    {
+      op: "create",
+      id: "IconPath",
+      type: "rect",
+      parent: "Icon",
+      key: at(0),
+      props: { name: "Glyph", width: 5, height: 5, fills: RED },
+    },
+    {
+      op: "create",
+      id: "Btn",
+      type: "frame",
+      parent: page,
+      key: at(1),
+      props: { name: "Button", isComponent: true, width: 40, height: 20 },
+    },
+    {
+      op: "create",
+      id: "BtnIcon",
+      type: "frame",
+      parent: "Btn",
+      key: at(0),
+      props: { instanceOf: "Icon" },
+    },
+    placeInstance("PlacedBtn", page, "Btn", 3),
+    {
+      op: "create",
+      id: "CardOfBtn",
+      type: "frame",
+      parent: page,
+      key: at(4),
+      props: { name: "Card", isComponent: true, width: 80, height: 40 },
+    },
+    {
+      op: "create",
+      id: "CardBtn",
+      type: "frame",
+      parent: "CardOfBtn",
+      key: at(0),
+      props: { instanceOf: "Btn" },
+    },
+    placeInstance("PlacedCard", page, "CardOfBtn", 6),
+  ];
+
+  it("takes the editor's deletion of a main holding a nested instance, its instances kept as they showed", async () => {
+    const { fileId, socket } = await fileWith(nested);
+    const before = [await looks(fileId, "PlacedBtn"), await looks(fileId, "PlacedCard")];
+    const doc = new Doc();
+    doc.resetStored(await stored(fileId), "compact");
+    doc.apply([{ op: "delete", id: "Btn" }]);
+    socket.send({ t: "txn", seq: 2, ops: [...doc.lastStoredOps] });
+    await socket.next("ack");
+    expect([await looks(fileId, "PlacedBtn"), await looks(fileId, "PlacedCard")]).toEqual(before);
+  });
+
+  it("refuses the editor's deletion that would lose an override inside an instance of a main holding one", async () => {
+    const { browser, fileId, socket } = await fileWith(nested);
+    // The card's instance overrides the glyph inside its button's icon: a record under that id.
+    const doc = new Doc();
+    doc.resetStored(await stored(fileId), "compact");
+    const glyph = (() => {
+      const walk = (at: string): string | null => {
+        if (doc.get(at)?.type === "rect") return at;
+        for (const child of doc.childIds(at)) {
+          const found = walk(child);
+          if (found) return found;
+        }
+        return null;
+      };
+      return walk("PlacedCard") as string;
+    })();
+    doc.apply([{ op: "set", id: glyph, prop: "fills", value: BLUE }]);
+    socket.send({ t: "txn", seq: 2, ops: [...doc.lastStoredOps] });
+    await socket.next("ack");
+    const before = await looks(fileId, "PlacedCard");
+    expect(JSON.stringify(before)).toContain("#0000ff");
+    // Storing the button's nested icon gives its layers other ids, which the record doesn't name.
+    doc.apply([{ op: "delete", id: "Btn" }]);
+    socket.send({ t: "txn", seq: 3, ops: [...doc.lastStoredOps] });
+    const refused = await socket.next<{ code: string; message: string }>("reject");
+    expect(refused.code).toBe("conflict");
+    expect(refused.message).toMatch(
+      /Removing the component “Button” would change how its instance “Card” looks/,
+    );
+    expect(await looks(fileId, "PlacedCard")).toEqual(before);
+    // As it says: detached first, the card's instance keeps its look, and the button goes.
+    const fresh = new Doc();
+    fresh.resetStored(await stored(fileId), "compact");
+    const again = await open(browser, fileId);
+    fresh.apply([{ op: "set", id: "PlacedCard", prop: "instanceOf", value: null }]);
+    again.socket.send({ t: "txn", seq: 1, ops: [...fresh.lastStoredOps] });
+    await again.socket.next("ack");
+    fresh.apply([{ op: "delete", id: "Btn" }]);
+    again.socket.send({ t: "txn", seq: 2, ops: [...fresh.lastStoredOps] });
+    await again.socket.next("ack");
+    expect(JSON.stringify(await looks(fileId, "PlacedCard"))).toContain("#0000ff");
+  });
+
+  it("refuses a merge whose branch deleted a main main placed an instance of since, and takes it once that's gone", async () => {
+    const { browser, fileId, socket, page } = await fileWith(card);
+    const made = await browser.json<{ branch: { id: string } }>(`/api/files/${fileId}/branches`, {
+      method: "POST",
+      json: { name: "Tidy" },
+    });
+    // On the branch, the editor deletes the main, storing its instance as it shows there.
+    const branchDoc = new Doc();
+    branchDoc.resetStored(await stored(made.branch.id), "compact");
+    branchDoc.apply([{ op: "delete", id: "CardMain" }]);
+    const branch = await open(browser, made.branch.id);
+    branch.socket.send({ t: "txn", seq: 1, ops: [...branchDoc.lastStoredOps] });
+    await branch.socket.next("ack");
+    // On main meanwhile, another instance of it.
+    socket.send({ t: "txn", seq: 2, ops: [placeInstance("Later", page, "CardMain", 9)] });
+    await socket.next("ack");
+    const before = await looks(fileId, "Later");
+    const merge = () =>
+      browser.fetch(`/api/files/${made.branch.id}/branch/merge`, { method: "POST", json: {} });
+    const refused = await merge();
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain(
+      "These changes can't be merged as they are. Removing the component “Card” would change how its instance “Card” looks, so nothing was changed.",
+    );
+    expect(await looks(fileId, "Later")).toEqual(before);
+    // That instance deleted on main, the same merge goes in, the first instance looking as it did.
+    const placed = await looks(fileId, "Placed");
+    socket.send({ t: "txn", seq: 3, ops: [{ op: "delete", id: "Later" }] });
+    await socket.next("ack");
+    expect((await merge()).status).toBe(200);
+    expect((await stored(fileId)).some((n) => n.id === "CardMain")).toBe(false);
+    expect(await looks(fileId, "Placed")).toEqual(placed);
+  });
+
+  it("refuses removing a main whose instance is too large to check, saying so", async () => {
+    const { fileId, socket } = await fileWith(card);
+    // Over MAX_INSTANCE_BUILT layers in the main, a few thousand a transaction.
+    let key = at(0);
+    for (let batch = 0; batch < 6; batch++) {
+      const ops: Op[] = [];
+      for (let i = 0; i < 2_000; i++) {
+        key = keyBetween(key, null);
+        ops.push({
+          op: "create",
+          id: `Cell${batch}x${i}`,
+          type: "rect",
+          parent: "CardMain",
+          key,
+          props: {},
+        });
+      }
+      socket.send({ t: "txn", seq: 2 + batch, ops });
+      await socket.next("ack", 30_000);
+    }
+    socket.send({
+      t: "txn",
+      seq: 20,
+      ops: [{ op: "set", id: "CardMain", prop: "isComponent", value: false }],
+    });
+    const refused = await socket.next<{ code: string; message: string }>("reject", 30_000);
+    expect(refused.code).toBe("conflict");
+    expect(refused.message).toMatch(/too large to check \(12,001 layers shown, more than 10,000\)/);
+    // Nothing changed: still a component.
+    expect((await stored(fileId)).find((n) => n.id === "CardMain")?.props.isComponent).toBe(true);
+  });
+
+  describe("comment pins once the room let the map go", () => {
+    const root = kit.nodes.find(
+      (n) => n.type === "frame" && n.props.instanceOf && kit.nodes.some((c) => c.parent === n.id),
+    ) as NodeRecord;
+    const target = kit.nodes.find((n) => n.parent === root.id) as NodeRecord;
+    const page = kitPageOf(root.id);
+    const derived = compactByInstance(kit.nodes).ids.get(target.id) as string;
+
+    /** A kit converted a week ago: its pins moved, its map saved to R2 and let go. */
+    async function expired() {
+      const made = await materializedFile(kit.nodes);
+      await convert(made.fileId);
+      for (let i = 0; i < 3; i++) await runDurableObjectAlarm(roomOf(made.fileId));
+      await runInDurableObject(roomOf(made.fileId), (_room, state) => {
+        state.storage.sql.exec("UPDATE meta SET v = '0' WHERE k = 'pins_until'");
+      });
+      for (let i = 0; i < 3; i++) await runDurableObjectAlarm(roomOf(made.fileId));
+      const kept = await runInDurableObject(roomOf(made.fileId), (_room, state) => ({
+        map: state.storage.sql
+          .exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pin_map'")
+          .toArray().length,
+        key: state.storage.sql.exec<{ v: string }>("SELECT v FROM meta WHERE k = 'pins_key'").one()
+          .v,
+      }));
+      expect(kept.map).toBe(0);
+      return { ...made, key: kept.key };
+    }
+    const pinAt = (browser: Browser, fileId: string, nodeId: string) =>
+      browser.fetch(`/api/files/${fileId}/comments`, {
+        method: "POST",
+        json: { pageId: page.id, x: 1, y: 2, nodeId, offset: { x: 3, y: 4 }, body: "Here" },
+      });
+    const anchorOf = async (response: Response) => {
+      expect(response.status).toBe(201);
+      return ((await response.json()) as { thread: { anchor: Record<string, unknown> } }).thread
+        .anchor;
+    };
+
+    it("translates a copy's old id through the map kept in R2", async () => {
+      const { browser, fileId } = await expired();
+      expect(await anchorOf(await pinAt(browser, fileId, target.id))).toEqual({
+        x: 1,
+        y: 2,
+        nodeId: derived,
+        offset: { x: 3, y: 4 },
+      });
+    });
+
+    it("pins to the page, not to a layer the file doesn't have", async () => {
+      const { browser, fileId, key } = await expired();
+      expect(await anchorOf(await pinAt(browser, fileId, "NoSuchLayer0000"))).toEqual({
+        x: 1,
+        y: 2,
+        nodeId: null,
+        offset: null,
+      });
+      // With the copy in R2 gone too, an old id is one the file doesn't have.
+      await env.FILES.delete(key);
+      expect((await anchorOf(await pinAt(browser, fileId, target.id))).nodeId).toBeNull();
+      // Moving a pin onto it, the same.
+      const { thread } = await browser.json<{ thread: { id: string } }>(
+        `/api/files/${fileId}/comments`,
+        { method: "POST", json: { pageId: page.id, x: 0, y: 0, body: "Unpinned" } },
+      );
+      const moved = await browser.json<{ thread: { anchor: Record<string, unknown> } }>(
+        `/api/files/${fileId}/comments/${thread.id}`,
+        {
+          method: "PATCH",
+          json: { anchor: { x: 5, y: 6, nodeId: target.id, offset: { x: 1, y: 1 } } },
+        },
+      );
+      expect(moved.thread.anchor).toEqual({ x: 5, y: 6, nodeId: null, offset: null });
+    });
+
+    it("keeps a copy layer's own id, record or none, and a stored layer's", async () => {
+      const { browser, fileId } = await expired();
+      // A copy layer with no record: found on the comment's page.
+      expect((await anchorOf(await pinAt(browser, fileId, derived))).nodeId).toBe(derived);
+      expect((await anchorOf(await pinAt(browser, fileId, root.id))).nodeId).toBe(root.id);
+      // And one with a record (its own opacity), as the editor stores it.
+      const doc = new Doc();
+      doc.resetStored(await stored(fileId), "compact");
+      doc.apply([{ op: "set", id: derived, prop: "opacity", value: 0.5 }]);
+      const tab = await open(browser, fileId);
+      tab.socket.send({ t: "txn", seq: 1, ops: [...doc.lastStoredOps] });
+      await tab.socket.next("ack");
+      expect((await stored(fileId)).find((n) => n.id === derived)?.type).toBe("override");
+      expect((await anchorOf(await pinAt(browser, fileId, derived))).nodeId).toBe(derived);
+    });
   });
 });

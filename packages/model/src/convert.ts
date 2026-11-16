@@ -169,16 +169,25 @@ export interface ConvertReader {
   settled(rootId: string): boolean;
   /**
    * The size of what converting an instance holds, without reading it (the
-   * size check): `layers`, the nodes stored under its root; `bytes`, the
-   * bytes of their values and of every main it's built from (its own, its
-   * layers' and theirs, with their layers).
+   * size check): see `InstanceSize`.
    */
   sizeOf?(rootId: string): InstanceSize;
 }
 
-/** What converting an instance holds (see `ConvertReader.sizeOf`). */
+/** What converting an instance holds, counted before any of it is read (see `ConvertReader.sizeOf`). */
 export interface InstanceSize {
+  /** The nodes stored under its root: its materialized layers. */
   readonly layers: number;
+  /**
+   * The layers building it creates: what its main presents (a nested
+   * instance counting its own main's layers again, however deep), plus what
+   * any main its layers are swapped to presents. Building it holds them all,
+   * whether or not they turn out to match.
+   */
+  readonly built: number;
+  /** The stored nodes building it reads, each once: its layers, and every main's it's built from. */
+  readonly reached: number;
+  /** The bytes of the values of those nodes, as stored (UTF-8). */
   readonly bytes: number;
 }
 
@@ -190,11 +199,19 @@ export interface ConvertLimits {
    */
   readonly maxInstanceLayers?: number;
   /**
-   * The most bytes of values (its layers' and the mains it's built from)
-   * an instance may have to be converted. A larger one throws
-   * `InstanceTooLarge`, before any of it is read.
+   * The most layers building an instance may create (`InstanceSize.built`).
+   * A larger one throws `InstanceTooLarge`, before any of it is read.
+   */
+  readonly maxInstanceBuilt?: number;
+  /**
+   * The most an instance may cost to be converted: the bytes of its values
+   * and its mains' (`InstanceSize.bytes`), plus `layerBytes` for every node
+   * read and every layer built. A larger one throws `InstanceTooLarge`,
+   * before any of it is read.
    */
   readonly maxInstanceBytes?: number;
+  /** What each node read and each layer built is charged in `maxInstanceBytes`. */
+  readonly layerBytes?: number;
   /**
    * Asked before an instance of this size is read and converted: true
    * stops the run there (`stopped`), the instance left for the next.
@@ -202,19 +219,26 @@ export interface ConvertLimits {
   readonly stop?: (size: InstanceSize) => boolean;
 }
 
-/** An instance with more layers than a conversion holds at once: the file can't convert. */
+/** What converting an instance is charged against `ConvertLimits.maxInstanceBytes`. */
+export function instanceCost(size: InstanceSize, layerBytes: number): number {
+  return size.bytes + layerBytes * (size.reached + size.built);
+}
+
+/** An instance larger than a conversion holds at once: the file can't convert. */
 export class InstanceTooLarge extends ModelError {
   constructor(
     readonly rootId: string,
     readonly layers: number,
     readonly limit: number,
-    readonly unit: "layers" | "bytes" = "layers",
+    readonly unit: "layers" | "built" | "bytes" = "layers",
   ) {
     super(
       "invalid_value",
       unit === "layers"
         ? `The instance ${rootId} has ${layers.toLocaleString("en")} layers, more than the ${limit.toLocaleString("en")} converted at once.`
-        : `The instance ${rootId} and the components it's built from hold ${layers.toLocaleString("en")} bytes, more than the ${limit.toLocaleString("en")} converted at once.`,
+        : unit === "built"
+          ? `The instance ${rootId} presents ${layers.toLocaleString("en")} layers from its components, more than the ${limit.toLocaleString("en")} built at once.`
+          : `The instance ${rootId} and the components it's built from cost ${layers.toLocaleString("en")} bytes to convert, more than the ${limit.toLocaleString("en")} held at once.`,
     );
   }
 }
@@ -329,7 +353,9 @@ export class InstanceConverter {
   readonly #doing = new Set<string>();
   readonly #prepared = new Set<string>();
   readonly #max: number;
+  readonly #maxBuilt: number;
   readonly #maxBytes: number;
+  readonly #layerBytes: number;
   readonly #stop: ((size: InstanceSize) => boolean) | undefined;
   #stopped = false;
 
@@ -339,7 +365,9 @@ export class InstanceConverter {
     this.#overlay = new Overlay(reader);
     this.#view = new CopyView(this.#overlay, { lazy: true });
     this.#max = limits.maxInstanceLayers ?? Number.POSITIVE_INFINITY;
+    this.#maxBuilt = limits.maxInstanceBuilt ?? Number.POSITIVE_INFINITY;
     this.#maxBytes = limits.maxInstanceBytes ?? Number.POSITIVE_INFINITY;
+    this.#layerBytes = limits.layerBytes ?? 0;
     this.#stop = limits.stop;
   }
 
@@ -373,9 +401,11 @@ export class InstanceConverter {
       const size = this.#reader.sizeOf?.(rootId);
       if (size && size.layers > this.#max)
         throw new InstanceTooLarge(rootId, size.layers, this.#max);
-      if (size && size.bytes > this.#maxBytes)
-        throw new InstanceTooLarge(rootId, size.bytes, this.#maxBytes, "bytes");
-      if (this.#stop?.(size ?? { layers: 0, bytes: 0 })) {
+      if (size && size.built > this.#maxBuilt)
+        throw new InstanceTooLarge(rootId, size.built, this.#maxBuilt, "built");
+      const cost = size ? instanceCost(size, this.#layerBytes) : 0;
+      if (cost > this.#maxBytes) throw new InstanceTooLarge(rootId, cost, this.#maxBytes, "bytes");
+      if (this.#stop?.(size ?? { layers: 0, built: 0, reached: 0, bytes: 0 })) {
         this.#stopped = true;
         return;
       }

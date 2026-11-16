@@ -29,8 +29,9 @@
  * A step is bounded by the work it does (rows read and written), not by
  * the clock: on Cloudflare, `Date.now()` doesn't move while code runs
  * without I/O. An instance is held whole while it converts, so one larger
- * than `MAX_INSTANCE_LAYERS` stops the conversion (the file stays
- * materialized and working) rather than run out of memory.
+ * than `MAX_INSTANCE_LAYERS`, `MAX_INSTANCE_BUILT` or `MAX_INSTANCE_BYTES`,
+ * counted in SQL before any of it is read, stops the conversion (the file
+ * stays materialized and working) rather than run out of memory.
  *
  * The same code converts a table read from a snapshot (a version saved
  * before conversion, a branch's old base): `compactTable`.
@@ -73,12 +74,34 @@ export const CONVERT_STEP_WORK = 60_000;
 export const MAX_INSTANCE_LAYERS = 5_000;
 
 /**
- * The most bytes of values (UTF-8, as SQLite stores them) an instance may
- * hold to convert: its own layers' and those of every main it's built from
- * (its main, the mains of instances inside it, theirs, with their layers),
- * summed in SQL before any of it is read. One larger stops the conversion
- * (the file stays materialized and working): it would be held whole, and
- * built, in a Durable Object's 128 MB. The memory check
+ * The most layers building an instance may create to convert it: what its
+ * main presents, nested instances counted as built (an instance of a main
+ * of a hundred layers counts a hundred, however few it stores), plus what
+ * any main it's swapped to presents. Counted in SQL before any of it is
+ * read. Building it holds every one, and a mismatch is found only once it's
+ * built: an empty instance of a main of 200,000 empty rectangles ran a
+ * 128 MB heap out, where no catch runs to mark the conversion failed.
+ */
+export const MAX_INSTANCE_BUILT = 10_000;
+
+/**
+ * What each node read and each layer built is charged in
+ * `MAX_INSTANCE_BYTES`, on top of its values: a layer of empty values costs
+ * two bytes stored but several hundred in the heap (its record, its copy's
+ * slot, path and cached node, and their entries in the view's maps). The
+ * memory check measured about 700 bytes a layer near a 64 MB heap's limit;
+ * the bound below leaves room for that.
+ */
+export const LAYER_BYTES = 256;
+
+/**
+ * The most an instance may cost to convert: the bytes of values (UTF-8, as
+ * SQLite stores them) of its own layers and those of every main it's built
+ * from (its main, the mains of instances inside it, theirs, with their
+ * layers), plus `LAYER_BYTES` for every node read and every layer built,
+ * worked out in SQL before any of it is read. One larger stops the
+ * conversion (the file stays materialized and working): it would be held
+ * whole, and built, in a Durable Object's 128 MB. The memory check
  * (test-node/convert-memory.test.ts) converts instances at this size, wide
  * and deep, within a 64 MB heap.
  */
@@ -90,6 +113,14 @@ export const MAX_INSTANCE_BYTES = 8 * 1024 * 1024;
  * large the file's layers are.
  */
 export const CONVERT_STEP_BYTES = 8 * 1024 * 1024;
+
+/** The bounds on one instance that conversion (and the room's check of a removed main) holds. */
+export const INSTANCE_LIMITS = {
+  maxInstanceLayers: MAX_INSTANCE_LAYERS,
+  maxInstanceBuilt: MAX_INSTANCE_BUILT,
+  maxInstanceBytes: MAX_INSTANCE_BYTES,
+  layerBytes: LAYER_BYTES,
+} as const;
 
 /** The tables a conversion keeps its decisions in. */
 export interface ConvertTables {
@@ -179,48 +210,165 @@ function rootsUnderSql(src: string): string {
 }
 
 /**
+ * How many layers a node presents under it, worked out in SQL without
+ * building any: a stored layer counts one, and an instance counts what its
+ * main presents (and, for a copy swapped to another main, what that main
+ * presents too: an upper bound, for limits, not exact bookkeeping). Keeps
+ * what it worked out per node; make one per read of the file.
+ */
+export class PresentedCounter {
+  readonly #sql: SqlStorage;
+  readonly #src: string;
+  readonly #memo = new Map<string, number>();
+  /** Queries run, and rows they went through, about: what it cost. */
+  queries = 0;
+
+  constructor(sql: SqlStorage, src = "nodes") {
+    this.#sql = sql;
+    this.#src = src;
+  }
+
+  /** The main a live instance node follows, or null when it follows none. */
+  mainOf(id: string): string | null {
+    const src = this.#src;
+    this.queries++;
+    return (
+      this.#sql
+        .exec<{ of: string }>(
+          `SELECT json_extract(n.props, '$.instanceOf') AS of FROM ${src} n WHERE n.id = ? AND ${liveSql(src, "n")}`,
+          id,
+        )
+        .toArray()[0]?.of ?? null
+    );
+  }
+
+  /** The mains the override records under `id` swap their copies to, with how many swap to each. */
+  #swapsUnder(id: string): Array<{ of: string; n: number }> {
+    this.queries++;
+    return this.#sql
+      .exec<{ of: string; n: number }>(
+        `SELECT json_extract(props, '$.instanceOf') AS of, COUNT(*) AS n FROM ${this.#src}
+          WHERE parent = ? AND type = 'override' AND json_extract(props, '$.instanceOf') IS NOT NULL
+          GROUP BY of`,
+        id,
+      )
+      .toArray();
+  }
+
+  /** The layers `id` presents under it (itself not counted). */
+  under(id: string, guard: Set<string> = new Set()): number {
+    const known = this.#memo.get(id);
+    if (known !== undefined) return known;
+    // A main that (through its copies) contains its own instance: built without layers.
+    if (guard.has(id)) return 0;
+    guard.add(id);
+    const src = this.#src;
+    let n = 0;
+    const main = this.mainOf(id);
+    if (main !== null) {
+      // An instance presents its main's layers, built (whatever it stores).
+      n = this.under(main, guard);
+      for (const swap of this.#swapsUnder(id)) n += swap.n * this.under(swap.of, guard);
+    } else {
+      const walk = `WITH RECURSIVE sub(id, live) AS (
+          SELECT n.id, ${liveSql(src, "n")} FROM ${src} n WHERE n.parent = ? AND n.type != 'override'
+          UNION ALL
+          SELECT n.id, ${liveSql(src, "n")} FROM ${src} n JOIN sub ON n.parent = sub.id
+           WHERE sub.live = 0 AND n.type != 'override'
+        )`;
+      n = this.#sql.exec<{ n: number }>(`${walk} SELECT COUNT(*) AS n FROM sub`, id).one().n;
+      this.queries += 3 + Math.ceil(n / 4);
+      for (const row of this.#sql
+        .exec<{ of: string; n: number }>(
+          `${walk} SELECT json_extract(s.props, '$.instanceOf') AS of, COUNT(*) AS n
+             FROM sub CROSS JOIN ${src} s ON s.id = sub.id WHERE sub.live = 1 GROUP BY of`,
+          id,
+        )
+        .toArray())
+        n += row.n * this.under(row.of, guard);
+      // Copies inside those instances swapped to other mains present those mains' layers too.
+      for (const row of this.#sql
+        .exec<{ of: string; n: number }>(
+          `${walk} SELECT json_extract(r.props, '$.instanceOf') AS of, COUNT(*) AS n
+             FROM sub CROSS JOIN ${src} r ON r.parent = sub.id
+            WHERE sub.live = 1 AND r.type = 'override'
+              AND json_extract(r.props, '$.instanceOf') IS NOT NULL
+            GROUP BY of`,
+          id,
+        )
+        .toArray())
+        n += row.n * this.under(row.of, guard);
+    }
+    guard.delete(id);
+    this.#memo.set(id, n);
+    return n;
+  }
+
+  /**
+   * What building `rootId` (an instance, or a frame whose main is gone)
+   * holds, counted before any of it is read (see `InstanceSize`).
+   */
+  sizeOf(rootId: string): InstanceSize {
+    const src = this.#src;
+    // Its stored nodes, and the mains any of them names (a nested instance, a swapped copy).
+    const own = this.#sql
+      .exec<{ n: number; mains: string }>(
+        `WITH RECURSIVE sub(id) AS (
+           SELECT id FROM ${src} WHERE parent = ?
+           UNION ALL SELECT n.id FROM ${src} n JOIN sub ON n.parent = sub.id
+         ) SELECT COUNT(*) AS n,
+                  json_group_array(DISTINCT json_extract(s.props, '$.instanceOf')) AS mains
+             FROM sub CROSS JOIN ${src} s ON s.id = sub.id`,
+        rootId,
+      )
+      .one();
+    // Everything building it reads: its layers, the main of any instance among them (its own
+    // root first) or of any copy swapped, and each main's layers, and so on; each node once.
+    const reach = this.#sql
+      .exec<{ n: number; bytes: number | null }>(
+        `WITH RECURSIVE reach(id) AS (
+           SELECT ?
+           UNION SELECT n.id FROM ${src} n JOIN reach r ON n.parent = r.id
+           UNION SELECT json_extract(f.props, '$.instanceOf') FROM ${src} f JOIN reach r ON f.id = r.id
+                  WHERE f.type IN ('frame', 'override') AND json_extract(f.props, '$.instanceOf') IS NOT NULL
+         ) SELECT COUNT(*) AS n, SUM(LENGTH(CAST(s.props AS BLOB))) AS bytes
+             FROM reach JOIN ${src} s ON s.id = reach.id`,
+        rootId,
+      )
+      .one();
+    this.queries += 2 + Math.ceil((own.n + reach.n) / 4);
+    let built = this.under(rootId);
+    const main = this.mainOf(rootId);
+    // Its layers' mains, built over what they copy: counted again (an upper bound).
+    for (const of of JSON.parse(own.mains) as Array<string | null>)
+      if (of && of !== main && of !== rootId) built += this.under(of);
+    return { layers: own.n, built, reached: reach.n, bytes: reach.bytes ?? 0 };
+  }
+}
+
+/**
  * How many layers a file stored with compact copies presents (copy layers
  * counted as built), worked out in SQL without building any: each instance
- * presents what its main does. Swapped nested instances count as their
- * source's. For limits (the agent tools'), not exact bookkeeping.
+ * presents what its main does. A swapped nested instance counts its
+ * source's and its swapped-in main's (an upper bound). For limits (the
+ * agent tools'), not exact bookkeeping.
  */
 export function presentedCount(sql: SqlStorage, src = "nodes"): number {
   const stored = sql
     .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${src} WHERE type != 'override'`)
     .one().n;
-  const memo = new Map<string, number>();
-  const inside = (mainId: string, guard: Set<string>): number => {
-    const known = memo.get(mainId);
-    if (known !== undefined) return known;
-    if (guard.has(mainId)) return 0;
-    guard.add(mainId);
-    const walk = `WITH RECURSIVE sub(id, live) AS (
-        SELECT n.id, ${liveSql(src, "n")} FROM ${src} n WHERE n.parent = ? AND n.type != 'override'
-        UNION ALL
-        SELECT n.id, ${liveSql(src, "n")} FROM ${src} n JOIN sub ON n.parent = sub.id
-         WHERE sub.live = 0 AND n.type != 'override'
-      )`;
-    let n = sql.exec<{ n: number }>(`${walk} SELECT COUNT(*) AS n FROM sub`, mainId).one().n;
-    for (const row of sql
-      .exec<{ of: string; n: number }>(
-        `${walk} SELECT json_extract(s.props, '$.instanceOf') AS of, COUNT(*) AS n
-           FROM sub JOIN ${src} s ON s.id = sub.id WHERE sub.live = 1 GROUP BY of`,
-        mainId,
-      )
-      .toArray())
-      n += row.n * inside(row.of, guard);
-    guard.delete(mainId);
-    memo.set(mainId, n);
-    return n;
-  };
+  const counter = new PresentedCounter(sql, src);
   let total = stored;
   for (const row of sql
     .exec<{ of: string; n: number }>(
       `SELECT json_extract(n.props, '$.instanceOf') AS of, COUNT(*) AS n FROM ${src} n
-        WHERE ${liveSql(src, "n")} GROUP BY of`,
+        WHERE ${liveSql(src, "n")} GROUP BY of
+       UNION ALL
+       SELECT json_extract(props, '$.instanceOf') AS of, COUNT(*) AS n FROM ${src}
+        WHERE type = 'override' AND json_extract(props, '$.instanceOf') IS NOT NULL GROUP BY of`,
     )
     .toArray())
-    total += row.n * inside(row.of, new Set());
+    total += row.n * counter.under(row.of);
   return total;
 }
 
@@ -251,6 +399,7 @@ class SqlConversion implements ConvertReader, ConvertSink {
   readonly #renames = new Map<string, string | null>();
   readonly #settled = new Map<string, boolean>();
   readonly #inside = new Map<string, readonly string[]>();
+  #counter: PresentedCounter | null = null;
   convertedCount = 0;
   detachedCount = 0;
   /** Rows read and written so far: what bounds a step. */
@@ -320,32 +469,12 @@ class SqlConversion implements ConvertReader, ConvertSink {
   }
 
   sizeOf(rootId: string): InstanceSize {
-    const src = this.#src;
-    const layers = this.#sql
-      .exec<{ n: number }>(
-        `WITH RECURSIVE sub(id) AS (
-           SELECT id FROM ${src} WHERE parent = ?
-           UNION ALL SELECT n.id FROM ${src} n JOIN sub ON n.parent = sub.id
-         ) SELECT COUNT(*) AS n FROM sub`,
-        rootId,
-      )
-      .one().n;
-    // Everything building it reads: its layers, the main of any instance among them (its own
-    // root first), and each main's layers, and so on; each node once.
-    const reach = this.#sql
-      .exec<{ n: number; bytes: number | null }>(
-        `WITH RECURSIVE reach(id) AS (
-           SELECT ?
-           UNION SELECT n.id FROM ${src} n JOIN reach r ON n.parent = r.id
-           UNION SELECT json_extract(f.props, '$.instanceOf') FROM ${src} f JOIN reach r ON f.id = r.id
-                  WHERE f.type = 'frame' AND json_extract(f.props, '$.instanceOf') IS NOT NULL
-         ) SELECT COUNT(*) AS n, SUM(LENGTH(CAST(s.props AS BLOB))) AS bytes
-             FROM reach JOIN ${src} s ON s.id = reach.id`,
-        rootId,
-      )
-      .one();
-    this.work += 2 + Math.ceil((layers + reach.n) / 4);
-    return { layers, bytes: reach.bytes ?? 0 };
+    // Counted afresh each step: edits between steps change what mains present.
+    this.#counter ??= new PresentedCounter(this.#sql, this.#src);
+    const before = this.#counter.queries;
+    const size = this.#counter.sizeOf(rootId);
+    this.work += this.#counter.queries - before;
+    return size;
   }
 
   layersUnder(rootId: string): readonly NodeRecord[] {
@@ -544,11 +673,15 @@ export function convertStep(
   budget: number = CONVERT_STEP_WORK,
   {
     maxInstanceLayers = MAX_INSTANCE_LAYERS,
+    maxInstanceBuilt = MAX_INSTANCE_BUILT,
     maxInstanceBytes = MAX_INSTANCE_BYTES,
+    layerBytes = LAYER_BYTES,
     stepBytes = CONVERT_STEP_BYTES,
   }: {
     readonly maxInstanceLayers?: number;
+    readonly maxInstanceBuilt?: number;
     readonly maxInstanceBytes?: number;
+    readonly layerBytes?: number;
     readonly stepBytes?: number;
   } = {},
 ): StepResult {
@@ -559,7 +692,9 @@ export function convertStep(
   const conversion = new SqlConversion(room, src, t);
   const converter = new InstanceConverter(conversion, conversion, {
     maxInstanceLayers,
+    maxInstanceBuilt,
     maxInstanceBytes,
+    layerBytes,
     // At least one instance a step; then none that would take it past its budget, in rows or
     // in bytes.
     stop: (size) =>

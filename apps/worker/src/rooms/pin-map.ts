@@ -102,6 +102,47 @@ export async function savePinMap(bucket: R2Bucket, key: string, sql: SqlStorage)
   await putStream(bucket, key, text.pipeThrough(new CompressionStream("gzip")), 0);
 }
 
+/**
+ * What a map `savePinMap` wrote says `id` is named in the other form (old
+ * copy id → derived one when `toCompact`, and back), read from R2 a line at
+ * a time without keeping it; null when it doesn't name it, or it's gone.
+ */
+export async function pinRenamedInR2(
+  bucket: R2Bucket,
+  key: string,
+  id: string,
+  toCompact: boolean,
+): Promise<string | null> {
+  const object = await bucket.get(key);
+  if (!object) return null;
+  const reader = object.body
+    .pipeThrough(new DecompressionStream("gzip"))
+    .pipeThrough(new TextDecoderStream())
+    .getReader();
+  const find = (line: string): string | null => {
+    const [old, derived] = line.split("\t");
+    if (old === undefined || derived === undefined) return null;
+    if (toCompact) return old === id ? derived : null;
+    return derived === id ? old : null;
+  };
+  let rest = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const lines = (rest + value).split("\n");
+      rest = lines.pop() ?? "";
+      for (const line of lines) {
+        const found = find(line);
+        if (found !== null) return found;
+      }
+    }
+    return rest ? find(rest) : null;
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
 /** Reads a map `savePinMap` wrote into the pin map (replacing what's there). False when it's gone. */
 export async function loadPinMap(bucket: R2Bucket, key: string, sql: SqlStorage): Promise<boolean> {
   const object = await bucket.get(key);

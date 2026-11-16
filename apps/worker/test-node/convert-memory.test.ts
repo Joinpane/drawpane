@@ -22,7 +22,9 @@ import {
   applyConversion,
   convertStep,
   createConvertTables,
+  LAYER_BYTES,
   LIVE_CONVERSION,
+  MAX_INSTANCE_BUILT,
   MAX_INSTANCE_BYTES,
   MAX_INSTANCE_LAYERS,
 } from "../src/rooms/convert";
@@ -547,8 +549,10 @@ describe("converting instances that hold large values", { timeout: 3_600_000 }, 
     expect(r.peak - r.baseline).toBeLessThan(16 * MB);
   });
 
-  // Each just under the bound, its main and itself together.
-  const fit = (texts: number) => Math.floor((MAX_INSTANCE_BYTES * 0.95) / 2 / texts) - 120;
+  // Each just under the bound, its main and itself together: their values, and LAYER_BYTES for
+  // each of their layers read and each built.
+  const fit = (texts: number, nodes: number) =>
+    Math.floor((MAX_INSTANCE_BYTES * 0.95 - LAYER_BYTES * 3 * nodes) / 2 / texts) - 120;
   for (const [shape, layers, perLayer, what] of [
     ["wide", 4_800, 1, "4,800 texts side by side"],
     ["deep", 120, 2, "120 nested frames, each with a text"],
@@ -556,10 +560,82 @@ describe("converting instances that hold large values", { timeout: 3_600_000 }, 
   ] as const)
     it(`converts two instances of ${what}, as large as converts, within the capped heap`, () => {
       // Its main and itself hold a text per layer (the frames of the deep one are small).
-      const chars = fit(layers);
+      const chars = fit(layers, layers * perLayer + 2);
       const r = convertHeavy(shape, heavyFile(shape, layers, chars, 2));
       report(`Two instances of ${what} of ${chars.toLocaleString("en")} characters`, r);
       expect(r.error).toBeNull();
       expect(r.stored).toBe(1 + 1 + layers * perLayer + 2);
     });
+});
+
+/**
+ * Instances whose mains are large in layers, not in values (decision 0029,
+ * the third review): every layer an empty rectangle (`{}`, two bytes), and
+ * the instance stores less than its main presents, so it can't match, but
+ * building it to find that out holds every layer its main presents.
+ *
+ * - flat (the reviewer's): `rects` rectangles in the main, the instance empty;
+ * - wide: the main's rectangles in frames of a hundred, the instance storing
+ *   the frames only (its own layers well under MAX_INSTANCE_LAYERS);
+ * - deep: the main a chain of a hundred frames, each holding its share.
+ */
+function* emptyLayersFile(shape: "flat" | "wide" | "deep", rects: number): Generator<NodeRecord[]> {
+  const k = (i: number) => keyBetween(null, null) + i.toString(36).padStart(5, "0");
+  yield [
+    { id: "P", type: "page", parent: ROOT_ID, key: key(0), props: { name: "Page" } },
+    { id: "M", type: "frame", parent: "P", key: key(0), props: { isComponent: true } },
+    { id: "I", type: "frame", parent: "P", key: key(1), props: { instanceOf: "M" } },
+  ];
+  const groups = shape === "flat" ? 1 : 100;
+  const per = Math.ceil(rects / groups);
+  for (let g = 0; g < groups; g++) {
+    const batch: NodeRecord[] = [];
+    let parent = "M";
+    if (shape !== "flat") {
+      parent = `G${g}`;
+      batch.push({
+        id: parent,
+        type: "frame",
+        parent: shape === "deep" && g > 0 ? `G${g - 1}` : "M",
+        key: k(shape === "deep" ? per : g),
+        props: {},
+      });
+      // The wide instance stores its frames (copies of the main's), not their rectangles.
+      if (shape === "wide")
+        batch.push({
+          id: `IG${g}`,
+          type: "frame",
+          parent: "I",
+          key: k(g),
+          props: { mirrors: parent },
+        });
+    }
+    for (let r = 0; r < per && g * per + r < rects; r++)
+      batch.push({ id: `R${g}.${r}`, type: "rect", parent, key: k(r), props: {} });
+    for (let i = 0; i < batch.length; i += 5_000) yield batch.slice(i, i + 5_000);
+  }
+}
+
+describe("converting an instance of a main with many empty layers", { timeout: 3_600_000 }, () => {
+  for (const [shape, what] of [
+    ["flat", "an empty instance of a main of 200,000 empty rectangles (the third review's)"],
+    ["wide", "an instance storing 100 frames of a main that has 200,000 empty rectangles in them"],
+    ["deep", "an empty instance of a main of 100 nested frames holding 200,000 empty rectangles"],
+  ] as const)
+    it(`stops, before reading it, at ${what}`, () => {
+      const r = convertHeavy(`empty-${shape}`, emptyLayersFile(shape, 200_000));
+      report(`${what[0]?.toUpperCase()}${what.slice(1)}`, r);
+      expect(r.error).toBeInstanceOf(InstanceTooLarge);
+      // Refused at its size, counted in SQL: none of its main's layers was read.
+      expect(r.peak - r.baseline).toBeLessThan(16 * MB);
+    });
+
+  it("converts an empty instance of a main just under the bound, detaching it, within the capped heap", () => {
+    const rects = MAX_INSTANCE_BUILT - 1;
+    const r = convertHeavy("empty-under", emptyLayersFile("flat", rects));
+    report(`An empty instance of a main of ${rects.toLocaleString("en")} empty rectangles`, r);
+    expect(r.error).toBeNull();
+    // It stores less than its main presents: detached, keeping its look (no layers).
+    expect(r.stored).toBe(3 + rects);
+  });
 });

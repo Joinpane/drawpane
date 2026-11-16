@@ -324,4 +324,99 @@ describe("converting in steps", { timeout: 120_000 }, () => {
       expect(steps).toBeGreaterThanOrEqual(4);
     });
   });
+
+  /**
+   * What the third review found: layers of empty values cost two bytes
+   * stored, but building them holds them all. A main of `rects` empty
+   * rectangles (in `nested` instances of a main of their own, when given)
+   * and an empty materialized instance of it, which doesn't match it.
+   */
+  const emptyLayers = (rects: number, nested = 0): NodeRecord[] => {
+    const key = (i: number) => `a${i.toString(36).padStart(3, "0")}`;
+    const out: NodeRecord[] = [
+      { id: "Pg", type: "page", parent: "root", key: "a0", props: { name: "Page" } as never },
+      { id: "Main", type: "frame", parent: "Pg", key: "a0", props: { isComponent: true } as never },
+      {
+        id: "Inst",
+        type: "frame",
+        parent: "Pg",
+        key: "a1",
+        props: { instanceOf: "Main" } as never,
+      },
+    ];
+    if (nested === 0) {
+      for (let r = 0; r < rects; r++)
+        out.push({ id: `R${r}`, type: "rect", parent: "Main", key: key(r), props: {} as never });
+      return out;
+    }
+    out.push({
+      id: "Cell",
+      type: "frame",
+      parent: "Pg",
+      key: "a2",
+      props: { isComponent: true } as never,
+    });
+    for (let r = 0; r < rects; r++)
+      out.push({ id: `R${r}`, type: "rect", parent: "Cell", key: key(r), props: {} as never });
+    // Stored materialized: each instance of the cell inside the main holds its copies.
+    for (let i = 0; i < nested; i++) {
+      out.push({
+        id: `N${i}`,
+        type: "frame",
+        parent: "Main",
+        key: key(i),
+        props: { instanceOf: "Cell" } as never,
+      });
+      for (let r = 0; r < rects; r++)
+        out.push({
+          id: `N${i}R${r}`,
+          type: "rect",
+          parent: `N${i}`,
+          key: key(r),
+          props: { mirrors: `R${r}` } as never,
+        });
+    }
+    return out;
+  };
+
+  it("stops at an instance whose main presents too many layers, before reading it", async () => {
+    await inRoom((room) => {
+      tableOf(room.sql, SRC, emptyLayers(50));
+      createConvertTables(room.sql, T);
+      // It stores no layers and its main's are two bytes each: only what it builds is large.
+      expect(() => convertStep(room, SRC, T, 0, { maxInstanceBuilt: 49, layerBytes: 0 })).toThrow(
+        /presents 50 layers/,
+      );
+      const step = convertStep(room, SRC, T, 0, { maxInstanceBuilt: 50, layerBytes: 0 });
+      expect(step.detached).toBe(1);
+    });
+  });
+
+  it("counts the layers of instances inside its main as built, however many", async () => {
+    await inRoom((room) => {
+      // Ten instances of a cell of ten rectangles: 110 layers presented.
+      tableOf(room.sql, SRC, emptyLayers(10, 10));
+      createConvertTables(room.sql, T);
+      expect(() =>
+        convertStep(room, SRC, T, Number.POSITIVE_INFINITY, {
+          maxInstanceBuilt: 109,
+          layerBytes: 0,
+        }),
+      ).toThrow(/presents 110 layers/);
+    });
+  });
+
+  it("charges each layer read and built in the byte bound, whatever its values", async () => {
+    await inRoom((room) => {
+      tableOf(room.sql, SRC, emptyLayers(50));
+      createConvertTables(room.sql, T);
+      // Its values are about a hundred bytes; 52 nodes read and 50 built at a kilobyte each.
+      expect(() =>
+        convertStep(room, SRC, T, 0, { maxInstanceBytes: 100_000, layerBytes: 1_000 }),
+      ).toThrow(InstanceTooLarge);
+      expect(
+        convertStep(room, SRC, T, 0, { maxInstanceBytes: 110_000, layerBytes: 1_000 }).detached,
+      ).toBe(1);
+    });
+  });
 });
