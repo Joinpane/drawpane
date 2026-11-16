@@ -23,6 +23,7 @@ import {
   convertStep,
   createConvertTables,
   LIVE_CONVERSION,
+  MAX_INSTANCE_LAYERS,
 } from "../src/rooms/convert";
 import { countRows, insertNodes } from "../src/rooms/node-tables";
 import { NODE_SCHEMA } from "../src/rooms/sql-store";
@@ -263,12 +264,13 @@ describe(`converting a file of about ${NODES.toLocaleString("en")} layers`, {
     let detached = 0;
     for (;;) {
       const at = performance.now();
-      const step = convertStep(room, "nodes", LIVE_CONVERSION, 2_000);
+      // Bounded by the work it does (rows read and written), as in the room.
+      const step = convertStep(room, "nodes", LIVE_CONVERSION);
       longest = Math.max(longest, performance.now() - at);
       steps++;
       detached += step.detached;
       sample();
-      if (step.left === 0) break;
+      if (step.done) break;
     }
     const converting = (performance.now() - started) / 1000;
     const applyAt = performance.now();
@@ -294,5 +296,127 @@ describe(`converting a file of about ${NODES.toLocaleString("en")} layers`, {
       `peak heap ${(peakHeap / MB).toFixed(0)} MB (${(baseline / MB).toFixed(0)} MB before).`;
     console.log(line);
     appendFileSync(REPORT, `${line}\n`);
+  });
+});
+
+/**
+ * A main as large as an instance may be to convert (just under
+ * MAX_INSTANCE_LAYERS layers: groups of rectangles), and three materialized
+ * instances of it: each is held whole while it converts.
+ */
+const GROUPS = 100;
+const PER_GROUP = Math.floor((MAX_INSTANCE_LAYERS - GROUPS - 100) / GROUPS);
+function* bigFile(): Generator<NodeRecord[]> {
+  const rect = (g: number, r: number) => ({
+    x: r * 3,
+    y: g * 3,
+    width: 2,
+    height: 2,
+    name: `Cell ${g}.${r}`,
+    fills: [
+      { type: "solid", color: `#${((g * 7919 + r) % 0xffffff).toString(16).padStart(6, "0")}` },
+    ],
+  });
+  const tree = (
+    rootId: string,
+    parent: string,
+    k: string,
+    root: Record<string, unknown>,
+    copy: boolean,
+  ) => {
+    const out: NodeRecord[] = [
+      { id: rootId, type: "frame", parent, key: k, props: root as NodeRecord["props"] },
+    ];
+    for (let g = 0; g < GROUPS; g++) {
+      out.push({
+        id: `${rootId}g${g}`,
+        type: "frame",
+        parent: rootId,
+        key: key(g),
+        props: {
+          name: `Row ${g}`,
+          width: 600,
+          height: 3,
+          ...(copy ? { mirrors: `Bigg${g}` } : {}),
+        },
+      });
+      for (let r = 0; r < PER_GROUP; r++)
+        out.push({
+          id: `${rootId}g${g}r${r}`,
+          type: "rect",
+          parent: `${rootId}g${g}`,
+          key: keyBetween(null, null) + r.toString(36).padStart(3, "0"),
+          props: {
+            ...rect(g, r),
+            ...(copy ? { mirrors: `Bigg${g}r${r}` } : {}),
+          } as NodeRecord["props"],
+        });
+    }
+    return out;
+  };
+  yield [{ id: "P", type: "page", parent: ROOT_ID, key: key(0), props: { name: "Page" } }];
+  yield tree(
+    "Big",
+    "P",
+    key(0),
+    { name: "Big", isComponent: true, width: 600, height: 300 },
+    false,
+  );
+  for (let i = 0; i < 3; i++)
+    yield tree(
+      `I${i}`,
+      "P",
+      key(i + 1),
+      { name: "Big", width: 600, height: 300, instanceOf: "Big", y: 400 * (i + 1) },
+      true,
+    );
+}
+
+describe(`converting instances of ${MAX_INSTANCE_LAYERS.toLocaleString("en")} layers`, {
+  timeout: 3_600_000,
+}, () => {
+  it("converts each in a step of its own, within the capped heap", () => {
+    const big = sqlDouble(join(dir, "big.sqlite"), probe);
+    try {
+      big.sql.exec(NODE_SCHEMA);
+      let total = 0;
+      for (const batch of bigFile()) {
+        for (let i = 0; i < batch.length; i += 5_000)
+          big.transact(() => insertNodes(big.sql, "nodes", batch.slice(i, i + 5_000)));
+        total += batch.length;
+      }
+      createConvertTables(big.sql, LIVE_CONVERSION);
+      gc();
+      gc();
+      const baseline = getHeapStatistics().used_heap_size;
+      peakHeap = baseline;
+      let steps = 0;
+      let longest = 0;
+      let detached = 0;
+      const started = performance.now();
+      for (;;) {
+        const at = performance.now();
+        const step = convertStep(big, "nodes", LIVE_CONVERSION);
+        longest = Math.max(longest, performance.now() - at);
+        steps++;
+        detached += step.detached;
+        sample();
+        gc();
+        if (step.done) break;
+      }
+      const converting = (performance.now() - started) / 1000;
+      big.transact(() => applyConversion(big.sql, "nodes", LIVE_CONVERSION));
+      sample();
+      expect(detached).toBe(0);
+      expect(countRows(big.sql, "nodes")).toBe(total - 3 * (GROUPS + GROUPS * PER_GROUP));
+      const line =
+        `Convert 3 instances of ${(GROUPS + GROUPS * PER_GROUP + 1).toLocaleString("en")} layers (${total.toLocaleString("en")} in all) ` +
+        `(heap capped at ${process.env.MEMORY_HEAP_MB ?? 128} MB): ${steps} steps in ${converting.toFixed(1)} s ` +
+        `(longest ${(longest / 1000).toFixed(1)} s); peak heap ${(peakHeap / MB).toFixed(0)} MB (${(baseline / MB).toFixed(0)} MB before).`;
+      console.log(line);
+      appendFileSync(REPORT, `${line}\n`);
+    } finally {
+      big.close();
+    }
   });
 });

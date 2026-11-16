@@ -45,12 +45,11 @@ describe("converting a stored file an instance at a time", { timeout: 600_000 },
     load(room, kit.nodes);
     createConvertTables(room.sql, LIVE_CONVERSION);
     let steps = 0;
-    let clock = 0;
     for (;;) {
       steps++;
-      // A tiny budget: a few instances a step.
-      const step = convertStep(room, "nodes", LIVE_CONVERSION, 3, () => (clock += 1));
-      if (step.left === 0) break;
+      // A tiny budget: an instance a step.
+      const step = convertStep(room, "nodes", LIVE_CONVERSION, 0);
+      if (step.done) break;
     }
     const applied = room.transact(() => applyConversion(room.sql, "nodes", LIVE_CONVERSION));
     expect(applied.detached).toEqual([]);
@@ -68,11 +67,12 @@ describe("converting a stored file an instance at a time", { timeout: 600_000 },
     // Edits as the materialized editor makes them: a main's fill and every copy of it.
     const mains = kit.nodes.filter((n) => n.type === "frame" && n.props.isComponent);
     const copiesOf = (id: string) => kit.nodes.filter((n) => n.props.mirrors === id);
-    let clock = 0;
     let edits = 0;
     for (let i = 0; ; i++) {
-      const step = convertStep(room, "nodes", LIVE_CONVERSION, 5, () => (clock += 1));
-      if (step.left === 0 && edits >= 6) break;
+      const step = convertStep(room, "nodes", LIVE_CONVERSION, 0);
+      if (step.done && edits >= 6) break;
+      // Six edits, a few steps apart, then it's left to finish.
+      if (edits >= 6 || i % 3 !== 0) continue;
       const main = mains[(i * 7) % mains.length] as NodeRecord;
       const fill = [{ type: "solid", color: `#${(i % 10).toString().repeat(6)}` }];
       const ops: Op[] = [{ op: "set", id: main.id, prop: "fills", value: fill } as Op];

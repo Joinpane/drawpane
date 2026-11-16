@@ -42,8 +42,12 @@ async function inParts(browser: Browser, fileId: string) {
       method: "POST",
       json: { nodes },
     });
-  const commit = () =>
-    browser.fetch(`/api/files/${fileId}/imports/${importId}/commit`, { method: "POST", json: {} });
+  /** Commits it, saying how its nodes store copies (decision 0029; materialized when not said). */
+  const commit = (copies?: "compact") =>
+    browser.fetch(`/api/files/${fileId}/imports/${importId}/commit`, {
+      method: "POST",
+      json: copies ? { copies } : {},
+    });
   return { importId, part, commit };
 }
 
@@ -143,14 +147,14 @@ describe("importing into a new file", () => {
     // A record whose id isn't the one its path derives is refused.
     const refused = await browser.fetch(`/api/files/${fileId}/import`, {
       method: "POST",
-      json: { nodes: [page("P1", "Cover", "a0"), main, inner, copy, wrong] },
+      json: { nodes: [page("P1", "Cover", "a0"), main, inner, copy, wrong], copies: "compact" },
     });
     expect(refused.status).toBe(400);
     expect((await roomOf(fileId).stats()).nodes).toBe(1);
     // One that is comes in as it is.
     await browser.json(`/api/files/${fileId}/import`, {
       method: "POST",
-      json: { nodes: [page("P1", "Cover", "a0"), main, inner, copy, record] },
+      json: { nodes: [page("P1", "Cover", "a0"), main, inner, copy, record], copies: "compact" },
     });
     expect((await roomOf(fileId).stats()).nodes).toBe(5);
 
@@ -468,7 +472,7 @@ describe("importing into a new file", () => {
     // A record comes in a part: the file stores compact copies.
     expect((await part([record])).status).toBe(200);
     // At the commit it's checked as an edit's would be: its id isn't its path's.
-    const response = await commit();
+    const response = await commit("compact");
     expect(response.status).toBe(400);
     expect(JSON.stringify(await response.json())).toContain("path names");
     expect((await roomOf(fileId).stats()).nodes).toBe(1);

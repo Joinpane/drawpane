@@ -17,11 +17,20 @@
  *   isn't is detached instead (it keeps every layer, unlinked from its
  *   main, and looks as it did), and the reason is said.
  * - Ids other layers hold (reading orders, prototype links, flows' starts)
- *   are renamed with the copies they name.
+ *   are renamed with the copies they name: inside an instance as it
+ *   converts, and everywhere (override records included) once every
+ *   instance is, since one instance can name another's copies, converted
+ *   later.
+ * - Siblings draw in order of their keys, then their ids, wherever they're
+ *   stored. A built copy's layers are in its main's order; one whose
+ *   materialized layers are in another (siblings sharing a key, ids sorting
+ *   otherwise) isn't kept: the check compares the order too.
  */
+import { ModelError } from "./apply";
 import { CopyView, isMainNode, OVERRIDE_KEY, ownValues, samePropValue } from "./copies";
 import { ROOT_ID } from "./ids";
 import type { NodeRecord } from "./ops";
+import { compareSiblings } from "./order-key";
 import { getProp, type Props } from "./schema";
 import { MemoryStore } from "./store";
 
@@ -107,6 +116,36 @@ export interface ConvertReader {
   rootsInside(mainId: string): readonly string[];
   /** Whether a root was converted (or detached) already. */
   settled(rootId: string): boolean;
+  /** How many nodes are stored under an instance root, without reading them (the size check). */
+  countUnder?(rootId: string): number;
+}
+
+/** What bounds a run of conversions. */
+export interface ConvertLimits {
+  /**
+   * The most layers an instance may have to be converted: it's held whole
+   * while it is. A larger one throws `InstanceTooLarge`.
+   */
+  readonly maxInstanceLayers?: number;
+  /**
+   * Asked before an instance of `layers` layers is read and converted:
+   * true stops the run there (`stopped`), the instance left for the next.
+   */
+  readonly stop?: (layers: number) => boolean;
+}
+
+/** An instance with more layers than a conversion holds at once: the file can't convert. */
+export class InstanceTooLarge extends ModelError {
+  constructor(
+    readonly rootId: string,
+    readonly layers: number,
+    readonly limit: number,
+  ) {
+    super(
+      "invalid_value",
+      `The instance ${rootId} has ${layers.toLocaleString("en")} layers, more than the ${limit.toLocaleString("en")} converted at once.`,
+    );
+  }
 }
 
 /** What converting an instance gave. */
@@ -218,12 +257,22 @@ export class InstanceConverter {
   /** Roots being settled, to stop at a main that contains its own instance. */
   readonly #doing = new Set<string>();
   readonly #prepared = new Set<string>();
+  readonly #max: number;
+  readonly #stop: ((layers: number) => boolean) | undefined;
+  #stopped = false;
 
-  constructor(reader: ConvertReader, sink: ConvertSink) {
+  constructor(reader: ConvertReader, sink: ConvertSink, limits: ConvertLimits = {}) {
     this.#reader = reader;
     this.#sink = sink;
     this.#overlay = new Overlay(reader);
     this.#view = new CopyView(this.#overlay, { lazy: true });
+    this.#max = limits.maxInstanceLayers ?? Number.POSITIVE_INFINITY;
+    this.#stop = limits.stop;
+  }
+
+  /** Whether `limits.stop` stopped the run: nothing more is converted. */
+  get stopped(): boolean {
+    return this.#stopped;
   }
 
   /** Copy layers built and cached (to let go of them past a size). */
@@ -239,17 +288,28 @@ export class InstanceConverter {
 
   /** Converts `rootId` (a top-level instance root), and first what it's built from. */
   settle(rootId: string): void {
-    if (this.#reader.settled(rootId) || this.#doing.has(rootId)) return;
+    if (this.#stopped || this.#reader.settled(rootId) || this.#doing.has(rootId)) return;
     const root = this.#reader.get(rootId);
     const main = this.#view.mainOf(root);
     if (!root || !main) return;
     this.#doing.add(rootId);
     try {
       this.#prepare(main.id);
+      if (this.#stopped) return;
+      // Its size, before it's read: too large to hold, or more than this run has left.
+      const counted = this.#reader.countUnder?.(rootId);
+      if (counted !== undefined && counted > this.#max)
+        throw new InstanceTooLarge(rootId, counted, this.#max);
+      if (this.#stop?.(counted ?? 0)) {
+        this.#stopped = true;
+        return;
+      }
       const layers = this.#reader.layersUnder(rootId);
+      if (layers.length > this.#max) throw new InstanceTooLarge(rootId, layers.length, this.#max);
       for (const layer of layers) {
         const of = layer.type === "frame" ? layer.props.instanceOf : undefined;
         if (of && of !== main.id && isMainNode(this.#reader.get(of))) this.#prepare(of);
+        if (this.#stopped) return;
       }
       if (this.#reader.settled(rootId)) return;
       this.#convert(root, main, layers);
@@ -263,7 +323,12 @@ export class InstanceConverter {
     this.#prepared.add(mainId);
     const main = this.#reader.get(mainId);
     if (main && this.#view.mainOf(main)) this.settle(mainId);
-    for (const id of this.#reader.rootsInside(mainId)) this.settle(id);
+    for (const id of this.#reader.rootsInside(mainId)) {
+      if (this.#stopped) break;
+      this.settle(id);
+    }
+    // Stopped part way: what it holds isn't all converted yet.
+    if (this.#stopped) this.#prepared.delete(mainId);
   }
 
   #deps(main: NodeRecord, layers: readonly NodeRecord[]): string[] {
@@ -394,6 +459,7 @@ export class InstanceConverter {
       }
       for (const node of dKids) {
         const mirrors = node.props.mirrors;
+        // (Matched by what they copy; their order is checked below.)
         if (!mirrors) return `${node.id} copies nothing`;
         const source = rename(mirrors) ?? mirrors;
         const slotId = bySource.get(source);
@@ -421,6 +487,11 @@ export class InstanceConverter {
         const deeper = walk(node.id, slotId);
         if (deeper) return deeper;
       }
+      // Drawn in the same order: stored, siblings go by key, then id; built, by their main's.
+      const drawn = [...dKids].sort(compareSiblings);
+      for (let i = 0; i < drawn.length; i++)
+        if (ids.get((drawn[i] as NodeRecord).id) !== kids[i])
+          return `the layers under ${dParent} draw in another order than its main's`;
       return null;
     };
     const unmatched = walk(root.id, root.id);
@@ -573,9 +644,10 @@ export function compactByInstance(input: Iterable<NodeRecord>): InstanceCompactR
     },
   });
   for (const root of roots) converter.settle(root);
-  // Ids held outside the instances (a reading order, a prototype link) follow the copies they name.
+  // Ids held anywhere (a reading order, a prototype link), override records included, follow the
+  // copies they name: an instance can name another's, converted after it.
   for (const node of [...store.nodes()]) {
-    if (node.type === "override" || !holdsIds(node.props)) continue;
+    if (!holdsIds(node.props)) continue;
     const renamed = renameHeldIds(node.props, (id) => ids.get(id));
     if (renamed) store.replaceProps(node.id, renamed);
   }

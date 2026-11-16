@@ -12,8 +12,10 @@ import {
   compactByInstance,
   copyId,
   firstDifference,
+  keyBetween,
   libraryAssets,
   type NodeRecord,
+  newId,
   nodeReader,
   type Op,
   parseSnapshot,
@@ -22,6 +24,7 @@ import {
 } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import type { FileRoom } from "../src/rooms/file-room";
+import { SyncEngine as OldSyncEngine } from "./fixtures/sync-v1";
 import { type Browser, openSocket, signedInUser } from "./helpers";
 
 const roomOf = (fileId: string) => env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
@@ -134,7 +137,7 @@ describe("converting a file stored materialized", { timeout: 120_000 }, () => {
   it("goes on in steps while people edit, converting again what their edits change", async () => {
     const { browser, fileId } = await materializedFile(kit.nodes);
     await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
-      room.convertStepMs = 0;
+      room.convertStepWork = 0;
     });
     const socket = await openSocket(browser, fileId);
     socket.send({ t: "hello", protocol: 2, clientId: "editor", revn: null, copies: BOTH });
@@ -209,10 +212,10 @@ describe("converting a file stored materialized", { timeout: 120_000 }, () => {
       await state.storage.setAlarm(Date.now());
     });
     await convert(fileId);
-    // The old client is told to reload: it can't read compact copies.
+    // The old client can't read compact copies: it's sent the file as presented, to view.
     const again = await openSocket(browser, fileId);
     again.send({ t: "hello", protocol: 1, clientId: "old2", revn: null });
-    expect((await again.next<{ code: string }>("error")).code).toBe("reload");
+    expect((await again.next<{ role: string; copies: string }>("welcome")).role).toBe("viewer");
 
     const { backup } = await roomOf(fileId).copiesFormat();
     await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
@@ -468,5 +471,272 @@ describe("a file stored compact", { timeout: 120_000 }, () => {
       ops: [{ op: "create", id: "Inside1", type: "rect", parent: root.id, key: "a0", props: {} }],
     });
     expect((await socket.next<{ code: string }>("reject")).code).toBe("invalid_parent");
+  });
+});
+
+/** Instance roots of a live main that still store layers: a compact file must never have one. */
+const strays = (nodes: readonly NodeRecord[]) => {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  return nodes
+    .filter((r) => {
+      const of = r.type === "frame" ? r.props.instanceOf : undefined;
+      if (!of || !byId.get(of)?.props.isComponent) return false;
+      return nodes.some((c) => c.parent === r.id && c.type !== "override");
+    })
+    .map((r) => r.id);
+};
+
+/** Runs the room's alarm, from inside it (in a test pause), until the file stores copies compactly. */
+async function convertInside(room: FileRoom) {
+  for (let i = 0; i < 500; i++) {
+    await room.alarm();
+    if ((await room.copiesFormat()).copies === "compact") return;
+  }
+  throw new Error("the conversion didn't finish");
+}
+
+describe("what the review of the conversion found", { timeout: 120_000 }, () => {
+  it("refuses a merge that deletes a component main used meanwhile", async () => {
+    const { browser, fileId } = await newFile("Merge");
+    const { socket, nodes } = await open(browser, fileId);
+    const page = nodes.find((n) => n.type === "page") as NodeRecord;
+    const [main, inner, instance] = [newId(), newId(), newId()];
+    socket.send({
+      t: "txn",
+      seq: 1,
+      ops: [
+        {
+          op: "create",
+          id: main,
+          type: "frame",
+          parent: page.id,
+          key: keyBetween(null, null),
+          props: { name: "Badge", isComponent: true, width: 40, height: 20 },
+        },
+        {
+          op: "create",
+          id: inner,
+          type: "rect",
+          parent: main,
+          key: keyBetween(null, null),
+          props: { width: 10, height: 10 },
+        },
+      ],
+    });
+    await socket.next("ack");
+    const made = await browser.json<{ branch: { id: string } }>(`/api/files/${fileId}/branches`, {
+      method: "POST",
+      json: { name: "Tidy" },
+    });
+    // The branch deletes the main; main, meanwhile, places an instance of it.
+    const branch = await open(browser, made.branch.id);
+    branch.socket.send({ t: "txn", seq: 1, ops: [{ op: "delete", id: main }] });
+    await branch.socket.next("ack");
+    socket.send({
+      t: "txn",
+      seq: 2,
+      ops: [
+        {
+          op: "create",
+          id: instance,
+          type: "frame",
+          parent: page.id,
+          key: keyBetween(keyBetween(null, null), null),
+          props: { name: "Badge", instanceOf: main, width: 40, height: 20, x: 100 },
+        },
+      ],
+    });
+    await socket.next("ack");
+    const merged = await browser.fetch(`/api/files/${made.branch.id}/branch/merge`, {
+      method: "POST",
+      json: {},
+    });
+    expect(merged.status).not.toBe(200);
+    // The instance main placed still shows its main's layers.
+    const after = await stored(fileId);
+    expect(after.some((n) => n.id === main)).toBe(true);
+    const shown = presented(after, "compact");
+    expect(shown.filter((n) => n.parent === instance)).toHaveLength(1);
+  });
+
+  it("commits a restore in the form the file has when it commits", async () => {
+    const { browser, fileId } = await materializedFile(kit.nodes);
+    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
+      room.compactCopiesOff = true;
+    });
+    const saved = await browser.json<{ version: { id: string } }>(`/api/files/${fileId}/versions`, {
+      method: "POST",
+      json: { name: "Materialized" },
+    });
+    // The file converts while the restore saves its restore point.
+    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
+      room.compactCopiesOff = false;
+      room.pause = async (at) => {
+        if (at === "restore") await convertInside(room);
+      };
+    });
+    const restored = await browser.fetch(
+      `/api/files/${fileId}/versions/${saved.version.id}/restore`,
+      { method: "POST", json: {} },
+    );
+    expect(restored.status).toBe(200);
+    expect((await roomOf(fileId).copiesFormat()).copies).toBe("compact");
+    const after = await stored(fileId);
+    expect(strays(after)).toEqual([]);
+    expect(firstDifference(compactByInstance(kit.nodes).nodes, after)).toBeNull();
+  });
+
+  it("never sends compact copies to a client from before them, even when the file converts during its hello", async () => {
+    const { browser, fileId } = await materializedFile(kit.nodes);
+    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
+      room.pause = async (at) => {
+        if (at === "hello") await convertInside(room);
+      };
+    });
+    const old = await openSocket(browser, fileId);
+    old.send({ t: "hello", protocol: 1, clientId: "old-race", revn: null });
+    const welcome = await old.next<{ copies?: string; role: string }>("welcome", 30_000);
+    expect((await roomOf(fileId).copiesFormat()).copies).toBe("compact");
+    const sent: NodeRecord[] = [];
+    for (;;) {
+      const chunk = await old.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot", 30_000);
+      sent.push(...chunk.nodes);
+      if (chunk.done) break;
+    }
+    // What it's sent is the file as people see it, every copy layer stored, and it can't edit.
+    expect(sent.some((n) => n.type === "override")).toBe(false);
+    expect(welcome.role).toBe("viewer");
+    const expected = compactByInstance(kit.nodes);
+    expect(firstDifference(renameIds(kit.nodes, expected.ids), sent)).toBeNull();
+  });
+
+  it("serves a tab from before compact copies, running its own sync code, the file to view, and says to reload when it edits", async () => {
+    const { browser, fileId } = await materializedFile(kit.nodes);
+    await convert(fileId);
+    const socket = await openSocket(browser, fileId);
+    const doc = new Doc();
+    const engine = new OldSyncEngine(doc, {
+      clientId: "old-tab",
+      flushIntervalMs: 0,
+      statsIntervalMs: 3_600_000,
+    });
+    const rejected: string[] = [];
+    engine.on("rejected", (_code, message) => rejected.push(message));
+    let closed: number | null = null;
+    socket.ws.addEventListener("close", (event) => {
+      closed = event.code;
+    });
+    socket.ws.addEventListener("message", (event) => {
+      engine.receive(JSON.parse(event.data as string));
+    });
+    engine.connected((message) => socket.send(message));
+    for (let i = 0; i < 200 && engine.status !== "live" && closed === null; i++)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closed).toBeNull();
+    expect(engine.status).toBe("live");
+    expect(engine.role).toBe("viewer");
+    const expected = compactByInstance(kit.nodes);
+    expect(firstDifference(renameIds(kit.nodes, expected.ids), [...doc.nodes()])).toBeNull();
+    // An edit it had waiting (or makes anyway) is refused, saying why.
+    const page = kit.nodes.find((n) => n.type === "page") as NodeRecord;
+    engine.commit([{ op: "set", id: page.id, prop: "name", value: "Old tab" }]);
+    for (let i = 0; i < 100 && rejected.length === 0; i++)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(rejected.join(" ")).toMatch(/[Rr]eload/);
+    expect(closed).toBeNull();
+  });
+
+  it("takes compact copies through the one-request import when it says so", async () => {
+    const { browser, fileId } = await newFile();
+    // A copy's text changed: compact, it's an override record.
+    const text = kit.nodes.find((n) => n.type === "text" && n.props.mirrors) as NodeRecord;
+    const edited = kit.nodes.map((n) =>
+      n.id === text.id
+        ? { ...n, props: { ...n.props, characters: "Changed", overrides: ["characters"] } }
+        : n,
+    );
+    const converted = compactByInstance(edited);
+    expect(converted.nodes.some((n) => n.type === "override")).toBe(true);
+    await browser.json(`/api/files/${fileId}/import`, {
+      method: "POST",
+      json: { nodes: converted.nodes, copies: "compact" },
+    });
+    expect(firstDifference(converted.nodes, await stored(fileId))).toBeNull();
+    // Override records sent without saying so are refused, not converted as materialized.
+    const other = await newFile();
+    const refused = await other.browser.fetch(`/api/files/${other.fileId}/import`, {
+      method: "POST",
+      json: { nodes: converted.nodes },
+    });
+    expect(refused.status).toBe(400);
+  });
+
+  it("keeps an edit from a tab that loaded the file before it converted when it touches no copy", async () => {
+    const { browser, fileId } = await materializedFile(kit.nodes);
+    const socket = await openSocket(browser, fileId);
+    socket.send({ t: "hello", protocol: 1, clientId: "before", revn: null });
+    expect((await socket.next<{ mode: string }>("welcome")).mode).toBe("snapshot");
+    await convert(fileId);
+    const page = kit.nodes.find((n) => n.type === "page") as NodeRecord;
+    socket.send({
+      t: "txn",
+      seq: 1,
+      ops: [{ op: "set", id: page.id, prop: "name", value: "Renamed before reloading" }],
+    });
+    await socket.next("ack");
+    expect((await stored(fileId)).find((n) => n.id === page.id)?.props.name).toBe(
+      "Renamed before reloading",
+    );
+    // One on a copy layer, by its old id, is refused, saying why.
+    const copy = kit.nodes.find((n) => n.props.mirrors) as NodeRecord;
+    socket.send({
+      t: "txn",
+      seq: 2,
+      ops: [{ op: "set", id: copy.id, prop: "opacity", value: 0.5 }],
+    });
+    expect((await socket.next<{ code: string }>("reject")).code).toBe("format");
+  });
+
+  it("pins a comment made with a copy's old id to its new one, and restoring the backup puts pins back", async () => {
+    const root = kit.nodes.find(
+      (n) => n.type === "frame" && n.props.instanceOf && kit.nodes.some((c) => c.parent === n.id),
+    ) as NodeRecord;
+    const target = kit.nodes.find((n) => n.parent === root.id) as NodeRecord;
+    const page = kit.nodes.find((n) => n.type === "page") as NodeRecord;
+    const { browser, fileId } = await materializedFile(kit.nodes);
+    const pin = (nodeId: string) =>
+      browser.json<{ thread: { id: string } }>(`/api/files/${fileId}/comments`, {
+        method: "POST",
+        json: { pageId: page.id, x: 1, y: 2, nodeId, offset: { x: 0, y: 0 }, body: "Here" },
+      });
+    const before = await pin(target.id);
+    await convert(fileId);
+    for (let i = 0; i < 3; i++) await runDurableObjectAlarm(roomOf(fileId));
+    const derived = compactByInstance(kit.nodes).ids.get(target.id) as string;
+    const pinned = async (threadId: string) =>
+      (
+        await env.DB.prepare("SELECT node_id FROM comment_threads WHERE id = ?")
+          .bind(threadId)
+          .first<{ node_id: string }>()
+      )?.node_id;
+    expect(await pinned(before.thread.id)).toBe(derived);
+    // A tab that hasn't reloaded yet pins a comment to the copy's old id, after the pins moved.
+    const late = await pin(target.id);
+    for (let i = 0; i < 3; i++) await runDurableObjectAlarm(roomOf(fileId));
+    expect(await pinned(late.thread.id)).toBe(derived);
+
+    // Undone with conversion off: the pins go back to the layers as they were stored.
+    const { backup } = await roomOf(fileId).copiesFormat();
+    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
+      room.compactCopiesOff = true;
+    });
+    const restored = await browser.fetch(`/api/files/${fileId}/versions/${backup}/restore`, {
+      method: "POST",
+      json: {},
+    });
+    expect(restored.status).toBe(200);
+    for (let i = 0; i < 3; i++) await runDurableObjectAlarm(roomOf(fileId));
+    expect(await pinned(before.thread.id)).toBe(target.id);
+    expect(await pinned(late.thread.id)).toBe(target.id);
   });
 });

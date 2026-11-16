@@ -49,6 +49,7 @@ import { AgentEngine, type EngineRun } from "./agent-engine";
 import { CALL_SCHEMA, CallLedger, changedIds, overlap, type StepCall } from "./call-ledger";
 import {
   applyConversion,
+  CONVERT_STEP_WORK,
   COPIES_LOG_SCHEMA,
   compactTable,
   convertStep,
@@ -58,8 +59,10 @@ import {
   hasInstances,
   LIVE_CONVERSION,
   markDirty,
+  NotAllConverted,
   presentedCount,
-  renamedIn,
+  readyToApply,
+  strayInstance,
 } from "./convert";
 import {
   beginStaging,
@@ -84,6 +87,16 @@ import {
   tempTables,
 } from "./node-tables";
 import { OpChunks } from "./op-chunks";
+import {
+  dropPinMap,
+  hasPinMap,
+  keepPinMap,
+  loadPinMap,
+  PIN_MAP_KEEP_MS,
+  pinMapKey,
+  pinsRenamed,
+  savePinMap,
+} from "./pin-map";
 import { PresentedReader } from "./presented";
 import { loadSnapshot, restoreFromTable, SnapshotError } from "./restore";
 import {
@@ -135,7 +148,24 @@ export const STALE_MS = 150_000;
 const PRUNE_EVERY_MS = 15_000;
 
 /** How long one step of converting a file to compact copies runs before the room serves others. */
-const CONVERT_STEP_MS = 2_000;
+/** How often, at most, a client from before compact copies is sent the file again as it changes. */
+const VIEW_REFRESH_MS = 30_000;
+
+/** What a client from before compact copies is told when it tries to edit a file stored compact. */
+const RELOAD_TO_EDIT = "Drawpane was updated. Reload the page to edit this file.";
+
+/** Props only copies, instances and mains have: an edit setting them is about copies. */
+const COPY_PROPS: ReadonlySet<string> = new Set([
+  "instanceOf",
+  "mirrors",
+  "overrides",
+  "unset",
+  "isComponent",
+  "isComponentSet",
+]);
+
+/** Applying a conversion refused this many times in a row (something stays materialized): it stops. */
+const CONVERT_REFUSALS = 5;
 /** The version saved before a file's copies are converted (decision 0029): how to undo it. */
 export const BEFORE_COMPACT = "Before compact copies";
 
@@ -163,6 +193,24 @@ interface Attachment {
    * materialized.
    */
   copies?: CopiesFormat;
+  /**
+   * A client from before compact copies (protocol 1) in a file stored
+   * compact: it's sent the file as presented, every copy layer built, to
+   * view, and its edits are refused, telling it to reload (decision 0029).
+   */
+  viewing?: boolean;
+  /** When a viewing client was last sent the file. */
+  servedAt?: number;
+  /** Whether the file changed since a viewing client was last sent it. */
+  stale?: boolean;
+}
+
+/** What an edit to a file stored compact is checked for, once it has applied (see #checkCompact). */
+interface CompactCheck {
+  /** Mains it deleted or unmade, and whether each had layers. */
+  readonly removed: Map<string, boolean>;
+  /** Nodes that may now be an instance of a live main storing layers. */
+  readonly candidates: Set<string>;
 }
 
 const LOG_SCHEMA = `
@@ -303,8 +351,16 @@ export class FileRoom extends DurableObject<Env> {
   importLimits: ImportLimits = IMPORT_LIMITS;
   /** Tests: turns compact copies off (true) or on (false) as `COMPACT_COPIES` would; null reads it. */
   compactCopiesOff: boolean | null = null;
-  /** How long a step of converting to compact copies runs (tests shorten it to see it resume). */
-  convertStepMs = CONVERT_STEP_MS;
+  /**
+   * About how much work (rows read and written) a step of converting to
+   * compact copies does (tests set 0, one instance a step, to see it resume).
+   */
+  convertStepWork = CONVERT_STEP_WORK;
+  /**
+   * Tests: runs where a restore, a merge, an update or a hello has awaited
+   * and is about to go on, to make something happen in between.
+   */
+  pause: ((at: "restore" | "merge" | "update" | "hello") => Promise<void>) | null = null;
   readonly #sql: SqlStorage;
   readonly #store: SqlNodeStore;
   readonly #room: RoomSql;
@@ -431,20 +487,11 @@ export class FileRoom extends DurableObject<Env> {
     if (!me) return;
     switch (message.t) {
       case "hello": {
-        // A client that can't read how this file stores copies (one from before compact
-        // copies, say) is told to reload: it gets a newer one that can.
-        const reads =
+        // How the client can read copies: one from before compact copies reads them
+        // materialized. Which form the file has is decided when it's welcomed (see #hello).
+        const reads: readonly CopiesFormat[] =
           message.protocol === 1 ? ["materialized"] : (message.copies ?? ["materialized"]);
-        if (!reads.includes(this.#copies)) {
-          this.#send(ws, {
-            t: "error",
-            code: "reload",
-            message: "Drawpane was updated. Reload the page to keep working on this file.",
-          });
-          this.#close(ws, RELOAD_CLOSE_CODE, "Reload");
-          return;
-        }
-        return this.#checkedHello(ws, me, message.clientId, message.revn);
+        return this.#checkedHello(ws, me, message.clientId, message.revn, reads, message.protocol);
       }
       case "txn": {
         // Edits from someone whose access hasn't been confirmed lately wait for a check first.
@@ -515,7 +562,8 @@ export class FileRoom extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     this.pruneQuiet();
     const converting = await this.#convertCopies();
-    await this.#remapComments();
+    await this.#movePins();
+    const viewers = this.#refreshViewers();
     if (this.#announce) {
       // Everyone loads the file again, in its new form (comment pins moved first, when they could).
       this.#announce = false;
@@ -543,7 +591,8 @@ export class FileRoom extends DurableObject<Env> {
     // or something left behind waits to be cleared away.
     const next = [
       converting,
-      this.#meta("conv_comments") === null ? null : Date.now() + ALARM_DELAY_MS,
+      viewers,
+      this.#pinsDue(),
       this.#autosaveDue(),
       this.#importExpiry(),
       this.#staleTablesDue(),
@@ -575,7 +624,7 @@ export class FileRoom extends DurableObject<Env> {
       this.#sql.exec("DELETE FROM nodes");
       for (const node of nodes) this.#store.insert(node);
       dropConvertTables(this.#sql, LIVE_CONVERSION);
-      for (const k of ["conv_backup", "conv_failed", "conv_comments"])
+      for (const k of ["conv_backup", "conv_failed", "conv_refused"])
         this.#sql.exec("DELETE FROM meta WHERE k = ?", k);
       const next = this.#revn + 1;
       this.#setMeta("revn", String(next));
@@ -652,11 +701,11 @@ export class FileRoom extends DurableObject<Env> {
         createConvertTables(this.#sql, LIVE_CONVERSION);
         this.#converting = true;
       }
-      // From the step to applying it nothing awaits, so no edit lands between them.
-      const step = convertStep(this.#room, "nodes", LIVE_CONVERSION, this.convertStepMs);
-      if (step.left > 0) return Date.now();
-      this.#finishConversion(fileId, true);
-      return null;
+      // From the step to applying it nothing awaits, so no edit lands between them; applying
+      // lists the file's instances once more anyway, and refuses while any is left to convert.
+      const step = convertStep(this.#room, "nodes", LIVE_CONVERSION, this.convertStepWork);
+      if (!step.done) return Date.now();
+      return this.#finishConversion(fileId, true) ? null : Date.now();
     } catch (error) {
       console.error(
         `compact copies: converting file ${fileId} failed; it stays materialized`,
@@ -675,9 +724,47 @@ export class FileRoom extends DurableObject<Env> {
    * not logged as operations, like an import); agent sessions' undo stops at
    * it; comment pins on copies follow their layers' new ids (`#remapComments`).
    */
-  #finishConversion(fileId: string, tables: boolean): void {
+  #finishConversion(fileId: string, tables: boolean): boolean {
     const now = Date.now();
-    const result = this.ctx.storage.transactionSync(() => {
+    let result: { next: number; applied: ReturnType<typeof applyConversion> | null } | null;
+    try {
+      result = this.#applyConversion(fileId, tables, now);
+    } catch (error) {
+      if (!(error instanceof NotAllConverted)) throw error;
+      // Rolled back: an instance would stay materialized. The next steps convert it; should it
+      // keep happening, the conversion stops (the file stays materialized and working).
+      const refused = Number(this.#meta("conv_refused") ?? 0) + 1;
+      this.#setMeta("conv_refused", String(refused));
+      console.warn(`compact copies: file ${fileId} not applied yet: ${error.message}`);
+      if (refused >= CONVERT_REFUSALS) throw error;
+      return false;
+    }
+    if (!result) return false;
+    this.#revn = result.next;
+    this.#copies = "compact";
+    this.#converting = false;
+    this.#store.clearCache();
+    this.#engine?.drop();
+    this.#announce = true;
+    const applied = result.applied;
+    console.log(
+      `compact copies: file ${fileId} converted at revision ${result.next}` +
+        (applied
+          ? `: ${applied.removed} copy layers no longer stored, ${applied.records} override records, ${applied.detached.length} instances left detached`
+          : " (no instances)"),
+    );
+    return true;
+  }
+
+  /** The storage transaction that applies a conversion; null when an instance is left to convert. */
+  #applyConversion(
+    fileId: string,
+    tables: boolean,
+    now: number,
+  ): { next: number; applied: ReturnType<typeof applyConversion> | null } | null {
+    return this.ctx.storage.transactionSync(() => {
+      // Listed once more: an instance made since the last step converts first.
+      if (tables && !readyToApply(this.#sql, "nodes", LIVE_CONVERSION)) return null;
       const applied = tables ? applyConversion(this.#sql, "nodes", LIVE_CONVERSION) : null;
       for (const { root, why } of applied?.detached ?? [])
         this.#sql.exec(
@@ -694,68 +781,103 @@ export class FileRoom extends DurableObject<Env> {
       this.#setMeta("touched_at", String(now));
       // An agent's undo is in materialized terms: it doesn't reach back past this.
       this.#sql.exec("UPDATE agent_calls SET state = 'dropped' WHERE state IN ('done', 'undone')");
+      this.#sql.exec("DELETE FROM meta WHERE k = 'conv_refused'");
       if (tables) {
-        for (const t of [
-          LIVE_CONVERSION.rows,
-          LIVE_CONVERSION.done,
-          LIVE_CONVERSION.deps,
-          LIVE_CONVERSION.roots,
-        ])
-          this.#sql.exec(`DELETE FROM ${t}`);
-        // The map stays until comment pins follow it.
-        this.#setMeta("conv_comments", "pending");
+        // The map stays a while, for comment pins (see pin-map.ts); the rest goes.
+        keepPinMap(this.#sql, LIVE_CONVERSION.map);
+        dropConvertTables(this.#sql, LIVE_CONVERSION);
+        this.#setMeta("pins_key", pinMapKey(fileId, next));
+        this.#setMeta("pins_saved", "0");
+        this.#setMeta("pins_until", String(now + PIN_MAP_KEEP_MS));
+        this.#setMeta("pins_sweep", "1");
       }
       return { next, applied };
     });
-    this.#revn = result.next;
-    this.#copies = "compact";
-    this.#converting = false;
-    this.#store.clearCache();
-    this.#engine?.drop();
-    this.#announce = true;
-    const applied = result.applied;
-    console.log(
-      `compact copies: file ${fileId} converted at revision ${result.next}` +
-        (applied
-          ? `: ${applied.removed} copy layers no longer stored, ${applied.records} override records, ${applied.detached.length} instances left detached`
-          : " (no instances)"),
-    );
   }
 
   /**
-   * Comment pins on copy layers follow them to their derived ids (D1
-   * `comment_threads.node_id`), from the conversion's map. Retried by the
-   * alarm until it's done; then the map goes.
+   * Comment pins (D1 `comment_threads.node_id`) on copy layers follow the
+   * file's change of form (pin-map.ts): the map is kept in R2, pins are
+   * moved when it's applied or undone, and once more before the room lets
+   * the map go. Each part retried by the alarm until it's done.
    */
-  async #remapComments(): Promise<void> {
-    if (this.#meta("conv_comments") === null) return;
+  async #movePins(): Promise<void> {
     const fileId = this.#meta("file_id");
     if (!fileId) return;
     try {
-      const { results } = await this.env.DB.prepare(
-        "SELECT id, node_id FROM comment_threads WHERE file_id = ? AND node_id IS NOT NULL",
-      )
-        .bind(fileId)
-        .all<{ id: string; node_id: string }>();
-      const renamed = renamedIn(
-        this.#sql,
-        LIVE_CONVERSION,
-        results.map((r) => r.node_id),
-      );
-      const updates = results
-        .filter((r) => renamed.has(r.node_id))
-        .map((r) =>
-          this.env.DB.prepare(
-            "UPDATE comment_threads SET node_id = ? WHERE id = ? AND node_id = ?",
-          ).bind(renamed.get(r.node_id), r.id, r.node_id),
-        );
-      for (let i = 0; i < updates.length; i += 50)
-        await this.env.DB.batch(updates.slice(i, i + 50));
-      this.#sql.exec("DELETE FROM meta WHERE k = 'conv_comments'");
-      dropConvertTables(this.#sql, LIVE_CONVERSION);
+      const load = this.#meta("pins_load");
+      if (load !== null) {
+        // A restore put the old form back, and the room no longer had the map: from R2.
+        await loadPinMap(this.env.FILES, load, this.#sql);
+        this.#sql.exec("DELETE FROM meta WHERE k = 'pins_load'");
+        this.#setMeta("pins_until", String(Date.now() + PIN_MAP_KEEP_MS));
+        this.#setMeta("pins_sweep", "1");
+      }
+      if (!hasPinMap(this.#sql)) return;
+      const key = this.#meta("pins_key");
+      if (key !== null && this.#meta("pins_saved") === "0") {
+        await savePinMap(this.env.FILES, key, this.#sql);
+        this.#setMeta("pins_saved", "1");
+      }
+      if (this.#meta("pins_sweep") !== null) {
+        await this.#sweepPins(fileId);
+        this.#sql.exec("DELETE FROM meta WHERE k = 'pins_sweep'");
+      }
+      const until = Number(this.#meta("pins_until") ?? 0);
+      if (Date.now() >= until && this.#meta("pins_saved") !== "0") {
+        // Once more, for pins written since, then the map goes (R2 keeps it).
+        await this.#sweepPins(fileId);
+        dropPinMap(this.#sql);
+        for (const k of ["pins_until", "pins_sweep"])
+          this.#sql.exec("DELETE FROM meta WHERE k = ?", k);
+      }
     } catch (error) {
       console.warn(`compact copies: comment pins of file ${fileId} not moved yet`, error);
     }
+  }
+
+  /** Moves every pin the map renames, to the id the file names it by now. */
+  async #sweepPins(fileId: string): Promise<void> {
+    const { results } = await this.env.DB.prepare(
+      "SELECT id, node_id FROM comment_threads WHERE file_id = ? AND node_id IS NOT NULL",
+    )
+      .bind(fileId)
+      .all<{ id: string; node_id: string }>();
+    const renamed = pinsRenamed(
+      this.#sql,
+      results.map((r) => r.node_id),
+      this.#copies === "compact",
+    );
+    const updates = results
+      .filter((r) => renamed.has(r.node_id))
+      .map((r) =>
+        this.env.DB.prepare(
+          "UPDATE comment_threads SET node_id = ? WHERE id = ? AND node_id = ?",
+        ).bind(renamed.get(r.node_id), r.id, r.node_id),
+      );
+    for (let i = 0; i < updates.length; i += 50) await this.env.DB.batch(updates.slice(i, i + 50));
+  }
+
+  /** When pins need the alarm next (a sweep, a save, a load, the map's end); null when they don't. */
+  #pinsDue(): number | null {
+    if (
+      this.#meta("pins_load") !== null ||
+      this.#meta("pins_sweep") !== null ||
+      this.#meta("pins_saved") === "0"
+    )
+      return Date.now() + ALARM_DELAY_MS;
+    const until = this.#meta("pins_until");
+    return until === null ? null : Number(until);
+  }
+
+  /**
+   * A comment's pin as the file names its layer now: a copy layer's id in
+   * the form the file had before it changed (a tab that hasn't reloaded) is
+   * translated while the room keeps the map (pin-map.ts). Ids it doesn't
+   * know stay as they are.
+   */
+  async pinTarget(nodeId: string): Promise<string> {
+    return pinsRenamed(this.#sql, [nodeId], this.#copies === "compact").get(nodeId) ?? nodeId;
   }
 
   /**
@@ -954,13 +1076,20 @@ export class FileRoom extends DurableObject<Env> {
       const unreadable = this.#readable(versionCopies, "This version");
       if (unreadable) return { ok: false, reason: "invalid", message: unreadable };
       // A version saved before the file converted is converted as it's read.
-      if (versionCopies !== this.#copies) compactTable(this.#room, table);
+      const read = [{ table, copies: versionCopies }];
+      const unconverted = this.#reform(read, "This version");
+      if (unconverted) return { ok: false, reason: "invalid", message: unconverted };
       const restorePoint = await this.#saveVersion(fileId, {
         reason: "restore",
         by: by.userId,
         restoredId: version.id,
       });
-      // From here to the commit nothing awaits, so the diff and the store agree.
+      await this.pause?.("restore");
+      // The file may have changed form while that saved (a conversion applied): the version is
+      // read in the form it has now. From here to the commit nothing awaits, so the diff, the
+      // form and the store agree.
+      const reformed = this.#reform(read);
+      if (reformed) return { ok: false, reason: "invalid", message: reformed };
       const author = { clientId: "restore", seq: 0, userId: by.userId, sessionId: "restore" };
       const except = this.#attachments().find(({ me }) => me.sessionId === sessionId)?.ws;
       let committed: { revn: number; count: number; result: number };
@@ -988,6 +1117,33 @@ export class FileRoom extends DurableObject<Env> {
     } finally {
       dropTable(this.#sql, table);
     }
+  }
+
+  /**
+   * Brings tables read from snapshots (a version, a branch's base and side)
+   * into the form the file stores copies in now, converting those that come
+   * materialized into a file stored compact. Synchronous: call it right
+   * before working out what to commit from them, after the last await, as
+   * the file may have converted meanwhile. Returns why they can't come in,
+   * or null (and each entry says its table's form).
+   */
+  #reform(
+    tables: Array<{ readonly table: string; copies: CopiesFormat }>,
+    what = "It",
+  ): string | null {
+    for (const entry of tables) {
+      if (entry.copies === this.#copies) continue;
+      const unreadable = this.#readable(entry.copies, what);
+      if (unreadable) return unreadable;
+      try {
+        compactTable(this.#room, entry.table);
+      } catch (error) {
+        if (error instanceof ModelError) return error.message;
+        throw error;
+      }
+      entry.copies = "compact";
+    }
+    return null;
   }
 
   /**
@@ -1037,6 +1193,15 @@ export class FileRoom extends DurableObject<Env> {
       this.#setMeta("touched_at", String(now));
       this.#count(now, by.userId);
       this.#sql.exec("UPDATE agent_calls SET state = 'dropped' WHERE state IN ('done', 'undone')");
+      // Comment pins on copies go back to the ids the file has again (pin-map.ts): from the map
+      // the room keeps, or from its copy in R2.
+      if (hasPinMap(this.#sql)) {
+        this.#setMeta("pins_sweep", "1");
+        this.#setMeta("pins_until", String(now + PIN_MAP_KEEP_MS));
+      } else {
+        const key = this.#meta("pins_key");
+        if (key !== null && this.#meta("pins_saved") === "1") this.#setMeta("pins_load", key);
+      }
       return next;
     });
     this.#revn = revn;
@@ -1203,6 +1368,8 @@ export class FileRoom extends DurableObject<Env> {
     by: Requester,
     nodes: readonly NodeRecord[],
     fileId: string,
+    /** How the nodes store copies: said by the sender, as at a commit (see `commitImport`). */
+    sent: CopiesFormat = "materialized",
   ): Promise<ImportResult> {
     const begun = await this.beginImport(fileId);
     if (!begun.ok) return begun;
@@ -1211,7 +1378,7 @@ export class FileRoom extends DurableObject<Env> {
       this.#dropImport();
       return part.reason === "gone" ? { ok: false, reason: "gone" } : part;
     }
-    return this.commitImport(by, fileId, begun.importId);
+    return this.commitImport(by, fileId, begun.importId, sent);
   }
 
   /**
@@ -1286,6 +1453,27 @@ export class FileRoom extends DurableObject<Env> {
       return { ok: false, reason: "invalid", message: NO_COMPACT_COPIES };
     if (!seed) return { ok: false, reason: "not-empty" };
     if (this.#meta("import_revn") !== String(this.#revn)) return { ok: false, reason: "changed" };
+    // Records come only with nodes said to be compact: converted as materialized, every instance
+    // equal to its main would lose its layers.
+    if (
+      sent === "materialized" &&
+      this.#sql.exec(`SELECT 1 FROM ${IMPORT_TABLE} WHERE type = 'override' LIMIT 1`).toArray()
+        .length > 0
+    )
+      return {
+        ok: false,
+        reason: "invalid",
+        message:
+          'These nodes hold override records (compact copies): send them with copies: "compact".',
+      };
+    // Compact, they may not store layers under an instance: those come from its main.
+    if (sent === "compact" && strayInstance(this.#sql, IMPORT_TABLE) !== null)
+      return {
+        ok: false,
+        reason: "invalid",
+        message:
+          "An instance stores layers of its own, which in compact copies come from its main.",
+      };
     try {
       checkStaged(
         this.#sql,
@@ -1412,7 +1600,7 @@ export class FileRoom extends DurableObject<Env> {
       resolutions: new Map(Object.entries(choices.resolutions)),
       skip: new Set(choices.skip),
     };
-    return this.#threeWay(from.baseKey, from.nodes, async (tables) => {
+    return this.#threeWay(from.baseKey, from.nodes, async (tables, _revn, _base, read) => {
       // Checked before the restore point is saved, and again after (that awaits).
       const first = planThreeWay(this.#sql, tables, decided);
       if (first.undecided > 0)
@@ -1424,7 +1612,11 @@ export class FileRoom extends DurableObject<Env> {
         description: null,
         keepName: true,
       });
-      // From here to the commit nothing awaits, so the plan and the store agree.
+      await this.pause?.("merge");
+      // In the form the file has now (it may have converted meanwhile). From here to the commit
+      // nothing awaits, so the plan, the form and the store agree.
+      const reformed = this.#reform(read);
+      if (reformed) return { ok: false, reason: "invalid", message: reformed };
       const plan = planThreeWay(this.#sql, tables, decided);
       if (plan.undecided > 0) return { ok: false, reason: "undecided", undecided: plan.undecided };
       const author = { clientId: "merge", seq: 0, userId: by.userId, sessionId: "merge" };
@@ -1491,7 +1683,7 @@ export class FileRoom extends DurableObject<Env> {
     const result = await this.#threeWay(
       oldKey,
       mainNodes,
-      async (tables, mainRevn, baseRevn): Promise<UpdateResult> => {
+      async (tables, mainRevn, baseRevn, read): Promise<UpdateResult> => {
         // Main as read is no newer than the base: there's nothing to bring in, and the base stays.
         if (mainRevn <= baseRevn)
           return { ok: true, revn: this.#revn, changes: 0, kept: 0, mainRevn: baseRevn };
@@ -1508,7 +1700,14 @@ export class FileRoom extends DurableObject<Env> {
           await this.env.FILES.delete(newKey).catch(() => {});
           return { ok: false, message: "Main as it is now couldn't be stored. Try again." };
         }
-        // From here to the commit nothing awaits, so the plan and the store agree.
+        await this.pause?.("update");
+        // In the form the branch has now (it may have converted meanwhile). From here to the
+        // commit nothing awaits, so the plan, the form and the store agree.
+        const reformed = this.#reform(read);
+        if (reformed) {
+          await this.env.FILES.delete(newKey).catch(() => {});
+          return { ok: false, message: reformed };
+        }
         const plan = planThreeWay(this.#sql, tables, none);
         const author = { clientId: "update", seq: 0, userId: by.userId, sessionId: "update" };
         let count: number;
@@ -1557,7 +1756,13 @@ export class FileRoom extends DurableObject<Env> {
   async #threeWay<R>(
     baseKey: string,
     otherNodes: ReadableStream<Uint8Array>,
-    work: (tables: ThreeWayTables, otherRevn: number, baseRevn: number) => Promise<R>,
+    work: (
+      tables: ThreeWayTables,
+      otherRevn: number,
+      baseRevn: number,
+      /** Each side's table and its form now: `#reform` them after awaiting. */
+      read: Array<{ readonly table: string; copies: CopiesFormat }>,
+    ) => Promise<R>,
   ): Promise<
     | R
     | { readonly ok: false; readonly reason: "missing"; readonly missing: string }
@@ -1591,16 +1796,13 @@ export class FileRoom extends DurableObject<Env> {
       }
       // Compared in this file's form (decision 0029): a side saved before compact copies is
       // converted as it's read. Copies' ids are derived the same way on every side.
-      for (const [table, source] of [
-        [tables.base, base],
-        [tables.other, other],
-      ] as const) {
-        const copies = snapshotCopies(source.header);
-        const unreadable = this.#readable(copies, "One side");
-        if (unreadable) return { ok: false, reason: "invalid", message: unreadable };
-        if (copies !== this.#copies) compactTable(this.#room, table);
-      }
-      return await work(tables, other.header.revn ?? 0, base.header.revn ?? 0);
+      const read = [
+        { table: tables.base, copies: snapshotCopies(base.header) },
+        { table: tables.other, copies: snapshotCopies(other.header) },
+      ];
+      const unreadable = this.#reform(read, "One side");
+      if (unreadable) return { ok: false, reason: "invalid", message: unreadable };
+      return await work(tables, other.header.revn ?? 0, base.header.revn ?? 0, read);
     } finally {
       for (const table of Object.values(tables)) dropTable(this.#sql, table);
     }
@@ -1969,9 +2171,13 @@ export class FileRoom extends DurableObject<Env> {
     me: Attachment,
     clientId: string,
     revn: number | null,
+    reads: readonly CopiesFormat[],
+    protocol: number,
   ): Promise<void> {
     const current = await this.#checkAccess(ws, me, true);
-    if (current) this.#hello(ws, current, clientId, revn);
+    await this.pause?.("hello");
+    // The file's form is checked here, after the await, as it's sent (it may have converted).
+    if (current) this.#hello(ws, current, clientId, revn, reads, protocol);
   }
 
   /**
@@ -2024,10 +2230,34 @@ export class FileRoom extends DurableObject<Env> {
     }
   }
 
-  #hello(ws: WebSocket, me: Attachment, clientId: string, revn: number | null): void {
+  #hello(
+    ws: WebSocket,
+    me: Attachment,
+    clientId: string,
+    revn: number | null,
+    reads: readonly CopiesFormat[],
+    protocol: number,
+  ): void {
+    if (!reads.includes(this.#copies)) {
+      // A tab from before compact copies: the file to view, every copy built, as it reads it.
+      if (protocol === 1 && this.#copies === "compact") {
+        this.#helloToView(ws, me, clientId);
+        return;
+      }
+      // Anything else that can't read the file's form is told to reload, for a newer client.
+      this.#send(ws, {
+        t: "error",
+        code: "reload",
+        message: "Drawpane was updated. Reload the page to keep working on this file.",
+      });
+      this.#close(ws, RELOAD_CLOSE_CODE, "Reload");
+      return;
+    }
     me.clientId = clientId;
-    // Its changes are in the form the file has now; should that change, they're refused.
+    // Its changes are in the form the file has now; should that change, they're checked for it.
     me.copies = this.#copies;
+    me.viewing = false;
+    me.stale = false;
     ws.serializeAttachment(me);
     const lastSeq =
       this.#sql
@@ -2085,6 +2315,128 @@ export class FileRoom extends DurableObject<Env> {
     if (!me.guest) this.#broadcast({ t: "peer", peer: this.#peer(me) }, ws);
   }
 
+  /**
+   * Welcomes a client from before compact copies (protocol 1) into a file
+   * stored compact, as it can be: a viewer, sent the file as presented
+   * (every copy layer built from its main and its record, an instance at a
+   * time, as the MCP tools read it), in the form it reads. Its edits are
+   * refused, telling it to reload (see #transaction), and it's sent the file
+   * again as it changes, every VIEW_REFRESH_MS at most. The pre-compact
+   * client shows a viewer's file and a refusal's message as they are; a
+   * close it doesn't know would have it reconnect over and over.
+   */
+  #helloToView(ws: WebSocket, me: Attachment, clientId: string): void {
+    me.clientId = clientId;
+    me.copies = "materialized";
+    me.viewing = true;
+    me.servedAt = Date.now();
+    me.stale = false;
+    ws.serializeAttachment(me);
+    const lastSeq =
+      this.#sql
+        .exec<{ last_seq: number }>("SELECT last_seq FROM clients WHERE client_id = ?", clientId)
+        .toArray()[0]?.last_seq ?? 0;
+    const peers = me.guest ? [] : this.#peers().filter((p) => p.sessionId !== me.sessionId);
+    this.#send(ws, {
+      t: "welcome",
+      sessionId: me.sessionId,
+      revn: this.#revn,
+      role: "viewer",
+      peers,
+      mode: "snapshot",
+      lastSeq,
+      copies: "materialized",
+    });
+    // Nothing awaits from here to the last chunk: one revision.
+    const presented = new PresentedReader(new TableReader(this.#sql, "nodes"), this.#sql, "nodes");
+    let chunk: NodeRecord[] = [];
+    for (const node of presented.onPages()) {
+      chunk.push(node);
+      if (chunk.length < SNAPSHOT_CHUNK_SIZE) continue;
+      this.#send(ws, { t: "snapshot", nodes: chunk, done: false });
+      chunk = [];
+    }
+    this.#send(ws, { t: "snapshot", nodes: chunk, done: true });
+    if (!me.guest) this.#broadcast({ t: "peer", peer: this.#peer(me) }, ws);
+  }
+
+  /** Sends the file again to clients viewing it from before compact copies, when it changed. */
+  #refreshViewers(now = Date.now()): number | null {
+    let due: number | null = null;
+    for (const { ws, me } of this.#attachments()) {
+      if (!me.viewing || !me.stale) continue;
+      const at = (me.servedAt ?? 0) + VIEW_REFRESH_MS;
+      if (at <= now) {
+        ws.serializeAttachment({ ...me, stale: false, servedAt: now });
+        this.#send(ws, { t: "resync" });
+      } else due = due === null ? at : Math.min(due, at);
+    }
+    return due;
+  }
+
+  /**
+   * Why operations in the materialized form (from a client that loaded the
+   * file before it converted) can't apply to the file stored compact, or
+   * null when they can as they are: they touch no copy layer, instance,
+   * main or record, and make none (a page renamed, a layer on a screen
+   * moved). Those that do are refused, as their ids and meaning changed.
+   */
+  #materializedRefusal(ops: readonly Op[]): string | null {
+    const plain = new Map<string, boolean>();
+    // Whether a stored node, and every node above it, is outside copies, instances and mains.
+    const isPlain = (id: string): boolean => {
+      if (id === ROOT_ID) return true;
+      const known = plain.get(id);
+      if (known !== undefined) return known;
+      const node = this.#store.get(id);
+      const props = (node?.props ?? {}) as Record<string, unknown>;
+      const ok =
+        !!node &&
+        node.type !== "override" &&
+        ![...COPY_PROPS].some((prop) => props[prop] !== undefined) &&
+        isPlain(node.parent);
+      plain.set(id, ok);
+      return ok;
+    };
+    const holdsCopies = (id: string) =>
+      this.#sql
+        .exec(
+          `WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
+           SELECT 1 FROM nodes n JOIN sub ON sub.id = n.id
+            WHERE n.type = 'override' OR json_extract(n.props, '$.instanceOf') IS NOT NULL
+               OR json_extract(n.props, '$.isComponent') = 1
+               OR json_extract(n.props, '$.isComponentSet') = 1
+            LIMIT 1`,
+          id,
+        )
+        .toArray().length > 0;
+    const made = new Set<string>();
+    const refusal = "This file was updated, and that change was made before it was.";
+    try {
+      for (const op of ops) {
+        if (op.op === "create") {
+          const props = op.props as Record<string, unknown>;
+          if ([...COPY_PROPS].some((prop) => props[prop] !== undefined)) return refusal;
+          if (!made.has(op.parent) && !isPlain(op.parent)) return refusal;
+          made.add(op.id);
+          continue;
+        }
+        if (made.has(op.id)) {
+          if (op.op === "move" && !made.has(op.parent) && !isPlain(op.parent)) return refusal;
+          continue;
+        }
+        // An id it doesn't have is most likely a copy layer's old one.
+        if (!isPlain(op.id)) return refusal;
+        if (op.op === "set" && COPY_PROPS.has(op.prop)) return refusal;
+        if (op.op === "move" && !made.has(op.parent) && !isPlain(op.parent)) return refusal;
+        if (op.op === "delete" && holdsCopies(op.id)) return refusal;
+      }
+      return null;
+    } finally {
+      this.#store.clearCache();
+    }
+  }
+
   #transaction(ws: WebSocket, me: Attachment, seq: number, ops: Op[]): void {
     if (!me.clientId) {
       this.#send(ws, {
@@ -2098,12 +2450,24 @@ export class FileRoom extends DurableObject<Env> {
       this.#reject(ws, seq, ops, "forbidden", "You can view this file but not edit it.");
       return;
     }
-    // Changes in the form the file stored when this client loaded it: the file has converted
-    // since (decision 0029), so they're refused and the client loads it again.
-    if ((me.copies ?? "materialized") !== this.#copies) {
-      this.#reject(ws, seq, ops, "format", "This file was updated. Loading it again.");
-      this.#send(ws, { t: "resync" });
+    // A client from before compact copies, viewing a file stored compact: it can't edit it.
+    if (me.viewing) {
+      this.#reject(ws, seq, ops, "format", RELOAD_TO_EDIT);
       return;
+    }
+    // Changes in the form the file stored when this client loaded it, which has changed since
+    // (decision 0029): those that don't touch copies apply as they are; the rest are refused,
+    // and the client loads the file again (it was told to already).
+    if ((me.copies ?? "materialized") !== this.#copies) {
+      const refusal =
+        this.#copies === "compact"
+          ? this.#materializedRefusal(ops)
+          : "This file was updated, and that change was made before it was.";
+      if (refusal !== null) {
+        this.#reject(ws, seq, ops, "format", `${refusal} Loading it again.`);
+        this.#send(ws, { t: "resync" });
+        return;
+      }
     }
     // Override records (decision 0029) only in a file that stores compact copies.
     if (
@@ -2163,11 +2527,12 @@ export class FileRoom extends DurableObject<Env> {
       const revn = this.ctx.storage.transactionSync(() => {
         const next = this.#revn + 1;
         // An edit to a file stored compact is checked as a whole (decision 0029).
-        const removed = this.#copies === "compact" ? this.#mainsRemoved(ops) : null;
+        const check = this.#compactCheck();
         const inverse = this.#applyLogged(ops, author, next, {
           inverse: options.also !== undefined,
+          check,
         });
-        if (removed) this.#checkCompact(ops, removed);
+        if (check) this.#checkCompact(check);
         options.also?.(next, inverse);
         return next;
       });
@@ -2177,6 +2542,38 @@ export class FileRoom extends DurableObject<Env> {
       return revn;
     } finally {
       this.#store.clearCache();
+    }
+  }
+
+  /**
+   * What an edit to a file stored compact is checked for (decision 0029),
+   * gathered as its operations apply (a restore's or a merge's in chunks),
+   * then checked once, before its storage transaction ends; null when the
+   * file stores copies materialized.
+   */
+  #compactCheck(): CompactCheck | null {
+    return this.#copies === "compact" ? { removed: new Map(), candidates: new Set() } : null;
+  }
+
+  /** Before operations apply: the mains they delete or unmake (with whether they had layers). */
+  #noteRemovedMains(ops: readonly Op[], check: CompactCheck): void {
+    for (const [id, had] of this.#mainsRemoved(ops))
+      if (!check.removed.has(id)) check.removed.set(id, had);
+  }
+
+  /** After operations apply: the nodes that may now be an instance storing layers. */
+  #noteCandidates(ops: readonly Op[], check: CompactCheck): void {
+    for (const op of ops) {
+      if (op.op === "create" || op.op === "move") check.candidates.add(op.parent);
+      if (op.op === "set" && op.prop === "instanceOf") check.candidates.add(op.id);
+      if (op.op === "set" && op.prop === "isComponent" && op.value)
+        for (const row of this.#sql
+          .exec<{ id: string }>(
+            "SELECT id FROM nodes WHERE type = 'frame' AND json_extract(props, '$.instanceOf') = ?",
+            op.id,
+          )
+          .toArray())
+          check.candidates.add(row.id);
     }
   }
 
@@ -2217,7 +2614,8 @@ export class FileRoom extends DurableObject<Env> {
    * (the editor stores them before removing a main; one someone added
    * meanwhile hasn't, and the edit is refused, to be made again).
    */
-  #checkCompact(ops: readonly Op[], removed: ReadonlyMap<string, boolean>): void {
+  #checkCompact({ removed, candidates }: CompactCheck): void {
+    this.#store.clearCache();
     const isMain = (id: string) => {
       const main = this.#store.get(id);
       return main?.type === "frame" && !!main.props.isComponent;
@@ -2226,19 +2624,6 @@ export class FileRoom extends DurableObject<Env> {
       const of = node?.type === "frame" ? node.props.instanceOf : undefined;
       return !!of && of !== node?.id && isMain(of);
     };
-    const candidates = new Set<string>();
-    for (const op of ops) {
-      if (op.op === "create" || op.op === "move") candidates.add(op.parent);
-      if (op.op === "set" && op.prop === "instanceOf") candidates.add(op.id);
-      if (op.op === "set" && op.prop === "isComponent" && op.value)
-        for (const row of this.#sql
-          .exec<{ id: string }>(
-            "SELECT id FROM nodes WHERE type = 'frame' AND json_extract(props, '$.instanceOf') = ?",
-            op.id,
-          )
-          .toArray())
-          candidates.add(row.id);
-    }
     for (const id of candidates)
       if (
         isLive(this.#store.get(id)) &&
@@ -2295,17 +2680,22 @@ export class FileRoom extends DurableObject<Env> {
     ops: readonly Op[],
     author: Author,
     next: number,
-    { inverse, held = false }: { inverse: boolean; held?: boolean },
+    {
+      inverse,
+      held = false,
+      check,
+    }: { inverse: boolean; held?: boolean; check: CompactCheck | null },
   ): Op[] {
     // A conversion under way (decision 0029) converts again the instances this may change:
     // found before (what's deleted) and after (what's made) it applies.
     const touched = this.#converting ? touchedIds(ops) : null;
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
+    // A file stored compact: what this removes and makes, checked when the transaction ends.
+    if (check) this.#noteRemovedMains(ops, check);
     const undo = applyTransaction(this.#store, ops, { rollback: false, inverse, held });
-    if (touched) {
-      this.#store.clearCache();
-      markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
-    }
+    this.#store.clearCache();
+    if (check) this.#noteCandidates(ops, check);
+    if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
     const now = Date.now();
     this.#sql.exec(
       "INSERT INTO log (revn, client_id, seq, user_id, session_id, ops, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -2360,9 +2750,11 @@ export class FileRoom extends DurableObject<Env> {
     let outcome: { result: R; count: number };
     try {
       outcome = this.ctx.storage.transactionSync(() => {
+        // Checked as one edit, whatever order its chunks come in (decision 0029).
+        const check = this.#compactCheck();
         const out = new OpChunks((ops) => {
           next++;
-          this.#applyLogged(ops, author, next, { inverse: false, held });
+          this.#applyLogged(ops, author, next, { inverse: false, held, check });
           this.#store.clearCache();
           if (tooBig) return;
           sentChars += JSON.stringify(ops).length;
@@ -2373,6 +2765,7 @@ export class FileRoom extends DurableObject<Env> {
         });
         const result = produce(out);
         out.flush();
+        if (check) this.#checkCompact(check);
         return { result, count: out.count };
       });
     } catch (error) {
@@ -2823,6 +3216,13 @@ export class FileRoom extends DurableObject<Env> {
       const me = ws.deserializeAttachment() as Attachment | null;
       if (!me?.clientId) continue;
       if (me.guest && guestData === null) continue;
+      if (me.viewing && message.t === "txn") {
+        // A client from before compact copies can't take changes as stored: it's sent the file
+        // again, every VIEW_REFRESH_MS at most (the alarm sends it when it's held back).
+        ws.serializeAttachment({ ...me, stale: true });
+        if (this.#refreshViewers() !== null) void this.#scheduleAlarm(VIEW_REFRESH_MS);
+        continue;
+      }
       try {
         ws.send(me.guest ? (guestData as string) : data);
         sent++;

@@ -212,6 +212,22 @@ async function relay(env: Env, fileId: string, event: CommentEvent): Promise<voi
   }
 }
 
+/**
+ * The layer a pin names, as the file names it now: a copy layer's id from
+ * before the file changed how it stores copies (a tab not reloaded yet) is
+ * translated by its room, while it keeps the map (decision 0029). The id as
+ * sent when the room can't say.
+ */
+async function pinTarget(env: Env, fileId: string, nodeId: string | null): Promise<string | null> {
+  if (nodeId === null) return null;
+  try {
+    return await env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId)).pinTarget(nodeId);
+  } catch (error) {
+    console.error("couldn't check a pin's layer", error);
+    return nodeId;
+  }
+}
+
 interface MessageAccess {
   id: string;
   thread_id: string;
@@ -271,6 +287,7 @@ export const comments = new Hono<AppContext>()
     const { file } = await fileForWrite(c, user);
     const body = await readBody(c, NewCommentThread);
     const mentions = await validMentions(c.env.DB, file, body.mentions);
+    const nodeId = await pinTarget(c.env, file.id, body.nodeId ?? null);
     const threadId = newId();
     const commentId = newId();
     const now = Date.now();
@@ -284,7 +301,7 @@ export const comments = new Hono<AppContext>()
         body.pageId,
         body.x,
         body.y,
-        body.nodeId,
+        nodeId,
         body.offset?.x ?? null,
         body.offset?.y ?? null,
         user.id,
@@ -385,6 +402,7 @@ export const comments = new Hono<AppContext>()
       );
     }
     if (anchor) {
+      const nodeId = await pinTarget(c.env, file.id, anchor.nodeId ?? null);
       // Moving a pin isn't activity: it leaves updated_at (and list order) alone.
       writes.push(
         c.env.DB.prepare(
@@ -393,7 +411,7 @@ export const comments = new Hono<AppContext>()
         ).bind(
           anchor.x,
           anchor.y,
-          anchor.nodeId,
+          nodeId,
           anchor.offset?.x ?? null,
           anchor.offset?.y ?? null,
           threadId,

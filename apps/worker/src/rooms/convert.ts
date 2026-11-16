@@ -18,9 +18,19 @@
  * Edits go on meanwhile, to the materialized file as ever. Each one marks
  * the instances it may have changed (`markDirty`, in the edit's own
  * storage transaction): the instance it's in, and every instance built from
- * a main it's in. Their rows are dropped and they're converted again. When
- * every top-level instance is settled, `applyConversion` replaces what
- * changed in one storage transaction: nobody sees the file half converted.
+ * a main it's in. Their rows are dropped and they're converted again. An
+ * instance deleted (or unlinked) before its turn is settled as gone. When a
+ * fresh listing of the file's instances finds every one settled
+ * (`StepResult.done`), `applyConversion` replaces what changed in one
+ * storage transaction, after listing them once more in it and refusing if
+ * any instance of a live main would still store layers: nobody sees the
+ * file half converted.
+ *
+ * A step is bounded by the work it does (rows read and written), not by
+ * the clock: on Cloudflare, `Date.now()` doesn't move while code runs
+ * without I/O. An instance is held whole while it converts, so one larger
+ * than `MAX_INSTANCE_LAYERS` stops the conversion (the file stays
+ * materialized and working) rather than run out of memory.
  *
  * The same code converts a table read from a snapshot (a version saved
  * before conversion, a branch's old base): `compactTable`.
@@ -35,6 +45,7 @@ import {
   type DetachedInstance,
   holdsIds,
   InstanceConverter,
+  ModelError,
   type NodeRecord,
   ROOT_ID,
   renameHeldIds,
@@ -49,6 +60,16 @@ import {
   toRecord,
   toRow,
 } from "./node-tables";
+
+/**
+ * About how much work a step of a room's conversion does: rows read and
+ * written. About a second and a half in Node for kit-shaped files (the
+ * memory check), whatever the clock says.
+ */
+export const CONVERT_STEP_WORK = 60_000;
+
+/** The most layers an instance may have to convert: it's held whole (and built) while it does. */
+export const MAX_INSTANCE_LAYERS = 5_000;
 
 /** The tables a conversion keeps its decisions in. */
 export interface ConvertTables {
@@ -212,6 +233,8 @@ class SqlConversion implements ConvertReader, ConvertSink {
   readonly #inside = new Map<string, readonly string[]>();
   convertedCount = 0;
   detachedCount = 0;
+  /** Rows read and written so far: what bounds a step. */
+  work = 0;
 
   constructor(room: RoomSql, src: string, t: ConvertTables) {
     this.#room = room;
@@ -247,6 +270,7 @@ class SqlConversion implements ConvertReader, ConvertSink {
         id,
       )
       .toArray()[0];
+    this.work++;
     const node = row ? toRecord(row) : null;
     this.#nodes.set(id, node);
     return node ?? undefined;
@@ -267,12 +291,27 @@ class SqlConversion implements ConvertReader, ConvertSink {
       )
       .toArray()
       .map((row) => row.id);
+    this.work += 1 + ids.length;
     this.#kids.set(parent, ids);
     return ids;
   }
 
+  countUnder(rootId: string): number {
+    const n = this.#sql
+      .exec<{ n: number }>(
+        `WITH RECURSIVE sub(id) AS (
+           SELECT id FROM ${this.#src} WHERE parent = ?
+           UNION ALL SELECT n.id FROM ${this.#src} n JOIN sub ON n.parent = sub.id
+         ) SELECT COUNT(*) AS n FROM sub`,
+        rootId,
+      )
+      .one().n;
+    this.work += 1 + Math.ceil(n / 4);
+    return n;
+  }
+
   layersUnder(rootId: string): readonly NodeRecord[] {
-    return this.#sql
+    const layers = this.#sql
       .exec<NodeRow>(
         `WITH RECURSIVE sub(id) AS (
            SELECT id FROM ${this.#src} WHERE parent = ?
@@ -282,6 +321,8 @@ class SqlConversion implements ConvertReader, ConvertSink {
       )
       .toArray()
       .map(toRecord);
+    this.work += 1 + layers.length;
+    return layers;
   }
 
   renamed(id: string): string | undefined {
@@ -302,6 +343,7 @@ class SqlConversion implements ConvertReader, ConvertSink {
       .exec<{ id: string }>(rootsUnderSql(this.#src), mainId)
       .toArray()
       .map((row) => row.id);
+    this.work += 1 + ids.length;
     this.#inside.set(mainId, ids);
     return ids;
   }
@@ -311,6 +353,7 @@ class SqlConversion implements ConvertReader, ConvertSink {
     if (cached !== undefined) return cached;
     const done =
       this.#sql.exec(`SELECT 1 FROM ${this.#t.done} WHERE root = ?`, rootId).toArray().length > 0;
+    this.work++;
     this.#settled.set(rootId, done);
     return done;
   }
@@ -343,6 +386,7 @@ class SqlConversion implements ConvertReader, ConvertSink {
     for (const from of ids.keys()) this.#kids.delete(from);
     this.#settled.set(root.id, true);
     this.convertedCount++;
+    this.work += 1 + records.length + ids.size;
   }
 
   detached({ root, layers, why, deps }: DetachedInstance): void {
@@ -352,7 +396,24 @@ class SqlConversion implements ConvertReader, ConvertSink {
     for (const layer of layers) this.#nodes.set(layer.id, layer);
     this.#settled.set(root.id, true);
     this.detachedCount++;
+    this.work += 1 + layers.length;
     console.warn(`compact copies: instance ${root.id} left detached: ${why}`);
+  }
+
+  /** Instances settled in this run, converted or detached. */
+  get settledCount(): number {
+    return this.convertedCount + this.detachedCount;
+  }
+
+  /**
+   * A listed root that's no longer an instance to convert (deleted, unlinked,
+   * its main gone): settled as gone. Made again (an undo), its edit marks it
+   * to convert again, and a fresh listing lists it.
+   */
+  gone(rootId: string): void {
+    this.#settle(rootId, "gone", null, []);
+    this.#settled.set(rootId, true);
+    this.work++;
   }
 
   #putRows(nodes: readonly NodeRecord[], rootId: string): void {
@@ -417,29 +478,41 @@ export interface StepResult {
   /** Instances settled in this step. */
   readonly converted: number;
   readonly detached: number;
-  /** Top-level instances not settled yet; 0 means the conversion can be applied. */
+  /** Listed top-level instances not settled yet. */
   readonly left: number;
+  /**
+   * Whether the conversion can be applied: this step listed the file's
+   * instances afresh and every one is settled. (`left` is 0 also when the
+   * budget ran out right after the last listed one: an instance made since
+   * isn't listed yet.)
+   */
+  readonly done: boolean;
 }
 
 /**
- * Converts instances until `budgetMs` has passed (each in its own storage
- * transaction), then says how many are left. When none are, the file's
- * roots are listed afresh (edits may have made new ones) before saying so.
+ * Converts instances until about `budget` rows have been read and written
+ * (at least one instance a step, each batch in its own storage
+ * transaction), then says what's left. When nothing listed is left, the
+ * file's instances are listed afresh (edits may have made new ones); only a
+ * step that did so and found nothing is `done`.
  */
 export function convertStep(
   room: RoomSql,
   src: string,
   t: ConvertTables,
-  budgetMs: number,
-  now: () => number = Date.now,
+  budget: number = CONVERT_STEP_WORK,
+  { maxInstanceLayers = MAX_INSTANCE_LAYERS }: { readonly maxInstanceLayers?: number } = {},
 ): StepResult {
   const sql = room.sql;
   createConvertTables(sql, t);
-  const started = now();
   if (sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${t.roots}`).one().n === 0)
     listRoots(sql, src, t);
   const conversion = new SqlConversion(room, src, t);
-  const converter = new InstanceConverter(conversion, conversion);
+  const converter = new InstanceConverter(conversion, conversion, {
+    maxInstanceLayers,
+    // At least one instance a step; then none that would take it past its budget.
+    stop: (layers) => conversion.settledCount > 0 && conversion.work + layers > budget,
+  });
   const pending = () =>
     sql
       .exec<{ id: string }>(
@@ -449,30 +522,88 @@ export function convertStep(
       .toArray()
       .map((row) => row.id);
   let relisted = false;
+  let stopped = false;
   for (;;) {
     let batch = pending();
-    if (batch.length === 0 && !relisted) {
+    if (batch.length === 0) {
+      if (relisted) break;
       listRoots(sql, src, t);
       relisted = true;
       batch = pending();
+      if (batch.length === 0) break;
     }
-    if (batch.length === 0) break;
     // A batch's decisions are kept together: one cut short is converted again.
     room.transact(() => {
       for (const id of batch) {
         converter.settle(id);
+        if (converter.stopped) {
+          stopped = true;
+          return;
+        }
+        // Deleted, unlinked or put inside another instance since it was listed.
+        if (!conversion.settled(id)) conversion.gone(id);
         if (converter.cached > 200_000) converter.clear();
-        if (now() - started > budgetMs) break;
+        if (conversion.work > budget && conversion.settledCount > 0) {
+          stopped = true;
+          return;
+        }
       }
     });
-    if (now() - started > budgetMs) break;
+    if (stopped) break;
   }
   const left = sql
     .exec<{ n: number }>(
       `SELECT COUNT(*) AS n FROM ${t.roots} r WHERE NOT EXISTS (SELECT 1 FROM ${t.done} d WHERE d.root = r.id)`,
     )
     .one().n;
-  return { converted: conversion.convertedCount, detached: conversion.detachedCount, left };
+  return {
+    converted: conversion.convertedCount,
+    detached: conversion.detachedCount,
+    left,
+    done: relisted && !stopped && left === 0,
+  };
+}
+
+/**
+ * Lists the file's instances afresh and says whether every one is settled:
+ * what applying waits for. Call in the storage transaction that applies,
+ * so nothing made since the last step is left materialized.
+ */
+export function readyToApply(sql: SqlStorage, src: string, t: ConvertTables): boolean {
+  listRoots(sql, src, t);
+  return (
+    sql
+      .exec(
+        `SELECT 1 FROM ${t.roots} r WHERE NOT EXISTS (SELECT 1 FROM ${t.done} d WHERE d.root = r.id) LIMIT 1`,
+      )
+      .toArray().length === 0
+  );
+}
+
+/**
+ * An instance root of a live main that still stores layers in `src`, or
+ * null: what a file stored compact must never have (its layers come from
+ * its main), checked after a conversion is applied and of what an import
+ * brings.
+ */
+export function strayInstance(sql: SqlStorage, src: string): string | null {
+  return (
+    sql
+      .exec<{ id: string }>(
+        `SELECT r.id FROM ${src} r
+          WHERE ${liveSql(src, "r")}
+            AND EXISTS (SELECT 1 FROM ${src} c WHERE c.parent = r.id AND c.type != 'override')
+          LIMIT 1`,
+      )
+      .toArray()[0]?.id ?? null
+  );
+}
+
+/** Applying would leave an instance materialized: refused (and rolled back), to try again. */
+export class NotAllConverted extends Error {
+  constructor(readonly rootId: string) {
+    super(`instance ${rootId} would still store its layers`);
+  }
 }
 
 /**
@@ -546,15 +677,16 @@ export function applyConversion(sql: SqlStorage, src: string, t: ConvertTables):
     .one().n;
   sql.exec(`DELETE FROM ${src} WHERE id IN (SELECT old FROM ${t.map})`);
   sql.exec(`INSERT OR REPLACE INTO ${src} (${NODE_COLUMNS}) SELECT ${NODE_COLUMNS} FROM ${t.rows}`);
-  // Ids held outside the converted instances (a reading order, a prototype link, a flow).
+  // Ids held anywhere (a reading order, a prototype link, a flow), override records and what the
+  // conversion wrote included: an instance can name another's copies, converted after it, whose
+  // ids weren't known yet. Renaming twice changes nothing (no derived id is an old one).
   let after = "";
   for (;;) {
     const rows = sql
       .exec<NodeRow>(
         `SELECT ${NODE_COLUMNS} FROM ${src}
-          WHERE id > ? AND type != 'override'
+          WHERE id > ?
             AND (props LIKE '%"readingOrder"%' OR props LIKE '%"reactions"%' OR props LIKE '%"flows"%')
-            AND NOT EXISTS (SELECT 1 FROM ${t.rows} r WHERE r.id = ${src}.id)
           ORDER BY id LIMIT 500`,
         after,
       )
@@ -573,32 +705,15 @@ export function applyConversion(sql: SqlStorage, src: string, t: ConvertTables):
     if (rows.length < 500) break;
     after = (rows[rows.length - 1] as NodeRow).id;
   }
+  // Nothing may be left materialized: an instance no step converted (one made meanwhile, say).
+  const stray = strayInstance(sql, src);
+  if (stray !== null) throw new NotAllConverted(stray);
   const detached = sql
     .exec<{ root: string; why: string }>(
       `SELECT root, why FROM ${t.done} WHERE status = 'detached' ORDER BY root`,
     )
     .toArray();
   return { removed, records, detached };
-}
-
-/** A copy layer's derived id, from an applied conversion's map (comment pins). */
-export function renamedIn(
-  sql: SqlStorage,
-  t: ConvertTables,
-  ids: readonly string[],
-): Map<string, string> {
-  const out = new Map<string, string>();
-  for (let i = 0; i < ids.length; i += 90) {
-    const batch = ids.slice(i, i + 90);
-    for (const row of sql
-      .exec<{ old: string; new: string }>(
-        `SELECT old, new FROM ${t.map} WHERE old IN (${batch.map(() => "?").join(", ")})`,
-        ...batch,
-      )
-      .toArray())
-      out.set(row.old, row.new);
-  }
-  return out;
 }
 
 /**
@@ -619,9 +734,19 @@ export function compactTable(room: RoomSql, table: string): Applied {
     createConvertTables(room.sql, t);
     for (;;) {
       const step = convertStep(room, table, t, Number.POSITIVE_INFINITY);
-      if (step.left === 0) break;
+      if (step.done) break;
     }
-    const applied = room.transact(() => applyConversion(room.sql, table, t));
+    let applied: Applied;
+    try {
+      applied = room.transact(() => applyConversion(room.sql, table, t));
+    } catch (error) {
+      if (error instanceof NotAllConverted)
+        throw new ModelError(
+          "invalid_value",
+          `Its component copies couldn't be converted: ${error.message}.`,
+        );
+      throw error;
+    }
     fillDepths(room.sql, table, Number.POSITIVE_INFINITY);
     return applied;
   } finally {
