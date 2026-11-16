@@ -1,3 +1,4 @@
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { signedInUser } from "./helpers";
 
@@ -70,6 +71,113 @@ describe("files API", () => {
     await browser.json(`/api/files/${file.id}`, { method: "DELETE" });
     await browser.json(`/api/files/${file.id}?permanent=1`, { method: "DELETE" });
     expect((await browser.fetch(`/api/files/${file.id}`)).status).toBe(404);
+  });
+
+  it("renames a project, moves files between projects, and deletes a project into the trash", async () => {
+    const { browser, projectId: drafts, teamId } = await signedInUser();
+    type Project = { id: string; name: string; fileCount: number };
+    const projects = async () =>
+      (await browser.json<{ projects: Project[] }>(`/api/teams/${teamId}/projects`)).projects;
+    const newFile = async (projectId: string, name: string) =>
+      (
+        await browser.json<{ file: { id: string } }>(`/api/projects/${projectId}/files`, {
+          method: "POST",
+          json: { name },
+        })
+      ).file.id;
+
+    // The team's only project can't go: new files need somewhere to land.
+    const alone = await browser.fetch(`/api/projects/${drafts}`, { method: "DELETE" });
+    expect(alone.status).toBe(409);
+
+    const { project } = await browser.json<{ project: Project }>(`/api/teams/${teamId}/projects`, {
+      method: "POST",
+      json: { name: "Mobile" },
+    });
+    await browser.json(`/api/projects/${project.id}`, {
+      method: "PATCH",
+      json: { name: "Mobile app" },
+    });
+    const a = await newFile(project.id, "Onboarding");
+    const b = await newFile(drafts, "Settings");
+    await browser.json(`/api/files/${b}`, { method: "PATCH", json: { projectId: project.id } });
+    expect((await projects()).find((p) => p.id === project.id)).toMatchObject({
+      name: "Mobile app",
+      fileCount: 2,
+    });
+
+    const deleted = await browser.json<{ trashed: number }>(`/api/projects/${project.id}`, {
+      method: "DELETE",
+    });
+    expect(deleted.trashed).toBe(2);
+    expect((await projects()).map((p) => p.id)).toEqual([drafts]);
+    const trash = await browser.json<{ files: { id: string }[] }>(
+      `/api/teams/${teamId}/files?view=trash`,
+    );
+    expect(trash.files.map((f) => f.id).sort()).toEqual([a, b].sort());
+    // Gone from view: nothing new goes in, and nothing moves there.
+    expect(
+      (await browser.fetch(`/api/projects/${project.id}/files`, { method: "POST", json: {} }))
+        .status,
+    ).toBe(404);
+    const c = await newFile(drafts, "Profile");
+    expect(
+      (
+        await browser.fetch(`/api/files/${c}`, {
+          method: "PATCH",
+          json: { projectId: project.id },
+        })
+      ).status,
+    ).toBe(404);
+
+    // Restoring one of its files brings the project back, with just that file.
+    await browser.json(`/api/files/${a}/restore`, { method: "POST" });
+    expect((await projects()).find((p) => p.id === project.id)).toMatchObject({
+      name: "Mobile app",
+      fileCount: 1,
+    });
+  });
+
+  it("empties the trash for good, and the deleted projects left with nothing", async () => {
+    const { browser, projectId: drafts, teamId } = await signedInUser();
+    const editor = await signedInUser("Editor", "editor", teamId);
+    const { project } = await browser.json<{ project: { id: string } }>(
+      `/api/teams/${teamId}/projects`,
+      { method: "POST", json: { name: "Old" } },
+    );
+    const ids: string[] = [];
+    for (const [projectId, name] of [
+      [project.id, "One"],
+      [drafts, "Two"],
+      [drafts, "Kept"],
+    ] as const) {
+      const { file } = await browser.json<{ file: { id: string } }>(
+        `/api/projects/${projectId}/files`,
+        { method: "POST", json: { name } },
+      );
+      ids.push(file.id);
+    }
+    await browser.json(`/api/projects/${project.id}`, { method: "DELETE" });
+    await browser.json(`/api/files/${ids[1]}`, { method: "DELETE" });
+
+    // Only an owner deletes for good.
+    const refused = await editor.browser.fetch(`/api/teams/${teamId}/trash/empty`, {
+      method: "POST",
+    });
+    expect(refused.status).toBe(403);
+
+    const emptied = await browser.json<{ deleted: number; remaining: number }>(
+      `/api/teams/${teamId}/trash/empty`,
+      { method: "POST" },
+    );
+    expect(emptied).toEqual({ deleted: 2, remaining: 0 });
+    for (const id of ids.slice(0, 2))
+      expect((await browser.fetch(`/api/files/${id}`)).status).toBe(404);
+    expect((await browser.fetch(`/api/files/${ids[2]}`)).status).toBe(200);
+    const left = await env.DB.prepare("SELECT id FROM projects WHERE team_id = ?")
+      .bind(teamId)
+      .all<{ id: string }>();
+    expect(left.results.map((r) => r.id)).toEqual([drafts]);
   });
 
   it("keeps a team owner", async () => {

@@ -1,6 +1,6 @@
 # Icons
 
-Drawpane's own icon set: 127 glyphs on a 16px grid, with a 1.5px stroke and round caps and joins. Every file is single-ink in `#1c1b19` (the Paper theme's `ink`), because an SVG shown through `<img>` can't inherit color. In product code, use `Drawpane.Icon`, which draws the same paths in `currentColor`.
+Drawpane's own icon set: 138 glyphs on a 16px grid, with a 1.5px stroke and round caps and joins. Every file is single-ink in `#1c1b19` (the Paper theme's `ink`), because an SVG shown through `<img>` can't inherit color. In product code, use `Drawpane.Icon`, which draws the same paths in `currentColor`.
 
 | Group | Names |
 | --- | --- |
@@ -17,5 +17,5 @@ Drawpane's own icon set: 127 glyphs on a 16px grid, with a 1.5px stroke and roun
 | Prototyping | `restart`, `device`, `flow` |
 | Properties | `radius`, `corners`, `opacity`, `rotate`, `gap-horizontal`, `gap-vertical`, `padding`, `line-height`, `letter-spacing`, `italic`, `list-bullet`, `list-number`, `indent`, `outdent`, `stroke-weight`, `dash`, `line`, `eyedropper`, `ruler`, `pixel-grid`, `minimap` |
 | Arrange | `align-left`, `align-center`, `align-right`, `align-top`, `align-middle`, `align-bottom`, `distribute-horizontal`, `distribute-vertical`, `tidy`, `flip-horizontal`, `flip-vertical`, `portrait`, `landscape`, `fit`, `bring-front`, `send-back`, `actual-size` |
-| Account and file | `sun`, `moon`, `sign-out`, `trash`, `link`, `detach`, `people`, `inbox`, `mail`, `sidebar` |
+| Account and file | `sun`, `moon`, `sign-out`, `trash`, `move`, `link`, `detach`, `people`, `inbox`, `mail`, `sidebar` |
 | Effects | `drop-shadow`, `inner-shadow`, `layer-blur`, `background-blur`, `glass` |

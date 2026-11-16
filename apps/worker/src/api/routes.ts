@@ -368,7 +368,7 @@ export const api = new Hono<AppContext>()
     const { results } = await c.env.DB.prepare(
       `SELECT p.id, p.team_id AS teamId, p.name, p.created_at AS createdAt, p.updated_at AS updatedAt,
               (SELECT COUNT(*) FROM files f WHERE f.project_id = p.id AND f.deleted_at IS NULL AND f.branch_of IS NULL) AS fileCount
-         FROM projects p WHERE p.team_id = ? ORDER BY p.created_at`,
+         FROM projects p WHERE p.team_id = ? AND p.deleted_at IS NULL ORDER BY p.created_at`,
     )
       .bind(teamId)
       .all();
@@ -404,18 +404,34 @@ export const api = new Hono<AppContext>()
     return c.json({ ok: true });
   })
 
+  /**
+   * Deletes a project: its files go to the trash, and it stays, hidden,
+   * until the last of them is deleted for good. Restoring one of them brings
+   * it back. A team keeps at least one project, for new files to go in.
+   */
   .delete("/projects/:projectId", async (c) => {
     const user = requireUser(c);
     const project = await projectTeam(c.env.DB, c.req.param("projectId"));
     await requireTeamRole(c.env, user.id, project.team_id, "owner");
-    const live = await c.env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM files WHERE project_id = ? AND deleted_at IS NULL AND branch_of IS NULL",
+    const others = await c.env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM projects WHERE team_id = ? AND id <> ? AND deleted_at IS NULL",
     )
-      .bind(project.id)
+      .bind(project.team_id, project.id)
       .first<{ n: number }>();
-    if ((live?.n ?? 0) > 0) throw conflict("Move or delete this project's files first.");
-    await c.env.DB.prepare("DELETE FROM projects WHERE id = ?").bind(project.id).run();
-    return c.json({ ok: true });
+    if ((others?.n ?? 0) === 0)
+      throw conflict("A team keeps at least one project. Create another before deleting this one.");
+    const now = Date.now();
+    const [trashed] = await c.env.DB.batch([
+      c.env.DB.prepare(
+        "UPDATE files SET deleted_at = ? WHERE project_id = ? AND deleted_at IS NULL AND branch_of IS NULL",
+      ).bind(now, project.id),
+      c.env.DB.prepare("UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ?").bind(
+        now,
+        now,
+        project.id,
+      ),
+    ]);
+    return c.json({ ok: true, trashed: trashed?.meta.changes ?? 0 });
   })
 
   // Files -------------------------------------------------------------------
@@ -610,10 +626,8 @@ export const api = new Hono<AppContext>()
     if (permanent) {
       if (file.deleted_at === null)
         throw conflict("Move the file to trash before deleting it for good.");
-      await deleteBranchesOf(c.env, file.id);
-      await c.env.FILE_ROOM.get(c.env.FILE_ROOM.idFromName(file.id)).destroy();
-      await c.env.FILES.delete(thumbnailKey(file.id));
-      await c.env.DB.prepare("DELETE FROM files WHERE id = ?").bind(file.id).run();
+      await deleteForGood(c.env, file.id);
+      await dropEmptiedProjects(c.env.DB, file.team_id);
     } else {
       await c.env.DB.prepare("UPDATE files SET deleted_at = ? WHERE id = ?")
         .bind(Date.now(), file.id)
@@ -622,13 +636,46 @@ export const api = new Hono<AppContext>()
     return c.json({ ok: true });
   })
 
+  /** Out of the trash, and its project with it if that was deleted too. */
   .post("/files/:fileId/restore", async (c) => {
     const user = requireUser(c);
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
-    await c.env.DB.prepare("UPDATE files SET deleted_at = NULL, updated_at = ? WHERE id = ?")
-      .bind(Date.now(), file.id)
-      .run();
+    const now = Date.now();
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE files SET deleted_at = NULL, updated_at = ? WHERE id = ?").bind(
+        now,
+        file.id,
+      ),
+      c.env.DB.prepare(
+        "UPDATE projects SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL",
+      ).bind(now, file.project_id),
+    ]);
     return c.json({ ok: true });
+  })
+
+  /**
+   * Empties the team's trash, a batch at a time (each file is several
+   * storage calls, and a request can make only so many): call again while
+   * `remaining` is more than 0.
+   */
+  .post("/teams/:teamId/trash/empty", async (c) => {
+    const user = requireUser(c);
+    const teamId = c.req.param("teamId");
+    await requireTeamRole(c.env, user.id, teamId, "owner");
+    const { results } = await c.env.DB.prepare(
+      `SELECT id FROM files WHERE team_id = ? AND deleted_at IS NOT NULL AND branch_of IS NULL
+        ORDER BY deleted_at LIMIT ${EMPTY_TRASH_BATCH}`,
+    )
+      .bind(teamId)
+      .all<{ id: string }>();
+    for (const { id } of results) await deleteForGood(c.env, id);
+    await dropEmptiedProjects(c.env.DB, teamId);
+    const left = await c.env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM files WHERE team_id = ? AND deleted_at IS NOT NULL AND branch_of IS NULL",
+    )
+      .bind(teamId)
+      .first<{ n: number }>();
+    return c.json({ deleted: results.length, remaining: left?.n ?? 0 });
   })
 
   // Comments ----------------------------------------------------------------
@@ -651,9 +698,32 @@ export const api = new Hono<AppContext>()
   // Google Fonts, copied to this server on first use (./fonts.ts) ------------
   .route("/fonts", fonts);
 
+/** Files emptying the trash deletes in one request. */
+const EMPTY_TRASH_BATCH = 20;
+
+/** A file (in the trash) gone for good: its branches, its room's storage, its thumbnail, its row. */
+async function deleteForGood(env: Env, fileId: string): Promise<void> {
+  await deleteBranchesOf(env, fileId);
+  await env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId)).destroy();
+  await env.FILES.delete(thumbnailKey(fileId));
+  await env.DB.prepare("DELETE FROM files WHERE id = ?").bind(fileId).run();
+}
+
+/** Deleted projects whose last file is gone for good go too. */
+async function dropEmptiedProjects(db: D1Database, teamId: string): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM projects WHERE team_id = ? AND deleted_at IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM files f WHERE f.project_id = projects.id)`,
+    )
+    .bind(teamId)
+    .run();
+}
+
+/** A project that isn't deleted, and its team; not found otherwise. */
 async function projectTeam(db: D1Database, projectId: string) {
   const row = await db
-    .prepare("SELECT id, team_id FROM projects WHERE id = ?")
+    .prepare("SELECT id, team_id FROM projects WHERE id = ? AND deleted_at IS NULL")
     .bind(projectId)
     .first<{ id: string; team_id: string }>();
   if (!row) throw notFound();
