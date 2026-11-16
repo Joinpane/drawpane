@@ -251,6 +251,57 @@ describe("reviewing and merging", () => {
     expect(after.some((n) => n.id === "A" || n.id === "Z")).toBe(false);
   });
 
+  it("refuses to combine two sides' changes into layers deeper than the limit", async () => {
+    const owner = await signedInUser("Ana");
+    const { file } = await owner.browser.json<{ file: { id: string } }>(
+      `/api/projects/${owner.projectId}/files`,
+      { method: "POST", json: { name: "Deep" } },
+    );
+    const main = await join(owner.browser, file.id, "clientM");
+    const group = (id: string, parent: string, key = "a0"): Op => ({
+      op: "create",
+      id,
+      type: "group",
+      parent,
+      key,
+      props: {},
+    });
+    // A chain of groups whose last is 127 levels down (the page is the first), and a group A
+    // beside it near the top.
+    const chain: Op[] = [];
+    for (let i = 1; i <= 126; i++) chain.push(group(`C${i}`, i === 1 ? main.page.id : `C${i - 1}`));
+    await main.edit([...chain, group("A", main.page.id, "a1")]);
+    const { branch } = await owner.browser.json<{ branch: BranchInfo }>(
+      `/api/files/${file.id}/branches`,
+      { method: "POST", json: { name: "Inside A" } },
+    );
+    const onBranch = await join(owner.browser, branch.id, "clientB");
+    // Each side's change is legal on its own: the branch puts B in A near the top, main moves
+    // the empty A to the bottom of the chain, 128 levels down.
+    await onBranch.edit([group("B", "A")]);
+    await main.edit([{ op: "move", id: "A", parent: "C126", key: "a0" }]);
+
+    // Merged, B would be 129 levels down in main.
+    const merged = await owner.browser.fetch(`/api/files/${branch.id}/branch/merge`, {
+      method: "POST",
+      json: { resolutions: {} },
+    });
+    expect(merged.status).toBe(409);
+    expect(await merged.text()).toContain("deeper than 128 levels");
+    const mainAfter = (await roomOf(file.id).allNodes()) as NodeRecord[];
+    expect(mainAfter.some((n) => n.id === "B")).toBe(false);
+
+    // Brought into the branch, main's move would take B down with A, 129 levels down.
+    const updated = await owner.browser.fetch(`/api/files/${branch.id}/branch/update`, {
+      method: "POST",
+    });
+    expect(updated.status).toBe(409);
+    expect(await updated.text()).toContain("deeper than 128 levels");
+    const branchAfter = (await roomOf(branch.id).allNodes()) as NodeRecord[];
+    expect(branchAfter.find((n) => n.id === "A")?.parent).toBe(main.page.id);
+    expect(branchAfter.find((n) => n.id === "B")?.parent).toBe("A");
+  });
+
   it("merges when the branch deleted something main has edited since, either way it's decided", async () => {
     for (const side of ["main", "branch"] as const) {
       const { browser, mainId, main, branch } = await mainWithBranch();

@@ -677,7 +677,11 @@ export class FileRoom extends DurableObject<Env> {
       const except = this.#attachments().find(({ me }) => me.sessionId === sessionId)?.ws;
       let committed: { revn: number; count: number; result: number };
       try {
-        committed = this.#commitChunks(author, (out) => restoreFromTable(this.#sql, table, out));
+        committed = this.#commitChunks(
+          author,
+          (out) => restoreFromTable(this.#sql, table, out),
+          true,
+        );
       } catch (error) {
         // The whole restore applies, or none of it.
         if (error instanceof ModelError)
@@ -1024,8 +1028,10 @@ export class FileRoom extends DurableObject<Env> {
       const author = { clientId: "merge", seq: 0, userId: by.userId, sessionId: "merge" };
       let committed: { revn: number; count: number };
       try {
-        committed = this.#commitChunks(author, (out) =>
-          applyThreeWay(this.#sql, tables, decided, out),
+        committed = this.#commitChunks(
+          author,
+          (out) => applyThreeWay(this.#sql, tables, decided, out),
+          false,
         );
       } catch (error) {
         // The whole merge applies, or none of it.
@@ -1105,17 +1111,21 @@ export class FileRoom extends DurableObject<Env> {
         const author = { clientId: "update", seq: 0, userId: by.userId, sessionId: "update" };
         let count: number;
         try {
-          ({ count } = this.#commitChunks(author, (out) => {
-            applyThreeWay(this.#sql, tables, none, out);
-            out.flush();
-            // In the same transaction as the changes: the branch and its base move together.
-            this.#setMeta("base_key", newKey);
-            this.#sql.exec(
-              "INSERT OR REPLACE INTO stale_objects (key, at) VALUES (?, ?)",
-              oldKey,
-              Date.now(),
-            );
-          }));
+          ({ count } = this.#commitChunks(
+            author,
+            (out) => {
+              applyThreeWay(this.#sql, tables, none, out);
+              out.flush();
+              // In the same transaction as the changes: the branch and its base move together.
+              this.#setMeta("base_key", newKey);
+              this.#sql.exec(
+                "INSERT OR REPLACE INTO stale_objects (key, at) VALUES (?, ?)",
+                oldKey,
+                Date.now(),
+              );
+            },
+            false,
+          ));
         } catch (error) {
           await this.env.FILES.delete(newKey).catch(() => {});
           if (error instanceof ModelError) return { ok: false, message: error.message };
@@ -1791,6 +1801,13 @@ export class FileRoom extends DurableObject<Env> {
   #commitChunks<R>(
     author: Author,
     produce: (out: OpChunks) => R,
+    /**
+     * Whether the operations bring back what this file already held (a
+     * restore), so layers come back as deep as they were. A merge or an
+     * update combines two files' changes into a tree neither held, so it
+     * follows the ordinary depth rule.
+     */
+    held: boolean,
   ): { revn: number; count: number; result: R } {
     let next = this.#revn;
     const sent: Array<{ revn: number; ops: Op[] }> = [];
@@ -1801,8 +1818,7 @@ export class FileRoom extends DurableObject<Env> {
       outcome = this.ctx.storage.transactionSync(() => {
         const out = new OpChunks((ops) => {
           next++;
-          // A restore, a merge or an update brings back layers as deep as they were held.
-          this.#applyLogged(ops, author, next, { inverse: false, held: true });
+          this.#applyLogged(ops, author, next, { inverse: false, held });
           this.#store.clearCache();
           if (tooBig) return;
           sentChars += JSON.stringify(ops).length;

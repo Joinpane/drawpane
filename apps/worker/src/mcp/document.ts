@@ -12,6 +12,8 @@ export interface DocView {
   get(id: string): NodeRecord | undefined;
   /** A node's children in order, read as they're asked for (a wide node is never read whole). */
   children(id: string): Iterable<NodeRecord>;
+  /** A node's children's ids in order, as they're asked for. */
+  childIds(id: string): Iterable<string>;
   childCount(id: string): number;
   pages(): NodeRecord[];
   /** The page a node is on, when it's on one (library copies and tokens aren't). */
@@ -23,17 +25,30 @@ export interface DocView {
 /** Children listed in full by `get_node`; past this they're counted. */
 export const DETAIL_CHILDREN = 500;
 
-/** Every node under the pages, parents first, holding only the path down to where it is. */
+/**
+ * Every node under the pages, parents first, holding only the path down to
+ * where it is: each level waiting below holds its children's ids, never a
+ * node, so a chain of nodes with large properties isn't kept on the way
+ * down. A node is read when it's reached and let go when the walk moves on.
+ */
 function* walkPages(doc: DocView): Generator<NodeRecord> {
-  const stack: Iterator<NodeRecord>[] = [doc.pages()[Symbol.iterator]()];
+  const stack: Iterator<string>[] = [
+    doc
+      .pages()
+      .map((p) => p.id)
+      [Symbol.iterator](),
+  ];
   while (stack.length > 0) {
-    const next = (stack[stack.length - 1] as Iterator<NodeRecord>).next();
+    const next = (stack[stack.length - 1] as Iterator<string>).next();
     if (next.done) {
       stack.pop();
       continue;
     }
-    yield next.value;
-    stack.push(doc.children(next.value.id)[Symbol.iterator]());
+    const node = doc.get(next.value);
+    // One deleted since its parent's ids were read is passed over.
+    if (!node) continue;
+    yield node;
+    stack.push(doc.childIds(next.value)[Symbol.iterator]());
   }
 }
 
@@ -65,6 +80,10 @@ export class FileDoc implements DocView {
 
   children(id: string): readonly NodeRecord[] {
     return this.#children.get(id) ?? [];
+  }
+
+  childIds(id: string): string[] {
+    return this.children(id).map((n) => n.id);
   }
 
   childCount(id: string): number {
@@ -102,6 +121,10 @@ export class SqlFileDoc implements DocView {
 
   children(id: string): Iterable<NodeRecord> {
     return this.#reader.childNodes(id);
+  }
+
+  childIds(id: string): Iterable<string> {
+    return this.#reader.children(id);
   }
 
   childCount(id: string): number {

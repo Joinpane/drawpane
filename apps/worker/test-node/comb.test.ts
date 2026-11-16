@@ -112,6 +112,38 @@ describe("a deep file with wide levels", { timeout: 3_600_000 }, () => {
     expect(found).toMatchObject({ total: 0 });
   });
 
+  it("searches a chain of nodes with large properties, holding one at a time", async () => {
+    // A third review's shape: 126 frames, each inside the last, each with 12,000 variant
+    // properties of 64 characters (about 1 MB a frame). A walk that kept every frame on its
+    // way down would hold all of them.
+    const chain = sqlDouble(join(dir, "chain.sqlite"), probe);
+    chain.sql.exec(NODE_SCHEMA);
+    insertNodes(chain.sql, "nodes", [
+      { id: "P1", parent: ROOT_ID, type: "page", key: "a0", props: {} },
+    ]);
+    const value = "v".repeat(64);
+    for (let i = 0; i < 126; i++) {
+      const variantProps: Record<string, string> = {};
+      for (let k = 0; k < 12_000; k++) variantProps[`p${k}`] = value;
+      chain.transact(() =>
+        insertNodes(chain.sql, "nodes", [
+          {
+            id: `F${i}`,
+            type: "frame",
+            parent: i === 0 ? "P1" : `F${i - 1}`,
+            key: "a0",
+            props: { variantProps },
+          },
+        ]),
+      );
+    }
+    const found = await measured("MCP find_nodes (a chain of 1 MB frames)", () =>
+      findNodes(new SqlFileDoc(new TableReader(chain.sql, "nodes")), "not-found", undefined, 10),
+    );
+    expect(found).toMatchObject({ total: 0 });
+    chain.close();
+  });
+
   it("hashes it as the in-memory reader does, on a smaller comb", () => {
     // The same shape, 20 levels of 50: small enough to read whole.
     const small = sqlDouble(join(dir, "small.sqlite"), () => {});
