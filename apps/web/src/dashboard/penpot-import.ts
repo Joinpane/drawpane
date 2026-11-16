@@ -9,13 +9,22 @@
 import type { NodeRecord } from "@drawpane/model";
 import { api, type FileMeta } from "../api/client";
 
-export type ImportStage = "waiting" | "images" | "converting" | "saving" | "done" | "failed";
+export type ImportStage =
+  | "waiting"
+  | "reading"
+  | "images"
+  | "converting"
+  | "saving"
+  | "done"
+  | "failed";
 
 export interface FileImport {
   readonly key: string;
   readonly name: string;
   readonly stage: ImportStage;
   readonly images: { readonly done: number; readonly total: number };
+  /** Reading from a service (Figma) in parts, and any wait it asked for. */
+  readonly reading?: { readonly done: number; readonly total: number; readonly waiting: number };
   readonly pages: number;
   readonly layers: number;
   /** The Drawpane file, once created. */

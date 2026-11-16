@@ -290,22 +290,32 @@ export function ImportDialog({
   );
 }
 
+/** Reading from Figma: in parts when the file is too large to send at once. */
+function readingStatus(reading: FileImport["reading"]): string {
+  if (reading?.waiting) return `Figma asked for a pause: going on in ${reading.waiting} s`;
+  if (reading && reading.total > 1)
+    return `Reading from Figma in parts: ${Math.min(reading.done + 1, reading.total)} of ${reading.total}`;
+  return "Reading from Figma";
+}
+
 function ImportRow({ row, onOpen }: { row: FileImport; onOpen: (fileId: string) => void }) {
-  const { stage, images } = row;
+  const { stage, images, reading } = row;
   const status =
     stage === "waiting"
       ? "Waiting"
-      : stage === "images"
-        ? images.total > 0
-          ? `Uploading images ${images.done} of ${images.total}`
-          : "Preparing"
-        : stage === "converting"
-          ? "Converting"
-          : stage === "saving"
-            ? "Saving"
-            : stage === "failed"
-              ? (row.error ?? "Failed")
-              : `${row.pages} ${row.pages === 1 ? "page" : "pages"} · ${row.layers} ${row.layers === 1 ? "layer" : "layers"}`;
+      : stage === "reading"
+        ? readingStatus(reading)
+        : stage === "images"
+          ? images.total > 0
+            ? `Uploading images ${images.done} of ${images.total}`
+            : "Preparing"
+          : stage === "converting"
+            ? "Converting"
+            : stage === "saving"
+              ? "Saving"
+              : stage === "failed"
+                ? (row.error ?? "Failed")
+                : `${row.pages} ${row.pages === 1 ? "page" : "pages"} · ${row.layers} ${row.layers === 1 ? "layer" : "layers"}`;
   // Images are most of the waiting; converting and saving are short.
   const progress =
     stage === "images" && images.total > 0
