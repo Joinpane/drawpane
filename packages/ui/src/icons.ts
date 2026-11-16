@@ -3,7 +3,7 @@
 /** One shape of an icon: an SVG element name and its React attributes. */
 export type IconNode = readonly [tag: string, attributes: Readonly<Record<string, string>>];
 
-/** Drawpane's 137 icons on a 16px grid; strokes and fills inherit currentColor. */
+/** Drawpane's 138 icons on a 16px grid; strokes and fills inherit currentColor. */
 export const iconData = {
   pointer: [
     [
@@ -1987,6 +1987,20 @@ export const iconData = {
       "path",
       {
         d: "M13.25 9.6A5.5 5.5 0 1 1 6.4 2.75a4.5 4.5 0 0 0 6.85 6.85z",
+      },
+    ],
+  ],
+  move: [
+    [
+      "path",
+      {
+        d: "M2.25 4.25a1 1 0 0 1 1-1h2.9l1.5 1.5h6.1a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H3.25a1 1 0 0 1-1-1z",
+      },
+    ],
+    [
+      "path",
+      {
+        d: "M6 9h4.25M8.5 7.25L10.25 9 8.5 10.75",
       },
     ],
   ],

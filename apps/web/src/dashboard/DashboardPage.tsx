@@ -24,6 +24,14 @@ import { FileThumbnail } from "./FileThumbnail";
 import { ImportDialog } from "./ImportDialog";
 import { InviteDialog } from "./InviteDialog";
 import { MembersView } from "./Members";
+import {
+  DeleteForeverDialog,
+  DeleteProjectDialog,
+  EmptyTrashDialog,
+  MoveFileDialog,
+  moveFile,
+  RenameProjectDialog,
+} from "./ProjectDialogs";
 import { isPenpotFile } from "./penpot-import";
 import { highlightParts, matchesAll, useDebounced } from "./search";
 import { TeamFontsView } from "./TeamFonts";
@@ -123,6 +131,14 @@ export function DashboardPage() {
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
+  const [renaming, setRenaming] = useState<Project | null>(null);
+  const [deleting, setDeleting] = useState<Project | null>(null);
+  const [moving, setMoving] = useState<FileMeta | null>(null);
+  const [deletingForGood, setDeletingForGood] = useState<FileMeta | null>(null);
+  const [emptyingTrash, setEmptyingTrash] = useState(false);
+  /** A file card being dragged, to drop on a project in the sidebar. */
+  const [carried, setCarried] = useState<FileMeta | null>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
   // A file dragged over the page: show where it can go.
   const [dragging, setDragging] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -214,6 +230,22 @@ export function DashboardPage() {
     setImportFile(file);
     setImportOpen(true);
   };
+  /** A project's options: rename for editors; delete (its files to the trash) for owners. */
+  const projectMenu = (p: Project): MenuItem[] => [
+    { label: "Rename", icon: "rename", onSelect: () => setRenaming(p) },
+    ...(role === "owner"
+      ? ([
+          { separator: true },
+          {
+            label: "Delete project",
+            icon: "trash",
+            danger: true,
+            disabled: (projects.data?.projects.length ?? 0) <= 1,
+            onSelect: () => setDeleting(p),
+          },
+        ] satisfies MenuItem[])
+      : []),
+  ];
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: dropping a .penpot export anywhere imports it; the Import button is the keyboard way
@@ -322,13 +354,23 @@ export function DashboardPage() {
         </div>
         <nav className="dash__nav dash__projects">
           {projects.data?.projects.map((p, i) => (
-            <NavLink
+            <ProjectRow
               key={p.id}
+              project={p}
               active={projectId === p.id}
               dot={i}
-              to={{ teamId, project: p.id }}
-              label={p.name}
-              count={p.fileCount}
+              teamId={teamId}
+              menu={canEdit ? projectMenu(p) : null}
+              carried={carried}
+              onDropFile={(file) => {
+                setCarried(null);
+                setMoveError(null);
+                void moveFile(file.id, p.id)
+                  .then(invalidateFiles)
+                  .catch((e: unknown) =>
+                    setMoveError(e instanceof Error ? e.message : "Couldn't move the file."),
+                  );
+              }}
             />
           ))}
         </nav>
@@ -366,7 +408,16 @@ export function DashboardPage() {
       ) : (
         <main className="dash__main" inert={behind}>
           <header className="dash__header">
-            <h1 className="dash__title">{heading}</h1>
+            <div className="dash__heading">
+              <h1 className="dash__title">{heading}</h1>
+              {project && canEdit && !searching ? (
+                <MenuButton
+                  label={`Options for ${project.name}`}
+                  items={projectMenu(project)}
+                  align="start"
+                />
+              ) : null}
+            </div>
             <label className="dash__search">
               <Icon name="search" />
               <input
@@ -406,6 +457,11 @@ export function DashboardPage() {
                 <span className="dash__btn-label">Import</span>
               </Button>
             ) : null}
+            {view === "trash" && role === "owner" && !searching && visible.length > 0 ? (
+              <Button size="lg" icon="trash" onClick={() => setEmptyingTrash(true)}>
+                Empty trash
+              </Button>
+            ) : null}
             {canEdit && view !== "trash" ? (
               <Button
                 variant="primary"
@@ -422,6 +478,11 @@ export function DashboardPage() {
           {createFile.error ? (
             <p className="dash__error" role="alert">
               {createFile.error.message}
+            </p>
+          ) : null}
+          {moveError ? (
+            <p className="dash__error" role="alert">
+              {moveError}
             </p>
           ) : null}
 
@@ -470,6 +531,9 @@ export function DashboardPage() {
                     }
                     highlight={searching ? query : ""}
                     onChanged={invalidateFiles}
+                    onMove={() => setMoving(file)}
+                    onDeleteForever={() => setDeletingForGood(file)}
+                    onCarry={(carrying) => setCarried(carrying ? file : null)}
                   />
                 ))}
               </ul>
@@ -500,6 +564,37 @@ export function DashboardPage() {
           </p>
         </div>
       ) : null}
+      <RenameProjectDialog
+        project={renaming}
+        onClose={() => setRenaming(null)}
+        onRenamed={invalidateFiles}
+      />
+      <DeleteProjectDialog
+        project={deleting}
+        onClose={() => setDeleting(null)}
+        onDeleted={(gone) => {
+          invalidateFiles();
+          if (projectId === gone.id) void navigate({ to: "/t/$teamId", params: { teamId } });
+        }}
+      />
+      <MoveFileDialog
+        file={moving}
+        projects={projects.data?.projects ?? []}
+        onClose={() => setMoving(null)}
+        onMoved={invalidateFiles}
+      />
+      <DeleteForeverDialog
+        file={deletingForGood}
+        onClose={() => setDeletingForGood(null)}
+        onDeleted={invalidateFiles}
+      />
+      <EmptyTrashDialog
+        open={emptyingTrash}
+        teamId={teamId}
+        count={files.data?.files.length ?? 0}
+        onClose={() => setEmptyingTrash(false)}
+        onEmptied={invalidateFiles}
+      />
       <NewProjectDialog
         open={newProjectOpen}
         teamId={teamId}
@@ -597,6 +692,79 @@ function NavLink({
   );
 }
 
+/** What a dragged file card carries (its id), so only the dashboard's own drops take it. */
+const FILE_DRAG = "application/x-drawpane-file";
+
+/**
+ * A project in the sidebar: a link to it, its options on hover or focus,
+ * and somewhere to drop a file card to move the file there.
+ */
+function ProjectRow({
+  project,
+  active,
+  dot,
+  teamId,
+  menu,
+  carried,
+  onDropFile,
+}: {
+  project: Project;
+  active: boolean;
+  dot: number;
+  teamId: string;
+  menu: MenuItem[] | null;
+  /** A file card being dragged, if any. */
+  carried: FileMeta | null;
+  onDropFile: (file: FileMeta) => void;
+}) {
+  const [over, setOver] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  // A file can be put in any project but its own.
+  const takes = carried !== null && carried.projectId !== project.id;
+  useEffect(() => {
+    if (!takes) setOver(false);
+  }, [takes]);
+  return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: dropping a file card here moves it; "Move to…" on the card is the keyboard way
+    <div
+      className="dash__project"
+      data-drop={takes ? (over ? "over" : "ready") : undefined}
+      data-menu-open={menuOpen || undefined}
+      onDragOver={(e) => {
+        if (!takes || !e.dataTransfer.types.includes(FILE_DRAG)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        setOver(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver(false);
+      }}
+      onDrop={(e) => {
+        if (!takes || !carried) return;
+        e.preventDefault();
+        setOver(false);
+        onDropFile(carried);
+      }}
+    >
+      <NavLink
+        active={active}
+        dot={dot}
+        to={{ teamId, project: project.id }}
+        label={project.name}
+        count={project.fileCount}
+      />
+      {menu ? (
+        <MenuButton
+          className="dash__project-menu"
+          label={`Options for ${project.name}`}
+          items={menu}
+          onOpenChange={setMenuOpen}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 function UserMenu({ name, email, admin }: { name: string; email: string; admin: boolean }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -649,6 +817,9 @@ function FileCard({
   projectName,
   highlight,
   onChanged,
+  onMove,
+  onDeleteForever,
+  onCarry,
 }: {
   file: FileMeta;
   trash: boolean;
@@ -658,6 +829,10 @@ function FileCard({
   /** A search query whose words are marked in the name. */
   highlight: string;
   onChanged: () => void;
+  onMove: () => void;
+  onDeleteForever: () => void;
+  /** Dragged (to a project in the sidebar), or put down. */
+  onCarry: (carrying: boolean) => void;
 }) {
   const navigate = useNavigate();
   const [renaming, setRenaming] = useState(false);
@@ -665,6 +840,7 @@ function FileCard({
   const [error, setError] = useState<string | null>(null);
   const menuItems: MenuItem[] = [
     { label: "Rename", icon: "rename", onSelect: () => setRenaming(true) },
+    { label: "Move to…", icon: "move", onSelect: onMove },
     {
       label: "Duplicate",
       icon: "duplicate",
@@ -718,8 +894,19 @@ function FileCard({
     if (!trash) void navigate({ to: "/f/$fileId", params: { fileId: file.id } });
   };
 
+  const movable = canEdit && !trash && !renaming;
   return (
-    <li className="dash__card">
+    <li
+      className="dash__card"
+      draggable={movable}
+      onDragStart={(e) => {
+        if (!movable) return;
+        e.dataTransfer.setData(FILE_DRAG, file.id);
+        e.dataTransfer.effectAllowed = "move";
+        onCarry(true);
+      }}
+      onDragEnd={() => onCarry(false)}
+    >
       <button
         type="button"
         className="dash__thumb"
@@ -801,11 +988,7 @@ function FileCard({
                 Restore
               </Button>
               {isOwner ? (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => act(() => api.delete(`/files/${file.id}?permanent=1`))}
-                >
+                <Button size="sm" variant="ghost" onClick={onDeleteForever}>
                   Delete forever
                 </Button>
               ) : null}
