@@ -12,6 +12,7 @@ import { convertFile as convertFigma } from "@drawpane/figma";
 import {
   applyTransaction,
   compact,
+  compactByInstance,
   expand,
   firstDifference,
   MemoryStore,
@@ -66,6 +67,12 @@ function equivalent(materialized: readonly NodeRecord[]): Checked {
   expect(difference).toBeNull();
   // Canonical: the stored form of the built document is the stored form.
   expect(firstDifference(result.nodes, compact(expand(result.nodes)).nodes)).toBeNull();
+  // An instance at a time, as a room converts a stored file (phase 4b): the same stored form,
+  // every instance checked as it goes and none left behind.
+  const streamed = compactByInstance(materialized);
+  expect([...streamed.detached], "instances the room would detach").toEqual([]);
+  expect(firstDifference(result.nodes, streamed.nodes)).toBeNull();
+  expect(new Map(streamed.ids)).toEqual(new Map(result.ids));
   return {
     layers: materialized.length,
     stored: result.nodes.length,

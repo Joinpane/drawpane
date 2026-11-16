@@ -25,7 +25,6 @@ import type { AppContext, Env } from "../env";
 import { readCapped } from "../lib/body";
 import { badRequest, conflict, notFound } from "../lib/http";
 import type { ImportPartResult, ImportResult } from "../rooms/file-room";
-import { NO_COMPACT_COPIES } from "../rooms/import-stage";
 import { requireFileRole } from "./access";
 
 /** The most one request sends: a part, or a whole one-request import. */
@@ -53,9 +52,8 @@ async function readNodes(request: Request): Promise<NodeRecord[]> {
   }
   const parsed = Part.safeParse(json);
   if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? "Invalid import.");
-  // Override records (decision 0029) wait for rooms that store compact copies (phase 4b).
-  // The room refuses them too, for each part and again at the commit.
-  if (parsed.data.nodes.some((n) => n.type === "override")) throw badRequest(NO_COMPACT_COPIES);
+  // Override records (decision 0029) come only into a file that stores compact copies: the
+  // room says, for each part and again at the commit.
   return parsed.data.nodes as NodeRecord[];
 }
 
@@ -105,7 +103,11 @@ export const imports = new Hono<AppContext>()
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
     const begun = await room(c.env, file.id).beginImport(file.id);
     if (!begun.ok) throw conflict("This file already has content; import into a new file.");
-    return c.json({ importId: begun.importId, partBytes: IMPORT_MAX_BYTES }, 201);
+    // How the file stores copies (decision 0029): the browser converts before sending when it can.
+    return c.json(
+      { importId: begun.importId, partBytes: IMPORT_MAX_BYTES, copies: begun.copies },
+      201,
+    );
   })
 
   /** One part of an import's nodes, checked and kept for the commit. */

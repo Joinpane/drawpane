@@ -15,7 +15,13 @@ async function newFile() {
 
 async function join(browser: Browser, fileId: string, clientId: string) {
   const socket = await openSocket(browser, fileId);
-  socket.send({ t: "hello", protocol: 1, clientId, revn: null });
+  socket.send({
+    t: "hello",
+    protocol: 2,
+    clientId,
+    revn: null,
+    copies: ["materialized", "compact"],
+  });
   const welcome = await socket.next<{ sessionId: string; revn: number }>("welcome");
   const nodes: NodeRecord[] = [];
   for (;;) {

@@ -101,6 +101,8 @@ export interface CompactApplied {
   readonly inverse: Op[];
   /** The operations as stored. */
   readonly stored: Op[];
+  /** Undoes the stored operations exactly, as stored operations (`applyStored`). */
+  readonly storedInverse: Op[];
   readonly ids: ReadonlySet<string>;
   readonly parents: ReadonlySet<string>;
 }
@@ -177,6 +179,7 @@ export class CompactCopies {
     return {
       inverse: tx.inverse.reverse().flat(),
       stored: tx.stored,
+      storedInverse: [...tx.undoStored].reverse().flat(),
       ids: tx.ids,
       parents: tx.parents,
     };
@@ -191,12 +194,8 @@ export class CompactCopies {
       this.#rollback(tx);
       throw error;
     }
-    return {
-      inverse: tx.inverse.reverse().flat(),
-      stored: tx.stored,
-      ids: tx.ids,
-      parents: tx.parents,
-    };
+    const inverse = tx.inverse.reverse().flat();
+    return { inverse, stored: tx.stored, storedInverse: inverse, ids: tx.ids, parents: tx.parents };
   }
 
   #tx(held = false): Tx {

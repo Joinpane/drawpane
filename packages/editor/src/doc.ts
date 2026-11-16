@@ -1,6 +1,7 @@
 import {
   type ApplyOptions,
   applyTransaction,
+  type CopiesFormat,
   type CopySlot,
   collectSubtree,
   compact,
@@ -30,14 +31,19 @@ export interface DocOptions {
   /**
    * Keep copies compact (decision 0029): store instance roots and override
    * records, and present every copy layer as an ordinary node. Off unless
-   * asked for, or `setCompactCopiesDefault(true)` was called.
+   * asked for, or `setCompactCopiesDefault(true)` was called. A document
+   * loaded from a room takes the form the room stores (`resetStored`).
    */
   readonly compactCopies?: boolean;
 }
 
 let compactByDefault = false;
 
-/** Whether new documents keep copies compact (decision 0029's flag; off by default). */
+/**
+ * Whether new documents keep copies compact before anything says otherwise
+ * (off by default; the tests' second run turns it on). A file from a room
+ * takes the room's form when it loads.
+ */
 export function setCompactCopiesDefault(on: boolean): void {
   compactByDefault = on;
 }
@@ -56,7 +62,7 @@ export function compactCopiesDefault(): boolean {
  * operations on presented nodes (see compact-copies.ts).
  */
 export class Doc {
-  readonly compactCopies: boolean;
+  #compactCopies: boolean;
   #store = new MemoryStore();
   #compact: CompactCopies | null;
   readonly #listeners = new Set<Listener>();
@@ -69,11 +75,22 @@ export class Doc {
   #logIds = 0;
 
   #lastStored: readonly Op[] = [];
+  #lastStoredInverse: readonly Op[] = [];
   #resetIds: ReadonlyMap<string, string> = new Map();
 
   constructor(options: DocOptions = {}) {
-    this.compactCopies = options.compactCopies ?? compactByDefault;
-    this.#compact = this.compactCopies ? new CompactCopies() : null;
+    this.#compactCopies = options.compactCopies ?? compactByDefault;
+    this.#compact = this.#compactCopies ? new CompactCopies() : null;
+  }
+
+  /** Whether copies are kept compact (decision 0029): as the file's room stores them. */
+  get compactCopies(): boolean {
+    return this.#compactCopies;
+  }
+
+  /** How copies are stored here, as the room says it. */
+  get copies(): CopiesFormat {
+    return this.#compactCopies ? "compact" : "materialized";
   }
 
   get version(): number {
@@ -82,6 +99,11 @@ export class Doc {
 
   get size(): number {
     return this.#compact ? this.#compact.size : this.#store.size;
+  }
+
+  /** Nodes as stored (override records counted, copy layers not): what a room holds. */
+  get storedSize(): number {
+    return (this.#compact?.store ?? this.#store).size;
   }
 
   get(id: string): NodeRecord | undefined {
@@ -149,6 +171,25 @@ export class Doc {
     return this.#compact?.layoutDiffers(rootId) ?? false;
   }
 
+  /**
+   * The stored form as a reader, without copying it: override records and
+   * instance roots as stored, no copy layers (compact copies), or the
+   * document itself otherwise. What a comparison with a room's stored nodes
+   * reads (a branch's review).
+   */
+  storedReader(): {
+    get(id: string): NodeRecord | undefined;
+    childIds(parent: string): readonly string[];
+    pageIds(): readonly string[];
+  } {
+    const store = () => this.#compact?.store ?? this.#store;
+    return {
+      get: (id) => store().get(id),
+      childIds: (parent) => store().childIds(parent),
+      pageIds: () => this.pageIds(),
+    };
+  }
+
   /** The stored form: what a room would store. Materialized when copies aren't compact. */
   stored(): NodeRecord[] {
     return [...(this.#compact?.store ?? this.#store).nodes()];
@@ -164,6 +205,11 @@ export class Doc {
     return this.#lastStored;
   }
 
+  /** What undoes the latest `apply` exactly, as stored operations (for `applyStored`). */
+  get lastStoredInverse(): readonly Op[] {
+    return this.#lastStoredInverse;
+  }
+
   /**
    * Applies operations all-or-nothing and returns their inverse. `held`:
    * they put back what the document held (a rebase, a change the room
@@ -173,12 +219,14 @@ export class Doc {
     if (this.#compact) {
       const applied = this.#compact.apply(ops, options);
       this.#lastStored = applied.stored;
+      this.#lastStoredInverse = applied.storedInverse;
       this.#record(new Set(applied.ids), new Set(applied.parents), false);
       return applied.inverse;
     }
     const touched = this.#touched(ops);
     const inverse = applyTransaction(this.#store, ops, { held: options.held ?? false });
     this.#lastStored = ops;
+    this.#lastStoredInverse = inverse;
     this.#record(touched.ids, touched.parents, false);
     return inverse;
   }
@@ -188,13 +236,14 @@ export class Doc {
     if (!this.#compact) return this.apply(ops, options);
     const applied = this.#compact.applyStored(ops, options);
     this.#lastStored = applied.stored;
+    this.#lastStoredInverse = applied.storedInverse;
     this.#record(new Set(applied.ids), new Set(applied.parents), false);
     return applied.inverse;
   }
 
   /** Replaces the whole document, e.g. from a snapshot (in the materialized form). */
   reset(nodes: Iterable<NodeRecord>): void {
-    if (this.compactCopies) {
+    if (this.#compactCopies) {
       const converted = compact([...nodes]);
       this.#compact = new CompactCopies(converted.nodes);
       this.#resetIds = converted.ids;
@@ -205,10 +254,21 @@ export class Doc {
     this.#record(new Set(), new Set(), true);
   }
 
-  /** Replaces the whole document with one already in the stored form (compact copies). */
-  resetStored(nodes: Iterable<NodeRecord>): void {
-    if (this.compactCopies) this.#compact = new CompactCopies(nodes);
-    else this.#store = new MemoryStore(nodes);
+  /**
+   * Replaces the whole document with nodes as a room stores them: in
+   * `copies` form when said (which this document then keeps, as a file's
+   * room tells it), else in the form it keeps.
+   */
+  resetStored(nodes: Iterable<NodeRecord>, copies?: CopiesFormat): void {
+    if (copies !== undefined) this.#compactCopies = copies === "compact";
+    if (this.#compactCopies) {
+      this.#compact = new CompactCopies(nodes);
+      this.#store = new MemoryStore();
+    } else {
+      this.#compact = null;
+      this.#store = new MemoryStore(nodes);
+    }
+    this.#resetIds = new Map();
     this.#record(new Set(), new Set(), true);
   }
 

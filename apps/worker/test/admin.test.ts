@@ -9,7 +9,13 @@ const makeAdmin = (userId: string) =>
 
 async function edit(browser: Parameters<typeof openSocket>[0], fileId: string, count: number) {
   const socket = await openSocket(browser, fileId);
-  socket.send({ t: "hello", protocol: 1, clientId: `c-${fileId}`, revn: null });
+  socket.send({
+    t: "hello",
+    protocol: 2,
+    clientId: `c-${fileId}`,
+    revn: null,
+    copies: ["materialized", "compact"],
+  });
   await socket.next("welcome");
   let page: NodeRecord | undefined;
   for (;;) {
@@ -66,7 +72,13 @@ describe("instance health", () => {
     expect(after.files.busy).toBeGreaterThanOrEqual(1);
     // Clients report how long confirmations took: 40 fast, 2 slow.
     const reporter = await openSocket(ana.browser, file.id);
-    reporter.send({ t: "hello", protocol: 1, clientId: "reporter", revn: null });
+    reporter.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "reporter",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
     await reporter.next("welcome");
     reporter.send({ t: "stats", latency: [0, 0, 0, 40, 0, 0, 0, 0, 2, 0, 0] });
     reporter.send({ t: "ping" });

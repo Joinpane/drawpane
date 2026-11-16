@@ -333,6 +333,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: 5.20261113.1
         version: 5.20261113.1
+      '@drawpane/corpus':
+        specifier: workspace:*
+        version: link:../../packages/corpus
       '@simplewebauthn/browser':
         specifier: 14.0.0
         version: 14.0.0

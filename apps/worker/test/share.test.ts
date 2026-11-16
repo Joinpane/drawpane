@@ -15,7 +15,13 @@ async function sharedFile() {
 const tokenOf = (url: string) => new URL(url).pathname.replace(/^\/p\//, "");
 
 async function hello(socket: Awaited<ReturnType<typeof openSocketAt>>, clientId: string) {
-  socket.send({ t: "hello", protocol: 1, clientId, revn: null });
+  socket.send({
+    t: "hello",
+    protocol: 2,
+    clientId,
+    revn: null,
+    copies: ["materialized", "compact"],
+  });
   const welcome = await socket.next<{ role: string; peers: unknown[]; mode: string }>("welcome");
   const nodes: NodeRecord[] = [];
   for (;;) {

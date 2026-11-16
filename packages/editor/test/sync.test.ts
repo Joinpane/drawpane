@@ -11,7 +11,7 @@ import {
 } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { Doc } from "../src/doc";
+import { compactCopiesDefault, Doc } from "../src/doc";
 import { compactOps, SyncEngine } from "../src/sync";
 
 /** A FileRoom stand-in with the same ordering, dedupe and catch-up rules. */
@@ -40,6 +40,7 @@ class FakeRoom {
         peers: [],
         mode: catchup ? "catchup" : "snapshot",
         lastSeq: this.lastSeq.get(message.clientId)?.seq ?? 0,
+        copies: compactCopiesDefault() ? "compact" : "materialized",
       });
       if (catchup) {
         for (const entry of this.log) {
@@ -376,6 +377,7 @@ describe("SyncEngine room requests", () => {
       peers: [],
       mode: "snapshot",
       lastSeq: 0,
+      copies: compactCopiesDefault() ? "compact" : "materialized",
     });
     engine.receive({ t: "snapshot", nodes: [], done: true });
     return { doc, engine, sent };
@@ -389,7 +391,15 @@ describe("SyncEngine room requests", () => {
     sent.length = 0;
     engine.receive({ t: "resync" });
     expect(engine.status).toBe("syncing");
-    expect(sent).toEqual([{ t: "hello", protocol: 1, clientId: "c1", revn: null }]);
+    expect(sent).toEqual([
+      {
+        t: "hello",
+        protocol: 2,
+        clientId: "c1",
+        revn: null,
+        copies: ["materialized", "compact"],
+      },
+    ]);
     expect(engine.pendingCount).toBe(1);
     expect(desyncs).toEqual([]);
   });
@@ -429,6 +439,7 @@ describe("SyncEngine room requests", () => {
       peers: [],
       mode: "snapshot",
       lastSeq: 0,
+      copies: compactCopiesDefault() ? "compact" : "materialized",
     });
     engine.receive({ t: "snapshot", nodes: [], done: true });
     engine.commit(seed);
@@ -481,6 +492,7 @@ describe("SyncEngine in a file deeper than 128 levels", () => {
       peers: [],
       mode: "snapshot",
       lastSeq: 0,
+      copies: compactCopiesDefault() ? "compact" : "materialized",
     });
     engine.receive({ t: "snapshot", nodes, done: true });
     const desyncs: string[] = [];

@@ -8,6 +8,8 @@
  * words, with its size.
  */
 import {
+  type CopiesFormat,
+  compact,
   IMPORT_PART_BYTES,
   MAX_IMPORT_BYTES,
   MAX_IMPORT_NODES,
@@ -84,7 +86,8 @@ export async function saveImport(
   onProgress?: (sent: number, total: number) => void,
 ): Promise<void> {
   const file = `/files/${encodeURIComponent(fileId)}`;
-  const parts = partsOf(nodes);
+  let parts = partsOf(nodes);
+  let total = nodes.length;
   // The first part is measured before anything is sent: most imports are one.
   let next = parts.next();
   const tooLarge = (bytes: number, sent: number) =>
@@ -97,8 +100,19 @@ export async function saveImport(
   if (!next.done && next.value.bytes > MAX_IMPORT_BYTES)
     throw tooLarge(next.value.bytes, next.value.count);
 
-  const { importId } = await api.post<{ importId: string }>(`${file}/imports`, {});
+  const { importId, copies } = await api.post<{ importId: string; copies?: CopiesFormat }>(
+    `${file}/imports`,
+    {},
+  );
   const imports = `${file}/imports/${encodeURIComponent(importId)}`;
+  // Into a file that stores compact copies (decision 0029), copies go as override records:
+  // about a fifth to send. (The room converts what comes materialized, too.)
+  if (copies === "compact") {
+    const stored = compact(nodes).nodes;
+    parts = partsOf(stored);
+    next = parts.next();
+    total = stored.length;
+  }
   let sent = 0;
   let bytes = 0;
   try {
@@ -112,7 +126,7 @@ export async function saveImport(
         );
       await api.post(`${imports}/parts`, new JsonText(part.body));
       sent += part.count;
-      onProgress?.(sent, nodes.length);
+      onProgress?.(Math.round((sent / total) * nodes.length), nodes.length);
     }
     await api.post(`${imports}/commit`, {});
   } catch (error) {

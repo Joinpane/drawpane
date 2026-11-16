@@ -4,7 +4,6 @@ import {
   Interaction,
   liveFlows,
   screenOf,
-  setCompactCopiesDefault,
   setGlassTuning,
 } from "@drawpane/editor";
 import type { BranchInfo, VersionInfo } from "@drawpane/model";
@@ -134,16 +133,10 @@ function FileEditor({ fileId }: { fileId: string }) {
     queryFn: () => api.file(fileId),
     retry: false,
   });
-  const [editor] = useState(() => {
-    // Compact copies (decision 0029) stay a developer switch until the room stores them:
-    // `localStorage.setItem("drawpane:compact-copies", "1")`.
-    try {
-      setCompactCopiesDefault(localStorage.getItem("drawpane:compact-copies") === "1");
-    } catch {
-      // Storage blocked: off.
-    }
-    return new Editor({ measurer: textMeasurer(), booleanEngine: loadBooleanEngine });
-  });
+  // How copies are kept (decision 0029) is the file's: the room says at hello.
+  const [editor] = useState(
+    () => new Editor({ measurer: textMeasurer(), booleanEngine: loadBooleanEngine }),
+  );
   const interaction = useMemo(() => new Interaction(editor), [editor]);
   // The inspector's popovers open over the canvas, clear of it and of the selection.
   const inspectorPane = useRef<HTMLElement>(null);
@@ -230,7 +223,7 @@ function FileEditor({ fileId }: { fileId: string }) {
   const [activeChange, setActiveChange] = useState<string | null>(null);
   useEffect(() => {
     if (!comparing || !review.main) return;
-    compare.load(review.main);
+    compare.load(review.main, review.mainCopies);
     return compare.link();
   }, [comparing, review.main, compare]);
   // On opening review, and on changing how the two are shown (the canvases move), show

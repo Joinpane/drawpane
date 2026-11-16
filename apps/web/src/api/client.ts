@@ -2,11 +2,13 @@
 import {
   type BranchInfo,
   type BranchReviewNodes,
+  type CopiesFormat,
   type LibraryPublish,
   type NodeRecord,
   parseBranchReview,
   parseSnapshot,
   type Resolution,
+  snapshotCopies,
   type VersionInfo,
 } from "@drawpane/model";
 
@@ -250,12 +252,15 @@ export const api = {
     versionId: string,
     body: { name?: string | null; description?: string | null },
   ) => request<{ version: VersionInfo }>("PATCH", `/files/${fileId}/versions/${versionId}`, body),
-  /** The file's nodes as they were in a version. */
-  versionNodes: async (fileId: string, versionId: string): Promise<NodeRecord[]> => {
+  /** The file's nodes as they were in a version, and how they store copies (decision 0029). */
+  versionNodes: async (
+    fileId: string,
+    versionId: string,
+  ): Promise<{ nodes: NodeRecord[]; copies: CopiesFormat }> => {
     const text = await requestText("GET", `/files/${fileId}/versions/${versionId}/snapshot`);
     const snapshot = parseSnapshot(text);
     if (!snapshot) throw new ApiError(500, "internal", "That version couldn't be read.");
-    return snapshot.nodes;
+    return { nodes: snapshot.nodes, copies: snapshotCopies(snapshot.header) };
   },
   /** Publishes the file as a team library (decision 0010): a named version, and what it offers. */
   publishLibrary: (fileId: string, body: { description?: string }) =>

@@ -7,10 +7,20 @@
  */
 import { z } from "zod";
 import type { CommentEvent } from "./comments";
+import type { CopiesFormat } from "./convert";
 import { ID_PATTERN } from "./ids";
 import { type NodeRecord, type Op, OpsSchema } from "./ops";
 
-export const PROTOCOL_VERSION = 1;
+/**
+ * 2: the room says how the file stores copies (decision 0029), at welcome;
+ * the client says which ways it can read, at hello. A client on version 1
+ * (from before compact copies) is served only a file stored materialized,
+ * and told to reload otherwise.
+ */
+export const PROTOCOL_VERSION = 2;
+
+/** The close code that tells a client the room needs a newer one: reload the page. */
+export const RELOAD_CLOSE_CODE = 4426;
 
 /** Nodes per snapshot chunk, so a big file never becomes one huge frame. */
 export const SNAPSHOT_CHUNK_SIZE = 2_000;
@@ -48,11 +58,17 @@ export function latencyBucket(ms: number): number {
 export const ClientMessage = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("hello"),
-    protocol: z.literal(PROTOCOL_VERSION),
+    /** 1 from clients before compact copies, which read materialized files only. */
+    protocol: z.union([z.literal(1), z.literal(PROTOCOL_VERSION)]),
     /** Stable per browser tab; used to make resent transactions idempotent. */
     clientId: Id,
     /** Last revision this client has fully applied, or null for a fresh load. */
     revn: z.number().int().nonnegative().nullable(),
+    /** How the client can read copies stored (decision 0029). Version 2 says; version 1 reads materialized only. */
+    copies: z
+      .array(z.enum(["materialized", "compact"]))
+      .max(4)
+      .optional(),
   }),
   z.object({
     t: z.literal("txn"),
@@ -101,6 +117,12 @@ export type ServerMessage =
       readonly mode: "snapshot" | "catchup";
       /** Highest `seq` the room has accepted from this client id, so it can drop acknowledged resends. */
       readonly lastSeq: number;
+      /**
+       * How the file stores copies (decision 0029): the snapshot that follows is
+       * in this form, and the room takes changes only in it. When it changes
+       * (the file converted), the room sends `resync`.
+       */
+      readonly copies: CopiesFormat;
     }
   | { readonly t: "snapshot"; readonly nodes: readonly NodeRecord[]; readonly done: boolean }
   | ({ readonly t: "txn" } & RemoteTxn)

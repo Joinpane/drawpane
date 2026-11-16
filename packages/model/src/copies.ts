@@ -167,9 +167,16 @@ export class CopyView {
   readonly #building = new Set<string>();
   readonly #presenting = new Set<string>();
   #complete = false;
+  readonly #lazy: boolean;
 
-  constructor(store: StoredReader) {
+  /**
+   * `lazy`: an id nobody has built yet is taken as not a copy layer, rather
+   * than building every instance to find it. For readers over a file too
+   * large to build whole (the room's), which build an instance at a time.
+   */
+  constructor(store: StoredReader, { lazy = false }: { readonly lazy?: boolean } = {}) {
     this.#store = store;
+    this.#lazy = lazy;
   }
 
   /** The main a stored instance root follows, or undefined when it doesn't follow one. */
@@ -184,7 +191,7 @@ export class CopyView {
   /** The slot of a copy layer, or undefined for anything stored. */
   slot(id: string): CopySlot | undefined {
     const slot = this.#slots.get(id);
-    if (slot || this.#complete) return slot;
+    if (slot || this.#complete || this.#lazy) return slot;
     if (this.#store.get(id) && this.#store.get(id)?.type !== "override") return undefined;
     this.buildAll();
     return this.#slots.get(id);
@@ -328,6 +335,16 @@ export class CopyView {
       for (const parent of built.kids.keys()) parents.add(parent);
     }
     return { ids, parents };
+  }
+
+  /**
+   * Lets go of what was built for an instance (its copy layers and their
+   * cache), without building it again: a reader working an instance at a
+   * time keeps only what it's at. It's built again when next read.
+   */
+  release(rootId: string): void {
+    this.#unbuild(rootId, new Set(), new Set());
+    this.#nodes.delete(rootId);
   }
 
   /** Drops everything cached (after a rollback, say). */

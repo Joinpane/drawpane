@@ -8,6 +8,8 @@ import type { Editor } from "@drawpane/editor";
 import {
   type BranchInfo,
   branchChanges,
+  type CopiesFormat,
+  compact,
   type NodeRecord,
   nodeReader,
   type Resolution,
@@ -21,6 +23,8 @@ export interface BranchReviewState {
   readonly rows: readonly ReviewRow[] | null;
   /** Main as review read it, for comparing on screen. */
   readonly main: readonly NodeRecord[] | null;
+  /** How main stores copies (decision 0029). */
+  readonly mainCopies: CopiesFormat;
   readonly plan: MergePlan | null;
   readonly loading: boolean;
   readonly error: string | null;
@@ -62,16 +66,30 @@ export function useBranchReview(
     () => editor.doc.version,
   );
   const live = useEditorLive(editor);
+  // Compared as main's room merges (decision 0029): its stored form, which a side saved
+  // before main stored compact copies is converted to, ids derived alike.
+  const stored = useMemo(() => {
+    if (!review.data) return null;
+    const form = review.data.copies.main;
+    const as = (nodes: NodeRecord[], copies: CopiesFormat) =>
+      copies === form ? nodes : form === "compact" ? compact(nodes).nodes : null;
+    const base = as(review.data.base, review.data.copies.base);
+    return base ? { form, base: nodeReader(base), main: nodeReader(review.data.main) } : null;
+  }, [review.data]);
   const rows = useMemo(() => {
     void version;
-    if (!review.data || !live) return null;
-    const docs = {
-      base: nodeReader(review.data.base),
-      branch: editor.doc,
-      main: nodeReader(review.data.main),
-    };
-    return reviewRows(branchChanges(docs.base, docs.branch, docs.main), docs);
-  }, [review.data, editor, version, live]);
+    if (!stored || !live) return null;
+    const branchStored =
+      editor.doc.copies === stored.form
+        ? editor.doc.storedReader()
+        : stored.form === "compact"
+          ? nodeReader(compact(editor.doc.stored()).nodes)
+          : null;
+    if (!branchStored) return null;
+    const changes = branchChanges(stored.base, branchStored, stored.main);
+    // Named as people see them: a copy's record by its layer.
+    return reviewRows(changes, { base: stored.base, branch: editor.doc, main: stored.main });
+  }, [stored, editor, version, live]);
 
   const [resolutions, setResolutions] = useState<ReadonlyMap<string, Resolution>>(new Map());
   const [skipped, setSkipped] = useState<ReadonlySet<string>>(new Set());
@@ -123,6 +141,7 @@ export function useBranchReview(
   return {
     rows,
     main: review.data?.main ?? null,
+    mainCopies: review.data?.copies.main ?? "materialized",
     plan,
     loading: review.isPending || (review.isSuccess && !live),
     error: review.error ? review.error.message : null,

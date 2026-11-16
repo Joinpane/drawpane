@@ -29,6 +29,7 @@
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.8.1",
     "@cloudflare/workers-types": "5.20261113.1",
+    "@drawpane/corpus": "workspace:*",
     "@simplewebauthn/browser": "14.0.0",
     "typescript": "catalog:",
     "vitest": "catalog:",

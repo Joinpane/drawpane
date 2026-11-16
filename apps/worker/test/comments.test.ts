@@ -298,10 +298,22 @@ describe("comments in the room", () => {
     const { browser, fileId, teamId } = await newFile();
     const viewer = await signedInUser("Vera", "viewer", teamId);
     const a = await openSocket(browser, fileId);
-    a.send({ t: "hello", protocol: 1, clientId: "clientA", revn: null });
+    a.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "clientA",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
     await a.next("welcome");
     const b = await openSocket(viewer.browser, fileId);
-    b.send({ t: "hello", protocol: 1, clientId: "clientB", revn: null });
+    b.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "clientB",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
     await b.next("welcome");
 
     const { thread } = await startThread(viewer.browser, fileId, { body: "From the viewer." });
@@ -332,7 +344,13 @@ describe("comments in the room", () => {
     const a = await openSocket(browser, fileId);
     // Sockets that haven't said hello yet don't get room traffic.
     expect(await room.broadcastComments({ kind: "deleted", threadId: "x" })).toBe(0);
-    a.send({ t: "hello", protocol: 1, clientId: "clientA", revn: null });
+    a.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "clientA",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
     await a.next("welcome");
     expect(await room.broadcastComments({ kind: "deleted", threadId: "x" })).toBe(1);
     a.ws.close();

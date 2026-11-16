@@ -1,0 +1,583 @@
+/**
+ * Converting a stored file between the materialized form (every copy layer
+ * stored, `mirrors`-linked) and the compact form (decision 0029) an
+ * instance at a time, so a file of any size converts without being held:
+ * what the room runs on its SQLite (phase 4b), and what the tests run on a
+ * `MemoryStore`.
+ *
+ * `compact` in copies.ts converts a whole document held in memory. This
+ * does the same, one top-level instance root at a time, reading the file
+ * through a `ConvertReader` that shows it as converted so far:
+ *
+ * - An instance is converted after what it's built from: the instances
+ *   inside its main (and inside the mains its layers are swapped to), and
+ *   its main itself when that's an instance too.
+ * - Each is checked before it's kept: its copies, built from the compact
+ *   form, must be exactly its materialized layers, ids renamed. One that
+ *   isn't is detached instead (it keeps every layer, unlinked from its
+ *   main, and looks as it did), and the reason is said.
+ * - Ids other layers hold (reading orders, prototype links, flows' starts)
+ *   are renamed with the copies they name.
+ */
+import { CopyView, isMainNode, OVERRIDE_KEY, ownValues, samePropValue } from "./copies";
+import { ROOT_ID } from "./ids";
+import type { NodeRecord } from "./ops";
+import { getProp, type Props } from "./schema";
+import { MemoryStore } from "./store";
+
+/** How copies are stored in a file: every copy layer, or the compact form (decision 0029). */
+export type CopiesFormat = "materialized" | "compact";
+
+export const COPIES_FORMATS: readonly CopiesFormat[] = ["materialized", "compact"];
+
+export function isCopiesFormat(value: unknown): value is CopiesFormat {
+  return value === "materialized" || value === "compact";
+}
+
+// ---------------------------------------------------------------------------
+// Ids held in properties
+
+/** Properties whose values name other layers by id: renamed with the layers they name. */
+export const ID_HOLDING_PROPS: readonly string[] = ["readingOrder", "reactions", "flows"];
+
+/**
+ * `props` with the layer ids it holds renamed by `rename` (a reading
+ * order's entries, prototype destinations, flows' starting screens), or
+ * null when none is renamed. Ids `rename` doesn't know stay as they are.
+ */
+export function renameHeldIds(
+  props: Readonly<Props>,
+  rename: (id: string) => string | undefined,
+): Props | null {
+  const p = props as Record<string, unknown>;
+  let out: Record<string, unknown> | null = null;
+  const order = p.readingOrder;
+  if (Array.isArray(order)) {
+    let changed = false;
+    const next = order.map((id: unknown) => {
+      const to = typeof id === "string" ? rename(id) : undefined;
+      if (to === undefined || to === id) return id;
+      changed = true;
+      return to;
+    });
+    if (changed) out = { ...(out ?? {}), readingOrder: next };
+  }
+  for (const [prop, key] of [
+    ["reactions", "to"],
+    ["flows", "start"],
+  ] as const) {
+    const list = p[prop];
+    if (!Array.isArray(list)) continue;
+    let changed = false;
+    const text = JSON.stringify(list);
+    const next = JSON.parse(text, (k, value: unknown) => {
+      if (k !== key || typeof value !== "string") return value;
+      const to = rename(value);
+      if (to === undefined || to === value) return value;
+      changed = true;
+      return to;
+    }) as unknown;
+    if (changed) out = { ...(out ?? {}), [prop]: next };
+  }
+  return out ? ({ ...props, ...out } as Props) : null;
+}
+
+/** Whether a node's properties hold ids of other layers (see `renameHeldIds`). */
+export function holdsIds(props: Readonly<Props>): boolean {
+  const p = props as Record<string, unknown>;
+  return ID_HOLDING_PROPS.some((prop) => p[prop] !== undefined);
+}
+
+// ---------------------------------------------------------------------------
+// The file as it converts
+
+/**
+ * The file as converted so far: stored nodes (an instance converted shows
+ * its rewritten root and its records, and not the layers it had), plus what
+ * the converter asks of the materialized form.
+ */
+export interface ConvertReader {
+  get(id: string): NodeRecord | undefined;
+  childIds(parent: string): readonly string[];
+  /** Every node stored under an instance root, override records aside: its materialized layers. */
+  layersUnder(rootId: string): readonly NodeRecord[];
+  /** A copy layer's derived id, when an earlier conversion renamed it. */
+  renamed(id: string): string | undefined;
+  /** The top-level instance roots inside a main's own layers (not inside its copies). */
+  rootsInside(mainId: string): readonly string[];
+  /** Whether a root was converted (or detached) already. */
+  settled(rootId: string): boolean;
+}
+
+/** What converting an instance gave. */
+export interface ConvertedInstance {
+  /** The instance root as stored now. */
+  readonly root: NodeRecord;
+  /** Its override records. */
+  readonly records: readonly NodeRecord[];
+  /** Its layers' old ids → derived ids. */
+  readonly ids: ReadonlyMap<string, string>;
+  /** The mains (and their sets) it was built from: a change to one means converting it again. */
+  readonly deps: readonly string[];
+}
+
+export interface DetachedInstance {
+  readonly root: NodeRecord;
+  /** Its layers, unlinked. */
+  readonly layers: readonly NodeRecord[];
+  readonly why: string;
+  readonly deps: readonly string[];
+}
+
+/** Where the converter puts what it decides; the reader shows it from then on. */
+export interface ConvertSink {
+  converted(result: ConvertedInstance): void;
+  detached(result: DetachedInstance): void;
+}
+
+/** A node without the properties that link it to a main: what detaching leaves. */
+export function unlinkedNode(node: NodeRecord): NodeRecord {
+  const props: Record<string, unknown> = { ...node.props };
+  delete props.instanceOf;
+  delete props.mirrors;
+  delete props.overrides;
+  delete props.unset;
+  return { ...node, props: props as Props };
+}
+
+const isSetNode = (node: NodeRecord | undefined) =>
+  node?.type === "frame" && getProp(node.props, "isComponentSet");
+
+/** Whether a record's values change which main its copy's layers come from. */
+function swaps(props: Readonly<Record<string, unknown>>): boolean {
+  return (
+    props.instanceOf !== undefined ||
+    ((props.unset as readonly string[] | undefined) ?? []).includes("instanceOf")
+  );
+}
+
+/** The reader with the instance being converted written over it, and its old layers hidden. */
+class Overlay {
+  readonly #reader: ConvertReader;
+  readonly #writes = new Map<string, NodeRecord | null>();
+  #hidden: ReadonlySet<string> = new Set();
+
+  constructor(reader: ConvertReader) {
+    this.#reader = reader;
+  }
+
+  get(id: string): NodeRecord | undefined {
+    const written = this.#writes.get(id);
+    if (written !== undefined) return written ?? undefined;
+    if (this.#hidden.has(id)) return undefined;
+    return this.#reader.get(id);
+  }
+
+  childIds(parent: string): readonly string[] {
+    return this.#reader.childIds(parent).filter((id) => this.get(id) !== undefined);
+  }
+
+  *nodes(): Iterable<NodeRecord> {
+    // The view is lazy: it never asks for every node.
+  }
+
+  begin(hidden: ReadonlySet<string>): void {
+    this.#writes.clear();
+    this.#hidden = hidden;
+  }
+
+  put(node: NodeRecord): void {
+    this.#writes.set(node.id, node);
+  }
+
+  remove(id: string): void {
+    this.#writes.set(id, null);
+  }
+
+  /** What was written for the instance: its root and records (nulls are records it no longer has). */
+  written(): Map<string, NodeRecord | null> {
+    return new Map(this.#writes);
+  }
+
+  end(): void {
+    this.#writes.clear();
+    this.#hidden = new Set();
+  }
+}
+
+/**
+ * Converts top-level instance roots of a materialized file, each after
+ * what it's built from. Keep one for a run of conversions (it caches what
+ * mains look like); `settle` converts a root and what it needs first.
+ */
+export class InstanceConverter {
+  readonly #reader: ConvertReader;
+  readonly #overlay: Overlay;
+  readonly #view: CopyView;
+  readonly #sink: ConvertSink;
+  /** Roots being settled, to stop at a main that contains its own instance. */
+  readonly #doing = new Set<string>();
+  readonly #prepared = new Set<string>();
+
+  constructor(reader: ConvertReader, sink: ConvertSink) {
+    this.#reader = reader;
+    this.#sink = sink;
+    this.#overlay = new Overlay(reader);
+    this.#view = new CopyView(this.#overlay, { lazy: true });
+  }
+
+  /** Copy layers built and cached (to let go of them past a size). */
+  get cached(): number {
+    return this.#view.slotCount;
+  }
+
+  /** Lets go of everything cached. */
+  clear(): void {
+    this.#view.clear();
+    this.#prepared.clear();
+  }
+
+  /** Converts `rootId` (a top-level instance root), and first what it's built from. */
+  settle(rootId: string): void {
+    if (this.#reader.settled(rootId) || this.#doing.has(rootId)) return;
+    const root = this.#reader.get(rootId);
+    const main = this.#view.mainOf(root);
+    if (!root || !main) return;
+    this.#doing.add(rootId);
+    try {
+      this.#prepare(main.id);
+      const layers = this.#reader.layersUnder(rootId);
+      for (const layer of layers) {
+        const of = layer.type === "frame" ? layer.props.instanceOf : undefined;
+        if (of && of !== main.id && isMainNode(this.#reader.get(of))) this.#prepare(of);
+      }
+      if (this.#reader.settled(rootId)) return;
+      this.#convert(root, main, layers);
+    } finally {
+      this.#doing.delete(rootId);
+    }
+  }
+
+  #prepare(mainId: string): void {
+    if (this.#prepared.has(mainId)) return;
+    this.#prepared.add(mainId);
+    const main = this.#reader.get(mainId);
+    if (main && this.#view.mainOf(main)) this.settle(mainId);
+    for (const id of this.#reader.rootsInside(mainId)) this.settle(id);
+  }
+
+  #deps(main: NodeRecord, layers: readonly NodeRecord[]): string[] {
+    const deps = new Set<string>();
+    const add = (id: string) => {
+      deps.add(id);
+      const node = this.#reader.get(id);
+      if (node && isSetNode(this.#reader.get(node.parent))) deps.add(node.parent);
+    };
+    add(main.id);
+    for (const layer of layers) {
+      const of = layer.type === "frame" ? layer.props.instanceOf : undefined;
+      if (of) add(of);
+    }
+    return [...deps];
+  }
+
+  #convert(root: NodeRecord, main: NodeRecord, layers: readonly NodeRecord[]): void {
+    const deps = this.#deps(main, layers);
+    const children = new Map<string, NodeRecord[]>();
+    for (const node of layers) {
+      if (node.type === "override") continue;
+      const list = children.get(node.parent);
+      if (list) list.push(node);
+      else children.set(node.parent, [node]);
+    }
+    const stored = layers.filter((n) => n.type !== "override");
+    // Records and no layers: stored compact already.
+    if (stored.length === 0 && layers.length > 0) {
+      this.#sink.converted({ root, records: [], ids: new Map(), deps });
+      return;
+    }
+    this.#overlay.begin(new Set(stored.map((n) => n.id)));
+    const ids = new Map<string, string>();
+    const outcome = (() => {
+      try {
+        return this.#match(root, children, stored, ids);
+      } catch (error) {
+        // A layer the view can't build (a value it refuses): left as it was, said why.
+        return error instanceof Error ? error.message : String(error);
+      }
+    })();
+    if (outcome === null) {
+      const written = this.#overlay.written();
+      const records: NodeRecord[] = [];
+      for (const node of written.values()) if (node?.type === "override") records.push(node);
+      const kept = written.get(root.id) ?? root;
+      this.#overlay.end();
+      this.#sink.converted({ root: kept, records, ids, deps });
+      // An instance on a screen isn't read again: let go of it. One inside a main is (by its
+      // main's instances), so it stays built.
+      if (!this.#insideMain(root)) this.#view.release(root.id);
+      return;
+    }
+    this.#overlay.end();
+    this.#view.clear();
+    this.#prepared.clear();
+    this.#sink.detached({
+      root: unlinkedNode(root),
+      layers: stored.map(unlinkedNode),
+      why: outcome,
+      deps,
+    });
+  }
+
+  #insideMain(node: NodeRecord): boolean {
+    const seen = new Set<string>();
+    let at: NodeRecord | undefined = this.#reader.get(node.parent);
+    while (at && !seen.has(at.id)) {
+      seen.add(at.id);
+      if (at.type === "frame" && getProp(at.props, "isComponent")) return true;
+      at = this.#reader.get(at.parent);
+    }
+    return false;
+  }
+
+  /**
+   * Writes the root and its records over the reader, then builds the
+   * instance and checks it's its materialized layers exactly. Null when it
+   * is; otherwise why not.
+   */
+  #match(
+    root: NodeRecord,
+    children: ReadonlyMap<string, readonly NodeRecord[]>,
+    layers: readonly NodeRecord[],
+    ids: Map<string, string>,
+  ): string | null {
+    const view = this.#view;
+    const overlay = this.#overlay;
+    const rename = (id: string) => ids.get(id) ?? this.#reader.renamed(id);
+    const base = view.base(root.id);
+    if (!base) return "its main isn't a component";
+    const putRoot = (props: Readonly<Props>) => {
+      overlay.put({ ...root, props: (ownValues(base.props, props, true) ?? {}) as Props });
+      view.forget([root.id], [root.id]);
+    };
+    putRoot(root.props);
+
+    const write = (
+      slotId: string,
+      path: readonly string[],
+      own: Record<string, unknown> | null,
+      structural: boolean,
+    ) => {
+      if (own)
+        overlay.put({
+          id: slotId,
+          type: "override",
+          parent: root.id,
+          key: OVERRIDE_KEY,
+          props: { path: [...path], ...own } as Props,
+        });
+      else overlay.remove(slotId);
+      view.forget([slotId], structural ? [slotId] : []);
+    };
+
+    const slotOf = new Map<string, { id: string; path: readonly string[] }>();
+    const walk = (dParent: string, presented: string): string | null => {
+      const dKids = children.get(dParent) ?? [];
+      const kids = view.childIds(presented);
+      if (dKids.length !== kids.length)
+        return `${dKids.length} layers under ${dParent}, ${kids.length} in its main`;
+      const bySource = new Map<string, string>();
+      for (const id of kids) {
+        const slot = view.slot(id);
+        if (!slot) return `${id} isn't a copy`;
+        bySource.set(slot.source, id);
+      }
+      for (const node of dKids) {
+        const mirrors = node.props.mirrors;
+        if (!mirrors) return `${node.id} copies nothing`;
+        const source = rename(mirrors) ?? mirrors;
+        const slotId = bySource.get(source);
+        if (!slotId) return `no copy of ${mirrors} under ${presented}`;
+        bySource.delete(source);
+        const slot = view.slot(slotId);
+        const slotBase = view.base(slotId);
+        if (!slot || !slotBase || slotBase.type !== node.type || slot.key !== node.key)
+          return `${node.id} isn't its main layer's type or place`;
+        ids.set(node.id, slotId);
+        slotOf.set(node.id, { id: slotId, path: slot.path });
+        const own = ownValues(slotBase.props, node.props);
+        if (own) {
+          const swapped = node.type === "frame" && swaps(own);
+          write(slotId, slot.path, own, swapped);
+          // Swapped: its base is the other main's now, so what it keeps is what differs from that.
+          if (swapped)
+            write(
+              slotId,
+              slot.path,
+              ownValues((view.base(slotId) ?? slotBase).props, node.props),
+              true,
+            );
+        }
+        const deeper = walk(node.id, slotId);
+        if (deeper) return deeper;
+      }
+      return null;
+    };
+    const unmatched = walk(root.id, root.id);
+    if (unmatched) return unmatched;
+
+    // Ids the layers hold, renamed now that every copy's id is known.
+    const held = (node: NodeRecord) => renameHeldIds(node.props, rename) ?? node.props;
+    if (holdsIds(root.props)) putRoot(held(root));
+    for (const node of layers) {
+      if (!holdsIds(node.props)) continue;
+      const slot = slotOf.get(node.id) as { id: string; path: readonly string[] };
+      const slotBase = view.base(slot.id);
+      if (!slotBase) return `${node.id} has no base`;
+      write(slot.id, slot.path, ownValues(slotBase.props, held(node)), false);
+    }
+
+    // The check: built again from what's written, it's the layers it was, ids renamed.
+    view.forget([root.id], [root.id]);
+    const presentedRoot = view.get(root.id);
+    if (!presentedRoot) return "it can't be built";
+    const differs = differences(held(root), presentedRoot.props);
+    if (differs) return `the instance's ${differs}`;
+    let count = 0;
+    const stack = [...view.childIds(root.id)];
+    for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
+      count++;
+      for (const child of view.childIds(id)) stack.push(child);
+    }
+    if (count !== layers.length) return `${count} layers built, ${layers.length} stored`;
+    for (const node of layers) {
+      const id = ids.get(node.id) as string;
+      const built = view.get(id);
+      if (!built) return `${node.id} isn't built`;
+      const parent = node.parent === root.id ? root.id : ids.get(node.parent);
+      if (built.parent !== parent || built.key !== node.key || built.type !== node.type)
+        return `${node.id} isn't where it was`;
+      const want: Record<string, unknown> = { ...held(node) };
+      if (typeof want.mirrors === "string") want.mirrors = rename(want.mirrors) ?? want.mirrors;
+      const off = differences(want as Props, built.props);
+      if (off) return `layer ${node.id}'s ${off}`;
+    }
+    return null;
+  }
+}
+
+/** The first property two nodes' values differ in (a missing value equals its default), or null. */
+function differences(want: Readonly<Props>, have: Readonly<Props>): string | null {
+  const a = want as Record<string, unknown>;
+  const b = have as Record<string, unknown>;
+  for (const prop of new Set([...Object.keys(a), ...Object.keys(b)]))
+    if (!samePropValue(prop, a[prop], b[prop]))
+      return `${prop} is ${JSON.stringify(b[prop])} built, ${JSON.stringify(a[prop])} stored`;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// A document in memory, through the same steps (tests, and small files)
+
+/** Top-level instance roots of a stored document, and the mains they're inside, in file order. */
+export function topLevelRoots(
+  get: (id: string) => NodeRecord | undefined,
+  childIds: (parent: string) => readonly string[],
+  from: string,
+): { roots: string[]; inside: Map<string, string[]> } {
+  const roots: string[] = [];
+  const inside = new Map<string, string[]>();
+  const isLive = (node: NodeRecord) => {
+    const of = node.type === "frame" ? node.props.instanceOf : undefined;
+    return !!of && of !== node.id && isMainNode(get(of));
+  };
+  const stack: Array<{ id: string; mains: readonly string[] }> = [];
+  for (const id of [...childIds(from)].reverse()) stack.push({ id, mains: [] });
+  for (let at = stack.pop(); at; at = stack.pop()) {
+    const node = get(at.id);
+    if (!node || node.type === "override") continue;
+    if (isLive(node)) {
+      roots.push(node.id);
+      for (const main of at.mains) {
+        const list = inside.get(main);
+        if (list) list.push(node.id);
+        else inside.set(main, [node.id]);
+      }
+      continue;
+    }
+    const mains = isMainNode(node) ? [...at.mains, node.id] : at.mains;
+    for (const id of [...childIds(node.id)].reverse()) stack.push({ id, mains });
+  }
+  return { roots, inside };
+}
+
+/** What `compactByInstance` gives: the stored form, renames, and the instances it detached and why. */
+export interface InstanceCompactResult {
+  readonly nodes: NodeRecord[];
+  readonly ids: ReadonlyMap<string, string>;
+  readonly detached: ReadonlyMap<string, string>;
+}
+
+/**
+ * A materialized document in the compact form, converted an instance at a
+ * time as the room converts a stored file (`compact` does the same in one
+ * pass). Ids other layers hold are renamed too.
+ */
+export function compactByInstance(input: Iterable<NodeRecord>): InstanceCompactResult {
+  const store = new MemoryStore(input);
+  const { roots, inside } = topLevelRoots(
+    (id) => store.get(id),
+    (parent) => store.childIds(parent),
+    ROOT_ID,
+  );
+  const ids = new Map<string, string>();
+  const settled = new Set<string>();
+  const detached = new Map<string, string>();
+  const subtree = (id: string): NodeRecord[] => {
+    const out: NodeRecord[] = [];
+    const stack = [...store.childIds(id)];
+    for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
+      const node = store.get(at);
+      if (!node) continue;
+      out.push(node);
+      stack.push(...store.childIds(at));
+    }
+    return out;
+  };
+  const replace = (node: NodeRecord) => {
+    if (store.get(node.id)) store.replaceProps(node.id, node.props);
+    else store.insert(node);
+  };
+  const reader: ConvertReader = {
+    get: (id) => store.get(id),
+    childIds: (parent) => store.childIds(parent),
+    layersUnder: subtree,
+    renamed: (id) => ids.get(id),
+    rootsInside: (mainId) => inside.get(mainId) ?? [],
+    settled: (id) => settled.has(id),
+  };
+  const converter = new InstanceConverter(reader, {
+    converted(result) {
+      settled.add(result.root.id);
+      const old = subtree(result.root.id);
+      for (let i = old.length - 1; i >= 0; i--) store.remove((old[i] as NodeRecord).id);
+      replace(result.root);
+      for (const record of result.records) store.insert(record);
+      for (const [from, to] of result.ids) ids.set(from, to);
+    },
+    detached(result) {
+      settled.add(result.root.id);
+      detached.set(result.root.id, result.why);
+      replace(result.root);
+      for (const layer of result.layers) replace(layer);
+    },
+  });
+  for (const root of roots) converter.settle(root);
+  // Ids held outside the instances (a reading order, a prototype link) follow the copies they name.
+  for (const node of [...store.nodes()]) {
+    if (node.type === "override" || !holdsIds(node.props)) continue;
+    const renamed = renameHeldIds(node.props, (id) => ids.get(id));
+    if (renamed) store.replaceProps(node.id, renamed);
+  }
+  return { nodes: [...store.nodes()], ids, detached };
+}

@@ -24,7 +24,7 @@ async function join(
   revn: number | null = null,
 ) {
   const socket = await openSocket(browser, fileId);
-  socket.send({ t: "hello", protocol: 1, clientId, revn });
+  socket.send({ t: "hello", protocol: 2, clientId, revn, copies: ["materialized", "compact"] });
   const welcome = await socket.next<{
     revn: number;
     mode: string;
@@ -232,7 +232,13 @@ describe("FileRoom", () => {
         resolve({ code: event.code, reason: event.reason }),
       ),
     );
-    socket.send({ t: "hello", protocol: 1, clientId: "clientL", revn: null });
+    socket.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "clientL",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
     expect(await closed).toEqual({ code: 4401, reason: "Access removed" });
   });
 

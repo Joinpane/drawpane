@@ -22,7 +22,7 @@ import {
   type ToolServices,
   textFaces,
 } from "@drawpane/editor";
-import type { NodeRecord, Op } from "@drawpane/model";
+import type { CopiesFormat, NodeRecord, Op } from "@drawpane/model";
 import type { HeadlessMeasurer } from "../agent/measurer";
 
 /** Nothing animates in a Worker. */
@@ -30,7 +30,11 @@ const NO_FRAMES: FrameClock = { request: () => 0, cancel: () => {} };
 
 export interface EngineRun {
   readonly result: ToolResult;
-  /** The operations the tool made, fix-ups included: what the room commits. Empty for a read. */
+  /**
+   * The operations the tool made, fix-ups included, as stored (override
+   * records in a file with compact copies): what the room commits. Empty
+   * for a read.
+   */
   readonly ops: Op[];
 }
 
@@ -55,19 +59,25 @@ export class AgentEngine {
 
   /**
    * The editor at the room's revision `revn`, kept warm or built from `read()`
-   * when cold, out of step, or holding a different number of nodes than the
-   * room (a sign it drifted).
+   * (stored as `copies`: decision 0029) when cold, out of step, or holding a
+   * different number of stored nodes than the room (a sign it drifted).
    */
-  editorAt(revn: number, count: number, read: () => NodeRecord[]): Editor {
+  editorAt(
+    revn: number,
+    count: number,
+    read: () => NodeRecord[],
+    copies: CopiesFormat = "materialized",
+  ): Editor {
     const warm = this.#editor;
-    if (warm && this.#revn === revn && warm.doc.size === count) return warm;
+    if (warm && this.#revn === revn && warm.doc.storedSize === count && warm.doc.copies === copies)
+      return warm;
     const editor = new Editor({
       measurer: this.#measurer,
       clientId: "agent",
       frames: NO_FRAMES,
       reducedMotion: () => true,
     });
-    editor.doc.reset(read());
+    editor.doc.resetStored(read(), copies);
     editor.state.set({ role: "editor", status: "live" });
     this.#editor = editor;
     this.#revn = revn;
@@ -83,8 +93,8 @@ export class AgentEngine {
       return;
     }
     try {
-      // The room committed it: applied as it is, however deep (decision 0026).
-      editor.doc.apply(ops, { held: true });
+      // The room committed it: applied as stored, however deep (decision 0026).
+      editor.doc.applyStored(ops, { held: true });
       this.#revn = revn;
     } catch {
       this.drop();
