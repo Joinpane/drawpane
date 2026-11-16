@@ -166,21 +166,28 @@ const SELF: Record<string, string> = {
 /** A child's layout props, when its parent frame has a layout. */
 export function childLayout(shape: Raw, notes: Notes): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  const h = SIZING[String(shape.layoutItemHSizing)];
-  const v = SIZING[String(shape.layoutItemVSizing)];
-  if (h && h !== "fixed") out.sizingH = h;
-  if (v && v !== "fixed") out.sizingV = v;
   if (shape.layoutItemAbsolute === true) out.positioning = "absolute";
   const self = SELF[String(shape.layoutItemAlignSelf)];
   if (self) out.alignSelf = self;
-  for (const [from, to] of [
-    ["layoutItemMinW", "minWidth"],
-    ["layoutItemMaxW", "maxWidth"],
-    ["layoutItemMinH", "minHeight"],
-    ["layoutItemMaxH", "maxHeight"],
-  ] as const) {
-    const value = shape[from];
-    if (typeof value === "number" && Number.isFinite(value) && value >= 0) out[to] = value;
+  const h = SIZING[String(shape.layoutItemHSizing)];
+  const v = SIZING[String(shape.layoutItemVSizing)];
+  // A Drawpane group has no size of its own: it's always its layers' bounds,
+  // which is how it hugs. Set to Fill, Penpot stretches its layers to the
+  // space; here it keeps the size it was saved at.
+  if (shape.type === "group") {
+    if (h === "fill" || v === "fill") notes.add("group-fill");
+  } else {
+    if (h && h !== "fixed") out.sizingH = h;
+    if (v && v !== "fixed") out.sizingV = v;
+    for (const [from, to] of [
+      ["layoutItemMinW", "minWidth"],
+      ["layoutItemMaxW", "maxWidth"],
+      ["layoutItemMinH", "minHeight"],
+      ["layoutItemMaxH", "maxHeight"],
+    ] as const) {
+      const value = shape[from];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) out[to] = value;
+    }
   }
   const m = (shape.layoutItemMargin ?? {}) as Raw;
   if (["m1", "m2", "m3", "m4"].some((k) => num(m[k]) !== 0)) notes.add("layout-margins");

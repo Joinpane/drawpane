@@ -48,4 +48,8 @@ The converter also had four translation errors:
 - Laid out again by Drawpane (the harness's `relayout` phase, as if every auto layout frame were edited), 31,516 layers move. Most of that is stale Penpot layout being computed afresh, as Penpot itself would on an edit. Auto layout margins, which Drawpane doesn't have, account for the rest. Supporting margins is future work.
 - A file saved by a client whose font never loaded keeps that text's size until someone edits it. Before, any editor opening it re-measured it.
 - Detached copies no longer follow their component. The summary says so, and they look as they did.
+- Two things the server refused stopped seven kits being added at all ("A group has no "sizingH" property"). The sweep had loaded layers straight into a document, past the server's checks.
+  - A group set to Fill or Hug in an auto layout: a Drawpane group is always its layers' bounds, so it keeps the size it was saved at.
+  - A dotted border on a board or shape: Drawpane caps only lines and paths, so Penpot's round dots become square ones on the same spacing.
+  - The sweep now runs every converted file through the server's checks and fails on any refusal.
 - Run the sweep with `PENPOT_KITS=<folder of .penpot files> PENPOT_PHASE=static|open|relayout pnpm --filter @drawpane/penpot exec vitest run test/kits-compat.test.ts`. It writes a report and every mismatch to the folder.

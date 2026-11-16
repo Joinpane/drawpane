@@ -46,6 +46,7 @@ import {
   type MediaLookup,
   num,
   radii,
+  type StrokeEnds,
   strokes,
 } from "./styles";
 import { convertText, typographyProps } from "./text";
@@ -276,7 +277,7 @@ export function convertFile(source: PenpotFile, media: MediaLookup): ConvertedFi
       switch (type) {
         case "frame": {
           const box = boxOf(s, at);
-          Object.assign(props, box.props, fillsAndStrokes(s, false), radii(s));
+          Object.assign(props, box.props, fillsAndStrokes(s, "none"), radii(s));
           if (s.showContent === true) props.clipContent = false;
           Object.assign(props, containerLayout(s, notes));
           const grids = layoutGrids(s.grids);
@@ -330,7 +331,7 @@ export function convertFile(source: PenpotFile, media: MediaLookup): ConvertedFi
         case "circle": {
           if (isMain) notes.add("component-not-frame");
           const box = boxOf(s, at);
-          Object.assign(props, box.props, fillsAndStrokes(s, false));
+          Object.assign(props, box.props, fillsAndStrokes(s, "none"));
           if (type !== "circle") Object.assign(props, radii(s));
           if (type === "image" && s.metadata && typeof s.metadata === "object") {
             // Pre-migration image shapes: a rectangle filled with the image.
@@ -389,7 +390,7 @@ export function convertFile(source: PenpotFile, media: MediaLookup): ConvertedFi
           if (attrs.fillRule === "evenodd" || attrs.fillRule === "evenOdd")
             props.windingRule = "evenodd";
           const open = !segments.some((seg) => seg.c === "Z");
-          Object.assign(props, fillsAndStrokes(s, open));
+          Object.assign(props, fillsAndStrokes(s, open ? "open" : "closed"));
           if (maskIds.has(s.id)) props.isMask = true;
           const reactions = interactions(s);
           if (reactions.length > 0) props.reactions = reactions;
@@ -432,11 +433,11 @@ export function convertFile(source: PenpotFile, media: MediaLookup): ConvertedFi
 
   return { name: file.name, nodes: tidy(nodes, colors), notes, idOf };
 
-  function fillsAndStrokes(s: Raw, open: boolean): Record<string, unknown> {
+  function fillsAndStrokes(s: Raw, ends: StrokeEnds): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     const f = fills(s.fills, media, notes);
     if (f.length > 0) out.fills = f;
-    const stroke = strokes(s.strokes, open, media, notes);
+    const stroke = strokes(s.strokes, ends, media, notes);
     if (stroke.strokes.length > 0) Object.assign(out, stroke);
     // A fill tied to a library colour in this file stays tied to its variable.
     const list = Array.isArray(s.fills) ? (s.fills as Raw[]) : [];
