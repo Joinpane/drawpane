@@ -4,7 +4,7 @@
  * read and convert more than it would take.
  */
 
-/** Nodes one import saves at most (a file's room holds its document in memory). */
+/** Nodes one import saves at most (it goes to the file's room in one call, validated on a copy). */
 export const MAX_IMPORT_NODES = 200_000;
 
 /**

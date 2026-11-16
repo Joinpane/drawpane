@@ -1,7 +1,7 @@
 /**
  * Saving an import: the converted nodes fill the new file in one request.
  * The server takes at most MAX_IMPORT_NODES nodes in MAX_IMPORT_BYTES of
- * JSON (a file's room holds its document in memory). The body is
+ * JSON (it goes to the file's room in one call, validated on a copy). The body is
  * serialized once and measured here, so an import too large says so in
  * words, with its size, instead of a refusal partway through a long upload.
  */
