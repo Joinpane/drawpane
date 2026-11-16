@@ -352,6 +352,34 @@ describe("a file stored compact", { timeout: 120_000 }, () => {
     expect(browser).toBeTruthy();
   });
 
+  it("takes an import the browser converted as it is: instances equal to their main stay instances", async () => {
+    const { browser, fileId } = await newFile();
+    const converted = compactByInstance(kit.nodes);
+    // Most instances here equal their main: neither layers nor records under them.
+    const { importId } = await browser.json<{ importId: string }>(`/api/files/${fileId}/imports`, {
+      method: "POST",
+      json: {},
+    });
+    const parts = `/api/files/${fileId}/imports/${importId}`;
+    for (let i = 0; i < converted.nodes.length; i += 1_000)
+      await browser.json(`${parts}/parts`, {
+        method: "POST",
+        json: { nodes: converted.nodes.slice(i, i + 1_000) },
+      });
+    await browser.json(`${parts}/commit`, { method: "POST", json: { copies: "compact" } });
+    expect(firstDifference(converted.nodes, await stored(fileId))).toBeNull();
+  });
+
+  it("copies a compact file to a branch as it is", async () => {
+    const { browser, fileId } = await materializedFile(kit.nodes);
+    await convert(fileId);
+    const made = await browser.json<{ branch: { id: string } }>(`/api/files/${fileId}/branches`, {
+      method: "POST",
+      json: { name: "After" },
+    });
+    expect(firstDifference(await stored(fileId), await stored(made.branch.id))).toBeNull();
+  });
+
   it("publishes a library whose hashes are those of the copies as presented", async () => {
     const { browser, fileId } = await materializedFile(kit.nodes);
     await convert(fileId);

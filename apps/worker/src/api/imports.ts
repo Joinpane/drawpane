@@ -25,7 +25,7 @@ import type { AppContext, Env } from "../env";
 import { readCapped } from "../lib/body";
 import { badRequest, conflict, notFound } from "../lib/http";
 import type { ImportPartResult, ImportResult } from "../rooms/file-room";
-import { requireFileRole } from "./access";
+import { readBody, requireFileRole } from "./access";
 
 /** The most one request sends: a part, or a whole one-request import. */
 export const IMPORT_MAX_BYTES = MAX_IMPORT_PART_BYTES;
@@ -129,10 +129,20 @@ export const imports = new Hono<AppContext>()
     const user = requireUser(c);
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
     const id = importId(c.req.param("importId"));
+    // How the parts store copies: the browser says `compact` when it converted them.
+    const { copies } = await readBody(
+      c,
+      // An empty body (a client from before compact copies) is materialized.
+      z.preprocess(
+        (body) => body ?? {},
+        z.object({ copies: z.enum(["materialized", "compact"]).default("materialized") }),
+      ),
+    );
     const result = (await room(c.env, file.id).commitImport(
       { userId: user.id, name: user.name },
       file.id,
       id,
+      copies,
     )) as ImportResult;
     return c.json(await committed(c.env, file.id, result));
   })

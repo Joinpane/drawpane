@@ -128,7 +128,10 @@ export async function saveImport(
       sent += part.count;
       onProgress?.(Math.round((sent / total) * nodes.length), nodes.length);
     }
-    await api.post(`${imports}/commit`, {});
+    // Says how the parts store copies, so the room converts only what came materialized.
+    await api.post(`${imports}/commit`, {
+      copies: copies === "compact" ? "compact" : "materialized",
+    });
   } catch (error) {
     // Nothing of it shows: what was sent is thrown away.
     await api.delete(imports).catch(() => undefined);

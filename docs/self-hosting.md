@@ -35,6 +35,10 @@ It swaps in the new release, applies new database migrations (additive, so the r
 
 The instance's **Health and cost** page (the bolt beside your name in the dashboard, for whoever set the instance up) shows the version it runs, and says when a newer one is out, with its release notes and this command. To know that, the Worker asks the npm registry for `create-drawpane`'s latest version when the page is opened, at most once every six hours. To turn that off, add `"vars": { "UPDATE_CHECK": "off" }` to `drawpane.json` and run `npm create drawpane@latest upgrade -- --force`.
 
+### Compact copies
+
+Since component copies are stored compactly (decision 0029), each file stored the older way converts the first time it's opened after the upgrade: a version named "Before compact copies" is saved first, then the file converts in steps of a few seconds while it stays open for editing, and everyone in it reloads it when it's done. An instance that can't be converted exactly is detached instead (it looks the same and stops following its component), and the Worker's log says which and why. To stop conversions, and have new files and imports use the older form, add `"vars": { "COMPACT_COPIES": "off" }` to `drawpane.json` and run the upgrade command again; files already converted stay converted. With it off, restoring a file's "Before compact copies" version puts it back as it was stored before.
+
 ## Installing by hand
 
 The installer runs these steps; they're here as a reference, or for setups it doesn't cover. They take about ten minutes. You need:

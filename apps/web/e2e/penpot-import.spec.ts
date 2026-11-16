@@ -5,6 +5,7 @@
  * a bad file explained; and a two-file export making two files.
  */
 import { resolve } from "node:path";
+import { expand, type NodeRecord } from "@drawpane/model";
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
 
@@ -112,7 +113,9 @@ test.describe
       };
       const box = (props: Record<string, unknown>) =>
         [props.x, props.y, props.width, props.height].map((v) => v ?? null).join(" ");
-      const want = Object.fromEntries(saved.nodes.map((n) => [n.id, box(n.props)]));
+      // What was sent is stored compact (decision 0029): compared as built.
+      const sent = expand(saved.nodes as unknown as NodeRecord[]);
+      const want = Object.fromEntries(sent.map((n) => [n.id, box(n.props)]));
       await page.evaluate(() => document.fonts.ready);
       await page.waitForTimeout(1_000);
       const have = await page.evaluate(() =>

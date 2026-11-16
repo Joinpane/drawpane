@@ -69,6 +69,7 @@ import {
   IMPORT_LIMITS,
   IMPORT_TABLE,
   type ImportLimits,
+  NO_COMPACT_COPIES,
   stageNodes,
 } from "./import-stage";
 import {
@@ -1156,8 +1157,18 @@ export class FileRoom extends DurableObject<Env> {
    * half an import: before this, nobody sees any of it; a check that fails
    * leaves the file as it was (the import is thrown away).
    */
-  async commitImport(by: Requester, fileId: string, importId: string): Promise<ImportResult> {
-    return this.#commitImport(by, fileId, importId, false);
+  async commitImport(
+    by: Requester,
+    fileId: string,
+    importId: string,
+    /**
+     * How the parts stored copies (decision 0029): `compact` when the browser
+     * converted them before sending. Anything else (an older page, another
+     * client) is taken as materialized and converted here.
+     */
+    sent: CopiesFormat = "materialized",
+  ): Promise<ImportResult> {
+    return this.#commitImport(by, fileId, importId, false, this.#copies, sent);
   }
 
   /** A copy of a file this server holds (`importSnapshot`) isn't held to an import's limits. */
@@ -1166,12 +1177,13 @@ export class FileRoom extends DurableObject<Env> {
     fileId: string,
     importId: string,
     copy: boolean,
-    copies: CopiesFormat = this.#copies,
+    copies: CopiesFormat,
+    sent: CopiesFormat,
   ): ImportResult {
     this.#adopt(fileId);
     if (this.#meta("import_id") !== importId) return { ok: false, reason: "gone" };
     try {
-      return this.#fillFromStaging(by, copy, copies);
+      return this.#fillFromStaging(by, copy, copies, sent);
     } finally {
       this.#dropImport();
     }
@@ -1238,7 +1250,7 @@ export class FileRoom extends DurableObject<Env> {
         return { ok: false, reason: "invalid", message: error.message };
       throw error;
     }
-    return this.#commitImport(by, fileId, begun.importId, true, copies);
+    return this.#commitImport(by, fileId, begun.importId, true, copies, sourceCopies);
   }
 
   /** The starting page, when it's all the file has (and still empty). */
@@ -1262,8 +1274,16 @@ export class FileRoom extends DurableObject<Env> {
    * someone renamed the starting page, say, and the import would replace
    * that acknowledged edit unseen.
    */
-  #fillFromStaging(by: Requester, copy: boolean, copies: CopiesFormat): ImportResult {
+  #fillFromStaging(
+    by: Requester,
+    copy: boolean,
+    copies: CopiesFormat,
+    sent: CopiesFormat,
+  ): ImportResult {
     const seed = this.#seedPage();
+    // Compact copies can't come into a file stored materialized: they'd show nothing.
+    if (sent === "compact" && copies !== "compact")
+      return { ok: false, reason: "invalid", message: NO_COMPACT_COPIES };
     if (!seed) return { ok: false, reason: "not-empty" };
     if (this.#meta("import_revn") !== String(this.#revn)) return { ok: false, reason: "changed" };
     try {
@@ -1279,8 +1299,9 @@ export class FileRoom extends DurableObject<Env> {
         return { ok: false, reason: "invalid", message: error.message };
       throw error;
     }
-    // Into a file that stores compact copies, what came materialized is converted first.
-    if (copies === "compact") compactTable(this.#room, IMPORT_TABLE);
+    // Into a file that stores compact copies, what came materialized is converted first. What
+    // came compact isn't: an instance equal to its main has no layers and no records there.
+    if (copies === "compact" && sent === "materialized") compactTable(this.#room, IMPORT_TABLE);
     const nodes = countRows(this.#sql, IMPORT_TABLE);
     const revn = this.ctx.storage.transactionSync(() => {
       fillFromStaged(this.#sql, seed.id, IMPORT_TABLE);

@@ -5,8 +5,8 @@
  *
  * The file stays as it is (materialized, `nodes`) while it converts. What
  * the conversion decides goes into tables beside it, an instance at a time,
- * each in its own storage transaction, so a conversion cut short (the room
- * evicted, a deploy) resumes where it was:
+ * a batch of instances to a storage transaction, so a conversion cut short
+ * (the room evicted, a deploy) resumes where it was:
  *
  * - `map`: each copy layer's old id → its derived id, and its instance;
  * - `rows`: what's stored differently: each converted instance's root and
@@ -235,15 +235,18 @@ class SqlConversion implements ConvertReader, ConvertSink {
     if (cached !== undefined) return cached ?? undefined;
     this.#trim();
     const t = this.#t;
-    const row =
-      this.#sql
-        .exec<NodeRow>(`SELECT ${NODE_COLUMNS} FROM ${t.rows} WHERE id = ?`, id)
-        .toArray()[0] ??
-      (this.#sql.exec(`SELECT 1 FROM ${t.map} WHERE old = ?`, id).toArray().length > 0
-        ? undefined
-        : this.#sql
-            .exec<NodeRow>(`SELECT ${NODE_COLUMNS} FROM ${this.#src} WHERE id = ?`, id)
-            .toArray()[0]);
+    // Written by the conversion, else stored and not a copy layer it renamed.
+    const row = this.#sql
+      .exec<NodeRow>(
+        `SELECT ${NODE_COLUMNS} FROM ${t.rows} WHERE id = ?1
+         UNION ALL
+         SELECT ${NODE_COLUMNS} FROM ${this.#src} s WHERE id = ?1
+           AND NOT EXISTS (SELECT 1 FROM ${t.map} m WHERE m.old = ?1)
+           AND NOT EXISTS (SELECT 1 FROM ${t.rows} r WHERE r.id = ?1)
+         LIMIT 1`,
+        id,
+      )
+      .toArray()[0];
     const node = row ? toRecord(row) : null;
     this.#nodes.set(id, node);
     return node ?? undefined;
@@ -314,7 +317,7 @@ class SqlConversion implements ConvertReader, ConvertSink {
 
   converted({ root, records, ids, deps }: ConvertedInstance): void {
     const t = this.#t;
-    this.#room.transact(() => {
+    {
       const pairs = [...ids];
       for (let i = 0; i < pairs.length; i += 30) {
         const batch = pairs.slice(i, i + 30);
@@ -325,7 +328,7 @@ class SqlConversion implements ConvertReader, ConvertSink {
       }
       this.#putRows([root, ...records], root.id);
       this.#settle(root.id, "converted", null, deps);
-    });
+    }
     this.#nodes.set(root.id, root);
     for (const record of records) this.#nodes.set(record.id, record);
     for (const [from, to] of ids) {
@@ -335,16 +338,16 @@ class SqlConversion implements ConvertReader, ConvertSink {
       else this.#nodes.delete(from);
       this.#nodes.delete(to);
     }
-    this.#kids.clear();
+    // Child lists that changed: the instance's own (records in, layers out), and its layers'.
+    this.#kids.delete(root.id);
+    for (const from of ids.keys()) this.#kids.delete(from);
     this.#settled.set(root.id, true);
     this.convertedCount++;
   }
 
   detached({ root, layers, why, deps }: DetachedInstance): void {
-    this.#room.transact(() => {
-      this.#putRows([root, ...layers], root.id);
-      this.#settle(root.id, "detached", why, deps);
-    });
+    this.#putRows([root, ...layers], root.id);
+    this.#settle(root.id, "detached", why, deps);
     this.#nodes.set(root.id, root);
     for (const layer of layers) this.#nodes.set(layer.id, layer);
     this.#settled.set(root.id, true);
@@ -454,11 +457,14 @@ export function convertStep(
       batch = pending();
     }
     if (batch.length === 0) break;
-    for (const id of batch) {
-      converter.settle(id);
-      if (converter.cached > 200_000) converter.clear();
-      if (now() - started > budgetMs) break;
-    }
+    // A batch's decisions are kept together: one cut short is converted again.
+    room.transact(() => {
+      for (const id of batch) {
+        converter.settle(id);
+        if (converter.cached > 200_000) converter.clear();
+        if (now() - started > budgetMs) break;
+      }
+    });
     if (now() - started > budgetMs) break;
   }
   const left = sql
