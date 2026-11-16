@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
+    "@drawpane/fig": "workspace:*",
     "@drawpane/figma": "workspace:*",
     "@drawpane/model": "workspace:*",
     "@drawpane/penpot": "workspace:*",

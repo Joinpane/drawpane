@@ -6,7 +6,7 @@
 
 ## Context
 
-Most people who'd move to Drawpane have their work in Figma. Penpot import exists (`@drawpane/penpot`); Figma import didn't. Figma offers two ways in: its REST API (official and documented; one file read per import, but free plans allow only a few reads of a file a month), and the `.fig` file its desktop app saves (undocumented, its schema versioned inside each file, with more in it than the API gives, but reading it needs a legal review of Figma's terms). Research is in the pull request that added this.
+Most people who'd move to Drawpane have their work in Figma. Penpot import exists (`@drawpane/penpot`); Figma import didn't. Figma offers two ways in: its REST API (official and documented; one file read per import, but free plans allow only a few reads of a file a month), and the `.fig` file its desktop app saves (undocumented, its schema versioned inside each file, with more in it than the API gives). Research is in the pull request that added this.
 
 ## Decision
 
@@ -25,5 +25,5 @@ Most people who'd move to Drawpane have their work in Figma. Penpot import exist
 
 ## Consequences
 
-- `.fig` files come next only after a legal review; if it rules them out, a Drawpane export plugin running inside Figma is the way to the data the API leaves out (glass settings, variables on non-Enterprise plans, font axes, guides).
+- `.fig` files import too, read with Open Pencil and converted by the same converter: [decision 0025](0025-fig-import.md). Some of what the API leaves out (glass settings, variables on non-Enterprise plans, font axes, guides) is in them, for later.
 - Real files bring what the parity scenes don't: text in many fonts, deep component trees, images. The fidelity suite grows with a corpus of such files (their API responses and renders cached, as here), and the gaps it finds rank the model changes worth making first (leading trim, per-paragraph alignment; per-side strokes, alpha masks, lists and per-range line height came first, decisions 0015 to 0018).

@@ -21,6 +21,7 @@ import { InboxView } from "../inbox/InboxView";
 import { useUnread } from "../inbox/inbox";
 import { KitStoreView } from "../kits/KitStore";
 import { FileThumbnail } from "./FileThumbnail";
+import { isFigFile } from "./fig-import";
 import { ImportDialog } from "./ImportDialog";
 import { InviteDialog } from "./InviteDialog";
 import { MembersView } from "./Members";
@@ -216,7 +217,7 @@ export function DashboardPage() {
   };
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: dropping a .penpot export anywhere imports it; the Import button is the keyboard way
+    // biome-ignore lint/a11y/noStaticElementInteractions: dropping a .fig or .penpot file anywhere imports it; the Import button is the keyboard way
     <div
       className={`dash${navOpen ? " dash--nav-open" : ""}`}
       onDragOver={(e) => {
@@ -232,7 +233,8 @@ export function DashboardPage() {
         if (!canImport || importOpen) return;
         e.preventDefault();
         setDragging(false);
-        const file = [...e.dataTransfer.files].find(isPenpotFile) ?? e.dataTransfer.files[0];
+        const files = [...e.dataTransfer.files];
+        const file = files.find((f) => isFigFile(f) || isPenpotFile(f)) ?? files[0];
         if (file) openImport(file);
       }}
     >
@@ -401,7 +403,7 @@ export function DashboardPage() {
                 icon="import"
                 onClick={() => openImport()}
                 aria-label="Import"
-                title="Import a Penpot file"
+                title="Import from Figma or Penpot"
               >
                 <span className="dash__btn-label">Import</span>
               </Button>

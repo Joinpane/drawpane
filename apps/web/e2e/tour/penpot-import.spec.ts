@@ -1,14 +1,19 @@
 import { resolve } from "node:path";
 /**
- * Screenshots of importing from Penpot for design review, in both themes:
- * the dialog, an import finished with notes, and the imported file in the
- * editor. Run with `pnpm --filter @drawpane/web tour`.
+ * Screenshots of importing from Figma and Penpot for design review, in both
+ * themes: the dialog's two tabs, a .fig import and a Penpot import finished
+ * with notes, and the imported file in the editor. Run with
+ * `pnpm --filter @drawpane/web tour`.
  */
 import { expect } from "@playwright/test";
 import { passkey, shot, test } from "./harness";
 
 const fixture = (name: string) =>
   resolve(import.meta.dirname, "../../../../packages/penpot/test/fixtures", name);
+const figFixture = resolve(
+  import.meta.dirname,
+  "../../../../packages/fig/test/fixtures/medianova.fig",
+);
 
 test("penpot import tour", async ({ browser }) => {
   test.setTimeout(120_000);
@@ -29,6 +34,13 @@ test("penpot import tour", async ({ browser }) => {
   await expect(dialog).toBeVisible();
   await page.waitForTimeout(200);
   await shot(page, "130-import-figma");
+  await dialog.locator('input[type="file"]').setInputFiles(figFixture);
+  await expect(dialog.getByRole("button", { name: "Done" })).toBeEnabled({ timeout: 60_000 });
+  await dialog.locator("summary").first().click();
+  await page.waitForTimeout(200);
+  await shot(page, "130-import-fig-done");
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
   await dialog.getByRole("radio", { name: "Penpot" }).click();
   await page.waitForTimeout(200);
   await shot(page, "130-import-choose");

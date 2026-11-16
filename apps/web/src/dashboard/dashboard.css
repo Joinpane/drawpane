@@ -808,7 +808,7 @@
   pointer-events: none;
 }
 
-/* Import from Penpot */
+/* Import from a file: .fig or .penpot */
 .import-drop {
   display: flex;
   flex-direction: column;
@@ -836,6 +836,32 @@
   background: var(--surface-raised);
   box-shadow: inset 0 0 0 1px var(--line);
   color: var(--ink-muted);
+}
+/* Beside the link form (Figma), the drop area is shorter. */
+.import-drop--compact {
+  gap: var(--space-200);
+  padding: var(--space-500);
+}
+.import-drop--compact .import-drop__icon {
+  width: 32px;
+  height: 32px;
+}
+/* A rule with words in the middle, between two ways to import. */
+.import-or {
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  color: var(--ink-muted);
+  font: 400 11px / 14px var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.import-or::before,
+.import-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
 }
 .import-drop__title {
   margin: 0;

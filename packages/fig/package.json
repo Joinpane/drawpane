@@ -1,0 +1,30 @@
+{
+  "name": "@drawpane/fig",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "Reads Figma's .fig files (Save local copy) into the REST-shaped file @drawpane/figma converts, with Open Pencil's reader. Pure TypeScript: runs in the browser, in Workers and in tests.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@drawpane/figma": "workspace:*",
+    "@drawpane/import-kit": "workspace:*",
+    "@open-pencil/fig": "0.16.0",
+    "@open-pencil/kiwi": "0.16.0",
+    "@open-pencil/scene-graph": "0.16.0"
+  },
+  "devDependencies": {
+    "@drawpane/editor": "workspace:*",
+    "@drawpane/model": "workspace:*",
+    "@types/node": "26.6.6",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
