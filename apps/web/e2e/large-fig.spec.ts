@@ -82,18 +82,38 @@ test.describe
     });
   });
 
-/** The browser's memory now: every Chrome process's resident set, in MB (Linux). */
-function browserRss(): number {
+/**
+ * This test's browser: the Chrome processes under this Playwright worker,
+ * each with its resident memory now and its peak (Linux), in MB.
+ */
+function browserMemory(): { now: number; peak: number } {
   try {
-    const out = execFileSync("ps", ["-eo", "rss=,comm="], { encoding: "utf8" });
-    let kb = 0;
-    for (const line of out.split("\n")) {
-      const [rss, ...name] = line.trim().split(/\s+/);
-      if (/chrom/i.test(name.join(" "))) kb += Number(rss) || 0;
+    const out = execFileSync("ps", ["-eo", "pid=,ppid=,rss=,comm="], { encoding: "utf8" });
+    const rows = out
+      .trim()
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/))
+      .map(([pid, ppid, rss, ...name]) => ({ pid, ppid, rss: Number(rss), name: name.join(" ") }));
+    const mine = new Set([String(process.pid)]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const row of rows)
+        if (row.pid && row.ppid && mine.has(row.ppid) && !mine.has(row.pid)) {
+          mine.add(row.pid);
+          grew = true;
+        }
     }
-    return Math.round(kb / 1024);
+    let now = 0;
+    let peak = 0;
+    for (const row of rows) {
+      if (!row.pid || !mine.has(row.pid) || !/chrom/i.test(row.name)) continue;
+      now += row.rss;
+      const status = execFileSync("cat", [`/proc/${row.pid}/status`], { encoding: "utf8" });
+      peak = Math.max(peak, Number(status.match(/VmHWM:\s+(\d+)/)?.[1] ?? 0));
+    }
+    return { now: Math.round(now / 1024), peak: Math.round(peak / 1024) };
   } catch {
-    return 0;
+    return { now: 0, peak: 0 };
   }
 }
 
@@ -122,9 +142,20 @@ test.describe
         if (/\/imports\/[^/]+\/parts$/.test(request.url()))
           parts.push(request.postDataBuffer()?.byteLength ?? 0);
       });
-      let peak = browserRss();
+      // A refused request says why in the log, whatever the row then shows.
+      page.on("response", async (response) => {
+        if (response.url().includes("/imports") && !response.ok())
+          console.log(
+            `${response.status()} ${response.url()}: ${await response.text().catch(() => "")}`,
+          );
+      });
+      page.on("pageerror", (error) => console.log(`page error: ${error.message}`));
+      let peak = 0;
+      let largest = 0;
       const sampler = setInterval(() => {
-        peak = Math.max(peak, browserRss());
+        const memory = browserMemory();
+        peak = Math.max(peak, memory.now);
+        largest = Math.max(largest, memory.peak);
       }, 2_000);
       const started = Date.now();
       try {
@@ -132,17 +163,20 @@ test.describe
         await dialog(page)
           .locator('input[type="file"][accept=".fig"]')
           .setInputFiles(LARGE_FIG as string);
-        // No pages to choose: it fits in one file.
+        // No pages to choose: it fits in one file. It ends opened, or failed and saying why.
         const row = dialog(page).getByRole("listitem").first();
-        await expect(row.getByRole("button", { name: "Open" })).toBeVisible({
+        const failed = row.locator(".import-row__status[role=alert]");
+        await expect(row.getByRole("button", { name: "Open" }).or(failed)).toBeVisible({
           timeout: 3_500_000,
         });
+        if (await failed.isVisible())
+          throw new Error(`The import failed: ${await failed.textContent()}`);
         const status = (await row.locator(".import-row__status").textContent()) ?? "";
         const layers = Number(status.match(/([\d,]+) layers/)?.[1]?.replaceAll(",", ""));
         console.log(
           `Imported ${status.trim()} in ${Math.round((Date.now() - started) / 1000)} s: ` +
             `${parts.length} parts, ${Math.round(parts.reduce((a, b) => a + b, 0) / 1024 / 1024)} MB sent, ` +
-            `browser memory peaked at ${peak} MB (all Chrome processes).`,
+            `browser memory peaked at ${peak} MB in all, ${largest} MB in its largest process.`,
         );
         expect(layers).toBeGreaterThan(100_000);
         expect(parts.length).toBeGreaterThan(1);

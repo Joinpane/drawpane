@@ -23,7 +23,7 @@ import {
   parseSvgPath,
   serializePath,
 } from "@drawpane/import-kit";
-import { keysBetween, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { keysBetween, type NodeRecord, propAllowed, ROOT_ID } from "@drawpane/model";
 import { convertEffects } from "./effects";
 import { drawpaneId, mirroredId } from "./ids";
 import { childLayout, containerLayout, layoutGrids } from "./layout";
@@ -166,14 +166,6 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     if (blend) props.blendMode = blend;
     const effects = convertEffects(node.effects, notes);
     if (effects.length > 0) props.effects = effects;
-    if (node.isMask) {
-      props.isMask = true;
-      // Figma's masks mask by their alpha unless set otherwise (older files say so with
-      // isMaskOutline); Drawpane's default is the outline.
-      const type = node.maskType ?? (node.isMaskOutline ? "VECTOR" : "ALPHA");
-      if (type !== "VECTOR") props.maskType = type === "LUMINANCE" ? "luminance" : "alpha";
-    }
-
     let type: NodeRecord["type"];
     const isGroup = node.type === "GROUP";
     if (FRAMES.has(node.type)) type = "frame";
@@ -189,6 +181,17 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     else {
       notes.add("unsupported-node");
       return;
+    }
+
+    if (node.isMask) {
+      // Figma lets any layer mask what's above it; Drawpane masks with frames and shapes.
+      if (propAllowed(type, "isMask")) {
+        props.isMask = true;
+        // Figma's masks mask by their alpha unless set otherwise (older files say so with
+        // isMaskOutline); Drawpane's default is the outline.
+        const mask = node.maskType ?? (node.isMaskOutline ? "VECTOR" : "ALPHA");
+        if (mask !== "VECTOR") props.maskType = mask === "LUMINANCE" ? "luminance" : "alpha";
+      } else notes.add("mask-kind");
     }
 
     if (type !== "group") {
