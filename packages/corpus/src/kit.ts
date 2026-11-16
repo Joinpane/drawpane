@@ -125,8 +125,10 @@ export function generateKit(options: KitOptions): Kit {
   const copy = (main: string, parent: string, x = 0, y = 0): string => {
     const made = instantiateOps(doc, main, parent, key(parent), { x, y });
     if (!made) throw new Error(`Not a component: ${main}`);
+    // Layers made, as the document presents them (with compact copies, one operation makes them all).
+    const before = doc.size;
     doc.apply(made.ops);
-    layers += made.ops.length;
+    layers += doc.size - before;
     return made.rootId;
   };
   const laidOut = (id: string) => {

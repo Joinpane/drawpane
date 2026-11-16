@@ -13,6 +13,10 @@
  * - **edit a main**: a fill change on the most used component, through the
  *   editor's own commit, so every copy follows as it does for a person.
  *
+ * With BENCH_COMPACT=1 the editor keeps copies compact (decision 0029: the
+ * file stored as mains, instance roots and override records, copies
+ * presented), and the table says how much the file stores.
+ *
  * Prints a table and attaches the numbers as JSON. Budgets aren't enforced
  * here: this VM draws without a GPU, so compare runs on one machine
  * (see the bench notes) and hold the targets on hardware like the PRD's.
@@ -25,6 +29,7 @@ import { freshInstance, type Instance } from "../fresh-instance";
 import { pan, type Summary, summaryRow, zoom } from "./frames";
 
 const SIZES = (process.env.BENCH_SCALE ?? "100000").split(",").map(Number);
+const COMPACT = process.env.BENCH_COMPACT === "1";
 /** Nodes per request when the page fetches the generated file. */
 const CHUNK = 20_000;
 
@@ -36,6 +41,9 @@ interface Result {
   heapMb: number;
   canvas: Record<string, Summary>;
   editMain: { ms: number; copies: number };
+  compact: boolean;
+  /** What the document stores once loaded (with compact copies, far fewer than it shows). */
+  stored: { nodes: number; bytes: number };
 }
 
 async function heapMb(cdp: CDPSession): Promise<number> {
@@ -60,6 +68,17 @@ async function load(page: Page, chunks: number): Promise<number> {
     e.doc.reset(all);
     return performance.now() - t;
   }, chunks);
+}
+
+/** What the loaded document stores: nodes and JSON bytes. */
+async function stored(page: Page): Promise<{ nodes: number; bytes: number }> {
+  return page.evaluate(() => {
+    const doc = (window as unknown as { drawpane: { doc: { stored(): unknown[] } } }).drawpane.doc;
+    const nodes = doc.stored();
+    let bytes = 0;
+    for (const n of nodes) bytes += JSON.stringify(n).length + 1;
+    return { nodes: nodes.length, bytes };
+  });
 }
 
 /** Shows `pageId`, whole, and returns how long until its first frame was drawn. */
@@ -133,7 +152,11 @@ test.describe("Scale", () => {
       await cdp.send("Performance.enable");
 
       await page.goto("/");
-      await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
+      await page.evaluate((compact) => {
+        localStorage.setItem("drawpane:debug", "1");
+        if (compact) localStorage.setItem("drawpane:compact-copies", "1");
+        else localStorage.removeItem("drawpane:compact-copies");
+      }, COMPACT);
       await page.getByRole("button", { name: "New file" }).first().click();
       await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
         timeout: 30_000,
@@ -141,6 +164,7 @@ test.describe("Scale", () => {
       const before = await heapMb(cdp);
       const resetMs = await load(page, chunks.length);
       chunks.length = 0;
+      const storedNow = await stored(page);
       const firstFrameMs = await firstFrame(page, largestPage(kit.nodes));
       // Let fonts and the first full paint settle.
       await page.waitForTimeout(1500);
@@ -165,10 +189,13 @@ test.describe("Scale", () => {
         heapMb: heap,
         canvas,
         editMain: { ms: Math.round(editMs), copies: busiest.copies },
+        compact: COMPACT,
+        stored: storedNow,
       };
       console.log(
         [
-          `\nScale: ${result.layers.toLocaleString("en")} layers, ${(result.bytes / 1048576).toFixed(0)} MB of nodes, ${result.copies.toLocaleString("en")} copies`,
+          `\nScale: ${result.layers.toLocaleString("en")} layers, ${(result.bytes / 1048576).toFixed(0)} MB of nodes, ${result.copies.toLocaleString("en")} copies${COMPACT ? ", compact copies" : ""}`,
+          `stored      ${result.stored.nodes.toLocaleString("en")} nodes, ${(result.stored.bytes / 1048576).toFixed(0)} MB`,
           `load        reset ${result.load.resetMs} ms · first frame of the largest page ${result.load.firstFrameMs} ms`,
           `memory      ${result.heapMb} MB of JS heap for the file`,
           ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),

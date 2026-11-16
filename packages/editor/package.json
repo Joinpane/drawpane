@@ -11,8 +11,8 @@
   },
   "scripts": {
     "typecheck": "tsc -p .",
-    "test": "vitest run",
-    "fuzz": "vitest run --testTimeout=1800000"
+    "test": "vitest run && DRAWPANE_COMPACT_COPIES=1 vitest run",
+    "fuzz": "vitest run --testTimeout=1800000 && DRAWPANE_COMPACT_COPIES=1 vitest run --testTimeout=1800000"
   },
   "dependencies": {
     "@drawpane/model": "workspace:*",

@@ -18,7 +18,11 @@
     "@drawpane/model": "workspace:*"
   },
   "devDependencies": {
+    "@drawpane/fig": "workspace:*",
+    "@drawpane/figma": "workspace:*",
+    "@drawpane/penpot": "workspace:*",
     "@types/node": "26.6.6",
+    "fast-check": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

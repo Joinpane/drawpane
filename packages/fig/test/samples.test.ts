@@ -51,51 +51,56 @@ const sample = (name: string) => {
 const convert = (fig: FigFile) =>
   convertFile(fig.file, { images: (ref) => (fig.images.has(ref) ? "a".repeat(64) : null) });
 
-describe.each(["pattern.fig", "tailwind-ecklf.fig", "medianova.fig"])("%s", (name) => {
-  it("converts to nodes the server accepts", async () => {
-    const fig = await sample(name);
-    const { nodes } = convert(fig);
-    expect(nodes.filter((n) => n.type === "page").length).toBe(fig.pages);
-    expect(nodes.length).toBeGreaterThan(fig.pages);
-    validate(nodes);
-  });
+// Reading and converting a sample takes a second or two alone, several under a full parallel run.
+describe.each(["pattern.fig", "tailwind-ecklf.fig", "medianova.fig"])(
+  "%s",
+  { timeout: 60_000 },
+  (name) => {
+    it("converts to nodes the server accepts", async () => {
+      const fig = await sample(name);
+      const { nodes } = convert(fig);
+      expect(nodes.filter((n) => n.type === "page").length).toBe(fig.pages);
+      expect(nodes.length).toBeGreaterThan(fig.pages);
+      validate(nodes);
+    });
 
-  it("reads the same a page at a time as all at once", async () => {
-    const whole = await sample(name);
-    const paged = await readFig(fixture(name), { fileName: name, pageAtATime: true });
-    expect(paged.file).toEqual(whole.file);
-    expect(paged.notes.lines()).toEqual(whole.notes.lines());
-  });
+    it("reads the same a page at a time as all at once", async () => {
+      const whole = await sample(name);
+      const paged = await readFig(fixture(name), { fileName: name, pageAtATime: true });
+      expect(paged.file).toEqual(whole.file);
+      expect(paged.notes.lines()).toEqual(whole.notes.lines());
+    });
 
-  it("gives every layer its own id, and every copied layer the main's layer it copies", async () => {
-    const fig = await sample(name);
-    const ids = new Set<string>();
-    for (const n of walk(fig.file.document)) {
-      expect(ids.has(n.id), n.id).toBe(false);
-      ids.add(n.id);
-    }
-    // A copied layer names a layer of its main, unless its instance was swapped to another
-    // component (REST's ids can't name those either) or its main is a library's.
-    const byId = new Map([...walk(fig.file.document)].map((n) => [n.id, n]));
-    const parentOf = new Map<string, Figma.Node>();
-    for (const n of byId.values()) for (const c of n.children ?? []) parentOf.set(c.id, n);
-    let checked = 0;
-    for (const [id, node] of byId) {
-      if (!id.startsWith("I")) continue;
-      let instance = parentOf.get(id);
-      while (instance && instance.type !== "INSTANCE") instance = parentOf.get(instance.id);
-      if (!instance?.componentId || !byId.has(instance.componentId)) continue;
-      const parts = instance.id.slice(1).split(";");
-      const original = parts.length > 1 ? byId.get(mirroredId(instance.id) ?? "") : instance;
-      // A nested instance: the main's own copy of it must be here (not in a library's main)
-      // and of the same component (not swapped).
-      if (!original || original.componentId !== instance.componentId) continue;
-      checked++;
-      expect(byId.has(mirroredId(id) ?? ""), `${id} (${node.name})`).toBe(true);
-    }
-    if (name !== "pattern.fig") expect(checked).toBeGreaterThan(50);
-  });
-});
+    it("gives every layer its own id, and every copied layer the main's layer it copies", async () => {
+      const fig = await sample(name);
+      const ids = new Set<string>();
+      for (const n of walk(fig.file.document)) {
+        expect(ids.has(n.id), n.id).toBe(false);
+        ids.add(n.id);
+      }
+      // A copied layer names a layer of its main, unless its instance was swapped to another
+      // component (REST's ids can't name those either) or its main is a library's.
+      const byId = new Map([...walk(fig.file.document)].map((n) => [n.id, n]));
+      const parentOf = new Map<string, Figma.Node>();
+      for (const n of byId.values()) for (const c of n.children ?? []) parentOf.set(c.id, n);
+      let checked = 0;
+      for (const [id, node] of byId) {
+        if (!id.startsWith("I")) continue;
+        let instance = parentOf.get(id);
+        while (instance && instance.type !== "INSTANCE") instance = parentOf.get(instance.id);
+        if (!instance?.componentId || !byId.has(instance.componentId)) continue;
+        const parts = instance.id.slice(1).split(";");
+        const original = parts.length > 1 ? byId.get(mirroredId(instance.id) ?? "") : instance;
+        // A nested instance: the main's own copy of it must be here (not in a library's main)
+        // and of the same component (not swapped).
+        if (!original || original.componentId !== instance.componentId) continue;
+        checked++;
+        expect(byId.has(mirroredId(id) ?? ""), `${id} (${node.name})`).toBe(true);
+      }
+      if (name !== "pattern.fig") expect(checked).toBeGreaterThan(50);
+    });
+  },
+);
 
 describe("what each sample keeps", () => {
   it("pattern (zip, v95): every page, in order", async () => {
