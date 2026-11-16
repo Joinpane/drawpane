@@ -1211,6 +1211,19 @@ export class FileRoom extends DurableObject<Env> {
       this.#reject(ws, seq, ops, "forbidden", "You can view this file but not edit it.");
       return;
     }
+    // Override records (decision 0029) wait for rooms that store compact copies (phase 4b):
+    // until then a client with the developer switch on would leave records other editors
+    // can't read.
+    if (ops.some((op) => op.op === "create" && op.type === "override")) {
+      this.#reject(
+        ws,
+        seq,
+        ops,
+        "unsupported",
+        "This file doesn't store compact copies yet. Turn off the compact-copies switch.",
+      );
+      return;
+    }
     const clientId = me.clientId;
     const known = this.#sql
       .exec<{ last_seq: number; last_revn: number }>(
