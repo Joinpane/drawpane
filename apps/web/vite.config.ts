@@ -16,6 +16,9 @@ export default defineConfig({
       "/ws": { target: "ws://localhost:8787", ws: true },
     },
   },
+  // The .fig reader runs in a module Worker (dashboard/fig.worker.ts), from this origin, as the
+  // CSP's worker-src allows.
+  worker: { format: "es" },
   test: {
     // Playwright owns e2e/; Vitest runs unit tests next to the code.
     include: ["src/**/*.test.ts"],

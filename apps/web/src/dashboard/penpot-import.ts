@@ -25,6 +25,8 @@ export interface FileImport {
   readonly images: { readonly done: number; readonly total: number };
   /** Reading from a service (Figma) in parts, and any wait it asked for. */
   readonly reading?: { readonly done: number; readonly total: number; readonly waiting: number };
+  /** Reading a file (a .fig) and building its pages; no pages counted yet while it's read. */
+  readonly building?: { readonly done: number; readonly total: number };
   readonly pages: number;
   readonly layers: number;
   /** The Drawpane file, once created. */

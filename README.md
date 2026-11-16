@@ -12,6 +12,7 @@ The open design tool you own. Drawpane is a real-time design and prototyping too
 - Rich text with OpenType features, variable font axes (width, slant, optical size and a font's own), text styles, strokes that follow the glyphs, Google Fonts and fonts a team uploads
 - A full color picker (solid, linear, radial and angular gradients, image, eyedropper, contrast ratio), stroke end markers, per-corner radius, frame presets for current phones, tablets and desktops, align, distribute, tidy up and flip
 - Rulers (`⇧R`), guides you drag out of them onto the page or a board, layout grids (columns, rows, square) that layers snap to, and distances to any layer while you hold `Alt`
+- Import from Figma (a `.fig` file saved with File → Save local copy, or a file's link) and from Penpot (`.penpot` exports), and a kit store of UI kits from Penpot's community
 - SVG files and markup (an icon set's "Copy SVG", Figma's "Copy as SVG") dropped or pasted in as frames of layers you can edit, or used as image fills
 - Right-click menus on the canvas, layers and pages; copy and paste properties; a keyboard shortcuts sheet (`⌘/`)
 - The pen tool, vector editing, flatten and boolean operations
@@ -36,6 +37,8 @@ See the [PRD](docs/PRD.md) for where it's going.
 | [`packages/editor`](packages/editor) | The editor engine: sync client, undo, geometry, auto layout, Canvas renderer, interaction. Framework-free. |
 | [`packages/ui`](packages/ui) | The design system as React components, with tokens generated from [`design-system/tokens.json`](design-system/tokens.json). |
 | [`packages/penpot`](packages/penpot) | Reads Penpot's `.penpot` exports and converts them to Drawpane files. |
+| [`packages/figma`](packages/figma) | Converts Figma files, as Figma's REST API returns them, to Drawpane files. |
+| [`packages/fig`](packages/fig) | Reads Figma's `.fig` files (with [Open Pencil](https://github.com/open-pencil/open-pencil)'s MIT packages) into the file `packages/figma` converts. |
 | [`packages/create-drawpane`](packages/create-drawpane) | `npm create drawpane`: installs and upgrades an instance on your Cloudflare account. |
 | [`apps/worker`](apps/worker) | The Cloudflare Worker: passkey auth, REST API, static assets, and a FileRoom Durable Object per file (SQLite, one row per node). |
 | [`apps/web`](apps/web) | The browser app: sign-in, dashboard and the editor. |
@@ -73,4 +76,4 @@ Then open http://localhost:8000/designs/ and http://localhost:8000/design-system
 
 ## License
 
-[MPL-2.0](LICENSE). Drawpane was inspired by [Penpot](https://penpot.app) and is not affiliated with it.
+[MPL-2.0](LICENSE). Drawpane was inspired by [Penpot](https://penpot.app) and is not affiliated with it. Third-party code it bundles under other licences is credited beside the package that uses it, as in [`packages/fig/NOTICE`](packages/fig/NOTICE).

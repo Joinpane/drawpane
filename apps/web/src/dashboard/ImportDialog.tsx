@@ -1,13 +1,14 @@
 /**
- * Import from Figma (a file's link and a personal access token) or from
- * Penpot (a .penpot export), then watch each file come across (images,
- * converting, saving), with a short note on anything that couldn't come
- * across exactly, and a way to open it.
+ * Import from Figma (a .fig file it saved, or a file's link and a personal
+ * access token) or from Penpot (a .penpot export), then watch each file
+ * come across (reading, images, converting, saving), with a short note on
+ * anything that couldn't come across exactly, and a way to open it.
  */
 import { Button, Icon, SegmentedControl, Switch, TextField } from "@drawpane/ui";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useId, useRef, useState } from "react";
 import { Dialog } from "../app/Dialog";
+import { importFig, isFigFile } from "./fig-import";
 import { figmaFileKey, importFigma } from "./figma-import";
 import { type FileImport, importPenpot, isPenpotFile } from "./penpot-import";
 
@@ -59,11 +60,11 @@ export function ImportDialog({
   const [phase, setPhase] = useState<Phase>("choose");
   const [rows, setRows] = useState<readonly FileImport[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [over, setOver] = useState(false);
-  const input = useRef<HTMLInputElement>(null);
-  const hintId = useId();
+  /** Whether the error is about a chosen file or the link form, so it shows beside the right one. */
+  const [errorAt, setErrorAt] = useState<"file" | "link">("link");
 
   const startFigma = async () => {
+    setErrorAt("link");
     if (!figmaFileKey(link)) {
       setError("Paste a link to a Figma design file (figma.com/design/…).");
       return;
@@ -86,17 +87,27 @@ export function ImportDialog({
     }
   };
 
-  const start = async (source: File) => {
-    setSource("penpot");
-    if (!isPenpotFile(source)) {
-      setError(`"${source.name}" isn't a .penpot file. Export one from Penpot first.`);
+  /** A dropped or chosen file, imported by its kind; `tab` is where it was dropped, if anywhere. */
+  const start = async (source: File, tab?: Source) => {
+    const fig = isFigFile(source);
+    setErrorAt("file");
+    if (!fig && !isPenpotFile(source)) {
+      setSource(tab ?? "figma");
+      setError(
+        tab === "penpot"
+          ? `"${source.name}" isn't a .penpot file. Export one from Penpot first.`
+          : tab === "figma"
+            ? `"${source.name}" isn't a .fig file. In Figma, choose File → Save local copy to make one.`
+            : `"${source.name}" can't be imported. Drop a .fig file from Figma or a .penpot file from Penpot.`,
+      );
       return;
     }
+    setSource(fig ? "figma" : "penpot");
     setError(null);
     setRows([]);
     setPhase("running");
     try {
-      await importPenpot(source, projectId, setRows);
+      await (fig ? importFig : importPenpot)(source, projectId, setRows);
       onImported();
       setPhase("finished");
     } catch (e) {
@@ -180,6 +191,26 @@ export function ImportDialog({
             void startFigma();
           }}
         >
+          <DropZone
+            compact
+            title="Drop a .fig file here"
+            accept=".fig"
+            hint={
+              <>
+                In Figma, choose <strong>File → Save local copy</strong>. No token needed, and
+                everything comes into <strong>{projectName}</strong> as a new file.
+              </>
+            }
+            onFile={(f) => void start(f, "figma")}
+          />
+          {error && errorAt === "file" ? (
+            <p className="auth__error" role="alert">
+              {error}
+            </p>
+          ) : null}
+          <div className="import-or">
+            <span>or import from a link</span>
+          </div>
           <TextField
             label="Figma file link"
             placeholder="https://www.figma.com/design/…"
@@ -204,12 +235,10 @@ export function ImportDialog({
             onChange={setRemember}
           />
           <p className="app-muted import-hint">
-            The token goes from this browser to Figma only; Drawpane never sees it. Pages, frames,
-            components, auto layout, text, images and effects come into{" "}
-            <strong>{projectName}</strong> as a new file. Files on Figma's free plan can be read
-            only a few times a month.
+            The token goes from this browser to Figma only; Drawpane never sees it. Files on Figma's
+            free plan can be read only a few times a month.
           </p>
-          {error ? (
+          {error && errorAt === "link" ? (
             <p className="auth__error" role="alert">
               {error}
             </p>
@@ -219,46 +248,18 @@ export function ImportDialog({
         </form>
       ) : phase === "choose" ? (
         <div className="app-stack">
-          {/* biome-ignore lint/a11y/noStaticElementInteractions: a drop target; the button inside is the keyboard way in */}
-          <div
-            className="import-drop"
-            data-over={over || undefined}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setOver(true);
-            }}
-            onDragLeave={() => setOver(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setOver(false);
-              const dropped = e.dataTransfer.files[0];
-              if (dropped) void start(dropped);
-            }}
-          >
-            <span className="import-drop__icon" aria-hidden="true">
-              <Icon name="import" size={16} />
-            </span>
-            <p className="import-drop__title">Drop a .penpot file here</p>
-            <Button onClick={() => input.current?.click()} aria-describedby={hintId}>
-              Choose file
-            </Button>
-            <input
-              ref={input}
-              type="file"
-              accept=".penpot"
-              hidden
-              onChange={(e) => {
-                const chosen = e.target.files?.[0];
-                e.target.value = "";
-                if (chosen) void start(chosen);
-              }}
-            />
-          </div>
-          <p id={hintId} className="app-muted import-hint">
-            In Penpot, use <strong>Export</strong> on a file and choose the .penpot format. Its
-            pages, boards, components, text, colors and text styles come into{" "}
-            <strong>{projectName}</strong> as new files.
-          </p>
+          <DropZone
+            title="Drop a .penpot file here"
+            accept=".penpot"
+            hint={
+              <>
+                In Penpot, use <strong>Export</strong> on a file and choose the .penpot format. Its
+                pages, boards, components, text, colors and text styles come into{" "}
+                <strong>{projectName}</strong> as new files.
+              </>
+            }
+            onFile={(f) => void start(f, "penpot")}
+          />
           {error ? (
             <p className="auth__error" role="alert">
               {error}
@@ -269,7 +270,7 @@ export function ImportDialog({
         <ul className="import-rows" aria-live="polite">
           {rows.length === 0 ? (
             <li className="import-row">
-              <span className="import-row__name">Reading the export…</span>
+              <span className="import-row__name">Reading the file…</span>
               <span className="import-bar import-bar--busy" />
             </li>
           ) : (
@@ -298,13 +299,37 @@ function readingStatus(reading: FileImport["reading"]): string {
   return "Reading from Figma";
 }
 
+/** Reading a .fig: decoding it, then building its pages (with their instances) one by one. */
+function buildingStatus(building: NonNullable<FileImport["building"]>): string {
+  if (building.total === 0) return "Reading the file";
+  if (building.total === 1) return "Building its page";
+  return `Building pages: ${Math.min(building.done + 1, building.total)} of ${building.total}`;
+}
+
+/** How far along a row is, 0 to 1, or null while there's no telling. */
+function progressOf(row: FileImport): number | null {
+  const { stage, images, building } = row;
+  // A .fig's reading takes real time; images and the rest share what's left.
+  const read = building ? 0.3 : 0;
+  if (stage === "reading")
+    return building && building.total > 0 ? (building.done / building.total) * read : null;
+  if (stage === "images")
+    return images.total > 0 ? read + (images.done / images.total) * (0.7 - read) : read || null;
+  if (stage === "converting") return 0.8;
+  if (stage === "saving") return 0.9;
+  if (stage === "done") return 1;
+  return null;
+}
+
 function ImportRow({ row, onOpen }: { row: FileImport; onOpen: (fileId: string) => void }) {
-  const { stage, images, reading } = row;
+  const { stage, images, reading, building } = row;
   const status =
     stage === "waiting"
       ? "Waiting"
       : stage === "reading"
-        ? readingStatus(reading)
+        ? building
+          ? buildingStatus(building)
+          : readingStatus(reading)
         : stage === "images"
           ? images.total > 0
             ? `Uploading images ${images.done} of ${images.total}`
@@ -316,17 +341,7 @@ function ImportRow({ row, onOpen }: { row: FileImport; onOpen: (fileId: string) 
               : stage === "failed"
                 ? (row.error ?? "Failed")
                 : `${row.pages} ${row.pages === 1 ? "page" : "pages"} · ${row.layers} ${row.layers === 1 ? "layer" : "layers"}`;
-  // Images are most of the waiting; converting and saving are short.
-  const progress =
-    stage === "images" && images.total > 0
-      ? (images.done / images.total) * 0.7
-      : stage === "converting"
-        ? 0.8
-        : stage === "saving"
-          ? 0.9
-          : stage === "done"
-            ? 1
-            : null;
+  const progress = progressOf(row);
   return (
     <li className="import-row" data-stage={stage}>
       <span className="import-row__icon" aria-hidden="true">
@@ -371,5 +386,66 @@ function ImportRow({ row, onOpen }: { row: FileImport; onOpen: (fileId: string) 
         </details>
       ) : null}
     </li>
+  );
+}
+
+/** A dashed area that takes a dropped file, with a button as the keyboard (and click) way in. */
+function DropZone({
+  title,
+  accept,
+  hint,
+  compact = false,
+  onFile,
+}: {
+  title: string;
+  accept: string;
+  hint: React.ReactNode;
+  compact?: boolean;
+  onFile: (file: File) => void;
+}) {
+  const [over, setOver] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const hintId = useId();
+  return (
+    <>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: a drop target; the button inside is the keyboard way in */}
+      <div
+        className={compact ? "import-drop import-drop--compact" : "import-drop"}
+        data-over={over || undefined}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setOver(true);
+        }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setOver(false);
+          const dropped = e.dataTransfer.files[0];
+          if (dropped) onFile(dropped);
+        }}
+      >
+        <span className="import-drop__icon" aria-hidden="true">
+          <Icon name="import" size={16} />
+        </span>
+        <p className="import-drop__title">{title}</p>
+        <Button onClick={() => input.current?.click()} aria-describedby={hintId}>
+          Choose file
+        </Button>
+        <input
+          ref={input}
+          type="file"
+          accept={accept}
+          hidden
+          onChange={(e) => {
+            const chosen = e.target.files?.[0];
+            e.target.value = "";
+            if (chosen) onFile(chosen);
+          }}
+        />
+      </div>
+      <p id={hintId} className="app-muted import-hint">
+        {hint}
+      </p>
+    </>
   );
 }
