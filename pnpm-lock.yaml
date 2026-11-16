@@ -404,6 +404,9 @@ importers:
       '@drawpane/import-kit':
         specifier: workspace:*
         version: link:../import-kit
+      '@drawpane/model':
+        specifier: workspace:*
+        version: link:../model
       '@open-pencil/fig':
         specifier: 0.16.0
         version: 0.16.0(@open-pencil/kiwi@0.16.0)(@open-pencil/scene-graph@0.16.0(typescript@7.0.2))(typescript@7.0.2)
@@ -417,9 +420,6 @@ importers:
       '@drawpane/editor':
         specifier: workspace:*
         version: link:../editor
-      '@drawpane/model':
-        specifier: workspace:*
-        version: link:../model
       '@types/node':
         specifier: 26.6.6
         version: 26.6.6

@@ -3,16 +3,23 @@
  * access token) or from Penpot (a .penpot export), then watch each file
  * come across (reading, images, converting, saving), with a short note on
  * anything that couldn't come across exactly, and a way to open it.
+ *
+ * A .fig too large for one Drawpane file has its pages chosen first, by
+ * their estimated sizes, and can then be imported again, other pages into
+ * another file, without reading it twice.
  */
+
+import type { FigPage } from "@drawpane/fig";
 import { Button, Icon, SegmentedControl, Switch, TextField } from "@drawpane/ui";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useId, useRef, useState } from "react";
 import { Dialog } from "../app/Dialog";
-import { importFig, isFigFile } from "./fig-import";
+import { FigImportError, isFigFile, type OpenedFigImport, openFigImport } from "./fig-import";
 import { figmaFileKey, importFigma } from "./figma-import";
+import { FILE_LAYERS } from "./import-save";
 import { type FileImport, importPenpot, isPenpotFile } from "./penpot-import";
 
-type Phase = "choose" | "running" | "finished";
+type Phase = "choose" | "running" | "pages" | "finished";
 type Source = "figma" | "penpot";
 
 /** Where a Figma token is kept: for this tab, or (when asked) on this device. */
@@ -62,6 +69,83 @@ export function ImportDialog({
   const [error, setError] = useState<string | null>(null);
   /** Whether the error is about a chosen file or the link form, so it shows beside the right one. */
   const [errorAt, setErrorAt] = useState<"file" | "link">("link");
+  /** An opened .fig too large for one file, while its pages are being chosen and imported. */
+  const [fig, setFig] = useState<OpenedFigImport | null>(null);
+  const [chosen, setChosen] = useState<ReadonlySet<string>>(new Set());
+  /**
+   * Estimated layers the chosen pages may come to: FILE_LAYERS, until an import of this file
+   * proves too large once converted and shows how much fits.
+   */
+  const [budget, setBudget] = useState(FILE_LAYERS);
+  /** Its pages imported so far, this time the dialog is open. */
+  const [imported, setImported] = useState<ReadonlySet<string>>(new Set());
+  // The worker holding a decoded file goes when the dialog does.
+  const figRef = useRef<OpenedFigImport | null>(null);
+  figRef.current = fig;
+  useEffect(() => () => figRef.current?.close(), []);
+
+  /**
+   * Imports some (or all, for null) of an opened .fig's pages. Whether the file is kept open
+   * afterwards, to choose (other) pages: when there were too many, or when only some came in.
+   */
+  const importFigPages = async (
+    opened: OpenedFigImport,
+    pageIds: readonly string[] | null,
+  ): Promise<boolean> => {
+    setError(null);
+    setRows([]);
+    setPhase("running");
+    try {
+      const [row] = await opened.import(projectId, pageIds, setRows);
+      onImported();
+      if (row?.stage === "done")
+        setImported((was) => new Set([...was, ...(pageIds ?? opened.pages.map((p) => p.id))]));
+      setPhase("finished");
+      return pageIds !== null;
+    } catch (e) {
+      setErrorAt("file");
+      setError(e instanceof Error ? e.message : "That file couldn't be imported.");
+      if (e instanceof FigImportError && e.tooManyLayers) {
+        // Fewer pages will do: what fits is now known from these, so the budget follows it.
+        const tried = opened.pages
+          .filter((p) => pageIds === null || pageIds.includes(p.id))
+          .reduce((sum, p) => sum + p.layers, 0);
+        const fits = Math.floor(tried * (e.fits ?? 0.8) * 0.9);
+        const next = Math.min(budget, fits);
+        setBudget(next);
+        setFig(opened);
+        setChosen(firstThatFit(opened.pages, imported, next));
+        setPhase("pages");
+        return true;
+      }
+      opened.close();
+      setFig(null);
+      setPhase("choose");
+      return false;
+    }
+  };
+
+  /** A .fig: imported whole when it fits one file, else its pages are chosen first. */
+  const startFig = async (source: File) => {
+    let opened: OpenedFigImport;
+    try {
+      opened = await openFigImport(source);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "That file couldn't be imported.");
+      setPhase("choose");
+      return;
+    }
+    if (opened.layers <= FILE_LAYERS) {
+      // Imported whole, nothing is left to choose, so the decoded file goes.
+      if (!(await importFigPages(opened, null))) opened.close();
+      return;
+    }
+    setFig(opened);
+    setImported(new Set());
+    setBudget(FILE_LAYERS);
+    setChosen(firstThatFit(opened.pages, new Set(), FILE_LAYERS));
+    setPhase("pages");
+  };
 
   const startFigma = async () => {
     setErrorAt("link");
@@ -106,8 +190,11 @@ export function ImportDialog({
     setError(null);
     setRows([]);
     setPhase("running");
+    figRef.current?.close();
+    setFig(null);
+    if (fig) return startFig(source);
     try {
-      await (fig ? importFig : importPenpot)(source, projectId, setRows);
+      await importPenpot(source, projectId, setRows);
       onImported();
       setPhase("finished");
     } catch (e) {
@@ -127,12 +214,19 @@ export function ImportDialog({
 
   const close = () => {
     if (phase === "running") return;
+    fig?.close();
+    setFig(null);
+    setImported(new Set());
     setPhase("choose");
     setRows([]);
     setError(null);
     started.current = null;
     onClose();
   };
+
+  const picked = fig ? fig.pages.filter((p) => chosen.has(p.id)) : [];
+  const pickedLayers = picked.reduce((sum, p) => sum + p.layers, 0);
+  const left = fig ? fig.pages.filter((p) => !imported.has(p.id) && !isDivider(p)) : [];
 
   return (
     <Dialog
@@ -145,9 +239,43 @@ export function ImportDialog({
             Importing…
           </Button>
         ) : phase === "finished" ? (
-          <Button variant="primary" onClick={close}>
-            Done
-          </Button>
+          <>
+            {fig && left.length > 0 ? (
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setChosen(firstThatFit(fig.pages, imported, budget));
+                  setError(null);
+                  setPhase("pages");
+                }}
+              >
+                Import other pages
+              </Button>
+            ) : null}
+            <Button variant="primary" onClick={close}>
+              Done
+            </Button>
+          </>
+        ) : phase === "pages" ? (
+          <>
+            <Button variant="ghost" onClick={close}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              icon="import"
+              disabled={picked.length === 0 || pickedLayers > budget}
+              onClick={() =>
+                fig &&
+                void importFigPages(
+                  fig,
+                  picked.map((p) => p.id),
+                )
+              }
+            >
+              {picked.length === 1 ? "Import 1 page" : `Import ${picked.length} pages`}
+            </Button>
+          </>
         ) : (
           <>
             <Button variant="ghost" onClick={close}>
@@ -246,6 +374,16 @@ export function ImportDialog({
           {/* Enter in a field submits. */}
           <button type="submit" hidden />
         </form>
+      ) : phase === "pages" && fig ? (
+        <PagePicker
+          fig={fig}
+          chosen={chosen}
+          imported={imported}
+          projectName={projectName}
+          error={error}
+          budget={budget}
+          onChange={setChosen}
+        />
       ) : phase === "choose" ? (
         <div className="app-stack">
           <DropZone
@@ -289,6 +427,138 @@ export function ImportDialog({
       )}
     </Dialog>
   );
+}
+
+/** A page that only separates others in Figma's page list ("---"), not one to import. */
+const isDivider = (page: FigPage) => page.layers === 0 && /^[\s\-–—_=*·•.|/]*$/.test(page.name);
+
+/** Pages in Figma's order that fit one file together, not yet imported: what the picker starts with. */
+function firstThatFit(
+  pages: readonly FigPage[],
+  imported: ReadonlySet<string>,
+  budget: number,
+): Set<string> {
+  const out = new Set<string>();
+  let total = 0;
+  for (const page of pages) {
+    if (imported.has(page.id) || isDivider(page)) continue;
+    if (total + page.layers > budget) continue;
+    out.add(page.id);
+    total += page.layers;
+  }
+  return out;
+}
+
+const compact = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+const whole = new Intl.NumberFormat("en");
+
+/** A file too large for one Drawpane file: its pages, by size, to choose from. */
+function PagePicker({
+  fig,
+  chosen,
+  imported,
+  projectName,
+  error,
+  budget,
+  onChange,
+}: {
+  fig: OpenedFigImport;
+  chosen: ReadonlySet<string>;
+  imported: ReadonlySet<string>;
+  projectName: string;
+  error: string | null;
+  /** Estimated layers the chosen pages may come to. */
+  budget: number;
+  onChange: (chosen: ReadonlySet<string>) => void;
+}) {
+  const total = fig.pages.reduce((sum, p) => (chosen.has(p.id) ? sum + p.layers : sum), 0);
+  const count = fig.pages.filter((p) => chosen.has(p.id)).length;
+  const over = total > budget;
+  const meterId = useId();
+  const toggle = (id: string) => {
+    const next = new Set(chosen);
+    if (!next.delete(id)) next.add(id);
+    onChange(next);
+  };
+  return (
+    <div className="app-stack import-pages">
+      <p className="import-hint">
+        <strong>{fig.name}</strong> comes to about {whole.format(roundTo(fig.layers))} layers once
+        its components are filled in. One Drawpane file holds about {whole.format(roundTo(budget))},
+        so choose the pages to bring into <strong>{projectName}</strong>. You can import the others
+        into another file afterwards.
+      </p>
+      <div className="import-pages__meter" data-over={over || undefined} id={meterId}>
+        <span className="import-pages__total">
+          {over
+            ? `About ${compact.format(total)} layers, more than one file holds`
+            : `About ${compact.format(total)} of ${compact.format(budget)} layers`}
+        </span>
+        <span className="import-pages__count">
+          {count === 1 ? "1 page" : `${count} pages`}
+          {count > 0 ? (
+            <button
+              type="button"
+              className="import-pages__clear"
+              onClick={() => onChange(new Set())}
+            >
+              Clear
+            </button>
+          ) : null}
+        </span>
+        <meter
+          className="dp-visually-hidden"
+          aria-label="Layers chosen"
+          min={0}
+          max={budget}
+          value={Math.min(total, budget)}
+          aria-valuetext={`About ${whole.format(total)} of ${whole.format(budget)} layers`}
+        />
+        <span
+          className="import-bar import-pages__bar"
+          aria-hidden="true"
+          style={{ "--progress": Math.min(1, total / budget) } as React.CSSProperties}
+        />
+      </div>
+      <fieldset className="import-pages__list" aria-describedby={meterId}>
+        <legend className="dp-visually-hidden">Pages</legend>
+        {fig.pages.map((page) =>
+          isDivider(page) ? (
+            <hr key={page.id} className="import-pages__divider" />
+          ) : (
+            <label key={page.id} className="import-pages__page">
+              <input
+                type="checkbox"
+                checked={chosen.has(page.id)}
+                onChange={() => toggle(page.id)}
+              />
+              <span className="import-pages__name">{page.name || "Untitled page"}</span>
+              {imported.has(page.id) ? <span className="import-pages__done">Imported</span> : null}
+              <span className="import-pages__size">
+                {page.layers === 0 ? "Empty" : compact.format(page.layers)}
+                <span className="dp-visually-hidden">{page.layers === 0 ? "" : " layers"}</span>
+              </span>
+            </label>
+          ),
+        )}
+      </fieldset>
+      <p className="app-muted import-hint">
+        Sizes are estimates. Copies of components on pages left out come in detached.
+      </p>
+      {error ? (
+        <p className="auth__error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** A large estimate to two significant figures: it's no more exact than that. */
+function roundTo(n: number): number {
+  if (n < 1000) return n;
+  const step = 10 ** (Math.floor(Math.log10(n)) - 1);
+  return Math.round(n / step) * step;
 }
 
 /** Reading from Figma: in parts when the file is too large to send at once. */
@@ -340,7 +610,7 @@ function ImportRow({ row, onOpen }: { row: FileImport; onOpen: (fileId: string) 
               ? "Saving"
               : stage === "failed"
                 ? (row.error ?? "Failed")
-                : `${row.pages} ${row.pages === 1 ? "page" : "pages"} · ${row.layers} ${row.layers === 1 ? "layer" : "layers"}`;
+                : `${whole.format(row.pages)} ${row.pages === 1 ? "page" : "pages"} · ${whole.format(row.layers)} ${row.layers === 1 ? "layer" : "layers"}`;
   const progress = progressOf(row);
   return (
     <li className="import-row" data-stage={stage}>

@@ -6,7 +6,9 @@ export type ImportErrorCode =
   /** A .fig file that's damaged or cut short. */
   | "corrupt"
   /** Larger than a browser tab can read. */
-  | "too-large";
+  | "too-large"
+  /** More layers than one Drawpane file holds: some of its pages can still come in. */
+  | "too-many-layers";
 
 /** Why a .fig import can't go ahead, in words for the person importing. */
 export class ImportError extends Error {
@@ -14,8 +16,9 @@ export class ImportError extends Error {
   constructor(
     readonly code: ImportErrorCode,
     message: string,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, cause === undefined ? undefined : { cause });
   }
 }
 
