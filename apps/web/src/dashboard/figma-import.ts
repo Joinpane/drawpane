@@ -11,40 +11,23 @@
  * The converter loads only when someone imports.
  */
 import { api, type FileMeta } from "../api/client";
+import { figmaError, readFigmaFile } from "./figma-read";
 import { detachedNote, type FileImport } from "./penpot-import";
 
 const FIGMA_API = "https://api.figma.com/v1";
 
-/** A Figma file's key from its link (design, file, proto or board), or a bare key. */
+/**
+ * A Figma file's key from its link (design, file, proto or board), or a bare
+ * key. A branch's link names the branch's own key, which is what reads it.
+ */
 export function figmaFileKey(link: string): string | null {
   const text = link.trim();
-  const fromLink = /figma\.com\/(?:design|file|proto|board)\/([A-Za-z0-9]{10,})/.exec(text)?.[1];
+  const fromLink =
+    /figma\.com\/(?:design|file|proto|board)\/[A-Za-z0-9]{10,}\/branch\/([A-Za-z0-9]{10,})/.exec(
+      text,
+    )?.[1] ?? /figma\.com\/(?:design|file|proto|board)\/([A-Za-z0-9]{10,})/.exec(text)?.[1];
   if (fromLink) return fromLink;
   return /^[A-Za-z0-9]{10,}$/.test(text) ? text : null;
-}
-
-/** What Figma's API said, in words someone importing can act on. */
-async function figmaError(response: Response): Promise<Error> {
-  if (response.status === 403)
-    return new Error(
-      "Figma turned the token away. Check it's still valid and can read file content.",
-    );
-  if (response.status === 404)
-    return new Error("Figma has no file at that link, or the token's account can't open it.");
-  if (response.status === 429) {
-    const wait = Number(response.headers.get("Retry-After") ?? "");
-    const plan = response.headers.get("X-Figma-Plan-Tier");
-    const when =
-      Number.isFinite(wait) && wait > 0
-        ? wait > 3600
-          ? ` Try again in about ${Math.ceil(wait / 3600)} hours.`
-          : ` Try again in ${Math.ceil(wait / 60)} minutes.`
-        : " Try again later.";
-    return new Error(
-      `Figma's limit on reading files was reached${plan === "starter" ? " (files on Figma's free plan can be read only a few times a month)" : ""}.${when}`,
-    );
-  }
-  return new Error(`Figma couldn't send the file (${response.status}). Try again.`);
 }
 
 async function figma<T>(path: string, token: string): Promise<T> {
@@ -81,8 +64,8 @@ export async function importFigma(
   if (!key) throw new Error("That doesn't look like a Figma file link.");
   let row: FileImport = {
     key,
-    name: "Reading from Figma…",
-    stage: "waiting",
+    name: "Figma file",
+    stage: "reading",
     images: { done: 0, total: 0 },
     pages: 0,
     layers: 0,
@@ -100,7 +83,11 @@ export async function importFigma(
   const [converter, { pinInstances }, file] = await Promise.all([
     import("@drawpane/figma"),
     import("@drawpane/editor"),
-    figma<import("@drawpane/figma").Figma.File>(`files/${key}?geometry=paths`, token),
+    readFigmaFile(
+      key,
+      (path) => figma(path, token),
+      (reading) => update({ reading }),
+    ),
   ]);
   let fileId: string | null = null;
   try {

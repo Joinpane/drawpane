@@ -9,6 +9,10 @@ describe("Figma links", () => {
     expect(figmaFileKey("figma.com/file/AbCdEfGhIjKl/Old")).toBe("AbCdEfGhIjKl");
     expect(figmaFileKey("https://www.figma.com/proto/AbCdEfGhIjKl/Flow")).toBe("AbCdEfGhIjKl");
     expect(figmaFileKey("  AbCdEfGhIjKl  ")).toBe("AbCdEfGhIjKl");
+    // A branch is read by its own key.
+    expect(
+      figmaFileKey("https://www.figma.com/design/AbCdEfGhIjKl/branch/ZyXwVuTsRqPo/Kit?node-id=1-2"),
+    ).toBe("ZyXwVuTsRqPo");
   });
 
   it("turns away what isn't one", () => {

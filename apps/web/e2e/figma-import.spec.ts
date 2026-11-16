@@ -3,8 +3,9 @@
  * test: the page itself calls Figma (the token goes nowhere else), so this
  * is what proves the Content Security Policy lets it, for the file and for
  * the images in Figma's storage. A file read, its image downloaded and
- * uploaded, the new file opened with the image in it; and Figma's limit
- * explained in words, from the headers it exposes to the page.
+ * uploaded, the new file opened with the image in it; a file too large for
+ * Figma to send at once, read in parts; and Figma's limit explained in
+ * words, from the headers it exposes to the page.
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -66,6 +67,8 @@ test.describe
     let instance: Instance;
     let page: Page;
     const blocked: string[] = [];
+    /** What the first import's row said once done ("6 pages · N layers"). */
+    let summary = "";
 
     test.beforeAll(async ({ browser }) => {
       test.setTimeout(180_000);
@@ -103,6 +106,7 @@ test.describe
       const row = dialog(page).getByRole("listitem").filter({ hasText: "From Figma" });
       await expect(row).toContainText("6 pages", { timeout: 30_000 });
       await expect(dialog(page).getByRole("button", { name: "Done" })).toBeEnabled();
+      summary = (await row.locator(".import-row__status").textContent()) ?? "";
       expect(blocked).toEqual([]);
       expect(tokens.length).toBeGreaterThan(0);
       expect(tokens.every((token) => token === "figd_test-token")).toBe(true);
@@ -120,6 +124,71 @@ test.describe
         .toBe(true);
       await page.unrouteAll();
       await page.goBack();
+    });
+
+    test("reads a file Figma finds too large to send at once, page by page", async () => {
+      const file = figmaFile();
+      const byId = new Map<string, unknown>();
+      const walk = (node: { id: string; children?: unknown[] }) => {
+        byId.set(node.id, node);
+        for (const child of node.children ?? []) walk(child as typeof node);
+      };
+      walk(file.document);
+      const outline = {
+        ...file,
+        document: {
+          ...file.document,
+          children: file.document.children.map((p: { children?: { id: string }[] }) => ({
+            ...p,
+            children: p.children?.map((c) => ({ ...c, children: undefined })),
+          })),
+        },
+      };
+      const asked: string[] = [];
+      await page.route("https://api.figma.com/v1/**", async (route: Route) => {
+        const url = new URL(route.request().url());
+        asked.push(`${url.pathname.replace(`/v1/files/${KEY}`, "")}${url.search}`);
+        if (url.pathname === `/v1/files/${KEY}/images`)
+          return route.fulfill({
+            headers: cors,
+            json: { error: false, status: 200, meta: { images: { [IMAGE_REF]: IMAGE_URL } } },
+          });
+        if (url.pathname === `/v1/files/${KEY}/nodes`) {
+          const ids = (url.searchParams.get("ids") ?? "").split(",");
+          return route.fulfill({
+            headers: cors,
+            json: {
+              name: file.name,
+              nodes: Object.fromEntries(
+                ids.map((id) => [id, { document: byId.get(id), components: file.components }]),
+              ),
+            },
+          });
+        }
+        if (url.pathname === `/v1/files/${KEY}` && url.searchParams.get("depth") === "2")
+          return route.fulfill({ headers: cors, json: outline });
+        if (url.pathname === `/v1/files/${KEY}`)
+          return route.fulfill({
+            status: 400,
+            headers: cors,
+            json: { status: 400, err: "Request too large" },
+          });
+        return route.fulfill({ status: 404, headers: cors, json: {} });
+      });
+      await page.route(IMAGE_URL, (route) =>
+        route.fulfill({ headers: { ...cors, "content-type": "image/png" }, body: PNG }),
+      );
+
+      await startImport(page);
+      const row = dialog(page).getByRole("listitem").filter({ hasText: "From Figma" });
+      await expect(row).toContainText("6 pages", { timeout: 30_000 });
+      // The same file as read in one request.
+      await expect(row.locator(".import-row__status")).toHaveText(summary);
+      expect(asked.slice(0, 2)).toEqual(["?geometry=paths", "?depth=2"]);
+      expect(asked.filter((a) => a.startsWith("/nodes"))).toHaveLength(6);
+      expect(blocked).toEqual([]);
+      await dialog(page).getByRole("button", { name: "Done" }).click();
+      await page.unrouteAll();
     });
 
     test("explains Figma's limit, from the headers Figma exposes", async () => {
