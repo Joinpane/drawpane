@@ -144,6 +144,93 @@ describe("applyOp", () => {
     expect(store.get("g")?.parent).toBe("p1");
   });
 
+  describe("in a file already deeper than the limit", () => {
+    // A chain of groups from level 2 (D0) to level 133 (D131), as a file could hold from before
+    // moves checked the layers they carry down. Di is at level i + 2.
+    const deepStore = () => {
+      const nodes: NodeRecord[] = [
+        { id: "P1", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      ];
+      for (let i = 0; i < 132; i++)
+        nodes.push({
+          id: `D${i}`,
+          type: "group",
+          parent: i === 0 ? "P1" : `D${i - 1}`,
+          key: "a0",
+          props: {},
+        });
+      return new MemoryStore(nodes);
+    };
+
+    it("reorders a layer where it is, however deep", () => {
+      const deep = deepStore();
+      applyOp(deep, { op: "move", id: "D130", parent: "D129", key: "a1" });
+      expect(deep.get("D130")?.key).toBe("a1");
+    });
+
+    it("moves a layer shallower, even when it stays past the limit", () => {
+      const deep = deepStore();
+      // D131 from level 133 to 131.
+      applyOp(deep, { op: "move", id: "D131", parent: "D128", key: "a1" });
+      expect(deep.get("D131")?.parent).toBe("D128");
+    });
+
+    it("refuses a move that takes a layer deeper past the limit", () => {
+      const deep = deepStore();
+      applyOp(deep, rect("r", "P1", "a1"));
+      // From level 2 to level 133.
+      expectCode(
+        () => applyOp(deep, { op: "move", id: "r", parent: "D130", key: "a1" }),
+        "too_deep",
+      );
+      // Deeper by one, from level 128 to 129, is still deeper.
+      applyOp(deep, { op: "move", id: "r", parent: "D125", key: "a1" });
+      expectCode(
+        () => applyOp(deep, { op: "move", id: "r", parent: "D126", key: "a1" }),
+        "too_deep",
+      );
+      // A cycle is still a cycle there.
+      expectCode(
+        () => applyOp(deep, { op: "move", id: "D129", parent: "D131", key: "a1" }),
+        "cycle",
+      );
+    });
+
+    it("refuses a new layer past the limit, unless it puts back one the file held", () => {
+      const deep = deepStore();
+      expectCode(() => applyOp(deep, rect("r", "D129")), "too_deep");
+      // Undoing a delete there (a rollback, a rebase, a restore) brings back what was.
+      const inverse = applyOp(deep, { op: "delete", id: "D131" });
+      expectCode(() => applyTransaction(deep, inverse), "too_deep");
+      applyTransaction(deep, inverse, { held: true });
+      expect(deep.get("D131")?.parent).toBe("D130");
+    });
+
+    it("rolls back a failed transaction however deep it reaches", () => {
+      const deep = deepStore();
+      expectCode(
+        () =>
+          applyTransaction(deep, [
+            { op: "delete", id: "D131" },
+            { op: "set", id: "missing", prop: "x", value: 1 },
+          ]),
+        "not_found",
+      );
+      expect(deep.get("D131")?.parent).toBe("D130");
+    });
+
+    it("counts levels without looping in a store that holds a cycle", () => {
+      const looped = new MemoryStore([
+        { id: "P1", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+        { id: "A", type: "group", parent: "B", key: "a0", props: {} },
+        { id: "B", type: "group", parent: "A", key: "a0", props: {} },
+        { id: "C", type: "group", parent: "P1", key: "a0", props: {} },
+      ]);
+      expectCode(() => applyOp(looped, { op: "move", id: "C", parent: "A", key: "a0" }), "cycle");
+      expectCode(() => applyOp(looped, rect("r", "A")), "cycle");
+    });
+  });
+
   it("deletes whole subtrees and restores them with the inverse", () => {
     applyOp(store, frame("f2", "f1", "a1"));
     applyOp(store, rect("r2", "f2"));

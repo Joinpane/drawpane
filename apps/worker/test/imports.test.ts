@@ -359,6 +359,43 @@ describe("importing into a new file", () => {
     expect((await roomOf(third.fileId).stats()).nodes).toBe(1);
   });
 
+  it("counts an import's bytes as UTF-8: CJK text three each, an emoji four", async () => {
+    // A page whose name is 150 CJK characters and 50 emoji: 250 characters (UTF-16 code
+    // units) of name, but 650 bytes of it.
+    const name = "界".repeat(150) + "😀".repeat(50);
+    const line = `{"id":"P1","parent":"root","key":"a0","type":"page","props":${JSON.stringify({ name })}}`;
+    expect(line.length).toBeLessThan(400);
+    const bytes = new TextEncoder().encode(line).length;
+    expect(bytes).toBeGreaterThan(700);
+
+    // Under a limit of 400 bytes: refused, though its characters would fit.
+    const { browser, fileId } = await newFile();
+    await lowerLimits(fileId, { nodes: 10, bytes: 400 });
+    const over = await inParts(browser, fileId);
+    const refused = await over.part([page("P1", name, "a0")]);
+    expect(refused.status).toBe(400);
+    expect(JSON.stringify(await refused.json())).toContain("MB");
+
+    // Under exactly its bytes: kept, and committed.
+    const second = await newFile();
+    await lowerLimits(second.fileId, { nodes: 10, bytes });
+    const fits = await inParts(second.browser, second.fileId);
+    expect((await fits.part([page("P1", name, "a0")])).status).toBe(200);
+    const staged = await runInDurableObject(roomOf(second.fileId), (_room, state) =>
+      state.storage.sql.exec<{ bytes: number }>(`SELECT bytes FROM ${IMPORT_TABLE}_size`).one(),
+    );
+    expect(staged.bytes).toBe(bytes);
+    expect((await fits.commit()).status).toBe(200);
+
+    // One byte under it by the commit: refused there, counting the same bytes.
+    const third = await newFile();
+    const late = await inParts(third.browser, third.fileId);
+    expect((await late.part([page("P1", name, "a0")])).status).toBe(200);
+    await lowerLimits(third.fileId, { nodes: 10, bytes: bytes - 1 });
+    expect((await late.commit()).status).toBe(400);
+    expect((await roomOf(third.fileId).stats()).nodes).toBe(1);
+  });
+
   it("refuses override records in each part and at the commit of an import in parts", async () => {
     const { browser, fileId } = await newFile();
     const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };

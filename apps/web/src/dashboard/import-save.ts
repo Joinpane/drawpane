@@ -13,6 +13,7 @@ import {
   MAX_IMPORT_NODES,
   MAX_IMPORT_PART_BYTES,
   type NodeRecord,
+  utf8Length,
 } from "@drawpane/model";
 import { api, JsonText } from "../api/client";
 
@@ -46,24 +47,29 @@ export class ImportTooLarge extends Error {
   }
 }
 
-/** The nodes as request bodies of about IMPORT_PART_BYTES each, serialized as they're asked for. */
+/**
+ * The nodes as request bodies of about IMPORT_PART_BYTES each, serialized as they're asked
+ * for. `bytes` is their lines' UTF-8 bytes, as the server counts them (a character of CJK
+ * text is three, an emoji four).
+ */
 function* partsOf(
   nodes: readonly NodeRecord[],
-): Generator<{ body: string; count: number; chars: number }> {
+): Generator<{ body: string; count: number; bytes: number }> {
   let lines: string[] = [];
-  let chars = 0;
+  let bytes = 0;
   for (const node of nodes) {
     const line = JSON.stringify(node);
-    if (lines.length > 0 && chars + line.length > IMPORT_PART_BYTES) {
-      yield { body: `{"nodes":[${lines.join(",")}]}`, count: lines.length, chars };
+    const size = utf8Length(line);
+    if (lines.length > 0 && bytes + size > IMPORT_PART_BYTES) {
+      yield { body: `{"nodes":[${lines.join(",")}]}`, count: lines.length, bytes };
       lines = [];
-      chars = 0;
+      bytes = 0;
     }
     lines.push(line);
-    chars += line.length;
+    bytes += size;
   }
   if (lines.length > 0)
-    yield { body: `{"nodes":[${lines.join(",")}]}`, count: lines.length, chars };
+    yield { body: `{"nodes":[${lines.join(",")}]}`, count: lines.length, bytes };
 }
 
 /**
@@ -81,28 +87,28 @@ export async function saveImport(
   const parts = partsOf(nodes);
   // The first part is measured before anything is sent: most imports are one.
   let next = parts.next();
-  const tooLarge = (chars: number, sent: number) =>
+  const tooLarge = (bytes: number, sent: number) =>
     // Past the limit partway: the whole is estimated from what was measured.
-    new ImportTooLarge(Math.round((chars / Math.max(sent, 1)) * nodes.length), nodes.length);
+    new ImportTooLarge(Math.round((bytes / Math.max(sent, 1)) * nodes.length), nodes.length);
   if (nodes.length > MAX_IMPORT_NODES) {
-    const sample = next.done ? 0 : next.value.chars / next.value.count;
+    const sample = next.done ? 0 : next.value.bytes / next.value.count;
     throw new ImportTooLarge(Math.round(sample * nodes.length), nodes.length);
   }
-  if (!next.done && next.value.chars > MAX_IMPORT_BYTES)
-    throw tooLarge(next.value.chars, next.value.count);
+  if (!next.done && next.value.bytes > MAX_IMPORT_BYTES)
+    throw tooLarge(next.value.bytes, next.value.count);
 
   const { importId } = await api.post<{ importId: string }>(`${file}/imports`, {});
   const imports = `${file}/imports/${encodeURIComponent(importId)}`;
   let sent = 0;
-  let chars = 0;
+  let bytes = 0;
   try {
     for (; !next.done; next = parts.next()) {
       const part = next.value;
-      chars += part.chars;
-      if (chars > MAX_IMPORT_BYTES) throw tooLarge(chars, sent + part.count);
+      bytes += part.bytes;
+      if (bytes > MAX_IMPORT_BYTES) throw tooLarge(bytes, sent + part.count);
       if (new Blob([part.body]).size > MAX_IMPORT_PART_BYTES)
         throw new Error(
-          `A layer is too large to import (${mb(part.chars)} of data in one layer, ${mb(MAX_IMPORT_PART_BYTES)} at most).`,
+          `A layer is too large to import (${mb(part.bytes)} of data in one layer, ${mb(MAX_IMPORT_PART_BYTES)} at most).`,
         );
       await api.post(`${imports}/parts`, new JsonText(part.body));
       sent += part.count;

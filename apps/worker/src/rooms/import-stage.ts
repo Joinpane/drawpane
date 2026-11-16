@@ -26,7 +26,7 @@ import {
   insertRows,
   type NodeRow,
   type RoomSql,
-  rowLine,
+  rowLineBytes,
   toRow,
 } from "./node-tables";
 
@@ -112,8 +112,8 @@ export function stageNodes(
       throw new ModelError("already_exists", `Node ${node.id} is in the import twice.`, i);
     seen.add(node.id);
     const row = toRow(checked);
-    // Counted as the node's line of JSON, as the browser counts what it sends.
-    bytes += rowLine(row).length;
+    // Counted as the node's line of JSON in UTF-8 bytes, as the browser counts what it sends.
+    bytes += rowLineBytes(row);
     rows.push(row);
   }
   return room.transact(() => {

@@ -1723,7 +1723,9 @@ export class FileRoom extends DurableObject<Env> {
     try {
       const revn = this.ctx.storage.transactionSync(() => {
         const next = this.#revn + 1;
-        const inverse = this.#applyLogged(ops, author, next, options.also !== undefined);
+        const inverse = this.#applyLogged(ops, author, next, {
+          inverse: options.also !== undefined,
+        });
         options.also?.(next, inverse);
         return next;
       });
@@ -1740,9 +1742,16 @@ export class FileRoom extends DurableObject<Env> {
    * Applies and logs one transaction as revision `next`, inside a storage
    * transaction the caller runs. Returns the operations that undo it when
    * asked (`inverse`); without them, a delete doesn't read what it removes.
+   * `held`: it puts back what a file this server holds had (a restore, a
+   * merge, an update from main), so nothing is refused for depth.
    */
-  #applyLogged(ops: readonly Op[], author: Author, next: number, inverse: boolean): Op[] {
-    const undo = applyTransaction(this.#store, ops, { rollback: false, inverse });
+  #applyLogged(
+    ops: readonly Op[],
+    author: Author,
+    next: number,
+    { inverse, held = false }: { inverse: boolean; held?: boolean },
+  ): Op[] {
+    const undo = applyTransaction(this.#store, ops, { rollback: false, inverse, held });
     const now = Date.now();
     this.#sql.exec(
       "INSERT INTO log (revn, client_id, seq, user_id, session_id, ops, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1792,7 +1801,8 @@ export class FileRoom extends DurableObject<Env> {
       outcome = this.ctx.storage.transactionSync(() => {
         const out = new OpChunks((ops) => {
           next++;
-          this.#applyLogged(ops, author, next, false);
+          // A restore, a merge or an update brings back layers as deep as they were held.
+          this.#applyLogged(ops, author, next, { inverse: false, held: true });
           this.#store.clearCache();
           if (tooBig) return;
           sentChars += JSON.stringify(ops).length;

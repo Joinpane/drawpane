@@ -117,6 +117,8 @@ export class SqlNodeStore implements NodeStore {
 
   /** Whether anything lies more than `levels` levels below `id`, in one statement. */
   deeperThan(id: string, levels: number): boolean {
+    // The node itself is 0 levels below: past a negative count already.
+    if (levels < 0) return true;
     return (
       this.#sql
         .exec(

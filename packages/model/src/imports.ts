@@ -34,3 +34,26 @@ export const MAX_IMPORT_PART_BYTES = 12 * 1024 * 1024;
 
 /** How long an import begun and not committed is kept before it's thrown away. */
 export const IMPORT_TTL_MS = 60 * 60_000;
+
+/**
+ * How many bytes `text` takes as UTF-8, what `TextEncoder` would write,
+ * counted without making a copy: an import's limits are bytes, and a
+ * character of CJK text is three of them, an emoji four. A lone surrogate
+ * counts as the three bytes of the replacement character it's written as.
+ */
+export function utf8Length(text: string): number {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x80) bytes += 1;
+    else if (c < 0x800) bytes += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i++;
+      } else bytes += 3;
+    } else bytes += 3;
+  }
+  return bytes;
+}

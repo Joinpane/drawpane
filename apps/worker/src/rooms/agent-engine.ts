@@ -83,7 +83,8 @@ export class AgentEngine {
       return;
     }
     try {
-      editor.doc.apply(ops);
+      // The room committed it: applied as it is, however deep (decision 0026).
+      editor.doc.apply(ops, { held: true });
       this.#revn = revn;
     } catch {
       this.drop();

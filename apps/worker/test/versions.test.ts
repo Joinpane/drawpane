@@ -239,6 +239,69 @@ describe("versions", () => {
     expect((await roomOf(fileId).stats()).nodes).toBe(131);
   });
 
+  /** A file holding a chain of 132 groups, D0 at level 2 down to D131 at level 133. */
+  async function deepFile() {
+    const { browser, fileId } = await newFile();
+    const a = await join(browser, fileId, "clientA");
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      for (let i = 0; i < 132; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a0', 'group', '{}')",
+          `D${i}`,
+          i === 0 ? a.page.id : `D${i - 1}`,
+        );
+    });
+    const row = (id: string) =>
+      runInDurableObject(
+        roomOf(fileId),
+        (_room, state) =>
+          state.storage.sql
+            .exec<{ parent: string; key: string }>("SELECT parent, key FROM nodes WHERE id = ?", id)
+            .toArray()[0],
+      );
+    return { browser, fileId, a, row };
+  }
+
+  it("edits layers past the limit where that takes nothing deeper", async () => {
+    const { a, row } = await deepFile();
+    // Reordering where it is (level 132), and moving shallower (133 to 131).
+    await a.edit([{ op: "move", id: "D130", parent: "D129", key: "a1" }]);
+    await a.edit([{ op: "move", id: "D131", parent: "D128", key: "a1" }]);
+    expect(await row("D130")).toEqual({ parent: "D129", key: "a1" });
+    expect(await row("D131")).toEqual({ parent: "D128", key: "a1" });
+    // Taking a layer deeper past the limit is refused (sent as the next edit would be, seq 4).
+    await a.edit([rect("r", a.page.id)]);
+    a.send({ t: "txn", seq: 4, ops: [{ op: "move", id: "r", parent: "D129", key: "a2" }] });
+    expect(await a.next<{ code: string }>("reject")).toMatchObject({ code: "too_deep" });
+    // And so is a new layer there.
+    a.send({ t: "txn", seq: 4, ops: [rect("r2", "D129")] });
+    expect(await a.next<{ code: string }>("reject")).toMatchObject({ code: "too_deep" });
+  });
+
+  it("restores layers past the limit as deep as they were", async () => {
+    const { browser, fileId, row } = await deepFile();
+    const v1 = await name(browser, fileId, "Deep");
+    const restore = () =>
+      browser.json<{ changed: number }>(`/api/files/${fileId}/versions/${v1.id}/restore`, {
+        method: "POST",
+        json: {},
+      });
+    // A key changed at level 132: the restore moves it back where it was.
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      state.storage.sql.exec("UPDATE nodes SET key = 'a1' WHERE id = 'D130'");
+    });
+    expect((await restore()).changed).toBeGreaterThan(0);
+    expect(await row("D130")).toEqual({ parent: "D129", key: "a0" });
+    // A layer at level 133 deleted: the restore brings it back, though an edit couldn't add it.
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      state.storage.sql.exec("DELETE FROM nodes WHERE id = 'D131'");
+    });
+    expect(await row("D131")).toBeUndefined();
+    expect((await restore()).changed).toBeGreaterThan(0);
+    expect(await row("D131")).toEqual({ parent: "D130", key: "a0" });
+    expect((await roomOf(fileId).stats()).nodes).toBe(133);
+  });
+
   it("refuses a version it can't make sense of, changing nothing", async () => {
     const { browser, fileId } = await newFile();
     const a = await join(browser, fileId, "clientA");

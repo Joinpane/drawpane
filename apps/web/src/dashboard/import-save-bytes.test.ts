@@ -45,4 +45,54 @@ describe("an import past the byte limit", () => {
     expect(urls.filter((u) => u.endsWith("/parts")).length).toBe(10);
     expect(urls.at(-1)).toBe("DELETE /api/files/F1/imports/I1");
   });
+
+  it("counts bytes, not characters: CJK text is three each, an emoji four", async () => {
+    const fetch = vi.fn(async (url: string) =>
+      url.endsWith("/imports")
+        ? new Response(JSON.stringify({ importId: "I1" }), { status: 201 })
+        : new Response("{}"),
+    );
+    vi.stubGlobal("fetch", fetch);
+    // 4.8 million characters, 12 MB of UTF-8: more than the file takes (10 MB), in bytes only.
+    const text = (id: string, characters: string): NodeRecord =>
+      ({ id, type: "text", parent: "p", key: "a0", props: { characters } }) as NodeRecord;
+    const nodes = Array.from({ length: 8 }, (_, i) =>
+      text(`n${i}`, i % 2 === 0 ? "界".repeat(600_000) : "😀".repeat(300_000)),
+    );
+    const error = await saveImport("F1", nodes).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ImportTooLarge);
+    const bodies = (fetch.mock.calls as unknown as Array<[string, RequestInit]>)
+      .filter(([url]) => url.endsWith("/parts"))
+      .map(([, init]) => new Blob([init.body as string]).size);
+    for (const size of bodies) expect(size).toBeLessThan(2 * 1024 * 1024);
+  });
+
+  it("sends parts of about IMPORT_PART_BYTES in bytes, however many each character takes", async () => {
+    const fetch = vi.fn(async (url: string) =>
+      url.endsWith("/imports")
+        ? new Response(JSON.stringify({ importId: "I1" }), { status: 201 })
+        : new Response("{}"),
+    );
+    vi.stubGlobal("fetch", fetch);
+    // 2,000 text layers of 1,000 CJK characters: 6 MB, which the file takes.
+    const nodes = Array.from(
+      { length: 2000 },
+      (_, i) =>
+        ({
+          id: `n${i}`,
+          type: "text",
+          parent: "p",
+          key: "a0",
+          props: { characters: "界".repeat(1000) },
+        }) as NodeRecord,
+    );
+    await saveImport("F1", nodes);
+    const bodies = (fetch.mock.calls as unknown as Array<[string, RequestInit]>)
+      .filter(([url]) => url.endsWith("/parts"))
+      .map(([, init]) => new Blob([init.body as string]).size);
+    // About 1 MB each (IMPORT_PART_BYTES here, plus commas and brackets), not the 3 MB that
+    // counting characters would send.
+    expect(bodies.length).toBeGreaterThanOrEqual(6);
+    for (const size of bodies) expect(size).toBeLessThanOrEqual(1024 * 1024 + 4096);
+  });
 });

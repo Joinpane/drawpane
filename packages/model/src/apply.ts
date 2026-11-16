@@ -59,17 +59,34 @@ function checkParent(store: NodeStore, parent: string, childType: NodeType): voi
   }
 }
 
-function depthOf(store: NodeStore, id: string): number {
+/**
+ * How many levels `id` is below the root (a page is 1), counted as far as
+ * they go, and whether walking up from it reached `stop` (the layer being
+ * moved: the destination is inside it). A parent missing ends the count; a
+ * walk that comes back to a node it passed (a store holding a cycle) ends
+ * it too, as `looped`, rather than going round for ever.
+ */
+function levelsAbove(
+  store: NodeStore,
+  id: string,
+  stop?: string,
+): { depth: number; reached: boolean; looped: boolean } {
   let depth = 0;
-  let current = id;
-  while (current !== ROOT_ID) {
+  const seen = new Set<string>();
+  for (let current = id; current !== ROOT_ID; ) {
+    if (current === stop) return { depth, reached: true, looped: false };
+    if (seen.has(current)) return { depth, reached: false, looped: true };
+    seen.add(current);
     const node = store.get(current);
     if (!node) break;
     current = node.parent;
-    if (++depth > MAX_DEPTH) break;
+    depth++;
   }
-  return depth;
+  return { depth, reached: false, looped: false };
 }
+
+const tooDeep = () =>
+  new ModelError("too_deep", `Layers can't nest deeper than ${MAX_DEPTH} levels.`);
 
 function checkValue(type: NodeType, prop: string, value: unknown): asserts prop is PropName {
   if (!isPropName(prop)) throw new ModelError("invalid_prop", `Unknown property "${prop}".`);
@@ -104,14 +121,17 @@ export function checkNode(node: NodeRecord): NodeRecord {
   return { id: node.id, type: node.type, parent: node.parent, key: node.key, props };
 }
 
-function applyCreate(store: NodeStore, op: CreateOp): Op[] {
+function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
   if (!isValidId(op.id)) throw new ModelError("invalid_id", `"${op.id}" isn't a valid id.`);
   if (store.get(op.id)) throw new ModelError("already_exists", `Node ${op.id} already exists.`);
   if (!isValidOrderKey(op.key)) throw new ModelError("invalid_key", `Invalid order key.`);
   checkParent(store, op.parent, op.type);
   if (op.type === "override") checkRecord(store, op);
-  if (op.parent !== ROOT_ID && depthOf(store, op.parent) >= MAX_DEPTH) {
-    throw new ModelError("too_deep", `Layers can't nest deeper than ${MAX_DEPTH} levels.`);
+  if (op.parent !== ROOT_ID) {
+    const above = levelsAbove(store, op.parent);
+    if (above.looped) throw new ModelError("cycle", `Layer ${op.parent} is inside itself.`);
+    // A new layer is as deep as it goes: past the limit only when it puts back what was held.
+    if (!held && above.depth + 1 > MAX_DEPTH) throw tooDeep();
   }
   const props: Record<string, unknown> = {};
   for (const [prop, value] of Object.entries(op.props)) {
@@ -197,7 +217,7 @@ function applySet(store: NodeStore, op: SetOp): Op[] {
   return [{ op: "set", id: op.id, prop: op.prop, value: previous === undefined ? null : previous }];
 }
 
-function applyMove(store: NodeStore, op: MoveOp): Op[] {
+function applyMove(store: NodeStore, op: MoveOp, held: boolean): Op[] {
   const node = requireNode(store, op.id);
   if (node.type === "override") {
     throw new ModelError("invalid_parent", "An override record stays with its instance.");
@@ -205,24 +225,19 @@ function applyMove(store: NodeStore, op: MoveOp): Op[] {
   if (!isValidOrderKey(op.key)) throw new ModelError("invalid_key", `Invalid order key.`);
   checkParent(store, op.parent, node.type);
   // Walk up from the new parent: meeting the node itself means a cycle.
-  let depth = 1;
-  for (let current = op.parent; current !== ROOT_ID; ) {
-    if (current === op.id) {
-      throw new ModelError("cycle", "A layer can't be moved inside itself.");
-    }
-    const ancestor = store.get(current);
-    if (!ancestor) break;
-    current = ancestor.parent;
-    if (++depth > MAX_DEPTH) {
-      throw new ModelError("too_deep", `Layers can't nest deeper than ${MAX_DEPTH} levels.`);
-    }
-  }
-  // What's inside it moves down as far as it does: none of that may pass the limit either.
-  // A move that doesn't take it deeper is always allowed, so a file holding layers past the
-  // limit (moves didn't use to check this) can still be tidied.
-  if (depth > depthOf(store, op.id) && deeperThan(store, op.id, MAX_DEPTH - depth)) {
-    throw new ModelError("too_deep", `Layers can't nest deeper than ${MAX_DEPTH} levels.`);
-  }
+  const above = levelsAbove(store, op.parent, op.id);
+  if (above.reached) throw new ModelError("cycle", "A layer can't be moved inside itself.");
+  if (above.looped) throw new ModelError("cycle", `Layer ${op.parent} is inside itself.`);
+  // What's inside it moves down as far as it does: a move may not take the deepest layer it
+  // carries past the limit. One that doesn't take it deeper is always allowed, so a file
+  // holding layers past the limit (moves didn't use to check this) can still be tidied.
+  const depth = above.depth + 1;
+  if (
+    !held &&
+    depth > levelsAbove(store, op.id).depth &&
+    (depth > MAX_DEPTH || deeperThan(store, op.id, MAX_DEPTH - depth))
+  )
+    throw tooDeep();
   const inverse: MoveOp = { op: "move", id: op.id, parent: node.parent, key: node.key };
   store.move(op.id, op.parent, op.key);
   return [inverse];
@@ -233,20 +248,20 @@ function applyMove(store: NodeStore, op: MoveOp): Op[] {
  * in the order they must run. Throws `ModelError` and leaves the store
  * untouched when the operation is invalid.
  */
-export function applyOp(store: NodeStore, op: Op): Op[] {
-  return apply(store, op, false, true);
+export function applyOp(store: NodeStore, op: Op, { held = false }: ApplyOptions = {}): Op[] {
+  return apply(store, op, false, true, held);
 }
 
-function apply(store: NodeStore, op: Op, force: boolean, inverse: boolean): Op[] {
+function apply(store: NodeStore, op: Op, force: boolean, inverse: boolean, held: boolean): Op[] {
   switch (op.op) {
     case "create":
-      return applyCreate(store, op);
+      return applyCreate(store, op, held);
     case "delete":
       return applyDelete(store, op, force, inverse);
     case "set":
       return applySet(store, op);
     case "move":
-      return applyMove(store, op);
+      return applyMove(store, op, held);
   }
 }
 
@@ -262,6 +277,17 @@ export interface ApplyOptions {
    * layers costs no memory; only with `rollback` off.
    */
   readonly inverse?: boolean;
+  /**
+   * The operations put back layers the document (or a file the server
+   * holds) already had: a rebase undoing unacknowledged edits, a change the
+   * room already accepted, a restore, a merge, an update from main. They
+   * may stand as deep as they stood, so nothing is refused for depth;
+   * everything else is checked as ever. An edit (an undo by the user too)
+   * leaves this off: it may not make anything deeper than MAX_DEPTH unless
+   * it was already that deep (decision 0026). A transaction's own rollback
+   * is always applied this way.
+   */
+  readonly held?: boolean;
 }
 
 /**
@@ -271,19 +297,20 @@ export interface ApplyOptions {
 export function applyTransaction(
   store: NodeStore,
   ops: readonly Op[],
-  { rollback = true, inverse = true }: ApplyOptions = {},
+  { rollback = true, inverse = true, held = false }: ApplyOptions = {},
 ): Op[] {
   const undo: Op[][] = [];
   const keep = inverse || rollback;
   for (let i = 0; i < ops.length; i++) {
     try {
-      const back = apply(store, ops[i] as Op, false, keep);
+      const back = apply(store, ops[i] as Op, false, keep, held);
       if (keep) undo.push(back);
     } catch (error) {
       if (rollback) {
         for (let j = undo.length - 1; j >= 0; j--) {
-          // Rolling back may delete the only page a failed transaction created.
-          for (const back of undo[j] as Op[]) apply(store, back, true, true);
+          // Rolling back may delete the only page a failed transaction created, and puts back
+          // what the transaction removed however deep it was.
+          for (const back of undo[j] as Op[]) apply(store, back, true, true, true);
         }
       }
       if (error instanceof ModelError) throw new ModelError(error.code, error.message, i);
