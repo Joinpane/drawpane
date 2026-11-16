@@ -570,18 +570,32 @@ describe("Performance", () => {
     const first = editor.pathOf(id)?.[0]?.anchors[0];
     if (!first) throw new Error("no anchors");
     const start = screenOf(editor, id, first);
-    // Hover (nearest segment search on every move).
-    let t0 = performance.now();
-    for (let k = 0; k < 120; k++) ix.move(at(400 + k, 90 + (k % 7)));
-    const hover = (performance.now() - t0) / 120;
+    // The median move: what a move costs as a rule. An average lets one garbage collection or
+    // a busy CI machine's pause decide; a median fails only when moves themselves are slow.
+    const median = (times: number[]) => {
+      const sorted = [...times].sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)] as number;
+    };
+    const timed = (move: () => void) => {
+      const t0 = performance.now();
+      move();
+      return performance.now() - t0;
+    };
+    // Hover (nearest segment search on every move), after a few moves to warm up.
+    for (let k = 0; k < 10; k++) ix.move(at(380 + k, 90));
+    const hovers: number[] = [];
+    for (let k = 0; k < 120; k++) hovers.push(timed(() => ix.move(at(400 + k, 90 + (k % 7)))));
+    const hover = median(hovers);
     // Drag one anchor: recompute, fit, serialize and commit every move.
     ix.down(at(start.x, start.y));
-    t0 = performance.now();
-    for (let k = 1; k <= 120; k++) ix.move(at(start.x + k, start.y + k / 2));
-    const dragMs = (performance.now() - t0) / 120;
-    ix.up(at(start.x + 120, start.y + 60));
+    for (let k = 1; k <= 10; k++) ix.move(at(start.x + k / 10, start.y));
+    const drags: number[] = [];
+    for (let k = 1; k <= 120; k++)
+      drags.push(timed(() => ix.move(at(start.x + 1 + k, start.y + k / 2))));
+    const dragMs = median(drags);
+    ix.up(at(start.x + 121, start.y + 60));
     console.log(
-      `500-anchor path: hover ${hover.toFixed(2)} ms/move, anchor drag ${dragMs.toFixed(2)} ms/move`,
+      `500-anchor path, median move: hover ${hover.toFixed(2)} ms, anchor drag ${dragMs.toFixed(2)} ms`,
     );
     expect(hover).toBeLessThan(16);
     expect(dragMs).toBeLessThan(16);
