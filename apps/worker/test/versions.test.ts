@@ -1,5 +1,5 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import type { NodeRecord, Op, VersionInfo } from "@drawpane/model";
+import { type NodeRecord, type Op, parseSnapshot, type VersionInfo } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { snapshotKey } from "../src/rooms/snapshots";
 import { type Browser, openSocket, signedInUser } from "./helpers";
@@ -88,9 +88,13 @@ describe("versions", () => {
     const response = await browser.fetch(`/api/files/${fileId}/versions/${version.id}/snapshot`);
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toContain("immutable");
-    const snapshot = (await response.json()) as { revn: number; nodes: NodeRecord[] };
-    expect(snapshot.revn).toBe(revn);
-    expect(snapshot.nodes.find((n) => n.id === "card")?.props).toMatchObject({ x: 40, fills: [] });
+    // Version 2: a header line, then a node per line (decision 0026).
+    const snapshot = parseSnapshot(await response.text());
+    expect(snapshot?.header).toMatchObject({ version: 2, revn });
+    expect(snapshot?.nodes.find((n) => n.id === "card")?.props).toMatchObject({
+      x: 40,
+      fills: [],
+    });
   });
 
   it("renames, describes and un-names versions", async () => {

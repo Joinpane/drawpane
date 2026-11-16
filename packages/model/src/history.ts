@@ -259,6 +259,40 @@ function sanitize(
   return out;
 }
 
+/**
+ * What restoring one node takes, `now` being the node as it is (or undefined)
+ * and `node` as the version had it: a create or move to `parent`/`key` when
+ * needed, and a set for each property that differs. A property the schema no
+ * longer accepts, or a node whose type changed, counts as dropped. Shared by
+ * `restoreOps` and the FileRoom's restore, which reads both sides from SQLite.
+ */
+export function restoreNodeOps(
+  now: NodeRecord | undefined,
+  node: NodeRecord,
+  parent: string,
+  key: string,
+  count: { dropped: number },
+): { place: Op | null; sets: Op[] } {
+  const id = node.id;
+  const props = sanitize(node.type, node.props, count);
+  if (!now) return { place: { op: "create", id, type: node.type, parent, key, props }, sets: [] };
+  if (now.type !== node.type) {
+    // Ids never change type; a mismatch means foreign data. Leave it alone.
+    count.dropped++;
+    return { place: null, sets: [] };
+  }
+  const place: Op | null =
+    now.parent !== parent || now.key !== key ? { op: "move", id, parent, key } : null;
+  const sets: Op[] = [];
+  const was: Readonly<Record<string, unknown>> = now.props;
+  for (const prop of new Set([...Object.keys(was), ...Object.keys(props)])) {
+    if (!sameValue(was[prop], props[prop])) {
+      sets.push({ op: "set", id, prop: prop as PropName, value: props[prop] ?? null });
+    }
+  }
+  return { place, sets };
+}
+
 /** The version's tree: nodes by id and child ids by parent, in no particular order. */
 class Target {
   readonly nodes = new Map<string, NodeRecord>();
@@ -357,24 +391,9 @@ export function restoreOps(
   /** Brings `id` (whose target parent is already in place) to `parent`/`key` with the version's props. */
   const restoreNode = (id: string, parent: string, key: string): void => {
     const node = target.nodes.get(id) as NodeRecord;
-    const props = sanitize(node.type, node.props, count);
-    const now = current.get(id);
-    if (!now) {
-      placeOps.push({ op: "create", id, type: node.type, parent, key, props });
-      return;
-    }
-    if (now.type !== node.type) {
-      // Ids never change type; a mismatch means foreign data. Leave it alone.
-      count.dropped++;
-      return;
-    }
-    if (now.parent !== parent || now.key !== key) placeOps.push({ op: "move", id, parent, key });
-    const was: Readonly<Record<string, unknown>> = now.props;
-    for (const prop of new Set([...Object.keys(was), ...Object.keys(props)])) {
-      if (!sameValue(was[prop], props[prop])) {
-        setOps.push({ op: "set", id, prop: prop as PropName, value: props[prop] ?? null });
-      }
-    }
+    const { place, sets } = restoreNodeOps(current.get(id), node, parent, key, count);
+    if (place) placeOps.push(place);
+    setOps.push(...sets);
   };
 
   /** Deletes the topmost nodes in `ids` that aren't in `keep`. */

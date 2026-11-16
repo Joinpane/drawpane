@@ -52,6 +52,11 @@ export interface DocReader {
   get(id: string): NodeRecord | undefined;
   childIds(parent: string): readonly string[];
   pageIds(): readonly string[];
+  /**
+   * Every main component on the pages, in file order, when the reader can
+   * find them without walking every layer (the Worker's reader over SQLite).
+   */
+  componentMains?(): NodeRecord[];
 }
 
 /** A reader over a snapshot's nodes (in the Worker, which has no editor). */
@@ -91,6 +96,7 @@ function setOf(doc: DocReader, id: string): NodeRecord | undefined {
 }
 /** Every main component on the file's pages, in order. */
 function mains(doc: DocReader): NodeRecord[] {
+  if (doc.componentMains) return doc.componentMains();
   const out: NodeRecord[] = [];
   const walk = (parent: string) => {
     for (const id of doc.childIds(parent)) {

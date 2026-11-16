@@ -4,6 +4,7 @@ import { isValidOrderKey } from "./order-key";
 import {
   CHILD_TYPES,
   isPropName,
+  NODE_TYPES,
   type NodeType,
   PROPS,
   type PropName,
@@ -82,6 +83,26 @@ function checkValue(type: NodeType, prop: string, value: unknown): asserts prop 
   }
 }
 
+/**
+ * Checks what a node is on its own (its id, order key and every property's
+ * value) and returns it as it would be stored, nulls left out. Where it sits
+ * (its parent, depth, cycles) is the store's to check. Throws `ModelError`.
+ * An import checks each node with this as it arrives, before anything is
+ * placed.
+ */
+export function checkNode(node: NodeRecord): NodeRecord {
+  if (!isValidId(node.id)) throw new ModelError("invalid_id", `"${node.id}" isn't a valid id.`);
+  if (!isValidOrderKey(node.key)) throw new ModelError("invalid_key", `Invalid order key.`);
+  if (!(NODE_TYPES as readonly string[]).includes(node.type))
+    throw new ModelError("invalid_parent", `There's no kind of layer called "${node.type}".`);
+  const props: Record<string, unknown> = {};
+  for (const [prop, value] of Object.entries(node.props)) {
+    checkValue(node.type, prop, value);
+    if (value !== null && value !== undefined) props[prop] = value;
+  }
+  return { id: node.id, type: node.type, parent: node.parent, key: node.key, props };
+}
+
 function applyCreate(store: NodeStore, op: CreateOp): Op[] {
   if (!isValidId(op.id)) throw new ModelError("invalid_id", `"${op.id}" isn't a valid id.`);
   if (store.get(op.id)) throw new ModelError("already_exists", `Node ${op.id} already exists.`);
@@ -113,11 +134,16 @@ export function collectSubtree(store: NodeStore, id: string): NodeRecord[] {
   return out;
 }
 
-function applyDelete(store: NodeStore, op: DeleteOp, force: boolean): Op[] {
+function applyDelete(store: NodeStore, op: DeleteOp, force: boolean, inverse: boolean): Op[] {
   const node = requireNode(store, op.id);
   const pages = () => store.childIds(ROOT_ID).filter((id) => store.get(id)?.type === "page").length;
   if (!force && node.type === "page" && pages() <= 1) {
     throw new ModelError("last_page", "A file needs at least one page.");
+  }
+  // Nothing to undo with: a store that can drops the whole subtree without reading it.
+  if (!inverse && store.removeTree) {
+    store.removeTree(op.id);
+    return [];
   }
   const subtree = collectSubtree(store, op.id);
   for (let i = subtree.length - 1; i >= 0; i--) store.remove((subtree[i] as NodeRecord).id);
@@ -169,15 +195,15 @@ function applyMove(store: NodeStore, op: MoveOp): Op[] {
  * untouched when the operation is invalid.
  */
 export function applyOp(store: NodeStore, op: Op): Op[] {
-  return apply(store, op, false);
+  return apply(store, op, false, true);
 }
 
-function apply(store: NodeStore, op: Op, force: boolean): Op[] {
+function apply(store: NodeStore, op: Op, force: boolean, inverse: boolean): Op[] {
   switch (op.op) {
     case "create":
       return applyCreate(store, op);
     case "delete":
-      return applyDelete(store, op, force);
+      return applyDelete(store, op, force, inverse);
     case "set":
       return applySet(store, op);
     case "move":
@@ -191,6 +217,12 @@ export interface ApplyOptions {
    * store rolls back by itself (a SQLite transaction).
    */
   readonly rollback?: boolean;
+  /**
+   * Work out the operations that undo it (the default). Without them, a
+   * delete doesn't read what it deletes, so deleting a page of 100,000
+   * layers costs no memory; only with `rollback` off.
+   */
+  readonly inverse?: boolean;
 }
 
 /**
@@ -200,17 +232,19 @@ export interface ApplyOptions {
 export function applyTransaction(
   store: NodeStore,
   ops: readonly Op[],
-  { rollback = true }: ApplyOptions = {},
+  { rollback = true, inverse = true }: ApplyOptions = {},
 ): Op[] {
   const undo: Op[][] = [];
+  const keep = inverse || rollback;
   for (let i = 0; i < ops.length; i++) {
     try {
-      undo.push(applyOp(store, ops[i] as Op));
+      const back = apply(store, ops[i] as Op, false, keep);
+      if (keep) undo.push(back);
     } catch (error) {
       if (rollback) {
         for (let j = undo.length - 1; j >= 0; j--) {
           // Rolling back may delete the only page a failed transaction created.
-          for (const inverse of undo[j] as Op[]) apply(store, inverse, true);
+          for (const back of undo[j] as Op[]) apply(store, back, true, true);
         }
       }
       if (error instanceof ModelError) throw new ModelError(error.code, error.message, i);

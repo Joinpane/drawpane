@@ -103,6 +103,18 @@ export class SqlNodeStore implements NodeStore {
     this.#cache.set(id, null);
   }
 
+  /** Removes a node and everything under it in one statement, without reading them. */
+  removeTree(id: string): void {
+    this.#sql.exec(
+      `WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
+       DELETE FROM nodes WHERE id IN (SELECT id FROM sub)`,
+      id,
+    );
+    // Whatever was cached under it is gone too.
+    this.#cache.clear();
+    this.#cache.set(id, null);
+  }
+
   count(): number {
     return this.#sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM nodes").one().n;
   }

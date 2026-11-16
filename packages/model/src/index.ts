@@ -13,4 +13,5 @@ export * from "./protocol";
 export * from "./prototype";
 export * from "./schema";
 export * from "./search";
+export * from "./snapshot";
 export * from "./store";

@@ -26,6 +26,7 @@ export default defineConfig(async () => {
         },
       }),
     ],
-    test: { setupFiles: ["./test/setup.ts"] },
+    // test-node/ is the memory check, run in Node (vitest.memory.config.ts).
+    test: { include: ["test/**/*.test.ts"], setupFiles: ["./test/setup.ts"] },
   };
 });

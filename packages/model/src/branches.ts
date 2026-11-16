@@ -66,6 +66,58 @@ function fields(node: NodeRecord): Map<string, unknown> {
 
 const same = (a: unknown, b: unknown) => stableJson(a) === stableJson(b);
 
+/**
+ * What the branch changed in one node it kept from the base: a change per
+ * field that differs, conflicting where main (`now`, undefined when main
+ * deleted it) changed the same field to something else.
+ */
+export function changedFields(
+  was: NodeRecord,
+  node: NodeRecord,
+  now: NodeRecord | undefined,
+): BranchChange[] {
+  const changes: BranchChange[] = [];
+  const before = fields(was);
+  const after = fields(node);
+  const onMain = now ? fields(now) : null;
+  for (const field of new Set([...before.keys(), ...after.keys()])) {
+    const b = before.get(field);
+    const a = after.get(field);
+    if (same(a, b)) continue;
+    const m = onMain ? onMain.get(field) : undefined;
+    const conflict = onMain === null || (!same(m, b) && !same(m, a));
+    changes.push({
+      kind: "changed",
+      id: node.id,
+      field: field as PropName | typeof POSITION,
+      base: b,
+      branch: a,
+      main: m,
+      conflict,
+    });
+  }
+  return changes;
+}
+
+/**
+ * A node the branch added: it conflicts when its parent was in the base
+ * (so isn't coming with it) and main has deleted it since.
+ */
+export function addedChange(
+  node: NodeRecord,
+  parentOnMain: boolean,
+  parentInBase: boolean,
+): BranchChange {
+  const parentThere = node.parent === ROOT_ID || parentOnMain || !parentInBase;
+  return { kind: "added", id: node.id, conflict: parentThere ? null : "parent-gone" };
+}
+
+/** Whether main changed a node since the base (`was` undefined: main added it). */
+export function editedSince(was: NodeRecord | undefined, now: NodeRecord): boolean {
+  // Maps don't serialise: compare their entries.
+  return !was || !same(Object.fromEntries(fields(was)), Object.fromEntries(fields(now)));
+}
+
 /** What the branch changed since the base, and where main disagrees. */
 export function branchChanges(base: DocReader, branch: DocReader, main: DocReader): BranchChange[] {
   const baseNodes = new Map(allNodes(base, base.childIds(ROOT_ID)).map((n) => [n.id, n]));
@@ -75,35 +127,14 @@ export function branchChanges(base: DocReader, branch: DocReader, main: DocReade
 
   for (const node of branchNodes) {
     const was = baseNodes.get(node.id);
-    const now = main.get(node.id);
     if (!was) {
       // Added on the branch: its parent must be there in main (or come with it).
-      const parentThere =
-        node.parent === ROOT_ID ||
-        main.get(node.parent) !== undefined ||
-        !baseNodes.has(node.parent);
-      changes.push({ kind: "added", id: node.id, conflict: parentThere ? null : "parent-gone" });
+      changes.push(
+        addedChange(node, main.get(node.parent) !== undefined, baseNodes.has(node.parent)),
+      );
       continue;
     }
-    const before = fields(was);
-    const after = fields(node);
-    const onMain = now ? fields(now) : null;
-    for (const field of new Set([...before.keys(), ...after.keys()])) {
-      const b = before.get(field);
-      const a = after.get(field);
-      if (same(a, b)) continue;
-      const m = onMain ? onMain.get(field) : undefined;
-      const conflict = onMain === null || (!same(m, b) && !same(m, a));
-      changes.push({
-        kind: "changed",
-        id: node.id,
-        field: field as PropName | typeof POSITION,
-        base: b,
-        branch: a,
-        main: m,
-        conflict,
-      });
-    }
+    changes.push(...changedFields(was, node, main.get(node.id)));
   }
   for (const [id, was] of baseNodes) {
     if (branchIds.has(id)) continue;
@@ -111,11 +142,7 @@ export function branchChanges(base: DocReader, branch: DocReader, main: DocReade
     if (baseNodes.has(was.parent) && !branchIds.has(was.parent)) continue;
     const now = main.get(id);
     if (!now) continue;
-    const mainEdited = allNodes(main, [id]).some((n) => {
-      const before = baseNodes.get(n.id);
-      // Maps don't serialise: compare their entries.
-      return !before || !same(Object.fromEntries(fields(before)), Object.fromEntries(fields(n)));
-    });
+    const mainEdited = allNodes(main, [id]).some((n) => editedSince(baseNodes.get(n.id), n));
     changes.push({ kind: "removed", id, conflict: mainEdited ? "changed-on-main" : null });
   }
   return changes;

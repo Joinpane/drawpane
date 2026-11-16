@@ -1,4 +1,4 @@
-import { ID_PATTERN, type NodeRecord, newId, searchFold } from "@drawpane/model";
+import { ID_PATTERN, newId, searchFold } from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
 import { publicOrigins } from "../auth/passkeys";
@@ -516,12 +516,11 @@ export const api = new Hono<AppContext>()
       c.env.DB.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").bind(now, project.id),
     ]);
     if (source) {
-      // Over RPC the records come back structurally typed; they're the room's own.
-      const nodes = (await room(c.env, source.id).allNodes()) as NodeRecord[];
-      const copied = await room(c.env, row.id).importNodes(
+      // Streamed from the source's room to the copy's, a batch at a time (decision 0026).
+      const copied = await room(c.env, row.id).importSnapshot(
         { userId: user.id, name: user.name },
-        nodes,
         row.id,
+        await room(c.env, source.id).exportSnapshot(),
       );
       if (!copied.ok) {
         await c.env.DB.prepare("DELETE FROM files WHERE id = ?").bind(row.id).run();

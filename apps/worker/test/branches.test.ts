@@ -6,6 +6,7 @@ import {
   type NodeRecord,
   nodeReader,
   type Op,
+  parseBranchReview,
   type VersionInfo,
 } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
@@ -14,6 +15,13 @@ import { branchBaseKey } from "../src/rooms/snapshots";
 import { type Browser, openSocket, signedInUser } from "./helpers";
 
 const roomOf = (fileId: string) => env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
+
+/** What review reads, streamed as lines of JSON. */
+async function readReview(browser: Browser, branchId: string) {
+  const response = await browser.fetch(`/api/files/${branchId}/branch/review`);
+  expect(response.status).toBe(200);
+  return parseBranchReview(await response.text());
+}
 
 async function join(browser: Browser, fileId: string, clientId: string) {
   const socket = await openSocket(browser, fileId);
@@ -137,12 +145,7 @@ describe("reviewing and merging", () => {
     // Meanwhile on main: a change of its own, which the merge keeps.
     await main.edit([{ op: "set", id: "r1", prop: "name", value: "Pay now" }]);
 
-    const review = await browser.json<{
-      base: NodeRecord[];
-      branch: NodeRecord[];
-      main: NodeRecord[];
-      mainRevn: number;
-    }>(`/api/files/${branch.id}/branch/review`);
+    const review = await readReview(browser, branch.id);
     const changes = branchChanges(
       nodeReader(review.base),
       nodeReader(review.branch),
@@ -187,11 +190,7 @@ describe("reviewing and merging", () => {
     });
     expect(undecided.status).toBe(409);
     // Nothing happened: it can still be merged.
-    const review = await browser.json<{
-      base: NodeRecord[];
-      branch: NodeRecord[];
-      main: NodeRecord[];
-    }>(`/api/files/${branch.id}/branch/review`);
+    const review = await readReview(browser, branch.id);
     const [conflict] = branchChanges(
       nodeReader(review.base),
       nodeReader(review.branch),
@@ -341,11 +340,7 @@ describe("updating a branch from main", () => {
     expect(nodes.some((n) => n.id === "r3")).toBe(true);
 
     // Only the branch's own change is left to review.
-    const review = await browser.json<{
-      base: NodeRecord[];
-      branch: NodeRecord[];
-      main: NodeRecord[];
-    }>(`/api/files/${branch.id}/branch/review`);
+    const review = await readReview(browser, branch.id);
     const changes = branchChanges(
       nodeReader(review.base),
       nodeReader(review.branch),
@@ -366,11 +361,7 @@ describe("updating a branch from main", () => {
       { method: "POST", json: {} },
     );
     expect(updated).toMatchObject({ changes: 0, kept: 1 });
-    const review = await browser.json<{
-      base: NodeRecord[];
-      branch: NodeRecord[];
-      main: NodeRecord[];
-    }>(`/api/files/${branch.id}/branch/review`);
+    const review = await readReview(browser, branch.id);
     const [change] = branchChanges(
       nodeReader(review.base),
       nodeReader(review.branch),

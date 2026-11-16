@@ -1,19 +1,27 @@
 /**
- * Saving an import: the converted nodes fill the new file in one request.
- * The server takes at most MAX_IMPORT_NODES nodes in MAX_IMPORT_BYTES of
- * JSON (it goes to the file's room in one call, validated on a copy). The body is
- * serialized once and measured here, so an import too large says so in
- * words, with its size, instead of a refusal partway through a long upload.
+ * Saving an import (decision 0026): the converted nodes go to the server in
+ * parts of about IMPORT_PART_BYTES of JSON (`POST /files/:id/imports`, a
+ * request per part, then a commit), each node serialized once, as its part
+ * is sent. The file shows nothing until the commit, and an import that fails
+ * partway is given up, so the file stays empty. A file can take
+ * MAX_IMPORT_NODES nodes in MAX_IMPORT_BYTES of JSON; more is refused in
+ * words, with its size.
  */
-import { MAX_IMPORT_BYTES, MAX_IMPORT_NODES, type NodeRecord } from "@drawpane/model";
+import {
+  IMPORT_PART_BYTES,
+  MAX_IMPORT_BYTES,
+  MAX_IMPORT_NODES,
+  MAX_IMPORT_PART_BYTES,
+  type NodeRecord,
+} from "@drawpane/model";
 import { api, JsonText } from "../api/client";
 
 /**
  * Layers one Drawpane file takes, by measure: converted layers come to 410 to 510 bytes each on
- * the shadcn/ui Pro kit (vector paths, names and paints), so the byte limit comes long before the
- * node limit. At 560 bytes a layer, with some room, that's about 45,000 in 24 MB: what importers
- * aim for before they know the bytes (the .fig reader's estimates are within about 10% of what
- * it builds).
+ * the shadcn/ui Pro kit (vector paths, names and paints). At 560 bytes a layer, with some room,
+ * the byte limit allows more than the node limit, so this is MAX_IMPORT_NODES: what importers aim
+ * for before they know the bytes (the .fig reader's estimates are within about 10% of what it
+ * builds).
  */
 export const FILE_LAYERS = Math.min(MAX_IMPORT_NODES, Math.floor(MAX_IMPORT_BYTES / 560));
 
@@ -38,11 +46,72 @@ export class ImportTooLarge extends Error {
   }
 }
 
-/** Fills a new file with an import's nodes; throws ImportTooLarge, before sending, when it won't fit. */
-export async function saveImport(fileId: string, nodes: readonly NodeRecord[]): Promise<void> {
-  const text = JSON.stringify({ nodes });
-  const bytes = new Blob([text]).size;
-  if (bytes > MAX_IMPORT_BYTES || nodes.length > MAX_IMPORT_NODES)
-    throw new ImportTooLarge(bytes, nodes.length);
-  await api.post(`/files/${encodeURIComponent(fileId)}/import`, new JsonText(text));
+/** The nodes as request bodies of about IMPORT_PART_BYTES each, serialized as they're asked for. */
+function* partsOf(
+  nodes: readonly NodeRecord[],
+): Generator<{ body: string; count: number; chars: number }> {
+  let lines: string[] = [];
+  let chars = 0;
+  for (const node of nodes) {
+    const line = JSON.stringify(node);
+    if (lines.length > 0 && chars + line.length > IMPORT_PART_BYTES) {
+      yield { body: `{"nodes":[${lines.join(",")}]}`, count: lines.length, chars };
+      lines = [];
+      chars = 0;
+    }
+    lines.push(line);
+    chars += line.length;
+  }
+  if (lines.length > 0)
+    yield { body: `{"nodes":[${lines.join(",")}]}`, count: lines.length, chars };
+}
+
+/**
+ * Fills a new file with an import's nodes, a part at a time. Throws
+ * ImportTooLarge, before sending, when there are more nodes than a file
+ * takes, or as soon as the JSON passes what it takes (the import is given
+ * up). `onProgress` hears how many nodes have gone.
+ */
+export async function saveImport(
+  fileId: string,
+  nodes: readonly NodeRecord[],
+  onProgress?: (sent: number, total: number) => void,
+): Promise<void> {
+  const file = `/files/${encodeURIComponent(fileId)}`;
+  const parts = partsOf(nodes);
+  // The first part is measured before anything is sent: most imports are one.
+  let next = parts.next();
+  const tooLarge = (chars: number, sent: number) =>
+    // Past the limit partway: the whole is estimated from what was measured.
+    new ImportTooLarge(Math.round((chars / Math.max(sent, 1)) * nodes.length), nodes.length);
+  if (nodes.length > MAX_IMPORT_NODES) {
+    const sample = next.done ? 0 : next.value.chars / next.value.count;
+    throw new ImportTooLarge(Math.round(sample * nodes.length), nodes.length);
+  }
+  if (!next.done && next.value.chars > MAX_IMPORT_BYTES)
+    throw tooLarge(next.value.chars, next.value.count);
+
+  const { importId } = await api.post<{ importId: string }>(`${file}/imports`, {});
+  const imports = `${file}/imports/${encodeURIComponent(importId)}`;
+  let sent = 0;
+  let chars = 0;
+  try {
+    for (; !next.done; next = parts.next()) {
+      const part = next.value;
+      chars += part.chars;
+      if (chars > MAX_IMPORT_BYTES) throw tooLarge(chars, sent + part.count);
+      if (new Blob([part.body]).size > MAX_IMPORT_PART_BYTES)
+        throw new Error(
+          `A layer is too large to import (${mb(part.chars)} of data in one layer, ${mb(MAX_IMPORT_PART_BYTES)} at most).`,
+        );
+      await api.post(`${imports}/parts`, new JsonText(part.body));
+      sent += part.count;
+      onProgress?.(sent, nodes.length);
+    }
+    await api.post(`${imports}/commit`, {});
+  } catch (error) {
+    // Nothing of it shows: what was sent is thrown away.
+    await api.delete(imports).catch(() => undefined);
+    throw error;
+  }
 }

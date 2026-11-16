@@ -5,6 +5,10 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  // Up to five minutes of CPU per request (the most Cloudflare allows; billed as used): a room
+  // committing an import, restore or merge of a few hundred thousand layers works for tens of
+  // seconds in one call (docs/decisions/0026-large-files-on-the-server.md).
+  "limits": { "cpu_ms": 300000 },
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS",

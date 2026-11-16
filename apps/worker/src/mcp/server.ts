@@ -9,7 +9,7 @@
  * (render, set_props…), which the file's room runs on its headless editor.
  */
 import { AGENT_TOOLS, type AgentTool, type ToolLevel } from "@drawpane/editor";
-import { ID_PATTERN, type NodeRecord, newId } from "@drawpane/model";
+import { ID_PATTERN, newId } from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
 import { agentToolsEnabled } from "../agent/measurer";
@@ -20,12 +20,12 @@ import {
   SessionError,
   startSession,
 } from "../agent/sessions";
-import { requireFileRole } from "../api/access";
+import { type FileRow, requireFileRole } from "../api/access";
 import { type TokenScope, userForBearer } from "../auth/tokens";
 import type { AppContext, Env, User } from "../env";
 import { HttpError } from "../lib/http";
 import type { AgentCallResult } from "../rooms/file-room";
-import { components, FileDoc, findNodes, nodeDetail, outline, tokens } from "./document";
+import type { DocumentRequest } from "./document";
 
 /** The revisions we speak, oldest first; the last is what we offer a client that names none we know. */
 export const PROTOCOL_VERSIONS = ["2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"] as const;
@@ -101,19 +101,33 @@ interface Tool {
 const FileId = z.string().regex(ID_PATTERN, "a file id from list_files");
 const NodeId = z.string().regex(ID_PATTERN, "a layer id from get_outline or find_nodes");
 
-/** A file's document, once the person's access to it is checked. */
+/** A file, once the person's access to it is checked. */
 async function readFile(ctx: ToolContext, fileId: string) {
   try {
     const { file } = await requireFileRole(ctx.env, ctx.user.id, fileId, "viewer");
-    const room = ctx.env.FILE_ROOM.get(ctx.env.FILE_ROOM.idFromName(file.id));
-    // The RPC stub's types widen tuples; the nodes are as the room stores them.
-    const nodes = (await room.allNodes()) as unknown as NodeRecord[];
-    return { file, doc: new FileDoc(nodes) };
+    return { file };
   } catch (error) {
     if (error instanceof HttpError)
       throw new ToolError(`No file ${fileId} that you can open. Use list_files to find one.`);
     throw error;
   }
+}
+
+/**
+ * A read of a file's document, answered by its room from SQLite (a large
+ * file is never sent whole, decision 0026).
+ */
+async function readDocument<T>(
+  ctx: ToolContext,
+  fileId: string,
+  request: DocumentRequest,
+): Promise<{ file: FileRow; answer: T }> {
+  const { file } = await readFile(ctx, fileId);
+  const room = ctx.env.FILE_ROOM.get(ctx.env.FILE_ROOM.idFromName(file.id));
+  const answer = (await room.readDocument(file.id, request)) as T | { error: string };
+  if (answer && typeof answer === "object" && "error" in answer && typeof answer.error === "string")
+    throw new ToolError(answer.error);
+  return { file, answer: answer as T };
 }
 
 function tool<S extends z.ZodRawShape>(
@@ -178,17 +192,18 @@ const READ_TOOLS: readonly Tool[] = [
       limit: z.number().int().min(10).max(2000).default(400).describe("Most layers to list."),
     },
     async (ctx, { fileId, pageId, rootId, depth, limit }) => {
-      const { file, doc } = await readFile(ctx, fileId);
-      const pages = doc.pages();
-      const page = pageId ? doc.get(pageId) : pages[0];
-      if (pageId && page?.type !== "page") throw new ToolError(`No page ${pageId} in this file.`);
-      const start = rootId ?? page?.id;
-      if (rootId && !doc.get(rootId)) throw new ToolError(`No layer ${rootId} in this file.`);
-      return {
-        file: { id: file.id, name: file.name },
-        pages: pages.map((p) => ({ id: p.id, name: p.props.name ?? "Page" })),
-        outline: start ? outline(doc, start, depth, limit) : null,
-      };
+      const { file, answer } = await readDocument<{ pages: unknown; outline: unknown }>(
+        ctx,
+        fileId,
+        {
+          kind: "outline",
+          ...(pageId ? { pageId } : {}),
+          ...(rootId ? { rootId } : {}),
+          depth,
+          limit,
+        },
+      );
+      return { file: { id: file.id, name: file.name }, ...answer };
     },
   ),
   tool(
@@ -197,10 +212,7 @@ const READ_TOOLS: readonly Tool[] = [
     "One layer's full properties (as stored: properties at their default are left out), its parent, page and children.",
     { fileId: FileId, nodeId: NodeId },
     async (ctx, { fileId, nodeId }) => {
-      const { doc } = await readFile(ctx, fileId);
-      const detail = nodeDetail(doc, nodeId);
-      if (!detail) throw new ToolError(`No layer ${nodeId} in this file.`);
-      return detail;
+      return (await readDocument(ctx, fileId, { kind: "node", nodeId })).answer;
     },
   ),
   tool(
@@ -214,8 +226,8 @@ const READ_TOOLS: readonly Tool[] = [
       limit: z.number().int().min(1).max(500).default(100),
     },
     async (ctx, { fileId, query, kind, limit }) => {
-      const { doc } = await readFile(ctx, fileId);
-      return findNodes(doc, query, kind, limit);
+      const request = { kind: "find", query, ...(kind ? { nodeKind: kind } : {}), limit } as const;
+      return (await readDocument(ctx, fileId, request)).answer;
     },
   ),
   tool(
@@ -224,8 +236,7 @@ const READ_TOOLS: readonly Tool[] = [
     "The file's own main components and sets of variants: names, descriptions and how many instances use each. Build with these rather than drawing your own.",
     { fileId: FileId },
     async (ctx, { fileId }) => {
-      const { doc } = await readFile(ctx, fileId);
-      return { components: components(doc) };
+      return (await readDocument(ctx, fileId, { kind: "components" })).answer;
     },
   ),
   tool(
@@ -234,8 +245,7 @@ const READ_TOOLS: readonly Tool[] = [
     "The file's variable collections (colours, numbers, strings, with a value per mode) and text styles. Use these names rather than raw values.",
     { fileId: FileId },
     async (ctx, { fileId }) => {
-      const { doc } = await readFile(ctx, fileId);
-      return tokens(doc);
+      return (await readDocument(ctx, fileId, { kind: "tokens" })).answer;
     },
   ),
   tool(

@@ -10,11 +10,8 @@ import {
   type LibraryAsset,
   LibraryAssets,
   type LibraryPublish,
-  libraryAssets,
   MAX_LIBRARY_ASSETS,
-  type NodeRecord,
   newId,
-  nodeReader,
   type VersionPerson,
 } from "@drawpane/model";
 import { Hono } from "hono";
@@ -22,7 +19,7 @@ import { z } from "zod";
 import { requireUser } from "../auth/session";
 import type { AppContext, Env } from "../env";
 import { badRequest, notFound } from "../lib/http";
-import { readSnapshot, snapshotKey } from "../rooms/snapshots";
+import type { PublishResult } from "../rooms/file-room";
 import { readBody, requireFileRole } from "./access";
 
 /** Publishes listed per library, newest first. */
@@ -92,22 +89,23 @@ export const libraries = new Hono<AppContext>()
     const user = requireUser(c);
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
     const body = await readBody(c, z.object({ description: Description.optional() }));
-    // A first look, so an empty publish doesn't leave a version behind.
-    const now = (await room(c.env, file.id).allNodes()) as unknown as NodeRecord[];
-    if (libraryAssets(nodeReader(now)).length === 0)
-      throw badRequest("There's nothing to publish: make a component first.");
     const description = body.description ?? null;
     const firstLine = description?.split("\n")[0]?.slice(0, 100);
-    const saved = await room(c.env, file.id).saveVersion(
+    // The room reads what the file offers and saves the version from one copy of its nodes,
+    // so the list and the content can't disagree (decision 0026: nothing reads the file whole).
+    const published = (await room(c.env, file.id).publishLibrary(
       { userId: user.id, name: user.name },
+      file.id,
       firstLine ? `Published: ${firstLine}` : "Published",
       description,
-    );
-    const nodes = await readSnapshot(c.env.FILES, snapshotKey(file.id, saved.revn));
-    if (!nodes) throw notFound("The version didn't save. Try again.");
-    const assets = libraryAssets(nodeReader(nodes));
-    if (assets.length > MAX_LIBRARY_ASSETS)
-      throw badRequest(`A library can offer up to ${MAX_LIBRARY_ASSETS} components.`);
+    )) as PublishResult;
+    if (!published.ok)
+      throw badRequest(
+        published.reason === "empty"
+          ? "There's nothing to publish: make a component first."
+          : `A library can offer up to ${MAX_LIBRARY_ASSETS} components.`,
+      );
+    const { version: saved, assets } = published;
     const id = newId();
     await c.env.DB.prepare(
       `INSERT INTO library_publishes (id, file_id, team_id, version_id, revn, published_by, published_at, description, assets)

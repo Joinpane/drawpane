@@ -4,9 +4,21 @@
  * outline, one node, a search, its components, its tokens. Bounded, so a
  * big file can't flood a model's context.
  */
-import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { type DocReader, getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
 
-export class FileDoc {
+/** What the views below read a document through. */
+export interface DocView {
+  get(id: string): NodeRecord | undefined;
+  children(id: string): readonly NodeRecord[];
+  pages(): NodeRecord[];
+  /** The page a node is on, when it's on one (library copies and tokens aren't). */
+  pageOf(id: string): NodeRecord | undefined;
+  /** Every node on a page, parents first. */
+  onPages(): Generator<NodeRecord>;
+}
+
+/** A document held in memory: for tests, and files small enough to read whole. */
+export class FileDoc implements DocView {
   readonly #nodes = new Map<string, NodeRecord>();
   readonly #children = new Map<string, NodeRecord[]>();
 
@@ -51,6 +63,99 @@ export class FileDoc {
   }
 }
 
+/**
+ * A document read from SQLite as the views ask (the FileRoom's, through a
+ * `TableReader`), so a large file is never read whole: an outline reads the
+ * layers it lists, a search walks the pages a node's children at a time.
+ */
+export class SqlFileDoc implements DocView {
+  readonly #reader: DocReader;
+
+  constructor(reader: DocReader) {
+    this.#reader = reader;
+  }
+
+  get(id: string): NodeRecord | undefined {
+    return this.#reader.get(id);
+  }
+
+  children(id: string): readonly NodeRecord[] {
+    const out: NodeRecord[] = [];
+    for (const child of this.#reader.childIds(id)) {
+      const node = this.#reader.get(child);
+      if (node) out.push(node);
+    }
+    return out;
+  }
+
+  pages(): NodeRecord[] {
+    return this.children(ROOT_ID).filter((n) => n.type === "page");
+  }
+
+  pageOf(id: string): NodeRecord | undefined {
+    for (let node = this.get(id); node; node = this.get(node.parent))
+      if (node.type === "page") return node;
+    return undefined;
+  }
+
+  *onPages(): Generator<NodeRecord> {
+    const stack = [...this.pages()].reverse();
+    while (stack.length > 0) {
+      const node = stack.pop() as NodeRecord;
+      yield node;
+      stack.push(...[...this.children(node.id)].reverse());
+    }
+  }
+}
+
+/** A read the MCP tools ask a file's room for. */
+export type DocumentRequest =
+  | {
+      readonly kind: "outline";
+      readonly pageId?: string;
+      readonly rootId?: string;
+      readonly depth: number;
+      readonly limit: number;
+    }
+  | { readonly kind: "node"; readonly nodeId: string }
+  | {
+      readonly kind: "find";
+      readonly query: string;
+      readonly nodeKind?: string;
+      readonly limit: number;
+    }
+  | { readonly kind: "components" }
+  | { readonly kind: "tokens" };
+
+/** The answer to a read, or `{ error }` worded for the model. */
+export function answerDocument(doc: DocView, request: DocumentRequest): unknown {
+  switch (request.kind) {
+    case "outline": {
+      const pages = doc.pages();
+      const page = request.pageId ? doc.get(request.pageId) : pages[0];
+      if (request.pageId && page?.type !== "page")
+        return { error: `No page ${request.pageId} in this file.` };
+      if (request.rootId && !doc.get(request.rootId))
+        return { error: `No layer ${request.rootId} in this file.` };
+      const start = request.rootId ?? page?.id;
+      return {
+        pages: pages.map((p) => ({ id: p.id, name: p.props.name ?? "Page" })),
+        outline: start ? outline(doc, start, request.depth, request.limit) : null,
+      };
+    }
+    case "node":
+      return (
+        nodeDetail(doc, request.nodeId) ?? { error: `No layer ${request.nodeId} in this file.` }
+      );
+    case "find":
+      return findNodes(doc, request.query, request.nodeKind, request.limit);
+    case "components":
+      return { components: components(doc) };
+    case "tokens":
+      return tokens(doc);
+  }
+}
+
 /** A node's name as people see it: its own, or its kind. */
 export function displayName(node: NodeRecord): string {
   const name = getProp(node.props, "name");
@@ -85,7 +190,7 @@ export interface OutlineEntry {
  * A page's (or a layer's) layers as a tree, `depth` levels down and at most
  * `limit` nodes in all; what's left out is counted.
  */
-export function outline(doc: FileDoc, rootId: string, depth: number, limit: number) {
+export function outline(doc: DocView, rootId: string, depth: number, limit: number) {
   let budget = limit;
   let truncated = false;
   const visit = (node: NodeRecord, level: number): OutlineEntry => {
@@ -125,7 +230,7 @@ export function outline(doc: FileDoc, rootId: string, depth: number, limit: numb
 const round = (n: number) => Math.round(n * 100) / 100;
 
 /** A node in full: its props (defaults left out, as stored), parent and children. */
-export function nodeDetail(doc: FileDoc, id: string) {
+export function nodeDetail(doc: DocView, id: string) {
   const node = doc.get(id);
   if (!node) return null;
   return {
@@ -140,7 +245,7 @@ export function nodeDetail(doc: FileDoc, id: string) {
 }
 
 /** Layers on pages whose name or text holds `query` (any case), and of `kind` when given. */
-export function findNodes(doc: FileDoc, query: string, kind: string | undefined, limit: number) {
+export function findNodes(doc: DocView, query: string, kind: string | undefined, limit: number) {
   const q = query.trim().toLowerCase();
   const found: Array<{ id: string; kind: string; name: string; page: string }> = [];
   let total = 0;
@@ -164,7 +269,7 @@ export function findNodes(doc: FileDoc, query: string, kind: string | undefined,
 }
 
 /** The file's own components (and sets of variants), with how often each is used. */
-export function components(doc: FileDoc) {
+export function components(doc: DocView) {
   const uses = new Map<string, number>();
   for (const node of doc.onPages()) {
     const of = node.type === "frame" ? getProp(node.props, "instanceOf") : null;
@@ -203,7 +308,7 @@ export function components(doc: FileDoc) {
 }
 
 /** The file's tokens: variable collections (values by mode name) and text styles. */
-export function tokens(doc: FileDoc) {
+export function tokens(doc: DocView) {
   const collections = doc
     .children(ROOT_ID)
     .filter((n) => n.type === "collection")

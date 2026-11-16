@@ -86,7 +86,7 @@ test.describe
 
     test("imports a .fig chosen in the dialog, and opens it", async () => {
       const imported = page.waitForRequest(
-        (r) => r.method() === "POST" && /\/api\/files\/[^/]+\/import$/.test(r.url()),
+        (r) => r.method() === "POST" && /\/api\/files\/[^/]+\/imports\/[^/]+\/parts$/.test(r.url()),
       );
       await page.getByRole("button", { name: "Import", exact: true }).click();
       await chooser(page).setInputFiles(FIXTURE);

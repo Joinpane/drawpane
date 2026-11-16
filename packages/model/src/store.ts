@@ -18,6 +18,11 @@ export interface NodeStore {
   move(id: string, parent: string, key: string): void;
   /** Removes one node. Callers remove descendants first. */
   remove(id: string): void;
+  /**
+   * Removes a node and everything under it, without reading them: for a
+   * store that can (SQLite), used when nobody needs what was deleted back.
+   */
+  removeTree?(id: string): void;
 }
 
 /**

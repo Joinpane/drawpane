@@ -87,7 +87,7 @@ describe("importing into a new file", () => {
     expect(response.status).toBe(404);
   });
 
-  it("commits a large import in chunks", async () => {
+  it("fills the file as one change, which clients behind it load rather than catch up on", async () => {
     const { browser, fileId } = await newFile();
     const nodes: NodeRecord[] = [page("P1", "Big", "a0")];
     // About 3 MB of nodes (long path data): more than one log row can hold.
@@ -106,6 +106,118 @@ describe("importing into a new file", () => {
     await browser.json(`/api/files/${fileId}/import`, { method: "POST", json: { nodes } });
     const stats = await roomOf(fileId).stats();
     expect(stats.nodes).toBe(3001);
-    expect(stats.revn).toBeGreaterThan(2);
+    // The starting page was revision 1; the import is revision 2, not logged as operations.
+    expect(stats.revn).toBe(2);
+    const socket = await openSocket(browser, fileId);
+    socket.send({ t: "hello", protocol: 1, clientId: "c1", revn: 1 });
+    expect((await socket.next<{ mode: string }>("welcome")).mode).toBe("snapshot");
+  });
+
+  it("takes an import in parts, showing none of it until the commit", async () => {
+    const { browser, fileId } = await newFile();
+    const { importId } = await browser.json<{ importId: string }>(`/api/files/${fileId}/imports`, {
+      method: "POST",
+      json: {},
+    });
+    const part = (nodes: NodeRecord[]) =>
+      browser.fetch(`/api/files/${fileId}/imports/${importId}/parts`, {
+        method: "POST",
+        json: { nodes },
+      });
+    // Children may come before their parents, in any part.
+    expect((await part([rect("R1", "P1")])).status).toBe(200);
+    expect((await part([page("P1", "Cover", "a0")])).status).toBe(200);
+    // A part with a bad value is refused whole; the parts before it stay.
+    expect((await part([{ ...rect("R2", "P1", "a1"), props: { width: -5 } }])).status).toBe(400);
+    // A node sent twice is refused.
+    expect((await part([rect("R1", "P1")])).status).toBe(400);
+    // Meanwhile the file is as it was.
+    expect((await roomOf(fileId).stats()).nodes).toBe(1);
+    const done = await browser.json<{ nodes: number; revn: number }>(
+      `/api/files/${fileId}/imports/${importId}/commit`,
+      { method: "POST", json: {} },
+    );
+    expect(done.nodes).toBe(2);
+    expect((await roomOf(fileId).stats()).nodes).toBe(2);
+    // It's finished: no more parts or commits.
+    expect((await part([rect("R3", "P1")])).status).toBe(404);
+  });
+
+  it("checks how the parts fit together at the commit, leaving the file as it was", async () => {
+    const { browser, fileId } = await newFile();
+    const tryImport = async (nodes: NodeRecord[]) => {
+      const { importId } = await browser.json<{ importId: string }>(
+        `/api/files/${fileId}/imports`,
+        { method: "POST", json: {} },
+      );
+      await browser.json(`/api/files/${fileId}/imports/${importId}/parts`, {
+        method: "POST",
+        json: { nodes },
+      });
+      return browser.fetch(`/api/files/${fileId}/imports/${importId}/commit`, {
+        method: "POST",
+        json: {},
+      });
+    };
+    const cases: Array<[NodeRecord[], string]> = [
+      [[page("P1", "Cover", "a0"), rect("R1", "nope")], "Parent nope doesn't exist."],
+      [[page("P1", "Cover", "a0"), { ...page("P2", "In", "a0"), parent: "P1" }], "can't contain"],
+      [
+        [
+          page("P1", "Cover", "a0"),
+          { id: "G1", type: "group", parent: "G2", key: "a0", props: {} },
+          { id: "G2", type: "group", parent: "G1", key: "a0", props: {} },
+        ],
+        "inside itself",
+      ],
+      [[rect("R1", "R2"), rect("R2", "R1")], "There's nothing to import."],
+    ];
+    for (const [nodes, message] of cases) {
+      const response = await tryImport(nodes);
+      expect(response.status).toBe(400);
+      expect(JSON.stringify(await response.json())).toContain(message);
+      expect((await roomOf(fileId).stats()).nodes).toBe(1);
+    }
+    // Too deep: 130 groups, one in another.
+    const deep: NodeRecord[] = [page("P1", "Deep", "a0")];
+    for (let i = 0; i < 130; i++)
+      deep.push({
+        id: `D${i}`,
+        type: "group",
+        parent: i === 0 ? "P1" : `D${i - 1}`,
+        key: "a0",
+        props: {},
+      });
+    const response = await tryImport(deep);
+    expect(JSON.stringify(await response.json())).toContain("deeper than");
+    expect((await roomOf(fileId).stats()).nodes).toBe(1);
+  });
+
+  it("throws away an import given up, or begun again", async () => {
+    const { browser, fileId } = await newFile();
+    const begin = () =>
+      browser.json<{ importId: string }>(`/api/files/${fileId}/imports`, {
+        method: "POST",
+        json: {},
+      });
+    const first = await begin();
+    await browser.json(`/api/files/${fileId}/imports/${first.importId}/parts`, {
+      method: "POST",
+      json: { nodes: [page("P1", "Cover", "a0")] },
+    });
+    // Begun again: the first is gone.
+    const second = await begin();
+    const stale = await browser.fetch(`/api/files/${fileId}/imports/${first.importId}/commit`, {
+      method: "POST",
+      json: {},
+    });
+    expect(stale.status).toBe(404);
+    await browser.json(`/api/files/${fileId}/imports/${second.importId}`, { method: "DELETE" });
+    const gone = await browser.fetch(`/api/files/${fileId}/imports/${second.importId}/commit`, {
+      method: "POST",
+      json: {},
+    });
+    expect(gone.status).toBe(404);
+    expect((await roomOf(fileId).stats()).nodes).toBe(1);
   });
 });
