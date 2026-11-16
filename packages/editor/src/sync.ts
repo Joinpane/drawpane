@@ -371,7 +371,8 @@ export class SyncEngine {
     this.#doc.batch(() => {
       this.#undoPending();
       try {
-        this.#doc.apply(ops);
+        // The room accepted it: applied as it is, however deep (decision 0026).
+        this.#doc.apply(ops, { held: true });
       } catch (error) {
         this.#redoPending();
         this.#resync(error instanceof Error ? error.message : String(error));
@@ -433,7 +434,7 @@ export class SyncEngine {
   #undoPending(): void {
     for (let i = this.#pending.length - 1; i >= 0; i--) {
       const txn = this.#pending[i] as PendingTxn;
-      if (txn.inverse) this.#doc.apply(txn.inverse);
+      if (txn.inverse) this.#doc.apply(txn.inverse, { held: true });
       txn.inverse = null;
     }
   }

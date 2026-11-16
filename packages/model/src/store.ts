@@ -18,6 +18,33 @@ export interface NodeStore {
   move(id: string, parent: string, key: string): void;
   /** Removes one node. Callers remove descendants first. */
   remove(id: string): void;
+  /**
+   * Removes a node and everything under it, without reading them: for a
+   * store that can (SQLite), used when nobody needs what was deleted back.
+   */
+  removeTree?(id: string): void;
+  /**
+   * Whether anything lies more than `levels` levels below `id` (a child is
+   * one level below), for a store that can tell without reading every node
+   * (SQLite). See `deeperThan`.
+   */
+  deeperThan?(id: string, levels: number): boolean;
+}
+
+/**
+ * Whether anything lies more than `levels` levels below `id`: a level at a
+ * time, reading no further than `levels + 1` levels down.
+ */
+export function deeperThan(store: NodeStore, id: string, levels: number): boolean {
+  if (store.deeperThan) return store.deeperThan(id, levels);
+  let level: readonly string[] = [id];
+  for (let depth = 0; level.length > 0; depth++) {
+    if (depth > levels) return true;
+    const next: string[] = [];
+    for (const parent of level) for (const child of store.childIds(parent)) next.push(child);
+    level = next;
+  }
+  return false;
 }
 
 /**

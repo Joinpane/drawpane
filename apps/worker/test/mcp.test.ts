@@ -2,7 +2,7 @@
  * The MCP server (decision 0011): personal access tokens, the protocol over
  * Streamable HTTP for old and new clients, and the read tools on a real file.
  */
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import type { NodeRecord, Op } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { Browser, openSocket, signedInUser } from "./helpers";
@@ -258,6 +258,47 @@ describe("the read tools", () => {
           expect.objectContaining({ name: "color/primary", values: { Light: "#e04f1a" } }),
         ],
       }),
+    ]);
+  });
+
+  it("read a layer with 150,000 children without holding them all", {
+    timeout: 120_000,
+  }, async () => {
+    const ana = await signedInUser("Ana");
+    const { fileId } = await seededFile(ana.browser, ana.projectId);
+    const { token } = await makeToken(ana.browser);
+    const stub = env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
+    // 150,000 rectangles side by side in the card, written straight into the room's table.
+    await runInDurableObject(stub, (_room, state) => {
+      state.storage.sql.exec(
+        `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 149999)
+         INSERT INTO nodes (id, parent, key, type, props)
+         SELECT 'W' || i, 'card', 'b0', 'rect', '{"name":"Wide ' || i || '","width":1,"height":1}' FROM n`,
+      );
+    });
+    const found = await call(token, "find_nodes", { fileId, query: "wide 14999", limit: 5 });
+    expect(found.isError).toBe(false);
+    // Wide 14999 and Wide 149990 to 149999.
+    expect(found.structuredContent.total).toBe(11);
+    const outline = await call(token, "get_outline", {
+      fileId,
+      rootId: "card",
+      depth: 2,
+      limit: 50,
+    });
+    expect(outline.isError).toBe(false);
+    const tree = (
+      outline.structuredContent.outline as { tree: { more: number; children: unknown[] } }
+    ).tree;
+    expect(tree.children.length + tree.more).toBe(150_002);
+    const node = await call(token, "get_node", { fileId, nodeId: "card" });
+    expect(node.isError).toBe(false);
+    const detail = node.structuredContent as { children: unknown[]; moreChildren?: number };
+    expect(detail.children.length).toBeLessThan(2_000);
+    expect(detail.children.length + (detail.moreChildren ?? 0)).toBe(150_002);
+    const components = await call(token, "list_components", { fileId });
+    expect(components.structuredContent.components).toEqual([
+      expect.objectContaining({ id: "btn", instances: 1 }),
     ]);
   });
 

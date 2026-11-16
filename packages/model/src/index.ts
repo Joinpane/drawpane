@@ -15,4 +15,5 @@ export * from "./prototype";
 export * from "./schema";
 export * from "./search";
 export * from "./sha256";
+export * from "./snapshot";
 export * from "./store";

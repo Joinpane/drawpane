@@ -1,4 +1,5 @@
 import {
+  type ApplyOptions,
   applyTransaction,
   type CopySlot,
   collectSubtree,
@@ -163,25 +164,29 @@ export class Doc {
     return this.#lastStored;
   }
 
-  /** Applies operations all-or-nothing and returns their inverse. */
-  apply(ops: readonly Op[]): Op[] {
+  /**
+   * Applies operations all-or-nothing and returns their inverse. `held`:
+   * they put back what the document held (a rebase, a change the room
+   * already accepted), so nothing is refused for depth.
+   */
+  apply(ops: readonly Op[], options: ApplyOptions = {}): Op[] {
     if (this.#compact) {
-      const applied = this.#compact.apply(ops);
+      const applied = this.#compact.apply(ops, options);
       this.#lastStored = applied.stored;
       this.#record(new Set(applied.ids), new Set(applied.parents), false);
       return applied.inverse;
     }
     const touched = this.#touched(ops);
-    const inverse = applyTransaction(this.#store, ops);
+    const inverse = applyTransaction(this.#store, ops, { held: options.held ?? false });
     this.#lastStored = ops;
     this.#record(touched.ids, touched.parents, false);
     return inverse;
   }
 
   /** Applies operations on the stored form as they are (compact copies; the same as `apply` otherwise). */
-  applyStored(ops: readonly Op[]): Op[] {
-    if (!this.#compact) return this.apply(ops);
-    const applied = this.#compact.applyStored(ops);
+  applyStored(ops: readonly Op[], options: ApplyOptions = {}): Op[] {
+    if (!this.#compact) return this.apply(ops, options);
+    const applied = this.#compact.applyStored(ops, options);
     this.#lastStored = applied.stored;
     this.#record(new Set(applied.ids), new Set(applied.parents), false);
     return applied.inverse;

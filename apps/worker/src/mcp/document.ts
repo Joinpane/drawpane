@@ -5,8 +5,61 @@
  * big file can't flood a model's context.
  */
 import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import type { TableReader } from "../rooms/node-tables";
 
-export class FileDoc {
+/** What the views below read a document through. */
+export interface DocView {
+  get(id: string): NodeRecord | undefined;
+  /** A node's children in order, read as they're asked for (a wide node is never read whole). */
+  children(id: string): Iterable<NodeRecord>;
+  /** A node's children's ids in order, as they're asked for. */
+  childIds(id: string): Iterable<string>;
+  childCount(id: string): number;
+  pages(): NodeRecord[];
+  /** The page a node is on, when it's on one (library copies and tokens aren't). */
+  pageOf(id: string): NodeRecord | undefined;
+  /** Every node on a page, parents first. */
+  onPages(): Generator<NodeRecord>;
+}
+
+/** Children listed in full by `get_node`; past this they're counted. */
+export const DETAIL_CHILDREN = 500;
+
+/**
+ * Every node under the pages, parents first, holding only the path down to
+ * where it is: each level waiting below holds its children's ids, never a
+ * node, so a chain of nodes with large properties isn't kept on the way
+ * down. A node is read when it's reached and let go when the walk moves on.
+ */
+function* walkPages(doc: DocView): Generator<NodeRecord> {
+  const stack: Iterator<string>[] = [
+    doc
+      .pages()
+      .map((p) => p.id)
+      [Symbol.iterator](),
+  ];
+  while (stack.length > 0) {
+    const next = (stack[stack.length - 1] as Iterator<string>).next();
+    if (next.done) {
+      stack.pop();
+      continue;
+    }
+    const node = doc.get(next.value);
+    // One deleted since its parent's ids were read is passed over.
+    if (!node) continue;
+    yield node;
+    stack.push(doc.childIds(next.value)[Symbol.iterator]());
+  }
+}
+
+function pageOf(doc: DocView, id: string): NodeRecord | undefined {
+  for (let node = doc.get(id); node; node = doc.get(node.parent))
+    if (node.type === "page") return node;
+  return undefined;
+}
+
+/** A document held in memory: for tests, and files small enough to read whole. */
+export class FileDoc implements DocView {
   readonly #nodes = new Map<string, NodeRecord>();
   readonly #children = new Map<string, NodeRecord[]>();
 
@@ -29,25 +82,118 @@ export class FileDoc {
     return this.#children.get(id) ?? [];
   }
 
+  childIds(id: string): string[] {
+    return this.children(id).map((n) => n.id);
+  }
+
+  childCount(id: string): number {
+    return this.children(id).length;
+  }
+
   pages(): NodeRecord[] {
     return this.children(ROOT_ID).filter((n) => n.type === "page");
   }
 
-  /** The page a node is on, when it's on one (library copies and tokens aren't). */
   pageOf(id: string): NodeRecord | undefined {
-    for (let node = this.get(id); node; node = this.get(node.parent))
-      if (node.type === "page") return node;
-    return undefined;
+    return pageOf(this, id);
   }
 
-  /** Every node on a page, parents first. */
-  *onPages(): Generator<NodeRecord> {
-    const stack = [...this.pages()].reverse();
-    while (stack.length > 0) {
-      const node = stack.pop() as NodeRecord;
-      yield node;
-      stack.push(...[...this.children(node.id)].reverse());
+  onPages(): Generator<NodeRecord> {
+    return walkPages(this);
+  }
+}
+
+/**
+ * A document read from SQLite as the views ask (the FileRoom's, through a
+ * `TableReader`), so a large file is never read whole: an outline reads the
+ * layers it lists, a search walks the pages a page of children at a time.
+ */
+export class SqlFileDoc implements DocView {
+  readonly #reader: TableReader;
+
+  constructor(reader: TableReader) {
+    this.#reader = reader;
+  }
+
+  get(id: string): NodeRecord | undefined {
+    return this.#reader.get(id);
+  }
+
+  children(id: string): Iterable<NodeRecord> {
+    return this.#reader.childNodes(id);
+  }
+
+  childIds(id: string): Iterable<string> {
+    return this.#reader.children(id);
+  }
+
+  childCount(id: string): number {
+    return this.#reader.childCount(id);
+  }
+
+  pages(): NodeRecord[] {
+    const out: NodeRecord[] = [];
+    for (const id of this.#reader.pageIds()) {
+      const page = this.#reader.get(id);
+      if (page) out.push(page);
     }
+    return out;
+  }
+
+  pageOf(id: string): NodeRecord | undefined {
+    return pageOf(this, id);
+  }
+
+  onPages(): Generator<NodeRecord> {
+    return walkPages(this);
+  }
+}
+
+/** A read the MCP tools ask a file's room for. */
+export type DocumentRequest =
+  | {
+      readonly kind: "outline";
+      readonly pageId?: string;
+      readonly rootId?: string;
+      readonly depth: number;
+      readonly limit: number;
+    }
+  | { readonly kind: "node"; readonly nodeId: string }
+  | {
+      readonly kind: "find";
+      readonly query: string;
+      readonly nodeKind?: string;
+      readonly limit: number;
+    }
+  | { readonly kind: "components" }
+  | { readonly kind: "tokens" };
+
+/** The answer to a read, or `{ error }` worded for the model. */
+export function answerDocument(doc: DocView, request: DocumentRequest): unknown {
+  switch (request.kind) {
+    case "outline": {
+      const pages = doc.pages();
+      const page = request.pageId ? doc.get(request.pageId) : pages[0];
+      if (request.pageId && page?.type !== "page")
+        return { error: `No page ${request.pageId} in this file.` };
+      if (request.rootId && !doc.get(request.rootId))
+        return { error: `No layer ${request.rootId} in this file.` };
+      const start = request.rootId ?? page?.id;
+      return {
+        pages: pages.map((p) => ({ id: p.id, name: p.props.name ?? "Page" })),
+        outline: start ? outline(doc, start, request.depth, request.limit) : null,
+      };
+    }
+    case "node":
+      return (
+        nodeDetail(doc, request.nodeId) ?? { error: `No layer ${request.nodeId} in this file.` }
+      );
+    case "find":
+      return findNodes(doc, request.query, request.nodeKind, request.limit);
+    case "components":
+      return { components: components(doc) };
+    case "tokens":
+      return tokens(doc);
   }
 }
 
@@ -85,7 +231,7 @@ export interface OutlineEntry {
  * A page's (or a layer's) layers as a tree, `depth` levels down and at most
  * `limit` nodes in all; what's left out is counted.
  */
-export function outline(doc: FileDoc, rootId: string, depth: number, limit: number) {
+export function outline(doc: DocView, rootId: string, depth: number, limit: number) {
   let budget = limit;
   let truncated = false;
   const visit = (node: NodeRecord, level: number): OutlineEntry => {
@@ -98,20 +244,21 @@ export function outline(doc: FileDoc, rootId: string, depth: number, limit: numb
       entry.height = round(getProp(node.props, "height"));
     }
     if (node.type === "text") entry.text = getProp(node.props, "characters").slice(0, 200);
-    const kids = doc.children(node.id);
-    if (kids.length > 0) {
+    const count = doc.childCount(node.id);
+    if (count > 0) {
       if (level >= depth) {
-        entry.more = kids.length;
+        entry.more = count;
         truncated = true;
       } else {
         const shown: OutlineEntry[] = [];
-        for (const child of kids) {
-          if (budget <= 0) break;
-          shown.push(visit(child, level + 1));
-        }
+        if (budget > 0)
+          for (const child of doc.children(node.id)) {
+            shown.push(visit(child, level + 1));
+            if (budget <= 0) break;
+          }
         entry.children = shown;
-        if (shown.length < kids.length) {
-          entry.more = kids.length - shown.length;
+        if (shown.length < count) {
+          entry.more = count - shown.length;
           truncated = true;
         }
       }
@@ -124,10 +271,19 @@ export function outline(doc: FileDoc, rootId: string, depth: number, limit: numb
 
 const round = (n: number) => Math.round(n * 100) / 100;
 
-/** A node in full: its props (defaults left out, as stored), parent and children. */
-export function nodeDetail(doc: FileDoc, id: string) {
+/**
+ * A node in full: its props (defaults left out, as stored), parent and
+ * children, the first DETAIL_CHILDREN of them listed and the rest counted.
+ */
+export function nodeDetail(doc: DocView, id: string) {
   const node = doc.get(id);
   if (!node) return null;
+  const children: Array<{ id: string; kind: string; name: string }> = [];
+  for (const c of doc.children(id)) {
+    if (children.length >= DETAIL_CHILDREN) break;
+    children.push({ id: c.id, kind: kindOf(c), name: displayName(c) });
+  }
+  const count = children.length < DETAIL_CHILDREN ? children.length : doc.childCount(id);
   return {
     id: node.id,
     kind: kindOf(node),
@@ -135,12 +291,13 @@ export function nodeDetail(doc: FileDoc, id: string) {
     parent: node.parent,
     page: doc.pageOf(id)?.id ?? null,
     props: node.props,
-    children: doc.children(id).map((c) => ({ id: c.id, kind: kindOf(c), name: displayName(c) })),
+    children,
+    ...(count > children.length ? { moreChildren: count - children.length } : {}),
   };
 }
 
 /** Layers on pages whose name or text holds `query` (any case), and of `kind` when given. */
-export function findNodes(doc: FileDoc, query: string, kind: string | undefined, limit: number) {
+export function findNodes(doc: DocView, query: string, kind: string | undefined, limit: number) {
   const q = query.trim().toLowerCase();
   const found: Array<{ id: string; kind: string; name: string; page: string }> = [];
   let total = 0;
@@ -164,7 +321,7 @@ export function findNodes(doc: FileDoc, query: string, kind: string | undefined,
 }
 
 /** The file's own components (and sets of variants), with how often each is used. */
-export function components(doc: FileDoc) {
+export function components(doc: DocView) {
   const uses = new Map<string, number>();
   for (const node of doc.onPages()) {
     const of = node.type === "frame" ? getProp(node.props, "instanceOf") : null;
@@ -191,10 +348,10 @@ export function components(doc: FileDoc) {
       instances: uses.get(node.id) ?? 0,
     };
     if (kind === "component set") {
-      entry.variants = doc
-        .children(node.id)
-        .filter((c) => kindOf(c) === "component")
-        .map((c) => ({ id: c.id, name: displayName(c), instances: uses.get(c.id) ?? 0 }));
+      entry.variants = [];
+      for (const c of doc.children(node.id))
+        if (kindOf(c) === "component")
+          entry.variants.push({ id: c.id, name: displayName(c), instances: uses.get(c.id) ?? 0 });
       entry.instances = entry.variants.reduce((n, v) => n + v.instances, 0);
     }
     out.push(entry);
@@ -203,9 +360,8 @@ export function components(doc: FileDoc) {
 }
 
 /** The file's tokens: variable collections (values by mode name) and text styles. */
-export function tokens(doc: FileDoc) {
-  const collections = doc
-    .children(ROOT_ID)
+export function tokens(doc: DocView) {
+  const collections = [...doc.children(ROOT_ID)]
     .filter((n) => n.type === "collection")
     .map((collection) => {
       const modes = getProp(collection.props, "modes");
@@ -214,8 +370,7 @@ export function tokens(doc: FileDoc) {
         id: collection.id,
         name: displayName(collection),
         modes: modes.map((m) => m.name),
-        variables: doc
-          .children(collection.id)
+        variables: [...doc.children(collection.id)]
           .filter((v) => v.type === "variable")
           .map((v) => ({
             id: v.id,
@@ -237,8 +392,7 @@ export function tokens(doc: FileDoc) {
           })),
       };
     });
-  const textStyles = doc
-    .children(ROOT_ID)
+  const textStyles = [...doc.children(ROOT_ID)]
     .filter((n) => n.type === "textStyle")
     .map((style) => ({
       id: style.id,

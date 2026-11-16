@@ -57,7 +57,7 @@ test.describe
 
     test("imports an export into a new file, and opens it", async () => {
       const imported = page.waitForRequest(
-        (r) => r.method() === "POST" && /\/api\/files\/[^/]+\/import$/.test(r.url()),
+        (r) => r.method() === "POST" && /\/api\/files\/[^/]+\/imports\/[^/]+\/parts$/.test(r.url()),
       );
       await openPenpotImport(page);
       await chooser(page).setInputFiles(fixture("showcase.penpot"));

@@ -207,7 +207,12 @@ export const versions = new Hono<AppContext>()
       { id: row.id, name: row.name, at: row.created_at, revn: row.revn },
       body.sessionId ?? null,
     );
-    if (!result.ok) throw conflict("That version's snapshot is missing, so it can't be restored.");
+    if (!result.ok)
+      throw conflict(
+        result.reason === "missing"
+          ? "That version's snapshot is missing, so it can't be restored."
+          : `That version can't be restored, so nothing changed. ${result.message}`,
+      );
     const { ok: _, ...change } = result;
     return c.json(change);
   });

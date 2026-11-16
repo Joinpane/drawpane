@@ -1,10 +1,13 @@
 /** Typed client for the Worker's REST API. Errors carry the server's sentence. */
-import type {
-  BranchInfo,
-  LibraryPublish,
-  NodeRecord,
-  Resolution,
-  VersionInfo,
+import {
+  type BranchInfo,
+  type BranchReviewNodes,
+  type LibraryPublish,
+  type NodeRecord,
+  parseBranchReview,
+  parseSnapshot,
+  type Resolution,
+  type VersionInfo,
 } from "@drawpane/model";
 
 export type Role = "owner" | "editor" | "viewer";
@@ -131,6 +134,17 @@ export class JsonText {
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return (await send(method, path, body).then(readJson)) as T;
+}
+
+/** A response's text (a snapshot, a review: lines of JSON, decision 0026), or its error. */
+async function requestText(method: string, path: string): Promise<string> {
+  const response = await send(method, path);
+  if (!response.ok) await readJson(response);
+  return response.text();
+}
+
+async function send(method: string, path: string, body?: unknown): Promise<Response> {
   let response: Response;
   try {
     response = await fetch(`/api${path}`, {
@@ -148,8 +162,13 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       "Couldn't reach Drawpane. Check your connection and try again.",
     );
   }
+  return response;
+}
+
+/** A response's JSON; throws its error, in the server's words, when it isn't ok. */
+async function readJson(response: Response): Promise<unknown> {
   const data = (await response.json().catch(() => null)) as
-    | (T & { error?: undefined })
+    | { error?: undefined }
     | { error: { code: string; message: string } }
     | null;
   if (!response.ok) {
@@ -160,7 +179,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       error?.message ?? "Something went wrong. Try again.",
     );
   }
-  return data as T;
+  return data;
 }
 
 export const api = {
@@ -232,13 +251,12 @@ export const api = {
     body: { name?: string | null; description?: string | null },
   ) => request<{ version: VersionInfo }>("PATCH", `/files/${fileId}/versions/${versionId}`, body),
   /** The file's nodes as they were in a version. */
-  versionNodes: async (fileId: string, versionId: string) =>
-    (
-      await request<{ revn: number; nodes: NodeRecord[] }>(
-        "GET",
-        `/files/${fileId}/versions/${versionId}/snapshot`,
-      )
-    ).nodes,
+  versionNodes: async (fileId: string, versionId: string): Promise<NodeRecord[]> => {
+    const text = await requestText("GET", `/files/${fileId}/versions/${versionId}/snapshot`);
+    const snapshot = parseSnapshot(text);
+    if (!snapshot) throw new ApiError(500, "internal", "That version couldn't be read.");
+    return snapshot.nodes;
+  },
   /** Publishes the file as a team library (decision 0010): a named version, and what it offers. */
   publishLibrary: (fileId: string, body: { description?: string }) =>
     request<{ publish: LibraryPublish }>("POST", `/files/${fileId}/library/publish`, body),
@@ -264,8 +282,8 @@ export const api = {
   createBranch: (fileId: string, name: string) =>
     request<{ branch: BranchInfo }>("POST", `/files/${fileId}/branches`, { name }),
   /** What review compares: the branch's base, the branch now, and main now. */
-  branchReview: (branchId: string) =>
-    request<BranchReview>("GET", `/files/${branchId}/branch/review`),
+  branchReview: async (branchId: string): Promise<BranchReview> =>
+    parseBranchReview(await requestText("GET", `/files/${branchId}/branch/review`)),
   /** Merges a branch into its main file, with a side for each conflict and changes left out. */
   mergeBranch: (
     branchId: string,
@@ -292,13 +310,8 @@ export const api = {
     }),
 };
 
-export interface BranchReview {
-  readonly base: readonly NodeRecord[];
-  readonly branch: readonly NodeRecord[];
-  readonly main: readonly NodeRecord[];
-  /** Main's revision when read. */
-  readonly mainRevn: number;
-}
+/** What review compares: the branch's base, the branch now, and main now. */
+export type BranchReview = BranchReviewNodes;
 
 export interface RestoreResult {
   readonly revn: number;

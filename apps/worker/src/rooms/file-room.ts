@@ -12,27 +12,24 @@ import { DurableObject } from "cloudflare:workers";
 import { findTool, type HeadlessRenderer, ToolFailure, type ToolServices } from "@drawpane/editor";
 import {
   applyTransaction,
-  branchChanges,
   ClientMessage,
   type CommentEvent,
-  changeKey,
+  IMPORT_TTL_MS,
   keyBetween,
   LATENCY_BUCKETS_MS,
+  type LibraryAsset,
+  libraryAssets,
   MAX_CLIENT_MESSAGE_BYTES,
-  MAX_OPS_PER_TRANSACTION,
-  MemoryStore,
+  MAX_LIBRARY_ASSETS,
   ModelError,
-  mergeOps,
   type NodeRecord,
   newId,
-  nodeReader,
   type Op,
   type Peer,
   type Presence,
   type Resolution,
   type RestoredVersion,
   ROOT_ID,
-  restoreOps,
   type ServerMessage,
   SNAPSHOT_CHUNK_SIZE,
   summarizeEdits,
@@ -44,10 +41,46 @@ import { headlessRenderer } from "../agent/render";
 import { FILE_ACCESS, FILE_ROLE } from "../api/access";
 import type { Env, Role } from "../env";
 import { verifyPayload } from "../lib/crypto";
+import { answerDocument, type DocumentRequest, SqlFileDoc } from "../mcp/document";
 import { AgentEngine, type EngineRun } from "./agent-engine";
 import { CALL_SCHEMA, CallLedger, changedIds, overlap, type StepCall } from "./call-ledger";
-import { AUTOSAVE_RETENTION_MS, readSnapshot, snapshotKey, writeSnapshot } from "./snapshots";
+import {
+  beginStaging,
+  checkStaged,
+  dropStaging,
+  fillFromStaged,
+  IMPORT_LIMITS,
+  IMPORT_TABLE,
+  type ImportLimits,
+  stageNodes,
+} from "./import-stage";
+import {
+  copyNodes,
+  countRows,
+  dropTable,
+  type RoomSql,
+  TableReader,
+  tablePages,
+  tempTable,
+  tempTableAge,
+  tempTables,
+} from "./node-tables";
+import { OpChunks } from "./op-chunks";
+import { loadSnapshot, restoreFromTable, SnapshotError } from "./restore";
+import {
+  AUTOSAVE_RETENTION_MS,
+  branchBaseKey,
+  nextBranchBaseKey,
+  openSnapshot,
+  openSnapshotStream,
+  type SnapshotSource,
+  snapshotKey,
+  snapshotNodes,
+  snapshotStream,
+  writeSnapshot,
+} from "./snapshots";
 import { NODE_SCHEMA, SqlNodeStore } from "./sql-store";
+import { applyThreeWay, planThreeWay, type ThreeWayTables } from "./three-way";
 
 /** How long a confirmed membership is trusted before an edit checks it again. */
 const ACCESS_RECHECK_MS = 60_000;
@@ -119,6 +152,9 @@ const LOG_SCHEMA = `
     at INTEGER NOT NULL
   ) STRICT;
   CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
+  -- Objects in R2 this room no longer points at (a branch's old bases), deleted by the
+  -- alarm once nothing that read the pointer before can still be reading them.
+  CREATE TABLE IF NOT EXISTS stale_objects (key TEXT PRIMARY KEY, at INTEGER NOT NULL) STRICT;
   -- Usage not yet reported to D1 (see #flushUsage): counted here so it
   -- survives the room going to sleep, and moved out by the alarm.
   CREATE TABLE IF NOT EXISTS usage (
@@ -150,6 +186,20 @@ const SWEEP_INTERVAL_MS = 24 * 60 * 60_000;
 const MAX_CATCHUP_BYTES = 1 << 20;
 /** A change bigger than this is not broadcast; clients are told to load the file again. */
 const MAX_BROADCAST_BYTES = 1 << 20;
+/** A transient table older than this was let go of by whatever read it. */
+const STALE_TABLE_MS = 60 * 60_000;
+/** A copy of a file this server already holds is taken whatever its size. */
+const UNLIMITED: ImportLimits = {
+  nodes: Number.POSITIVE_INFINITY,
+  bytes: Number.POSITIVE_INFINITY,
+};
+/**
+ * The most nodes a file may have for agents to work on it: the headless
+ * editor (decision 0021) holds the whole file in memory: its document alone
+ * measured 34 MB at 50,000 layers (about 700 bytes each), and building it
+ * reads them all at once first.
+ */
+export const AGENT_MAX_NODES = 50_000;
 
 /** Who a change is logged as. */
 interface Author {
@@ -203,7 +253,9 @@ export interface SavedVersion {
 export type RestoreResult =
   | ({ readonly ok: true } & RestoredChange)
   /** The version's snapshot isn't in R2 (deleted by hand, or a failed write). */
-  | { readonly ok: false; readonly reason: "missing" };
+  | { readonly ok: false; readonly reason: "missing" }
+  /** Its snapshot doesn't hold together, or can't be applied: nothing changed. */
+  | { readonly ok: false; readonly reason: "invalid"; readonly message: string };
 
 export interface RestoredChange {
   /** The revision the restore created, or the current one when nothing changed. */
@@ -217,8 +269,11 @@ export interface RestoredChange {
 }
 
 export class FileRoom extends DurableObject<Env> {
+  /** What one import may bring in all its parts (tests lower it to reach it with a few nodes). */
+  importLimits: ImportLimits = IMPORT_LIMITS;
   readonly #sql: SqlStorage;
   readonly #store: SqlNodeStore;
+  readonly #room: RoomSql;
   /** When this room last looked for quiet sessions (in memory: after a sleep it looks again). */
   #prunedAt = 0;
   /** Live presence by session. Not persisted: after hibernation, peers resend on their next move. */
@@ -228,15 +283,20 @@ export class FileRoom extends DurableObject<Env> {
   /** The warm headless editor agents' calls run on (decision 0021); made on the first call. */
   #engine: AgentEngine | null = null;
   #rendering: Promise<HeadlessRenderer> | null = null;
+  /** The update from main under way, which the next waits for: one at a time. */
+  #updating: Promise<unknown> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#sql = ctx.storage.sql;
     this.#store = new SqlNodeStore(this.#sql);
     this.#ledger = new CallLedger(this.#sql);
+    this.#room = { sql: this.#sql, transact: (fn) => ctx.storage.transactionSync(fn) };
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
     ctx.blockConcurrencyWhile(async () => {
       this.#sql.exec(NODE_SCHEMA + LOG_SCHEMA + CALL_SCHEMA);
+      // Nothing can be reading a transient table yet: any left are from before a restart.
+      for (const table of tempTables(this.#sql)) dropTable(this.#sql, table);
       this.#revn = Number(this.#meta("revn") ?? 0);
       const hasPage = this.#store
         .childIds(ROOT_ID)
@@ -404,11 +464,64 @@ export class FileRoom extends DurableObject<Env> {
     if (fileId) await this.#sweepVersions(fileId);
     this.#sql.exec("DELETE FROM log WHERE revn <= ?", this.#revn - LOG_RETENTION);
     this.#ledger.sweep();
-    // Keep going while there are edits no version holds yet.
-    const next = this.#autosaveDue();
-    if (next !== null) {
-      await this.ctx.storage.setAlarm(Math.max(next, Date.now() + ALARM_DELAY_MS));
+    this.#sweepStaging();
+    await this.#sweepStaleObjects();
+    // Keep going while there are edits no version holds yet, an import waits for its commit,
+    // or something left behind waits to be cleared away.
+    const next = [
+      this.#autosaveDue(),
+      this.#importExpiry(),
+      this.#staleTablesDue(),
+      this.#staleObjectsDue(),
+    ].filter((n) => n !== null);
+    if (next.length > 0) {
+      await this.ctx.storage.setAlarm(Math.max(Math.min(...next), Date.now() + ALARM_DELAY_MS));
     }
+  }
+
+  /**
+   * Drops transient tables a stream let go of without finishing (after an
+   * hour: none is read for that long), and an import nobody committed.
+   */
+  #sweepStaging(now = Date.now()): void {
+    for (const table of tempTables(this.#sql))
+      if (tempTableAge(table, now) > STALE_TABLE_MS) dropTable(this.#sql, table);
+    const expiry = this.#importExpiry();
+    if (expiry !== null && expiry <= now) this.#dropImport();
+  }
+
+  /** Deletes the R2 objects this room stopped pointing at an hour or more ago (a branch's old bases). */
+  async #sweepStaleObjects(now = Date.now()): Promise<void> {
+    const due = this.#sql
+      .exec<{ key: string }>(
+        "SELECT key FROM stale_objects WHERE at <= ? ORDER BY at LIMIT 1000",
+        now - STALE_TABLE_MS,
+      )
+      .toArray()
+      .map((row) => row.key);
+    if (due.length === 0) return;
+    await this.env.FILES.delete(due);
+    for (const key of due) this.#sql.exec("DELETE FROM stale_objects WHERE key = ?", key);
+  }
+
+  /** When the oldest object this room stopped pointing at can go; null when there's none. */
+  #staleObjectsDue(): number | null {
+    const at = this.#sql
+      .exec<{ at: number | null }>("SELECT MIN(at) AS at FROM stale_objects")
+      .one().at;
+    return at === null ? null : at + STALE_TABLE_MS;
+  }
+
+  /** When the oldest transient table left behind is old enough to drop; null when there's none. */
+  #staleTablesDue(now = Date.now()): number | null {
+    const ages = tempTables(this.#sql).map((table) => tempTableAge(table, now));
+    return ages.length === 0 ? null : now - Math.max(...ages) + STALE_TABLE_MS;
+  }
+
+  /** When the import waiting for its commit is thrown away; null when none is. */
+  #importExpiry(): number | null {
+    const at = this.#meta("import_at");
+    return at === null ? null : Number(at) + IMPORT_TTL_MS;
   }
 
   /**
@@ -542,83 +655,330 @@ export class FileRoom extends DurableObject<Env> {
     sessionId: string | null,
   ): Promise<RestoreResult> {
     const fileId = this.#requireFileId();
-    const nodes = await readSnapshot(this.env.FILES, snapshotKey(fileId, version.revn));
-    if (!nodes) return { ok: false, reason: "missing" };
-    const restorePoint = await this.#saveVersion(fileId, {
-      reason: "restore",
-      by: by.userId,
-      restoredId: version.id,
-    });
-    // From here to the commit nothing awaits, so the diff and the store agree.
-    const now: NodeRecord[] = [];
-    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) now.push(...page);
-    const plan = restoreOps(new MemoryStore(now), nodes);
-    if (plan.ops.length === 0) {
-      return {
-        ok: true,
-        revn: this.#revn,
-        restorePoint: restorePoint.id,
-        changed: 0,
-        dropped: plan.dropped,
-      };
+    const source = await openSnapshot(this.env.FILES, snapshotKey(fileId, version.revn));
+    if (!source) return { ok: false, reason: "missing" };
+    // The version goes into a table beside the file's, a batch at a time.
+    const table = tempTable("version");
+    try {
+      try {
+        await loadSnapshot(this.#sql, table, source, this.#room.transact);
+      } catch (error) {
+        if (error instanceof SnapshotError)
+          return { ok: false, reason: "invalid", message: error.message };
+        throw error;
+      }
+      const restorePoint = await this.#saveVersion(fileId, {
+        reason: "restore",
+        by: by.userId,
+        restoredId: version.id,
+      });
+      // From here to the commit nothing awaits, so the diff and the store agree.
+      const author = { clientId: "restore", seq: 0, userId: by.userId, sessionId: "restore" };
+      const except = this.#attachments().find(({ me }) => me.sessionId === sessionId)?.ws;
+      let committed: { revn: number; count: number; result: number };
+      try {
+        committed = this.#commitChunks(
+          author,
+          (out) => restoreFromTable(this.#sql, table, out),
+          true,
+        );
+      } catch (error) {
+        // The whole restore applies, or none of it.
+        if (error instanceof ModelError)
+          return { ok: false, reason: "invalid", message: error.message };
+        throw error;
+      }
+      const { revn, count, result: dropped } = committed;
+      if (count > 0) {
+        this.#broadcast(
+          { t: "restored", by, version: { id: version.id, name: version.name, at: version.at } },
+          except,
+        );
+        void this.#scheduleAlarm();
+      }
+      return { ok: true, revn, restorePoint: restorePoint.id, changed: count, dropped };
+    } finally {
+      dropTable(this.#sql, table);
     }
-    const author = { clientId: "restore", seq: 0, userId: by.userId, sessionId: "restore" };
-    const revn = this.#commit(plan.ops, author);
-    const except = this.#attachments().find(({ me }) => me.sessionId === sessionId)?.ws;
-    this.#broadcastChange(revn, plan.ops, author);
-    this.#broadcast(
-      { t: "restored", by, version: { id: version.id, name: version.name, at: version.at } },
-      except,
-    );
-    void this.#scheduleAlarm();
-    return {
-      ok: true,
-      revn,
-      restorePoint: restorePoint.id,
-      changed: plan.ops.length,
-      dropped: plan.dropped,
-    };
   }
 
   /**
-   * Fills a new file with imported content (a converted .penpot, say). Only
-   * a file nobody has touched: its starting page, still empty, which the
-   * import replaces (removed once the imported pages are in). The nodes are checked as a whole first, so a bad one
-   * leaves the file as it was; they're then committed in chunks that keep
-   * each log row well under SQLite's row limit, parents before children.
-   * The room learns which file it is, so the file can be versioned and
-   * published before anyone opens it (a kit added and published at once).
+   * Publishes the file as a library (decision 0010): what it offers, read
+   * from its nodes copied aside at one revision, and a named version saved
+   * from that same copy, so the list and the content can't disagree. Nothing
+   * is saved when there's nothing to publish.
+   */
+  async publishLibrary(
+    by: Requester,
+    fileId: string,
+    name: string,
+    description: string | null,
+  ): Promise<PublishResult> {
+    this.#adopt(fileId);
+    const frozen = this.#freeze();
+    try {
+      const assets = libraryAssets(new TableReader(this.#sql, frozen.table));
+      if (assets.length === 0) return { ok: false, reason: "empty" };
+      if (assets.length > MAX_LIBRARY_ASSETS) return { ok: false, reason: "too-many" };
+      const version = await this.#saveVersion(
+        fileId,
+        { reason: "named", by: by.userId, name, description },
+        frozen,
+      );
+      return { ok: true, version, assets };
+    } finally {
+      dropTable(this.#sql, frozen.table);
+    }
+  }
+
+  /**
+   * Answers an MCP read (decision 0011) from the file's nodes in SQLite,
+   * reading only what the answer needs (see mcp/document.ts).
+   */
+  async readDocument(fileId: string, request: DocumentRequest): Promise<unknown> {
+    this.#adopt(fileId);
+    try {
+      return answerDocument(new SqlFileDoc(new TableReader(this.#sql, "nodes")), request);
+    } finally {
+      this.#store.clearCache();
+    }
+  }
+
+  /**
+   * Starts an import into a new file (decision 0026): only a file nobody
+   * has touched, its starting page still empty, which the import replaces.
+   * Its nodes then come in parts (`importPart`) and land at `commitImport`;
+   * until then the file is as it was. A new begin replaces an import that
+   * was never committed. The room learns which file it is, so the file can
+   * be versioned and published before anyone opens it (a kit added and
+   * published at once).
+   */
+  async beginImport(fileId: string): Promise<ImportBegun> {
+    this.#adopt(fileId);
+    if (!this.#seedPage()) return { ok: false, reason: "not-empty" };
+    const importId = newId();
+    beginStaging(this.#sql, IMPORT_TABLE);
+    this.#setMeta("import_id", importId);
+    this.#setMeta("import_at", String(Date.now()));
+    // The commit replaces the file as it is now; an edit in between refuses it (see the commit).
+    this.#setMeta("import_revn", String(this.#revn));
+    // So an import nobody commits is thrown away.
+    void this.#scheduleAlarm();
+    return { ok: true, importId };
+  }
+
+  /** Checks a part of an import's nodes and keeps them for the commit. All or none of the part. */
+  async importPart(
+    fileId: string,
+    importId: string,
+    nodes: readonly NodeRecord[],
+  ): Promise<ImportPartResult> {
+    this.#adopt(fileId);
+    if (this.#meta("import_id") !== importId) return { ok: false, reason: "gone" };
+    try {
+      // Held to the import's limits in all, in the same transaction that keeps the part.
+      const staged = stageNodes(this.#room, nodes, IMPORT_TABLE, this.importLimits);
+      this.#setMeta("import_at", String(Date.now()));
+      return { ok: true, staged };
+    } catch (error) {
+      if (error instanceof ModelError)
+        return { ok: false, reason: "invalid", message: error.message };
+      throw error;
+    }
+  }
+
+  /**
+   * Checks the import's nodes as a whole and fills the file with them in one
+   * storage transaction, replacing the starting page. A file never shows
+   * half an import: before this, nobody sees any of it; a check that fails
+   * leaves the file as it was (the import is thrown away).
+   */
+  async commitImport(by: Requester, fileId: string, importId: string): Promise<ImportResult> {
+    return this.#commitImport(by, fileId, importId, false);
+  }
+
+  /** A copy of a file this server holds (`importSnapshot`) isn't held to an import's limits. */
+  #commitImport(by: Requester, fileId: string, importId: string, copy: boolean): ImportResult {
+    this.#adopt(fileId);
+    if (this.#meta("import_id") !== importId) return { ok: false, reason: "gone" };
+    try {
+      return this.#fillFromStaging(by, copy);
+    } finally {
+      this.#dropImport();
+    }
+  }
+
+  /** Throws away an import that was begun (the importer gave up). */
+  async abortImport(fileId: string, importId: string): Promise<void> {
+    this.#adopt(fileId);
+    if (this.#meta("import_id") === importId) this.#dropImport();
+  }
+
+  /**
+   * Fills a new file with nodes in one call: a small import (the one-request
+   * endpoint), staged and committed as one sending parts would be.
    */
   async importNodes(
     by: Requester,
     nodes: readonly NodeRecord[],
     fileId: string,
   ): Promise<ImportResult> {
-    this.#adopt(fileId);
+    const begun = await this.beginImport(fileId);
+    if (!begun.ok) return begun;
+    const part = await this.importPart(fileId, begun.importId, nodes);
+    if (!part.ok) {
+      this.#dropImport();
+      return part.reason === "gone" ? { ok: false, reason: "gone" } : part;
+    }
+    return this.commitImport(by, fileId, begun.importId);
+  }
+
+  /**
+   * Fills a new file with another's nodes, read from a snapshot stream (a
+   * duplicate, a branch: see `exportSnapshot`), or from a snapshot in R2.
+   */
+  async importSnapshot(
+    by: Requester,
+    fileId: string,
+    from: ReadableStream<Uint8Array> | { readonly key: string },
+  ): Promise<ImportResult> {
+    const source =
+      from instanceof ReadableStream
+        ? await openSnapshotStream(from)
+        : await openSnapshot(this.env.FILES, from.key);
+    if (!source) return { ok: false, reason: "invalid", message: "There's nothing to copy." };
+    const begun = await this.beginImport(fileId);
+    if (!begun.ok) {
+      await source.lines.return(undefined);
+      return begun;
+    }
+    try {
+      for await (const nodes of snapshotNodes(source)) {
+        if (this.#meta("import_id") !== begun.importId) return { ok: false, reason: "gone" };
+        stageNodes(this.#room, nodes, IMPORT_TABLE, UNLIMITED);
+      }
+    } catch (error) {
+      this.#dropImport();
+      if (error instanceof ModelError)
+        return { ok: false, reason: "invalid", message: error.message };
+      throw error;
+    }
+    return this.#commitImport(by, fileId, begun.importId, true);
+  }
+
+  /** The starting page, when it's all the file has (and still empty). */
+  #seedPage(): NodeRecord | null {
     const roots = this.#store.childIds(ROOT_ID);
     const seed = roots.length === 1 ? this.#store.get(roots[0] as string) : undefined;
-    if (seed?.type !== "page" || this.#store.childIds(seed.id).length > 0)
-      return { ok: false, reason: "not-empty" };
-    if (!nodes.some((n) => n.parent === ROOT_ID && n.type === "page"))
-      return { ok: false, reason: "invalid", message: "There's nothing to import." };
-    // The starting page goes last: a file always has a page, even between chunks.
-    const ops: Op[] = [...creationOrder(nodes), { op: "delete", id: seed.id }];
+    const empty = seed?.type === "page" && this.#store.childIds(seed.id).length === 0;
+    this.#store.clearCache();
+    return empty ? (seed as NodeRecord) : null;
+  }
+
+  #dropImport(): void {
+    dropStaging(this.#sql, IMPORT_TABLE);
+    for (const k of ["import_id", "import_at", "import_revn"])
+      this.#sql.exec("DELETE FROM meta WHERE k = ?", k);
+  }
+
+  /**
+   * Checks the staged import and moves it into `nodes`, replacing the
+   * starting page. Refused when the file changed since the import began:
+   * someone renamed the starting page, say, and the import would replace
+   * that acknowledged edit unseen.
+   */
+  #fillFromStaging(by: Requester, copy: boolean): ImportResult {
+    const seed = this.#seedPage();
+    if (!seed) return { ok: false, reason: "not-empty" };
+    if (this.#meta("import_revn") !== String(this.#revn)) return { ok: false, reason: "changed" };
     try {
-      // A dry run on a copy: everything valid, or nothing written.
-      applyTransaction(new MemoryStore([seed]), ops, { rollback: false });
+      checkStaged(
+        this.#sql,
+        IMPORT_TABLE,
+        copy
+          ? { limits: UNLIMITED, maxDepth: Number.POSITIVE_INFINITY }
+          : { limits: this.importLimits },
+      );
     } catch (error) {
       if (error instanceof ModelError)
         return { ok: false, reason: "invalid", message: error.message };
       throw error;
     }
-    const author = { clientId: "import", seq: 0, userId: by.userId, sessionId: "import" };
-    let revn = this.#revn;
-    for (const chunk of chunked(ops, IMPORT_CHUNK_CHARS)) {
-      revn = this.#commit(chunk, author);
-      this.#broadcastChange(revn, chunk, author);
-    }
+    const nodes = countRows(this.#sql, IMPORT_TABLE);
+    const revn = this.ctx.storage.transactionSync(() => {
+      fillFromStaged(this.#sql, seed.id, IMPORT_TABLE);
+      // Not logged: one change of the whole file. Clients behind it load the file instead of
+      // catching up (see #hello); the log before it stays, for who edited what.
+      const next = this.#revn + 1;
+      this.#setMeta("catchup_from", String(next));
+      const now = Date.now();
+      this.#count(now, by.userId);
+      this.#setMeta("revn", String(next));
+      this.#setMeta("touched", "1");
+      this.#setMeta("touched_at", String(now));
+      return next;
+    });
+    this.#store.clearCache();
+    this.#revn = revn;
+    this.#engine?.drop();
+    this.#broadcast({ t: "resync" });
     void this.#scheduleAlarm();
-    return { ok: true, revn, nodes: nodes.length };
+    return { ok: true, revn, nodes };
+  }
+
+  /**
+   * The file's nodes as a version 2 snapshot stream (gzip), at the revision
+   * it's at now (see the header), however long it takes to read: copied
+   * aside first, so edits meanwhile don't show. What a branch, a duplicate
+   * or a merge reads another file's nodes from, room to room.
+   */
+  async exportSnapshot(): Promise<ReadableStream<Uint8Array>> {
+    const fileId = this.#meta("file_id") ?? "";
+    const { table, revn } = this.#freeze();
+    // Should the reader let go without finishing, the alarm drops the copy in time.
+    void this.#scheduleAlarm();
+    return snapshotStream({ fileId, revn, at: Date.now() }, tablePages(this.#sql, table), () =>
+      dropTable(this.#sql, table),
+    );
+  }
+
+  /**
+   * A branch's nodes as `exportSnapshot` streams them, and the key of the
+   * base they're a change from, read together: an update from main moves
+   * both at once (see `updateFromMain`).
+   */
+  async exportBranch(): Promise<{ baseKey: string; nodes: ReadableStream<Uint8Array> }> {
+    const baseKey = this.#baseKey(this.#requireFileId());
+    return { baseKey, nodes: await this.exportSnapshot() };
+  }
+
+  /** Where this branch's current base is in R2. */
+  #baseKey(fileId: string): string {
+    return this.#meta("base_key") ?? branchBaseKey(fileId);
+  }
+
+  /** Writes the file as it is now to `key` in R2 (a branch's base); returns its revision. */
+  async writeSnapshotTo(key: string): Promise<{ revn: number; size: number }> {
+    const fileId = this.#meta("file_id") ?? "";
+    const { table, revn } = this.#freeze();
+    try {
+      const size = await writeSnapshot(
+        this.env.FILES,
+        key,
+        { fileId, revn, at: Date.now() },
+        tablePages(this.#sql, table),
+      );
+      return { revn, size };
+    } finally {
+      dropTable(this.#sql, table);
+    }
+  }
+
+  /** Copies the nodes aside (in SQL, without awaiting), so a slow read sees one revision. */
+  #freeze(): { table: string; revn: number } {
+    const table = tempTable("frozen");
+    copyNodes(this.#sql, "nodes", table);
+    return { table, revn: this.#revn };
   }
 
   /**
@@ -627,13 +987,17 @@ export class FileRoom extends DurableObject<Env> {
    * nothing main did since the reviewer looked is overwritten unseen: a
    * conflict without a decision stops the merge. The file is saved as a named
    * version first, which undoes the merge from History; then the chosen
-   * changes are one ordinary transaction that everyone here sees arrive.
+   * changes are committed together (in chunks a large merge needs, in one
+   * storage transaction) that everyone here sees arrive. The branch's base
+   * comes from R2 and the branch itself as a snapshot stream, each into a
+   * table here (decision 0026).
    */
   async mergeBranch(
     by: Requester,
     fileId: string,
     branch: { readonly id: string; readonly name: string },
-    snapshots: { readonly base: readonly NodeRecord[]; readonly branch: readonly NodeRecord[] },
+    /** The branch's nodes, and the key of its base, from `exportBranch`. */
+    from: { readonly baseKey: string; readonly nodes: ReadableStream<Uint8Array> },
     choices: {
       /** Each conflict's side, by change key (see changeKey). */
       readonly resolutions: Readonly<Record<string, Resolution>>;
@@ -642,105 +1006,191 @@ export class FileRoom extends DurableObject<Env> {
     },
   ): Promise<MergeResult> {
     this.#adopt(fileId);
-    const read = () => {
-      const nodes: NodeRecord[] = [];
-      for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) nodes.push(...page);
-      return nodes;
+    const decided = {
+      resolutions: new Map(Object.entries(choices.resolutions)),
+      skip: new Set(choices.skip),
     };
-    const resolutions = new Map(Object.entries(choices.resolutions));
-    const skip = new Set(choices.skip);
-    const plan = (nodes: readonly NodeRecord[]) => {
-      const main = nodeReader(nodes);
-      const changes = branchChanges(
-        nodeReader(snapshots.base),
-        nodeReader(snapshots.branch),
-        main,
-      ).filter((c) => !skip.has(changeKey(c)));
-      const undecided = changes.filter((c) => c.conflict && !resolutions.has(changeKey(c)));
-      return { main, changes, undecided };
-    };
-
-    // Checked before the restore point is saved, and again after (that awaits).
-    const first = plan(read());
-    if (first.undecided.length > 0)
-      return { ok: false, reason: "undecided", undecided: first.undecided.length };
-    const restorePoint = await this.#saveVersion(fileId, {
-      reason: "named",
-      by: by.userId,
-      name: `Before merging “${branch.name}”`,
-      description: null,
-      keepName: true,
+    return this.#threeWay(from.baseKey, from.nodes, async (tables) => {
+      // Checked before the restore point is saved, and again after (that awaits).
+      const first = planThreeWay(this.#sql, tables, decided);
+      if (first.undecided > 0)
+        return { ok: false, reason: "undecided", undecided: first.undecided };
+      const restorePoint = await this.#saveVersion(fileId, {
+        reason: "named",
+        by: by.userId,
+        name: `Before merging “${branch.name}”`,
+        description: null,
+        keepName: true,
+      });
+      // From here to the commit nothing awaits, so the plan and the store agree.
+      const plan = planThreeWay(this.#sql, tables, decided);
+      if (plan.undecided > 0) return { ok: false, reason: "undecided", undecided: plan.undecided };
+      const author = { clientId: "merge", seq: 0, userId: by.userId, sessionId: "merge" };
+      let committed: { revn: number; count: number };
+      try {
+        committed = this.#commitChunks(
+          author,
+          (out) => applyThreeWay(this.#sql, tables, decided, out),
+          false,
+        );
+      } catch (error) {
+        // The whole merge applies, or none of it.
+        if (error instanceof ModelError)
+          return { ok: false, reason: "invalid", message: error.message };
+        throw error;
+      }
+      const { revn, count } = committed;
+      if (count === 0) return { ok: true, revn, restorePoint: restorePoint.id, changes: 0 };
+      this.#broadcast({
+        t: "merged-in",
+        by: { id: by.userId, name: by.name },
+        branch,
+        changes: plan.changes,
+      });
+      void this.#scheduleAlarm();
+      return { ok: true, revn, restorePoint: restorePoint.id, changes: plan.changes };
     });
-
-    // From here to the commit nothing awaits, so the plan and the store agree.
-    const nodes = read();
-    const { main, changes, undecided } = plan(nodes);
-    if (undecided.length > 0)
-      return { ok: false, reason: "undecided", undecided: undecided.length };
-    const ops = mergeOps(main, nodeReader(snapshots.branch), changes, resolutions);
-    if (ops.length === 0)
-      return { ok: true, revn: this.#revn, restorePoint: restorePoint.id, changes: 0 };
-    try {
-      // A dry run on a copy: the whole merge applies, or none of it.
-      applyTransaction(new MemoryStore(nodes), ops, { rollback: false });
-    } catch (error) {
-      if (error instanceof ModelError)
-        return { ok: false, reason: "invalid", message: error.message };
-      throw error;
-    }
-    const author = { clientId: "merge", seq: 0, userId: by.userId, sessionId: "merge" };
-    const revn = this.#commit(ops, author);
-    this.#broadcastChange(revn, ops, author);
-    this.#broadcast({
-      t: "merged-in",
-      by: { id: by.userId, name: by.name },
-      branch,
-      changes: changes.length,
-    });
-    void this.#scheduleAlarm();
-    return { ok: true, revn, restorePoint: restorePoint.id, changes: changes.length };
   }
 
   /**
    * Brings main's changes since the base into this file, a branch (decision
    * 0012). Worked out here, against the branch as it is at this moment:
-   * main's changes the branch didn't also make apply as one transaction;
+   * main's changes the branch didn't also make are committed together;
    * where both changed the same thing, the branch keeps its own, which
-   * review then shows as a change against main as it is now.
+   * review then shows as a change against main as it is now. Main as it was
+   * read becomes the branch's base.
+   *
+   * The two move together or not at all: main as read is written to R2
+   * first, under a key of its own, and the branch's changes and the pointer
+   * to its new base are then committed in one storage transaction. A failed
+   * write or commit leaves the branch and its base as they were, so trying
+   * again works. Updates run one at a time, and one bringing main as it was
+   * before the current base changes nothing. The base replaced is deleted
+   * later (by the alarm), as a review or merge may still be reading it.
    */
   async updateFromMain(
     by: Requester,
     fileId: string,
-    snapshots: { readonly base: readonly NodeRecord[]; readonly main: readonly NodeRecord[] },
+    mainNodes: ReadableStream<Uint8Array>,
+  ): Promise<UpdateResult> {
+    const run = this.#updating.then(() => this.#updateFromMain(by, fileId, mainNodes));
+    this.#updating = run.catch(() => {});
+    return run;
+  }
+
+  async #updateFromMain(
+    by: Requester,
+    fileId: string,
+    mainNodes: ReadableStream<Uint8Array>,
   ): Promise<UpdateResult> {
     this.#adopt(fileId);
-    const nodes: NodeRecord[] = [];
-    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) nodes.push(...page);
-    const here = nodeReader(nodes);
-    const main = nodeReader(snapshots.main);
-    // What main changed since the base, and where this branch changed the same.
-    const changes = branchChanges(nodeReader(snapshots.base), main, here);
-    const kept = changes.filter((c) => c.conflict).length;
-    // No resolutions: a conflict keeps the branch's side.
-    const ops = mergeOps(here, main, changes);
-    if (ops.length === 0) return { ok: true, revn: this.#revn, changes: 0, kept };
+    const none = { resolutions: new Map<string, Resolution>(), skip: new Set<string>() };
+    const oldKey = this.#baseKey(fileId);
+    const result = await this.#threeWay(
+      oldKey,
+      mainNodes,
+      async (tables, mainRevn, baseRevn): Promise<UpdateResult> => {
+        // Main as read is no newer than the base: there's nothing to bring in, and the base stays.
+        if (mainRevn <= baseRevn)
+          return { ok: true, revn: this.#revn, changes: 0, kept: 0, mainRevn: baseRevn };
+        const newKey = nextBranchBaseKey(fileId, mainRevn);
+        try {
+          await writeSnapshot(
+            this.env.FILES,
+            newKey,
+            { fileId, revn: mainRevn, at: Date.now() },
+            tablePages(this.#sql, tables.other),
+          );
+        } catch (error) {
+          console.error(`couldn't store the new base of branch ${fileId}`, error);
+          await this.env.FILES.delete(newKey).catch(() => {});
+          return { ok: false, message: "Main as it is now couldn't be stored. Try again." };
+        }
+        // From here to the commit nothing awaits, so the plan and the store agree.
+        const plan = planThreeWay(this.#sql, tables, none);
+        const author = { clientId: "update", seq: 0, userId: by.userId, sessionId: "update" };
+        let count: number;
+        try {
+          ({ count } = this.#commitChunks(
+            author,
+            (out) => {
+              applyThreeWay(this.#sql, tables, none, out);
+              out.flush();
+              // In the same transaction as the changes: the branch and its base move together.
+              this.#setMeta("base_key", newKey);
+              this.#sql.exec(
+                "INSERT OR REPLACE INTO stale_objects (key, at) VALUES (?, ?)",
+                oldKey,
+                Date.now(),
+              );
+            },
+            false,
+          ));
+        } catch (error) {
+          await this.env.FILES.delete(newKey).catch(() => {});
+          if (error instanceof ModelError) return { ok: false, message: error.message };
+          throw error;
+        }
+        void this.#scheduleAlarm();
+        const kept = plan.conflicts;
+        const taken = plan.changes - kept;
+        if (count > 0)
+          this.#broadcast({
+            t: "updated-from-main",
+            by: { id: by.userId, name: by.name },
+            changes: taken,
+          });
+        return { ok: true, revn: this.#revn, changes: taken, kept, mainRevn };
+      },
+    );
+    if ("missing" in result) return { ok: false, message: result.missing };
+    if ("reason" in result) return { ok: false, message: result.message };
+    return result;
+  }
+
+  /**
+   * Reads a branch's base (from R2) and the other side (a stream) into
+   * tables here, runs `work` on them, and drops them.
+   */
+  async #threeWay<R>(
+    baseKey: string,
+    otherNodes: ReadableStream<Uint8Array>,
+    work: (tables: ThreeWayTables, otherRevn: number, baseRevn: number) => Promise<R>,
+  ): Promise<
+    | R
+    | { readonly ok: false; readonly reason: "missing"; readonly missing: string }
+    | { readonly ok: false; readonly reason: "invalid"; readonly message: string }
+  > {
+    const tables: ThreeWayTables = {
+      base: tempTable("base"),
+      other: tempTable("other"),
+      removals: tempTable("removals"),
+    };
+    let other: SnapshotSource | null = null;
     try {
-      applyTransaction(new MemoryStore(nodes), ops, { rollback: false });
-    } catch (error) {
-      if (error instanceof ModelError) return { ok: false, message: error.message };
-      throw error;
+      other = await openSnapshotStream(otherNodes);
+      if (!other) throw new Error("the other file's nodes didn't come");
+      const base = await openSnapshot(this.env.FILES, baseKey);
+      if (!base) {
+        await other.lines.return(undefined);
+        return {
+          ok: false,
+          reason: "missing",
+          missing: "This branch's starting point is missing.",
+        };
+      }
+      try {
+        await loadSnapshot(this.#sql, tables.base, base, this.#room.transact);
+        await loadSnapshot(this.#sql, tables.other, other, this.#room.transact);
+      } catch (error) {
+        if (error instanceof SnapshotError)
+          return { ok: false, reason: "invalid", message: `It can't be read. ${error.message}` };
+        throw error;
+      }
+      return await work(tables, other.header.revn ?? 0, base.header.revn ?? 0);
+    } finally {
+      for (const table of Object.values(tables)) dropTable(this.#sql, table);
     }
-    const author = { clientId: "update", seq: 0, userId: by.userId, sessionId: "update" };
-    const revn = this.#commit(ops, author);
-    this.#broadcastChange(revn, ops, author);
-    const taken = changes.length - kept;
-    this.#broadcast({
-      t: "updated-from-main",
-      by: { id: by.userId, name: by.name },
-      changes: taken,
-    });
-    void this.#scheduleAlarm();
-    return { ok: true, revn, changes: taken, kept };
   }
 
   // -------------------------------------------------------------------------
@@ -770,6 +1220,8 @@ export class FileRoom extends DurableObject<Env> {
     if (tool?.level !== "write") return { ok: false, message: `There's no write tool ${name}.` };
     const replay = this.#replay(session.id, callId);
     if (replay) return replay;
+    const tooLarge = this.#tooLargeForAgents();
+    if (tooLarge) return tooLarge;
     const engine = this.#agentEngine(session.fileId);
     if (!engine) return { ok: false, message: NO_ENGINE };
 
@@ -814,6 +1266,8 @@ export class FileRoom extends DurableObject<Env> {
     const tool = findTool(name);
     if (!tool || tool.level === "write")
       return { ok: false, message: `There's no read tool ${name}.` };
+    const tooLarge = this.#tooLargeForAgents();
+    if (tooLarge) return tooLarge;
     const engine = this.#agentEngine(fileId);
     if (!engine) return { ok: false, message: NO_ENGINE };
     if (name === "export_image") {
@@ -927,6 +1381,16 @@ export class FileRoom extends DurableObject<Env> {
     return { ok: true, revn, result, replayed: false };
   }
 
+  /** A refusal when the file is more than the headless editor holds (AGENT_MAX_NODES). */
+  #tooLargeForAgents(): AgentCallResult | null {
+    const nodes = this.#store.count();
+    if (nodes <= AGENT_MAX_NODES) return null;
+    return {
+      ok: false,
+      message: `This file is too large for agent tools (${nodes.toLocaleString("en")} layers; they work on files of up to ${AGENT_MAX_NODES.toLocaleString("en")}). The read tools (get_outline, find_nodes, get_node) still work.`,
+    };
+  }
+
   #replay(sessionId: string, callId: string): AgentCallResult | null {
     const seen = this.#ledger.get(sessionId, callId);
     return seen ? { ok: true, revn: seen.revn, result: seen.result, replayed: true } : null;
@@ -997,6 +1461,8 @@ export class FileRoom extends DurableObject<Env> {
     ids: ReadonlySet<string>,
   ): { userId: string; ids: string[] } | "unknown" | null {
     if (since >= this.#revn) return null;
+    // An import since then replaced the file without logging it.
+    if (since < this.#catchupFrom()) return "unknown";
     const oldest = this.#sql
       .exec<{ revn: number | null }>("SELECT MIN(revn) AS revn FROM log")
       .one().revn;
@@ -1046,21 +1512,14 @@ export class FileRoom extends DurableObject<Env> {
     return nodes;
   }
 
-  /** Every node in the file, for copying it into another (a duplicate, a file from a template). */
-  async allNodes(): Promise<NodeRecord[]> {
-    const out: NodeRecord[] = [];
-    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) out.push(...page);
-    return out;
-  }
-
   /**
-   * Every node with the revision they're at, read without awaiting so the two
-   * agree: what a branch is made from, and its base (decision 0012).
+   * Every node in the file, for tests. Nothing on the server reads a whole
+   * file this way (decision 0026): it streams (`exportSnapshot`) or asks
+   * the room. Refuses files over 20,000 nodes.
    */
-  async snapshot(): Promise<{ revn: number; nodes: NodeRecord[] }> {
-    const nodes: NodeRecord[] = [];
-    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) nodes.push(...page);
-    return { revn: this.#revn, nodes };
+  async allNodes(): Promise<NodeRecord[]> {
+    if (this.#store.count() > 20_000) throw new Error("allNodes is for small files (tests)");
+    return this.#readAll();
   }
 
   /** Current revision and node count, for tests and the health page. */
@@ -1154,6 +1613,7 @@ export class FileRoom extends DurableObject<Env> {
     const canCatchUp =
       revn !== null &&
       revn <= this.#revn &&
+      revn >= this.#catchupFrom() &&
       (revn === this.#revn ||
         (oldest !== null &&
           oldest <= revn + 1 &&
@@ -1272,34 +1732,10 @@ export class FileRoom extends DurableObject<Env> {
   ): number {
     try {
       const revn = this.ctx.storage.transactionSync(() => {
-        const inverse = applyTransaction(this.#store, ops, { rollback: false });
         const next = this.#revn + 1;
-        const now = Date.now();
-        this.#sql.exec(
-          "INSERT INTO log (revn, client_id, seq, user_id, session_id, ops, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          next,
-          author.clientId,
-          author.seq,
-          author.userId,
-          author.sessionId,
-          JSON.stringify(ops),
-          now,
-        );
-        if (author.seq > 0) {
-          this.#sql.exec(
-            `INSERT INTO clients (client_id, last_seq, last_revn, at) VALUES (?, ?, ?, ?)
-             ON CONFLICT (client_id) DO UPDATE SET last_seq = excluded.last_seq, last_revn = excluded.last_revn, at = excluded.at`,
-            author.clientId,
-            author.seq,
-            next,
-            now,
-          );
-        }
-        if (author.userId !== "system") this.#count(now, author.userId);
-        this.#setMeta("revn", String(next));
-        this.#setMeta("touched", "1");
-        // When the file was last edited (not when the alarm gets round to saying so).
-        this.#setMeta("touched_at", String(now));
+        const inverse = this.#applyLogged(ops, author, next, {
+          inverse: options.also !== undefined,
+        });
         options.also?.(next, inverse);
         return next;
       });
@@ -1310,6 +1746,107 @@ export class FileRoom extends DurableObject<Env> {
     } finally {
       this.#store.clearCache();
     }
+  }
+
+  /**
+   * Applies and logs one transaction as revision `next`, inside a storage
+   * transaction the caller runs. Returns the operations that undo it when
+   * asked (`inverse`); without them, a delete doesn't read what it removes.
+   * `held`: it puts back what a file this server holds had (a restore, a
+   * merge, an update from main), so nothing is refused for depth.
+   */
+  #applyLogged(
+    ops: readonly Op[],
+    author: Author,
+    next: number,
+    { inverse, held = false }: { inverse: boolean; held?: boolean },
+  ): Op[] {
+    const undo = applyTransaction(this.#store, ops, { rollback: false, inverse, held });
+    const now = Date.now();
+    this.#sql.exec(
+      "INSERT INTO log (revn, client_id, seq, user_id, session_id, ops, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      next,
+      author.clientId,
+      author.seq,
+      author.userId,
+      author.sessionId,
+      JSON.stringify(ops),
+      now,
+    );
+    if (author.seq > 0) {
+      this.#sql.exec(
+        `INSERT INTO clients (client_id, last_seq, last_revn, at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (client_id) DO UPDATE SET last_seq = excluded.last_seq, last_revn = excluded.last_revn, at = excluded.at`,
+        author.clientId,
+        author.seq,
+        next,
+        now,
+      );
+    }
+    if (author.userId !== "system") this.#count(now, author.userId);
+    this.#setMeta("revn", String(next));
+    this.#setMeta("touched", "1");
+    // When the file was last edited (not when the alarm gets round to saying so).
+    this.#setMeta("touched_at", String(now));
+    return undo;
+  }
+
+  /**
+   * Commits operations worked out a few at a time (a restore, a merge),
+   * each chunk of about a megabyte its own logged revision, all in one
+   * storage transaction: everything lands or, if anything throws, nothing
+   * does. Then everyone here sees it arrive, chunk by chunk, or is asked to
+   * load the file again when it's more than a broadcast carries.
+   */
+  #commitChunks<R>(
+    author: Author,
+    produce: (out: OpChunks) => R,
+    /**
+     * Whether the operations bring back what this file already held (a
+     * restore), so layers come back as deep as they were. A merge or an
+     * update combines two files' changes into a tree neither held, so it
+     * follows the ordinary depth rule.
+     */
+    held: boolean,
+  ): { revn: number; count: number; result: R } {
+    let next = this.#revn;
+    const sent: Array<{ revn: number; ops: Op[] }> = [];
+    let sentChars = 0;
+    let tooBig = false;
+    let outcome: { result: R; count: number };
+    try {
+      outcome = this.ctx.storage.transactionSync(() => {
+        const out = new OpChunks((ops) => {
+          next++;
+          this.#applyLogged(ops, author, next, { inverse: false, held });
+          this.#store.clearCache();
+          if (tooBig) return;
+          sentChars += JSON.stringify(ops).length;
+          if (sentChars > MAX_BROADCAST_BYTES) {
+            tooBig = true;
+            sent.length = 0;
+          } else sent.push({ revn: next, ops });
+        });
+        const result = produce(out);
+        out.flush();
+        return { result, count: out.count };
+      });
+    } catch (error) {
+      this.#engine?.drop();
+      throw error;
+    } finally {
+      this.#store.clearCache();
+    }
+    this.#revn = next;
+    if (tooBig) {
+      this.#engine?.drop();
+      this.#broadcast({ t: "resync" });
+    } else
+      for (const chunk of sent) {
+        this.#engine?.follow(chunk.ops, chunk.revn);
+        this.#broadcastChange(chunk.revn, chunk.ops, author);
+      }
+    return { revn: next, count: outcome.count, result: outcome.result };
   }
 
   /** Sends a committed change to everyone but `except`, or asks them to reload when it's huge. */
@@ -1470,9 +2007,10 @@ export class FileRoom extends DurableObject<Env> {
       /** Name a version that's already there only if it has no name yet. */
       readonly keepName?: boolean;
     },
+    /** The nodes to save, already copied aside at their revision (see #freeze). */
+    frozen?: { readonly table: string; readonly revn: number },
   ): Promise<SavedVersion> {
-    // Read everything first, without awaiting, so the snapshot is one consistent revision.
-    const revn = this.#revn;
+    const revn = frozen?.revn ?? this.#revn;
     const previous = Number(this.#meta("snapshot_revn") ?? 0);
     const existing = await this.env.DB.prepare(
       "SELECT id FROM versions WHERE file_id = ? AND revn = ?",
@@ -1492,22 +2030,45 @@ export class FileRoom extends DurableObject<Env> {
       return { id: existing.id, revn };
     }
 
-    if (revn !== this.#revn) return this.#saveVersion(fileId, options);
-    const nodes: NodeRecord[] = [];
-    for (const page of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) nodes.push(...page);
-    const rows = this.#sql
-      .exec<{ ops: string; user_id: string; at: number }>(
-        "SELECT ops, user_id, at FROM log WHERE revn > ? AND revn <= ? AND client_id != 'system' ORDER BY revn",
-        previous,
-        revn,
-      )
-      .toArray();
-    const summary = summarizeEdits(rows.map((row) => JSON.parse(row.ops) as Op[]));
-    const authors = [...new Set(rows.map((row) => row.user_id))].filter(
-      (id) => !id.startsWith("guest:"),
-    );
+    if (!frozen && revn !== this.#revn) return this.#saveVersion(fileId, options);
+    // Copied aside without awaiting, so the snapshot is one consistent revision however long
+    // writing it takes.
+    const table = frozen ? null : this.#freeze().table;
+    let size: number;
+    let summary: ReturnType<typeof summarizeEdits>;
+    let authors: string[];
+    let startedAt: number | null;
     const now = Date.now();
-    const size = await writeSnapshot(this.env.FILES, fileId, revn, now, nodes);
+    try {
+      // What changed since the last version, read a log row at a time.
+      const range = [previous, revn] as const;
+      const who = this.#sql
+        .exec<{ user_id: string; first: number }>(
+          "SELECT user_id, MIN(at) AS first FROM log WHERE revn > ? AND revn <= ? AND client_id != 'system' GROUP BY user_id ORDER BY MIN(revn)",
+          ...range,
+        )
+        .toArray();
+      authors = who.map((row) => row.user_id).filter((id) => !id.startsWith("guest:"));
+      startedAt = who.length > 0 ? Math.min(...who.map((row) => row.first)) : null;
+      const sql = this.#sql;
+      summary = summarizeEdits(
+        (function* () {
+          for (const row of sql.exec<{ ops: string }>(
+            "SELECT ops FROM log WHERE revn > ? AND revn <= ? AND client_id != 'system' ORDER BY revn",
+            ...range,
+          ))
+            yield JSON.parse(row.ops) as Op[];
+        })(),
+      );
+      size = await writeSnapshot(
+        this.env.FILES,
+        snapshotKey(fileId, revn),
+        { fileId, revn, at: now },
+        tablePages(this.#sql, frozen?.table ?? (table as string)),
+      );
+    } finally {
+      if (table) dropTable(this.#sql, table);
+    }
     const id = newId();
     await this.env.DB.prepare(
       `INSERT INTO versions (id, file_id, revn, reason, name, description, restored_id, created_by, created_at, authors, summary, started_at, size)
@@ -1528,7 +2089,7 @@ export class FileRoom extends DurableObject<Env> {
         now,
         JSON.stringify(authors),
         JSON.stringify(summary),
-        rows[0]?.at ?? null,
+        startedAt,
         size,
       )
       .run();
@@ -1603,6 +2164,11 @@ export class FileRoom extends DurableObject<Env> {
     const fileId = this.#meta("file_id");
     if (!fileId) throw new ModelError("not_found", "This file has never been opened.");
     return fileId;
+  }
+
+  /** The oldest revision a client can catch up from: none before the last import. */
+  #catchupFrom(): number {
+    return Number(this.#meta("catchup_from") ?? 0);
   }
 
   #meta(k: string): string | null {
@@ -1744,6 +2310,8 @@ export type UpdateResult =
       readonly changes: number;
       /** Main's changes to things the branch had changed too: the branch's stayed. */
       readonly kept: number;
+      /** Main's revision as read: the branch's base from now on. */
+      readonly mainRevn: number;
     }
   | { readonly ok: false; readonly message: string };
 
@@ -1759,72 +2327,28 @@ export type MergeResult =
     }
   /** Main changed since review: conflicts nobody decided. */
   | { readonly ok: false; readonly reason: "undecided"; readonly undecided: number }
-  | { readonly ok: false; readonly reason: "invalid"; readonly message: string };
+  | { readonly ok: false; readonly reason: "invalid"; readonly message: string }
+  /** The branch's base isn't in R2. */
+  | { readonly ok: false; readonly reason: "missing"; readonly missing: string };
 
 export type ImportResult =
   | { readonly ok: true; readonly revn: number; readonly nodes: number }
   | { readonly ok: false; readonly reason: "not-empty" }
+  /** The file changed after the import began: nothing was imported. */
+  | { readonly ok: false; readonly reason: "changed" }
+  /** No such import: never begun, committed, given up, or replaced by another. */
+  | { readonly ok: false; readonly reason: "gone" }
   | { readonly ok: false; readonly reason: "invalid"; readonly message: string };
 
-/** About 1 MB of JSON per commit: one log row each, far below SQLite's 2 MB row cap. */
-const IMPORT_CHUNK_CHARS = 1_000_000;
+export type ImportBegun =
+  | { readonly ok: true; readonly importId: string }
+  | { readonly ok: false; readonly reason: "not-empty" };
 
-/** Create ops for `nodes`, each parent before its children (siblings keep their order). */
-function creationOrder(nodes: readonly NodeRecord[]): Op[] {
-  const byParent = new Map<string, NodeRecord[]>();
-  for (const node of nodes) {
-    const list = byParent.get(node.parent) ?? [];
-    list.push(node);
-    byParent.set(node.parent, list);
-  }
-  const ops: Op[] = [];
-  const queue = [...(byParent.get(ROOT_ID) ?? [])];
-  for (let node = queue.shift(); node; node = queue.shift()) {
-    ops.push({
-      op: "create",
-      id: node.id,
-      type: node.type,
-      parent: node.parent,
-      key: node.key,
-      props: node.props,
-    });
-    queue.push(...(byParent.get(node.id) ?? []));
-  }
-  // Nodes whose parent isn't in the set go last, where validation rejects them by name.
-  if (ops.length < nodes.length) {
-    const placed = new Set(ops.map((o) => o.id));
-    for (const node of nodes)
-      if (!placed.has(node.id))
-        ops.push({
-          op: "create",
-          id: node.id,
-          type: node.type,
-          parent: node.parent,
-          key: node.key,
-          props: node.props,
-        });
-  }
-  return ops;
-}
+export type ImportPartResult =
+  | { readonly ok: true; readonly staged: number }
+  | { readonly ok: false; readonly reason: "gone" }
+  | { readonly ok: false; readonly reason: "invalid"; readonly message: string };
 
-/** `ops` in runs of at most about `limit` characters of JSON (and a transaction's worth of ops). */
-function chunked(ops: readonly Op[], limit: number): Op[][] {
-  const out: Op[][] = [];
-  let current: Op[] = [];
-  let size = 0;
-  for (const op of ops) {
-    const length = JSON.stringify(op).length;
-    if (
-      current.length > 0 &&
-      (size + length > limit || current.length >= MAX_OPS_PER_TRANSACTION)
-    ) {
-      out.push(current);
-      current = [];
-      size = 0;
-    }
-    current.push(op);
-    size += length;
-  }
-  if (current.length > 0) out.push(current);
-  return out;
-}
+export type PublishResult =
+  | { readonly ok: true; readonly version: SavedVersion; readonly assets: LibraryAsset[] }
+  | { readonly ok: false; readonly reason: "empty" | "too-many" };

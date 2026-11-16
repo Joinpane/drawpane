@@ -24,7 +24,7 @@ Drawpane already has most of the machinery inside one file:
 1. **Publishing.**
    - Publishing saves a named version of the library file (named "Published", or after its note) and records a row in `library_publishes`. The row holds the file, team, version, revision, who published and when, the note, and a manifest of the published components.
    - The manifest gives each component's id, name, description and a content hash of everything it draws (its layers, the components nested in it, and the text styles and variables it uses). So what changed between publishes is known without loading either snapshot.
-   - The Worker reads the manifest from the version's own snapshot (the hashing lives in `@drawpane/model`), so the list and the content can't disagree, whatever was in flight when someone pressed Publish.
+   - The file's room copies its nodes aside at one revision, reads the manifest from that copy and saves the version from it (the hashing lives in `@drawpane/model`), so the list and the content can't disagree, whatever was in flight when someone pressed Publish. It reads the copy from SQLite as the hashing asks, never the whole file at once (decision 0026).
    - Versions a publish points at are never swept by autosave retention, even if someone un-names them.
 2. **Using.**
    - A file that uses a library holds a `library` node under the root, naming the library file and the publish it has taken.

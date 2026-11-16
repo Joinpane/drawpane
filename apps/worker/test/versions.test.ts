@@ -1,5 +1,5 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import type { NodeRecord, Op, VersionInfo } from "@drawpane/model";
+import { type NodeRecord, type Op, parseSnapshot, type VersionInfo } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { snapshotKey } from "../src/rooms/snapshots";
 import { type Browser, openSocket, signedInUser } from "./helpers";
@@ -88,9 +88,13 @@ describe("versions", () => {
     const response = await browser.fetch(`/api/files/${fileId}/versions/${version.id}/snapshot`);
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toContain("immutable");
-    const snapshot = (await response.json()) as { revn: number; nodes: NodeRecord[] };
-    expect(snapshot.revn).toBe(revn);
-    expect(snapshot.nodes.find((n) => n.id === "card")?.props).toMatchObject({ x: 40, fills: [] });
+    // Version 2: a header line, then a node per line (decision 0026).
+    const snapshot = parseSnapshot(await response.text());
+    expect(snapshot?.header).toMatchObject({ version: 2, revn });
+    expect(snapshot?.nodes.find((n) => n.id === "card")?.props).toMatchObject({
+      x: 40,
+      fills: [],
+    });
   });
 
   it("renames, describes and un-names versions", async () => {
@@ -211,6 +215,119 @@ describe("versions", () => {
       { method: "POST", json: {} },
     );
     expect(same.changed).toBe(0);
+  });
+
+  it("restores a version unchanged without losing layers deeper than new edits may go", async () => {
+    const { browser, fileId } = await newFile();
+    const a = await join(browser, fileId, "clientA");
+    // A chain of 130 groups: deeper than the 128 levels an edit may make now, as a file
+    // could hold from before moves checked the layers they carry down.
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      for (let i = 0; i < 130; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a0', 'group', '{}')",
+          `D${i}`,
+          i === 0 ? a.page.id : `D${i - 1}`,
+        );
+    });
+    const v1 = await name(browser, fileId, "Deep");
+    const restored = await browser.json<{ changed: number }>(
+      `/api/files/${fileId}/versions/${v1.id}/restore`,
+      { method: "POST", json: {} },
+    );
+    expect(restored.changed).toBe(0);
+    expect((await roomOf(fileId).stats()).nodes).toBe(131);
+  });
+
+  /** A file holding a chain of 132 groups, D0 at level 2 down to D131 at level 133. */
+  async function deepFile() {
+    const { browser, fileId } = await newFile();
+    const a = await join(browser, fileId, "clientA");
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      for (let i = 0; i < 132; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a0', 'group', '{}')",
+          `D${i}`,
+          i === 0 ? a.page.id : `D${i - 1}`,
+        );
+    });
+    const row = (id: string) =>
+      runInDurableObject(
+        roomOf(fileId),
+        (_room, state) =>
+          state.storage.sql
+            .exec<{ parent: string; key: string }>("SELECT parent, key FROM nodes WHERE id = ?", id)
+            .toArray()[0],
+      );
+    return { browser, fileId, a, row };
+  }
+
+  it("edits layers past the limit where that takes nothing deeper", async () => {
+    const { a, row } = await deepFile();
+    // Reordering where it is (level 132), and moving shallower (133 to 131).
+    await a.edit([{ op: "move", id: "D130", parent: "D129", key: "a1" }]);
+    await a.edit([{ op: "move", id: "D131", parent: "D128", key: "a1" }]);
+    expect(await row("D130")).toEqual({ parent: "D129", key: "a1" });
+    expect(await row("D131")).toEqual({ parent: "D128", key: "a1" });
+    // Taking a layer deeper past the limit is refused (sent as the next edit would be, seq 4).
+    await a.edit([rect("r", a.page.id)]);
+    a.send({ t: "txn", seq: 4, ops: [{ op: "move", id: "r", parent: "D129", key: "a2" }] });
+    expect(await a.next<{ code: string }>("reject")).toMatchObject({ code: "too_deep" });
+    // And so is a new layer there.
+    a.send({ t: "txn", seq: 4, ops: [rect("r2", "D129")] });
+    expect(await a.next<{ code: string }>("reject")).toMatchObject({ code: "too_deep" });
+  });
+
+  it("restores layers past the limit as deep as they were", async () => {
+    const { browser, fileId, row } = await deepFile();
+    const v1 = await name(browser, fileId, "Deep");
+    const restore = () =>
+      browser.json<{ changed: number }>(`/api/files/${fileId}/versions/${v1.id}/restore`, {
+        method: "POST",
+        json: {},
+      });
+    // A key changed at level 132: the restore moves it back where it was.
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      state.storage.sql.exec("UPDATE nodes SET key = 'a1' WHERE id = 'D130'");
+    });
+    expect((await restore()).changed).toBeGreaterThan(0);
+    expect(await row("D130")).toEqual({ parent: "D129", key: "a0" });
+    // A layer at level 133 deleted: the restore brings it back, though an edit couldn't add it.
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      state.storage.sql.exec("DELETE FROM nodes WHERE id = 'D131'");
+    });
+    expect(await row("D131")).toBeUndefined();
+    expect((await restore()).changed).toBeGreaterThan(0);
+    expect(await row("D131")).toEqual({ parent: "D130", key: "a0" });
+    expect((await roomOf(fileId).stats()).nodes).toBe(133);
+  });
+
+  it("refuses a version it can't make sense of, changing nothing", async () => {
+    const { browser, fileId } = await newFile();
+    const a = await join(browser, fileId, "clientA");
+    await a.edit([rect("card", a.page.id), rect("other", a.page.id)]);
+    const v1 = await name(browser, fileId, "V1");
+    // Its snapshot names a parent it doesn't have, and a pair of groups each inside the other.
+    const nodes = [
+      { ...a.page },
+      { id: "card", type: "rect", parent: "nowhere", key: "a0", props: {} },
+      { id: "G1", type: "group", parent: "G2", key: "a0", props: {} },
+      { id: "G2", type: "group", parent: "G1", key: "a0", props: {} },
+    ];
+    const v1Json = `{"format":"drawpane.snapshot","version":1,"fileId":"${fileId}","revn":${v1.revn},"at":1,"nodes":${JSON.stringify(nodes)}}`;
+    const gz = await new Response(
+      new Blob([v1Json]).stream().pipeThrough(new CompressionStream("gzip")),
+    ).arrayBuffer();
+    await env.FILES.put(snapshotKey(fileId, v1.revn), gz);
+    const before = await roomOf(fileId).stats();
+    const response = await browser.fetch(`/api/files/${fileId}/versions/${v1.id}/restore`, {
+      method: "POST",
+      json: {},
+    });
+    expect(response.status).toBe(409);
+    expect(JSON.stringify(await response.json())).toContain("can't be restored");
+    const after = await roomOf(fileId).stats();
+    expect(after).toMatchObject({ revn: before.revn, nodes: before.nodes });
   });
 
   it("refuses to restore a version whose snapshot is gone", async () => {

@@ -25,6 +25,7 @@
  *   stored, which is what a room would receive (phase 4b).
  */
 import {
+  type ApplyOptions,
   applyOp,
   CopyView,
   collectSubtree,
@@ -91,6 +92,8 @@ interface Tx {
   readonly absorbLater: Set<string>;
   /** Invalidation held back while a group of stored operations runs. */
   deferred: { changed: string[]; structural: string[] } | null;
+  /** Puts back what was held (see `ApplyOptions.held`): nothing refused for depth. */
+  readonly held: boolean;
 }
 
 export interface CompactApplied {
@@ -159,17 +162,8 @@ export class CompactCopies {
   // -------------------------------------------------------------------------
   // Applying
 
-  apply(ops: readonly Op[]): CompactApplied {
-    const tx: Tx = {
-      stored: [],
-      undoStored: [],
-      inverse: [],
-      ids: new Set(),
-      parents: new Set(),
-      alias: new Map(),
-      absorbLater: new Set(),
-      deferred: null,
-    };
+  apply(ops: readonly Op[], { held = false }: ApplyOptions = {}): CompactApplied {
+    const tx = this.#tx(held);
     let index = 0;
     try {
       for (; index < ops.length; index++) this.#op(tx, ops[index] as Op);
@@ -189,8 +183,8 @@ export class CompactCopies {
   }
 
   /** Applies operations on the stored form as they are (a room's, or a test's). */
-  applyStored(ops: readonly Op[]): CompactApplied {
-    const tx = this.#tx();
+  applyStored(ops: readonly Op[], { held = false }: ApplyOptions = {}): CompactApplied {
+    const tx = this.#tx(held);
     try {
       for (const op of ops) tx.inverse.push(this.#put(tx, op));
     } catch (error) {
@@ -205,8 +199,9 @@ export class CompactCopies {
     };
   }
 
-  #tx(): Tx {
+  #tx(held = false): Tx {
     return {
+      held,
       stored: [],
       undoStored: [],
       inverse: [],
@@ -222,7 +217,7 @@ export class CompactCopies {
     for (let i = tx.undoStored.length - 1; i >= 0; i--)
       for (const op of tx.undoStored[i] as Op[]) {
         try {
-          applyOp(this.store, op);
+          applyOp(this.store, op, { held: true });
         } catch {
           // Only the last page's delete can refuse; nothing else a rollback does can.
         }
@@ -282,7 +277,7 @@ export class CompactCopies {
     const before = this.store.get(op.id);
     const removed = op.op === "delete" ? collectSubtree(this.store, op.id) : [];
     const presentedRemoved = op.op === "delete" ? this.#presentedSubtree(op.id) : [];
-    const undo = applyOp(this.store, op);
+    const undo = applyOp(this.store, op, { held: tx.held });
     tx.undoStored.push(undo);
     tx.stored.push(op);
 

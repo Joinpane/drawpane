@@ -5,14 +5,14 @@
  * happens in the main file's room, as one ordinary transaction after a
  * restore point, after which the branch is read-only history.
  */
-import { type BranchInfo, type NodeRecord, newId, searchFold } from "@drawpane/model";
+import { type BranchInfo, newId, searchFold } from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
 import { requireUser } from "../auth/session";
 import type { AppContext, Env } from "../env";
 import { badRequest, conflict, notFound } from "../lib/http";
-import type { MergeResult, UpdateResult } from "../rooms/file-room";
-import { branchBaseKey, readSnapshot, writeSnapshot } from "../rooms/snapshots";
+import type { ImportResult, MergeResult, UpdateResult } from "../rooms/file-room";
+import { branchBaseKey, openSnapshot, openSnapshotStream, reviewStream } from "../rooms/snapshots";
 import { type FileRow, readBody, requireFileRole } from "./access";
 import { thumbnailKey } from "./media";
 
@@ -112,10 +112,17 @@ export async function makeBranch(
   main: FileRow,
   name: string,
 ): Promise<BranchInfo> {
-  // Main's nodes and the revision they're at, read together.
-  const base = (await room(env, main.id).snapshot()) as { revn: number; nodes: NodeRecord[] };
+  // Main's nodes at the revision they're at, written as the branch's base before anything else.
   const id = newId();
   const now = Date.now();
+  let base: { revn: number };
+  try {
+    base = await room(env, main.id).writeSnapshotTo(branchBaseKey(id));
+  } catch (error) {
+    console.error(`couldn't save the base of a branch of ${main.id}`, error);
+    await env.FILES.delete(branchBaseKey(id));
+    throw conflict("The branch couldn't be made. Try again.");
+  }
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO files (id, project_id, team_id, name, search_name, created_by, created_at, updated_at, branch_of)
@@ -124,12 +131,10 @@ export async function makeBranch(
     env.DB.prepare("INSERT INTO branches (file_id, base_revn) VALUES (?, ?)").bind(id, base.revn),
   ]);
   try {
-    await writeSnapshot(env.FILES, id, base.revn, now, base.nodes, branchBaseKey(id));
-    const copied = await room(env, id).importNodes(
-      { userId: by.id, name: by.name },
-      base.nodes,
-      id,
-    );
+    // The branch's room fills itself from the base, a batch at a time.
+    const copied = (await room(env, id).importSnapshot({ userId: by.id, name: by.name }, id, {
+      key: branchBaseKey(id),
+    })) as ImportResult;
     if (!copied.ok) throw new Error(`couldn't copy into the branch: ${copied.reason}`);
     // The branch looks like its main file in the branch list straight away.
     const thumbnail = await env.FILES.get(thumbnailKey(main.id));
@@ -197,13 +202,20 @@ export const branches = new Hono<AppContext>()
   .get("/files/:fileId/branch/review", async (c) => {
     const user = requireUser(c);
     const { file } = await requireBranch(c.env, user.id, c.req.param("fileId"));
-    const base = await readSnapshot(c.env.FILES, branchBaseKey(file.id));
-    if (!base) throw conflict("This branch's starting point is missing, so it can't be reviewed.");
-    const [branch, main] = await Promise.all([
-      room(c.env, file.id).snapshot(),
-      room(c.env, file.branch_of).snapshot(),
-    ]);
-    return c.json({ base, branch: branch.nodes, main: main.nodes, mainRevn: main.revn });
+    // Each file is copied aside in its room and streamed from there (decision 0026); the
+    // branch's room says which base its nodes are a change from.
+    const exported = await room(c.env, file.id).exportBranch();
+    const base = await openSnapshot(c.env.FILES, exported.baseKey);
+    if (!base) {
+      await exported.nodes.cancel();
+      throw conflict("This branch's starting point is missing, so it can't be reviewed.");
+    }
+    const branch = await openSnapshotStream(exported.nodes);
+    const main = await openSnapshotStream(await room(c.env, file.branch_of).exportSnapshot());
+    if (!branch || !main) throw conflict("The files couldn't be read. Try again.");
+    return new Response(reviewStream(base, branch, main), {
+      headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" },
+    });
   })
 
   /**
@@ -239,14 +251,13 @@ export const branches = new Hono<AppContext>()
 
     let result: MergeResult;
     try {
-      const base = await readSnapshot(c.env.FILES, branchBaseKey(file.id));
-      if (!base) throw conflict("This branch's starting point is missing, so it can't be merged.");
-      const branch = await room(c.env, file.id).snapshot();
+      // Main's room reads the base from R2 and the branch as it streams from the branch's room.
+      const branch = await room(c.env, file.id).exportBranch();
       result = (await room(c.env, file.branch_of).mergeBranch(
         { userId: user.id, name: user.name },
         file.branch_of,
         { id: file.id, name: file.name },
-        { base, branch: branch.nodes as NodeRecord[] },
+        branch,
         choices,
       )) as MergeResult;
     } catch (error) {
@@ -259,7 +270,9 @@ export const branches = new Hono<AppContext>()
         ? conflict(
             `Main changed while you were reviewing: ${result.undecided === 1 ? "a conflict needs" : `${result.undecided} conflicts need`} a decision. Review again.`,
           )
-        : conflict(`These changes can't be merged as they are. ${result.message}`);
+        : result.reason === "missing"
+          ? conflict("This branch's starting point is missing, so it can't be merged.")
+          : conflict(`These changes can't be merged as they are. ${result.message}`);
     }
     await c.env.DB.prepare(
       "UPDATE branches SET merged_revn = ?, merged_changes = ? WHERE file_id = ?",
@@ -284,30 +297,18 @@ export const branches = new Hono<AppContext>()
     const user = requireUser(c);
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
     if (!file.branch_of) throw notFound("That file isn't a branch.");
-    const base = await readSnapshot(c.env.FILES, branchBaseKey(file.id));
-    if (!base) throw conflict("This branch's starting point is missing, so it can't be updated.");
-    const main = (await room(c.env, file.branch_of).snapshot()) as {
-      revn: number;
-      nodes: NodeRecord[];
-    };
+    // The branch's room reads its base from R2 and main as it streams from main's room, and
+    // keeps main as read as its base from here on.
+    const main = await room(c.env, file.branch_of).exportSnapshot();
     const result = (await room(c.env, file.id).updateFromMain(
       { userId: user.id, name: user.name },
       file.id,
-      { base, main: main.nodes },
+      main,
     )) as UpdateResult;
     if (!result.ok)
       throw conflict(`Main's changes can't be brought in as they are. ${result.message}`);
-    // The branch now starts from main as it is: that's its base from here on.
-    await writeSnapshot(
-      c.env.FILES,
-      file.id,
-      main.revn,
-      Date.now(),
-      main.nodes,
-      branchBaseKey(file.id),
-    );
     await c.env.DB.prepare("UPDATE branches SET base_revn = ? WHERE file_id = ?")
-      .bind(main.revn, file.id)
+      .bind(result.mainRevn, file.id)
       .run();
     return c.json({
       branch: await branchInfo(c.env, file.id),

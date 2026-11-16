@@ -3,8 +3,16 @@
  * file's publishes, and the libraries other files on the team can use.
  */
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import type { LibraryPublish, NodeRecord, Op, VersionInfo } from "@drawpane/model";
+import {
+  type LibraryPublish,
+  libraryAssets,
+  type NodeRecord,
+  nodeReader,
+  type Op,
+  type VersionInfo,
+} from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import { TableReader, toRecord } from "../src/rooms/node-tables";
 import { snapshotKey } from "../src/rooms/snapshots";
 import { type Browser, openSocket, signedInUser } from "./helpers";
 
@@ -67,6 +75,8 @@ async function published(browser: Browser, fileId: string, body: unknown = {}) {
   return ((await res.json()) as { publish: LibraryPublish }).publish;
 }
 
+const roomOf = (fileId: string) => env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
+
 describe("team libraries", () => {
   it("publishes a file as a named version, with what that version offers", async () => {
     const ana = await signedInUser("Ana");
@@ -96,6 +106,42 @@ describe("team libraries", () => {
       `/api/files/${kit.id}/library`,
     );
     expect(publishes.map((p) => p.id)).toEqual([pub.id]);
+  });
+
+  it("publishes a component however deep it sits, as the in-memory reader finds it", async () => {
+    const ana = await signedInUser("Ana");
+    const kit = await newFile(ana.browser, ana.projectId, "Deep kit", ["Button"]);
+    // Under 132 nested groups (the component at level 134): deeper than an edit may make now,
+    // as a file could hold from before moves checked the layers they carry down.
+    await runInDurableObject(roomOf(kit.id), (_room, state) => {
+      for (let i = 0; i < 132; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a5', 'group', '{}')",
+          `D${i}`,
+          i === 0 ? kit.page.id : `D${i - 1}`,
+        );
+      state.storage.sql.exec(
+        "INSERT INTO nodes (id, parent, key, type, props) VALUES ('deep', 'D131', 'a0', 'frame', ?)",
+        JSON.stringify({ name: "Deep", isComponent: true }),
+      );
+    });
+    const pub = await published(ana.browser, kit.id);
+    expect(pub.assets.map((a) => [a.id, a.name])).toEqual([
+      ["button", "Button"],
+      ["deep", "Deep"],
+    ]);
+    // The room's reader over SQLite gives the manifest the in-memory reader does.
+    await runInDurableObject(roomOf(kit.id), (_room, state) => {
+      const nodes = state.storage.sql
+        .exec<{ id: string; parent: string; key: string; type: string; props: string }>(
+          "SELECT id, parent, key, type, props FROM nodes",
+        )
+        .toArray()
+        .map(toRecord);
+      const inMemory = libraryAssets(nodeReader(nodes));
+      expect(libraryAssets(new TableReader(state.storage.sql, "nodes"))).toEqual(inMemory);
+      expect(pub.assets).toEqual(inMemory);
+    });
   });
 
   it("refuses an empty publish (leaving no version), and people who can only view", async () => {

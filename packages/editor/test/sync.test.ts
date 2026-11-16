@@ -457,3 +457,49 @@ describe("SyncEngine room requests", () => {
     ]);
   });
 });
+
+describe("SyncEngine in a file deeper than 128 levels", () => {
+  it("rebases over a change the room accepted, putting back layers as deep as they were", () => {
+    // A chain of groups from level 2 (D0) to level 133 (D131), as a file could hold.
+    const nodes: NodeRecord[] = [{ id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} }];
+    for (let i = 0; i < 132; i++)
+      nodes.push({
+        id: `D${i}`,
+        type: "group",
+        parent: i === 0 ? "p" : `D${i - 1}`,
+        key: "a0",
+        props: {},
+      });
+    const doc = new Doc();
+    const engine = new SyncEngine(doc, { clientId: "c1", setTimer: () => 0 });
+    engine.connected(() => {});
+    engine.receive({
+      t: "welcome",
+      sessionId: "s1",
+      revn: 1,
+      role: "editor",
+      peers: [],
+      mode: "snapshot",
+      lastSeq: 0,
+    });
+    engine.receive({ t: "snapshot", nodes, done: true });
+    const desyncs: string[] = [];
+    engine.on("desync", (reason) => desyncs.push(reason));
+    // Deleting the deepest layer waits for the room: undoing it to rebase puts it back.
+    engine.commit([{ op: "delete", id: "D131" }]);
+    // Meanwhile the room accepted a restore that brought back a layer there.
+    engine.receive({
+      t: "txn",
+      revn: 2,
+      ops: [{ op: "create", id: "back", type: "group", parent: "D131", key: "a1", props: {} }],
+      author: { userId: "u", sessionId: "restore" },
+    });
+    expect(desyncs).toEqual([]);
+    // The pending delete is redone on top, taking the restored layer with it, as the room will.
+    expect(doc.get("D131")).toBeUndefined();
+    expect(engine.pendingCount).toBe(1);
+    // The room confirms the delete.
+    engine.receive({ t: "ack", seq: 1, revn: 3 });
+    expect(desyncs).toEqual([]);
+  });
+});

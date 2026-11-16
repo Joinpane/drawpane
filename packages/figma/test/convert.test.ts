@@ -403,6 +403,34 @@ describe("masks", () => {
     expect(type("Old alpha")).toBe("alpha");
     expect(type("Old outline")).toBe("outline");
   });
+
+  it("leave a group used as a mask unmasking, with a note, as Drawpane masks with shapes", () => {
+    const { nodes, notes } = convertFile(
+      file(
+        node({
+          id: "1:40",
+          type: "GROUP",
+          name: "Group mask",
+          isMask: true,
+          relativeTransform: at(0, 0),
+          absoluteBoundingBox: { x: 0, y: 0, width: 40, height: 40 },
+          children: [
+            node({
+              id: "1:41",
+              type: "RECTANGLE",
+              name: "Inside",
+              size: { x: 40, y: 40 },
+              relativeTransform: at(0, 0),
+              absoluteBoundingBox: { x: 0, y: 0, width: 40, height: 40 },
+            }),
+          ],
+        }),
+      ),
+    );
+    validate(nodes);
+    expect(byName(nodes, "Group mask").props.isMask).toBeUndefined();
+    expect(notes.lines().join(" ")).toContain("no longer mask");
+  });
 });
 
 describe("vectors", () => {
