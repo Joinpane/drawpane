@@ -77,6 +77,27 @@ describe("importing into a new file", () => {
     expect((await roomOf(fileId).stats()).nodes).toBe(1);
   });
 
+  it("refuses compact copies' override records until rooms store them (decision 0029)", async () => {
+    const { browser, fileId } = await newFile();
+    const main = { id: "M1", type: "frame", parent: "P1", key: "a0", props: { isComponent: true } };
+    const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
+    const record = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["X1"] } };
+    const response = await browser.fetch(`/api/files/${fileId}/import`, {
+      method: "POST",
+      json: { nodes: [page("P1", "Cover", "a0"), main, copy, record] },
+    });
+    expect(response.status).toBe(400);
+    expect((await roomOf(fileId).stats()).nodes).toBe(1);
+
+    // Nor through a change sent over the socket.
+    const socket = await openSocket(browser, fileId);
+    socket.send({ t: "hello", protocol: 1, clientId: "c1", revn: null });
+    await socket.next("welcome");
+    socket.send({ t: "txn", seq: 1, ops: [{ op: "create", ...record }] });
+    const reject = await socket.next<{ code: string }>("reject");
+    expect(reject.code).toBe("unsupported");
+  });
+
   it("is for editors of the file", async () => {
     const { fileId } = await newFile();
     const stranger = await signedInUser("Bo");

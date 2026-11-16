@@ -343,7 +343,9 @@ describe("pinInstances (files made elsewhere)", () => {
     expect(propagationOps(editor.doc, ["main", "label"])).toEqual([]);
     // …and the copy still follows its main where it didn't differ.
     editor.setProp(["label"], "opacity", 0.5);
-    expect(getProp((editor.doc.get("copyLabel") as NodeRecord).props, "opacity")).toBe(0.5);
+    // (With compact copies the copy layer's id is derived on the way in.)
+    const copyLabel = editor.doc.resetIds.get("copyLabel") ?? "copyLabel";
+    expect(getProp((editor.doc.get(copyLabel) as NodeRecord).props, "opacity")).toBe(0.5);
     expect(getProp((editor.doc.get("copy") as NodeRecord).props, "width")).toBe(160);
   });
 

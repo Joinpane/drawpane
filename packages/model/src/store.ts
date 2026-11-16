@@ -71,6 +71,11 @@ export class MemoryStore implements NodeStore {
     this.#nodes.set(id, { ...node, props });
   }
 
+  /** Replaces a node's properties at once (its place unchanged): for building a store, not for edits. */
+  replaceProps(id: string, props: NodeRecord["props"]): void {
+    this.#nodes.set(id, { ...this.#require(id), props });
+  }
+
   move(id: string, parent: string, key: string): void {
     const node = this.#require(id);
     this.#removeChild(node.parent, id);

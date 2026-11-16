@@ -35,8 +35,10 @@ import {
   instantiateOps,
   isInsideInstance,
   isMainComponent,
+  outermostInstanceOf,
   overrideOps,
   propagationOps,
+  relayoutTargets,
   resetOverridesOps,
   swapInstanceOps,
   syncInstanceOps,
@@ -599,6 +601,8 @@ export class Editor {
       // content, auto layout places children. Each can feed the next.
       for (let round = 0; round < MAX_FIXUP_ROUNDS && touched.size > 0; round++) {
         const live = [...touched].filter((id) => this.doc.has(id));
+        // Compact copies follow their mains unwritten; the ones laid out differently go again.
+        const relayout = relayoutTargets(this.doc, live, lastOps);
         const synced = propagationOps(this.doc, live);
         let roundInverse: Op[] = synced.length > 0 ? this.sync.commit(synced) : [];
         const resolved = variableFixupOps(this.doc, [...lastOps, ...synced]);
@@ -607,12 +611,12 @@ export class Editor {
         const styled = textStyleFixupOps(this.doc, [...lastOps, ...synced, ...resolved]);
         if (styled.length > 0) roundInverse = [...this.sync.commit(styled), ...roundInverse];
         const derivedSoFar = [...synced, ...resolved, ...styled];
-        const text = this.#textFixups([...live, ...derivedSoFar.map((o) => o.id)]);
+        const text = this.#textFixups([...live, ...derivedSoFar.map((o) => o.id), ...relayout]);
         if (text.length > 0) roundInverse = [...this.sync.commit(text), ...roundInverse];
         const derived = [...derivedSoFar, ...text];
         const afterSync =
           derived.length > 0 ? this.#touchedBy(derived, roundInverse) : new Set<string>();
-        const layoutTargets = [...new Set([...live, ...afterSync])].filter((id) =>
+        const layoutTargets = [...new Set([...live, ...afterSync, ...relayout])].filter((id) =>
           this.doc.has(id),
         );
         const layout = layoutOps(this.doc, layoutTargets);
@@ -2140,9 +2144,10 @@ export class Editor {
     // Clearing overrides, then syncing, as one undo step.
     this.beginGesture("Reset instance");
     this.commit(ops, "Reset instance");
+    // Synced through the outermost instance: a nested one's layers copy the instance it's in.
     const roots = new Set(
       this.s.selection
-        .map((id) => instanceRootOf(this.doc, id)?.id)
+        .map((id) => outermostInstanceOf(this.doc, id)?.id)
         .filter((id): id is string => !!id),
     );
     const sync = [...roots].flatMap((id) => syncInstanceOps(this.doc, id));
@@ -2316,7 +2321,11 @@ export class Editor {
     this.beginGesture("Swap instance");
     // The swap carries the person's overrides as-is; it records none of its own.
     this.commit(ops, "Swap instance", { overrides: false });
-    const sync = syncInstanceOps(this.doc, instanceId);
+    // Synced through the outermost instance: a nested one's layers copy the instance it's in.
+    const sync = syncInstanceOps(
+      this.doc,
+      outermostInstanceOf(this.doc, instanceId)?.id ?? instanceId,
+    );
     if (sync.length > 0) this.commit(sync, "Swap instance", { overrides: false });
     this.endGesture();
   }
@@ -2332,7 +2341,7 @@ export class Editor {
       [{ op: "set", id, prop: "overrides", value: remaining.length > 0 ? remaining : null }],
       "Reset override",
     );
-    const sync = syncInstanceOps(this.doc, root.id);
+    const sync = syncInstanceOps(this.doc, outermostInstanceOf(this.doc, id)?.id ?? root.id);
     if (sync.length > 0) this.commit(sync, "Reset override", { overrides: false });
     this.endGesture();
   }

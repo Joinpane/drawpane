@@ -14,6 +14,7 @@
  * deleted, whatever the library did with it.
  */
 import {
+  copyChildId,
   dependencyRoots,
   getProp,
   keyBetween,
@@ -149,6 +150,27 @@ function remap(node: NodeRecord, to: (id: string) => string, copied: ReadonlySet
   return props as Props;
 }
 
+/**
+ * A library node's id in the file. With compact copies on both sides, a
+ * copy layer inside a library main isn't stored: its id is derived in the
+ * file from its instance's (decision 0029), through the same path, each
+ * step a library id.
+ */
+function copyNamer(doc: Doc, source: Doc, fileId: string): (id: string) => string {
+  const to = (id: string) => libraryNodeId(fileId, id);
+  if (!doc.compactCopies || !source.compactCopies) return to;
+  const memo = new Map<string, string>();
+  const name = (id: string): string => {
+    const known = memo.get(id);
+    if (known) return known;
+    const slot = source.copySlot(id);
+    const out = slot ? copyChildId(name(slot.parent), name(slot.source)) : to(id);
+    memo.set(id, out);
+    return out;
+  };
+  return name;
+}
+
 function keyOfLast(doc: Doc, parent: string): string | null {
   const last = doc.childIds(parent).at(-1);
   return last ? (doc.get(last)?.key ?? null) : null;
@@ -167,7 +189,7 @@ function reconcileBatches(
   roots: readonly string[],
   update: boolean,
 ): Op[][] {
-  const to = (id: string) => libraryNodeId(lib.fileId, id);
+  const to = copyNamer(doc, source, lib.fileId);
   const container = libraryContainerId(lib.fileId);
   const batches: Op[][] = [];
   const existing = doc.get(container);
@@ -286,8 +308,8 @@ export function updateOps(doc: Doc, source: Doc, lib: LibraryRef): Op[] {
   // What the library no longer has inside the copies the file keeps: deleted
   // last, after anything that moved out of it has, keeping what's used.
   const wanted = new Set<string>();
-  for (const root of roots)
-    for (const node of subtree(source, root)) wanted.add(libraryNodeId(lib.fileId, node.id));
+  const name = copyNamer(doc, source, lib.fileId);
+  for (const root of roots) for (const node of subtree(source, root)) wanted.add(name(node.id));
   // New top keys go after any the copying above gave out.
   let rootKey = keyOfLast(doc, container);
   for (const op of ops)

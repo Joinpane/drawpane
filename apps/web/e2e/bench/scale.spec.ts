@@ -13,6 +13,10 @@
  * - **edit a main**: a fill change on the most used component, through the
  *   editor's own commit, so every copy follows as it does for a person.
  *
+ * With BENCH_COMPACT=1 the editor keeps copies compact (decision 0029: the
+ * file stored as mains, instance roots and override records, copies
+ * presented), and the table says how much the file stores.
+ *
  * Prints a table and attaches the numbers as JSON. Budgets aren't enforced
  * here: this VM draws without a GPU, so compare runs on one machine
  * (see the bench notes) and hold the targets on hardware like the PRD's.
@@ -25,6 +29,7 @@ import { freshInstance, type Instance } from "../fresh-instance";
 import { pan, type Summary, summaryRow, zoom } from "./frames";
 
 const SIZES = (process.env.BENCH_SCALE ?? "100000").split(",").map(Number);
+const COMPACT = process.env.BENCH_COMPACT === "1";
 /** Nodes per request when the page fetches the generated file. */
 const CHUNK = 20_000;
 
@@ -35,7 +40,10 @@ interface Result {
   load: { resetMs: number; firstFrameMs: number };
   heapMb: number;
   canvas: Record<string, Summary>;
-  editMain: { ms: number; copies: number };
+  editMain: { ms: number; commitMs: number; copies: number };
+  compact: boolean;
+  /** What the document stores once loaded (with compact copies, far fewer than it shows). */
+  stored: { nodes: number; bytes: number };
 }
 
 async function heapMb(cdp: CDPSession): Promise<number> {
@@ -62,6 +70,17 @@ async function load(page: Page, chunks: number): Promise<number> {
   }, chunks);
 }
 
+/** What the loaded document stores: nodes and JSON bytes. */
+async function stored(page: Page): Promise<{ nodes: number; bytes: number }> {
+  return page.evaluate(() => {
+    const doc = (window as unknown as { drawpane: { doc: { stored(): unknown[] } } }).drawpane.doc;
+    const nodes = doc.stored();
+    let bytes = 0;
+    for (const n of nodes) bytes += JSON.stringify(n).length + 1;
+    return { nodes: nodes.length, bytes };
+  });
+}
+
 /** Shows `pageId`, whole, and returns how long until its first frame was drawn. */
 async function firstFrame(page: Page, pageId: string): Promise<number> {
   return page.evaluate(async (pageId) => {
@@ -75,8 +94,14 @@ async function firstFrame(page: Page, pageId: string): Promise<number> {
   }, pageId);
 }
 
-/** Changes a main component's fill through the editor's commit; how long until it's drawn. */
-async function editMain(page: Page, mainId: string): Promise<number> {
+/**
+ * Changes a main component's fill through the editor's commit: how long the
+ * commit takes (the document, copies and layout), and how long until it's drawn.
+ */
+async function editMain(
+  page: Page,
+  mainId: string,
+): Promise<{ commitMs: number; drawnMs: number }> {
   return page.evaluate(async (mainId) => {
     const e = (
       window as unknown as {
@@ -85,8 +110,9 @@ async function editMain(page: Page, mainId: string): Promise<number> {
     ).drawpane;
     const t = performance.now();
     e.setProp([mainId], "fills", [{ type: "solid", color: "#e8590c" }]);
+    const commitMs = performance.now() - t;
     await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
-    return performance.now() - t;
+    return { commitMs, drawnMs: performance.now() - t };
   }, mainId);
 }
 
@@ -109,7 +135,9 @@ test.describe("Scale", () => {
 
   test.beforeAll(async ({ browser }) => {
     test.setTimeout(180_000);
-    instance = await freshInstance(browser, { port: 8823, inspectorPort: 9363 });
+    // BENCH_PORT when another run (another checkout's) has the usual one.
+    const port = Number(process.env.BENCH_PORT ?? 8823);
+    instance = await freshInstance(browser, { port, inspectorPort: port + 540 });
   });
   test.afterAll(async () => {
     await instance?.stop();
@@ -133,7 +161,11 @@ test.describe("Scale", () => {
       await cdp.send("Performance.enable");
 
       await page.goto("/");
-      await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
+      await page.evaluate((compact) => {
+        localStorage.setItem("drawpane:debug", "1");
+        if (compact) localStorage.setItem("drawpane:compact-copies", "1");
+        else localStorage.removeItem("drawpane:compact-copies");
+      }, COMPACT);
       await page.getByRole("button", { name: "New file" }).first().click();
       await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
         timeout: 30_000,
@@ -141,6 +173,7 @@ test.describe("Scale", () => {
       const before = await heapMb(cdp);
       const resetMs = await load(page, chunks.length);
       chunks.length = 0;
+      const storedNow = await stored(page);
       const firstFrameMs = await firstFrame(page, largestPage(kit.nodes));
       // Let fonts and the first full paint settle.
       await page.waitForTimeout(1500);
@@ -155,7 +188,7 @@ test.describe("Scale", () => {
         );
       canvas["zoom, whole"] = await zoom(page, 120);
       const busiest = kit.busiestMains[0] as { id: string; copies: number };
-      const editMs = await editMain(page, busiest.id);
+      const edit = await editMain(page, busiest.id);
 
       const result: Result = {
         layers: kit.stats.layers,
@@ -164,15 +197,22 @@ test.describe("Scale", () => {
         load: { resetMs: Math.round(resetMs), firstFrameMs: Math.round(firstFrameMs) },
         heapMb: heap,
         canvas,
-        editMain: { ms: Math.round(editMs), copies: busiest.copies },
+        editMain: {
+          ms: Math.round(edit.drawnMs),
+          commitMs: Math.round(edit.commitMs),
+          copies: busiest.copies,
+        },
+        compact: COMPACT,
+        stored: storedNow,
       };
       console.log(
         [
-          `\nScale: ${result.layers.toLocaleString("en")} layers, ${(result.bytes / 1048576).toFixed(0)} MB of nodes, ${result.copies.toLocaleString("en")} copies`,
+          `\nScale: ${result.layers.toLocaleString("en")} layers, ${(result.bytes / 1048576).toFixed(0)} MB of nodes, ${result.copies.toLocaleString("en")} copies${COMPACT ? ", compact copies" : ""}`,
+          `stored      ${result.stored.nodes.toLocaleString("en")} nodes, ${(result.stored.bytes / 1048576).toFixed(0)} MB`,
           `load        reset ${result.load.resetMs} ms · first frame of the largest page ${result.load.firstFrameMs} ms`,
           `memory      ${result.heapMb} MB of JS heap for the file`,
           ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),
-          `edit main   ${result.editMain.ms} ms to change a fill on a main with ${result.editMain.copies.toLocaleString("en")} copies`,
+          `edit main   ${result.editMain.ms} ms to change a fill on a main with ${result.editMain.copies.toLocaleString("en")} copies, drawn (the commit ${result.editMain.commitMs} ms)`,
           "",
         ].join("\n"),
       );
