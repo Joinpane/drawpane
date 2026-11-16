@@ -8,6 +8,7 @@
  */
 import type { NodeRecord } from "@drawpane/model";
 import { api, type FileMeta } from "../api/client";
+import { saveImport } from "./import-save";
 
 export type ImportStage =
   | "waiting"
@@ -118,7 +119,7 @@ export async function importPenpot(
         notes: [...converted.notes.lines(), ...detachedNote(pinned.detached)],
         components: nodes.filter((n) => n.props.isComponent === true).length,
       });
-      await api.post(`/files/${fileId}/import`, { nodes });
+      await saveImport(fileId, nodes);
       update(file.id, { stage: "done" });
     } catch (error) {
       // Nothing half-imported stays behind.

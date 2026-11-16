@@ -125,6 +125,11 @@ export class ApiError extends Error {
   }
 }
 
+/** A body already serialized (a large import, measured before it's sent), sent as it is. */
+export class JsonText {
+  constructor(readonly text: string) {}
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   let response: Response;
   try {
@@ -132,7 +137,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       method,
       credentials: "same-origin",
       headers: body === undefined ? {} : { "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(body === undefined
+        ? {}
+        : { body: body instanceof JsonText ? body.text : JSON.stringify(body) }),
     });
   } catch {
     throw new ApiError(

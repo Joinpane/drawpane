@@ -191,7 +191,17 @@ export interface File {
   readonly name: string;
   readonly document: Node;
   readonly components?: Readonly<
-    Record<string, { key?: string; name?: string; componentSetId?: string; remote?: boolean }>
+    Record<
+      string,
+      {
+        key?: string;
+        name?: string;
+        componentSetId?: string;
+        remote?: boolean;
+        /** Its main is on a page the import left out (a .fig read in part), not in a library. */
+        omitted?: boolean;
+      }
+    >
   >;
   readonly componentSets?: Readonly<Record<string, { name?: string }>>;
   readonly styles?: Readonly<Record<string, { name?: string; styleType?: string }>>;

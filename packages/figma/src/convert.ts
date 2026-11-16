@@ -235,7 +235,12 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
         if (node.componentId && present.has(node.componentId)) {
           props.instanceOf = drawpaneId(node.componentId);
           instances.push(id);
-        } else notes.add("library-component");
+        } else
+          notes.add(
+            node.componentId && file.components?.[node.componentId]?.omitted
+              ? "component-omitted"
+              : "library-component",
+          );
       }
     }
     // A layer inside an instance copies the main component's layer its id names.

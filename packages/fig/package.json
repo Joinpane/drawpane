@@ -16,13 +16,13 @@
   "dependencies": {
     "@drawpane/figma": "workspace:*",
     "@drawpane/import-kit": "workspace:*",
+    "@drawpane/model": "workspace:*",
     "@open-pencil/fig": "0.16.0",
     "@open-pencil/kiwi": "0.16.0",
     "@open-pencil/scene-graph": "0.16.0"
   },
   "devDependencies": {
     "@drawpane/editor": "workspace:*",
-    "@drawpane/model": "workspace:*",
     "@types/node": "26.6.6",
     "typescript": "catalog:",
     "vitest": "catalog:"

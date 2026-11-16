@@ -70,6 +70,13 @@ const CONSTRAINT_V = {
 } as const;
 /** Kinds Open Pencil reads as themselves (anything else it saves as a rectangle). */
 const RECTANGLES = new Set(["RECTANGLE", "ROUNDED_RECTANGLE"]);
+
+/** The page a node is on, if any. */
+function pageOf(graph: SceneGraph, node: SceneNode): SceneNode | null {
+  let at: SceneNode | undefined = node;
+  while (at && at.type !== "CANVAS") at = at.parentId ? graph.getNode(at.parentId) : undefined;
+  return at ?? null;
+}
 /** Figma's "auto" column or row count, saved as the largest int. */
 const AUTO_COUNT = 1_000_000;
 
@@ -304,7 +311,7 @@ export class RestFileBuilder {
   readonly #pages: RestNode[] = [];
   readonly #components: Record<
     string,
-    { key?: string; name?: string; componentSetId?: string; remote?: boolean }
+    { key?: string; name?: string; componentSetId?: string; remote?: boolean; omitted?: boolean }
   > = {};
   readonly #componentSets: Record<string, { name?: string }> = {};
   readonly #styles: Record<string, { name?: string; styleType?: string }> = {};
@@ -330,13 +337,26 @@ export class RestFileBuilder {
     });
   }
 
-  /** Component keys and the file's styles, from a graph's every node (they live on the internal page). */
-  addLibrary(ctx: AdaptContext): void {
+  /**
+   * Component keys and the file's styles, from a graph's every node (they live on the internal
+   * page), and the components on `omitted` pages (by source guid): pages of the file the import
+   * leaves out, whose copies come in detached.
+   */
+  addLibrary(ctx: AdaptContext, omitted: ReadonlySet<string> = new Set()): void {
     for (const node of ctx.graph.getAllNodes()) {
       if (node.type === "COMPONENT" && node.componentKey) {
         const id = ctx.ids.of(node);
         this.#components[id] = { ...this.#components[id], key: node.componentKey, name: node.name };
         this.#components[id].remote ??= true;
+      }
+      if (node.type === "COMPONENT" && omitted.size > 0) {
+        const page = pageOf(ctx.graph, node);
+        const guid = page ? ctx.ids.sourceGuid(page) : null;
+        if (guid && omitted.has(guid)) {
+          const id = ctx.ids.of(node);
+          if (this.#components[id]?.remote !== false)
+            this.#components[id] = { ...this.#components[id], name: node.name, omitted: true };
+        }
       }
       if (node.sharedStyleType)
         this.#styles[ctx.ids.of(node)] = { name: node.name, styleType: node.sharedStyleType };

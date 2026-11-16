@@ -926,6 +926,110 @@
   margin: 0;
   font: 400 12px / 18px var(--font-ui);
 }
+/* A file too large for one Drawpane file: its pages to choose, with a meter of their size. */
+.import-pages__meter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: var(--space-200);
+  align-items: baseline;
+}
+.import-pages__total {
+  font: 600 13px / 18px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+.import-pages__meter[data-over] .import-pages__total {
+  color: var(--danger);
+}
+.import-pages__count {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-300);
+  color: var(--ink-muted);
+  font: 400 12px / 16px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+.import-pages__clear {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--signal-ink);
+  font: 500 12px / 16px var(--font-ui);
+  cursor: pointer;
+}
+.import-pages__clear:hover {
+  text-decoration: underline;
+}
+.import-pages__clear:focus-visible {
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-focus);
+  outline: none;
+}
+/* Across the meter, under its words (the generic bar sits in a row's second column). */
+.import-pages__meter .import-pages__bar {
+  grid-column: 1 / -1;
+}
+.import-pages__meter[data-over] .import-pages__bar::after {
+  background: var(--danger);
+}
+.import-pages__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 280px;
+  margin: 0;
+  padding: var(--space-100);
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+.import-pages__page {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-300);
+  min-height: var(--size-control-md);
+  padding: 0 var(--space-200);
+  border-radius: var(--radius-xs);
+  font: 500 13px / 16px var(--font-ui);
+  cursor: pointer;
+}
+.import-pages__page:hover {
+  background: var(--surface-hover);
+}
+.import-pages__page:has(input:focus-visible) {
+  box-shadow: var(--shadow-focus);
+}
+.import-pages__page input {
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--signal);
+}
+.import-pages__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-pages__done {
+  color: var(--success);
+  font: 500 11px / 14px var(--font-ui);
+}
+.import-pages__size {
+  min-width: 4ch;
+  color: var(--ink-muted);
+  font: 400 12px / 16px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.import-pages__divider {
+  flex-shrink: 0;
+  width: calc(100% - 2 * var(--space-200));
+  margin: var(--space-100) auto;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
 .import-rows {
   display: grid;
   gap: var(--space-200);

@@ -10,8 +10,10 @@
  *
  * The converter loads only when someone imports.
  */
+import { MAX_IMPORT_NODES } from "@drawpane/model";
 import { api, type FileMeta } from "../api/client";
-import { figmaError, readFigmaFile } from "./figma-read";
+import { figmaError, figmaJson, readFigmaFile } from "./figma-read";
+import { ImportTooLarge, saveImport } from "./import-save";
 import { detachedNote, type FileImport } from "./penpot-import";
 
 const FIGMA_API = "https://api.figma.com/v1";
@@ -38,7 +40,7 @@ async function figma<T>(path: string, token: string): Promise<T> {
     throw new Error("Couldn't reach Figma. Check your connection and try again.");
   }
   if (!response.ok) throw await figmaError(response);
-  return (await response.json()) as T;
+  return figmaJson<T>(response);
 }
 
 /** Uploads an image's bytes; null when the server can't take them. */
@@ -87,6 +89,8 @@ export async function importFigma(
       key,
       (path) => figma(path, token),
       (reading) => update({ reading }),
+      undefined,
+      MAX_IMPORT_NODES,
     ),
   ]);
   let fileId: string | null = null;
@@ -133,7 +137,7 @@ export async function importFigma(
       notes: [...converted.notes.lines(), ...detachedNote(pinned.detached)],
       layers: converted.nodes.filter((n) => n.type !== "page").length,
     });
-    await api.post(`/files/${fileId}/import`, { nodes: pinned.nodes });
+    await saveImport(fileId, pinned.nodes);
     update({ stage: "done" });
   } catch (error) {
     // Nothing half-imported stays behind.
@@ -141,7 +145,12 @@ export async function importFigma(
     update({
       stage: "failed",
       fileId: null,
-      error: error instanceof Error ? error.message : "The import failed.",
+      error:
+        error instanceof ImportTooLarge
+          ? `${error.message} In Figma, choose File → Save local copy and drop the .fig file here to choose which pages to import.`
+          : error instanceof Error
+            ? error.message
+            : "The import failed.",
     });
   }
   return [row];

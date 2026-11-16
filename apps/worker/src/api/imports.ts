@@ -3,7 +3,12 @@
  * export, say) to Drawpane nodes and uploads its images as media; this fills
  * the file with those nodes in one go. The file must still be empty.
  */
-import { type NodeRecord, NodeRecordSchema } from "@drawpane/model";
+import {
+  MAX_IMPORT_BYTES,
+  MAX_IMPORT_NODES,
+  type NodeRecord,
+  NodeRecordSchema,
+} from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
 import { requireUser } from "../auth/session";
@@ -13,10 +18,8 @@ import { badRequest, conflict } from "../lib/http";
 import { requireFileRole } from "./access";
 
 /** A converted file's JSON; generous, since large design files are mostly nodes. */
-export const IMPORT_MAX_BYTES = 64 * 1024 * 1024;
-const MAX_NODES = 200_000;
-
-const ImportBody = z.object({ nodes: z.array(NodeRecordSchema).min(1).max(MAX_NODES) });
+export const IMPORT_MAX_BYTES = MAX_IMPORT_BYTES;
+const ImportBody = z.object({ nodes: z.array(NodeRecordSchema).min(1).max(MAX_IMPORT_NODES) });
 
 export const imports = new Hono<AppContext>()
   /** Fills an empty file with nodes (editors). */
@@ -26,7 +29,7 @@ export const imports = new Hono<AppContext>()
     const bytes = await readCapped(
       c.req.raw,
       IMPORT_MAX_BYTES,
-      "That file is too large to import (64 MB at most).",
+      `That file is too large to import (${IMPORT_MAX_BYTES / (1024 * 1024)} MB at most).`,
     );
     let json: unknown;
     try {

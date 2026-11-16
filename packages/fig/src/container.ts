@@ -15,10 +15,12 @@ export interface Container {
 }
 
 const notFig = () => new ImportError("not-fig", `This isn't a Figma .fig file. ${SAVE_LOCAL_COPY}`);
-const corrupt = () =>
+/** `cause`: what the reader threw, kept for the console (a reader bug reads the same as damage). */
+const corrupt = (cause?: unknown) =>
   new ImportError(
     "corrupt",
     "This .fig file is damaged or incomplete. Save a local copy from Figma again.",
+    cause,
   );
 
 const ZIP_ERRORS: ZipErrors = {

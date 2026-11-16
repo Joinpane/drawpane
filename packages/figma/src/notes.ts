@@ -42,6 +42,10 @@ export const NOTE_TEXT = {
     "copy of a component from a library was detached",
     "copies of components from libraries were detached",
   ],
+  "component-omitted": [
+    "copy of a component on a page left out was detached",
+    "copies of components on pages left out were detached",
+  ],
   "unsupported-node": [
     "layer of an unsupported kind was skipped",
     "layers of unsupported kinds were skipped",
