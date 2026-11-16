@@ -107,6 +107,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     timing.redraw = () => {
       renderer.invalidate();
       exact = true;
+      // Asked for by tests that read the canvas next: drawn whole in one frame, never a part.
+      whole = true;
       contentDirty = true;
       schedule();
     };
@@ -134,6 +136,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     // A zoom draws quick stand-in frames; once it pauses, one exact frame follows.
     let exact = false;
+    /** The next content frame is drawn whole, without a budget (see `timing.redraw`). */
+    let whole = false;
     let settle = 0;
     let fadeTimer = 0;
     const draw = () => {
@@ -143,11 +147,16 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       if (contentDirty && s.pageId) {
         // Truncated text shows all its lines while it's being edited.
         renderer.whole = s.editingText;
-        const done = renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr, {
-          exact,
-          budget: CONTENT_BUDGET,
-        });
+        const done = renderer.render(
+          cctx,
+          s.pageId,
+          s.camera,
+          s.viewport,
+          dpr,
+          whole ? { exact: true } : { exact, budget: CONTENT_BUDGET },
+        );
         exact = false;
+        whole = false;
         clearTimeout(settle);
         contentDirty = false;
         if (renderer.pending) {
