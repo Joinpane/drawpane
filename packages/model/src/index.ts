@@ -1,6 +1,7 @@
 export * from "./apply";
 export * from "./branches";
 export * from "./comments";
+export * from "./copies";
 export * from "./fonts";
 export * from "./history";
 export * from "./ids";
@@ -13,4 +14,5 @@ export * from "./protocol";
 export * from "./prototype";
 export * from "./schema";
 export * from "./search";
+export * from "./sha256";
 export * from "./store";

@@ -26,6 +26,8 @@ export const NODE_TYPES = [
   "line",
   "path",
   "text",
+  // What differs in one layer of a component copy (decision 0029): kept under its instance's root.
+  "override",
 ] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
 
@@ -52,7 +54,8 @@ export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]
   textStyle: [],
   // A team library a file uses (decision 0010): read-only copies of its components and what they need.
   library: [...LAYER_TYPES, "textStyle", "collection"],
-  frame: LAYER_TYPES,
+  // Override records sit only under instance roots (frames with `instanceOf`); `applyOp` checks.
+  frame: [...LAYER_TYPES, "override"],
   group: LAYER_TYPES,
   rect: [],
   ellipse: [],
@@ -61,6 +64,7 @@ export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]
   line: [],
   path: [],
   text: [],
+  override: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -634,6 +638,15 @@ export const PROPS = {
   instanceOf: prop(z.string().regex(ID_PATTERN).nullable(), null, CONTAINERS),
   mirrors: prop(z.string().regex(ID_PATTERN).nullable(), null, LAYERS),
   overrides: prop(z.array(z.string().max(64)).max(64), [], LAYERS),
+  /**
+   * Compact copies (decision 0029). `path` names the layer an override
+   * record is for: main layer ids from its instance root's main down,
+   * through nested instances, whose own mains continue it. `unset` lists the
+   * properties a copy has at their default where its main's layer has a
+   * value (a stored value can't be null).
+   */
+  path: prop(z.array(z.string().regex(ID_PATTERN)).min(1).max(128), [], ["override"]),
+  unset: prop(z.array(z.string().max(64)).max(256), [], ["frame", "override"]),
 
   // Frames
   clipContent: prop(z.boolean(), true, CONTAINERS),
@@ -745,6 +758,9 @@ export const PROPS = {
 } as const satisfies Record<string, PropSpec>;
 
 export type PropName = keyof typeof PROPS;
+
+/** Never held by an override record: they're the copy's link to its main, or not a layer's. */
+const OVERRIDE_REFUSED: ReadonlySet<string> = new Set(["mirrors", "isComponent"]);
 export type PropValues = { -readonly [K in PropName]: z.infer<(typeof PROPS)[K]["schema"]> };
 /** What a node stores: only the properties that differ from their defaults. */
 export type Props = Partial<PropValues>;
@@ -754,7 +770,15 @@ export const PROP_NAMES = Object.keys(PROPS) as PropName[];
 const allowedProps: Record<NodeType, ReadonlySet<PropName>> = Object.fromEntries(
   NODE_TYPES.map((type) => [
     type,
-    new Set(PROP_NAMES.filter((name) => (PROPS[name].types as readonly NodeType[]).includes(type))),
+    new Set(
+      PROP_NAMES.filter(
+        // An override record holds any property a copied layer can have; whether it applies
+        // to that layer's type is decided where the copy is built.
+        (name) =>
+          (PROPS[name].types as readonly NodeType[]).includes(type) ||
+          (type === "override" && !OVERRIDE_REFUSED.has(name)),
+      ),
+    ),
   ]),
 ) as unknown as Record<NodeType, ReadonlySet<PropName>>;
 

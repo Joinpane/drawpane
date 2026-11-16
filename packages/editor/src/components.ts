@@ -10,9 +10,16 @@
  * instance in the same transaction (like auto layout), skipping properties an
  * instance overrode. Editing a layer inside an instance records an override.
  * Syncing is a pure function of the document, so every client agrees.
+ *
+ * With compact copies (decision 0029, `Doc.compactCopies`), copies aren't
+ * written at all: the document presents them from their main, an edit to a
+ * main is the main's own, and only the instances whose layout differs are
+ * laid out again (`relayoutTargets`).
  */
 import {
+  copyChildId,
   getProp,
+  isMainNode,
   isPropName,
   type NodeRecord,
   newId,
@@ -20,6 +27,7 @@ import {
   type PropName,
   type Props,
 } from "@drawpane/model";
+import { LAYOUT_NEUTRAL } from "./compact-copies";
 import { type Doc, Doc as DocCtor } from "./doc";
 import { layerName } from "./names";
 
@@ -62,6 +70,19 @@ export function instanceRootOf(doc: Doc, id: string): NodeRecord | undefined {
     if (isInstanceRoot(node)) return node;
   }
   return undefined;
+}
+
+/**
+ * The instance a layer is ultimately part of: its outermost instance root (a
+ * nested instance's copies follow through the instance it's in).
+ */
+export function outermostInstanceOf(doc: Doc, id: string): NodeRecord | undefined {
+  let found: NodeRecord | undefined;
+  for (let node = doc.get(id); node && node.type !== "page"; node = doc.get(node.parent)) {
+    if (isInstanceRoot(node)) found = node;
+    if (isMainComponent(node)) break;
+  }
+  return found;
 }
 
 /** The nearest main component at or above `id`, if any. */
@@ -243,6 +264,8 @@ export function instantiateOps(
       key: copyKey,
       props: props as Props,
     });
+    // Compact copies: the root is all there is to write; its layers come from the main.
+    if (doc.compactCopies) return;
     for (const childId of doc.childIds(node.id)) {
       const child = doc.get(childId);
       if (child) visit(child, newId(), copyId, child.key, false);
@@ -288,7 +311,12 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
   const ops: Op[] = [];
   const mainIds = new Set<string>();
 
-  const syncProps = (from: NodeRecord, to: NodeRecord, isRoot: boolean) => {
+  const syncProps = (
+    from: NodeRecord,
+    to: NodeRecord,
+    isRoot: boolean,
+    only?: (prop: string) => boolean,
+  ) => {
     const overridden = new Set(getProp(to.props, "overrides"));
     // Auto layout decides where its children go and how big Hug and Fill
     // children are; the instance runs its own layout, so never copy those.
@@ -315,11 +343,36 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
     for (const prop of keys) {
       if (!isPropName(prop) || LINK_PROPS.has(prop) || overridden.has(prop)) continue;
       if (isRoot && ROOT_LOCAL_PROPS.has(prop)) continue;
+      if (only && !only(prop)) continue;
       const want = from.props[prop];
       const have = to.props[prop];
       if (sameValue(want, have)) continue;
       ops.push({ op: "set", id: to.id, prop, value: want === undefined ? null : want });
     }
+  };
+
+  /** An instance root's name: its main's, or its set's for a variant, unless overridden. */
+  const nameAfterSet = (root: NodeRecord, mainId: string) => {
+    const set = componentSetOf(doc, mainId);
+    if (!set || getProp(root.props, "overrides").includes("name")) return;
+    const wanted = getProp(set.props, "name");
+    const index = ops.findIndex((o) => o.op === "set" && o.id === root.id && o.prop === "name");
+    if (index !== -1) ops.splice(index, 1);
+    if (getProp(root.props, "name") !== wanted)
+      ops.push({ op: "set", id: root.id, prop: "name", value: wanted });
+  };
+
+  /**
+   * A nested instance swapped for another component (its `instanceOf`
+   * overridden): an instance of that component placed where its main layer
+   * is, so it follows that component, not the main layer.
+   */
+  const swappedMain = (copy: NodeRecord, mainLayer: NodeRecord): NodeRecord | undefined => {
+    const own = getProp(copy.props, "instanceOf");
+    if (!own || own === getProp(mainLayer.props, "instanceOf")) return undefined;
+    if (!getProp(copy.props, "overrides").includes("instanceOf")) return undefined;
+    const swapped = doc.get(own);
+    return isMainNode(swapped) ? swapped : undefined;
   };
 
   const visit = (mainNode: NodeRecord, instanceParent: NodeRecord) => {
@@ -338,21 +391,19 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
       if (existing.parent !== instanceParent.id || existing.key !== mainChild.key) {
         ops.push({ op: "move", id: existing.id, parent: instanceParent.id, key: mainChild.key });
       }
-      syncProps(mainChild, existing, false);
-      visit(mainChild, existing);
+      const swapped = swappedMain(existing, mainChild);
+      if (swapped) {
+        syncProps(mainChild, existing, false, (prop) => ROOT_LOCAL_PROPS.has(prop));
+        syncProps(swapped, existing, true);
+        nameAfterSet(existing, swapped.id);
+      } else syncProps(mainChild, existing, false);
+      visit(swapped ?? mainChild, existing);
     }
   };
 
   syncProps(main, instance, true);
-  const set = componentSetOf(doc, main.id);
-  if (set && !getProp(instance.props, "overrides").includes("name")) {
-    // Undo the variant-name sync above: instances of a variant carry the set's name.
-    const wanted = getProp(set.props, "name");
-    const index = ops.findIndex((o) => o.op === "set" && o.id === instance.id && o.prop === "name");
-    if (index !== -1) ops.splice(index, 1);
-    if (getProp(instance.props, "name") !== wanted)
-      ops.push({ op: "set", id: instance.id, prop: "name", value: wanted });
-  }
+  // Instances of a variant carry the set's name.
+  nameAfterSet(instance, main.id);
   visit(main, instance);
 
   // Layers whose main counterpart is gone (or that never had one) don't belong in an instance.
@@ -370,6 +421,9 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
       }
     }
   }
+  // Compact copies have their main's structure by construction (a swap rebuilds it): only
+  // values are synced.
+  if (doc.compactCopies) return ops.filter((op) => op.op === "set");
   return dedupeDeletes(doc, ops);
 }
 
@@ -415,18 +469,104 @@ export function affectedComponents(doc: Doc, ids: Iterable<string>): Set<string>
 
 /** Sync operations for every instance of the components `ids` touched. */
 export function propagationOps(doc: Doc, ids: Iterable<string>): Op[] {
+  // Compact copies follow their mains without being written (decision 0029).
+  if (doc.compactCopies) return [];
   const ops: Op[] = [];
+  const synced = new Set<string>();
   for (const componentId of affectedComponents(doc, ids)) {
     for (const instanceId of instancesOf(doc, componentId)) {
       // An instance inside its own component would recurse; wouldCycle prevents creating one.
       if (doc.ancestors(instanceId).some((a) => a.id === componentId)) continue;
       // A nested instance inside another instance mirrors the outer component's
-      // copy, so it follows that copy (through the outer sync), not its main directly.
-      if (getProp(doc.get(instanceId)?.props ?? {}, "mirrors") !== null) continue;
-      ops.push(...syncInstanceOps(doc, instanceId));
+      // copy, so it follows that copy (through the outer sync), not its main directly;
+      // one swapped for this component follows it, through its outer instance's sync.
+      const props = doc.get(instanceId)?.props ?? {};
+      let root = instanceId;
+      if (getProp(props, "mirrors") !== null) {
+        if (!getProp(props, "overrides").includes("instanceOf")) continue;
+        root = outermostInstanceOf(doc, instanceId)?.id ?? instanceId;
+      }
+      if (synced.has(root)) continue;
+      synced.add(root);
+      ops.push(...syncInstanceOps(doc, root));
     }
   }
   return ops;
+}
+
+/**
+ * With compact copies, what to lay out again after `ops` changed `ids`.
+ * Every copy that equals its main is laid out already (it is its main), so
+ * only two kinds of instance need it:
+ *
+ * - one whose layout differs from its main's (it stores a value a layout
+ *   reads: a text, a size, a hidden layer), when its main's layout inside
+ *   may have changed: every layer of it, so texts measure themselves and
+ *   frames place their children;
+ * - one whose main changed size, so its parent's layout places it again.
+ *
+ * A main whose instances (inside it, as the icon in a button) changed size
+ * changed inside too, with no operation of its own. Changes no layout reads
+ * (a fill, a name, a child of a frame without auto layout) lay out nothing.
+ */
+export function relayoutTargets(doc: Doc, ids: Iterable<string>, ops: readonly Op[]): string[] {
+  if (!doc.compactCopies) return [];
+  const reads = (op: Op) => op.op !== "set" || !LAYOUT_NEUTRAL.has(op.prop);
+  if (!ops.some(reads)) return [];
+  const isLayout = (node: NodeRecord | undefined) =>
+    node?.type === "frame" && getProp(node.props, "layoutMode") !== "none";
+  const inLayout = (node: NodeRecord) => {
+    let parent = doc.get(node.parent);
+    while (parent?.type === "group") parent = doc.get(parent.parent);
+    return isLayout(parent);
+  };
+  /** Mains whose layout inside may have changed. */
+  const inner = new Set<string>();
+  /** Mains whose root changed in a way its instances' parents read. */
+  const sized = new Set<string>();
+  for (const op of ops) {
+    if (!reads(op)) continue;
+    const node = op.op === "delete" ? undefined : doc.get(op.id);
+    if (!node) {
+      // Gone: whatever held it may have changed.
+      for (const id of affectedComponents(doc, ids)) inner.add(id);
+      continue;
+    }
+    const around = affectedComponents(doc, [node.id]);
+    if (around.size === 0) continue;
+    const isRoot = isMainComponent(node);
+    if (isRoot && op.op === "set" && ROOT_LOCAL_PROPS.has(op.prop)) continue;
+    if (isRoot) sized.add(node.id);
+    if (isRoot || node.type === "text" || isLayout(node) || inLayout(node))
+      for (const id of around) inner.add(id);
+  }
+  // A main holding instances of a resized main changed inside, however deep.
+  const queue = [...sized];
+  for (let i = 0; i < queue.length; i++)
+    for (const root of doc.instanceRoots(queue[i] as string))
+      for (const outer of affectedComponents(doc, [root]))
+        if (!inner.has(outer)) {
+          inner.add(outer);
+          queue.push(outer);
+        }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const componentId of new Set([...inner, ...sized])) {
+    for (const root of doc.instanceRoots(componentId)) {
+      if (seen.has(root) || !doc.has(root)) continue;
+      if (doc.ancestors(root).some((a) => a.id === componentId)) continue;
+      if (doc.layoutDiffers(root) && inner.has(componentId)) {
+        seen.add(root);
+        const all = [root];
+        for (let i = 0; i < all.length; i++) {
+          const id = all[i] as string;
+          out.push(id);
+          all.push(...doc.childIds(id));
+        }
+      } else if (sized.has(componentId)) out.push(root);
+    }
+  }
+  return out;
 }
 
 /**
@@ -458,7 +598,8 @@ export function pinInstances(nodes: readonly NodeRecord[]): {
     );
 
   // Copies sync can't keep as they are lose their link, everything inside them too.
-  let doc = new DocCtor();
+  // Read as materialized: this is about the file as it was made.
+  let doc = new DocCtor({ compactCopies: false });
   doc.reset(nodes);
   const unlinked = new Set<string>();
   let detached = 0;
@@ -481,7 +622,7 @@ export function pinInstances(nodes: readonly NodeRecord[]): {
   });
 
   // What syncing would still change on the rest is theirs: overridden.
-  doc = new DocCtor();
+  doc = new DocCtor({ compactCopies: false });
   doc.reset(out);
   const marks = new Map<string, Set<string>>();
   for (const root of roots(doc)) {
@@ -583,6 +724,59 @@ export function overriddenProps(node: NodeRecord): readonly PropName[] {
   return getProp(node.props, "overrides").filter(isPropName);
 }
 
+/** For a nested instance (inside another), marks `instanceOf` overridden. */
+function nestedSwapMark(instance: NodeRecord): Op[] {
+  if (getProp(instance.props, "mirrors") === null) return [];
+  const marks = new Set(getProp(instance.props, "overrides"));
+  if (marks.has("instanceOf")) return [];
+  marks.add("instanceOf");
+  return [{ op: "set", id: instance.id, prop: "overrides", value: [...marks].sort() }];
+}
+
+/**
+ * A swap with compact copies: `instanceOf` set, the new main's layers
+ * presented at once with ids derived from it, and the carried overrides set
+ * on them. A nested instance marks `instanceOf` overridden, so its outer
+ * instance keeps it swapped.
+ */
+function swapCompactOps(doc: Doc, instance: NodeRecord, target: NodeRecord): Op[] {
+  const carried = new Map<string, Record<string, unknown>>();
+  const stack = [...doc.childIds(instance.id)];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    const node = doc.get(id);
+    if (!node) continue;
+    const overridden = getProp(node.props, "overrides");
+    if (overridden.length > 0) {
+      const values: Record<string, unknown> = {};
+      for (const prop of overridden)
+        values[prop] = (node.props as Record<string, unknown>)[prop] ?? null;
+      carried.set(namePath(doc, instance.id, id), values);
+    }
+    stack.push(...doc.childIds(id));
+  }
+  const ops: Op[] = [{ op: "set", id: instance.id, prop: "instanceOf", value: target.id }];
+  ops.push(...nestedSwapMark(instance));
+  const walk = (mainParent: string, copyParent: string, path: string) => {
+    for (const childId of doc.childIds(mainParent)) {
+      const child = doc.get(childId);
+      if (!child) continue;
+      const id = copyChildId(copyParent, childId);
+      const name = getProp(child.props, "name") || child.type;
+      const at = path ? `${path}/${name}` : name;
+      const values = carried.get(at);
+      if (values) {
+        for (const [prop, value] of Object.entries(values))
+          if (isPropName(prop)) ops.push({ op: "set", id, prop, value });
+        ops.push({ op: "set", id, prop: "overrides", value: Object.keys(values) });
+      }
+      walk(childId, id, at);
+    }
+  };
+  walk(target.id, instance.id, "");
+  return ops;
+}
+
 // ---------------------------------------------------------------------------
 // Variants
 
@@ -665,6 +859,7 @@ export function swapInstanceOps(doc: Doc, instanceId: string, componentId: strin
   const instance = doc.get(instanceId);
   const target = doc.get(componentId);
   if (!instance || !isInstanceRoot(instance) || !target || !isMainComponent(target)) return [];
+  if (doc.compactCopies) return swapCompactOps(doc, instance, target);
 
   // Overridden values by name path (the root keeps its own overrides as-is).
   const carried = new Map<string, Record<string, unknown>>();
@@ -685,6 +880,8 @@ export function swapInstanceOps(doc: Doc, instanceId: string, componentId: strin
 
   const ops: Op[] = doc.childIds(instanceId).map((id): Op => ({ op: "delete", id }));
   ops.push({ op: "set", id: instanceId, prop: "instanceOf", value: componentId });
+  // A nested instance keeps the swap: its outer instance's sync leaves `instanceOf` alone.
+  ops.push(...nestedSwapMark(instance));
   const created: Op[] = [];
   for (const childId of doc.childIds(componentId)) {
     const child = doc.get(childId);

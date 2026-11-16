@@ -74,6 +74,8 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   instanceOf: "component",
   mirrors: "component",
   overrides: "component",
+  path: "component",
+  unset: "component",
   clipContent: "style",
   layoutMode: "layout",
   layoutWrap: "layout",

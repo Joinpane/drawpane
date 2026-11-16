@@ -39,6 +39,9 @@ export const imports = new Hono<AppContext>()
     }
     const parsed = ImportBody.safeParse(json);
     if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? "Invalid import.");
+    // Override records (decision 0029) wait for rooms that store compact copies (phase 4b).
+    if (parsed.data.nodes.some((n) => n.type === "override"))
+      throw badRequest("This server doesn't store compact copies yet.");
     const room = c.env.FILE_ROOM.get(c.env.FILE_ROOM.idFromName(file.id));
     const result = await room.importNodes(
       { userId: user.id, name: user.name },
