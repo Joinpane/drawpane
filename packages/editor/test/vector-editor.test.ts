@@ -597,8 +597,13 @@ describe("Performance", () => {
     console.log(
       `500-anchor path, median move: hover ${hover.toFixed(2)} ms, anchor drag ${dragMs.toFixed(2)} ms`,
     );
-    expect(hover).toBeLessThan(16);
-    expect(dragMs).toBeLessThan(16);
+    // A frame is 16 ms. CI runs this alongside every other package's tests on a shared machine,
+    // where the first pass's median drag measures 12 to 16 ms against 2 to 3 ms on the second
+    // (run when the machine is free) and locally: there, twice the frame still catches a move
+    // made several times slower. Frame budgets proper are held by the benchmarks.
+    const frame = process.env.CI ? 32 : 16;
+    expect(hover).toBeLessThan(frame);
+    expect(dragMs).toBeLessThan(frame);
     expect(editor.history.canUndo).toBe(true);
   });
 });
