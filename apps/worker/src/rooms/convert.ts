@@ -52,7 +52,7 @@ import {
   type ConvertSink,
   type DetachedInstance,
   ENTRY_BYTES,
-  holdsIds,
+  ID_HOLDING_PROPS,
   InstanceConverter,
   type InstanceSize,
   InstanceTooLarge,
@@ -60,6 +60,7 @@ import {
   ModelError,
   type NodeRecord,
   nodeBytes,
+  type Props,
   ROOT_ID,
   renameHeldIds,
 } from "@drawpane/model";
@@ -995,31 +996,12 @@ export function applyConversion(sql: SqlStorage, src: string, t: ConvertTables):
   // Ids held anywhere (a reading order, a prototype link, a flow), override records and what the
   // conversion wrote included: an instance can name another's copies, converted after it, whose
   // ids weren't known yet. Renaming twice changes nothing (no derived id is an old one).
-  let after = "";
-  for (;;) {
-    const rows = sql
-      .exec<NodeRow>(
-        `SELECT ${NODE_COLUMNS} FROM ${src}
-          WHERE id > ?
-            AND (props LIKE '%"readingOrder"%' OR props LIKE '%"reactions"%' OR props LIKE '%"flows"%')
-          ORDER BY id LIMIT 500`,
-        after,
-      )
-      .toArray();
-    for (const row of rows) {
-      const node = toRecord(row);
-      if (!holdsIds(node.props)) continue;
-      const renamed = renameHeldIds(
-        node.props,
-        (id) =>
-          sql.exec<{ new: string }>(`SELECT new FROM ${t.map} WHERE old = ?`, id).toArray()[0]?.new,
-      );
-      if (renamed)
-        sql.exec(`UPDATE ${src} SET props = ? WHERE id = ?`, JSON.stringify(renamed), node.id);
-    }
-    if (rows.length < 500) break;
-    after = (rows[rows.length - 1] as NodeRow).id;
-  }
+  renameHeldIdsIn(
+    sql,
+    src,
+    (id) =>
+      sql.exec<{ new: string }>(`SELECT new FROM ${t.map} WHERE old = ?`, id).toArray()[0]?.new,
+  );
   // Nothing may be left materialized: an instance no step converted (one made meanwhile, say).
   const stray = strayInstance(sql, src);
   if (stray !== null) throw new NotAllConverted(stray);
@@ -1029,6 +1011,65 @@ export function applyConversion(sql: SqlStorage, src: string, t: ConvertTables):
     )
     .toArray();
   return { removed, records, detached };
+}
+
+/** The SQL paths of the values that hold layer ids (`renameHeldIds`). */
+const HELD_PATHS = ID_HOLDING_PROPS.map((prop) => [prop, `$.${prop}`] as const);
+
+/**
+ * Renames the layer ids the nodes in `src` hold (`renameHeldIds`) by
+ * `rename`. Bounded whatever the file holds: only rows with a value that
+ * holds ids (a non-empty reading order, reactions or flows, found in SQL)
+ * are read, a page of their ids at a time, then each row's values holding
+ * ids alone, one row at a time; a layer's other values (a text's
+ * characters, say) are never read into memory, and what changes is written
+ * back in place.
+ */
+export function renameHeldIdsIn(
+  sql: SqlStorage,
+  src: string,
+  rename: (id: string) => string | undefined,
+): void {
+  // LIKE first: cheap, and most rows hold none of these at all.
+  const holds = HELD_PATHS.map(
+    ([prop, path]) =>
+      `(props LIKE '%"${prop}"%' AND json_type(props, '${path}') = 'array' AND json_array_length(props, '${path}') > 0)`,
+  ).join(" OR ");
+  const values = HELD_PATHS.map(([prop, path]) => `json_extract(props, '${path}') AS ${prop}`).join(
+    ", ",
+  );
+  let after = "";
+  for (;;) {
+    const ids = sql
+      .exec<{ id: string }>(
+        `SELECT id FROM ${src} WHERE id > ? AND (${holds}) ORDER BY id LIMIT 500`,
+        after,
+      )
+      .toArray()
+      .map((row) => row.id);
+    for (const id of ids) {
+      const row = sql
+        .exec<Record<string, string | null>>(`SELECT ${values} FROM ${src} WHERE id = ?`, id)
+        .toArray()[0];
+      if (!row) continue;
+      const held: Record<string, unknown> = {};
+      for (const [prop] of HELD_PATHS) {
+        const text = row[prop];
+        if (typeof text === "string") held[prop] = JSON.parse(text);
+      }
+      const renamed = renameHeldIds(held as Props, rename) as Record<string, unknown> | null;
+      if (!renamed) continue;
+      for (const [prop, path] of HELD_PATHS)
+        if (renamed[prop] !== held[prop])
+          sql.exec(
+            `UPDATE ${src} SET props = json_set(props, '${path}', json(?)) WHERE id = ?`,
+            JSON.stringify(renamed[prop]),
+            id,
+          );
+    }
+    if (ids.length < 500) return;
+    after = ids[ids.length - 1] as string;
+  }
 }
 
 /**

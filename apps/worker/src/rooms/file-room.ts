@@ -78,6 +78,7 @@ import {
   NO_COMPACT_COPIES,
   stageNodes,
 } from "./import-stage";
+import { CYCLE_CHECK_SCHEMA, CycleCheck } from "./instance-cycles";
 import { MainRemoval, RemovalNeedsLooks } from "./main-removal";
 import {
   copyNodes,
@@ -433,7 +434,9 @@ export class FileRoom extends DurableObject<Env> {
     this.#room = { sql: this.#sql, transact: (fn) => ctx.storage.transactionSync(fn) };
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
     ctx.blockConcurrencyWhile(async () => {
-      this.#sql.exec(NODE_SCHEMA + LOG_SCHEMA + CALL_SCHEMA + COPIES_LOG_SCHEMA);
+      this.#sql.exec(
+        NODE_SCHEMA + LOG_SCHEMA + CALL_SCHEMA + COPIES_LOG_SCHEMA + CYCLE_CHECK_SCHEMA,
+      );
       // Nothing can be reading a transient table yet: any left are from before a restart.
       for (const table of tempTables(this.#sql)) dropTable(this.#sql, table);
       this.#revn = Number(this.#meta("revn") ?? 0);
@@ -912,6 +915,9 @@ export class FileRoom extends DurableObject<Env> {
     else this.#sql.exec("DELETE FROM meta WHERE k = 'pins_sweep'");
     // A map waiting to load was the old conversion's: one applied now brings its own.
     if (to === "compact") this.#sql.exec("DELETE FROM meta WHERE k = 'pins_load'");
+    // Materialized again, the backup was the conversion's that's undone: converting again saves
+    // the file as it is then, edits made since included.
+    else this.#sql.exec("DELETE FROM meta WHERE k = 'conv_backup'");
   }
 
   /**
@@ -1619,7 +1625,12 @@ export class FileRoom extends DurableObject<Env> {
         IMPORT_TABLE,
         copy
           ? { limits: UNLIMITED, maxDepth: Number.POSITIVE_INFINITY, records: copies === "compact" }
-          : { limits: this.importLimits, records: copies === "compact" },
+          : {
+              limits: this.importLimits,
+              records: copies === "compact",
+              // Compact, it lands as it is: a component containing itself is refused.
+              cycles: sent === "compact",
+            },
       );
     } catch (error) {
       if (error instanceof ModelError)
@@ -2748,10 +2759,13 @@ export class FileRoom extends DurableObject<Env> {
           const next = this.#revn + 1;
           // An edit to a file stored compact is checked as a whole (decision 0029).
           const check = this.#compactCheck(look);
+          const cycles = new CycleCheck(this.#sql);
           const inverse = this.#applyLogged(ops, author, next, {
             inverse: options.also !== undefined,
             check,
+            cycles,
           });
+          cycles.check();
           // Checked before `also` writes anything: a check that asks to run it again rolls back.
           if (check) this.#checkCompact(check);
           options.also?.(next, inverse);
@@ -2851,7 +2865,8 @@ export class FileRoom extends DurableObject<Env> {
       inverse,
       held = false,
       check,
-    }: { inverse: boolean; held?: boolean; check: CompactCheck | null },
+      cycles,
+    }: { inverse: boolean; held?: boolean; check: CompactCheck | null; cycles: CycleCheck },
   ): Op[] {
     // A conversion under way (decision 0029) converts again the instances this may change:
     // found before (what's deleted) and after (what's made) it applies.
@@ -2859,12 +2874,13 @@ export class FileRoom extends DurableObject<Env> {
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
     // A file stored compact: what this removes and makes, checked when the transaction ends.
     if (check) this.#noteRemovedMains(ops, check);
-    // Every commit is checked for instances inside their own main, held or not (the clients follow).
+    // Every commit is checked for instances inside their own main, held or not (the clients
+    // follow), once all of it has applied (`cycles.check()`), in SQL.
     const undo = applyTransaction(this.#store, ops, {
       rollback: false,
       inverse,
       held,
-      cycles: true,
+      cycles,
     });
     this.#store.clearCache();
     if (check) this.#noteCandidates(ops, check);
@@ -2934,9 +2950,11 @@ export class FileRoom extends DurableObject<Env> {
         return this.ctx.storage.transactionSync(() => {
           // Checked as one edit, whatever order its chunks come in (decision 0029).
           const check = this.#compactCheck(look);
+          // And for components containing themselves, on what all of it leaves.
+          const cycles = new CycleCheck(this.#sql);
           const out = new OpChunks((ops) => {
             next++;
-            this.#applyLogged(ops, author, next, { inverse: false, held, check });
+            this.#applyLogged(ops, author, next, { inverse: false, held, check, cycles });
             this.#store.clearCache();
             if (tooBig) return;
             sentChars += JSON.stringify(ops).length;
@@ -2947,6 +2965,7 @@ export class FileRoom extends DurableObject<Env> {
           });
           const result = produce(out);
           out.flush();
+          cycles.check();
           if (check) this.#checkCompact(check);
           return { result, count: out.count };
         });

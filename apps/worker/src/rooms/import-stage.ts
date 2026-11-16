@@ -8,6 +8,7 @@
  * from the table in one storage transaction. Until then the file is as it
  * was.
  */
+
 import {
   checkNode,
   copyId,
@@ -18,6 +19,7 @@ import {
   type NodeRecord,
   ROOT_ID,
 } from "@drawpane/model";
+import { cyclicMainIn } from "./instance-cycles";
 import {
   allowedChildrenSql,
   countRows,
@@ -153,6 +155,14 @@ export interface CheckOptions {
   readonly maxDepth?: number;
   /** Override records may come (into a file that stores compact copies), checked as edits are. */
   readonly records?: boolean;
+  /**
+   * Refuse a component that contains an instance of itself, directly or
+   * through others (decision 0029): for nodes that land as they are, in the
+   * compact form. Converting what comes materialized detaches such
+   * instances instead, keeping their look; a branch or a duplicate keeps
+   * what its file held.
+   */
+  readonly cycles?: boolean;
 }
 
 /**
@@ -168,6 +178,7 @@ export function checkStaged(
     limits = IMPORT_LIMITS,
     maxDepth = MAX_DEPTH,
     records = false,
+    cycles = false,
   }: CheckOptions = {},
 ): void {
   const total = countRows(sql, table);
@@ -222,6 +233,16 @@ export function checkStaged(
       .exec<{ id: string }>(`SELECT id FROM ${table} WHERE depth IS NULL LIMIT 1`)
       .toArray()[0];
     throw new ModelError("cycle", `Layer ${looped?.id ?? ""} is inside itself.`);
+  }
+
+  // Checked once the layers hold together: what a main contains is followed through its parents.
+  if (cycles) {
+    const main = cyclicMainIn(sql, table);
+    if (main !== null)
+      throw new ModelError(
+        "cycle",
+        `Its component ${main} contains an instance of itself, directly or through other components.`,
+      );
   }
 }
 

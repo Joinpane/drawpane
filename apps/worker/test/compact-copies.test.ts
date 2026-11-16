@@ -1702,3 +1702,121 @@ describe("a main containing an instance of itself (the fourth review)", {
     expect(shown.filter((n) => n.parent === "CyOkInst")).toHaveLength(1);
   });
 });
+
+describe("what the fifth review found", { timeout: 120_000 }, () => {
+  const frame = (id: string, parent: string, key: string, props: NodeRecord["props"]): Op => ({
+    op: "create",
+    id,
+    type: "frame",
+    parent,
+    key,
+    props,
+  });
+
+  it("restores a version whose components hold each other the other way round", async () => {
+    // The version: B holds an instance of A. The file now: A holds an instance of B, and B
+    // nothing. A restore creates the version's IA before it deletes the file's IB.
+    const { browser, fileId, socket, page } = await fileWith((page) => [
+      frame("FvA", page, "a0", { isComponent: true, name: "A" }),
+      { op: "create", id: "FvRect", type: "rect", parent: "FvA", key: "a0", props: {} },
+      frame("FvB", page, "a1", { isComponent: true, name: "B" }),
+      frame("FvIA", "FvB", "a0", { instanceOf: "FvA" }),
+    ]);
+    void page;
+    const saved = await browser.json<{ version: { id: string } }>(`/api/files/${fileId}/versions`, {
+      method: "POST",
+      json: { name: "B holds A" },
+    });
+    socket.send({
+      t: "txn",
+      seq: 2,
+      ops: [{ op: "delete", id: "FvIA" }, frame("FvIB", "FvA", "a5", { instanceOf: "FvB" })],
+    });
+    await socket.next("ack");
+    const restored = await browser.fetch(
+      `/api/files/${fileId}/versions/${saved.version.id}/restore`,
+      { method: "POST", json: {} },
+    );
+    expect(restored.status).toBe(200);
+    const after = await stored(fileId);
+    expect(after.find((n) => n.id === "FvIA")?.parent).toBe("FvB");
+    expect(after.find((n) => n.id === "FvIB")).toBeUndefined();
+  });
+
+  it("refuses a compact import holding a component that contains its own instance", async () => {
+    const { browser, fileId } = await newFile();
+    const before = await stored(fileId);
+    const nodes: NodeRecord[] = [
+      { id: "LpPage", type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page" } },
+      { id: "LpA", type: "frame", parent: "LpPage", key: "a0", props: { isComponent: true } },
+      { id: "LpRect", type: "rect", parent: "LpA", key: "a0", props: {} },
+      { id: "LpSelf", type: "frame", parent: "LpA", key: "a1", props: { instanceOf: "LpA" } },
+      { id: "LpI", type: "frame", parent: "LpPage", key: "a1", props: { instanceOf: "LpA" } },
+    ];
+    const { importId } = await browser.json<{ importId: string }>(`/api/files/${fileId}/imports`, {
+      method: "POST",
+      json: {},
+    });
+    const parts = `/api/files/${fileId}/imports/${importId}`;
+    await browser.json(`${parts}/parts`, { method: "POST", json: { nodes } });
+    const commit = await browser.fetch(`${parts}/commit`, {
+      method: "POST",
+      json: { copies: "compact" },
+    });
+    expect(commit.status).toBe(400);
+    expect(await commit.text()).toMatch(/LpA contains an instance of itself/);
+    expect(firstDifference(before, await stored(fileId))).toBeNull();
+  });
+
+  it("saves a fresh backup when a file converts again after a rollback", async () => {
+    const nodes: NodeRecord[] = [
+      { id: "BkPage", type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page" } },
+      { id: "BkMain", type: "frame", parent: "BkPage", key: "a0", props: { isComponent: true } },
+      { id: "BkRect", type: "rect", parent: "BkMain", key: "a0", props: { name: "R" } },
+      { id: "BkInst", type: "frame", parent: "BkPage", key: "a1", props: { instanceOf: "BkMain" } },
+      {
+        id: "BkCopy",
+        type: "rect",
+        parent: "BkInst",
+        key: "a0",
+        props: { name: "R", mirrors: "BkRect" },
+      },
+    ];
+    const { browser, fileId } = await materializedFile(nodes);
+    await convert(fileId);
+    const first = (await roomOf(fileId).copiesFormat()).backup;
+    expect(first).not.toBeNull();
+    // Compact copies turned off: the backup is restored, the file materialized again.
+    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
+      room.compactCopiesOff = true;
+    });
+    const restored = await browser.fetch(`/api/files/${fileId}/versions/${first}/restore`, {
+      method: "POST",
+      json: {},
+    });
+    expect(restored.status).toBe(200);
+    expect((await roomOf(fileId).copiesFormat()).copies).toBe("materialized");
+    // An acknowledged edit, then compact copies on again before any autosave.
+    const { socket } = await open(browser, fileId);
+    socket.send({
+      t: "txn",
+      seq: 1,
+      ops: [{ op: "set", id: "BkPage", prop: "name", value: "Edited after rollback" }],
+    });
+    await socket.next("ack");
+    socket.ws.close();
+    await runInDurableObject(roomOf(fileId), async (room: FileRoom, state) => {
+      room.compactCopiesOff = false;
+      await state.storage.setAlarm(Date.now());
+    });
+    await convert(fileId);
+    const second = (await roomOf(fileId).copiesFormat()).backup;
+    expect(second).not.toBe(first);
+    // The backup a second rollback restores holds the edit.
+    const text = await (
+      await browser.fetch(`/api/files/${fileId}/versions/${second}/snapshot`)
+    ).text();
+    const page = parseSnapshot(text)?.nodes.find((n) => n.id === "BkPage");
+    expect(page?.props.name).toBe("Edited after rollback");
+  });
+});

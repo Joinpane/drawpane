@@ -9,7 +9,7 @@ import {
   type BranchInfo,
   branchChanges,
   type CopiesFormat,
-  compact,
+  compactByInstance,
   type NodeRecord,
   nodeReader,
   type Resolution,
@@ -72,7 +72,7 @@ export function useBranchReview(
     if (!review.data) return null;
     const form = review.data.copies.main;
     const as = (nodes: NodeRecord[], copies: CopiesFormat) =>
-      copies === form ? nodes : form === "compact" ? compact(nodes).nodes : null;
+      copies === form ? nodes : form === "compact" ? compactByInstance(nodes).nodes : null;
     const base = as(review.data.base, review.data.copies.base);
     return base ? { form, base: nodeReader(base), main: nodeReader(review.data.main) } : null;
   }, [review.data]);
@@ -83,7 +83,7 @@ export function useBranchReview(
       editor.doc.copies === stored.form
         ? editor.doc.storedReader()
         : stored.form === "compact"
-          ? nodeReader(compact(editor.doc.stored()).nodes)
+          ? nodeReader(compactByInstance(editor.doc.stored()).nodes)
           : null;
     if (!branchStored) return null;
     const changes = branchChanges(stored.base, branchStored, stored.main);

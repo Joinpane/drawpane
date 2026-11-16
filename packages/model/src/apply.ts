@@ -287,29 +287,35 @@ function mainsNamed(store: NodeStore, id: string, deep: boolean): Set<string> {
 }
 
 /**
- * Whether, after `op` applied, a main contains an instance of itself,
- * directly or through other mains (an instance's layers are its main's, so
- * that main would contain itself without end). Only what `op` changed is
- * looked at: the mains around the node it touched, and the mains named
- * at or under it.
+ * What an operation may have made a main contain: the node it touched, and
+ * whether what's under it counts too (it moved, or became a main). Null for
+ * an operation that can't make a main contain itself.
  */
-function makesInstanceCycle(store: NodeStore, op: Op): boolean {
-  let deep: boolean;
-  if (op.op === "create") {
-    if (op.type !== "frame" && op.type !== "override") return false;
-    deep = false;
-  } else if (op.op === "move") deep = true;
-  else if (op.op === "set" && (op.prop === "instanceOf" || op.prop === "isComponent")) {
-    if (!op.value) return false;
-    deep = op.prop === "isComponent";
-  } else return false;
-  const node = store.get(op.id);
+export function cycleCandidate(op: Op): { id: string; deep: boolean } | null {
+  if (op.op === "create")
+    return op.type === "frame" || op.type === "override" ? { id: op.id, deep: false } : null;
+  if (op.op === "move") return { id: op.id, deep: true };
+  if (op.op === "set" && (op.prop === "instanceOf" || op.prop === "isComponent") && op.value)
+    return { id: op.id, deep: op.prop === "isComponent" };
+  return null;
+}
+
+/**
+ * Whether a main contains an instance of itself through `id`, as the store
+ * is now: one of the mains `id` is in is reached from the mains named at
+ * `id` (or anywhere under it when `deep`), followed through what each main
+ * contains. A store that can answer without reading values (SQLite) does;
+ * otherwise only what's around `id` is read.
+ */
+export function instanceCycleAt(store: NodeStore, id: string, deep: boolean): boolean {
+  if (store.instanceCycle) return store.instanceCycle(id, deep);
+  const node = store.get(id);
   if (!node) return false;
   // A record's swap puts its main's layers in the instance it belongs to.
-  const around = mainsAround(store, node.type === "override" ? node.parent : op.id);
+  const around = mainsAround(store, node.type === "override" ? node.parent : id);
   if (around.size === 0) return false;
   // The node itself counts: a main that's an instance is made of its own main's layers.
-  const named = mainsNamed(store, op.id, deep);
+  const named = mainsNamed(store, id, deep);
   if (named.size === 0) return false;
   const contained = new Map<string, Set<string>>();
   const containedIn = (main: string): Set<string> => {
@@ -331,6 +337,13 @@ function makesInstanceCycle(store: NodeStore, op: Op): boolean {
   return false;
 }
 
+const cycleError = (opIndex?: number) =>
+  new ModelError(
+    "cycle",
+    "A component can't contain an instance of itself, directly or through other components.",
+    opIndex,
+  );
+
 /**
  * Validates and applies one operation. Returns the operations that undo it,
  * in the order they must run. Throws `ModelError` and leaves the store
@@ -341,40 +354,45 @@ export function applyOp(
   op: Op,
   { held = false, cycles = !held }: ApplyOptions = {},
 ): Op[] {
-  return apply(store, op, false, true, held, cycles);
+  const undo = apply(store, op, false, true, held);
+  const candidate = cycles === false ? null : cycleCandidate(op);
+  if (!candidate) return undo;
+  if (typeof cycles === "object") cycles.add(candidate.id, candidate.deep);
+  else if (instanceCycleAt(store, candidate.id, candidate.deep)) {
+    // Taken back before saying so: an operation that's refused changes nothing.
+    takeBack(store, [undo]);
+    throw cycleError();
+  }
+  return undo;
 }
 
-function apply(
-  store: NodeStore,
-  op: Op,
-  force: boolean,
-  inverse: boolean,
-  held: boolean,
-  cycles: boolean,
-): Op[] {
-  let undo: Op[];
+function apply(store: NodeStore, op: Op, force: boolean, inverse: boolean, held: boolean): Op[] {
   switch (op.op) {
     case "create":
-      undo = applyCreate(store, op, held);
-      break;
+      return applyCreate(store, op, held);
     case "delete":
       return applyDelete(store, op, force, inverse);
     case "set":
-      undo = applySet(store, op);
-      break;
+      return applySet(store, op);
     case "move":
-      undo = applyMove(store, op, held);
-      break;
+      return applyMove(store, op, held);
   }
-  if (cycles && makesInstanceCycle(store, op)) {
-    // Taken back before saying so: an operation that's refused changes nothing.
-    for (const back of undo) apply(store, back, true, true, true, false);
-    throw new ModelError(
-      "cycle",
-      "A component can't contain an instance of itself, directly or through other components.",
-    );
-  }
-  return undo;
+}
+
+/** Undoes applied operations, last first: always allowed, however deep, never checked for cycles. */
+function takeBack(store: NodeStore, undo: readonly (readonly Op[])[]): void {
+  for (let j = undo.length - 1; j >= 0; j--)
+    for (const back of undo[j] as Op[]) apply(store, back, true, true, true);
+}
+
+/**
+ * Where the nodes a transaction's operations may have made a main contain
+ * itself through go, for a caller that checks them itself once more has
+ * applied (`instanceCycleAt`): a room committing a restore or a merge in
+ * chunks checks them all once, when the last has applied.
+ */
+export interface CycleCandidates {
+  add(id: string, deep: boolean): void;
 }
 
 export interface ApplyOptions {
@@ -401,14 +419,18 @@ export interface ApplyOptions {
    */
   readonly held?: boolean;
   /**
-   * Refuse an operation that would make a main contain an instance of
+   * Refuse a transaction that would leave a main containing an instance of
    * itself, directly or through other mains (its layers would contain
-   * themselves without end). On by default, off for `held` operations: they
-   * put back what was there (a client's rebase follows the room, which
-   * checks). The room checks every transaction it commits, held or not.
-   * A transaction's own rollback never checks.
+   * themselves without end). Checked once every operation has applied, on
+   * what they leave: an operation may pass through such a state on the way
+   * (a restore creates a version's layers before it deletes the file's), as
+   * long as the end isn't one. On by default, off for `held` operations:
+   * they put back what was there (a client's rebase follows the room, which
+   * checks). The room checks every transaction it commits, held or not,
+   * passing `CycleCandidates` to check its chunks together. A transaction's
+   * own rollback never checks.
    */
-  readonly cycles?: boolean;
+  readonly cycles?: boolean | CycleCandidates;
 }
 
 /**
@@ -422,21 +444,36 @@ export function applyTransaction(
 ): Op[] {
   const undo: Op[][] = [];
   const keep = inverse || rollback;
+  // Each node an operation may have made a main contain itself through, and the last operation
+  // that touched it: checked on what the transaction leaves.
+  const check = cycles === true ? new Map<string, { deep: boolean; index: number }>() : null;
+  const sink = typeof cycles === "object" ? cycles : null;
   for (let i = 0; i < ops.length; i++) {
+    const op = ops[i] as Op;
     try {
-      const back = apply(store, ops[i] as Op, false, keep, held, cycles);
+      const back = apply(store, op, false, keep, held);
       if (keep) undo.push(back);
     } catch (error) {
-      if (rollback) {
-        for (let j = undo.length - 1; j >= 0; j--) {
-          // Rolling back may delete the only page a failed transaction created, and puts back
-          // what the transaction removed however deep it was.
-          for (const back of undo[j] as Op[]) apply(store, back, true, true, true, false);
-        }
-      }
+      // Rolling back may delete the only page a failed transaction created, and puts back
+      // what the transaction removed however deep it was.
+      if (rollback) takeBack(store, undo);
       if (error instanceof ModelError) throw new ModelError(error.code, error.message, i);
       throw error;
     }
+    const candidate = check || sink ? cycleCandidate(op) : null;
+    if (!candidate) continue;
+    if (sink) sink.add(candidate.id, candidate.deep);
+    else if (check) {
+      const deep = candidate.deep || (check.get(candidate.id)?.deep ?? false);
+      check.delete(candidate.id);
+      check.set(candidate.id, { deep, index: i });
+    }
   }
+  if (check)
+    for (const [id, { deep, index }] of check)
+      if (instanceCycleAt(store, id, deep)) {
+        if (rollback) takeBack(store, undo);
+        throw cycleError(index);
+      }
   return undo.reverse().flat();
 }

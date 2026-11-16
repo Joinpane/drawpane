@@ -9,7 +9,7 @@
  */
 import {
   type CopiesFormat,
-  compact,
+  compactByInstance,
   IMPORT_PART_BYTES,
   MAX_IMPORT_BYTES,
   MAX_IMPORT_NODES,
@@ -106,9 +106,11 @@ export async function saveImport(
   );
   const imports = `${file}/imports/${encodeURIComponent(importId)}`;
   // Into a file that stores compact copies (decision 0029), copies go as override records:
-  // about a fifth to send. (The room converts what comes materialized, too.)
+  // about a fifth to send. Converted by the room's own steps (an instance at a time, each
+  // verified, ids layers hold renamed), so it's stored exactly as the room would store it sent
+  // materialized; the room takes what's said to be compact as it is.
   if (copies === "compact") {
-    const stored = compact(nodes).nodes;
+    const stored = compactByInstance(nodes).nodes;
     parts = partsOf(stored);
     next = parts.next();
     total = stored.length;

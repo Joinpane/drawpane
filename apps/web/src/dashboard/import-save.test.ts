@@ -1,8 +1,14 @@
 import {
+  CopyView,
+  compactByInstance,
+  copyId,
   IMPORT_PART_BYTES,
   MAX_IMPORT_BYTES,
   MAX_IMPORT_NODES,
+  MemoryStore,
   type NodeRecord,
+  type Props,
+  ROOT_ID,
 } from "@drawpane/model";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FILE_LAYERS, ImportTooLarge, saveImport } from "./import-save";
@@ -11,10 +17,10 @@ const node = (id: string, name = "Layer"): NodeRecord =>
   ({ id, type: "rect", parent: "p", key: "a0", props: { name } }) as unknown as NodeRecord;
 
 /** A fetch that answers as the server does, and keeps what was asked. */
-function server() {
+function server(copies?: "compact") {
   const fetch = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith("/imports") && init?.method === "POST")
-      return new Response(JSON.stringify({ importId: "I1" }), { status: 201 });
+      return new Response(JSON.stringify({ importId: "I1", copies }), { status: 201 });
     if (url.endsWith("/parts")) return new Response(JSON.stringify({ staged: 1 }));
     if (url.endsWith("/commit")) return new Response(JSON.stringify({ revn: 2, nodes: 1 }));
     return new Response(JSON.stringify({ ok: true }));
@@ -84,5 +90,63 @@ describe("saving an import", () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(new ImportTooLarge(MAX_IMPORT_BYTES * 2, 10).fits).toBe(0.5);
     expect(new ImportTooLarge(10, MAX_IMPORT_NODES * 4).fits).toBe(0.25);
+  });
+
+  describe("into a file that stores compact copies, converted as the room converts", () => {
+    const n = (id: string, type: string, parent: string, key: string, props: Props = {}) =>
+      ({ id, type, parent, key, props }) as NodeRecord;
+    async function sent(nodes: NodeRecord[]) {
+      const { calls } = server("compact");
+      await saveImport("F1", nodes);
+      const asked = calls();
+      expect(asked.at(-1)?.body).toBe(JSON.stringify({ copies: "compact" }));
+      return asked
+        .filter((c) => c.url.endsWith("/parts"))
+        .flatMap((p) => (JSON.parse(p.body as string) as { nodes: NodeRecord[] }).nodes);
+    }
+    const byId = (nodes: readonly NodeRecord[]) =>
+      [...nodes].sort((a, b) => (a.id < b.id ? -1 : 1));
+
+    it("renames the ids layers hold to the copies' new ids", async () => {
+      const nodes = [
+        n("Pg", "page", ROOT_ID, "a0"),
+        n("M", "frame", "Pg", "a0", { isComponent: true, width: 100, height: 100 }),
+        n("R", "rect", "M", "a0", { width: 10, height: 10 }),
+        n("I", "frame", "Pg", "a1", {
+          instanceOf: "M",
+          width: 100,
+          height: 100,
+          readingOrder: ["C"],
+        }),
+        n("C", "rect", "I", "a0", { width: 10, height: 10, mirrors: "R" }),
+      ];
+      const stored = await sent(nodes);
+      const instance = stored.find((x) => x.id === "I");
+      expect(instance?.props.readingOrder).toEqual([copyId("I", ["R"])]);
+      expect(stored.find((x) => x.id === "C")).toBeUndefined();
+      expect(byId(stored)).toEqual(byId(compactByInstance(nodes).nodes));
+    });
+
+    it("keeps the drawing order of siblings sharing a key, detaching what can't be built so", async () => {
+      // The main draws title before zzBody (same key, by id); the copy's ids sort the other way.
+      const nodes = [
+        n("Pg", "page", ROOT_ID, "a0"),
+        n("card", "frame", "Pg", "a0", { isComponent: true, width: 100 }),
+        n("title", "text", "card", "a5", { characters: "Title", width: 50, height: 10 }),
+        n("zzBody", "rect", "card", "a5", { width: 80, height: 40 }),
+        n("inst", "frame", "Pg", "a1", { width: 100, instanceOf: "card" }),
+        n("zTitle", "text", "inst", "a5", {
+          characters: "Title",
+          width: 50,
+          height: 10,
+          mirrors: "title",
+        }),
+        n("aBody", "rect", "inst", "a5", { width: 80, height: 40, mirrors: "zzBody" }),
+      ];
+      const stored = await sent(nodes);
+      expect(new CopyView(new MemoryStore(stored)).childIds("inst")).toEqual(["aBody", "zTitle"]);
+      expect(stored.find((x) => x.id === "inst")?.props.instanceOf).toBeUndefined();
+      expect(byId(stored)).toEqual(byId(compactByInstance(nodes).nodes));
+    });
   });
 });

@@ -29,6 +29,12 @@ export interface NodeStore {
    * (SQLite). See `deeperThan`.
    */
   deeperThan?(id: string, levels: number): boolean;
+  /**
+   * Whether a main contains an instance of itself through `id` (see
+   * `instanceCycleAt`), for a store that can tell without reading values
+   * (SQLite): what's checked can be a main of any size.
+   */
+  instanceCycle?(id: string, deep: boolean): boolean;
 }
 
 /**

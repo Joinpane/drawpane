@@ -8,6 +8,7 @@ import {
   type PropName,
   type Props,
 } from "@drawpane/model";
+import { instanceCycleIn } from "./instance-cycles";
 
 interface NodeRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -163,6 +164,11 @@ export class SqlNodeStore implements NodeStore {
         )
         .toArray().length > 0
     );
+  }
+
+  /** Whether a main contains an instance of itself through `id`, in SQL: no values are read. */
+  instanceCycle(id: string, deep: boolean): boolean {
+    return instanceCycleIn(this.#sql, "nodes", id, deep);
   }
 
   count(): number {

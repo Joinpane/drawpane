@@ -187,6 +187,55 @@ describe("an instance inside its own main", () => {
   });
 });
 
+describe("what a transaction leaves (the fifth review)", () => {
+  /** A holds IB (an instance of B); B is empty. */
+  const current = () =>
+    new MemoryStore([
+      node("Pg", "page", "root"),
+      node("A", "frame", "Pg", { isComponent: true }, "a0"),
+      node("IB", "frame", "A", { instanceOf: "B" }),
+      node("B", "frame", "Pg", { isComponent: true }, "a1"),
+    ]);
+  const createIA: Op = {
+    op: "create",
+    id: "IA",
+    type: "frame",
+    parent: "B",
+    key: "a0",
+    props: { instanceOf: "A" },
+  };
+
+  it("takes a restore that passes through a loop on the way to a file without one", () => {
+    // The version has B holding IA and no IB: a restore creates IA, then deletes IB.
+    const store = current();
+    applyTransaction(store, [createIA, { op: "delete", id: "IB" }], { held: true, cycles: true });
+    expect(store.get("IA")?.parent).toBe("B");
+    expect(store.get("IB")).toBeUndefined();
+    // Checked by the caller, the same way.
+    const room = current();
+    const candidates: Array<[string, boolean]> = [];
+    applyTransaction(room, [createIA, { op: "delete", id: "IB" }], {
+      held: true,
+      cycles: { add: (id, deep) => candidates.push([id, deep]) },
+    });
+    expect(candidates).toEqual([["IA", false]]);
+  });
+
+  it("refuses one that ends in a loop, naming the operation, and changes nothing", () => {
+    const store = current();
+    const before = JSON.stringify([...store.nodes()]);
+    let error: unknown;
+    try {
+      applyTransaction(store, [{ op: "set", id: "Pg", prop: "name", value: "Renamed" }, createIA]);
+    } catch (caught) {
+      error = caught;
+    }
+    expect((error as ModelError).code).toBe("cycle");
+    expect((error as ModelError).opIndex).toBe(1);
+    expect(JSON.stringify([...store.nodes()])).toBe(before);
+  });
+});
+
 /** A main holding `n` instances of itself, and an instance of it on the page (written as files from before held it). */
 function selfHolding(n: number): MemoryStore {
   const nodes = [node("Pg", "page", "root"), node("M", "frame", "Pg", { isComponent: true })];
