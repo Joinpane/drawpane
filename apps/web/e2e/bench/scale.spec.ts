@@ -40,7 +40,7 @@ interface Result {
   load: { resetMs: number; firstFrameMs: number };
   heapMb: number;
   canvas: Record<string, Summary>;
-  editMain: { ms: number; copies: number };
+  editMain: { ms: number; commitMs: number; copies: number };
   compact: boolean;
   /** What the document stores once loaded (with compact copies, far fewer than it shows). */
   stored: { nodes: number; bytes: number };
@@ -94,8 +94,14 @@ async function firstFrame(page: Page, pageId: string): Promise<number> {
   }, pageId);
 }
 
-/** Changes a main component's fill through the editor's commit; how long until it's drawn. */
-async function editMain(page: Page, mainId: string): Promise<number> {
+/**
+ * Changes a main component's fill through the editor's commit: how long the
+ * commit takes (the document, copies and layout), and how long until it's drawn.
+ */
+async function editMain(
+  page: Page,
+  mainId: string,
+): Promise<{ commitMs: number; drawnMs: number }> {
   return page.evaluate(async (mainId) => {
     const e = (
       window as unknown as {
@@ -104,8 +110,9 @@ async function editMain(page: Page, mainId: string): Promise<number> {
     ).drawpane;
     const t = performance.now();
     e.setProp([mainId], "fills", [{ type: "solid", color: "#e8590c" }]);
+    const commitMs = performance.now() - t;
     await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
-    return performance.now() - t;
+    return { commitMs, drawnMs: performance.now() - t };
   }, mainId);
 }
 
@@ -128,7 +135,9 @@ test.describe("Scale", () => {
 
   test.beforeAll(async ({ browser }) => {
     test.setTimeout(180_000);
-    instance = await freshInstance(browser, { port: 8823, inspectorPort: 9363 });
+    // BENCH_PORT when another run (another checkout's) has the usual one.
+    const port = Number(process.env.BENCH_PORT ?? 8823);
+    instance = await freshInstance(browser, { port, inspectorPort: port + 540 });
   });
   test.afterAll(async () => {
     await instance?.stop();
@@ -179,7 +188,7 @@ test.describe("Scale", () => {
         );
       canvas["zoom, whole"] = await zoom(page, 120);
       const busiest = kit.busiestMains[0] as { id: string; copies: number };
-      const editMs = await editMain(page, busiest.id);
+      const edit = await editMain(page, busiest.id);
 
       const result: Result = {
         layers: kit.stats.layers,
@@ -188,7 +197,11 @@ test.describe("Scale", () => {
         load: { resetMs: Math.round(resetMs), firstFrameMs: Math.round(firstFrameMs) },
         heapMb: heap,
         canvas,
-        editMain: { ms: Math.round(editMs), copies: busiest.copies },
+        editMain: {
+          ms: Math.round(edit.drawnMs),
+          commitMs: Math.round(edit.commitMs),
+          copies: busiest.copies,
+        },
         compact: COMPACT,
         stored: storedNow,
       };
@@ -199,7 +212,7 @@ test.describe("Scale", () => {
           `load        reset ${result.load.resetMs} ms · first frame of the largest page ${result.load.firstFrameMs} ms`,
           `memory      ${result.heapMb} MB of JS heap for the file`,
           ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),
-          `edit main   ${result.editMain.ms} ms to change a fill on a main with ${result.editMain.copies.toLocaleString("en")} copies`,
+          `edit main   ${result.editMain.ms} ms to change a fill on a main with ${result.editMain.copies.toLocaleString("en")} copies, drawn (the commit ${result.editMain.commitMs} ms)`,
           "",
         ].join("\n"),
       );
