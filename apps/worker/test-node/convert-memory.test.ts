@@ -16,13 +16,14 @@ import { appendFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getHeapStatistics } from "node:v8";
-import { keyBetween, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { InstanceTooLarge, keyBetween, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   applyConversion,
   convertStep,
   createConvertTables,
   LIVE_CONVERSION,
+  MAX_INSTANCE_BYTES,
   MAX_INSTANCE_LAYERS,
 } from "../src/rooms/convert";
 import { countRows, insertNodes } from "../src/rooms/node-tables";
@@ -419,4 +420,146 @@ describe(`converting instances of ${MAX_INSTANCE_LAYERS.toLocaleString("en")} la
       big.close();
     }
   });
+});
+
+/**
+ * Instances whose layers hold large values (decision 0029, the second
+ * review): a main and `instances` materialized instances of it, in one of
+ * three shapes, each layer a text of `chars` characters.
+ *
+ * - wide: `layers` texts side by side in the main;
+ * - deep: a chain of `layers` frames, each holding the next and a text;
+ * - few: `layers` texts, few and large.
+ *
+ * Written a hundred layers at a time, so the test itself holds little.
+ */
+function* heavyFile(
+  shape: "wide" | "deep" | "few",
+  layers: number,
+  chars: number,
+  instances: number,
+): Generator<NodeRecord[]> {
+  const text = (n: number) => `${n} `.padEnd(chars, "x");
+  yield [{ id: "P", type: "page", parent: ROOT_ID, key: key(0), props: { name: "Page" } }];
+  const tree = function* (root: string, k: string, props: Record<string, unknown>, copy: boolean) {
+    yield [{ id: root, type: "frame", parent: "P", key: k, props: props as NodeRecord["props"] }];
+    let batch: NodeRecord[] = [];
+    const flush = function* () {
+      if (batch.length > 0) yield batch;
+      batch = [];
+    };
+    for (let i = 0; i < layers; i++) {
+      const mirror = (id: string) => (copy ? { mirrors: id } : {});
+      if (shape === "deep") {
+        const parent = i === 0 ? root : `${root}f${i - 1}`;
+        batch.push(
+          {
+            id: `${root}f${i}`,
+            type: "frame",
+            parent,
+            key: key(1),
+            props: { name: `Level ${i}`, width: 100, height: 100, ...mirror(`Mf${i}`) },
+          },
+          {
+            id: `${root}t${i}`,
+            type: "text",
+            parent,
+            key: key(0),
+            props: { characters: text(i), ...mirror(`Mt${i}`) } as NodeRecord["props"],
+          },
+        );
+      } else
+        batch.push({
+          id: `${root}t${i}`,
+          type: "text",
+          parent: root,
+          key: keyBetween(null, null) + i.toString(36).padStart(4, "0"),
+          props: { characters: text(i), ...mirror(`Mt${i}`) } as NodeRecord["props"],
+        });
+      if (batch.length >= 100) yield* flush();
+    }
+    yield* flush();
+  };
+  yield* tree("M", key(0), { name: "Heavy", isComponent: true, width: 600, height: 300 }, false);
+  for (let i = 0; i < instances; i++)
+    yield* tree(
+      `I${i}`,
+      key(i + 1),
+      { name: "Heavy", width: 600, height: 300, instanceOf: "M", y: 400 * (i + 1) },
+      true,
+    );
+}
+
+/** Converts a heavy file in steps, as a room does; what it took, or the error that stopped it. */
+function convertHeavy(name: string, batches: Iterable<NodeRecord[]>) {
+  const db = sqlDouble(join(dir, `${name}.sqlite`), probe);
+  try {
+    db.sql.exec(NODE_SCHEMA);
+    for (const batch of batches) db.transact(() => insertNodes(db.sql, "nodes", batch));
+    const bytes = db.sql
+      .exec<{ n: number }>("SELECT SUM(LENGTH(CAST(props AS BLOB))) AS n FROM nodes")
+      .one().n;
+    createConvertTables(db.sql, LIVE_CONVERSION);
+    gc();
+    gc();
+    const baseline = getHeapStatistics().used_heap_size;
+    peakHeap = baseline;
+    let steps = 0;
+    let longest = 0;
+    let error: unknown = null;
+    try {
+      for (;;) {
+        const at = performance.now();
+        const step = convertStep(db, "nodes", LIVE_CONVERSION);
+        longest = Math.max(longest, performance.now() - at);
+        steps++;
+        sample();
+        gc();
+        if (step.done) break;
+      }
+      db.transact(() => applyConversion(db.sql, "nodes", LIVE_CONVERSION));
+      sample();
+    } catch (caught) {
+      error = caught;
+    }
+    const stored = countRows(db.sql, "nodes");
+    return { bytes, steps, longest, baseline, peak: peakHeap, error, stored };
+  } finally {
+    db.close();
+  }
+}
+
+const report = (what: string, r: ReturnType<typeof convertHeavy>) => {
+  const line =
+    `${what} (${(r.bytes / MB).toFixed(1)} MB of values; heap capped at ${process.env.MEMORY_HEAP_MB ?? 128} MB): ` +
+    (r.error ? `stopped (${(r.error as Error).message}), ` : "") +
+    `${r.steps} steps (longest ${(r.longest / 1000).toFixed(1)} s); peak heap ${(r.peak / MB).toFixed(0)} MB (${(r.baseline / MB).toFixed(0)} MB before).`;
+  console.log(line);
+  appendFileSync(REPORT, `${line}\n`);
+};
+
+describe("converting instances that hold large values", { timeout: 3_600_000 }, () => {
+  it("stops, before reading it, at an instance of 4,000 texts of 20,000 characters", () => {
+    const r = convertHeavy("reviewer", heavyFile("few", 4_000, 20_000, 1));
+    report("An instance of 4,000 texts of 20,000 characters", r);
+    expect(r.error).toBeInstanceOf(InstanceTooLarge);
+    // Refused at its size, which SQL summed: nothing of it was parsed.
+    expect(r.peak - r.baseline).toBeLessThan(16 * MB);
+  });
+
+  // Each just under the bound, its main and itself together.
+  const fit = (texts: number) => Math.floor((MAX_INSTANCE_BYTES * 0.95) / 2 / texts) - 120;
+  for (const [shape, layers, perLayer, what] of [
+    ["wide", 4_800, 1, "4,800 texts side by side"],
+    ["deep", 120, 2, "120 nested frames, each with a text"],
+    ["few", 40, 1, "40 large texts"],
+  ] as const)
+    it(`converts two instances of ${what}, as large as converts, within the capped heap`, () => {
+      // Its main and itself hold a text per layer (the frames of the deep one are small).
+      const chars = fit(layers);
+      const r = convertHeavy(shape, heavyFile(shape, layers, chars, 2));
+      report(`Two instances of ${what} of ${chars.toLocaleString("en")} characters`, r);
+      expect(r.error).toBeNull();
+      expect(r.stored).toBe(1 + 1 + layers * perLayer + 2);
+    });
 });

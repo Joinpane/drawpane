@@ -238,9 +238,90 @@ describe("converting in steps", { timeout: 120_000 }, () => {
     await inRoom((room) => {
       tableOf(room.sql, SRC, kit.nodes);
       createConvertTables(room.sql, T);
-      expect(() => convertStep(room, SRC, T, 0, { maxInstanceLayers: 2 })).toThrow(
+      // Every instance in the kit has a layer: whichever comes first stops it.
+      expect(() => convertStep(room, SRC, T, 0, { maxInstanceLayers: 0 })).toThrow(
         InstanceTooLarge,
       );
+    });
+  });
+
+  /** A main of `layers` text layers of `chars` characters each, and a materialized instance of it. */
+  const heavy = (layers: number, chars: number, instanceChars = chars): NodeRecord[] => {
+    const out: NodeRecord[] = [
+      { id: "Pg", type: "page", parent: "root", key: "a0", props: { name: "Page" } as never },
+      { id: "Main", type: "frame", parent: "Pg", key: "a0", props: { isComponent: true } as never },
+      {
+        id: "Inst",
+        type: "frame",
+        parent: "Pg",
+        key: "a1",
+        props: { instanceOf: "Main" } as never,
+      },
+    ];
+    for (let i = 0; i < layers; i++) {
+      const key = `a${i.toString(36).padStart(3, "0")}`;
+      out.push(
+        {
+          id: `M${i}`,
+          type: "text",
+          parent: "Main",
+          key,
+          props: { characters: "m".repeat(chars) } as never,
+        },
+        {
+          id: `C${i}`,
+          type: "text",
+          parent: "Inst",
+          key,
+          props: { characters: "m".repeat(instanceChars), mirrors: `M${i}` } as never,
+        },
+      );
+    }
+    return out;
+  };
+
+  it("stops at an instance whose values are too large to hold, before reading it", async () => {
+    await inRoom((room) => {
+      tableOf(room.sql, SRC, heavy(4, 5_000));
+      createConvertTables(room.sql, T);
+      // Layers alone would let it through.
+      expect(() => convertStep(room, SRC, T, 0, { maxInstanceBytes: 30_000 })).toThrow(
+        InstanceTooLarge,
+      );
+      expect(convertStep(room, SRC, T, 0, { maxInstanceBytes: 50_000 }).converted).toBe(1);
+    });
+  });
+
+  it("counts the bytes of the mains an instance is built from, not only its own", async () => {
+    await inRoom((room) => {
+      // Its own layers are small; its main's are large.
+      tableOf(room.sql, SRC, heavy(4, 10_000, 10));
+      createConvertTables(room.sql, T);
+      expect(() => convertStep(room, SRC, T, 0, { maxInstanceBytes: 30_000 })).toThrow(
+        InstanceTooLarge,
+      );
+    });
+  });
+
+  it("bounds a step by the bytes it reads, at least one instance a step", async () => {
+    await inRoom((room) => {
+      const nodes = heavy(2, 2_000);
+      // Three more instances of the same main.
+      for (const n of ["X", "Y", "Z"])
+        for (const node of nodes.filter((x) => x.id === "Inst" || x.parent === "Inst"))
+          nodes.push({
+            ...node,
+            id: node.id === "Inst" ? `Inst${n}` : `${node.id}${n}`,
+            parent: node.id === "Inst" ? "Pg" : `Inst${n}`,
+            key: node.id === "Inst" ? `a${n}` : node.key,
+          });
+      tableOf(room.sql, SRC, nodes);
+      createConvertTables(room.sql, T);
+      const step = convertStep(room, SRC, T, Number.POSITIVE_INFINITY, { stepBytes: 1 });
+      expect(step.converted).toBe(1);
+      let steps = 1;
+      while (!convertStep(room, SRC, T, Number.POSITIVE_INFINITY, { stepBytes: 1 }).done) steps++;
+      expect(steps).toBeGreaterThanOrEqual(4);
     });
   });
 });

@@ -91,6 +91,57 @@ export function renameHeldIds(
   return out ? ({ ...props, ...out } as Props) : null;
 }
 
+/**
+ * Every node id `props` holds, by what it names: `layers` are the ids
+ * `renameHeldIds` renames (a reading order's entries, prototype
+ * destinations, flows' starting screens), which can name a copy layer;
+ * `others` name mains, styles, variables and collections (`instanceOf`,
+ * `mirrors`, an override record's `path`, `textStyle`, `bindings`, the
+ * collections `variableModes` sets, a variable's aliases), which never name
+ * a copy layer. Ids that aren't nodes' (a reaction's or flow's own id, a
+ * mode's) aren't listed. Every id-valued property in the schema is one of
+ * these (checked by a test against `PROPS`).
+ */
+export function heldNodeIds(props: Readonly<Props>): { layers: string[]; others: string[] } {
+  const p = props as Record<string, unknown>;
+  const layers: string[] = [];
+  const others: string[] = [];
+  const str = (value: unknown, into: string[]) => {
+    if (typeof value === "string") into.push(value);
+  };
+  if (Array.isArray(p.readingOrder)) for (const id of p.readingOrder) str(id, layers);
+  if (Array.isArray(p.reactions))
+    for (const r of p.reactions as Array<{ action?: { to?: unknown } }>) str(r?.action?.to, layers);
+  if (Array.isArray(p.flows))
+    for (const f of p.flows as Array<{ start?: unknown }>) str(f?.start, layers);
+  str(p.instanceOf, others);
+  str(p.mirrors, others);
+  str(p.textStyle, others);
+  if (Array.isArray(p.path)) for (const id of p.path) str(id, others);
+  if (p.bindings && typeof p.bindings === "object")
+    for (const id of Object.values(p.bindings as Record<string, unknown>)) str(id, others);
+  if (p.variableModes && typeof p.variableModes === "object")
+    for (const id of Object.keys(p.variableModes as Record<string, unknown>)) str(id, others);
+  if (p.values && typeof p.values === "object")
+    for (const value of Object.values(p.values as Record<string, unknown>))
+      if (value && typeof value === "object") str((value as { alias?: unknown }).alias, others);
+  return { layers, others };
+}
+
+/** Properties whose values hold node ids (see `heldNodeIds`). */
+export const NODE_ID_PROPS: readonly string[] = [
+  "readingOrder",
+  "reactions",
+  "flows",
+  "instanceOf",
+  "mirrors",
+  "textStyle",
+  "path",
+  "bindings",
+  "variableModes",
+  "values",
+];
+
 /** Whether a node's properties hold ids of other layers (see `renameHeldIds`). */
 export function holdsIds(props: Readonly<Props>): boolean {
   const p = props as Record<string, unknown>;
@@ -116,8 +167,19 @@ export interface ConvertReader {
   rootsInside(mainId: string): readonly string[];
   /** Whether a root was converted (or detached) already. */
   settled(rootId: string): boolean;
-  /** How many nodes are stored under an instance root, without reading them (the size check). */
-  countUnder?(rootId: string): number;
+  /**
+   * The size of what converting an instance holds, without reading it (the
+   * size check): `layers`, the nodes stored under its root; `bytes`, the
+   * bytes of their values and of every main it's built from (its own, its
+   * layers' and theirs, with their layers).
+   */
+  sizeOf?(rootId: string): InstanceSize;
+}
+
+/** What converting an instance holds (see `ConvertReader.sizeOf`). */
+export interface InstanceSize {
+  readonly layers: number;
+  readonly bytes: number;
 }
 
 /** What bounds a run of conversions. */
@@ -128,10 +190,16 @@ export interface ConvertLimits {
    */
   readonly maxInstanceLayers?: number;
   /**
-   * Asked before an instance of `layers` layers is read and converted:
-   * true stops the run there (`stopped`), the instance left for the next.
+   * The most bytes of values (its layers' and the mains it's built from)
+   * an instance may have to be converted. A larger one throws
+   * `InstanceTooLarge`, before any of it is read.
    */
-  readonly stop?: (layers: number) => boolean;
+  readonly maxInstanceBytes?: number;
+  /**
+   * Asked before an instance of this size is read and converted: true
+   * stops the run there (`stopped`), the instance left for the next.
+   */
+  readonly stop?: (size: InstanceSize) => boolean;
 }
 
 /** An instance with more layers than a conversion holds at once: the file can't convert. */
@@ -140,10 +208,13 @@ export class InstanceTooLarge extends ModelError {
     readonly rootId: string,
     readonly layers: number,
     readonly limit: number,
+    readonly unit: "layers" | "bytes" = "layers",
   ) {
     super(
       "invalid_value",
-      `The instance ${rootId} has ${layers.toLocaleString("en")} layers, more than the ${limit.toLocaleString("en")} converted at once.`,
+      unit === "layers"
+        ? `The instance ${rootId} has ${layers.toLocaleString("en")} layers, more than the ${limit.toLocaleString("en")} converted at once.`
+        : `The instance ${rootId} and the components it's built from hold ${layers.toLocaleString("en")} bytes, more than the ${limit.toLocaleString("en")} converted at once.`,
     );
   }
 }
@@ -258,7 +329,8 @@ export class InstanceConverter {
   readonly #doing = new Set<string>();
   readonly #prepared = new Set<string>();
   readonly #max: number;
-  readonly #stop: ((layers: number) => boolean) | undefined;
+  readonly #maxBytes: number;
+  readonly #stop: ((size: InstanceSize) => boolean) | undefined;
   #stopped = false;
 
   constructor(reader: ConvertReader, sink: ConvertSink, limits: ConvertLimits = {}) {
@@ -267,6 +339,7 @@ export class InstanceConverter {
     this.#overlay = new Overlay(reader);
     this.#view = new CopyView(this.#overlay, { lazy: true });
     this.#max = limits.maxInstanceLayers ?? Number.POSITIVE_INFINITY;
+    this.#maxBytes = limits.maxInstanceBytes ?? Number.POSITIVE_INFINITY;
     this.#stop = limits.stop;
   }
 
@@ -297,10 +370,12 @@ export class InstanceConverter {
       this.#prepare(main.id);
       if (this.#stopped) return;
       // Its size, before it's read: too large to hold, or more than this run has left.
-      const counted = this.#reader.countUnder?.(rootId);
-      if (counted !== undefined && counted > this.#max)
-        throw new InstanceTooLarge(rootId, counted, this.#max);
-      if (this.#stop?.(counted ?? 0)) {
+      const size = this.#reader.sizeOf?.(rootId);
+      if (size && size.layers > this.#max)
+        throw new InstanceTooLarge(rootId, size.layers, this.#max);
+      if (size && size.bytes > this.#maxBytes)
+        throw new InstanceTooLarge(rootId, size.bytes, this.#maxBytes, "bytes");
+      if (this.#stop?.(size ?? { layers: 0, bytes: 0 })) {
         this.#stopped = true;
         return;
       }

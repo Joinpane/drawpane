@@ -3,13 +3,19 @@
  * 4b): what the review of the room's conversion found, each pinned here.
  */
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   CopyView,
   compactByInstance,
+  DEFAULT_TRANSITION,
   expand,
   firstDifference,
+  heldNodeIds,
+  ID_PATTERN,
   MemoryStore,
+  NODE_ID_PROPS,
   type NodeRecord,
+  PROPS,
   type Props,
   ROOT_ID,
   renameIds,
@@ -116,5 +122,43 @@ describe("converting an instance at a time", () => {
     expect(JSON.stringify(aTitle.props.reactions)).not.toContain('"bBody"');
     // No stored node holds the old id any more.
     expect(JSON.stringify(result.nodes)).not.toContain('"bBody"');
+  });
+});
+
+describe("ids held in values (heldNodeIds)", () => {
+  it("covers every property whose schema holds an id, node ids by what they name", () => {
+    const pattern = ID_PATTERN.source.slice(1, 12);
+    const holding = Object.entries(PROPS)
+      .filter(([, spec]) =>
+        JSON.stringify(
+          z.toJSONSchema(spec.schema as z.ZodType, { unrepresentable: "any" }),
+        ).includes(pattern),
+      )
+      .map(([prop]) => prop)
+      .sort();
+    // Ids that aren't nodes': a collection's modes, a library's file and publish.
+    expect(holding).toEqual([...NODE_ID_PROPS, "modes", "libraryFile", "libraryPublish"].sort());
+  });
+
+  it("lists each kind", () => {
+    const transition = DEFAULT_TRANSITION;
+    expect(
+      heldNodeIds({
+        readingOrder: ["a", "b"],
+        reactions: [
+          { id: "r1", trigger: { type: "tap" }, action: { type: "navigate", to: "c" }, transition },
+          { id: "r2", trigger: { type: "tap" }, action: { type: "back" }, transition },
+        ],
+        flows: [{ id: "f1", name: "F", start: "d", description: "" }],
+        instanceOf: "e",
+        mirrors: "f",
+        textStyle: "g",
+        path: ["h", "i"],
+        bindings: { fill: "j" },
+        variableModes: { k: "m1" },
+        values: { m1: { alias: "l" }, m2: "#ffffff" },
+        modes: [{ id: "m1", name: "Light" }],
+      } as Props),
+    ).toEqual({ layers: ["a", "b", "c", "d"], others: ["e", "f", "g", "h", "i", "j", "k", "l"] });
   });
 });

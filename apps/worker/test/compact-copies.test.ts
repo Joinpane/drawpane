@@ -11,6 +11,7 @@ import { Doc } from "@drawpane/editor";
 import {
   compactByInstance,
   copyId,
+  DEFAULT_TRANSITION,
   firstDifference,
   keyBetween,
   libraryAssets,
@@ -673,9 +674,11 @@ describe("what the review of the conversion found", { timeout: 120_000 }, () => 
 
   it("keeps an edit from a tab that loaded the file before it converted when it touches no copy", async () => {
     const { browser, fileId } = await materializedFile(kit.nodes);
+    // A tab of this version (it reads both forms), loaded while the file was materialized.
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 1, clientId: "before", revn: null });
-    expect((await socket.next<{ mode: string }>("welcome")).mode).toBe("snapshot");
+    socket.send({ t: "hello", protocol: 2, clientId: "before", revn: null, copies: BOTH });
+    const welcome = await socket.next<{ mode: string; copies: string }>("welcome");
+    expect([welcome.mode, welcome.copies]).toEqual(["snapshot", "materialized"]);
     await convert(fileId);
     const page = kit.nodes.find((n) => n.type === "page") as NodeRecord;
     socket.send({
@@ -738,5 +741,434 @@ describe("what the review of the conversion found", { timeout: 120_000 }, () => 
     for (let i = 0; i < 3; i++) await runDurableObjectAlarm(roomOf(fileId));
     expect(await pinned(before.thread.id)).toBe(target.id);
     expect(await pinned(late.thread.id)).toBe(target.id);
+  });
+});
+
+const RED = [{ type: "solid" as const, color: "#ff0000" }];
+
+/** A compact file with these nodes made on its first page, and a socket on it. */
+async function fileWith(make: (page: string) => Op[]) {
+  const made = await newFile("Second review");
+  const { socket, nodes } = await open(made.browser, made.fileId);
+  const page = (nodes.find((n) => n.type === "page") as NodeRecord).id;
+  socket.send({ t: "txn", seq: 1, ops: make(page) });
+  await socket.next("ack");
+  return { ...made, socket, page };
+}
+
+const at = (n: number) => {
+  let key: string | null = null;
+  for (let i = 0; i <= n; i++) key = keyBetween(key, null);
+  return key as string;
+};
+
+/** An instance as a compact editor places one: its root-local values only. */
+const placeInstance = (id: string, page: string, main: string, n = 5): Op => ({
+  op: "create",
+  id,
+  type: "frame",
+  parent: page,
+  key: at(n),
+  props: { instanceOf: main, x: 300 + n * 10, y: 0 },
+});
+
+describe("what the second review of the conversion found", { timeout: 120_000 }, () => {
+  /** An empty main that's red, and a main that's an instance of another (presenting its rect). */
+  const mains = (page: string): Op[] => [
+    {
+      op: "create",
+      id: "RedMain",
+      type: "frame",
+      parent: page,
+      key: at(0),
+      props: { name: "Red", isComponent: true, width: 40, height: 20, fills: RED },
+    },
+    {
+      op: "create",
+      id: "BaseMain",
+      type: "frame",
+      parent: page,
+      key: at(1),
+      props: { name: "Base", isComponent: true, width: 40, height: 20 },
+    },
+    {
+      op: "create",
+      id: "BaseRect",
+      type: "rect",
+      parent: "BaseMain",
+      key: at(0),
+      props: { width: 10, height: 10, fills: RED },
+    },
+    {
+      op: "create",
+      id: "WrapMain",
+      type: "frame",
+      parent: page,
+      key: at(2),
+      props: { instanceOf: "BaseMain", isComponent: true, x: 100 },
+    },
+  ];
+
+  /** What `id` shows in the file as stored now: its own values and its layers. */
+  async function shows(fileId: string, id: string) {
+    const all = presented(await stored(fileId), "compact");
+    const node = all.find((n) => n.id === id);
+    return { node, layers: all.filter((n) => n.parent === id) };
+  }
+
+  for (const [what, main] of [
+    ["an empty main", "RedMain"],
+    ["a main that is itself an instance", "WrapMain"],
+  ] as const)
+    it(`refuses a merge that deletes ${what} an instance placed meanwhile shows`, async () => {
+      const { browser, fileId, socket, page } = await fileWith(mains);
+      const made = await browser.json<{ branch: { id: string } }>(`/api/files/${fileId}/branches`, {
+        method: "POST",
+        json: { name: "Tidy" },
+      });
+      const branch = await open(browser, made.branch.id);
+      branch.socket.send({ t: "txn", seq: 1, ops: [{ op: "delete", id: main }] });
+      await branch.socket.next("ack");
+      socket.send({ t: "txn", seq: 2, ops: [placeInstance("Placed", page, main)] });
+      await socket.next("ack");
+      const before = await shows(fileId, "Placed");
+      expect(before.node?.props.fills ?? before.layers[0]?.props.fills).toEqual(RED);
+      const merged = await browser.fetch(`/api/files/${made.branch.id}/branch/merge`, {
+        method: "POST",
+        json: {},
+      });
+      expect(merged.status).not.toBe(200);
+      expect(await merged.text()).toMatch(/instance/);
+      const after = await shows(fileId, "Placed");
+      expect(after.node?.props).toEqual(before.node?.props);
+      expect(after.layers).toEqual(before.layers);
+    });
+
+  it("refuses an update from main that deletes a main the branch placed an instance of", async () => {
+    const { browser, fileId, socket } = await fileWith(mains);
+    const made = await browser.json<{ branch: { id: string } }>(`/api/files/${fileId}/branches`, {
+      method: "POST",
+      json: { name: "Use it" },
+    });
+    const branch = await open(browser, made.branch.id);
+    const page = (branch.nodes.find((n) => n.type === "page") as NodeRecord).id;
+    branch.socket.send({ t: "txn", seq: 1, ops: [placeInstance("Placed", page, "RedMain")] });
+    await branch.socket.next("ack");
+    socket.send({ t: "txn", seq: 2, ops: [{ op: "delete", id: "RedMain" }] });
+    await socket.next("ack");
+    const updated = await browser.fetch(`/api/files/${made.branch.id}/branch/update`, {
+      method: "POST",
+      json: {},
+    });
+    expect(updated.status).not.toBe(200);
+    expect((await shows(made.branch.id, "Placed")).node?.props.fills).toEqual(RED);
+  });
+
+  for (const [what, op] of [
+    ["deletes", { op: "delete", id: "RedMain" }],
+    ["unmakes", { op: "set", id: "RedMain", prop: "isComponent", value: false }],
+  ] as const)
+    it(`refuses an edit that ${what} an empty main an instance takes its look from`, async () => {
+      const { fileId, socket, page } = await fileWith((page) => [
+        ...mains(page),
+        placeInstance("Placed", page, "RedMain"),
+      ]);
+      socket.send({ t: "txn", seq: 2, ops: [op as Op] });
+      expect((await socket.next<{ code: string }>("reject")).code).toBe("invalid_value");
+      expect((await shows(fileId, "Placed")).node?.props.fills).toEqual(RED);
+      // As the editor removes a main, its instance stored first as it shows: kept.
+      const shown = (await shows(fileId, "Placed")).node as NodeRecord;
+      const keep = Object.entries(shown.props)
+        .filter(([prop]) => prop !== "instanceOf" && prop !== "x" && prop !== "y")
+        .map(([prop, value]) => ({ op: "set", id: "Placed", prop, value }) as Op);
+      socket.send({ t: "txn", seq: 3, ops: [...keep, op as Op] });
+      await socket.next("ack");
+      expect((await shows(fileId, "Placed")).node?.props.fills).toEqual(RED);
+      void page;
+    });
+
+  for (const main of ["RedMain", "WrapMain"])
+    it(`takes the editor's own deletion of ${main}, its instance kept as it showed`, async () => {
+      const { fileId, socket, page } = await fileWith((page) => [
+        ...mains(page),
+        placeInstance("Placed", page, main),
+      ]);
+      const before = await shows(fileId, "Placed");
+      const doc = new Doc();
+      doc.resetStored(await stored(fileId), "compact");
+      doc.apply([{ op: "delete", id: main }]);
+      socket.send({ t: "txn", seq: 2, ops: [...doc.lastStoredOps] });
+      await socket.next("ack");
+      const after = await shows(fileId, "Placed");
+      expect(after.node?.props).toEqual(before.node?.props);
+      expect(after.layers.map((n) => [n.id, n.type, n.props])).toEqual(
+        before.layers.map((n) => [n.id, n.type, n.props]),
+      );
+      void page;
+    });
+
+  it("refuses deleting a main that's an instance while an instance of it stores no layers", async () => {
+    const { fileId, socket, page } = await fileWith((page) => [
+      ...mains(page),
+      placeInstance("Placed", page, "WrapMain"),
+    ]);
+    expect((await shows(fileId, "Placed")).layers).toHaveLength(1);
+    socket.send({ t: "txn", seq: 2, ops: [{ op: "delete", id: "WrapMain" }] });
+    expect((await socket.next<{ code: string }>("reject")).code).toBe("invalid_value");
+    expect((await shows(fileId, "Placed")).layers).toHaveLength(1);
+    void page;
+  });
+
+  describe("ids held in values, from a tab that loaded the file before it converted", () => {
+    const kitById = new Map(kit.nodes.map((n) => [n.id, n]));
+    const plainChain = (n: NodeRecord | undefined): boolean => {
+      for (let at = n; at; at = kitById.get(at.parent))
+        if (at.props.instanceOf || at.props.mirrors || at.props.isComponent) return false;
+      return true;
+    };
+    // An ordinary frame on a screen, and a copy layer (inside an instance on a screen).
+    const frame = kit.nodes.find(
+      (n) => n.type === "frame" && n.parent !== ROOT_ID && plainChain(n),
+    ) as NodeRecord;
+    const page = kit.nodes.find((n) => n.type === "page") as NodeRecord;
+    const copy = kit.nodes.find(
+      (n) =>
+        n.props.mirrors &&
+        plainChain(kitById.get((kitById.get(n.parent) as NodeRecord).parent)) &&
+        kitById.get(n.parent)?.props.instanceOf,
+    ) as NodeRecord;
+    const derived = compactByInstance(kit.nodes).ids.get(copy.id) as string;
+    const reaction = (type: "navigate" | "overlay" | "swap-overlay", to: string) => ({
+      id: "r1",
+      trigger: { type: "tap" },
+      action:
+        type === "overlay"
+          ? { type, to, position: "center", closeOnOutside: true, dim: 0.4 }
+          : { type, to },
+      transition: DEFAULT_TRANSITION,
+    });
+
+    /** A tab on the file from before it converted; the file converted since. */
+    async function oldTab() {
+      const { browser, fileId } = await materializedFile(kit.nodes);
+      const tab = await open(browser, fileId);
+      expect(tab.welcome.copies).toBe("materialized");
+      await convert(fileId);
+      expect(derived).not.toBe(copy.id);
+      return { fileId, socket: tab.socket };
+    }
+
+    for (const [what, op, read] of [
+      [
+        "a reading order",
+        { op: "set", id: frame.id, prop: "readingOrder", value: [copy.id] },
+        (n: NodeRecord[]) => n.find((x) => x.id === frame.id)?.props.readingOrder,
+      ],
+      ...(["navigate", "overlay", "swap-overlay"] as const).map(
+        (type) =>
+          [
+            `a prototype link (${type})`,
+            { op: "set", id: frame.id, prop: "reactions", value: [reaction(type, copy.id)] },
+            (n: NodeRecord[]) =>
+              (
+                n.find((x) => x.id === frame.id)?.props.reactions as Array<{
+                  action: { to: string };
+                }>
+              )?.map((r) => [r.action.to]),
+          ] as const,
+      ),
+      [
+        "a flow's start",
+        {
+          op: "set",
+          id: page.id,
+          prop: "flows",
+          value: [{ id: "f1", name: "Flow", start: copy.id, description: "" }],
+        },
+        (n: NodeRecord[]) =>
+          (n.find((x) => x.id === page.id)?.props.flows as Array<{ start: string }>)?.map((f) => [
+            f.start,
+          ]),
+      ],
+      [
+        "a new layer's prototype link",
+        {
+          op: "create",
+          id: "NewLink",
+          type: "rect",
+          parent: frame.id,
+          key: at(40),
+          props: { width: 4, height: 4, reactions: [reaction("navigate", copy.id)] },
+        },
+        (n: NodeRecord[]) =>
+          (
+            n.find((x) => x.id === "NewLink")?.props.reactions as Array<{
+              action: { to: string };
+            }>
+          )?.map((r) => [r.action.to]),
+      ],
+    ] as const)
+      it(`names the copy by its new id when ${what} names it by its old one`, async () => {
+        const { fileId, socket } = await oldTab();
+        socket.send({ t: "txn", seq: 1, ops: [op] });
+        await socket.next("ack");
+        const after = await stored(fileId);
+        const held = JSON.stringify(read(after));
+        expect(held).toContain(derived);
+        expect(held).not.toContain(copy.id);
+      });
+
+    for (const [what, ops] of [
+      [
+        "a text style",
+        [
+          {
+            op: "create",
+            id: "NewText",
+            type: "text",
+            parent: frame.id,
+            key: at(40),
+            props: { characters: "Hi", textStyle: copy.id },
+          },
+        ],
+      ],
+      [
+        "a variable binding",
+        [{ op: "set", id: frame.id, prop: "bindings", value: { fill: copy.id } }],
+      ],
+      [
+        "a frame's variable modes",
+        [{ op: "set", id: frame.id, prop: "variableModes", value: { [copy.id]: "m1" } }],
+      ],
+      [
+        "a variable's alias",
+        [
+          {
+            op: "create",
+            id: "Coll",
+            type: "collection",
+            parent: ROOT_ID,
+            key: at(40),
+            props: { name: "Tokens" },
+          },
+          {
+            op: "create",
+            id: "Var",
+            type: "variable",
+            parent: "Coll",
+            key: at(0),
+            props: { name: "Brand", values: { m1: { alias: copy.id } } },
+          },
+        ],
+      ],
+    ] as const)
+      it(`refuses ${what} naming a copy by its old id`, async () => {
+        const { fileId, socket } = await oldTab();
+        socket.send({ t: "txn", seq: 1, ops: ops as unknown as Op[] });
+        expect((await socket.next<{ code: string }>("reject")).code).toBe("format");
+        expect(JSON.stringify(await stored(fileId))).not.toContain(copy.id);
+      });
+
+    it("refuses a layer id it can't translate once the room let the map go", async () => {
+      const { fileId, socket } = await oldTab();
+      await runInDurableObject(roomOf(fileId), (_room, state) => {
+        state.storage.sql.exec("DROP TABLE IF EXISTS pin_map");
+      });
+      socket.send({
+        t: "txn",
+        seq: 1,
+        ops: [{ op: "set", id: frame.id, prop: "readingOrder", value: [copy.id] }],
+      });
+      expect((await socket.next<{ code: string }>("reject")).code).toBe("format");
+      expect(JSON.stringify(await stored(fileId))).not.toContain(copy.id);
+    });
+  });
+
+  it("never sends compact changes to a tab from before them that was open when the file converted", async () => {
+    const { browser, fileId } = await materializedFile(kit.nodes);
+    const old = await openSocket(browser, fileId);
+    old.send({ t: "hello", protocol: 1, clientId: "old-across", revn: null });
+    expect((await old.next<{ copies?: string }>("welcome")).copies).toBe("materialized");
+    for (;;) if ((await old.next<{ done: boolean }>("snapshot")).done) break;
+    await convert(fileId);
+    // Someone with a new tab edits the file, now compact: an instance root and a copy layer.
+    const now = await open(browser, fileId);
+    const root = now.nodes.find(
+      (n) => n.type === "frame" && n.props.instanceOf && !now.nodes.some((c) => c.parent === n.id),
+    ) as NodeRecord;
+    const page = now.nodes.find((n) => n.type === "page") as NodeRecord;
+    old.inbox.length = 0;
+    now.socket.send({
+      t: "txn",
+      seq: 1,
+      ops: [
+        { op: "set", id: root.id, prop: "opacity", value: 0.5 },
+        { op: "set", id: page.id, prop: "name", value: "Edited after converting" },
+      ],
+    });
+    await now.socket.next("ack");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(old.inbox.filter((m) => m.t === "txn" || m.t === "snapshot")).toEqual([]);
+    // Its own edit is refused, telling it to reload; then it's sent the file to view.
+    old.send({
+      t: "txn",
+      seq: 1,
+      ops: [{ op: "set", id: page.id, prop: "name", value: "From the old tab" }],
+    });
+    expect((await old.next<{ message: string }>("reject")).message).toMatch(/[Rr]eload/);
+    expect((await stored(fileId)).find((n) => n.id === page.id)?.props.name).toBe(
+      "Edited after converting",
+    );
+  });
+
+  it("puts pins back when a restore lands while a sweep moving them forward awaits", async () => {
+    const root = kit.nodes.find(
+      (n) => n.type === "frame" && n.props.instanceOf && kit.nodes.some((c) => c.parent === n.id),
+    ) as NodeRecord;
+    const target = kit.nodes.find((n) => n.parent === root.id) as NodeRecord;
+    const page = kit.nodes.find((n) => n.type === "page") as NodeRecord;
+    const { browser, fileId } = await materializedFile(kit.nodes);
+    const { thread } = await browser.json<{ thread: { id: string } }>(
+      `/api/files/${fileId}/comments`,
+      {
+        method: "POST",
+        json: {
+          pageId: page.id,
+          x: 1,
+          y: 2,
+          nodeId: target.id,
+          offset: { x: 0, y: 0 },
+          body: "Hi",
+        },
+      },
+    );
+    const pinned = async () =>
+      (
+        await env.DB.prepare("SELECT node_id FROM comment_threads WHERE id = ?")
+          .bind(thread.id)
+          .first<{ node_id: string }>()
+      )?.node_id;
+    // The sweep after converting has read the pins and is about to move them; meanwhile the
+    // backup is restored with conversion off, materialized again.
+    let restored = 0;
+    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
+      room.pause = async (at) => {
+        if (at !== "sweep" || restored !== 0) return;
+        room.compactCopiesOff = true;
+        const { backup } = await room.copiesFormat();
+        restored = (
+          await browser.fetch(`/api/files/${fileId}/versions/${backup}/restore`, {
+            method: "POST",
+            json: {},
+          })
+        ).status;
+      };
+    });
+    // Converts, then sweeps (and the restore lands at that sweep).
+    for (let i = 0; i < 500 && restored === 0; i++) await runDurableObjectAlarm(roomOf(fileId));
+    expect(restored).toBe(200);
+    for (let i = 0; i < 4; i++) await runDurableObjectAlarm(roomOf(fileId));
+    expect((await roomOf(fileId).copiesFormat()).copies).toBe("materialized");
+    expect(await pinned()).toBe(target.id);
   });
 });

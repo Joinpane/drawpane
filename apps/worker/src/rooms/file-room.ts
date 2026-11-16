@@ -15,6 +15,8 @@ import {
   ClientMessage,
   type CommentEvent,
   type CopiesFormat,
+  CopyView,
+  heldNodeIds,
   IMPORT_TTL_MS,
   keyBetween,
   LATENCY_BUCKETS_MS,
@@ -28,12 +30,15 @@ import {
   type Op,
   type Peer,
   type Presence,
+  type Props,
   RELOAD_CLOSE_CODE,
   type Resolution,
   type RestoredVersion,
   ROOT_ID,
+  renameHeldIds,
   type ServerMessage,
   SNAPSHOT_CHUNK_SIZE,
+  samePropValue,
   snapshotCopies,
   summarizeEdits,
   type VersionReason,
@@ -194,6 +199,12 @@ interface Attachment {
    */
   copies?: CopiesFormat;
   /**
+   * The forms of copies the client reads, from its hello (a protocol 1
+   * client reads materialized only). Missing on sockets welcomed before it
+   * was recorded: see #reads.
+   */
+  reads?: CopiesFormat[];
+  /**
    * A client from before compact copies (protocol 1) in a file stored
    * compact: it's sent the file as presented, every copy layer built, to
    * view, and its edits are refused, telling it to reload (decision 0029).
@@ -205,10 +216,20 @@ interface Attachment {
   stale?: boolean;
 }
 
+/**
+ * What a main an edit deletes or unmakes gave its instances, read before it
+ * applies: the values an instance root takes from it, and whether it
+ * presents layers (stored, or built when it's an instance itself).
+ */
+interface RemovedMain {
+  readonly base: Readonly<Record<string, unknown>>;
+  readonly layers: boolean;
+}
+
 /** What an edit to a file stored compact is checked for, once it has applied (see #checkCompact). */
 interface CompactCheck {
-  /** Mains it deleted or unmade, and whether each had layers. */
-  readonly removed: Map<string, boolean>;
+  /** Mains it deleted or unmade, and what each gave its instances. */
+  readonly removed: Map<string, RemovedMain>;
   /** Nodes that may now be an instance of a live main storing layers. */
   readonly candidates: Set<string>;
 }
@@ -357,10 +378,11 @@ export class FileRoom extends DurableObject<Env> {
    */
   convertStepWork = CONVERT_STEP_WORK;
   /**
-   * Tests: runs where a restore, a merge, an update or a hello has awaited
-   * and is about to go on, to make something happen in between.
+   * Tests: runs where a restore, a merge, an update, a hello or a sweep of
+   * comment pins has awaited and is about to go on, to make something
+   * happen in between.
    */
-  pause: ((at: "restore" | "merge" | "update" | "hello") => Promise<void>) | null = null;
+  pause: ((at: "restore" | "merge" | "update" | "hello" | "sweep") => Promise<void>) | null = null;
   readonly #sql: SqlStorage;
   readonly #store: SqlNodeStore;
   readonly #room: RoomSql;
@@ -742,6 +764,7 @@ export class FileRoom extends DurableObject<Env> {
     if (!result) return false;
     this.#revn = result.next;
     this.#copies = "compact";
+    this.#viewersAfterChange();
     this.#converting = false;
     this.#store.clearCache();
     this.#engine?.drop();
@@ -789,8 +812,9 @@ export class FileRoom extends DurableObject<Env> {
         this.#setMeta("pins_key", pinMapKey(fileId, next));
         this.#setMeta("pins_saved", "0");
         this.#setMeta("pins_until", String(now + PIN_MAP_KEEP_MS));
-        this.#setMeta("pins_sweep", "1");
       }
+      // Any sweep under way was for the form before: it stops, and pins follow this one.
+      this.#formChanged("compact", tables);
       return { next, applied };
     });
   }
@@ -808,10 +832,13 @@ export class FileRoom extends DurableObject<Env> {
       const load = this.#meta("pins_load");
       if (load !== null) {
         // A restore put the old form back, and the room no longer had the map: from R2.
+        const gen = this.#pinsGen();
         await loadPinMap(this.env.FILES, load, this.#sql);
+        // The form changed again while that loaded: what that change asked for stands.
+        if (this.#pinsGen() !== gen) return;
         this.#sql.exec("DELETE FROM meta WHERE k = 'pins_load'");
         this.#setMeta("pins_until", String(Date.now() + PIN_MAP_KEEP_MS));
-        this.#setMeta("pins_sweep", "1");
+        this.#setMeta("pins_sweep", pinSweepFlag(this.#copies, gen));
       }
       if (!hasPinMap(this.#sql)) return;
       const key = this.#meta("pins_key");
@@ -819,34 +846,75 @@ export class FileRoom extends DurableObject<Env> {
         await savePinMap(this.env.FILES, key, this.#sql);
         this.#setMeta("pins_saved", "1");
       }
-      if (this.#meta("pins_sweep") !== null) {
-        await this.#sweepPins(fileId);
-        this.#sql.exec("DELETE FROM meta WHERE k = 'pins_sweep'");
+      const flag = this.#meta("pins_sweep");
+      if (flag !== null) {
+        const sweep = parsePinSweep(flag, this.#copies, this.#pinsGen());
+        // Cleared only when it finished, and only the flag it was for: a change of form since
+        // set another, which the next alarm sweeps (the latest form wins).
+        if ((await this.#sweepPins(fileId, sweep)) && this.#meta("pins_sweep") === flag)
+          this.#sql.exec("DELETE FROM meta WHERE k = 'pins_sweep'");
       }
       const until = Number(this.#meta("pins_until") ?? 0);
-      if (Date.now() >= until && this.#meta("pins_saved") !== "0") {
-        // Once more, for pins written since, then the map goes (R2 keeps it).
-        await this.#sweepPins(fileId);
-        dropPinMap(this.#sql);
-        for (const k of ["pins_until", "pins_sweep"])
-          this.#sql.exec("DELETE FROM meta WHERE k = ?", k);
+      if (
+        Date.now() >= until &&
+        this.#meta("pins_saved") !== "0" &&
+        this.#meta("pins_sweep") === null
+      ) {
+        // Once more, for pins written since, then the map goes (R2 keeps it), unless the form
+        // changed meanwhile: then that change's sweep comes first.
+        const sweep = { to: this.#copies, gen: this.#pinsGen() };
+        if ((await this.#sweepPins(fileId, sweep)) && this.#meta("pins_sweep") === null) {
+          dropPinMap(this.#sql);
+          this.#sql.exec("DELETE FROM meta WHERE k = 'pins_until'");
+        }
       }
     } catch (error) {
       console.warn(`compact copies: comment pins of file ${fileId} not moved yet`, error);
     }
   }
 
-  /** Moves every pin the map renames, to the id the file names it by now. */
-  async #sweepPins(fileId: string): Promise<void> {
+  /** How many times the file changed form (conversion applied, a materialized restore). */
+  #pinsGen(): number {
+    return Number(this.#meta("pins_gen") ?? 0);
+  }
+
+  /**
+   * The file changed how it stores copies (to `to`), in the storage
+   * transaction that changed it: a sweep of comment pins under way, for the
+   * form before, stops before its next write; pins are swept toward `to`
+   * when `sweep` (the room has the map), else when the map is loaded.
+   */
+  #formChanged(to: CopiesFormat, sweep: boolean): void {
+    const gen = this.#pinsGen() + 1;
+    this.#setMeta("pins_gen", String(gen));
+    if (sweep) this.#setMeta("pins_sweep", pinSweepFlag(to, gen));
+    else this.#sql.exec("DELETE FROM meta WHERE k = 'pins_sweep'");
+    // A map waiting to load was the old conversion's: one applied now brings its own.
+    if (to === "compact") this.#sql.exec("DELETE FROM meta WHERE k = 'pins_load'");
+  }
+
+  /**
+   * Moves every pin the map renames toward the form `sweep.to`. Before each
+   * write it checks the file still stores that form, at the same change
+   * (`gen`): a restore or a conversion that landed while it awaited D1
+   * stops it (false), and the sweep that change asked for puts pins where
+   * they belong. True when it finished. Each write moves a pin only from the
+   * id it read, so a sweep that runs again changes nothing more.
+   */
+  async #sweepPins(fileId: string, sweep: PinSweep): Promise<boolean> {
+    const current = () => this.#copies === sweep.to && this.#pinsGen() === sweep.gen;
+    if (!current()) return false;
     const { results } = await this.env.DB.prepare(
       "SELECT id, node_id FROM comment_threads WHERE file_id = ? AND node_id IS NOT NULL",
     )
       .bind(fileId)
       .all<{ id: string; node_id: string }>();
+    await this.pause?.("sweep");
+    if (!current()) return false;
     const renamed = pinsRenamed(
       this.#sql,
       results.map((r) => r.node_id),
-      this.#copies === "compact",
+      sweep.to === "compact",
     );
     const updates = results
       .filter((r) => renamed.has(r.node_id))
@@ -855,7 +923,11 @@ export class FileRoom extends DurableObject<Env> {
           "UPDATE comment_threads SET node_id = ? WHERE id = ? AND node_id = ?",
         ).bind(renamed.get(r.node_id), r.id, r.node_id),
       );
-    for (let i = 0; i < updates.length; i += 50) await this.env.DB.batch(updates.slice(i, i + 50));
+    for (let i = 0; i < updates.length; i += 50) {
+      if (!current()) return false;
+      await this.env.DB.batch(updates.slice(i, i + 50));
+    }
+    return true;
   }
 
   /** When pins need the alarm next (a sweep, a save, a load, the map's end); null when they don't. */
@@ -1195,13 +1267,14 @@ export class FileRoom extends DurableObject<Env> {
       this.#sql.exec("UPDATE agent_calls SET state = 'dropped' WHERE state IN ('done', 'undone')");
       // Comment pins on copies go back to the ids the file has again (pin-map.ts): from the map
       // the room keeps, or from its copy in R2.
-      if (hasPinMap(this.#sql)) {
-        this.#setMeta("pins_sweep", "1");
-        this.#setMeta("pins_until", String(now + PIN_MAP_KEEP_MS));
-      } else {
+      const map = hasPinMap(this.#sql);
+      if (map) this.#setMeta("pins_until", String(now + PIN_MAP_KEEP_MS));
+      else {
         const key = this.#meta("pins_key");
         if (key !== null && this.#meta("pins_saved") === "1") this.#setMeta("pins_load", key);
       }
+      // A sweep under way (toward compact) stops; pins go back once the map is here.
+      this.#formChanged("materialized", map);
       return next;
     });
     this.#revn = revn;
@@ -1493,6 +1566,8 @@ export class FileRoom extends DurableObject<Env> {
     const nodes = countRows(this.#sql, IMPORT_TABLE);
     const revn = this.ctx.storage.transactionSync(() => {
       fillFromStaged(this.#sql, seed.id, IMPORT_TABLE);
+      // A new form: a sweep of comment pins under way for the old one stops.
+      if (copies !== this.#copies) this.#formChanged(copies, false);
       this.#setMeta("copies", copies);
       // Not logged: one change of the whole file. Clients behind it load the file instead of
       // catching up (see #hello); the log before it stays, for who edited what.
@@ -1508,6 +1583,7 @@ export class FileRoom extends DurableObject<Env> {
     this.#store.clearCache();
     this.#revn = revn;
     this.#copies = copies;
+    this.#viewersAfterChange();
     this.#engine?.drop();
     this.#broadcast({ t: "resync" });
     void this.#scheduleAlarm();
@@ -2256,6 +2332,7 @@ export class FileRoom extends DurableObject<Env> {
     me.clientId = clientId;
     // Its changes are in the form the file has now; should that change, they're checked for it.
     me.copies = this.#copies;
+    me.reads = [...reads];
     me.viewing = false;
     me.stale = false;
     ws.serializeAttachment(me);
@@ -2328,6 +2405,7 @@ export class FileRoom extends DurableObject<Env> {
   #helloToView(ws: WebSocket, me: Attachment, clientId: string): void {
     me.clientId = clientId;
     me.copies = "materialized";
+    me.reads = ["materialized"];
     me.viewing = true;
     me.servedAt = Date.now();
     me.stale = false;
@@ -2375,13 +2453,43 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * Why operations in the materialized form (from a client that loaded the
-   * file before it converted) can't apply to the file stored compact, or
-   * null when they can as they are: they touch no copy layer, instance,
-   * main or record, and make none (a page renamed, a layer on a screen
-   * moved). Those that do are refused, as their ids and meaning changed.
+   * Whether a socket's client reads copies stored as `form`: what its hello
+   * said. A socket welcomed before that was recorded reads what it was
+   * welcomed in, and materialized (every client does).
    */
-  #materializedRefusal(ops: readonly Op[]): string | null {
+  #reads(me: Attachment, form: CopiesFormat): boolean {
+    if (me.reads) return me.reads.includes(form);
+    return form === "materialized" || me.copies === form;
+  }
+
+  /**
+   * Clients that can't read the file's form now (a tab from before compact
+   * copies, open while the file converted) become viewers, as if they had
+   * said hello now: no change in the new form is sent to them, their edits
+   * are refused telling them to reload, and they're sent the file again
+   * (`resync`) to view. Called right after the storage transaction that
+   * changes the form, with nothing awaited in between.
+   */
+  #viewersAfterChange(): void {
+    for (const { ws, me } of this.#attachments()) {
+      if (!me.clientId || me.viewing || this.#reads(me, this.#copies)) continue;
+      ws.serializeAttachment({ ...me, viewing: true, stale: true, servedAt: 0 });
+    }
+  }
+
+  /**
+   * Operations in the materialized form (from a client that loaded the file
+   * before it converted) as they apply to the file stored compact, or why
+   * they can't: they apply when they touch no copy layer, instance, main or
+   * record, and make none (a page renamed, a layer on a screen moved). Ids
+   * they hold in values are checked too: a layer named by its copy's old id
+   * (a reading order, a prototype link, a flow's start) is renamed to its
+   * derived id from the conversion's map; any other id the map knows (a
+   * text style, a binding, a variable mode or alias naming an old copy id)
+   * is refused, as is a held id the file doesn't have and the map can't
+   * translate. The rest are refused, as their ids and meaning changed.
+   */
+  #fromOldForm(ops: readonly Op[]): { ops: Op[] } | { refusal: string } {
     const plain = new Map<string, boolean>();
     // Whether a stored node, and every node above it, is outside copies, instances and mains.
     const isPlain = (id: string): boolean => {
@@ -2411,27 +2519,60 @@ export class FileRoom extends DurableObject<Env> {
         )
         .toArray().length > 0;
     const made = new Set<string>();
-    const refusal = "This file was updated, and that change was made before it was.";
+    for (const op of ops) if (op.op === "create") made.add(op.id);
+    const exists = (id: string) => {
+      if (made.has(id)) return true;
+      const node = this.#store.get(id);
+      return !!node && node.type !== "override";
+    };
+    const refusal = { refusal: "This file was updated, and that change was made before it was." };
+    /** Values with the ids they hold checked, layers' old copy ids renamed; null when refused. */
+    const held = (props: Readonly<Record<string, unknown>>): Record<string, unknown> | null => {
+      const { layers, others } = heldNodeIds(props as Props);
+      if (layers.length === 0 && others.length === 0) return props as Record<string, unknown>;
+      const renamed = pinsRenamed(this.#sql, [...layers, ...others], true);
+      if (others.some((id) => renamed.has(id) || !exists(id))) return null;
+      if (layers.some((id) => !renamed.has(id) && !exists(id))) return null;
+      if (renamed.size === 0) return props as Record<string, unknown>;
+      return (renameHeldIds(props as Props, (id) => renamed.get(id)) ?? props) as Record<
+        string,
+        unknown
+      >;
+    };
+    const out: Op[] = [];
     try {
       for (const op of ops) {
         if (op.op === "create") {
           const props = op.props as Record<string, unknown>;
           if ([...COPY_PROPS].some((prop) => props[prop] !== undefined)) return refusal;
           if (!made.has(op.parent) && !isPlain(op.parent)) return refusal;
-          made.add(op.id);
+          const checked = held(props);
+          if (!checked) return refusal;
+          out.push(checked === props ? op : { ...op, props: checked as Props });
           continue;
         }
-        if (made.has(op.id)) {
-          if (op.op === "move" && !made.has(op.parent) && !isPlain(op.parent)) return refusal;
+        if (op.op === "set") {
+          if (COPY_PROPS.has(op.prop)) return refusal;
+          if (!made.has(op.id) && !isPlain(op.id)) return refusal;
+          if (op.value === null || op.value === undefined) {
+            out.push(op);
+            continue;
+          }
+          const value = { [op.prop]: op.value };
+          const checked = held(value);
+          if (!checked) return refusal;
+          out.push(checked === value ? op : ({ ...op, value: checked[op.prop] } as Op));
           continue;
         }
-        // An id it doesn't have is most likely a copy layer's old one.
-        if (!isPlain(op.id)) return refusal;
-        if (op.op === "set" && COPY_PROPS.has(op.prop)) return refusal;
+        if (!made.has(op.id)) {
+          // An id it doesn't have is most likely a copy layer's old one.
+          if (!isPlain(op.id)) return refusal;
+          if (op.op === "delete" && holdsCopies(op.id)) return refusal;
+        }
         if (op.op === "move" && !made.has(op.parent) && !isPlain(op.parent)) return refusal;
-        if (op.op === "delete" && holdsCopies(op.id)) return refusal;
+        out.push(op);
       }
-      return null;
+      return { ops: out };
     } finally {
       this.#store.clearCache();
     }
@@ -2451,7 +2592,7 @@ export class FileRoom extends DurableObject<Env> {
       return;
     }
     // A client from before compact copies, viewing a file stored compact: it can't edit it.
-    if (me.viewing) {
+    if (me.viewing || !this.#reads(me, this.#copies)) {
       this.#reject(ws, seq, ops, "format", RELOAD_TO_EDIT);
       return;
     }
@@ -2459,15 +2600,16 @@ export class FileRoom extends DurableObject<Env> {
     // (decision 0029): those that don't touch copies apply as they are; the rest are refused,
     // and the client loads the file again (it was told to already).
     if ((me.copies ?? "materialized") !== this.#copies) {
-      const refusal =
+      const fitted: { ops: Op[] } | { refusal: string } =
         this.#copies === "compact"
-          ? this.#materializedRefusal(ops)
-          : "This file was updated, and that change was made before it was.";
-      if (refusal !== null) {
-        this.#reject(ws, seq, ops, "format", `${refusal} Loading it again.`);
+          ? this.#fromOldForm(ops)
+          : { refusal: "This file was updated, and that change was made before it was." };
+      if ("refusal" in fitted) {
+        this.#reject(ws, seq, ops, "format", `${fitted.refusal} Loading it again.`);
         this.#send(ws, { t: "resync" });
         return;
       }
+      ops = fitted.ops;
     }
     // Override records (decision 0029) only in a file that stores compact copies.
     if (
@@ -2555,10 +2697,10 @@ export class FileRoom extends DurableObject<Env> {
     return this.#copies === "compact" ? { removed: new Map(), candidates: new Set() } : null;
   }
 
-  /** Before operations apply: the mains they delete or unmake (with whether they had layers). */
+  /** Before operations apply: the mains they delete or unmake, and what each gave its instances. */
   #noteRemovedMains(ops: readonly Op[], check: CompactCheck): void {
-    for (const [id, had] of this.#mainsRemoved(ops))
-      if (!check.removed.has(id)) check.removed.set(id, had);
+    for (const [id, gave] of this.#mainsRemoved(ops))
+      if (!check.removed.has(id)) check.removed.set(id, gave);
   }
 
   /** After operations apply: the nodes that may now be an instance storing layers. */
@@ -2578,19 +2720,32 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * The mains (with whether they had layers) an edit is about to delete or
-   * unmake, read before it applies: their instances must keep their look.
+   * The mains an edit is about to delete or unmake, read before it applies,
+   * with what each gives its instances as presented (decision 0029): the
+   * values an instance root takes from it (all but root-local ones, from
+   * the main as it presents itself, so a main that's an instance itself
+   * counts what it takes from its own), and whether it presents layers.
+   * Their instances must keep exactly that.
    */
-  #mainsRemoved(ops: readonly Op[]): Map<string, boolean> {
-    const out = new Map<string, boolean>();
-    const hasLayers = (id: string) =>
-      this.#sql
-        .exec("SELECT 1 FROM nodes WHERE parent = ? AND type != 'override' LIMIT 1", id)
-        .toArray().length > 0;
+  #mainsRemoved(ops: readonly Op[]): Map<string, RemovedMain> {
+    const out = new Map<string, RemovedMain>();
+    let view: CopyView | null = null;
+    const gave = (id: string): RemovedMain => {
+      view ??= new CopyView(
+        {
+          get: (at) => this.#store.get(at),
+          childIds: (at) => this.#store.childIds(at),
+          nodes: () => [],
+        },
+        { lazy: true },
+      );
+      return { base: view.rootBase(id) ?? {}, layers: view.childIds(id).length > 0 };
+    };
     for (const op of ops) {
       if (op.op === "set" && op.prop === "isComponent" && !op.value) {
         const node = this.#store.get(op.id);
-        if (node?.type === "frame" && node.props.isComponent) out.set(op.id, hasLayers(op.id));
+        if (node?.type === "frame" && node.props.isComponent && !out.has(op.id))
+          out.set(op.id, gave(op.id));
       } else if (op.op === "delete") {
         for (const row of this.#sql
           .exec<{ id: string }>(
@@ -2600,7 +2755,7 @@ export class FileRoom extends DurableObject<Env> {
             op.id,
           )
           .toArray())
-          out.set(row.id, hasLayers(row.id));
+          if (!out.has(row.id)) out.set(row.id, gave(row.id));
       }
     }
     return out;
@@ -2635,7 +2790,12 @@ export class FileRoom extends DurableObject<Env> {
           "invalid_parent",
           "Layers inside an instance come from its main component: detach it to change them.",
         );
-    for (const [main, hadLayers] of removed) {
+    const used = () =>
+      new ModelError(
+        "invalid_value",
+        "This removes a component an instance takes its look from, and that instance doesn't keep it yet (someone placed it meanwhile, or the change is older than it). Detach the instance first, or keep the component.",
+      );
+    for (const [main, gave] of removed) {
       if (isMain(main)) continue;
       const roots = this.#sql
         .exec<{ id: string }>(
@@ -2649,11 +2809,18 @@ export class FileRoom extends DurableObject<Env> {
           .toArray();
         const records = kids.some((k) => k.type === "override");
         const layers = kids.some((k) => k.type !== "override");
-        if (records || (hadLayers && !layers))
-          throw new ModelError(
-            "invalid_value",
-            "Someone used this component meanwhile. Try again: its instances keep their look.",
-          );
+        if (records || (gave.layers && !layers)) throw used();
+        // Without its main it shows only what it stores: every value it took from the main
+        // (one that isn't a default) must be its own now, as the editor stores it before.
+        const own = (this.#store.get(id)?.props ?? {}) as Record<string, unknown>;
+        const unset = Array.isArray(own.unset) ? (own.unset as string[]) : [];
+        for (const [prop, value] of Object.entries(gave.base))
+          if (
+            own[prop] === undefined &&
+            !unset.includes(prop) &&
+            !samePropValue(prop, undefined, value)
+          )
+            throw used();
       }
       const swapped = this.#sql
         .exec(
@@ -2661,11 +2828,7 @@ export class FileRoom extends DurableObject<Env> {
           main,
         )
         .toArray();
-      if (swapped.length > 0)
-        throw new ModelError(
-          "invalid_value",
-          "Someone used this component meanwhile. Try again: its instances keep their look.",
-        );
+      if (swapped.length > 0) throw used();
     }
   }
 
@@ -3216,7 +3379,7 @@ export class FileRoom extends DurableObject<Env> {
       const me = ws.deserializeAttachment() as Attachment | null;
       if (!me?.clientId) continue;
       if (me.guest && guestData === null) continue;
-      if (me.viewing && message.t === "txn") {
+      if ((me.viewing || !this.#reads(me, this.#copies)) && message.t === "txn") {
         // A client from before compact copies can't take changes as stored: it's sent the file
         // again, every VIEW_REFRESH_MS at most (the alarm sends it when it's held back).
         ws.serializeAttachment({ ...me, stale: true });
@@ -3312,4 +3475,20 @@ function touchedIds(ops: readonly Op[]): string[] {
     if (op.op === "create" || op.op === "move") ids.add(op.parent);
   }
   return [...ids];
+}
+
+/** A sweep of comment pins: toward which form, for which change of form (see #formChanged). */
+interface PinSweep {
+  readonly to: CopiesFormat;
+  readonly gen: number;
+}
+
+function pinSweepFlag(to: CopiesFormat, gen: number): string {
+  return `${to}:${gen}`;
+}
+
+/** A `pins_sweep` flag read back; one without a form and change (older) is for the current ones. */
+function parsePinSweep(flag: string, copies: CopiesFormat, gen: number): PinSweep {
+  const [to, at] = flag.split(":");
+  return to === "compact" || to === "materialized" ? { to, gen: Number(at) } : { to: copies, gen };
 }

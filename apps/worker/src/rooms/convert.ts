@@ -45,6 +45,7 @@ import {
   type DetachedInstance,
   holdsIds,
   InstanceConverter,
+  type InstanceSize,
   ModelError,
   type NodeRecord,
   ROOT_ID,
@@ -70,6 +71,25 @@ export const CONVERT_STEP_WORK = 60_000;
 
 /** The most layers an instance may have to convert: it's held whole (and built) while it does. */
 export const MAX_INSTANCE_LAYERS = 5_000;
+
+/**
+ * The most bytes of values (UTF-8, as SQLite stores them) an instance may
+ * hold to convert: its own layers' and those of every main it's built from
+ * (its main, the mains of instances inside it, theirs, with their layers),
+ * summed in SQL before any of it is read. One larger stops the conversion
+ * (the file stays materialized and working): it would be held whole, and
+ * built, in a Durable Object's 128 MB. The memory check
+ * (test-node/convert-memory.test.ts) converts instances at this size, wide
+ * and deep, within a 64 MB heap.
+ */
+export const MAX_INSTANCE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * About how many bytes of values a step reads (at least one instance a
+ * step): with `CONVERT_STEP_WORK`, what bounds what a step holds, however
+ * large the file's layers are.
+ */
+export const CONVERT_STEP_BYTES = 8 * 1024 * 1024;
 
 /** The tables a conversion keeps its decisions in. */
 export interface ConvertTables {
@@ -235,6 +255,8 @@ class SqlConversion implements ConvertReader, ConvertSink {
   detachedCount = 0;
   /** Rows read and written so far: what bounds a step. */
   work = 0;
+  /** Bytes of values read so far: what bounds a step too. */
+  bytes = 0;
 
   constructor(room: RoomSql, src: string, t: ConvertTables) {
     this.#room = room;
@@ -271,6 +293,7 @@ class SqlConversion implements ConvertReader, ConvertSink {
       )
       .toArray()[0];
     this.work++;
+    if (row) this.bytes += row.props.length;
     const node = row ? toRecord(row) : null;
     this.#nodes.set(id, node);
     return node ?? undefined;
@@ -296,18 +319,33 @@ class SqlConversion implements ConvertReader, ConvertSink {
     return ids;
   }
 
-  countUnder(rootId: string): number {
-    const n = this.#sql
+  sizeOf(rootId: string): InstanceSize {
+    const src = this.#src;
+    const layers = this.#sql
       .exec<{ n: number }>(
         `WITH RECURSIVE sub(id) AS (
-           SELECT id FROM ${this.#src} WHERE parent = ?
-           UNION ALL SELECT n.id FROM ${this.#src} n JOIN sub ON n.parent = sub.id
+           SELECT id FROM ${src} WHERE parent = ?
+           UNION ALL SELECT n.id FROM ${src} n JOIN sub ON n.parent = sub.id
          ) SELECT COUNT(*) AS n FROM sub`,
         rootId,
       )
       .one().n;
-    this.work += 1 + Math.ceil(n / 4);
-    return n;
+    // Everything building it reads: its layers, the main of any instance among them (its own
+    // root first), and each main's layers, and so on; each node once.
+    const reach = this.#sql
+      .exec<{ n: number; bytes: number | null }>(
+        `WITH RECURSIVE reach(id) AS (
+           SELECT ?
+           UNION SELECT n.id FROM ${src} n JOIN reach r ON n.parent = r.id
+           UNION SELECT json_extract(f.props, '$.instanceOf') FROM ${src} f JOIN reach r ON f.id = r.id
+                  WHERE f.type = 'frame' AND json_extract(f.props, '$.instanceOf') IS NOT NULL
+         ) SELECT COUNT(*) AS n, SUM(LENGTH(CAST(s.props AS BLOB))) AS bytes
+             FROM reach JOIN ${src} s ON s.id = reach.id`,
+        rootId,
+      )
+      .one();
+    this.work += 2 + Math.ceil((layers + reach.n) / 4);
+    return { layers, bytes: reach.bytes ?? 0 };
   }
 
   layersUnder(rootId: string): readonly NodeRecord[] {
@@ -320,7 +358,10 @@ class SqlConversion implements ConvertReader, ConvertSink {
         rootId,
       )
       .toArray()
-      .map(toRecord);
+      .map((row) => {
+        this.bytes += row.props.length;
+        return toRecord(row);
+      });
     this.work += 1 + layers.length;
     return layers;
   }
@@ -501,7 +542,15 @@ export function convertStep(
   src: string,
   t: ConvertTables,
   budget: number = CONVERT_STEP_WORK,
-  { maxInstanceLayers = MAX_INSTANCE_LAYERS }: { readonly maxInstanceLayers?: number } = {},
+  {
+    maxInstanceLayers = MAX_INSTANCE_LAYERS,
+    maxInstanceBytes = MAX_INSTANCE_BYTES,
+    stepBytes = CONVERT_STEP_BYTES,
+  }: {
+    readonly maxInstanceLayers?: number;
+    readonly maxInstanceBytes?: number;
+    readonly stepBytes?: number;
+  } = {},
 ): StepResult {
   const sql = room.sql;
   createConvertTables(sql, t);
@@ -510,8 +559,12 @@ export function convertStep(
   const conversion = new SqlConversion(room, src, t);
   const converter = new InstanceConverter(conversion, conversion, {
     maxInstanceLayers,
-    // At least one instance a step; then none that would take it past its budget.
-    stop: (layers) => conversion.settledCount > 0 && conversion.work + layers > budget,
+    maxInstanceBytes,
+    // At least one instance a step; then none that would take it past its budget, in rows or
+    // in bytes.
+    stop: (size) =>
+      conversion.settledCount > 0 &&
+      (conversion.work + size.layers > budget || conversion.bytes + size.bytes > stepBytes),
   });
   const pending = () =>
     sql
@@ -543,7 +596,10 @@ export function convertStep(
         // Deleted, unlinked or put inside another instance since it was listed.
         if (!conversion.settled(id)) conversion.gone(id);
         if (converter.cached > 200_000) converter.clear();
-        if (conversion.work > budget && conversion.settledCount > 0) {
+        if (
+          (conversion.work > budget || conversion.bytes > stepBytes) &&
+          conversion.settledCount > 0
+        ) {
           stopped = true;
           return;
         }
@@ -732,8 +788,9 @@ export function compactTable(room: RoomSql, table: string): Applied {
   };
   try {
     createConvertTables(room.sql, t);
+    // In steps, as a room converts, so what's held stays bounded; all of them now.
     for (;;) {
-      const step = convertStep(room, table, t, Number.POSITIVE_INFINITY);
+      const step = convertStep(room, table, t);
       if (step.done) break;
     }
     let applied: Applied;
