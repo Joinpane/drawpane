@@ -60,7 +60,7 @@ type W = {
     centerOn(p: { x: number; y: number }): void;
     createPage?(): string;
   };
-  drawpaneFrames: { redraw(): void };
+  drawpaneFrames: { redraw(): void; exact: boolean };
 };
 
 const suites: Suite[] = readdirSync(join(ROOT, "scenes"))
@@ -242,6 +242,13 @@ test.describe
       test.setTimeout(180_000);
       instance = await freshInstance(browser, { port: 8941, inspectorPort: 9481 });
       await instance.page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
+      // PARITY_THROTTLE=6 slows the CPU as a busy CI machine does, to reproduce what only fails there.
+      if (process.env.PARITY_THROTTLE) {
+        const cdp = await instance.page.context().newCDPSession(instance.page);
+        await cdp.send("Emulation.setCPUThrottlingRate", {
+          rate: Number(process.env.PARITY_THROTTLE),
+        });
+      }
     });
 
     test.afterAll(async () => {
