@@ -35,13 +35,21 @@
  *   aren't mains any more are what it removed. If the room didn't look at
  *   their instances before, it throws `RemovalNeedsLooks`: the caller rolls
  *   the storage transaction back and runs it again, looking first.
- * - Bounded: each instance looked at is measured in SQL first, under the
- *   conversion's limits (`INSTANCE_LIMITS`), and all of them together under
- *   `REMOVAL_CHECK_LAYERS`. Larger, and the removal is refused, saying so.
+ * - Bounded as it's built: one `BuildBudget` covers the check, before and
+ *   after, charged for every copy built (intermediate copies of nested
+ *   mains and their paths too), every node presented and every row parsed
+ *   and kept (`BUILD_HELD_BYTES`), and for every layer built in all
+ *   (`REMOVAL_CHECK_LAYERS`). Each instance lets go of what it read and
+ *   built before the next is looked at. An instance that can't be built
+ *   within it, or instances too many to build, refuse the removal, saying
+ *   so. Each instance is also measured in SQL first, under the
+ *   conversion's limits (`INSTANCE_LIMITS`): a cheap first filter.
  *
  * Nothing here imports `cloudflare:workers`.
  */
 import {
+  BuildBudget,
+  BuildTooLarge,
   COPY_LINK_PROPS,
   CopyView,
   instanceCost,
@@ -53,7 +61,7 @@ import {
   ROOT_LOCAL_PROPS,
   samePropValue,
 } from "@drawpane/model";
-import { INSTANCE_LIMITS, PresentedCounter } from "./convert";
+import { BUILD_HELD_BYTES, INSTANCE_LIMITS, PresentedCounter } from "./convert";
 
 /**
  * The most layers the room builds, before and after together, to check a
@@ -68,6 +76,8 @@ export interface RemovalStore {
   get(id: string): NodeRecord | undefined;
   childIds(parent: string): readonly string[];
   clearCache(): void;
+  /** Charges what it parses and keeps to `budget` until its cache empties (see `SqlNodeStore`). */
+  meter?(budget: BuildBudget | null): void;
 }
 
 /**
@@ -114,10 +124,30 @@ export class MainRemoval {
   /** What each looked-at main and instance is called, from before. */
   readonly #names = new Map<string, string>();
   #built = 0;
+  readonly #budget: BuildBudget;
+  readonly #precount: boolean;
 
-  constructor(sql: SqlStorage, store: RemovalStore) {
+  constructor(
+    sql: SqlStorage,
+    store: RemovalStore,
+    {
+      heldBytes = BUILD_HELD_BYTES,
+      precount = true,
+    }: {
+      readonly heldBytes?: number;
+      /** Measure each instance in SQL first (the cheap filter). Off: the budget alone (the memory check). */
+      readonly precount?: boolean;
+    } = {},
+  ) {
     this.#sql = sql;
     this.#store = store;
+    this.#budget = new BuildBudget({ bytes: heldBytes, layers: REMOVAL_CHECK_LAYERS });
+    this.#precount = precount;
+  }
+
+  /** What the check has held at most, as its budget estimates it (for the memory check). */
+  get peakHeld(): number {
+    return this.#budget.peak;
   }
 
   /**
@@ -154,6 +184,7 @@ export class MainRemoval {
     }
     const counter = new PresentedCounter(this.#sql, "nodes");
     const view = this.#view();
+    this.#store.meter?.(this.#budget);
     try {
       for (const [root, mains] of this.#affected(fresh)) {
         if (deleted.size > 0 && this.#under(root, deleted)) {
@@ -170,6 +201,8 @@ export class MainRemoval {
         this.#looks.set(root, { look: this.#lookOf(view, counter, root, mains), mains });
       }
     } finally {
+      view.clear();
+      this.#store.meter?.(null);
       this.#store.clearCache();
     }
   }
@@ -207,14 +240,20 @@ export class MainRemoval {
       const gone = new Set(removed);
       const counter = new PresentedCounter(this.#sql, "nodes");
       const view = this.#view();
-      for (const [root, before] of this.#looks) {
-        const main = [...before.mains].find((id) => gone.has(id));
-        if (main === undefined || !this.#store.get(root)) continue;
-        if (this.#lookOf(view, counter, root, before.mains) !== before.look)
-          throw new ModelError(
-            "conflict",
-            `Removing ${this.#names.get(main)} would change how ${this.#names.get(root)} looks, so nothing was changed. If someone just changed that instance or the component, try again; otherwise detach the instance first.`,
-          );
+      this.#store.meter?.(this.#budget);
+      try {
+        for (const [root, before] of this.#looks) {
+          const main = [...before.mains].find((id) => gone.has(id));
+          if (main === undefined || !this.#store.get(root)) continue;
+          if (this.#lookOf(view, counter, root, before.mains) !== before.look)
+            throw new ModelError(
+              "conflict",
+              `Removing ${this.#names.get(main)} would change how ${this.#names.get(root)} looks, so nothing was changed. If someone just changed that instance or the component, try again; otherwise detach the instance first.`,
+            );
+        }
+      } finally {
+        view.clear();
+        this.#store.meter?.(null);
       }
     } finally {
       this.#store.clearCache();
@@ -228,7 +267,7 @@ export class MainRemoval {
         childIds: (id) => this.#store.childIds(id),
         nodes: () => [],
       },
-      { lazy: true },
+      { lazy: true, budget: this.#budget },
     );
   }
 
@@ -335,7 +374,9 @@ export class MainRemoval {
     root: string,
     mains: ReadonlySet<string>,
   ): string {
-    const size = counter.sizeOf(root);
+    const size = this.#precount
+      ? counter.sizeOf(root)
+      : { layers: 0, built: 0, reached: 0, bytes: 0 };
     const limits = INSTANCE_LIMITS;
     const main = this.#names.get([...mains][0] as string) ?? "a component";
     const instance =
@@ -358,16 +399,33 @@ export class MainRemoval {
       throw tooLarge(
         `${Math.ceil(cost / 1024 / 1024)} MB to build, more than ${limits.maxInstanceBytes / 1024 / 1024} MB`,
       );
-    this.#built += size.built + 1;
-    if (this.#built > REMOVAL_CHECK_LAYERS)
-      throw new ModelError(
+    const tooMany = () =>
+      new ModelError(
         "conflict",
         `Removing ${main} needs Drawpane to check that its instances keep their look, and they show more than ${REMOVAL_CHECK_LAYERS.toLocaleString("en")} layers, too many to check at once, so nothing was changed. Detach some of its instances first.`,
       );
-    try {
-      return lookHash(view, root);
-    } finally {
-      view.release(root);
+    this.#built += size.built + 1;
+    if (this.#built > REMOVAL_CHECK_LAYERS) throw tooMany();
+    // What was cached for the instances before (mains built, rows read) counts against this one:
+    // past the budget with any of it held, it's let go of and this one is built afresh.
+    for (let attempt = 0; ; attempt++) {
+      const before = this.#budget.held;
+      try {
+        return lookHash(view, root);
+      } catch (error) {
+        if (!(error instanceof BuildTooLarge)) throw error;
+        view.clear();
+        this.#store.clearCache();
+        if (error.unit === "layers") throw tooMany();
+        if (attempt > 0 || before === 0)
+          throw tooLarge(`more than ${Math.round(error.limit / 1024 / 1024)} MB to build`);
+      } finally {
+        // What this instance read and built goes before the next is looked at: its records
+        // and their values most of all.
+        view.release(root);
+        this.#store.clearCache();
+        if (this.#budget.held > this.#budget.limit / 2) view.clear();
+      }
     }
   }
 }

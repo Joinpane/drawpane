@@ -973,18 +973,25 @@ export class FileRoom extends DurableObject<Env> {
    *   that hasn't reloaded) is translated, through the map the room keeps
    *   for a week (pin-map.ts), or after that the copy of it in R2;
    * - anything else (a layer deleted since, an id the maps don't name) is
-   *   null: a comment is never pinned to a layer the file doesn't have.
+   *   null: a comment is never pinned to a layer the file doesn't have;
+   * - so is an id it can't translate because reading the map failed (R2
+   *   unavailable, a damaged copy), or the layer couldn't be looked for.
    */
   async pinTarget(nodeId: string, pageId: string | null = null): Promise<string | null> {
-    const toCompact = this.#copies === "compact";
-    if (this.#hasLayer(nodeId, pageId)) return nodeId;
-    const local = pinsRenamed(this.#sql, [nodeId], toCompact).get(nodeId);
-    if (local !== undefined) return this.#hasLayer(local, pageId) ? local : null;
-    const key = this.#meta("pins_key");
-    if (key === null || hasPinMap(this.#sql)) return null;
-    const archived = await pinRenamedInR2(this.env.FILES, key, nodeId, toCompact);
-    // Asked as the file is now: it may have changed while R2 answered.
-    return archived !== null && this.#hasLayer(archived, pageId) ? archived : null;
+    try {
+      const toCompact = this.#copies === "compact";
+      if (this.#hasLayer(nodeId, pageId)) return nodeId;
+      const local = pinsRenamed(this.#sql, [nodeId], toCompact).get(nodeId);
+      if (local !== undefined) return this.#hasLayer(local, pageId) ? local : null;
+      const key = this.#meta("pins_key");
+      if (key === null || hasPinMap(this.#sql)) return null;
+      const archived = await pinRenamedInR2(this.env.FILES, key, nodeId, toCompact);
+      // Asked as the file is now: it may have changed while R2 answered.
+      return archived !== null && this.#hasLayer(archived, pageId) ? archived : null;
+    } catch (error) {
+      console.error("comment pin: couldn't find or translate its layer; pinned to the page", error);
+      return null;
+    }
   }
 
   /**
@@ -2852,7 +2859,13 @@ export class FileRoom extends DurableObject<Env> {
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
     // A file stored compact: what this removes and makes, checked when the transaction ends.
     if (check) this.#noteRemovedMains(ops, check);
-    const undo = applyTransaction(this.#store, ops, { rollback: false, inverse, held });
+    // Every commit is checked for instances inside their own main, held or not (the clients follow).
+    const undo = applyTransaction(this.#store, ops, {
+      rollback: false,
+      inverse,
+      held,
+      cycles: true,
+    });
     this.#store.clearCache();
     if (check) this.#noteCandidates(ops, check);
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);

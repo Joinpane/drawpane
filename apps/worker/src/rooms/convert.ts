@@ -28,10 +28,15 @@
  *
  * A step is bounded by the work it does (rows read and written), not by
  * the clock: on Cloudflare, `Date.now()` doesn't move while code runs
- * without I/O. An instance is held whole while it converts, so one larger
- * than `MAX_INSTANCE_LAYERS`, `MAX_INSTANCE_BUILT` or `MAX_INSTANCE_BYTES`,
- * counted in SQL before any of it is read, stops the conversion (the file
- * stays materialized and working) rather than run out of memory.
+ * without I/O. What a step holds is bounded as it's built: everything the
+ * builder makes and keeps, and every row the reader parses and keeps, is
+ * charged to the step's `BuildBudget` (`BUILD_HELD_BYTES`). An instance
+ * that can't be built within it, even with nothing else held, stops the
+ * conversion (the file stays materialized and working) rather than run
+ * out of memory. Counted in SQL before any of it is read, an instance
+ * larger than `MAX_INSTANCE_LAYERS`, `MAX_INSTANCE_BUILT` or
+ * `MAX_INSTANCE_BYTES` stops it too: a cheap first filter, not what
+ * safety rests on.
  *
  * The same code converts a table read from a snapshot (a version saved
  * before conversion, a branch's old base): `compactTable`.
@@ -40,15 +45,21 @@
  * Node (test-node/).
  */
 import {
+  BuildBudget,
+  BuildTooLarge,
   type ConvertedInstance,
   type ConvertReader,
   type ConvertSink,
   type DetachedInstance,
+  ENTRY_BYTES,
   holdsIds,
   InstanceConverter,
   type InstanceSize,
+  InstanceTooLarge,
+  idsBytes,
   ModelError,
   type NodeRecord,
+  nodeBytes,
   ROOT_ID,
   renameHeldIds,
 } from "@drawpane/model";
@@ -113,6 +124,17 @@ export const MAX_INSTANCE_BYTES = 8 * 1024 * 1024;
  * large the file's layers are.
  */
 export const CONVERT_STEP_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The most a step of a conversion, or a check of a removed main, holds of
+ * what it builds and reads at once, as `BuildBudget` estimates V8's heap:
+ * copies built (with intermediate copies of nested mains, and their paths),
+ * presented nodes cached, rows parsed and kept. Counted as they're built,
+ * whatever the file's shape. The memory check
+ * (test-node/copy-budget.test.ts) runs generated shapes at this budget
+ * under a 64 MB heap.
+ */
+export const BUILD_HELD_BYTES = 24 * 1024 * 1024;
 
 /** The bounds on one instance that conversion (and the room's check of a removed main) holds. */
 export const INSTANCE_LIMITS = {
@@ -386,6 +408,57 @@ export function hasInstances(sql: SqlStorage, src = "nodes"): boolean {
 /** How many entries the reader's caches keep before starting again. */
 const CACHE_LIMIT = 50_000;
 
+/** A cache whose entries are charged to a budget, and given back when they go. */
+class HeldMap<V> {
+  readonly #map = new Map<string, V>();
+  readonly #budget: BuildBudget | null;
+  readonly #cost: (value: V) => number;
+  #held = 0;
+
+  constructor(budget: BuildBudget | null, cost: (value: V) => number) {
+    this.#budget = budget;
+    this.#cost = cost;
+  }
+
+  get size(): number {
+    return this.#map.size;
+  }
+
+  get(id: string): V | undefined {
+    return this.#map.get(id);
+  }
+
+  set(id: string, value: V): void {
+    this.delete(id);
+    if (this.#budget) {
+      const cost = this.#cost(value);
+      this.#budget.charge(cost);
+      this.#held += cost;
+    }
+    this.#map.set(id, value);
+  }
+
+  delete(id: string): void {
+    if (!this.#map.has(id)) return;
+    if (this.#budget) {
+      const cost = this.#cost(this.#map.get(id) as V);
+      this.#budget.release(cost);
+      this.#held -= cost;
+    }
+    this.#map.delete(id);
+  }
+
+  clear(): void {
+    this.#map.clear();
+    this.#budget?.release(this.#held);
+    this.#held = 0;
+  }
+}
+
+const recordCost = (node: NodeRecord | null) => ENTRY_BYTES + (node ? nodeBytes(node) : 0);
+const idsCost = (ids: readonly string[]) => ENTRY_BYTES + idsBytes(ids.length);
+const entryCost = () => ENTRY_BYTES;
+
 /**
  * The file as converted so far, read from SQLite (`src` and the
  * conversion's tables), and where the converter's decisions are written.
@@ -394,11 +467,12 @@ class SqlConversion implements ConvertReader, ConvertSink {
   readonly #room: RoomSql;
   readonly #src: string;
   readonly #t: ConvertTables;
-  readonly #nodes = new Map<string, NodeRecord | null>();
-  readonly #kids = new Map<string, readonly string[]>();
-  readonly #renames = new Map<string, string | null>();
-  readonly #settled = new Map<string, boolean>();
-  readonly #inside = new Map<string, readonly string[]>();
+  readonly #budget: BuildBudget | null;
+  readonly #nodes: HeldMap<NodeRecord | null>;
+  readonly #kids: HeldMap<readonly string[]>;
+  readonly #renames: HeldMap<string | null>;
+  readonly #settled: HeldMap<boolean>;
+  readonly #inside: HeldMap<readonly string[]>;
   #counter: PresentedCounter | null = null;
   convertedCount = 0;
   detachedCount = 0;
@@ -407,10 +481,25 @@ class SqlConversion implements ConvertReader, ConvertSink {
   /** Bytes of values read so far: what bounds a step too. */
   bytes = 0;
 
-  constructor(room: RoomSql, src: string, t: ConvertTables) {
+  constructor(room: RoomSql, src: string, t: ConvertTables, budget: BuildBudget | null = null) {
     this.#room = room;
     this.#src = src;
     this.#t = t;
+    this.#budget = budget;
+    this.#nodes = new HeldMap(budget, recordCost);
+    this.#kids = new HeldMap(budget, idsCost);
+    this.#renames = new HeldMap(budget, entryCost);
+    this.#settled = new HeldMap(budget, entryCost);
+    this.#inside = new HeldMap(budget, idsCost);
+  }
+
+  /** Lets go of everything cached (and gives it back to the budget). */
+  clearCaches(): void {
+    this.#nodes.clear();
+    this.#kids.clear();
+    this.#renames.clear();
+    this.#settled.clear();
+    this.#inside.clear();
   }
 
   get #sql(): SqlStorage {
@@ -478,19 +567,31 @@ class SqlConversion implements ConvertReader, ConvertSink {
   }
 
   layersUnder(rootId: string): readonly NodeRecord[] {
-    const layers = this.#sql
-      .exec<NodeRow>(
+    const layers: NodeRecord[] = [];
+    // Charged a row at a time as it's read (the converter gives them back): a row past the
+    // budget stops the read there.
+    let charged = 0;
+    try {
+      for (const row of this.#sql.exec<NodeRow>(
         `WITH RECURSIVE sub(id) AS (
            SELECT id FROM ${this.#src} WHERE parent = ?
            UNION ALL SELECT n.id FROM ${this.#src} n JOIN sub ON n.parent = sub.id
          ) SELECT ${NODE_COLUMNS} FROM ${this.#src} WHERE id IN (SELECT id FROM sub)`,
         rootId,
-      )
-      .toArray()
-      .map((row) => {
+      )) {
         this.bytes += row.props.length;
-        return toRecord(row);
-      });
+        const node = toRecord(row);
+        if (this.#budget) {
+          const cost = nodeBytes(node);
+          this.#budget.charge(cost);
+          charged += cost;
+        }
+        layers.push(node);
+      }
+    } catch (error) {
+      this.#budget?.release(charged);
+      throw error;
+    }
     this.work += 1 + layers.length;
     return layers;
   }
@@ -677,20 +778,25 @@ export function convertStep(
     maxInstanceBytes = MAX_INSTANCE_BYTES,
     layerBytes = LAYER_BYTES,
     stepBytes = CONVERT_STEP_BYTES,
+    heldBytes = BUILD_HELD_BYTES,
   }: {
     readonly maxInstanceLayers?: number;
     readonly maxInstanceBuilt?: number;
     readonly maxInstanceBytes?: number;
     readonly layerBytes?: number;
     readonly stepBytes?: number;
+    /** What the step may hold of what it builds and reads (`BuildBudget`). */
+    readonly heldBytes?: number;
   } = {},
 ): StepResult {
   const sql = room.sql;
   createConvertTables(sql, t);
   if (sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${t.roots}`).one().n === 0)
     listRoots(sql, src, t);
-  const conversion = new SqlConversion(room, src, t);
+  const held = new BuildBudget({ bytes: heldBytes });
+  const conversion = new SqlConversion(room, src, t, held);
   const converter = new InstanceConverter(conversion, conversion, {
+    budget: held,
     maxInstanceLayers,
     maxInstanceBuilt,
     maxInstanceBytes,
@@ -723,14 +829,32 @@ export function convertStep(
     // A batch's decisions are kept together: one cut short is converted again.
     room.transact(() => {
       for (const id of batch) {
-        converter.settle(id);
+        try {
+          converter.settle(id);
+        } catch (error) {
+          if (!(error instanceof BuildTooLarge)) throw error;
+          // Over the step's budget: everything held is let go of. When this step settled others
+          // first (what this one is built from, among them), what they held counted: the next
+          // step tries it again afresh. Afresh, it can't be converted within the budget.
+          converter.clear();
+          conversion.clearCaches();
+          if (conversion.settledCount > 0) {
+            stopped = true;
+            return;
+          }
+          throw new InstanceTooLarge(id, error.amount, error.limit, "held");
+        }
         if (converter.stopped) {
           stopped = true;
           return;
         }
         // Deleted, unlinked or put inside another instance since it was listed.
         if (!conversion.settled(id)) conversion.gone(id);
-        if (converter.cached > 200_000) converter.clear();
+        // Between instances: past half the budget, let go of what's cached (mains built, rows).
+        if (converter.cached > 200_000 || held.held > held.limit / 2) {
+          converter.clear();
+          conversion.clearCaches();
+        }
         if (
           (conversion.work > budget || conversion.bytes > stepBytes) &&
           conversion.settledCount > 0

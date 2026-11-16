@@ -1,4 +1,13 @@
-import type { NodeRecord, NodeStore, NodeType, PropName, Props } from "@drawpane/model";
+import {
+  type BuildBudget,
+  ENTRY_BYTES,
+  type NodeRecord,
+  type NodeStore,
+  type NodeType,
+  nodeBytes,
+  type PropName,
+  type Props,
+} from "@drawpane/model";
 
 interface NodeRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -41,6 +50,9 @@ function toRecord(row: NodeRow): NodeRecord {
 export class SqlNodeStore implements NodeStore {
   readonly #sql: SqlStorage;
   readonly #cache = new Map<string, NodeRecord | null>();
+  #budget: BuildBudget | null = null;
+  /** What the cache was charged since it last emptied. */
+  #held = 0;
 
   constructor(sql: SqlStorage) {
     this.#sql = sql;
@@ -48,6 +60,18 @@ export class SqlNodeStore implements NodeStore {
 
   clearCache(): void {
     this.#cache.clear();
+    this.#budget?.release(this.#held);
+    this.#held = 0;
+  }
+
+  /**
+   * Charges every row parsed into the cache to `budget` (null: none), until
+   * the cache empties: for reads that build copies from it (main-removal.ts),
+   * so what it keeps counts against what they may hold. Empties the cache.
+   */
+  meter(budget: BuildBudget | null): void {
+    this.clearCache();
+    this.#budget = budget;
   }
 
   get(id: string): NodeRecord | undefined {
@@ -57,6 +81,11 @@ export class SqlNodeStore implements NodeStore {
       .exec<NodeRow>("SELECT id, parent, key, type, props FROM nodes WHERE id = ?", id)
       .toArray()[0];
     const node = row ? toRecord(row) : null;
+    if (this.#budget) {
+      const cost = ENTRY_BYTES + (node ? nodeBytes(node) : 0);
+      this.#budget.charge(cost);
+      this.#held += cost;
+    }
     this.#cache.set(id, node);
     return node ?? undefined;
   }

@@ -31,6 +31,7 @@
     "@cloudflare/workers-types": "5.20261113.1",
     "@drawpane/corpus": "workspace:*",
     "@simplewebauthn/browser": "14.0.0",
+    "fast-check": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "wrangler": "catalog:"

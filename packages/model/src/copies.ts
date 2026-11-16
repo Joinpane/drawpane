@@ -33,6 +33,7 @@
  * (every copy layer stored, `mirrors`-linked) to the stored form; `expand`
  * goes back.
  */
+import { type BuildBudget, nodeBytes, slotBytes } from "./budget";
 import { sameValue } from "./history";
 import { ROOT_ID } from "./ids";
 import type { NodeRecord } from "./ops";
@@ -126,6 +127,8 @@ interface Built {
   readonly main: string;
   readonly slots: string[];
   readonly kids: Map<string, readonly string[]>;
+  /** What its slots were charged (`BuildBudget`). */
+  cost: number;
 }
 
 const EMPTY: readonly string[] = Object.freeze([]);
@@ -154,6 +157,15 @@ function merge(props: Record<string, unknown>, own: Props, type: NodeRecord["typ
  * A stored document as the editor sees it: every copy layer built from its
  * main and its override record, on demand, and cached. Built copies are
  * dropped with `forget` when what they're built from changes.
+ *
+ * A main that contains an instance of itself, directly or through other
+ * mains (the model refuses making one; a file from before may hold one),
+ * is "cyclic": its instances, and copies swapped to it, present no layers,
+ * so building never loops or grows without end.
+ *
+ * Given a `budget`, everything it builds and caches is charged to it, and
+ * given back when it lets go (`release`, `forget`, `clear`); past the
+ * budget it throws `BuildTooLarge` and lets go of everything it built.
  */
 export class CopyView {
   readonly #store: StoredReader;
@@ -166,17 +178,55 @@ export class CopyView {
   readonly #swapped = new Map<string, string>();
   readonly #building = new Set<string>();
   readonly #presenting = new Set<string>();
+  /** Mains known to contain an instance of themselves (true) or not (false). */
+  readonly #cyclic = new Map<string, boolean>();
   #complete = false;
   readonly #lazy: boolean;
+  readonly #budget: BuildBudget | null;
+  /** What this view has charged its budget and not given back. */
+  #held = 0;
 
   /**
    * `lazy`: an id nobody has built yet is taken as not a copy layer, rather
    * than building every instance to find it. For readers over a file too
    * large to build whole (the room's), which build an instance at a time.
    */
-  constructor(store: StoredReader, { lazy = false }: { readonly lazy?: boolean } = {}) {
+  constructor(
+    store: StoredReader,
+    {
+      lazy = false,
+      budget = null,
+    }: { readonly lazy?: boolean; readonly budget?: BuildBudget | null } = {},
+  ) {
     this.#store = store;
     this.#lazy = lazy;
+    this.#budget = budget;
+  }
+
+  #charge(bytes: number): void {
+    if (!this.#budget) return;
+    this.#budget.charge(bytes);
+    this.#held += bytes;
+  }
+
+  #giveBack(bytes: number): void {
+    if (!this.#budget) return;
+    this.#budget.release(bytes);
+    this.#held -= bytes;
+  }
+
+  /** Caches a presented node, charged. */
+  #keep(id: string, node: NodeRecord): void {
+    this.#charge(this.#budget ? nodeBytes(node) : 0);
+    this.#nodes.set(id, node);
+  }
+
+  /** Drops a cached presented node, given back. */
+  #drop(id: string): void {
+    const node = this.#nodes.get(id);
+    if (!node) return;
+    this.#nodes.delete(id);
+    if (this.#budget) this.#giveBack(nodeBytes(node));
   }
 
   /** The main a stored instance root follows, or undefined when it doesn't follow one. */
@@ -216,13 +266,13 @@ export class CopyView {
       const main = this.mainOf(stored);
       if (!main) return stored;
       const node = this.#presentRoot(stored, main);
-      this.#nodes.set(id, node);
+      this.#keep(id, node);
       return node;
     }
     const slot = this.slot(id);
     if (!slot) return undefined;
     const node = this.#presentSlot(slot);
-    if (node) this.#nodes.set(id, node);
+    if (node) this.#keep(id, node);
     return node;
   }
 
@@ -305,13 +355,15 @@ export class CopyView {
     for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
       if (ids.has(id)) continue;
       ids.add(id);
-      this.#nodes.delete(id);
+      this.#drop(id);
       const copies = this.#copiesOf.get(id);
       if (copies) for (const copy of copies) queue.push(copy);
     }
     const roots = new Set<string>();
     const seen = new Set<string>();
     const pending = [...structural];
+    // What contains what may have changed: which mains contain their own instances is worked out again.
+    if (pending.length > 0) this.#cyclic.clear();
     for (let id = pending.pop(); id !== undefined; id = pending.pop()) {
       if (seen.has(id)) continue;
       seen.add(id);
@@ -328,7 +380,7 @@ export class CopyView {
     for (const root of roots) {
       ids.add(root);
       parents.add(root);
-      this.#nodes.delete(root);
+      this.#drop(root);
       const built = this.#ensureBuilt(root, reuse.get(root));
       if (!built) continue;
       for (const id of built.slots) ids.add(id);
@@ -344,17 +396,98 @@ export class CopyView {
    */
   release(rootId: string): void {
     this.#unbuild(rootId, new Set(), new Set());
-    this.#nodes.delete(rootId);
+    this.#drop(rootId);
   }
 
-  /** Drops everything cached (after a rollback, say). */
+  /** Drops everything cached (after a rollback, say), and gives back all it was charged. */
   clear(): void {
     this.#slots.clear();
     this.#built.clear();
     this.#nodes.clear();
     this.#copiesOf.clear();
     this.#swapped.clear();
+    this.#cyclic.clear();
     this.#complete = false;
+    this.#budget?.release(this.#held);
+    this.#held = 0;
+  }
+
+  /** What this view holds of its budget now (0 without one). */
+  get held(): number {
+    return this.#held;
+  }
+
+  /**
+   * Whether the main `mainId` contains an instance of itself: through its
+   * own layers (instances, copies swapped by records), the main it is an
+   * instance of, and theirs, however far. Worked out for every main reached
+   * at once (Tarjan's strongly connected components) and kept until what
+   * contains what changes.
+   */
+  cyclic(mainId: string): boolean {
+    const known = this.#cyclic.get(mainId);
+    if (known !== undefined) return known;
+    const index = new Map<string, number>();
+    const low = new Map<string, number>();
+    const stack: string[] = [];
+    const onStack = new Set<string>();
+    const frames: Array<{ id: string; edges: string[]; at: number }> = [];
+    let next = 0;
+    const open = (id: string) => {
+      index.set(id, next);
+      low.set(id, next);
+      next++;
+      stack.push(id);
+      onStack.add(id);
+      frames.push({ id, edges: this.#contained(id), at: 0 });
+    };
+    open(mainId);
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1] as (typeof frames)[number];
+      if (frame.at < frame.edges.length) {
+        const to = frame.edges[frame.at++] as string;
+        // Settled by an earlier search: in a component of its own, which can't reach back here.
+        if (this.#cyclic.has(to)) continue;
+        if (!index.has(to)) open(to);
+        else if (onStack.has(to))
+          low.set(frame.id, Math.min(low.get(frame.id) as number, index.get(to) as number));
+        continue;
+      }
+      frames.pop();
+      const parent = frames[frames.length - 1];
+      if (parent)
+        low.set(parent.id, Math.min(low.get(parent.id) as number, low.get(frame.id) as number));
+      if (low.get(frame.id) !== index.get(frame.id)) continue;
+      const members: string[] = [];
+      for (;;) {
+        const id = stack.pop() as string;
+        onStack.delete(id);
+        members.push(id);
+        if (id === frame.id) break;
+      }
+      const cyclic = members.length > 1 || frame.edges.includes(frame.id);
+      for (const id of members) this.#cyclic.set(id, cyclic);
+    }
+    return this.#cyclic.get(mainId) ?? false;
+  }
+
+  /** The mains a main's layers come from: the one it's an instance of, its instances', its records' swaps. */
+  #contained(mainId: string): string[] {
+    const out = new Set<string>();
+    const add = (of: unknown) => {
+      if (typeof of === "string" && isMainNode(this.#store.get(of))) out.add(of);
+    };
+    const self = this.#store.get(mainId);
+    if (self?.type === "frame" && self.props.instanceOf !== mainId) add(self.props.instanceOf);
+    const stack = [...this.#store.childIds(mainId)];
+    for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
+      const node = this.#store.get(id);
+      if (!node) continue;
+      if (node.type === "frame" && node.props.instanceOf !== node.id) add(node.props.instanceOf);
+      else if (node.type === "override") add(swappedTo(node.props));
+      for (const child of this.#store.childIds(id)) stack.push(child);
+    }
+    return [...out];
   }
 
   #unbuild(rootId: string, ids: Set<string>, parents: Set<string>): Map<string, string> {
@@ -372,10 +505,11 @@ export class CopyView {
         this.#unlink(swapped, id);
         this.#swapped.delete(id);
       }
-      this.#nodes.delete(id);
+      this.#drop(id);
       ids.add(id);
     }
     for (const parent of old.kids.keys()) parents.add(parent);
+    this.#giveBack(old.cost);
     this.#built.delete(rootId);
     this.#unlink(old.main, rootId);
     return reuse;
@@ -468,11 +602,11 @@ export class CopyView {
     if (done) return done;
     const root = this.#store.get(rootId);
     const main = this.mainOf(root);
-    // A main that (through its copies) contains this instance: built without layers.
-    if (!main || this.#building.has(rootId)) return undefined;
+    // A main that contains its own instance: its instances are built without layers.
+    if (!main || this.#building.has(rootId) || this.cyclic(main.id)) return undefined;
     this.#building.add(rootId);
     try {
-      const built: Built = { main: main.id, slots: [], kids: new Map() };
+      const built: Built = { main: main.id, slots: [], kids: new Map(), cost: 0 };
       const kids: string[] = [];
       for (const child of this.childIds(main.id))
         this.#addSlot(built, rootId, rootId, EMPTY, child, kids, reuse);
@@ -480,6 +614,10 @@ export class CopyView {
       this.#built.set(rootId, built);
       this.#link(main.id, rootId);
       return built;
+    } catch (error) {
+      // Over budget (or anything else) part way: nothing half built is kept, and all is given back.
+      this.clear();
+      throw error;
     } finally {
       this.#building.delete(rootId);
     }
@@ -502,6 +640,12 @@ export class CopyView {
     const stored = this.#store.get(id);
     if (this.#slots.has(id) || (stored && stored.type !== "override")) return;
     const path = [...parentPath, element];
+    if (this.#budget) {
+      this.#budget.built();
+      const cost = slotBytes(path.length);
+      this.#charge(cost);
+      built.cost += cost;
+    }
     const slot: CopySlot = { id, root, path, source: sourceId, parent, key: source.key };
     this.#slots.set(id, slot);
     built.slots.push(id);
@@ -515,8 +659,10 @@ export class CopyView {
     }
     const from = swapped ?? sourceId;
     const kids: string[] = [];
-    for (const child of this.childIds(from))
-      this.#addSlot(built, root, id, path, child, kids, reuse);
+    // Swapped to a main that contains its own instance: no layers, as its instances have.
+    if (!swapped || !this.cyclic(swapped))
+      for (const child of this.childIds(from))
+        this.#addSlot(built, root, id, path, child, kids, reuse);
     built.kids.set(id, kids);
   }
 }

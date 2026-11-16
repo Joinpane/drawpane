@@ -7,9 +7,14 @@
  *
  * Built copies are cached, and let go once more than `limit` are held,
  * between instances (a walk is never inside one when the cache empties), so
- * a walk over a file of any size holds a few instances at most.
+ * a walk over a file of any size holds a few instances at most. What it
+ * builds is charged to a `BuildBudget` too (`BUILD_HELD_BYTES`): past half
+ * of it, the cache empties between instances, and an instance that can't
+ * be built within it throws `BuildTooLarge` rather than run the room out
+ * of memory.
  */
 import {
+  BuildBudget,
   CopyView,
   type DocReader,
   isMainNode,
@@ -17,6 +22,7 @@ import {
   type StoredReader,
 } from "@drawpane/model";
 import type { DocView } from "../mcp/document";
+import { BUILD_HELD_BYTES } from "./convert";
 import { NODE_COLUMNS, type NodeRow, type TableReader, toRecord } from "./node-tables";
 
 export class PresentedReader implements DocReader {
@@ -36,7 +42,16 @@ export class PresentedReader implements DocReader {
       childIds: (parent) => reader.childIds(parent),
       nodes: () => [],
     };
-    this.#view = new CopyView(stored, { lazy: true });
+    this.#view = new CopyView(stored, {
+      lazy: true,
+      budget: new BuildBudget({ bytes: BUILD_HELD_BYTES }),
+    });
+  }
+
+  /** Between instances: past the cache's size or half the budget, let go of what's built. */
+  #between(): void {
+    if (this.#view.slotCount > this.#limit || this.#view.held > BUILD_HELD_BYTES / 2)
+      this.#view.clear();
   }
 
   /** Whether `id` is stored and not a record: a node outside every copy. */
@@ -48,7 +63,7 @@ export class PresentedReader implements DocReader {
   get(id: string): NodeRecord | undefined {
     if (this.#storedLayer(id)) {
       // Between instances: a good moment to let go of what's built.
-      if (this.#view.slotCount > this.#limit) this.#view.clear();
+      this.#between();
       return this.#view.get(id);
     }
     const known = this.#view.get(id);
@@ -77,7 +92,7 @@ export class PresentedReader implements DocReader {
         .map(toRecord);
       for (const root of roots) {
         if (!this.#view.mainOf(root)) continue;
-        if (this.#view.slotCount > this.#limit) this.#view.clear();
+        this.#between();
         const stack = [...this.#view.childIds(root.id)];
         for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
           if (at === id) return this.#view.get(id);

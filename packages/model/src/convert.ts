@@ -27,6 +27,7 @@
  *   otherwise) isn't kept: the check compares the order too.
  */
 import { ModelError } from "./apply";
+import { type BuildBudget, BuildTooLarge, nodeBytes } from "./budget";
 import { CopyView, isMainNode, OVERRIDE_KEY, ownValues, samePropValue } from "./copies";
 import { ROOT_ID } from "./ids";
 import type { NodeRecord } from "./ops";
@@ -159,7 +160,12 @@ export function holdsIds(props: Readonly<Props>): boolean {
 export interface ConvertReader {
   get(id: string): NodeRecord | undefined;
   childIds(parent: string): readonly string[];
-  /** Every node stored under an instance root, override records aside: its materialized layers. */
+  /**
+   * Every node stored under an instance root, override records aside: its
+   * materialized layers. With a budget (`ConvertLimits.budget`), each is
+   * charged to it as it's read (`nodeBytes`), and the converter gives them
+   * back once the instance is done.
+   */
   layersUnder(rootId: string): readonly NodeRecord[];
   /** A copy layer's derived id, when an earlier conversion renamed it. */
   renamed(id: string): string | undefined;
@@ -217,6 +223,12 @@ export interface ConvertLimits {
    * stops the run there (`stopped`), the instance left for the next.
    */
   readonly stop?: (size: InstanceSize) => boolean;
+  /**
+   * What building copies may hold, charged as they're built (see
+   * `BuildBudget`). Past it, `settle` throws `BuildTooLarge`, having let go
+   * of everything it built; the instance isn't settled.
+   */
+  readonly budget?: BuildBudget;
 }
 
 /** What converting an instance is charged against `ConvertLimits.maxInstanceBytes`. */
@@ -230,7 +242,7 @@ export class InstanceTooLarge extends ModelError {
     readonly rootId: string,
     readonly layers: number,
     readonly limit: number,
-    readonly unit: "layers" | "built" | "bytes" = "layers",
+    readonly unit: "layers" | "built" | "bytes" | "held" = "layers",
   ) {
     super(
       "invalid_value",
@@ -238,7 +250,9 @@ export class InstanceTooLarge extends ModelError {
         ? `The instance ${rootId} has ${layers.toLocaleString("en")} layers, more than the ${limit.toLocaleString("en")} converted at once.`
         : unit === "built"
           ? `The instance ${rootId} presents ${layers.toLocaleString("en")} layers from its components, more than the ${limit.toLocaleString("en")} built at once.`
-          : `The instance ${rootId} and the components it's built from cost ${layers.toLocaleString("en")} bytes to convert, more than the ${limit.toLocaleString("en")} held at once.`,
+          : unit === "bytes"
+            ? `The instance ${rootId} and the components it's built from cost ${layers.toLocaleString("en")} bytes to convert, more than the ${limit.toLocaleString("en")} held at once.`
+            : `Building the instance ${rootId} from its components would hold more than the ${Math.round(limit / 1024 / 1024)} MB a conversion holds at once.`,
     );
   }
 }
@@ -357,13 +371,15 @@ export class InstanceConverter {
   readonly #maxBytes: number;
   readonly #layerBytes: number;
   readonly #stop: ((size: InstanceSize) => boolean) | undefined;
+  readonly #budget: BuildBudget | null;
   #stopped = false;
 
   constructor(reader: ConvertReader, sink: ConvertSink, limits: ConvertLimits = {}) {
     this.#reader = reader;
     this.#sink = sink;
     this.#overlay = new Overlay(reader);
-    this.#view = new CopyView(this.#overlay, { lazy: true });
+    this.#budget = limits.budget ?? null;
+    this.#view = new CopyView(this.#overlay, { lazy: true, budget: this.#budget });
     this.#max = limits.maxInstanceLayers ?? Number.POSITIVE_INFINITY;
     this.#maxBuilt = limits.maxInstanceBuilt ?? Number.POSITIVE_INFINITY;
     this.#maxBytes = limits.maxInstanceBytes ?? Number.POSITIVE_INFINITY;
@@ -383,6 +399,7 @@ export class InstanceConverter {
 
   /** Lets go of everything cached. */
   clear(): void {
+    this.#overlay.end();
     this.#view.clear();
     this.#prepared.clear();
   }
@@ -410,14 +427,27 @@ export class InstanceConverter {
         return;
       }
       const layers = this.#reader.layersUnder(rootId);
-      if (layers.length > this.#max) throw new InstanceTooLarge(rootId, layers.length, this.#max);
-      for (const layer of layers) {
-        const of = layer.type === "frame" ? layer.props.instanceOf : undefined;
-        if (of && of !== main.id && isMainNode(this.#reader.get(of))) this.#prepare(of);
-        if (this.#stopped) return;
+      try {
+        if (layers.length > this.#max) throw new InstanceTooLarge(rootId, layers.length, this.#max);
+        for (const layer of layers) {
+          const of = layer.type === "frame" ? layer.props.instanceOf : undefined;
+          if (of && of !== main.id && isMainNode(this.#reader.get(of))) this.#prepare(of);
+          if (this.#stopped) return;
+        }
+        if (this.#reader.settled(rootId)) return;
+        this.#convert(root, main, layers);
+      } finally {
+        // The reader charged them as it read them (`ConvertReader.layersUnder`).
+        if (this.#budget) {
+          let bytes = 0;
+          for (const layer of layers) bytes += nodeBytes(layer);
+          this.#budget.release(bytes);
+        }
       }
-      if (this.#reader.settled(rootId)) return;
-      this.#convert(root, main, layers);
+    } catch (error) {
+      // Over budget part way: nothing half done is kept (the view let go of what it built).
+      if (error instanceof BuildTooLarge) this.clear();
+      throw error;
     } finally {
       this.#doing.delete(rootId);
     }
@@ -466,12 +496,20 @@ export class InstanceConverter {
       this.#sink.converted({ root, records: [], ids: new Map(), deps });
       return;
     }
+    // Its main contains an instance of itself (a file from before the model refused that): it
+    // can't be built, so it keeps its layers, unlinked, and shows what it showed.
+    if (this.#view.cyclic(main.id)) {
+      this.#detach(root, stored, deps, "its component contains an instance of itself");
+      return;
+    }
     this.#overlay.begin(new Set(stored.map((n) => n.id)));
     const ids = new Map<string, string>();
     const outcome = (() => {
       try {
         return this.#match(root, children, stored, ids);
       } catch (error) {
+        // Over budget: not this instance's to say, the run stops (`settle`).
+        if (error instanceof BuildTooLarge) throw error;
         // A layer the view can't build (a value it refuses): left as it was, said why.
         return error instanceof Error ? error.message : String(error);
       }
@@ -489,12 +527,17 @@ export class InstanceConverter {
       return;
     }
     this.#overlay.end();
+    this.#detach(root, stored, deps, outcome);
+  }
+
+  #detach(root: NodeRecord, stored: readonly NodeRecord[], deps: string[], why: string): void {
+    // What was built from it as an instance (and which mains contain themselves) is worked out again.
     this.#view.clear();
     this.#prepared.clear();
     this.#sink.detached({
       root: unlinkedNode(root),
       layers: stored.map(unlinkedNode),
-      why: outcome,
+      why,
       deps,
     });
   }

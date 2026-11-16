@@ -216,7 +216,7 @@ export class CompactCopies {
     for (let i = tx.undoStored.length - 1; i >= 0; i--)
       for (const op of tx.undoStored[i] as Op[]) {
         try {
-          applyOp(this.store, op, { held: true });
+          applyOp(this.store, op, { held: true, cycles: false });
         } catch {
           // Only the last page's delete can refuse; nothing else a rollback does can.
         }

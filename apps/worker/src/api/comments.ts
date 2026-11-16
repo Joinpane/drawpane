@@ -216,9 +216,10 @@ async function relay(env: Env, fileId: string, event: CommentEvent): Promise<voi
  * The layer a pin names, as the file names it now (decision 0029): a copy
  * layer's id from before the file changed how it stores copies (a tab not
  * reloaded yet) is translated by its room, from the map it keeps for a
- * week or the copy of it in R2. Null when the file doesn't have the layer:
- * the comment is pinned to its point on the page instead. The id as sent
- * when the room can't say.
+ * week or the copy of it in R2. Null when the file doesn't have the layer,
+ * or when the room can't say (unreachable, or the map unreadable): the
+ * comment is pinned to its point on the page instead, never to an id the
+ * file may not have.
  */
 async function pinTarget(
   env: Env,
@@ -230,8 +231,8 @@ async function pinTarget(
   try {
     return await env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId)).pinTarget(nodeId, pageId);
   } catch (error) {
-    console.error("couldn't check a pin's layer", error);
-    return nodeId;
+    console.error("couldn't check a pin's layer; pinned to the page", error);
+    return null;
   }
 }
 

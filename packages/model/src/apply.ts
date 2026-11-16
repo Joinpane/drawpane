@@ -245,26 +245,136 @@ function applyMove(store: NodeStore, op: MoveOp, held: boolean): Op[] {
   return [inverse];
 }
 
+// ---------------------------------------------------------------------------
+// Instances inside their own main
+
+/** A frame's live main: the component it's an instance of (a record's swap counts too). */
+function liveMainOf(store: NodeStore, node: NodeRecord): string | null {
+  let of: unknown;
+  if (node.type === "frame") of = node.props.instanceOf;
+  else if (node.type === "override") of = node.props.instanceOf;
+  if (typeof of !== "string" || of === node.id) return null;
+  const main = store.get(of);
+  return main?.type === "frame" && main.props.isComponent ? of : null;
+}
+
+/** The mains `id` is, or is inside. */
+function mainsAround(store: NodeStore, id: string): Set<string> {
+  const out = new Set<string>();
+  const seen = new Set<string>();
+  for (let at = id; at !== ROOT_ID && !seen.has(at); ) {
+    seen.add(at);
+    const node = store.get(at);
+    if (!node) break;
+    if (node.type === "frame" && node.props.isComponent) out.add(at);
+    at = node.parent;
+  }
+  return out;
+}
+
+/** The mains named by instances (and records' swaps) at `id`, or anywhere under it when `deep`. */
+function mainsNamed(store: NodeStore, id: string, deep: boolean): Set<string> {
+  const out = new Set<string>();
+  const stack = [id];
+  for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
+    const node = store.get(at);
+    if (!node) continue;
+    const of = liveMainOf(store, node);
+    if (of) out.add(of);
+    if (deep) for (const child of store.childIds(at)) stack.push(child);
+  }
+  return out;
+}
+
+/**
+ * Whether, after `op` applied, a main contains an instance of itself,
+ * directly or through other mains (an instance's layers are its main's, so
+ * that main would contain itself without end). Only what `op` changed is
+ * looked at: the mains around the node it touched, and the mains named
+ * at or under it.
+ */
+function makesInstanceCycle(store: NodeStore, op: Op): boolean {
+  let deep: boolean;
+  if (op.op === "create") {
+    if (op.type !== "frame" && op.type !== "override") return false;
+    deep = false;
+  } else if (op.op === "move") deep = true;
+  else if (op.op === "set" && (op.prop === "instanceOf" || op.prop === "isComponent")) {
+    if (!op.value) return false;
+    deep = op.prop === "isComponent";
+  } else return false;
+  const node = store.get(op.id);
+  if (!node) return false;
+  // A record's swap puts its main's layers in the instance it belongs to.
+  const around = mainsAround(store, node.type === "override" ? node.parent : op.id);
+  if (around.size === 0) return false;
+  // The node itself counts: a main that's an instance is made of its own main's layers.
+  const named = mainsNamed(store, op.id, deep);
+  if (named.size === 0) return false;
+  const contained = new Map<string, Set<string>>();
+  const containedIn = (main: string): Set<string> => {
+    let out = contained.get(main);
+    if (!out) {
+      out = mainsNamed(store, main, true);
+      contained.set(main, out);
+    }
+    return out;
+  };
+  const seen = new Set<string>();
+  const stack = [...named];
+  for (let main = stack.pop(); main !== undefined; main = stack.pop()) {
+    if (around.has(main)) return true;
+    if (seen.has(main)) continue;
+    seen.add(main);
+    for (const next of containedIn(main)) stack.push(next);
+  }
+  return false;
+}
+
 /**
  * Validates and applies one operation. Returns the operations that undo it,
  * in the order they must run. Throws `ModelError` and leaves the store
  * untouched when the operation is invalid.
  */
-export function applyOp(store: NodeStore, op: Op, { held = false }: ApplyOptions = {}): Op[] {
-  return apply(store, op, false, true, held);
+export function applyOp(
+  store: NodeStore,
+  op: Op,
+  { held = false, cycles = !held }: ApplyOptions = {},
+): Op[] {
+  return apply(store, op, false, true, held, cycles);
 }
 
-function apply(store: NodeStore, op: Op, force: boolean, inverse: boolean, held: boolean): Op[] {
+function apply(
+  store: NodeStore,
+  op: Op,
+  force: boolean,
+  inverse: boolean,
+  held: boolean,
+  cycles: boolean,
+): Op[] {
+  let undo: Op[];
   switch (op.op) {
     case "create":
-      return applyCreate(store, op, held);
+      undo = applyCreate(store, op, held);
+      break;
     case "delete":
       return applyDelete(store, op, force, inverse);
     case "set":
-      return applySet(store, op);
+      undo = applySet(store, op);
+      break;
     case "move":
-      return applyMove(store, op, held);
+      undo = applyMove(store, op, held);
+      break;
   }
+  if (cycles && makesInstanceCycle(store, op)) {
+    // Taken back before saying so: an operation that's refused changes nothing.
+    for (const back of undo) apply(store, back, true, true, true, false);
+    throw new ModelError(
+      "cycle",
+      "A component can't contain an instance of itself, directly or through other components.",
+    );
+  }
+  return undo;
 }
 
 export interface ApplyOptions {
@@ -290,6 +400,15 @@ export interface ApplyOptions {
    * is always applied this way.
    */
   readonly held?: boolean;
+  /**
+   * Refuse an operation that would make a main contain an instance of
+   * itself, directly or through other mains (its layers would contain
+   * themselves without end). On by default, off for `held` operations: they
+   * put back what was there (a client's rebase follows the room, which
+   * checks). The room checks every transaction it commits, held or not.
+   * A transaction's own rollback never checks.
+   */
+  readonly cycles?: boolean;
 }
 
 /**
@@ -299,20 +418,20 @@ export interface ApplyOptions {
 export function applyTransaction(
   store: NodeStore,
   ops: readonly Op[],
-  { rollback = true, inverse = true, held = false }: ApplyOptions = {},
+  { rollback = true, inverse = true, held = false, cycles = !held }: ApplyOptions = {},
 ): Op[] {
   const undo: Op[][] = [];
   const keep = inverse || rollback;
   for (let i = 0; i < ops.length; i++) {
     try {
-      const back = apply(store, ops[i] as Op, false, keep, held);
+      const back = apply(store, ops[i] as Op, false, keep, held, cycles);
       if (keep) undo.push(back);
     } catch (error) {
       if (rollback) {
         for (let j = undo.length - 1; j >= 0; j--) {
           // Rolling back may delete the only page a failed transaction created, and puts back
           // what the transaction removed however deep it was.
-          for (const back of undo[j] as Op[]) apply(store, back, true, true, true);
+          for (const back of undo[j] as Op[]) apply(store, back, true, true, true, false);
         }
       }
       if (error instanceof ModelError) throw new ModelError(error.code, error.message, i);

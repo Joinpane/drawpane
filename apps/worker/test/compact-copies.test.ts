@@ -24,6 +24,7 @@ import {
   renameIds,
 } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import type { Env as WorkerEnv } from "../src/env";
 import type { FileRoom } from "../src/rooms/file-room";
 import { SyncEngine as OldSyncEngine } from "./fixtures/sync-v1";
 import { type Browser, openSocket, signedInUser } from "./helpers";
@@ -1560,5 +1561,144 @@ describe("what the third review of the conversion found", { timeout: 120_000 }, 
       expect((await stored(fileId)).find((n) => n.id === derived)?.type).toBe("override");
       expect((await anchorOf(await pinAt(browser, fileId, derived))).nodeId).toBe(derived);
     });
+
+    it("pins to the page when the map in R2 can't be read, never to the old id", async () => {
+      const { browser, fileId } = await expired();
+      // R2 failing: every read of the bucket throws, in the room that translates.
+      await runInDurableObject(roomOf(fileId), (room) => {
+        const real = (room as unknown as { env: WorkerEnv }).env;
+        const failing = new Proxy(real.FILES, {
+          get(target, prop, receiver) {
+            if (prop === "get") return () => Promise.reject(new Error("R2 is unavailable"));
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        (room as unknown as { env: WorkerEnv }).env = { ...real, FILES: failing };
+      });
+      expect(await anchorOf(await pinAt(browser, fileId, target.id))).toEqual({
+        x: 1,
+        y: 2,
+        nodeId: null,
+        offset: null,
+      });
+      // Moving a pin onto the old id, the same.
+      const { thread } = await browser.json<{ thread: { id: string } }>(
+        `/api/files/${fileId}/comments`,
+        { method: "POST", json: { pageId: page.id, x: 0, y: 0, body: "Unpinned" } },
+      );
+      const moved = await browser.json<{ thread: { anchor: Record<string, unknown> } }>(
+        `/api/files/${fileId}/comments/${thread.id}`,
+        {
+          method: "PATCH",
+          json: { anchor: { x: 5, y: 6, nodeId: target.id, offset: { x: 1, y: 1 } } },
+        },
+      );
+      expect(moved.thread.anchor).toEqual({ x: 5, y: 6, nodeId: null, offset: null });
+      // A layer the file has still pins to it.
+      expect((await anchorOf(await pinAt(browser, fileId, root.id))).nodeId).toBe(root.id);
+    });
+
+    it("pins to the page when the map in R2 is damaged (a gzip read error)", async () => {
+      const { browser, fileId, key } = await expired();
+      await env.FILES.put(key, new TextEncoder().encode("not gzip at all, just text"));
+      expect(await anchorOf(await pinAt(browser, fileId, target.id))).toEqual({
+        x: 1,
+        y: 2,
+        nodeId: null,
+        offset: null,
+      });
+    });
+  });
+});
+
+describe("a main containing an instance of itself (the fourth review)", {
+  timeout: 120_000,
+}, () => {
+  const page: NodeRecord = { id: "CyPage", type: "page", parent: "root", key: "a0", props: {} };
+  const main = (id: string, key: string): NodeRecord => ({
+    id,
+    type: "frame",
+    parent: page.id,
+    key,
+    props: { isComponent: true, name: id },
+  });
+  const instance = (id: string, parent: string, of: string, key: string): NodeRecord => ({
+    id,
+    type: "frame",
+    parent,
+    key,
+    props: { instanceOf: of },
+  });
+
+  it("is refused by the room, whoever sends it", async () => {
+    const { browser, fileId } = await materializedFile([
+      page,
+      main("CyA", "a0"),
+      { id: "CyRect", type: "rect", parent: "CyA", key: "a0", props: {} },
+      main("CyB", "a1"),
+      instance("CyIA", "CyB", "CyA", "a0"),
+      { id: "CyRectCopy", type: "rect", parent: "CyIA", key: "a0", props: { mirrors: "CyRect" } },
+    ]);
+    await convert(fileId);
+    const { socket } = await open(browser, fileId);
+    // B holds an instance of A: an instance of B inside A would hold itself.
+    socket.send({
+      t: "txn",
+      seq: 1,
+      ops: [
+        {
+          op: "create",
+          id: "CyLoop",
+          type: "frame",
+          parent: "CyA",
+          key: "a5",
+          props: { instanceOf: "CyB" },
+        },
+      ],
+    });
+    expect((await socket.next<{ code: string }>("reject")).code).toBe("cycle");
+    // Directly, too, and by relinking.
+    socket.send({
+      t: "txn",
+      seq: 2,
+      ops: [{ op: "set", id: "CyIA", prop: "instanceOf", value: "CyB" }],
+    });
+    expect((await socket.next<{ code: string }>("reject")).code).toBe("cycle");
+    expect((await stored(fileId)).find((n) => n.id === "CyIA")?.props.instanceOf).toBe("CyA");
+  });
+
+  it("converts a file that holds one: those instances are detached, keeping what they show", async () => {
+    // Written before the model refused it: a main holding fourteen instances of itself (built
+    // as instances, it would present millions of layers), and an instance of it on the page.
+    const nodes: NodeRecord[] = [page, main("CyM", "a0")];
+    for (let i = 0; i < 14; i++)
+      nodes.push(instance(`CyS${i}`, "CyM", "CyM", `a${String.fromCharCode(65 + i)}`));
+    nodes.push(instance("CyInst", page.id, "CyM", "a1"));
+    // And an ordinary component beside it, which converts as ever.
+    nodes.push(main("CyOk", "a2"));
+    nodes.push({ id: "CyOkRect", type: "rect", parent: "CyOk", key: "a0", props: { name: "R" } });
+    nodes.push(instance("CyOkInst", page.id, "CyOk", "a3"));
+    nodes.push({
+      id: "CyOkCopy",
+      type: "rect",
+      parent: "CyOkInst",
+      key: "a0",
+      props: { name: "R", mirrors: "CyOkRect" },
+    });
+    const { fileId } = await materializedFile(nodes);
+    await convert(fileId);
+    const format = await roomOf(fileId).copiesFormat();
+    expect(format.failed).toBeNull();
+    expect(format.copies).toBe("compact");
+    const detached = new Set(format.detached.map((d) => d.root));
+    for (let i = 0; i < 14; i++) expect(detached.has(`CyS${i}`)).toBe(true);
+    expect(detached.has("CyOkInst")).toBe(false);
+    // What it shows is what it stored: every layer, the loop's instances unlinked.
+    const shown = presented(await stored(fileId), "compact");
+    const ids = new Set(shown.map((n) => n.id));
+    for (const node of nodes) if (node.id !== "CyOkCopy") expect(ids.has(node.id)).toBe(true);
+    expect(shown.find((n) => n.id === "CyS0")?.props.instanceOf).toBeUndefined();
+    expect(shown.filter((n) => n.parent === "CyOkInst")).toHaveLength(1);
   });
 });
