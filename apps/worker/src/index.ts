@@ -51,7 +51,9 @@ app.route("/api/mcp", mcp);
  * already let this person in, so the ticket is all it takes. It's version 2
  * snapshot text, gzipped and streamed as read: a saved version from R2 (the
  * room sends the transactions after it through the socket), or the file as
- * it is now, copied aside in the room (also when that version is missing).
+ * it is now, copied aside in the room (also when that version is missing),
+ * one copy for everyone downloading that revision. Access is checked again:
+ * the ticket says who it was given to.
  */
 app.get("/api/files/:fileId/document", async (c) => {
   const ticket = await verifyPayload<DocumentTicket>(
@@ -61,14 +63,23 @@ app.get("/api/files/:fileId/document", async (c) => {
   if (
     ticket?.purpose !== "document" ||
     ticket.fid !== c.req.param("fileId") ||
+    typeof ticket.uid !== "string" ||
     !(ticket.exp > Date.now())
   )
     throw new HttpError(403, "forbidden", "That download has expired. Open the file again.");
-  const file = await c.env.DB.prepare("SELECT deleted_at FROM files WHERE id = ?")
-    .bind(ticket.fid)
-    .first<{ deleted_at: number | null }>();
-  if (!file || file.deleted_at !== null)
-    throw new HttpError(404, "not_found", "This file was deleted.");
+  // Whoever it was given to must still have the file: on its team, or its prototype link still on.
+  const guestLink = ticket.uid.startsWith("guest:") ? ticket.uid.slice("guest:".length) : null;
+  const file =
+    guestLink === null
+      ? (await requireFileRole(c.env, ticket.uid, ticket.fid, "viewer")).file
+      : await c.env.DB.prepare(
+          `SELECT f.deleted_at FROM share_links s JOIN files f ON f.id = s.file_id
+            WHERE s.id = ? AND s.file_id = ? AND s.revoked_at IS NULL`,
+        )
+          .bind(guestLink, ticket.fid)
+          .first<{ deleted_at: number | null }>();
+  if (!file) throw new HttpError(403, "forbidden", "This prototype link was turned off.");
+  if (file.deleted_at !== null) throw new HttpError(404, "not_found", "This file was deleted.");
   const gzip = (body: ReadableStream<Uint8Array>, size?: number) =>
     new Response(body, {
       headers: {
@@ -88,7 +99,7 @@ app.get("/api/files/:fileId/document", async (c) => {
     await object?.body.cancel();
   }
   const room = c.env.FILE_ROOM.get(c.env.FILE_ROOM.idFromName(ticket.fid));
-  return gzip(await room.exportSnapshot());
+  return gzip(await room.exportDocument());
 });
 
 app.route("/api", api);

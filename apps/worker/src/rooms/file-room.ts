@@ -108,6 +108,11 @@ export interface DocumentTicket {
   readonly purpose: "document";
   readonly fid: string;
   /**
+   * Who it was given to (a room claim's `uid`: a person, or `guest:<link>`),
+   * so a download checks they still have the file.
+   */
+  readonly uid: string;
+  /**
    * The saved version to read, from R2, the transactions after it sent
    * through the socket; null for the file as it is when downloaded.
    */
@@ -123,6 +128,12 @@ export const DOCUMENT_TICKET_TTL_MS = 5 * 60_000;
  * downloads the file as it is instead.
  */
 const MAX_REPLAY_BYTES = 8 << 20;
+/**
+ * A file is sent through the socket only when it's at most INLINE_SNAPSHOT_NODES
+ * nodes in at most this many characters of properties (a text layer may hold
+ * 200,000): anything more is downloaded, by a client that can.
+ */
+const INLINE_SNAPSHOT_CHARS = 8 << 20;
 
 /**
  * Clients ping every 25 s (connection.ts); the runtime answers for the room
@@ -314,6 +325,8 @@ export class FileRoom extends DurableObject<Env> {
   /** The warm headless editor agents' calls run on (decision 0021); made on the first call. */
   #engine: AgentEngine | null = null;
   #rendering: Promise<HeadlessRenderer> | null = null;
+  /** Copies of the file set aside for downloads, by revision (see exportDocument). */
+  readonly #sharedCopies = new Map<number, { table: string; readers: number }>();
   /** The update from main under way, which the next waits for: one at a time. */
   #updating: Promise<unknown> = Promise.resolve();
 
@@ -980,6 +993,45 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
+   * The file as it is, for a download (`GET /api/files/:id/document`): as
+   * `exportSnapshot` streams it, but downloads of one revision share one copy
+   * set aside, dropped when the last of them finishes, so many people opening
+   * a large file at once don't each copy it.
+   */
+  async exportDocument(): Promise<ReadableStream<Uint8Array>> {
+    const fileId = this.#meta("file_id") ?? "";
+    const revn = this.#revn;
+    let shared = this.#sharedCopies.get(revn);
+    // Shared only while young: the alarm drops copies an hour old, readers or not.
+    if (
+      shared &&
+      (tempTableAge(shared.table, Date.now()) > STALE_TABLE_MS / 4 ||
+        !tempTables(this.#sql).includes(shared.table))
+    ) {
+      this.#sharedCopies.delete(revn);
+      shared = undefined;
+    }
+    if (!shared) {
+      shared = { table: this.#freeze().table, readers: 0 };
+      this.#sharedCopies.set(revn, shared);
+    }
+    const copy = shared;
+    copy.readers++;
+    // Should a reader let go without finishing, the alarm drops the copy in time.
+    void this.#scheduleAlarm();
+    return snapshotStream(
+      { fileId, revn, at: Date.now() },
+      tablePages(this.#sql, copy.table),
+      () => {
+        copy.readers--;
+        if (copy.readers > 0) return;
+        if (this.#sharedCopies.get(revn) === copy) this.#sharedCopies.delete(revn);
+        dropTable(this.#sql, copy.table);
+      },
+    );
+  }
+
+  /**
    * A branch's nodes as `exportSnapshot` streams them, and the key of the
    * base they're a change from, read together: an update from main moves
    * both at once (see `updateFromMain`).
@@ -1604,6 +1656,7 @@ export class FileRoom extends DurableObject<Env> {
       signPayload(this.env.SESSION_SECRET, {
         purpose: "document",
         fid,
+        uid: me.userId,
         revn,
         exp,
       } satisfies DocumentTicket);
@@ -1619,13 +1672,19 @@ export class FileRoom extends DurableObject<Env> {
     };
   }
 
-  /** Whether the file has more than `count` nodes, reading no more than that many and one. */
-  #moreNodesThan(count: number): boolean {
-    return (
-      this.#sql
-        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM (SELECT 1 FROM nodes LIMIT ?)", count + 1)
-        .one().n > count
-    );
+  /**
+   * Whether the file is too large to send through the socket: more than
+   * INLINE_SNAPSHOT_NODES nodes, or more than INLINE_SNAPSHOT_CHARS of their
+   * properties, reading no more than that many nodes and one (in SQL).
+   */
+  #tooLargeToSend(): boolean {
+    const { n, chars } = this.#sql
+      .exec<{ n: number; chars: number }>(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(props)), 0) AS chars FROM (SELECT props FROM nodes LIMIT ?)",
+        INLINE_SNAPSHOT_NODES + 1,
+      )
+      .one();
+    return n > INLINE_SNAPSHOT_NODES || chars > INLINE_SNAPSHOT_CHARS;
   }
 
   /**
@@ -1747,7 +1806,7 @@ export class FileRoom extends DurableObject<Env> {
     // latest saved version and the log after it when they meet (nothing to copy, and R2 serves
     // it); else the file as it is, copied aside when it's downloaded (exportSnapshot).
     const download =
-      !canCatchUp && tickets !== null && this.#moreNodesThan(INLINE_SNAPSHOT_NODES)
+      !canCatchUp && tickets !== null && this.#tooLargeToSend()
         ? tickets.saved && this.#canReplayFrom(tickets.saved.revn)
           ? { ticket: tickets.saved.ticket, after: tickets.saved.revn }
           : { ticket: tickets.live, after: null }

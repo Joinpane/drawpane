@@ -28,6 +28,8 @@ class FakeRoom {
   readonly log: Array<{ revn: number; ops: Op[] }> = [];
   readonly lastSeq = new Map<string, { seq: number; revn: number }>();
   readonly sockets = new Set<FakeSocket>();
+  /** The next accepted transaction is too large to broadcast: others are told to load the file. */
+  bigNext = false;
   /** Saved versions (R2 snapshots), by revision. */
   readonly saved = new Map<number, NodeRecord[]>();
   latestSaved: number | null = null;
@@ -114,14 +116,20 @@ class FakeRoom {
     this.log.push({ revn: this.revn, ops: message.ops as Op[] });
     this.lastSeq.set(socket.clientId, { seq: message.seq, revn: this.revn });
     socket.deliver({ t: "ack", seq: message.seq, revn: this.revn });
+    const big = this.bigNext;
+    this.bigNext = false;
     for (const other of this.sockets) {
       if (other !== socket && other.clientId) {
-        other.deliver({
-          t: "txn",
-          revn: this.revn,
-          ops: message.ops as Op[],
-          author: { userId: "u", sessionId: "s" },
-        });
+        other.deliver(
+          big
+            ? { t: "resync" }
+            : {
+                t: "txn",
+                revn: this.revn,
+                ops: message.ops as Op[],
+                author: { userId: "u", sessionId: "s" },
+              },
+        );
       }
     }
   }
@@ -235,6 +243,7 @@ type Action =
   | { kind: "pump"; client: number; direction: "up" | "down" }
   | { kind: "reconnect"; client: number }
   | { kind: "save" }
+  | { kind: "big" }
   | { kind: "download"; client: number; fail: boolean }
   | { kind: "timers"; client: number };
 
@@ -310,6 +319,7 @@ describe("SyncEngine convergence", () => {
         arbitrary: fc.record({ kind: fc.constant("reconnect" as const), client: fc.nat(2) }),
       },
       { weight: 1, arbitrary: fc.record({ kind: fc.constant("save" as const) }) },
+      { weight: 1, arbitrary: fc.record({ kind: fc.constant("big" as const) }) },
       {
         weight: 2,
         arbitrary: fc.record({
@@ -363,6 +373,9 @@ describe("SyncEngine convergence", () => {
               case "save":
                 room.save();
                 break;
+              case "big":
+                room.bigNext = true;
+                break;
               case "download":
                 await client.answerDownload(a.fail);
                 break;
@@ -386,11 +399,20 @@ describe("SyncEngine convergence", () => {
             if (!moved) break;
           }
           const expected = snapshot(room.store.nodes());
-          for (const client of clients) {
-            expect(client.engine.pendingCount).toBe(0);
-            expect(snapshot(client.doc.nodes())).toEqual(expected);
-            expect(client.engine.revn).toBe(room.revn);
-          }
+          for (const client of clients)
+            expect({
+              client: client.id,
+              status: client.engine.status,
+              revn: client.engine.revn,
+              pending: client.engine.pendingCount,
+              nodes: snapshot(client.doc.nodes()),
+            }).toEqual({
+              client: client.id,
+              status: "live",
+              revn: room.revn,
+              pending: 0,
+              nodes: expected,
+            });
         },
       ),
       { numRuns: 400 },
@@ -513,6 +535,90 @@ describe("SyncEngine room requests", () => {
       ]);
       expect(engine.revn).toBeNull();
     }
+  });
+
+  it("takes no revision while the file loads again, from an ack or a change, so a reconnect loads it afresh", () => {
+    const { engine, sent } = live();
+    engine.commit(seed);
+    engine.flush();
+    // Someone's change too large to broadcast, then the room confirms ours, then another change.
+    engine.receive({ t: "resync" });
+    engine.receive({ t: "ack", seq: 1, revn: 3 });
+    engine.receive({
+      t: "txn",
+      revn: 4,
+      ops: [{ op: "set", id: PAGE, prop: "name", value: "Renamed" }],
+      author: { userId: "u", sessionId: "s" },
+    });
+    expect(engine.revn).toBeNull();
+    engine.disconnected();
+    sent.length = 0;
+    engine.connected((m) => sent.push(m));
+    expect(sent).toEqual([{ t: "hello", protocol: 1, clientId: "c1", revn: null }]);
+  });
+
+  it("sends one hello at a time, however often the room asks to reload before answering", () => {
+    const { engine, sent } = live();
+    sent.length = 0;
+    engine.receive({ t: "resync" });
+    engine.receive({ t: "resync" });
+    expect(sent.filter((m) => m.t === "hello")).toHaveLength(1);
+  });
+
+  it("asks again after a failed download without counting what came the first time twice", async () => {
+    const doc = new Doc();
+    const timers: Array<() => void> = [];
+    const engine = new SyncEngine(doc, { clientId: "c1", setTimer: (fn) => timers.push(fn) });
+    const sent: ClientMessage[] = [];
+    const answers: Array<{
+      resolve: (file: { revn: number; nodes: NodeRecord[] }) => void;
+      reject: (error: Error) => void;
+    }> = [];
+    engine.connected((m) => sent.push(m), {
+      download: () => new Promise((resolve, reject) => answers.push({ resolve, reject })),
+    });
+    const page: NodeRecord = {
+      id: PAGE,
+      type: "page",
+      parent: ROOT_ID,
+      key: "a0",
+      props: { name: "Page 1" },
+    };
+    // The room offers a saved version at revision 1, and sends revision 2 after it.
+    const welcomeAndReplay = () => {
+      engine.receive({
+        t: "welcome",
+        sessionId: "s1",
+        revn: 2,
+        role: "editor",
+        peers: [],
+        mode: "download",
+        lastSeq: 0,
+        ticket: "saved-1",
+      });
+      engine.receive({
+        t: "txn",
+        revn: 2,
+        ops: [{ op: "set", id: PAGE, prop: "name", value: "Renamed" }],
+        author: { userId: "u", sessionId: "s" },
+      });
+    };
+    const settle = async () => {
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+    };
+    welcomeAndReplay();
+    answers.shift()?.reject(new Error("network"));
+    await settle();
+    expect(timers).toHaveLength(1);
+    timers.shift()?.();
+    expect(sent.at(-1)).toMatchObject({ t: "hello", revn: null, download: true });
+    welcomeAndReplay();
+    answers.shift()?.resolve({ revn: 1, nodes: [page] });
+    await settle();
+    expect(engine.status).toBe("live");
+    expect(engine.revn).toBe(2);
+    expect(doc.get(PAGE)?.props.name).toBe("Renamed");
+    expect(sent.filter((m) => m.t === "hello")).toHaveLength(2);
   });
 
   it("reloads quietly when the room asks, keeping pending edits", () => {

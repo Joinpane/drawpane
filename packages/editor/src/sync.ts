@@ -109,6 +109,18 @@ export class SyncEngine {
    * one of them belongs to a connection or a welcome that's gone.
    */
   #generation = 0;
+  /**
+   * A hello is out and its welcome hasn't come. Another isn't sent meanwhile:
+   * two welcomes would each reset what's unconfirmed, the second from before
+   * edits sent after the first, which would then go again as new ones.
+   */
+  #awaitingWelcome = false;
+  /**
+   * This client fell out of step while a hello was out: the welcome coming
+   * may be a catch-up from the revision it no longer trusts, so it asks again
+   * for the whole file.
+   */
+  #wantsFile = false;
   /** Remote transactions that arrive while a snapshot is still loading. */
   #buffered: Array<{ revn: number; ops: readonly Op[] }> = [];
   #sessionId: string | null = null;
@@ -258,7 +270,9 @@ export class SyncEngine {
   }
 
   #hello(revn: number | null): void {
-    this.#send?.({
+    if (!this.#send) return;
+    this.#awaitingWelcome = true;
+    this.#send({
       t: "hello",
       protocol: PROTOCOL_VERSION,
       clientId: this.#clientId,
@@ -271,6 +285,8 @@ export class SyncEngine {
   disconnected(): void {
     this.#generation++;
     this.#send = null;
+    this.#awaitingWelcome = false;
+    this.#wantsFile = false;
     this.#download = null;
     this.#snapshot = null;
     this.#snapshotRevn = null;
@@ -355,6 +371,12 @@ export class SyncEngine {
 
   #welcome(message: Extract<ServerMessage, { t: "welcome" }>): void {
     this.#generation++;
+    this.#awaitingWelcome = false;
+    const stale = this.#wantsFile && message.mode === "catchup";
+    this.#wantsFile = false;
+    // Whatever came before this welcome comes again after it (in the log it replays, or in the
+    // file it sends), so what an earlier one buffered is let go.
+    this.#buffered = [];
     this.#sessionId = message.sessionId;
     this.#role = message.role;
     this.#emit("role", message.role);
@@ -371,12 +393,17 @@ export class SyncEngine {
       // Resent under new numbers: their old send times no longer apply.
       this.#sentAt.clear();
       this.#seq = Math.max(this.#seq, message.lastSeq);
-      if (message.mode === "catchup") {
+      if (message.mode === "catchup" && !stale) {
         this.#redoPending();
       }
     });
 
-    if (message.mode === "snapshot") {
+    if (stale) {
+      // Transactions buffer until the file asked for comes.
+      this.#snapshot = [];
+      this.#snapshotRevn = null;
+      this.#hello(null);
+    } else if (message.mode === "snapshot") {
       this.#snapshot = [];
       this.#snapshotRevn = message.revn;
     } else if (message.mode === "download") {
@@ -412,8 +439,15 @@ export class SyncEngine {
     }
     download(ticket).then((file) => {
       if (generation !== this.#generation || !this.#snapshot) return;
-      this.#downloadFailures = 0;
-      this.#loaded(file.nodes, file.revn);
+      try {
+        this.#loaded(file.nodes, file.revn);
+        this.#downloadFailures = 0;
+      } catch (error) {
+        // A file that won't load is asked for again in a while, as a failed download is.
+        this.#snapshot = [];
+        this.#snapshotRevn = null;
+        failed(error);
+      }
     }, failed);
   }
 
@@ -481,7 +515,10 @@ export class SyncEngine {
     }
     while (this.#pending[0] && (this.#pending[0].seq ?? Number.POSITIVE_INFINITY) <= seq)
       this.#pending.shift();
-    this.#revn = Math.max(this.#revn ?? 0, revn);
+    // Only a document that's in follows the room's revision: while the file is loading again (a
+    // resync asked for it, or a snapshot or download is on its way) the edit comes back in it,
+    // and taking its revision would say this client is caught up to a file it doesn't have.
+    if (this.#revn !== null && !this.#snapshot) this.#revn = Math.max(this.#revn, revn);
     this.#timeAck(seq);
   }
 
@@ -543,12 +580,18 @@ export class SyncEngine {
     if (reason !== null) this.#emit("desync", reason);
     this.#generation++;
     this.#revn = null;
-    this.#snapshot = null;
+    // Loading again from now: what arrives buffers, and nothing here moves the revision, until
+    // the file is in (a change applied to the document as it was would take its revision).
+    this.#snapshot = [];
     this.#snapshotRevn = null;
     this.#buffered = [];
     if (this.#send) {
       this.#setStatus("syncing");
-      this.#hello(null);
+      // A welcome on its way answers this too when the room asked (whatever made it ask came
+      // before it); when this client fell out of step, that welcome may be a catch-up, so it
+      // asks for the file then.
+      if (!this.#awaitingWelcome) this.#hello(null);
+      else if (reason !== null) this.#wantsFile = true;
     }
   }
 }

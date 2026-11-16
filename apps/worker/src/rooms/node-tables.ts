@@ -38,6 +38,8 @@ export const NODE_COLUMNS = "id, parent, key, type, props";
 
 /** Rows read at a time when a table is paged through. */
 export const PAGE_ROWS = 1_000;
+/** At most about this many characters of properties in a page (see `tablePages`). */
+export const PAGE_CHARS = 4 << 20;
 
 /** Bound parameters SQLite takes in one statement here (Durable Objects allow 100). */
 const MAX_PARAMS = 100;
@@ -184,21 +186,32 @@ export function* tablePages(
   sql: SqlStorage,
   table: string,
   size = PAGE_ROWS,
+  chars = PAGE_CHARS,
 ): Generator<NodeRow[]> {
   const t = checkName(table);
   let after = "";
   for (;;) {
-    const rows = sql
-      .exec<NodeRow>(
-        `SELECT ${NODE_COLUMNS} FROM ${t} WHERE id > ? ORDER BY id LIMIT ?`,
-        after,
-        size,
-      )
-      .toArray();
+    // Read a row at a time, so a page of large layers ends once it holds `chars` of properties
+    // rather than after `size` of them (a text layer may hold 200,000 characters).
+    const rows: NodeRow[] = [];
+    let held = 0;
+    let full = false;
+    for (const row of sql.exec<NodeRow>(
+      `SELECT ${NODE_COLUMNS} FROM ${t} WHERE id > ? ORDER BY id LIMIT ?`,
+      after,
+      size,
+    )) {
+      rows.push(row);
+      held += row.props.length;
+      if (held >= chars) {
+        full = true;
+        break;
+      }
+    }
     if (rows.length === 0) return;
     yield rows;
     after = (rows[rows.length - 1] as NodeRow).id;
-    if (rows.length < size) return;
+    if (!full && rows.length < size) return;
   }
 }
 

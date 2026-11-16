@@ -5,7 +5,7 @@
  * at once holds all of it; a room has 128 MB). Read from the latest saved
  * version with the transactions after it, or the file as it is.
  */
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import {
   INLINE_SNAPSHOT_NODES,
   keyBetween,
@@ -16,15 +16,19 @@ import {
 } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { base64UrlToBytes, signPayload } from "../src/lib/crypto";
-import type { DocumentTicket } from "../src/rooms/file-room";
+import type { DocumentTicket, FileRoom } from "../src/rooms/file-room";
+import { PAGE_CHARS, tablePages, tempTables } from "../src/rooms/node-tables";
 import { snapshotKey } from "../src/rooms/snapshots";
 import { Browser, openSocket, openSocketAt, signedInUser } from "./helpers";
 
 const roomOf = (fileId: string) => env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
 type Socket = Awaited<ReturnType<typeof openSocket>>;
 
-/** A file of a page and `layers` rectangles, imported as the browser imports one. */
-async function fileOf(layers: number) {
+/**
+ * A file of a page and `layers` rectangles (or text layers of `characters`
+ * characters each), imported as the browser imports one.
+ */
+async function fileOf(layers: number, characters = 0) {
   const owner = await signedInUser("Ana");
   const { file } = await owner.browser.json<{ file: { id: string } }>(
     `/api/projects/${owner.projectId}/files`,
@@ -35,13 +39,23 @@ async function fileOf(layers: number) {
   ];
   for (let i = 0, key: string | null = null; i < layers; i++) {
     key = keyBetween(key, null);
-    nodes.push({
-      id: `Rect${i}`,
-      type: "rect",
-      parent: "Page1",
-      key,
-      props: { name: `Rect ${i}`, x: i, y: 0, width: 10, height: 10 },
-    });
+    nodes.push(
+      characters > 0
+        ? {
+            id: `Rect${i}`,
+            type: "text",
+            parent: "Page1",
+            key,
+            props: { name: `Text ${i}`, characters: "x".repeat(characters) },
+          }
+        : {
+            id: `Rect${i}`,
+            type: "rect",
+            parent: "Page1",
+            key,
+            props: { name: `Rect ${i}`, x: i, y: 0, width: 10, height: 10 },
+          },
+    );
   }
   const { importId } = await owner.browser.json<{ importId: string }>(
     `/api/files/${file.id}/imports`,
@@ -235,5 +249,74 @@ describe("opening a file larger than one snapshot chunk", () => {
       300,
     );
     expect(await status(fileId, ticket as string)).toBe(404);
+  });
+
+  it("downloads a file of few layers holding a lot of text", async () => {
+    // 45 text layers of 200,000 characters: few nodes, but 9 MB of them.
+    const { browser, fileId } = await fileOf(45, 200_000);
+    const socket = await openSocket(browser, fileId);
+    expect(await hello(socket, "reader", true)).toMatchObject({ mode: "download" });
+  });
+
+  it("reads a table in pages of bounded characters, not only bounded rows", async () => {
+    const { fileId } = await fileOf(45, 200_000);
+    await runInDurableObject(roomOf(fileId), (_room: FileRoom, state) => {
+      let rows = 0;
+      for (const page of tablePages(state.storage.sql, "nodes", 1_000, 1 << 20)) {
+        let chars = 0;
+        for (const row of page) chars += row.props.length;
+        // At most one row past the bound.
+        expect(chars - (page.at(-1)?.props.length ?? 0)).toBeLessThan(1 << 20);
+        rows += page.length;
+      }
+      expect(rows).toBe(46);
+      expect(PAGE_CHARS).toBeGreaterThan(1 << 20);
+    });
+  });
+
+  it("shares one copy among downloads of one revision, dropped when the last ends", async () => {
+    const { fileId } = await fileOf(INLINE_SNAPSHOT_NODES + 500);
+    await runInDurableObject(roomOf(fileId), async (room: FileRoom, state) => {
+      const copies = () => tempTables(state.storage.sql).length;
+      const first = await room.exportDocument();
+      const second = await room.exportDocument();
+      expect(copies()).toBe(1);
+      await first.cancel();
+      expect(copies()).toBe(1);
+      const read = await new Response(second).arrayBuffer();
+      expect(read.byteLength).toBeGreaterThan(0);
+      expect(copies()).toBe(0);
+    });
+  });
+
+  it("stops a download once whoever it was given to has lost the file", async () => {
+    // A member removed from the team.
+    const { browser, fileId, userId } = await fileOf(INLINE_SNAPSHOT_NODES + 500);
+    const socket = await openSocket(browser, fileId);
+    const { ticket } = await hello(socket, "reader", true);
+    const fetchWith = (value: string) =>
+      new Browser().fetch(`/api/files/${fileId}/document?ticket=${encodeURIComponent(value)}`);
+    expect((await fetchWith(ticket as string)).status).toBe(200);
+    await env.DB.prepare("DELETE FROM team_members WHERE user_id = ?").bind(userId).run();
+    expect((await fetchWith(ticket as string)).status).toBe(404);
+
+    // A guest whose prototype link was turned off.
+    const other = await fileOf(INLINE_SNAPSHOT_NODES + 500);
+    const { link } = await other.browser.json<{ link: { url: string } }>(
+      `/api/files/${other.fileId}/share`,
+      { method: "POST" },
+    );
+    const guest = await openSocketAt(
+      new Browser(),
+      `/ws/share/${new URL(link.url).pathname.slice(3)}`,
+    );
+    const welcome = await hello(guest, "guest", true);
+    const guestFetch = () =>
+      new Browser().fetch(
+        `/api/files/${other.fileId}/document?ticket=${encodeURIComponent(welcome.ticket as string)}`,
+      );
+    expect((await guestFetch()).status).toBe(200);
+    await other.browser.json(`/api/files/${other.fileId}/share`, { method: "DELETE" });
+    expect((await guestFetch()).status).toBe(403);
   });
 });
