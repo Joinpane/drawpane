@@ -18,6 +18,10 @@ export interface DocChange {
 
 type Listener = (change: DocChange) => void;
 
+/** How many recent changes `changesSince` can replay, and how many ids they may hold in all. */
+const LOG_CHANGES = 256;
+const LOG_IDS = 2_000_000;
+
 /**
  * The editor's local copy of a file: a `MemoryStore` plus change
  * notifications. Every mutation goes through `apply` or `reset`, so views can
@@ -30,6 +34,9 @@ export class Doc {
   /** Changes collected while a batch is open; flushed as one notification. */
   #pending: { ids: Set<string>; parents: Set<string>; reset: boolean } | null = null;
   #batchDepth = 0;
+  /** Recent changes, oldest first, each with the version it made (see `changesSince`). */
+  readonly #log: Array<{ version: number; change: DocChange }> = [];
+  #logIds = 0;
 
   get version(): number {
     return this.#version;
@@ -109,6 +116,22 @@ export class Doc {
     }
   }
 
+  /**
+   * The changes that brought the document from `version` to now, oldest
+   * first, for views that catch up when they next look instead of
+   * listening (the scene's caches). Null when they're no longer kept: start
+   * afresh then.
+   */
+  changesSince(version: number): readonly DocChange[] | null {
+    if (version === this.#version) return [];
+    if (version > this.#version) return null;
+    const first = this.#log[0];
+    if (!first || first.version > version + 1) return null;
+    const out: DocChange[] = [];
+    for (const entry of this.#log) if (entry.version > version) out.push(entry.change);
+    return out;
+  }
+
   subscribe(listener: Listener): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
@@ -155,6 +178,12 @@ export class Doc {
     if (!change) return;
     this.#pending = null;
     this.#version++;
+    this.#log.push({ version: this.#version, change });
+    this.#logIds += change.ids.size + change.parents.size;
+    while (this.#log.length > LOG_CHANGES || (this.#log.length > 1 && this.#logIds > LOG_IDS)) {
+      const dropped = this.#log.shift();
+      if (dropped) this.#logIds -= dropped.change.ids.size + dropped.change.parents.size;
+    }
     for (const listener of this.#listeners) listener(change);
   }
 }
