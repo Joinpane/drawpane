@@ -1,0 +1,25 @@
+{
+  "name": "@drawpane/corpus",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "Generated files shaped like real UI kits (icons, components built of components, pages of screens made of copies), at any size, for measuring how Drawpane scales. Copies are made by the editor itself.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@drawpane/editor": "workspace:*",
+    "@drawpane/model": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
