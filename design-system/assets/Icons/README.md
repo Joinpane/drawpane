@@ -1,6 +1,6 @@
 # Icons
 
-Drawpane's own icon set: 127 glyphs on a 16px grid, with a 1.5px stroke and round caps and joins. Every file is single-ink in `#1c1b19` (the Paper theme's `ink`), because an SVG shown through `<img>` can't inherit color. In product code, use `Drawpane.Icon`, which draws the same paths in `currentColor`.
+Drawpane's own icon set: 138 glyphs on a 16px grid, with a 1.5px stroke and round caps and joins. Every file is single-ink in `#1c1b19` (the Paper theme's `ink`), because an SVG shown through `<img>` can't inherit color. In product code, use `Drawpane.Icon`, which draws the same paths in `currentColor`.
 
 | Group | Names |
 | --- | --- |
