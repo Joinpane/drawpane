@@ -36,6 +36,7 @@
     "svg2pdf.js": "2.9.0"
   },
   "devDependencies": {
+    "@drawpane/corpus": "workspace:*",
     "@playwright/test": "1.65.0",
     "@types/node": "26.6.6",
     "@types/react": "catalog:",

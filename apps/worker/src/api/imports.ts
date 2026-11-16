@@ -52,8 +52,13 @@ async function readNodes(request: Request): Promise<NodeRecord[]> {
   }
   const parsed = Part.safeParse(json);
   if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? "Invalid import.");
+  // Override records (decision 0029) wait for rooms that store compact copies (phase 4b).
+  // The room refuses them too, for each part and again at the commit.
+  if (parsed.data.nodes.some((n) => n.type === "override")) throw badRequest(NO_COMPACT_COPIES);
   return parsed.data.nodes as NodeRecord[];
 }
+
+const NO_COMPACT_COPIES = "This server doesn't store compact copies yet.";
 
 const GONE =
   "That import isn't there any more (it was finished, given up, or left too long). Start again.";

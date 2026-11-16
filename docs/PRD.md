@@ -93,7 +93,7 @@ Success at 12 months means 1,000 self-hosted deployments and designers who choos
 | Weekly active editors (hosted demo plus opted-in installs) | 5,000 | Opt-in telemetry |
 | Time from clone to working deploy | Under 10 minutes, median | Scripted test plus user survey |
 | Idle team cost | Under $0.10/month | Cloudflare billing for a reference team |
-| Canvas frame time on a 10k-layer file | p95 under 16 ms while panning | Automated benchmark in CI |
+| Canvas frame time on a 500k-layer file (the size of real UI kits, decision 0027) | p95 under 16 ms while panning and zooming, no frame over 50 ms | Automated benchmark (`bench -- scale`) |
 | Collaboration latency (edit to peer render) | p95 under 150 ms in the same region | Synthetic two-client test |
 | Penpot file import fidelity | 99% of a 500-file corpus opens with no visual diff | Visual-diff test suite |
 | Designer preference vs Figma | At least 60% prefer Drawpane on a timed task set | Moderated usability study |
@@ -221,7 +221,7 @@ Reference key: **Penpot** means Penpot has this capability and its behavior is o
 | Area | Requirement | Phase | Reference |
 | --- | --- | --- | --- |
 | Canvas | Boards, shapes, pen and path editing, booleans, masks, images, groups | v0.1 | Penpot |
-| Canvas | WebGL renderer; 10k-layer files pan at 60 fps | v0.1 | Penpot |
+| Canvas | Files the size of real UI kits (500k layers, 1M stretch) pan and zoom at 60 fps (decision 0027) | v0.1 | Figma |
 | Canvas | Fills, strokes, gradients, shadows, layer and background blur, glass (decision 0007), noise and texture (decision 0008) | v0.1 | Penpot |
 | Text | Rich text, OpenType features, variable fonts (decision 0009), Google Fonts and uploaded fonts | v0.1 | Penpot |
 | Text | Text on path | v1.0 | New |
@@ -257,8 +257,9 @@ Performance and data safety are release blockers. Every target below has an auto
 
 | Area | Requirement |
 | --- | --- |
-| Canvas performance | p95 frame time under 16 ms while panning and zooming a 10,000-layer file on a 2022 MacBook Air (M2) |
-| File open | Under 1.5 s to first interactive canvas for a 5 MB file on a warm cache; under 3 s cold |
+| Canvas performance | p95 frame time under 16 ms, and no frame over 50 ms, while panning and zooming a 500,000-layer file on a 2022 MacBook Air (M2) (decision 0027) |
+| File open | Under 1.5 s to first interactive canvas for a 5 MB file on a warm cache; under 3 s cold. A 500,000-layer file's largest page interactive within 3 s (warm) |
+| Scale | A 500,000-layer file imports as one file; an edit to any main component is drawn within 100 ms whatever its copies (decision 0027) |
 | Save latency | p95 under 200 ms from local edit to durable commit in the file's Durable Object |
 | Collaboration latency | p95 under 150 ms edit-to-peer render in the same region; pointer updates throttled to 50 ms |
 | Memory | Each Durable Object stays under 96 MB, below the 128 MB isolate limit, by loading only the pages a change touches |

@@ -1,3 +1,4 @@
+import { copyId } from "./copies";
 import { isValidId, ROOT_ID } from "./ids";
 import type { CreateOp, DeleteOp, MoveOp, NodeRecord, Op, SetOp } from "./ops";
 import { isValidOrderKey } from "./order-key";
@@ -108,6 +109,7 @@ function applyCreate(store: NodeStore, op: CreateOp): Op[] {
   if (store.get(op.id)) throw new ModelError("already_exists", `Node ${op.id} already exists.`);
   if (!isValidOrderKey(op.key)) throw new ModelError("invalid_key", `Invalid order key.`);
   checkParent(store, op.parent, op.type);
+  if (op.type === "override") checkRecord(store, op);
   if (op.parent !== ROOT_ID && depthOf(store, op.parent) >= MAX_DEPTH) {
     throw new ModelError("too_deep", `Layers can't nest deeper than ${MAX_DEPTH} levels.`);
   }
@@ -159,9 +161,37 @@ function applyDelete(store: NodeStore, op: DeleteOp, force: boolean, inverse: bo
   );
 }
 
+/**
+ * An override record (decision 0029) sits under an instance root, and its id
+ * is the one its path derives, so every client names the copy layer alike.
+ */
+function checkRecord(store: NodeStore, op: CreateOp): void {
+  const parent = store.get(op.parent);
+  if (parent?.type !== "frame" || !parent.props.instanceOf) {
+    throw new ModelError("invalid_parent", "An override record belongs under an instance.");
+  }
+  const path = op.props.path;
+  if (!Array.isArray(path) || path.length === 0) {
+    throw new ModelError("invalid_value", `An override record needs a "path".`);
+  }
+  if (op.id !== copyId(op.parent, path)) {
+    throw new ModelError("invalid_id", `"${op.id}" isn't the id of the layer its path names.`);
+  }
+}
+
 function applySet(store: NodeStore, op: SetOp): Op[] {
   const node = requireNode(store, op.id);
   checkValue(node.type, op.prop, op.value);
+  if (op.prop === "path") {
+    throw new ModelError("invalid_prop", "An override record's path doesn't change.");
+  }
+  if (
+    op.prop === "instanceOf" &&
+    op.value === null &&
+    store.childIds(op.id).some((id) => store.get(id)?.type === "override")
+  ) {
+    throw new ModelError("invalid_value", "An instance with override records stays an instance.");
+  }
   const previous = node.props[op.prop];
   store.setProp(op.id, op.prop, op.value === null ? undefined : op.value);
   return [{ op: "set", id: op.id, prop: op.prop, value: previous === undefined ? null : previous }];
@@ -169,6 +199,9 @@ function applySet(store: NodeStore, op: SetOp): Op[] {
 
 function applyMove(store: NodeStore, op: MoveOp): Op[] {
   const node = requireNode(store, op.id);
+  if (node.type === "override") {
+    throw new ModelError("invalid_parent", "An override record stays with its instance.");
+  }
   if (!isValidOrderKey(op.key)) throw new ModelError("invalid_key", `Invalid order key.`);
   checkParent(store, op.parent, node.type);
   // Walk up from the new parent: meeting the node itself means a cycle.

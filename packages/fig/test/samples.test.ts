@@ -51,7 +51,7 @@ const sample = (name: string) => {
 const convert = (fig: FigFile) =>
   convertFile(fig.file, { images: (ref) => (fig.images.has(ref) ? "a".repeat(64) : null) });
 
-// Reading a real file takes a few seconds, more while the rest of the repo's tests run alongside.
+// Reading and converting a sample takes a second or two alone, several under a full parallel run.
 describe.each(["pattern.fig", "tailwind-ecklf.fig", "medianova.fig"])(
   "%s",
   { timeout: 60_000 },
