@@ -48,7 +48,7 @@ export function connectFile(
           if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
         },
         // A large file comes over HTTP, streamed, not through the socket.
-        { download: (ticket) => api.downloadDocument(fileId, ticket) },
+        { download: (ticket, signal) => api.downloadDocument(fileId, ticket, signal) },
       );
       ping = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ t: "ping" }));

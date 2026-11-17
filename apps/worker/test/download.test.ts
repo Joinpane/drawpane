@@ -14,7 +14,7 @@ import {
   parseSnapshot,
   ROOT_ID,
 } from "@drawpane/model";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { base64UrlToBytes, signPayload } from "../src/lib/crypto";
 import type { DocumentTicket, FileRoom } from "../src/rooms/file-room";
 import { PAGE_CHARS, tablePages, tempTables } from "../src/rooms/node-tables";
@@ -318,5 +318,62 @@ describe("opening a file larger than one snapshot chunk", () => {
     expect((await guestFetch()).status).toBe(200);
     await other.browser.json(`/api/files/${other.fileId}/share`, { method: "DELETE" });
     expect((await guestFetch()).status).toBe(403);
+  });
+
+  it("keeps a role taken away while the download tickets were signed", async () => {
+    const owner = await signedInUser();
+    const { file } = await owner.browser.json<{ file: { id: string } }>(
+      `/api/projects/${owner.projectId}/files`,
+      { method: "POST", json: { name: "Race" } },
+    );
+    await openSocket(owner.browser, file.id);
+    await runInDurableObject(roomOf(file.id), async (room: FileRoom, state) => {
+      const ws = state.getWebSockets()[0] as WebSocket;
+      let began = () => {};
+      let release = () => {};
+      const started = new Promise<void>((resolve) => {
+        began = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const sign = crypto.subtle.sign.bind(crypto.subtle);
+      // Signing waits until the role has been changed.
+      const spy = vi.spyOn(crypto.subtle, "sign").mockImplementation(async (...args) => {
+        const result = await sign(...args);
+        began();
+        await gate;
+        return result;
+      });
+      try {
+        const hello = room.webSocketMessage(
+          ws,
+          JSON.stringify({ t: "hello", protocol: 1, clientId: "race", revn: null, download: true }),
+        );
+        await started;
+        await env.DB.prepare("UPDATE team_members SET role = 'viewer' WHERE user_id = ?")
+          .bind(owner.userId)
+          .run();
+        await room.accessChanged(owner.userId, "viewer", { id: "admin", name: "Admin" });
+        release();
+        await hello;
+        expect((ws.deserializeAttachment() as { role: string }).role).toBe("viewer");
+        const before = (await room.stats()).revn;
+        await room.webSocketMessage(
+          ws,
+          JSON.stringify({
+            t: "txn",
+            seq: 1,
+            ops: [
+              { op: "create", id: "Late", type: "page", parent: ROOT_ID, key: "a1", props: {} },
+            ],
+          }),
+        );
+        expect((await room.stats()).revn).toBe(before);
+      } finally {
+        release();
+        spy.mockRestore();
+      }
+    });
   });
 });

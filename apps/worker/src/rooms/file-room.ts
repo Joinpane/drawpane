@@ -1638,9 +1638,14 @@ export class FileRoom extends DurableObject<Env> {
   ): Promise<void> {
     const current = await this.#checkAccess(ws, me, true);
     if (!current) return;
-    const tickets = download ? await this.#documentTickets(current) : null;
-    // The file may have moved on while they were signed: #hello reads it as it is now.
-    this.#hello(ws, current, clientId, revn, tickets);
+    if (!download) return this.#hello(ws, current, clientId, revn, null);
+    const tickets = await this.#documentTickets(current);
+    // While they were signed the file may have moved on (#hello reads it as it is now), and their
+    // access may have changed: a role changed is in the attachment, a removal closed the socket.
+    // Never the attachment from before the wait, which would put back a role taken away.
+    const latest = ws.deserializeAttachment() as Attachment | null;
+    if (!latest || ws.readyState !== WebSocket.OPEN) return;
+    this.#hello(ws, latest, clientId, revn, tickets);
   }
 
   /**

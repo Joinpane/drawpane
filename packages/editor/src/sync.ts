@@ -64,10 +64,13 @@ type Send = (message: ClientMessage) => void;
 
 /**
  * Downloads the file with a welcome's ticket (mode `download`): its nodes,
- * and the revision they are at (the snapshot's header).
+ * and the revision they are at (the snapshot's header). `signal` aborts when
+ * the download is no longer wanted (a disconnect, another welcome), so it
+ * stops rather than reading the rest of a large file for nothing.
  */
 export type Download = (
   ticket: string,
+  signal: AbortSignal,
 ) => Promise<{ readonly revn: number; readonly nodes: readonly NodeRecord[] }>;
 
 /** The longest wait before asking for the file again after a download failed. */
@@ -109,6 +112,8 @@ export class SyncEngine {
    * one of them belongs to a connection or a welcome that's gone.
    */
   #generation = 0;
+  /** Aborts the download under way, if any. */
+  #downloading: AbortController | null = null;
   /**
    * A hello is out and its welcome hasn't come. Another isn't sent meanwhile:
    * two welcomes would each reset what's unconfirmed, the second from before
@@ -283,7 +288,7 @@ export class SyncEngine {
 
   /** Call when the socket closes. Pending edits are kept and resent on reconnect. */
   disconnected(): void {
-    this.#generation++;
+    this.#nextGeneration();
     this.#send = null;
     this.#awaitingWelcome = false;
     this.#wantsFile = false;
@@ -370,7 +375,7 @@ export class SyncEngine {
   }
 
   #welcome(message: Extract<ServerMessage, { t: "welcome" }>): void {
-    this.#generation++;
+    this.#nextGeneration();
     this.#awaitingWelcome = false;
     const stale = this.#wantsFile && message.mode === "catchup";
     this.#wantsFile = false;
@@ -422,6 +427,13 @@ export class SyncEngine {
     if (done) this.#loaded(this.#snapshot, this.#snapshotRevn);
   }
 
+  /** What was under way for the last welcome, connection or resync no longer is: a download stops. */
+  #nextGeneration(): void {
+    this.#generation++;
+    this.#downloading?.abort();
+    this.#downloading = null;
+  }
+
   #startDownload(ticket: string): void {
     const generation = this.#generation;
     const download = this.#download;
@@ -437,7 +449,10 @@ export class SyncEngine {
       failed(new Error("the room sent a download this connection can't make"));
       return;
     }
-    download(ticket).then((file) => {
+    const controller = new AbortController();
+    this.#downloading = controller;
+    download(ticket, controller.signal).then((file) => {
+      if (this.#downloading === controller) this.#downloading = null;
       if (generation !== this.#generation || !this.#snapshot) return;
       try {
         this.#loaded(file.nodes, file.revn);
@@ -578,7 +593,7 @@ export class SyncEngine {
   /** Loads the room's state afresh. `reason` is set when we fell out of step (not when the room asked). */
   #resync(reason: string | null): void {
     if (reason !== null) this.#emit("desync", reason);
-    this.#generation++;
+    this.#nextGeneration();
     this.#revn = null;
     // Loading again from now: what arrives buffers, and nothing here moves the revision, until
     // the file is in (a change applied to the document as it was would take its revision).

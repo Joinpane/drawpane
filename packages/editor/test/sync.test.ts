@@ -565,6 +565,33 @@ describe("SyncEngine room requests", () => {
     expect(sent.filter((m) => m.t === "hello")).toHaveLength(1);
   });
 
+  it("stops a download no longer wanted: on a disconnect, and on another welcome", () => {
+    const engine = new SyncEngine(new Doc(), { clientId: "c1", setTimer: () => 0 });
+    const signals: AbortSignal[] = [];
+    const download = (_ticket: string, signal: AbortSignal) => {
+      signals.push(signal);
+      return new Promise<never>(() => {});
+    };
+    const welcome = () =>
+      engine.receive({
+        t: "welcome",
+        sessionId: "s1",
+        revn: 1,
+        role: "editor",
+        peers: [],
+        mode: "download",
+        lastSeq: 0,
+        ticket: "t",
+      });
+    engine.connected(() => {}, { download });
+    welcome();
+    expect(signals.map((s) => s.aborted)).toEqual([false]);
+    welcome();
+    expect(signals.map((s) => s.aborted)).toEqual([true, false]);
+    engine.disconnected();
+    expect(signals.map((s) => s.aborted)).toEqual([true, true]);
+  });
+
   it("asks again after a failed download without counting what came the first time twice", async () => {
     const doc = new Doc();
     const timers: Array<() => void> = [];

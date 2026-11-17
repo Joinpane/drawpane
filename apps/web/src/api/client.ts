@@ -151,8 +151,9 @@ async function requestText(method: string, path: string): Promise<string> {
  */
 async function requestSnapshot(
   path: string,
+  signal?: AbortSignal,
 ): Promise<{ readonly revn: number; readonly nodes: NodeRecord[] }> {
-  const response = await send("GET", path);
+  const response = await send("GET", path, undefined, signal);
   if (!response.ok) await readJson(response);
   let snapshot: Awaited<ReturnType<typeof readSnapshotStream>>;
   try {
@@ -164,12 +165,18 @@ async function requestSnapshot(
   return { revn: snapshot.header.revn, nodes: snapshot.nodes };
 }
 
-async function send(method: string, path: string, body?: unknown): Promise<Response> {
+async function send(
+  method: string,
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<Response> {
   let response: Response;
   try {
     response = await fetch(`/api${path}`, {
       method,
       credentials: "same-origin",
+      ...(signal ? { signal } : {}),
       headers: body === undefined ? {} : { "content-type": "application/json" },
       ...(body === undefined
         ? {}
@@ -277,9 +284,10 @@ export const api = {
    * A file too large for its room's socket, with the ticket the room gave
    * (sync mode `download`): its nodes and the revision they're at.
    */
-  downloadDocument: (fileId: string, ticket: string) =>
+  downloadDocument: (fileId: string, ticket: string, signal?: AbortSignal) =>
     requestSnapshot(
       `/files/${encodeURIComponent(fileId)}/document?ticket=${encodeURIComponent(ticket)}`,
+      signal,
     ),
   /** Publishes the file as a team library (decision 0010): a named version, and what it offers. */
   publishLibrary: (fileId: string, body: { description?: string }) =>
