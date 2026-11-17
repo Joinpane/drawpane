@@ -22,7 +22,16 @@ import { z } from "zod";
 import type { Editor } from "../editor";
 import { ExportError } from "../export";
 import { base64, type HeadlessPng, type PngOptions } from "../headless-render";
-import { expandOne, JSX_TAGS, JsxError, type JsxTree, jsxToTrees, nodeToJsx, TAG_OF } from "./jsx";
+import {
+  expandOne,
+  JSX_TAGS,
+  JsxError,
+  JsxTooLong,
+  type JsxTree,
+  jsxToTrees,
+  nodeToJsx,
+  TAG_OF,
+} from "./jsx";
 
 /** read: looks only; view: changes what's shown, not the file; write: changes the file. */
 export type ToolLevel = "read" | "view" | "write";
@@ -155,6 +164,13 @@ const render = defineTool({
   },
 });
 
+/**
+ * The most get_jsx returns: more than a model reads at once, and bounded so
+ * reading a file of long texts holds a few MB, never the file again
+ * (decision 0026).
+ */
+export const MAX_JSX_CHARS = 2_000_000;
+
 const getJsx = defineTool({
   name: "get_jsx",
   title: "Read layers as JSX",
@@ -164,7 +180,22 @@ const getJsx = defineTool({
   input: z.object({ id, depth: z.number().int().min(0).max(40).optional() }),
   run(editor, { id: nodeId, depth }) {
     need(editor, nodeId);
-    return { data: { jsx: nodeToJsx(editor.doc, nodeId, depth === undefined ? {} : { depth }) } };
+    try {
+      return {
+        data: {
+          jsx: nodeToJsx(editor.doc, nodeId, {
+            maxChars: MAX_JSX_CHARS,
+            ...(depth === undefined ? {} : { depth }),
+          }),
+        },
+      };
+    } catch (error) {
+      if (error instanceof JsxTooLong)
+        throw new ToolFailure(
+          `That's more JSX than one read returns (over ${MAX_JSX_CHARS.toLocaleString("en")} characters). Read its layers one at a time by id, or pass a smaller depth.`,
+        );
+      throw error;
+    }
   },
 });
 

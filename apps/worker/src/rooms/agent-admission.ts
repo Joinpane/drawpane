@@ -1,83 +1,112 @@
 /**
  * Whether agent tools may work on a file (decisions 0021, 0026). The
- * headless editor (`agent-engine.ts`) holds the whole file in memory, so a
- * file is admitted only when what it would hold is known to fit, worked out
- * in SQL before anything is read: its layers (as presented, with compact
- * copies) and the bytes of its values.
+ * headless editor (`agent-engine.ts`) holds the whole file in memory, and a
+ * Durable Object that runs out of memory can't catch it. So what it holds
+ * is bounded as it's built, never predicted:
  *
- * Measured in Node 26 (`test-node/room-bounds.test.ts`, the standin text
- * measurer), what the editor holds once built:
+ * - A meter (`agentMeter`, a `BuildBudget` of AGENT_MAX_HELD) counts what
+ *   the editor keeps as it keeps it: each node as it's parsed (`storedBytes`:
+ *   its record, values and the store's entries), each copy layer as it's
+ *   built, the change log. The file is read a page at a time, each page
+ *   bounded by characters (`SqlNodeStore.records`), so its serialized and
+ *   parsed forms are never both held whole. Past the meter's limit the
+ *   build stops, before keeping what would pass it, with `AgentTooLarge`.
+ * - The warm editor stays metered: every transaction it follows is counted
+ *   as applied, and copy layers it builds are refused past the limit, so
+ *   one that grows past it is let go of, and the next call builds it again
+ *   (and is refused).
+ * - `agentPrecheck` is a fast first filter in SQL, before a row is read:
+ *   the layer limit, and a lower bound of what the meter will count. It
+ *   refuses only files the meter would refuse anyway.
  *
- * - long strings about a heap byte per UTF-8 byte stored: 1.00 for ASCII
- *   and emoji, 0.67 for CJK (two bytes a character in V8, three in UTF-8);
- * - small layers 524 bytes each with their values (rectangles, 210 bytes of
- *   JSON), 624 for texts of 300 characters: under 320 a layer beyond their
- *   UTF-8 bytes;
- * - copies built from their mains (compact copies) 707 bytes each.
- *
- * Building it peaked at 1.4 to 1.5 times what it then held, sampled
- * uncapped (garbage included). So the estimate is AGENT_LAYER_BYTES a
- * stored node, AGENT_COPY_BYTES a copy built, and the UTF-8 bytes of the
- * stored values; at most AGENT_MAX_HELD (48 MB), which leaves a room of
- * 128 MB about 25 MB beside a build's peak and the 17 MB it starts with. A
- * 50,000-layer kit (about 450 bytes of JSON a layer) is about 38 MB.
+ * AGENT_MAX_HELD (48 MB) leaves a room of 128 MB its baseline (17 MB on
+ * Workers), a page being parsed (at most PAGE_CHARS characters, read and
+ * parsed: under 20 MB), and a tool's own work beside what's held. Measured
+ * in Node 26 (`test-node/agent-meter.test.ts`): the meter counts at least
+ * what each shape holds once built (long ASCII, CJK and emoji text, nested
+ * fills, rectangles, short texts, shallow and deep compact copies).
  */
-import type { CopiesFormat } from "@drawpane/model";
+
+import { ToolFailure } from "@drawpane/editor";
+import {
+  BuildBudget,
+  BuildTooLarge,
+  type CopiesFormat,
+  LEAST_OBJECT_BYTES,
+  STORED_NODE_BYTES,
+} from "@drawpane/model";
 import { sumPast } from "./node-tables";
 
 /** The most layers (as presented) a file may have for agents to work on it. */
 export const AGENT_MAX_NODES = 50_000;
-/** What the headless editor holds for a stored node beyond its values' bytes, about. */
-export const AGENT_LAYER_BYTES = 320;
-/** What it holds for a copy layer it builds (compact copies), about. */
-export const AGENT_COPY_BYTES = 760;
-/** The most the headless editor may be estimated to hold. */
+/** The most the headless editor may hold, as its meter counts it. */
 export const AGENT_MAX_HELD = 48 << 20;
 
-export type AgentAdmission =
-  | { readonly ok: true; readonly held: number }
-  | { readonly ok: false; readonly message: string };
+/**
+ * The least the meter counts for a row, in SQL: a stored node's own bytes
+ * and ids, an object for its values, and a header and a byte a character
+ * for every string among them (`heapBytes` counts at least that; keys and
+ * numbers aren't counted here). So a file of long texts is refused here,
+ * before a row is read; one whose values are many small objects (which the
+ * meter counts closer) passes, and the meter refuses it as it's built.
+ */
+const LEAST_ROW_BYTES = `(${STORED_NODE_BYTES + LEAST_OBJECT_BYTES} + LENGTH(id) + LENGTH(parent) + LENGTH(key)
+  + COALESCE((SELECT SUM(16 + LENGTH(atom)) FROM json_tree(props) WHERE type = 'text'), 0))`;
 
 const READ_TOOLS = "The read tools (get_outline, find_nodes, get_node) still work.";
 
+export type AgentAdmission =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly message: string };
+
+/** A file the headless editor can't hold: a refusal, answered as the tool's failure. */
+export class AgentTooLarge extends ToolFailure {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/** Why a file of `layers` layers (as presented) is refused. */
+export function tooManyLayers(layers: number): string {
+  return `This file is too large for agent tools (${layers.toLocaleString("en")} layers; they work on files of up to ${AGENT_MAX_NODES.toLocaleString("en")}). ${READ_TOOLS}`;
+}
+
+/** Why a file the meter stopped at is refused. */
+export function tooMuchMemory(limit = AGENT_MAX_HELD): string {
+  return `This file is too large for agent tools (editing it would take more than the ${mb(limit)} MB of memory they work in; long texts take the most). ${READ_TOOLS}`;
+}
+
+/** The meter the headless editor counts what it keeps in. */
+export function agentMeter(limit = AGENT_MAX_HELD): BuildBudget {
+  return new BuildBudget({ bytes: limit });
+}
+
+/** `error` as the refusal it means, when it's the meter stopping a build; otherwise null. */
+export function asTooLarge(error: unknown, limit = AGENT_MAX_HELD): AgentTooLarge | null {
+  if (error instanceof AgentTooLarge) return error;
+  if (error instanceof BuildTooLarge) return new AgentTooLarge(tooMuchMemory(limit));
+  return null;
+}
+
 /**
- * Whether the file in `nodes` fits the headless editor, and what it would
- * hold. `presented` counts its layers as presented (called only for a
- * compact file of at most AGENT_MAX_NODES stored). The values' bytes are
- * read only until they're past the bound.
+ * The fast first filter, in SQL before a row is read: refused when the file
+ * has more layers (as presented: `presented`, called only for a compact
+ * file of at most AGENT_MAX_NODES stored) than agents work on, or when even
+ * the least the meter could count for it is past its limit. Admitted here
+ * doesn't mean it fits: the meter says, as the editor is built.
  */
-export function agentAdmission(
+export function agentPrecheck(
   sql: SqlStorage,
   copies: CopiesFormat,
   presented: () => number,
+  limit = AGENT_MAX_HELD,
 ): AgentAdmission {
   const stored = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM nodes").one().n;
-  // With compact copies the editor holds every copy layer as built: counted as presented.
   const layers = copies === "compact" && stored <= AGENT_MAX_NODES ? presented() : stored;
-  if (layers > AGENT_MAX_NODES)
-    return {
-      ok: false,
-      message: `This file is too large for agent tools (${layers.toLocaleString("en")} layers; they work on files of up to ${AGENT_MAX_NODES.toLocaleString("en")}). ${READ_TOOLS}`,
-    };
-  const own =
-    copies === "compact"
-      ? sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM nodes WHERE type != 'override'").one().n
-      : stored;
-  const fixed = AGENT_LAYER_BYTES * stored + AGENT_COPY_BYTES * Math.max(0, layers - own);
-  const held = fixed + sumPast(sql, "nodes", "LENGTH(CAST(props AS BLOB))", AGENT_MAX_HELD - fixed);
-  if (held <= AGENT_MAX_HELD) return { ok: true, held };
-  return {
-    ok: false,
-    message: `This file is too large for agent tools (editing it would take over ${mb(held)} MB of memory, and they work on files of up to ${mb(AGENT_MAX_HELD)} MB; long texts take the most). ${READ_TOOLS}`,
-  };
-}
-
-/** What following `ops` may add to what the editor holds: their JSON, and a layer for each create. */
-export function agentGrowth(ops: readonly { readonly op: string }[]): number {
-  let creates = 0;
-  for (const op of ops) if (op.op === "create") creates++;
-  // Two bytes a character: V8 holds text past Latin-1 so.
-  return 2 * JSON.stringify(ops).length + AGENT_LAYER_BYTES * creates;
+  if (layers > AGENT_MAX_NODES) return { ok: false, message: tooManyLayers(layers) };
+  if (sumPast(sql, "nodes", LEAST_ROW_BYTES, limit) > limit)
+    return { ok: false, message: tooMuchMemory(limit) };
+  return { ok: true };
 }
 
 const mb = (bytes: number) => Math.floor(bytes / (1 << 20)).toLocaleString("en");

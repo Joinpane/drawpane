@@ -49,9 +49,16 @@ import { FILE_ACCESS, FILE_ROLE } from "../api/access";
 import type { Env, Role } from "../env";
 import { signPayload, verifyPayload } from "../lib/crypto";
 import { answerDocument, type DocumentRequest, SqlFileDoc } from "../mcp/document";
-import { agentAdmission } from "./agent-admission";
+import { AgentTooLarge, agentPrecheck } from "./agent-admission";
 import { AgentEngine, type EngineRun } from "./agent-engine";
-import { CALL_SCHEMA, CallLedger, changedIds, firstOverlap, type StepCall } from "./call-ledger";
+import {
+  CALL_SCHEMA,
+  CallLedger,
+  changedIds,
+  firstOverlap,
+  inverseCharsPast,
+  type StepCall,
+} from "./call-ledger";
 import {
   applyConversion,
   CONVERT_STEP_WORK,
@@ -413,6 +420,12 @@ export type AgentCallResult =
 
 /** The largest change one agent call may make, in JSON bytes (one log row, well under SQLite's cap). */
 const MAX_AGENT_CHANGE_BYTES = 1 << 20;
+/**
+ * Why an agent's change that would take back more than that is refused: its
+ * undo is kept with the call (decision 0026, item 8).
+ */
+const TOO_MUCH_TO_UNDO =
+  "That changes too much at once to keep its undo (it would take back over 1 MB of layers' values). Change it in parts: fewer or smaller layers per call.";
 /** How often a call runs again because the file changed under it, before giving up. */
 const AGENT_ATTEMPTS = 3;
 const NO_ENGINE =
@@ -505,9 +518,8 @@ export class FileRoom extends DurableObject<Env> {
       // Nothing can be reading a transient table yet: any left are from before a restart.
       for (const table of tempTables(this.#sql)) dropTable(this.#sql, table);
       this.#revn = Number(this.#meta("revn") ?? 0);
-      const hasPage = this.#store
-        .childIds(ROOT_ID)
-        .some((id) => this.#store.get(id)?.type === "page");
+      // Counted in SQL: a file may hold a million pages, never all read to see whether it has one.
+      const hasPage = this.#store.pagesUpTo(1) > 0;
       const copies = this.#meta("copies");
       if (!hasPage) {
         // A new file: stored compact, unless conversion is turned off (COMPACT_COPIES=off).
@@ -2276,6 +2288,9 @@ export class FileRoom extends DurableObject<Env> {
       return { ok: false, message: await this.#blockedMessage(direction, target, blocked) };
 
     const ops = direction === "undo" ? target.inverse : target.ops;
+    // What it takes back is kept for the step after; past what a call keeps, refused.
+    if (inverseCharsPast(this.#sql, ops, MAX_AGENT_CHANGE_BYTES) > MAX_AGENT_CHANGE_BYTES)
+      return { ok: false, message: `Can't ${direction} “${target.label}”: ${TOO_MUCH_TO_UNDO}` };
     const author = { clientId: "agent", seq: 0, userId: by.userId, sessionId: session.id };
     const result = {
       [direction === "undo" ? "undone" : "redone"]: { tool: target.tool, label: target.label },
@@ -2308,26 +2323,25 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * A refusal when the file is more than the headless editor holds
-   * (`agent-admission.ts`): its layers, and the bytes of its values, counted
-   * in SQL before anything is read. A warm editor at this revision was
-   * admitted and has counted what it followed since, so it's asked instead.
+   * A refusal when the file is more than the headless editor may hold
+   * (`agent-admission.ts`). A warm editor at this revision is within it
+   * (its meter lets it go when it isn't). Otherwise the SQL pre-check, a
+   * fast filter before anything is read; a file it passes is measured as
+   * the editor is built (`#warmEditor`), and a refusal then is kept for the
+   * revision, so asking again doesn't read the file again.
    */
   #tooLargeForAgents(): AgentCallResult | null {
-    const warm = this.#engine?.heldAt(this.#revn);
-    if (warm != null) {
-      this.#admitted = { revn: this.#revn, held: warm };
-      return null;
+    if (this.#engine?.heldAt(this.#revn) != null) return null;
+    if (this.#agentRefusal?.revn !== this.#revn) {
+      const pre = agentPrecheck(this.#sql, this.#copies, () => this.#presentedLayers());
+      this.#agentRefusal = { revn: this.#revn, message: pre.ok ? null : pre.message };
     }
-    if (this.#admitted?.revn === this.#revn) return null;
-    const admission = agentAdmission(this.#sql, this.#copies, () => this.#presentedLayers());
-    if (!admission.ok) return { ok: false, message: admission.message };
-    this.#admitted = { revn: this.#revn, held: admission.held };
-    return null;
+    const message = this.#agentRefusal.message;
+    return message === null ? null : { ok: false, message };
   }
 
-  /** The revision the file was last admitted at, and what it was estimated to hold then. */
-  #admitted: { revn: number; held: number } | null = null;
+  /** Whether the file at a revision was refused for agents, and why (null: not refused). */
+  #agentRefusal: { revn: number; message: string | null } | null = null;
 
   /** Layers the file presents (compact copies), worked out once a revision. */
   #presented: { revn: number; count: number } | null = null;
@@ -2352,22 +2366,29 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * The headless editor at this revision. Built afresh only for a file
-   * admitted afresh: one that grew while the call awaited (its fonts) is
-   * refused (a `ToolFailure`, answered as the tool's failure).
+   * The headless editor at this revision, built when there's none warm:
+   * from pages of the room's rows (`SqlNodeStore.records`), metered as it's
+   * built. A file that's more than it may hold, or that grew past it while
+   * the call awaited (its fonts), is refused (`AgentTooLarge`, a
+   * `ToolFailure`, answered as the tool's failure).
    */
   #warmEditor(engine: AgentEngine) {
     if (engine.heldAt(this.#revn) === null) {
       const tooLarge = this.#tooLargeForAgents();
-      if (tooLarge && !tooLarge.ok) throw new ToolFailure(tooLarge.message);
+      if (tooLarge && !tooLarge.ok) throw new AgentTooLarge(tooLarge.message);
     }
-    return engine.editorAt(
-      this.#revn,
-      this.#store.count(),
-      () => this.#readAll(),
-      this.#copies,
-      this.#admitted?.held ?? 0,
-    );
+    try {
+      return engine.editorAt(
+        this.#revn,
+        this.#store.count(),
+        () => this.#store.records(),
+        this.#copies,
+      );
+    } catch (error) {
+      if (error instanceof AgentTooLarge)
+        this.#agentRefusal = { revn: this.#revn, message: error.message };
+      throw error;
+    }
   }
 
   /** Commits an engine run as one transaction, with its ledger row in the same storage transaction. */
@@ -2392,6 +2413,11 @@ export class FileRoom extends DurableObject<Env> {
         ok: false,
         message: "That's too much to change in one call. Build it in parts: one section per call.",
       };
+    }
+    if (inverseCharsPast(this.#sql, run.ops, MAX_AGENT_CHANGE_BYTES) > MAX_AGENT_CHANGE_BYTES) {
+      // Its editor already shows it: built again next time.
+      engine.drop();
+      return { ok: false, message: TOO_MUCH_TO_UNDO };
     }
     const author = { clientId: "agent", seq: 0, userId: by.userId, sessionId: session.id };
     let revn: number;
@@ -3056,7 +3082,7 @@ export class FileRoom extends DurableObject<Env> {
         }),
       );
       this.#revn = revn;
-      if (options.fromEngine) this.#engine?.committed(revn, ops);
+      if (options.fromEngine) this.#engine?.committed(revn);
       else this.#engine?.follow(ops, revn);
       return revn;
     } finally {

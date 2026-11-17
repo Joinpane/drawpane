@@ -259,3 +259,44 @@ export class CallLedger {
     this.#sql.exec("DELETE FROM agent_calls WHERE at <= ?", now - CALL_RETENTION_MS);
   }
 }
+
+/**
+ * At least how many characters of stored values undoing `ops` takes back,
+ * worked out in SQL before they're applied: a deleted layer's subtree, and
+ * the value a set replaces. Summed only until past `limit`. The room keeps
+ * an agent's call with its inverse (for its undo), so applying such a
+ * change would gather all that into memory beside the headless editor (a
+ * frame holding a whole file of long texts, deleted, ran a 128 MB heap out)
+ * and then fail to fit in its ledger row anyway.
+ */
+export function inverseCharsPast(sql: SqlStorage, ops: readonly Op[], limit: number): number {
+  let total = 0;
+  const seen = new Set<string>();
+  for (const op of ops) {
+    if (op.op === "delete") {
+      if (seen.has(`d${op.id}`)) continue;
+      seen.add(`d${op.id}`);
+      total +=
+        sql
+          .exec<{ n: number | null }>(
+            `WITH RECURSIVE sub(id) AS (SELECT ? UNION SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
+           SELECT SUM(LENGTH(n.props)) AS n FROM nodes n JOIN sub ON n.id = sub.id`,
+            op.id,
+          )
+          .one().n ?? 0;
+    } else if (op.op === "set") {
+      if (seen.has(`s${op.id}\u0000${op.prop}`)) continue;
+      seen.add(`s${op.id}\u0000${op.prop}`);
+      total +=
+        sql
+          .exec<{ n: number | null }>(
+            "SELECT LENGTH(json_extract(props, ?)) AS n FROM nodes WHERE id = ?",
+            `$."${op.prop}"`,
+            op.id,
+          )
+          .toArray()[0]?.n ?? 0;
+    }
+    if (total > limit) return total;
+  }
+  return total;
+}

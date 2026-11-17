@@ -80,6 +80,21 @@ export class BuildBudget {
     if (next > this.#peak) this.#peak = next;
   }
 
+  /**
+   * Counts `bytes` already kept, without refusing them: for a change that
+   * has to apply whole (a transaction a room committed), whose holder checks
+   * `over` once it's applied and lets go of everything when it is.
+   */
+  hold(bytes: number): void {
+    this.#held += bytes;
+    if (this.#held > this.#peak) this.#peak = this.#held;
+  }
+
+  /** Whether more is held than the limit (only `hold` can take it there). */
+  get over(): boolean {
+    return this.#held > this.limit;
+  }
+
   /** Gives back what was charged and let go of. */
   release(bytes: number): void {
     this.#held = Math.max(0, this.#held - bytes);
@@ -139,4 +154,102 @@ export function nodeBytes(node: {
   readonly props: unknown;
 }): number {
   return 120 + node.id.length + node.parent.length + node.key.length + valueBytes(node.props);
+}
+
+// ---------------------------------------------------------------------------
+// What a document held in memory keeps (the headless editor's meter)
+
+/**
+ * A value as V8 holds it once parsed, counted closer than `valueBytes`
+ * (which the copy builders' budgets were set with) but never under it, as
+ * measured in Node 26 (apps/worker/test-node/agent-meter.test.ts):
+ *
+ * - a string: its header and characters, a byte each (two past Latin-1),
+ *   to a whole word; short ones JSON.parse shares are counted anyway;
+ * - a number: nothing past its slot when it's a small integer, a boxed
+ *   double otherwise; true, false and null nothing (V8 shares them);
+ * - an array: its object and backing store, a slot an item;
+ * - an object: its header and a slot a property (keys are shared), or,
+ *   past 64 properties (which V8 may keep as a hash table), three slots a
+ *   property at twice its count and its key.
+ */
+export function heapBytes(value: unknown): number {
+  if (typeof value === "string") return stringBytes(value);
+  if (typeof value === "number")
+    return Number.isInteger(value) && value >= -(2 ** 30) && value < 2 ** 30 ? 0 : 16;
+  if (typeof value !== "object" || value === null) return 0;
+  if (Array.isArray(value)) {
+    let n = 48 + 8 * value.length;
+    for (const item of value) n += heapBytes(item);
+    return n;
+  }
+  const entries = Object.entries(value);
+  if (entries.length > 64) {
+    let n = 64;
+    for (const [key, item] of entries) n += 48 + stringBytes(key) + heapBytes(item);
+    return n;
+  }
+  let n = OBJECT_BYTES;
+  for (const [, item] of entries) n += SLOT_BYTES + heapBytes(item);
+  return n;
+}
+
+/** An object's header and properties backing store, and what a property's slot takes in it. */
+const OBJECT_BYTES = 40;
+/** The least `heapBytes` counts for an object. */
+export const LEAST_OBJECT_BYTES = OBJECT_BYTES;
+const SLOT_BYTES = 12;
+
+function stringBytes(s: string): number {
+  return 8 * Math.ceil((16 + (WIDE.test(s) ? 2 : 1) * s.length) / 8);
+}
+
+/**
+ * What a `MemoryStore` keeps for a node beside its ids and values: the
+ * record, its type, the strings' headers, its entry in the id map, its id
+ * in its parent's child list, and its own list when it has children.
+ */
+export const STORED_NODE_BYTES = 200;
+
+/** A node kept in a `MemoryStore`: its record, its ids and values (`heapBytes`), the store's entries. */
+export function storedBytes(node: {
+  readonly id: string;
+  readonly parent: string;
+  readonly key: string;
+  readonly props: unknown;
+}): number {
+  return (
+    STORED_NODE_BYTES +
+    node.id.length +
+    node.parent.length +
+    node.key.length +
+    heapBytes(node.props)
+  );
+}
+
+/** What setting a node's `prop` from `before` to `after` (undefined: not set) changes its `storedBytes` by. */
+export function propBytes(before: unknown, after: unknown): number {
+  const of = (value: unknown) => (value === undefined ? 0 : SLOT_BYTES + heapBytes(value));
+  return of(after) - of(before);
+}
+
+/**
+ * A presented copy layer the editor's view keeps (`CopyView`'s `cost`): its
+ * record and the object of its values, which point at values its main and
+ * its record already hold.
+ */
+export function presentedBytes(node: {
+  readonly id: string;
+  readonly parent: string;
+  readonly key: string;
+  readonly props: object;
+}): number {
+  return (
+    STORED_NODE_BYTES +
+    node.id.length +
+    node.parent.length +
+    node.key.length +
+    OBJECT_BYTES +
+    SLOT_BYTES * Object.keys(node.props).length
+  );
 }

@@ -7,9 +7,11 @@ import {
   nodeBytes,
   type PropName,
   type Props,
+  ROOT_ID,
 } from "@drawpane/model";
 import { checkIds, idsRoom } from "./convert";
 import { instanceCycleIn } from "./instance-cycles";
+import { tablePages } from "./node-tables";
 
 interface NodeRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -244,8 +246,37 @@ export class SqlNodeStore implements NodeStore {
     return instanceCycleIn(this.#sql, "nodes", id, deep);
   }
 
+  /** How many pages there are, counted in SQL no further than `atMost`. */
+  pagesUpTo(atMost: number): number {
+    return this.#sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM (SELECT 1 FROM nodes WHERE parent = ? AND type = 'page' LIMIT ?)",
+        ROOT_ID,
+        atMost,
+      )
+      .one().n;
+  }
+
   count(): number {
     return this.#sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM nodes").one().n;
+  }
+
+  /**
+   * Every node, in id order, read a page at a time with each page bounded by
+   * its characters (`tablePages`): what's held at once of the file's JSON is
+   * a page of it, and a page's rows are let go of as the next is read. For
+   * building something from the whole file that counts what it keeps (the
+   * headless editor).
+   */
+  *records(): Generator<NodeRecord> {
+    for (const rows of tablePages(this.#sql, "nodes")) {
+      const page = rows as NodeRow[];
+      for (let i = 0; i < page.length; i++) {
+        yield toRecord(page[i] as NodeRow);
+        // Its JSON isn't needed once parsed.
+        page[i] = undefined as unknown as NodeRow;
+      }
+    }
   }
 
   /** All nodes in pages of `size`, for snapshots. */

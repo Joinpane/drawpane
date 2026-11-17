@@ -4,6 +4,7 @@
  * what it couldn't draw exactly; sized for a model by default, at a scale
  * when asked; with any token, since it only looks.
  */
+import { env } from "cloudflare:test";
 import { DEFAULT_GLASS } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { signedInUser } from "./helpers";
@@ -118,6 +119,34 @@ describe("export_image, headless", () => {
     const out = picture(await call(token, "export_image", { fileId, id: photo, scale: 1 }));
     expect([out.width, out.height]).toEqual([100, 50]);
     expect(out.data.approximate).toBeUndefined();
+  });
+
+  it("refuses images more than a render may hold, known before their files are read", async () => {
+    const { browser, fileId, token, render } = await setup();
+    const png = Uint8Array.from(
+      atob(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8AAQv8BD/kD/YURmXYAAAAASUVORK5CYII=",
+      ),
+      (c) => c.charCodeAt(0),
+    );
+    const uploaded = await browser.fetch(`/api/files/${fileId}/media`, {
+      method: "POST",
+      headers: { "content-type": "image/png" },
+      body: png,
+    });
+    const { sha } = (await uploaded.json()) as { sha: string };
+    // As a 12-megapixel photo's record says: 48 MB decoded, past the 32 MB a render may hold.
+    await env.DB.prepare("UPDATE media SET width = 4000, height = 3000 WHERE sha = ?")
+      .bind(sha)
+      .run();
+    const photo = await render(
+      `<Rect w={100} h={50} fill={${JSON.stringify([{ type: "image", ref: sha, scaleMode: "fill" }])}} />`,
+    );
+    const refused = await call(token, "export_image", { fileId, id: photo, scale: 1 });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.structuredContent.error)).toMatch(
+      /images in that render take more memory than drawing here may \(up to 32 MB/,
+    );
   });
 
   it("explains what it can't draw", async () => {

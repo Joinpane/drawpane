@@ -143,17 +143,13 @@ export class PresentedReader implements DocReader {
     return this.#reader.childCount(parent);
   }
 
-  pageIds(): readonly string[] {
+  /** Page ids in file order, read a page of rows at a time as they're asked for. */
+  pageIds(): Iterable<string> {
     return this.#reader.pageIds();
   }
 
-  pages(): NodeRecord[] {
-    const out: NodeRecord[] = [];
-    for (const id of this.#reader.pageIds()) {
-      const page = this.#reader.get(id);
-      if (page) out.push(page);
-    }
-    return out;
+  pageCount(): number {
+    return this.#reader.pageCount();
   }
 
   pageOf(id: string): NodeRecord | undefined {
@@ -217,7 +213,8 @@ export class PresentedReader implements DocReader {
       children: (id) => this.childNodes(id),
       childIds: (id) => this.children(id),
       childCount: (id) => this.childCount(id),
-      pages: () => this.pages(),
+      pageIds: () => this.pageIds(),
+      pageCount: () => this.pageCount(),
       pageOf: (id) => this.pageOf(id),
       onPages: () => this.onPages(),
     };

@@ -185,6 +185,7 @@ export class CopyView {
   #complete = false;
   readonly #lazy: boolean;
   readonly #budget: BuildBudget | null;
+  readonly #cost: (node: NodeRecord) => number;
   /** What this view has charged its budget and not given back. */
   #held = 0;
 
@@ -198,11 +199,22 @@ export class CopyView {
     {
       lazy = false,
       budget = null,
-    }: { readonly lazy?: boolean; readonly budget?: BuildBudget | null } = {},
+      cost = nodeBytes,
+    }: {
+      readonly lazy?: boolean;
+      readonly budget?: BuildBudget | null;
+      /**
+       * What a presented node it caches is charged: `nodeBytes` (its values
+       * whole) unless said. A view over a store that's itself counted (the
+       * editor's) charges only what a presented node adds (`presentedBytes`).
+       */
+      readonly cost?: (node: NodeRecord) => number;
+    } = {},
   ) {
     this.#store = store;
     this.#lazy = lazy;
     this.#budget = budget;
+    this.#cost = cost;
   }
 
   #charge(bytes: number): void {
@@ -219,7 +231,7 @@ export class CopyView {
 
   /** Caches a presented node, charged. */
   #keep(id: string, node: NodeRecord): void {
-    this.#charge(this.#budget ? nodeBytes(node) : 0);
+    this.#charge(this.#budget ? this.#cost(node) : 0);
     this.#nodes.set(id, node);
   }
 
@@ -228,7 +240,7 @@ export class CopyView {
     const node = this.#nodes.get(id);
     if (!node) return;
     this.#nodes.delete(id);
-    if (this.#budget) this.#giveBack(nodeBytes(node));
+    if (this.#budget) this.#giveBack(this.#cost(node));
   }
 
   /** The main a stored instance root follows, or undefined when it doesn't follow one. */

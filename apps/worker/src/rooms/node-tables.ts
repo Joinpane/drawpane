@@ -468,14 +468,47 @@ export class TableReader implements DocReader {
     return !!node && (CHILD_TYPES[node.type] ?? []).length === 0;
   }
 
-  pageIds(): readonly string[] {
+  /**
+   * Page ids in file order, read PAGE_ROWS at a time as they're asked for:
+   * nothing limits how many pages a file has (a legal import may hold a
+   * million), so they're never all read at once.
+   */
+  *pageIds(): Generator<string> {
+    const t = this.#table;
+    let after: { key: string; id: string } | null = null;
+    for (;;) {
+      const rows: Array<{ id: string; key: string }> = (
+        after
+          ? this.#sql.exec<{ id: string; key: string }>(
+              `SELECT id, key FROM ${t} WHERE parent = ? AND type = 'page'
+                 AND (key > ? OR (key = ? AND id > ?)) ORDER BY key, id LIMIT ?`,
+              ROOT_ID,
+              after.key,
+              after.key,
+              after.id,
+              PAGE_ROWS,
+            )
+          : this.#sql.exec<{ id: string; key: string }>(
+              `SELECT id, key FROM ${t} WHERE parent = ? AND type = 'page' ORDER BY key, id LIMIT ?`,
+              ROOT_ID,
+              PAGE_ROWS,
+            )
+      ).toArray();
+      for (const row of rows) yield row.id;
+      const last = rows[rows.length - 1];
+      if (!last || rows.length < PAGE_ROWS) return;
+      after = { key: last.key, id: last.id };
+    }
+  }
+
+  /** How many pages the file has, counted in SQL. */
+  pageCount(): number {
     return this.#sql
-      .exec<{ id: string }>(
-        `SELECT id FROM ${this.#table} WHERE parent = ? AND type = 'page' ORDER BY key, id`,
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM ${this.#table} WHERE parent = ? AND type = 'page'`,
         ROOT_ID,
       )
-      .toArray()
-      .map((row) => row.id);
+      .one().n;
   }
 
   /**

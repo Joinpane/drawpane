@@ -13,6 +13,10 @@ import { provideMeasurer } from "../src/agent/measurer";
 import type { Env } from "../src/env";
 import { offered } from "../src/mcp/server";
 import { type Browser, openSocket, signedInUser } from "./helpers";
+
+const TOO_LARGE =
+  /^This file is too large for agent tools \(editing it would take more than the 48 MB of memory they work in; long texts take the most\)\. The read tools/;
+
 import { call, makeToken, rpc } from "./mcp-helpers";
 
 const roomOf = (fileId: string) => env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
@@ -242,13 +246,14 @@ describe("a live session", () => {
   });
 
   it("refuses a file of long texts by what the editor would hold, before reading it", async () => {
-    // 90 texts of 200,000 CJK characters: 91 layers, far under the 50,000-layer limit, but
-    // 54 MB of values (the seventh review of #163 aborted a room reading 240 MB of them).
+    // 260 texts of 200,000 characters: 261 layers, far under the 50,000-layer limit, but at
+    // least 52 MB held (#163's seventh review aborted a room reading 240 MB of them). The SQL
+    // pre-check counts their characters: refused before a row is read.
     const { browser, fileId, token } = await setup();
     const person = await join(browser, fileId);
     await runInDurableObject(roomOf(fileId), (_room, state) => {
-      const props = JSON.stringify({ characters: "界".repeat(200_000) });
-      for (let i = 0; i < 90; i++)
+      const props = JSON.stringify({ characters: "x".repeat(200_000) });
+      for (let i = 0; i < 260; i++)
         state.storage.sql.exec(
           "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a1', 'text', ?)",
           `T${i}`,
@@ -258,9 +263,84 @@ describe("a live session", () => {
     });
     const refused = await call(token, "get_jsx", { fileId, id: "T0" });
     expect(refused.isError).toBe(true);
-    expect(String(refused.structuredContent.error)).toMatch(
-      /^This file is too large for agent tools \(editing it would take over \d+ MB of memory, and they work on files of up to 48 MB; long texts take the most\)\. The read tools/,
-    );
+    expect(String(refused.structuredContent.error)).toMatch(TOO_LARGE);
+  });
+
+  it("refuses a file the editor's meter stops partway, and remembers it for the revision", {
+    timeout: 60_000,
+  }, async () => {
+    // Rectangles of 32 gradients of 32 stops: 36 KB of JSON each, which SQL can't tell from
+    // anything else of that size, but over 100 KB each as parsed objects. 500 of them pass
+    // the pre-check; building the editor stops at 48 MB (#173's review aborted at 50 MB).
+    const { browser, fileId, token } = await setup();
+    const person = await join(browser, fileId);
+    const stop = { position: 0, color: "#000000" };
+    const fill = {
+      type: "linear",
+      from: { x: 0, y: 0 },
+      to: { x: 1, y: 1 },
+      stops: Array(32).fill(stop),
+    };
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      const props = JSON.stringify({ fills: Array(32).fill(fill) });
+      for (let i = 0; i < 500; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a1', 'rect', ?)",
+          `R${i}`,
+          person.page.id,
+          props,
+        );
+    });
+    const refused = await call(token, "get_jsx", { fileId, id: "R0" });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.structuredContent.error)).toMatch(TOO_LARGE);
+    // Asked again at the same revision: refused as before, without building it again.
+    const again = await call(token, "get_jsx", { fileId, id: "R1" });
+    expect(String(again.structuredContent.error)).toMatch(TOO_LARGE);
+    // Smaller, it's admitted again.
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      state.storage.sql.exec("DELETE FROM nodes WHERE id LIKE 'R%' AND id != 'R0'");
+    });
+    await person.edit([{ op: "set", id: "R0", prop: "name", value: "Gradients" }]);
+    const jsx = await call(token, "get_jsx", { fileId, id: "R0" });
+    expect(jsx.isError).toBeFalsy();
+  });
+
+  it("refuses a change whose undo would take back more than a call keeps", async () => {
+    // Deleting a frame of six texts of 200,000 characters: 1.2 MB to put back. The room kept
+    // every call's undo, so it gathered all of it (a whole file's worth aborted a room).
+    const { browser, fileId, token } = await setup();
+    const person = await join(browser, fileId);
+    const session = await start(token, fileId, "live");
+    const frame = ok<{ ids: string[] }>(
+      await call(token, "render", {
+        sessionId: session.sessionId,
+        jsx: "<Frame w={100} h={100} />",
+      }),
+    ).ids[0] as string;
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      const props = JSON.stringify({ characters: "x".repeat(200_000) });
+      for (let i = 0; i < 6; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, ?, 'text', ?)",
+          `L${i}`,
+          frame,
+          `a${i}`,
+          props,
+        );
+    });
+    // The room's file changed underneath: a person's edit moves its revision on.
+    await person.edit([{ op: "set", id: frame, prop: "name", value: "Long texts" }]);
+    const refused = await call(token, "delete_nodes", {
+      sessionId: session.sessionId,
+      ids: [frame],
+    });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.structuredContent.error)).toMatch(/too much at once to keep its undo/);
+    expect((await roomOf(fileId).stats()).nodes).toBeGreaterThan(6);
+    // One of them is under it, and undone.
+    ok(await call(token, "delete_nodes", { sessionId: session.sessionId, ids: ["L0"] }));
+    ok(await call(token, "undo", { sessionId: session.sessionId }));
   });
 
   it("commits nothing when a tool fails, and says why", async () => {

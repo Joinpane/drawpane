@@ -6,9 +6,16 @@
  *
  * What the SVG can't hold travels with it: the font files its text is set
  * in (the caller's loader: the font proxy's upstream, R2 for team fonts) and
- * its images, embedded as data: URLs. Runs with OpenType features or
+ * its images, as files the rasteriser takes beside the SVG (named by a URL
+ * that's never fetched), never as data: URLs. Runs with OpenType features or
  * variable axes are written as glyph outlines from the measurer's shaper,
  * so they don't depend on the rasteriser's support for either.
+ *
+ * Images are bounded (decision 0021): only those the render draws are
+ * loaded, one at a time, each charged before its file is read
+ * (`imageCost`: the file, and its pixels decoded at their natural size, as
+ * resvg decodes them), and a render whose images come to more than
+ * HEADLESS_IMAGE_BYTES is refused.
  *
  * Effects SVG can only approximate (glass, noise, texture) or can't draw at
  * all (background blur) are listed with the picture, so a tool can say the
@@ -35,8 +42,37 @@ export interface ImageFile {
   readonly height: number;
 }
 
-/** An image by content hash (`media/<sha>` in R2), or null when it can't be had. */
-export type ImageBytesLoader = (ref: string) => Promise<ImageFile | null>;
+/**
+ * An image by content hash (`media/<sha>` in R2), or null when it can't be
+ * had. `room` is the most `imageCost` it may have: a loader that knows an
+ * image's size before reading it (the Worker's, from the media table)
+ * answers "too-large" without reading it. The renderer checks what it's
+ * given against `room` too.
+ */
+export type ImageBytesLoader = (
+  ref: string,
+  room: number,
+) => Promise<ImageFile | "too-large" | null>;
+
+/**
+ * The most a render may hold for its images at once (`imageCost`): beside
+ * what the headless editor holds (decision 0026), its output's pixels, and
+ * the room's own baseline, inside a Durable Object's 128 MB. A 2,000 ×
+ * 2,000 image fits; a 12-megapixel photo (48 MB decoded) doesn't.
+ */
+export const HEADLESS_IMAGE_BYTES = 32 << 20;
+
+/**
+ * What drawing an image holds: its file twice (read, and copied into the
+ * rasteriser) and its pixels, which resvg decodes at their natural size
+ * (nothing here can decode an image smaller).
+ */
+export function imageCost(bytes: number, width: number, height: number): number {
+  return 2 * bytes + 4 * width * height;
+}
+
+/** Where the SVG says an image is: a URL never fetched, which the rasteriser is handed the file for. */
+const imageHref = (ref: string) => `https://media.invalid/${ref}`;
 
 export interface HeadlessRenderDeps {
   /** Lays text out, as the editor does; its shaper (if any) outlines runs with features or axes. */
@@ -170,24 +206,33 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
     };
   };
 
-  const imagesFor = async (doc: Doc, ids: readonly string[]) => {
-    const loaded = new Map<string, SvgImageSource>();
+  /**
+   * The images the render draws (`drawn`: the refs of the image fills the
+   * SVG draws), loaded one at a time, each charged before it's read
+   * (`imageCost`); past HEADLESS_IMAGE_BYTES the render is refused.
+   */
+  const imagesFor = async (drawn: readonly string[]) => {
+    const sources = new Map<string, SvgImageSource>();
+    const files = new Map<string, Uint8Array>();
     const missing: string[] = [];
-    await Promise.all(
-      imageRefs(doc, ids).map(async (ref) => {
-        const file = await deps.images(ref).catch(() => null);
-        if (!file) {
-          missing.push(ref);
-          return;
-        }
-        loaded.set(ref, {
-          href: `data:${file.type};base64,${base64(file.bytes)}`,
-          width: file.width,
-          height: file.height,
-        });
-      }),
-    );
-    return { images: (ref: string) => loaded.get(ref) ?? null, missing: missing.sort() };
+    let held = 0;
+    for (const ref of drawn) {
+      const room = HEADLESS_IMAGE_BYTES - held;
+      const file = await deps.images(ref, room).catch(() => null);
+      if (!file) {
+        missing.push(ref);
+        continue;
+      }
+      if (file === "too-large" || imageCost(file.bytes.length, file.width, file.height) > room)
+        throw new ExportError(
+          `The images in that render take more memory than drawing here may (up to ${HEADLESS_IMAGE_BYTES >> 20} MB, as their pixels are decoded at full size). Render a part without the largest images, or open the file in the editor and export it there.`,
+        );
+      held += imageCost(file.bytes.length, file.width, file.height);
+      const href = imageHref(ref);
+      sources.set(ref, { href, width: file.width, height: file.height });
+      files.set(href, file.bytes);
+    }
+    return { sources, files, missing: missing.sort() };
   };
 
   return {
@@ -220,20 +265,32 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
         throw new ExportError(
           `That render is too large (${width} × ${height}). Try a smaller scale or a smaller layer.`,
         );
+      const svgOptions = { outlineFeatures: true, raster: scale };
+      // The images the SVG draws (visible fills of visible layers, inside what's drawn), found by
+      // writing it once without them: only when the layers have an image fill at all.
+      const drawn = new Set<string>();
+      if (imageRefs(doc, ids).length > 0)
+        exportSvg(scene, deps.measurer, ids, bounds, {
+          ...svgOptions,
+          images: (ref) => {
+            drawn.add(ref);
+            return null;
+          },
+        });
       const [fonts, images] = await Promise.all([
         fontsFor(facesUsed(doc, ids)),
-        imagesFor(doc, ids),
+        imagesFor([...drawn].sort()),
       ]);
       const svg = exportSvg(scene, deps.measurer, ids, bounds, {
-        images: images.images,
-        outlineFeatures: true,
-        raster: scale,
+        ...svgOptions,
+        images: (ref) => images.sources.get(ref) ?? null,
       });
       const raster = await deps.rasteriser.rasterise(svg, {
         scale,
         fonts: fonts.fonts,
         fallbackFamily: fallback,
         background: options.background ?? null,
+        images: images.files,
       });
       return {
         ...raster,

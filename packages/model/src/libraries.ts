@@ -51,7 +51,8 @@ export interface LibraryPublish {
 export interface DocReader {
   get(id: string): NodeRecord | undefined;
   childIds(parent: string): readonly string[];
-  pageIds(): readonly string[];
+  /** Page ids in file order, as they're asked for (a file may have any number of pages). */
+  pageIds(): Iterable<string>;
   /**
    * The ids of what the file offers as components (a main, or the set a
    * main is a variant of), each once, in file order, when the reader can

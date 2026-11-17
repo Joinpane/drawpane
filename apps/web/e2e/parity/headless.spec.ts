@@ -293,6 +293,7 @@ test.describe
             fonts: { id: number; data?: string }[];
             fallbackFamily: string | null;
             background: string | null;
+            images: { href: string; data: string }[];
           },
         ) => {
           for (const f of options.fonts)
@@ -302,6 +303,9 @@ test.describe
             fonts: options.fonts.map((f) => fonts.get(f.id) as Uint8Array),
             ...(options.fallbackFamily ? { fallbackFamily: options.fallbackFamily } : {}),
             background: options.background,
+            images: new Map(
+              options.images.map((i) => [i.href, new Uint8Array(Buffer.from(i.data, "base64"))]),
+            ),
           });
           return {
             png: Buffer.from(out.png).toString("base64"),
