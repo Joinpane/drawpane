@@ -14,3 +14,6 @@ storybook-static/
 .env
 .env.*
 !.env.example
+
+# Claude Code agents' local worktrees and settings
+.claude/
