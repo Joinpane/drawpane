@@ -15,18 +15,22 @@ export interface SelectionColor {
 
 type Effect = PropValues["effects"][number];
 
-function subtree(doc: Doc, ids: readonly string[]): NodeRecord[] {
+/** The layers in the selection and below it; null once there are more than `limit`. */
+function subtree(doc: Doc, ids: readonly string[], limit = Infinity): NodeRecord[] | null {
   const out: NodeRecord[] = [];
   const seen = new Set<string>();
-  const walk = (id: string) => {
-    if (seen.has(id)) return;
+  const stack = [...ids].reverse();
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    if (seen.has(id)) continue;
     seen.add(id);
     const node = doc.get(id);
-    if (!node) return;
+    if (!node) continue;
+    if (out.length >= limit) return null;
     out.push(node);
-    for (const c of doc.childIds(id)) walk(c);
-  };
-  for (const id of ids) walk(id);
+    const children = doc.childIds(id);
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i] as string);
+  }
   return out;
 }
 
@@ -48,10 +52,18 @@ function nodeColors(node: NodeRecord): Set<string> {
 /**
  * Colors used in the selection and below it, most used first; ties keep the
  * order the layers use them, so changing a color never reorders the list.
+ * Null when the selection holds more than `limit` layers: in a kit-sized
+ * frame, reading every layer's paints is more than a click should wait for.
  */
-export function selectionColors(doc: Doc, ids: readonly string[]): SelectionColor[] {
+export function selectionColors(
+  doc: Doc,
+  ids: readonly string[],
+  limit = Infinity,
+): SelectionColor[] | null {
+  const layers = subtree(doc, ids, limit);
+  if (!layers) return null;
   const counts = new Map<string, number>();
-  for (const node of subtree(doc, ids))
+  for (const node of layers)
     for (const c of nodeColors(node)) counts.set(c, (counts.get(c) ?? 0) + 1);
   return [...counts.entries()]
     .map(([color, layers]) => ({ color, layers }))
@@ -69,7 +81,7 @@ export function replaceColorOps(doc: Doc, ids: readonly string[], from: string, 
   const swapEffect = (e: Effect): Effect =>
     "color" in e && match(e.color) ? { ...e, color: to } : e;
   const ops: Op[] = [];
-  for (const node of subtree(doc, ids)) {
+  for (const node of subtree(doc, ids) ?? []) {
     if (!nodeColors(node).has(from.toLowerCase())) continue;
     for (const prop of ["fills", "strokes"] as const) {
       const now = getProp(node.props, prop);

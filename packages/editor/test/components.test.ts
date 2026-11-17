@@ -9,6 +9,7 @@ import {
   propagationOps,
   swapTargets,
 } from "../src/components";
+import { Doc } from "../src/doc";
 import { Editor } from "../src/editor";
 import { layoutOps } from "../src/layout";
 import type { TextMeasurer } from "../src/text";
@@ -75,6 +76,48 @@ describe("components and instances", () => {
     editor.select([button.frame]);
     editor.duplicate();
     instance = editor.s.selection[0] as string;
+  });
+
+  it("keeps the instances index up to date edit by edit, as reading the file afresh would", () => {
+    // Read once, then caught up from the change log after each edit.
+    instancesOf(editor.doc, button.frame);
+    const fresh = (componentId: string) => {
+      const copy = new Doc();
+      copy.resetStored(editor.doc.stored());
+      return [...instancesOf(copy, componentId)].sort();
+    };
+    const same = (componentId: string) =>
+      expect([...instancesOf(editor.doc, componentId)].sort()).toEqual(fresh(componentId));
+    editor.select([instance]);
+    editor.duplicate();
+    const second = editor.s.selection[0] as string;
+    same(button.frame);
+    expect(instancesOf(editor.doc, button.frame)).toHaveLength(2);
+    // Swapped for another component: it moves from one list to the other.
+    const card = editor.createLayer(
+      "frame",
+      { x: 400, y: 0, width: 80, height: 80 },
+      "p",
+    ) as string;
+    editor.select([card]);
+    editor.createComponent();
+    editor.swapInstance(second, card);
+    same(button.frame);
+    same(card);
+    expect(instancesOf(editor.doc, card)).toEqual([second]);
+    // Detached, then deleted: gone from the lists.
+    editor.select([instance]);
+    editor.detachInstances();
+    same(button.frame);
+    editor.select([second]);
+    editor.deleteSelection();
+    same(card);
+    expect(instancesOf(editor.doc, button.frame)).toEqual([]);
+    expect(instancesOf(editor.doc, card)).toEqual([]);
+    // And undo brings them back.
+    editor.undo();
+    same(card);
+    expect(instancesOf(editor.doc, card)).toEqual([second]);
   });
 
   it("turns a frame into a main component, and duplicating it makes an instance", () => {

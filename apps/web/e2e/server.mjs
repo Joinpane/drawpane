@@ -1,13 +1,28 @@
 // Starts the Worker for end-to-end tests on its own port with a throwaway
 // database, so every run begins with a fresh, un-set-up instance.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const port = process.env.E2E_PORT ?? "8788";
 const worker = resolve(import.meta.dirname, "../../worker");
+// Each run's database is removed when the Worker exits. A run that was killed
+// outright leaves its own behind: those over a day old are cleared here, so
+// many runs never fill the disk (hundreds once took 34 GB).
+const DAY_MS = 24 * 60 * 60_000;
+for (const name of readdirSync(tmpdir())) {
+  if (!name.startsWith("drawpane-e2e-")) continue;
+  const path = join(tmpdir(), name);
+  try {
+    if (Date.now() - statSync(path).mtimeMs > DAY_MS)
+      rmSync(path, { recursive: true, force: true });
+  } catch {
+    // Gone already, or another run's: leave it.
+  }
+}
 const persist = mkdtempSync(join(tmpdir(), "drawpane-e2e-"));
+const removePersist = () => rmSync(persist, { recursive: true, force: true });
 const wrangler = resolve(worker, "node_modules/.bin/wrangler");
 
 const migrate = spawnSync(
@@ -18,7 +33,10 @@ const migrate = spawnSync(
     stdio: "inherit",
   },
 );
-if (migrate.status !== 0) process.exit(migrate.status ?? 1);
+if (migrate.status !== 0) {
+  removePersist();
+  process.exit(migrate.status ?? 1);
+}
 
 const vars = {
   PUBLIC_ORIGIN: `http://localhost:${port}`,
@@ -58,4 +76,7 @@ const child = spawn(
   { cwd: worker, stdio: "inherit" },
 );
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));
-child.on("exit", (code) => process.exit(code ?? 0));
+child.on("exit", (code) => {
+  removePersist();
+  process.exit(code ?? 0);
+});

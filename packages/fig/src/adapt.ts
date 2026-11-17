@@ -332,6 +332,19 @@ function layoutFields(
   return out;
 }
 
+/**
+ * A layer's matrix in its parent. Open Pencil reads a .fig's transform into
+ * a position for a turn about the layer's centre, and draws every layer that
+ * way but lines, which it turns about their start. So a turned line read
+ * from a .fig would land off by the difference (a vertical separator half
+ * its length left and down); it's turned here about the centre it was read
+ * for.
+ */
+export function localMatrix(n: SceneNode): Mat {
+  if (n.type !== "LINE" || !n.rotation) return getNodeLocalMatrix(n);
+  return getNodeLocalMatrix({ ...n, type: "RECTANGLE" });
+}
+
 /** One layer and everything under it, in REST's shape. */
 export function adaptNode(
   n: SceneNode,
@@ -343,7 +356,7 @@ export function adaptNode(
   const guid = ids.sourceGuid(n);
   const raw = guid ? ctx.records.get(guid) : undefined;
   const type = restType(n, raw, notes);
-  const l = getNodeLocalMatrix(n);
+  const l = localMatrix(n);
   const abs = multiply(parentAbs, l);
   const node: RestNode = {
     id: ids.of(n),

@@ -5,8 +5,11 @@ import {
   containersWithin,
   dropTarget,
   INDENT,
+  indexRows,
   kindOf,
   layerRows,
+  pinnedRows,
+  type Row,
   revealLeft,
   rowWidthFor,
 } from "./layer-tree";
@@ -186,5 +189,96 @@ describe("deep trees", () => {
   it("scrolls back to a shallow row", () => {
     expect(revealLeft(1, 150, 224)).toBe(4);
     expect(revealLeft(0, 150, 224)).toBe(0);
+  });
+});
+
+describe("pinned ancestors", () => {
+  const H = 28;
+  /** Rows from depths alone: what pinning reads. */
+  const rowsOf = (depths: number[]) =>
+    depths.map(
+      (depth, i) => ({ node: { id: `r${i}` }, depth, hasChildren: false }) as unknown as Row,
+    );
+  // r0 A
+  //   r1 B
+  //     r2 C
+  //       r3 c1 … r7 c5
+  //     r8 D
+  //   r9 E
+  // r10 F
+  const tree = rowsOf([0, 1, 2, 3, 3, 3, 3, 3, 2, 1, 0]);
+  const index = indexRows(tree);
+
+  it("knows each row's parent and where what it holds ends", () => {
+    expect([...index.parent]).toEqual([-1, 0, 1, 2, 2, 2, 2, 2, 1, 0, -1]);
+    expect([...index.end]).toEqual([10, 9, 8, 4, 5, 6, 7, 8, 9, 10, 11]);
+  });
+
+  it("pins nothing at the top", () => {
+    expect(pinnedRows(index, 0, H, 10)).toEqual({ rows: [], offset: 0 });
+  });
+
+  it("pins each ancestor of the top row once its own row has scrolled out, by depth", () => {
+    // A is still partly in view: nothing pinned.
+    expect(pinnedRows(index, 10, H, 10).rows).toEqual([]);
+    // A's row has gone. Pinned, it covers B, which pins under it and covers C:
+    // a chain of first children pins together.
+    expect(pinnedRows(index, H, H, 10)).toEqual({ rows: [0, 1, 2], offset: 0 });
+    // Deep in C's children: A, B and C.
+    expect(pinnedRows(index, 4 * H, H, 10)).toEqual({ rows: [0, 1, 2], offset: 0 });
+  });
+
+  it("slides the innermost pinned row up as the end of what it holds passes", () => {
+    // C's last child (r7) ends at 8 rows; with three pinned, the stack ends 3 rows down.
+    expect(pinnedRows(index, 5 * H, H, 10)).toEqual({ rows: [0, 1, 2], offset: 0 });
+    expect(pinnedRows(index, 5 * H + 10, H, 10)).toEqual({ rows: [0, 1, 2], offset: -10 });
+    // Past it, D is under B: C is no longer pinned.
+    expect(pinnedRows(index, 6 * H, H, 10).rows).toEqual([0, 1]);
+  });
+
+  it("pins nothing past the end of a top-level row", () => {
+    expect(pinnedRows(index, 10 * H, H, 10).rows).toEqual([]);
+  });
+
+  it("keeps the outermost when there are more than fit", () => {
+    expect(pinnedRows(index, 4 * H, H, 2).rows).toEqual([0, 1]);
+  });
+
+  it("matches a brute-force reading of every scroll position", () => {
+    const depths = [0, 1, 2, 2, 3, 4, 4, 1, 2, 0, 1, 1, 2, 3, 3, 3, 0, 0, 1];
+    const rows = rowsOf(depths);
+    const idx = indexRows(rows);
+    const ancestors = (i: number) => {
+      const out: number[] = [];
+      for (let j = i - 1, d = depths[i] as number; j >= 0 && d > 0; j--)
+        if ((depths[j] as number) < d) {
+          out.unshift(j);
+          d = depths[j] as number;
+        }
+      return out;
+    };
+    const inside = (row: number, of: number) => row > of && row < (idx.end[of] as number);
+    for (let top = 0; top < rows.length * H; top += 7) {
+      const { rows: pinned, offset } = pinnedRows(idx, top, H, 10);
+      pinned.forEach((p, i) => {
+        // A chain from the top level down, each the parent of the next...
+        expect(depths[p]).toBe(i);
+        if (i > 0) expect(idx.parent[p]).toBe(pinned[i - 1]);
+        // ...each scrolled out from under the rows pinned above it, with what it holds still below them.
+        expect(p * H).toBeLessThan(top + i * H);
+        expect((idx.end[p] as number) * H).toBeGreaterThan(top + i * H);
+      });
+      // And nothing more to pin: the row under the stack is the last one's child (or is the top level).
+      const under = Math.floor((top + pinned.length * H) / H);
+      const last = pinned.at(-1);
+      if (under < rows.length) {
+        if (last === undefined) expect(depths[under]).toBe(0);
+        else if (inside(under, last)) expect(idx.parent[under]).toBe(last);
+      }
+      expect(offset).toBeLessThanOrEqual(0);
+      expect(offset).toBeGreaterThan(-H);
+      // Brute force agrees on the rows' parents.
+      for (let i = 0; i < rows.length; i++) expect(idx.parent[i]).toBe(ancestors(i).at(-1) ?? -1);
+    }
   });
 });
