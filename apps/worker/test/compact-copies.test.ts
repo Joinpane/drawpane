@@ -1820,3 +1820,86 @@ describe("what the fifth review found", { timeout: 120_000 }, () => {
     expect(page?.props.name).toBe("Edited after rollback");
   });
 });
+
+describe("what the sixth review found", { timeout: 120_000 }, () => {
+  /** What a tab from before compact copies (protocol 1) is sent of a file, every chunk. */
+  async function oldClientSees(browser: Browser, fileId: string): Promise<NodeRecord[]> {
+    const old = await openSocket(browser, fileId);
+    old.send({ t: "hello", protocol: 1, clientId: `old-${newId()}`, revn: null });
+    await old.next("welcome");
+    const received: NodeRecord[] = [];
+    for (;;) {
+      const chunk = await old.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot");
+      received.push(...chunk.nodes);
+      if (chunk.done) break;
+    }
+    old.ws.close();
+    return received;
+  }
+
+  it("sends a tab from before compact copies the document's styles and variables, not only its pages", async () => {
+    const { browser, projectId } = await signedInUser("Sixth review");
+    const { file } = await browser.json<{ file: { id: string } }>(
+      `/api/projects/${projectId}/files`,
+      { method: "POST", json: { name: "Assets" } },
+    );
+    const nodes: NodeRecord[] = [
+      { id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} },
+      { id: "Style", parent: ROOT_ID, key: "a1", type: "textStyle", props: { fontSize: 40 } },
+      { id: "Tokens", parent: ROOT_ID, key: "a2", type: "collection", props: {} },
+      {
+        id: "Token",
+        parent: "Tokens",
+        key: "a0",
+        type: "variable",
+        props: { variableType: "number", values: { m1: 42 } },
+      },
+      {
+        id: "Text",
+        parent: "P",
+        key: "a0",
+        type: "text",
+        props: { characters: "Hello", textStyle: "Style", fontSize: 40 },
+      },
+    ];
+    const imported = await roomOf(file.id).importNodes(
+      { userId: "system", name: "Review" },
+      nodes,
+      file.id,
+      "compact",
+    );
+    expect(imported.ok).toBe(true);
+    const ids = (await oldClientSees(browser, file.id)).map((n) => n.id).sort();
+    expect(ids).toEqual(["P", "Style", "Text", "Token", "Tokens"]);
+  });
+
+  it("sends a tab from before compact copies a page saying to reload when the file is too large to send it", async () => {
+    const { browser, projectId } = await signedInUser("Sixth review large");
+    const { file } = await browser.json<{ file: { id: string } }>(
+      `/api/projects/${projectId}/files`,
+      { method: "POST", json: { name: "Large" } },
+    );
+    // 45 texts of 200,000 characters: past the 8 MB a socket is sent.
+    const nodes: NodeRecord[] = [{ id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} }];
+    for (let i = 0; i < 45; i++)
+      nodes.push({
+        id: `T${i}`,
+        parent: "P",
+        key: "a0",
+        type: "text",
+        props: { characters: "x".repeat(200_000) },
+      });
+    const imported = await roomOf(file.id).importNodes(
+      { userId: "system", name: "Review" },
+      nodes,
+      file.id,
+      "compact",
+    );
+    expect(imported.ok).toBe(true);
+    const seen = await oldClientSees(browser, file.id);
+    expect(seen.map((n) => n.id)).toEqual(["drawpane-reload-page", "drawpane-reload-text"]);
+    expect(seen[1]?.props.characters).toBe(
+      "Drawpane was updated. Reload the page to see this file.",
+    );
+  });
+});

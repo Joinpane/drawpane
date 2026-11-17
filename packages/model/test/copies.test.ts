@@ -3,7 +3,7 @@ import {
   applyTransaction,
   COPY_LINK_PROPS,
   CopyView,
-  compact,
+  compactByInstance,
   copyChildId,
   copyId,
   expand,
@@ -153,6 +153,12 @@ const copyOf = (nodes: NodeRecord[], root: string, mirrors: string): NodeRecord 
   }
   return nodes.find((n) => inside.has(n.id) && n.props.mirrors === mirrors) as NodeRecord;
 };
+
+/** The converter, its detached instances listed. */
+function compact(nodes: readonly NodeRecord[]) {
+  const result = compactByInstance(nodes);
+  return { ...result, detached: [...result.detached.keys()] };
+}
 
 function roundTrip(nodes: NodeRecord[]) {
   const result = compact(nodes);

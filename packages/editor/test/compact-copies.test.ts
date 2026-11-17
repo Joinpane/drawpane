@@ -2,7 +2,7 @@
  * The editor's view of compact copies (decision 0029): copies stored as
  * their main plus what's overridden, presented as ordinary layers.
  */
-import { copyId, getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { copyId, DEFAULT_TRANSITION, getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isInstanceRoot } from "../src/components";
 import { compactCopiesDefault, type DocChange, setCompactCopiesDefault } from "../src/doc";
@@ -313,5 +313,58 @@ describe("compact copies in the editor", () => {
     editor.deleteSelection();
     expect(editor.doc.has(copy.id)).toBe(false);
     expect(editor.doc.childIds(instance)).not.toContain(copy.id);
+  });
+});
+
+describe("a saved version or a library shown in the compact form", () => {
+  // `loadStatic` converts a snapshot stored materialized when the open file is compact. It does
+  // so with the room's converter, so it shows what the room would store for it.
+  it("keeps a prototype link to a copy, renamed to the copy's derived id", () => {
+    const nodes: NodeRecord[] = [
+      { id: "P", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      { id: "M", type: "frame", parent: "P", key: "a0", props: { isComponent: true } },
+      { id: "F", type: "frame", parent: "M", key: "a0", props: {} },
+      { id: "I", type: "frame", parent: "P", key: "a1", props: { instanceOf: "M" } },
+      { id: "C", type: "frame", parent: "I", key: "a0", props: { mirrors: "F" } },
+      {
+        id: "B",
+        type: "rect",
+        parent: "P",
+        key: "a2",
+        props: {
+          reactions: [
+            {
+              id: "Reaction",
+              trigger: { type: "tap" },
+              action: { type: "navigate", to: "C" },
+              transition: DEFAULT_TRANSITION,
+            },
+          ],
+        },
+      },
+    ];
+    const editor = new Editor({ measurer, clientId: "test" });
+    editor.loadStatic(nodes, "materialized", "compact");
+    const action = editor.doc.get("B")?.props.reactions?.[0]?.action;
+    expect(action && "to" in action ? action.to : null).toBe(copyId("I", ["F"]));
+    expect(editor.doc.has(copyId("I", ["F"]))).toBe(true);
+  });
+
+  it("keeps the drawing order of siblings that share a key", () => {
+    // The copies' ids sort the other way round from their main layers': built, they'd draw in
+    // the main's order, so the instance is detached and keeps its own.
+    const nodes: NodeRecord[] = [
+      { id: "P", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      { id: "M", type: "frame", parent: "P", key: "a0", props: { isComponent: true } },
+      { id: "A", type: "rect", parent: "M", key: "a5", props: { name: "red" } },
+      { id: "Z", type: "rect", parent: "M", key: "a5", props: { name: "blue" } },
+      { id: "I", type: "frame", parent: "P", key: "a1", props: { instanceOf: "M" } },
+      { id: "zCopy", type: "rect", parent: "I", key: "a5", props: { name: "red", mirrors: "A" } },
+      { id: "aCopy", type: "rect", parent: "I", key: "a5", props: { name: "blue", mirrors: "Z" } },
+    ];
+    const editor = new Editor({ measurer, clientId: "test" });
+    editor.loadStatic(nodes, "materialized", "compact");
+    const drawn = editor.doc.childIds("I").map((id) => editor.doc.get(id)?.props.name);
+    expect(drawn).toEqual(["blue", "red"]);
   });
 });

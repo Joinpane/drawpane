@@ -60,6 +60,7 @@ import {
   ModelError,
   type NodeRecord,
   nodeBytes,
+  type Op,
   type Props,
   ROOT_ID,
   renameHeldIds,
@@ -232,6 +233,9 @@ function rootsUnderSql(src: string): string {
     ) SELECT id FROM sub WHERE live = 1`;
 }
 
+/** How many nodes a `PresentedCounter` remembers what they present for. */
+const MEMO_LIMIT = 20_000;
+
 /**
  * How many layers a node presents under it, worked out in SQL without
  * building any: a stored layer counts one, and an instance counts what its
@@ -242,6 +246,7 @@ function rootsUnderSql(src: string): string {
 export class PresentedCounter {
   readonly #sql: SqlStorage;
   readonly #src: string;
+  /** What each node presents, for as many as MEMO_LIMIT nodes; past that, forgotten and worked out again. */
   readonly #memo = new Map<string, number>();
   /** Queries run, and rows they went through, about: what it cost. */
   queries = 0;
@@ -301,28 +306,28 @@ export class PresentedCounter {
         )`;
       n = this.#sql.exec<{ n: number }>(`${walk} SELECT COUNT(*) AS n FROM sub`, id).one().n;
       this.queries += 3 + Math.ceil(n / 4);
-      for (const row of this.#sql
-        .exec<{ of: string; n: number }>(
-          `${walk} SELECT json_extract(s.props, '$.instanceOf') AS of, COUNT(*) AS n
-             FROM sub CROSS JOIN ${src} s ON s.id = sub.id WHERE sub.live = 1 GROUP BY of`,
-          id,
-        )
-        .toArray())
+      // A page of mains at a time, however many the main's instances name.
+      for (const row of groupedByMain(
+        this.#sql,
+        `${walk} SELECT json_extract(s.props, '$.instanceOf') AS of, COUNT(*) AS n
+           FROM sub CROSS JOIN ${src} s ON s.id = sub.id WHERE sub.live = 1 GROUP BY of`,
+        id,
+      ))
         n += row.n * this.under(row.of, guard);
       // Copies inside those instances swapped to other mains present those mains' layers too.
-      for (const row of this.#sql
-        .exec<{ of: string; n: number }>(
-          `${walk} SELECT json_extract(r.props, '$.instanceOf') AS of, COUNT(*) AS n
-             FROM sub CROSS JOIN ${src} r ON r.parent = sub.id
-            WHERE sub.live = 1 AND r.type = 'override'
-              AND json_extract(r.props, '$.instanceOf') IS NOT NULL
-            GROUP BY of`,
-          id,
-        )
-        .toArray())
+      for (const row of groupedByMain(
+        this.#sql,
+        `${walk} SELECT json_extract(r.props, '$.instanceOf') AS of, COUNT(*) AS n
+           FROM sub CROSS JOIN ${src} r ON r.parent = sub.id
+          WHERE sub.live = 1 AND r.type = 'override'
+            AND json_extract(r.props, '$.instanceOf') IS NOT NULL
+          GROUP BY of`,
+        id,
+      ))
         n += row.n * this.under(row.of, guard);
     }
     guard.delete(id);
+    if (this.#memo.size >= MEMO_LIMIT) this.#memo.clear();
     this.#memo.set(id, n);
     return n;
   }
@@ -334,17 +339,11 @@ export class PresentedCounter {
   sizeOf(rootId: string): InstanceSize {
     const src = this.#src;
     // Its stored nodes, and the mains any of them names (a nested instance, a swapped copy).
-    const own = this.#sql
-      .exec<{ n: number; mains: string }>(
-        `WITH RECURSIVE sub(id) AS (
+    const sub = `WITH RECURSIVE sub(id) AS (
            SELECT id FROM ${src} WHERE parent = ?
            UNION ALL SELECT n.id FROM ${src} n JOIN sub ON n.parent = sub.id
-         ) SELECT COUNT(*) AS n,
-                  json_group_array(DISTINCT json_extract(s.props, '$.instanceOf')) AS mains
-             FROM sub CROSS JOIN ${src} s ON s.id = sub.id`,
-        rootId,
-      )
-      .one();
+         )`;
+    const own = this.#sql.exec<{ n: number }>(`${sub} SELECT COUNT(*) AS n FROM sub`, rootId).one();
     // Everything building it reads: its layers, the main of any instance among them (its own
     // root first) or of any copy swapped, and each main's layers, and so on; each node once.
     const reach = this.#sql
@@ -362,8 +361,14 @@ export class PresentedCounter {
     this.queries += 2 + Math.ceil((own.n + reach.n) / 4);
     let built = this.under(rootId);
     const main = this.mainOf(rootId);
-    // Its layers' mains, built over what they copy: counted again (an upper bound).
-    for (const of of JSON.parse(own.mains) as Array<string | null>)
+    // Its layers' mains, built over what they copy: counted again (an upper bound). A page of
+    // them at a time, however many it names.
+    for (const { of } of groupedByMain(
+      this.#sql,
+      `${sub} SELECT json_extract(s.props, '$.instanceOf') AS of, 1 AS n
+         FROM sub CROSS JOIN ${src} s ON s.id = sub.id GROUP BY of`,
+      rootId,
+    ))
       if (of && of !== main && of !== rootId) built += this.under(of);
     return { layers: own.n, built, reached: reach.n, bytes: reach.bytes ?? 0 };
   }
@@ -382,15 +387,18 @@ export function presentedCount(sql: SqlStorage, src = "nodes"): number {
     .one().n;
   const counter = new PresentedCounter(sql, src);
   let total = stored;
-  for (const row of sql
-    .exec<{ of: string; n: number }>(
-      `SELECT json_extract(n.props, '$.instanceOf') AS of, COUNT(*) AS n FROM ${src} n
-        WHERE ${liveSql(src, "n")} GROUP BY of
-       UNION ALL
-       SELECT json_extract(props, '$.instanceOf') AS of, COUNT(*) AS n FROM ${src}
-        WHERE type = 'override' AND json_extract(props, '$.instanceOf') IS NOT NULL GROUP BY of`,
-    )
-    .toArray())
+  // A page of mains at a time, however many the file has.
+  for (const row of groupedByMain(
+    sql,
+    `SELECT json_extract(n.props, '$.instanceOf') AS of, COUNT(*) AS n FROM ${src} n
+      WHERE ${liveSql(src, "n")} GROUP BY of`,
+  ))
+    total += row.n * counter.under(row.of);
+  for (const row of groupedByMain(
+    sql,
+    `SELECT json_extract(props, '$.instanceOf') AS of, COUNT(*) AS n FROM ${src}
+      WHERE type = 'override' AND json_extract(props, '$.instanceOf') IS NOT NULL GROUP BY of`,
+  ))
     total += row.n * counter.under(row.of);
   return total;
 }
@@ -408,6 +416,54 @@ export function hasInstances(sql: SqlStorage, src = "nodes"): boolean {
 
 /** How many entries the reader's caches keep before starting again. */
 const CACHE_LIMIT = 50_000;
+
+/**
+ * What a list of ids costs while it's read (the rows SQLite hands over, and
+ * the ids kept): more than `idsBytes`, to cover the rows on the way.
+ */
+const ID_ROW_BYTES = 160;
+
+/**
+ * The most ids a read may return into what `budget` has left (none: no
+ * bound), so a parent with more children than a build could hold is
+ * refused (`BuildTooLarge`) before its ids are read, not after: a query
+ * asks for one more than this, and `checkIds` throws when it got it.
+ */
+export function idsRoom(budget: BuildBudget | null): number {
+  if (!budget) return 1_000_000_000;
+  return Math.max(1, Math.floor((budget.limit - budget.held) / ID_ROW_BYTES));
+}
+
+/** Throws `BuildTooLarge` when a read limited to `room` + 1 ids came back with more than `room`. */
+export function checkIds(budget: BuildBudget | null, room: number, got: number): void {
+  if (budget && got > room)
+    throw new BuildTooLarge(budget.held + got * ID_ROW_BYTES, budget.limit, "bytes");
+}
+
+/**
+ * The rows of a query that groups by a main id (`of`), a page at a time in
+ * order of `of`: the query (one `?` before this) gets `HAVING of > ?` and a
+ * limit appended, so however many mains it names, a page is held at once.
+ */
+function* groupedByMain(
+  sql: SqlStorage,
+  query: string,
+  ...bindings: SqlStorageValue[]
+): Generator<{ of: string; n: number }> {
+  let after = "";
+  for (;;) {
+    const page = sql
+      .exec<{ of: string; n: number }>(
+        `${query} HAVING of > ? ORDER BY of LIMIT 500`,
+        ...bindings,
+        after,
+      )
+      .toArray();
+    yield* page;
+    if (page.length < 500) return;
+    after = (page[page.length - 1] as { of: string }).of;
+  }
+}
 
 /** A cache whose entries are charged to a budget, and given back when they go. */
 class HeldMap<V> {
@@ -543,16 +599,20 @@ class SqlConversion implements ConvertReader, ConvertSink {
     if (cached) return cached;
     this.#trim();
     const t = this.#t;
+    // No more than the budget has room for: one more says it hasn't (checked before it's kept).
+    const room = idsRoom(this.#budget);
     const ids = this.#sql
       .exec<{ id: string }>(
         `SELECT id, key FROM ${this.#src} s WHERE parent = ?1
             AND NOT EXISTS (SELECT 1 FROM ${t.map} m WHERE m.old = s.id)
          UNION SELECT id, key FROM ${t.rows} WHERE parent = ?1
-         ORDER BY key, id`,
+         ORDER BY key, id LIMIT ?2`,
         parent,
+        room + 1,
       )
       .toArray()
       .map((row) => row.id);
+    checkIds(this.#budget, room, ids.length);
     this.work += 1 + ids.length;
     this.#kids.set(parent, ids);
     return ids;
@@ -615,10 +675,12 @@ class SqlConversion implements ConvertReader, ConvertSink {
   rootsInside(mainId: string): readonly string[] {
     const cached = this.#inside.get(mainId);
     if (cached) return cached;
+    const room = idsRoom(this.#budget);
     const ids = this.#sql
-      .exec<{ id: string }>(rootsUnderSql(this.#src), mainId)
+      .exec<{ id: string }>(`${rootsUnderSql(this.#src)} LIMIT ?`, mainId, room + 1)
       .toArray()
       .map((row) => row.id);
+    checkIds(this.#budget, room, ids.length);
     this.work += 1 + ids.length;
     this.#inside.set(mainId, ids);
     return ids;
@@ -716,12 +778,16 @@ class SqlConversion implements ConvertReader, ConvertSink {
   }
 }
 
-/** Forgets what was decided for an instance: it's converted again. */
-function unsettle(sql: SqlStorage, t: ConvertTables, rootId: string): void {
-  sql.exec(`DELETE FROM ${t.map} WHERE root = ?`, rootId);
-  sql.exec(`DELETE FROM ${t.rows} WHERE root = ?`, rootId);
-  sql.exec(`DELETE FROM ${t.done} WHERE root = ?`, rootId);
-  sql.exec(`DELETE FROM ${t.deps} WHERE root = ?`, rootId);
+/**
+ * Forgets what was decided for the instances `roots` selects (a SQL query
+ * of one column, `root`): they're converted again. In SQL, however many:
+ * nothing is read into memory. `done` goes last, since `roots` may read it.
+ */
+function unsettleWhere(sql: SqlStorage, t: ConvertTables, roots: string): void {
+  sql.exec(`DELETE FROM ${t.map} WHERE root IN (${roots})`);
+  sql.exec(`DELETE FROM ${t.rows} WHERE root IN (${roots})`);
+  sql.exec(`DELETE FROM ${t.deps} WHERE root IN (${roots})`);
+  sql.exec(`DELETE FROM ${t.done} WHERE root IN (${roots})`);
 }
 
 /** Lists the file's top-level instance roots afresh, keeping the order of those listed before. */
@@ -741,13 +807,9 @@ function listRoots(sql: SqlStorage, src: string, t: ConvertTables): void {
     sql.exec(`DROP TABLE IF EXISTS ${now}`);
   }
   // What was decided for an instance that's no longer one (unlinked, deleted, moved inside
-  // another) is forgotten: its rows would put back what isn't there.
-  for (const { root } of sql
-    .exec<{ root: string }>(
-      `SELECT root FROM ${t.done} WHERE root NOT IN (SELECT id FROM ${t.roots})`,
-    )
-    .toArray())
-    unsettle(sql, t, root);
+  // another) is forgotten: its rows would put back what isn't there. In SQL: a page of a
+  // thousand instances deleted is a thousand roots, never read into memory.
+  unsettleWhere(sql, t, `SELECT root FROM ${t.done} WHERE root NOT IN (SELECT id FROM ${t.roots})`);
 }
 
 export interface StepResult {
@@ -919,6 +981,60 @@ export function strayInstance(sql: SqlStorage, src: string): string | null {
   );
 }
 
+/**
+ * The nodes a storage transaction's operations may have made an instance of
+ * a live main storing layers (a file stored compact must never have one),
+ * kept in SQL: a restore, or a main made a component again, gathers as
+ * many as the file has instances. Gathered as each chunk applies
+ * (`noteStrayCandidates`), checked once its last has (`strayCandidate`).
+ */
+export const STRAY_CHECK_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS stray_check (id TEXT PRIMARY KEY) STRICT, WITHOUT ROWID;
+`;
+
+/** Call inside the storage transaction, before anything applies. */
+export function clearStrayCandidates(sql: SqlStorage): void {
+  sql.exec(STRAY_CHECK_SCHEMA);
+  sql.exec("DELETE FROM stray_check");
+}
+
+/** After operations apply: the nodes they may have made an instance storing layers. */
+export function noteStrayCandidates(sql: SqlStorage, ops: readonly Op[]): void {
+  const add = (id: string) => sql.exec("INSERT OR IGNORE INTO stray_check (id) VALUES (?)", id);
+  for (const op of ops) {
+    if (op.op === "create" || op.op === "move") add(op.parent);
+    if (op.op === "set" && op.prop === "instanceOf") add(op.id);
+    // A main made one again: every instance of it, gathered in SQL.
+    if (op.op === "set" && op.prop === "isComponent" && op.value)
+      sql.exec(
+        `INSERT OR IGNORE INTO stray_check (id)
+         SELECT id FROM nodes WHERE type = 'frame' AND json_extract(props, '$.instanceOf') = ?`,
+        op.id,
+      );
+  }
+}
+
+/**
+ * Whether a node gathered is an instance of a live main (a frame that's a
+ * component) storing a layer, in SQL, however many were gathered; empties
+ * what was gathered.
+ */
+export function strayCandidate(sql: SqlStorage): boolean {
+  const found =
+    sql
+      .exec(
+        `SELECT 1 FROM stray_check c
+           JOIN nodes r ON r.id = c.id AND r.type = 'frame'
+           JOIN nodes m ON m.id = json_extract(r.props, '$.instanceOf')
+          WHERE m.id != r.id AND m.type = 'frame' AND json_extract(m.props, '$.isComponent') = 1
+            AND EXISTS (SELECT 1 FROM nodes k WHERE k.parent = r.id AND k.type != 'override')
+          LIMIT 1`,
+      )
+      .toArray().length > 0;
+  sql.exec("DELETE FROM stray_check");
+  return found;
+}
+
 /** Applying would leave an instance materialized: refused (and rolled back), to try again. */
 export class NotAllConverted extends Error {
   constructor(readonly rootId: string) {
@@ -931,7 +1047,11 @@ export class NotAllConverted extends Error {
  * changed: an instance any of them is in, and every instance built from a
  * main (or set) any of them is in. Call inside the edit's storage
  * transaction, before and after it applies (so deleted and created layers
- * are both found).
+ * are both found). Returns how many were marked.
+ *
+ * What's held is bounded by `ids` and their depth (an edit's chunk): the
+ * instances marked, however many depend on a main (every instance of it,
+ * in a kit), are gathered and unsettled in SQL, in a table of their own.
  */
 export function markDirty(
   sql: SqlStorage,
@@ -947,11 +1067,8 @@ export function markDirty(
     while (at !== null && at !== ROOT_ID && !seen.has(at)) {
       seen.add(at);
       const row: { parent: string; of: string | null } | undefined = sql
-        .exec<{ parent: string; of: string | null; main: number | null; isset: number | null }>(
-          `SELECT parent, json_extract(props, '$.instanceOf') AS of,
-                  json_extract(props, '$.isComponent') AS main,
-                  json_extract(props, '$.isComponentSet') AS isset
-             FROM ${src} WHERE id = ?`,
+        .exec<{ parent: string; of: string | null }>(
+          `SELECT parent, json_extract(props, '$.instanceOf') AS of FROM ${src} WHERE id = ?`,
           at,
         )
         .toArray()[0];
@@ -962,24 +1079,33 @@ export function markDirty(
       at = row.parent;
     }
   }
-  const undo = new Set<string>();
-  for (const root of roots)
-    if (sql.exec(`SELECT 1 FROM ${t.done} WHERE root = ?`, root).toArray().length > 0)
-      undo.add(root);
-  for (const dep of mains)
-    for (const { root } of sql
-      .exec<{ root: string }>(`SELECT root FROM ${t.deps} WHERE dep = ?`, dep)
-      .toArray())
-      undo.add(root);
-  for (const root of undo) unsettle(sql, t, root);
-  return undo.size;
+  const dirty = tempTable("cvdirty");
+  try {
+    sql.exec(`CREATE TABLE ${dirty} (root TEXT PRIMARY KEY) STRICT, WITHOUT ROWID`);
+    for (const root of roots)
+      sql.exec(
+        `INSERT OR IGNORE INTO ${dirty} (root) SELECT root FROM ${t.done} WHERE root = ?`,
+        root,
+      );
+    for (const dep of mains)
+      sql.exec(
+        `INSERT OR IGNORE INTO ${dirty} (root) SELECT root FROM ${t.deps} WHERE dep = ?`,
+        dep,
+      );
+    const marked = sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${dirty}`).one().n;
+    if (marked > 0) unsettleWhere(sql, t, `SELECT root FROM ${dirty}`);
+    return marked;
+  } finally {
+    sql.exec(`DROP TABLE IF EXISTS ${dirty}`);
+  }
 }
 
 export interface Applied {
   /** Layers no longer stored (copies that equal their main's, or are records now). */
   readonly removed: number;
   readonly records: number;
-  readonly detached: Array<{ root: string; why: string }>;
+  /** Instances left detached; which, and why, stay in `t.done` (status `detached`) to copy in SQL. */
+  readonly detached: number;
 }
 
 /**
@@ -1010,10 +1136,8 @@ export function applyConversion(sql: SqlStorage, src: string, t: ConvertTables):
   const stray = strayInstance(sql, src);
   if (stray !== null) throw new NotAllConverted(stray);
   const detached = sql
-    .exec<{ root: string; why: string }>(
-      `SELECT root, why FROM ${t.done} WHERE status = 'detached' ORDER BY root`,
-    )
-    .toArray();
+    .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${t.done} WHERE status = 'detached'`)
+    .one().n;
   return { removed, records, detached };
 }
 

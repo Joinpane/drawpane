@@ -33,7 +33,7 @@
  * (every copy layer stored, `mirrors`-linked) to the stored form; `expand`
  * goes back.
  */
-import { type BuildBudget, nodeBytes, slotBytes } from "./budget";
+import { type BuildBudget, ENTRY_BYTES, idsBytes, nodeBytes, slotBytes } from "./budget";
 import { sameValue } from "./history";
 import { ROOT_ID } from "./ids";
 import type { NodeRecord } from "./ops";
@@ -180,6 +180,8 @@ export class CopyView {
   readonly #presenting = new Set<string>();
   /** Mains known to contain an instance of themselves (true) or not (false). */
   readonly #cyclic = new Map<string, boolean>();
+  /** What `#cyclic`'s entries were charged (given back when it's emptied). */
+  #cyclicHeld = 0;
   #complete = false;
   readonly #lazy: boolean;
   readonly #budget: BuildBudget | null;
@@ -363,7 +365,7 @@ export class CopyView {
     const seen = new Set<string>();
     const pending = [...structural];
     // What contains what may have changed: which mains contain their own instances is worked out again.
-    if (pending.length > 0) this.#cyclic.clear();
+    if (pending.length > 0) this.#forgetCyclic();
     for (let id = pending.pop(); id !== undefined; id = pending.pop()) {
       if (seen.has(id)) continue;
       seen.add(id);
@@ -407,6 +409,7 @@ export class CopyView {
     this.#copiesOf.clear();
     this.#swapped.clear();
     this.#cyclic.clear();
+    this.#cyclicHeld = 0;
     this.#complete = false;
     this.#budget?.release(this.#held);
     this.#held = 0;
@@ -433,42 +436,64 @@ export class CopyView {
     const onStack = new Set<string>();
     const frames: Array<{ id: string; edges: string[]; at: number }> = [];
     let next = 0;
+    // The search's own maps grow with the mains it reaches: charged while it runs, given back
+    // after (with a budget, a web of more mains than it allows throws `BuildTooLarge`).
+    let searching = 0;
     const open = (id: string) => {
+      const edges = this.#contained(id);
+      const cost = 4 * ENTRY_BYTES + idsBytes(edges.length);
+      this.#charge(cost);
+      searching += cost;
       index.set(id, next);
       low.set(id, next);
       next++;
       stack.push(id);
       onStack.add(id);
-      frames.push({ id, edges: this.#contained(id), at: 0 });
+      frames.push({ id, edges, at: 0 });
     };
-    open(mainId);
-    while (frames.length > 0) {
-      const frame = frames[frames.length - 1] as (typeof frames)[number];
-      if (frame.at < frame.edges.length) {
-        const to = frame.edges[frame.at++] as string;
-        // Settled by an earlier search: in a component of its own, which can't reach back here.
-        if (this.#cyclic.has(to)) continue;
-        if (!index.has(to)) open(to);
-        else if (onStack.has(to))
-          low.set(frame.id, Math.min(low.get(frame.id) as number, index.get(to) as number));
-        continue;
+    try {
+      open(mainId);
+      while (frames.length > 0) {
+        const frame = frames[frames.length - 1] as (typeof frames)[number];
+        if (frame.at < frame.edges.length) {
+          const to = frame.edges[frame.at++] as string;
+          // Settled by an earlier search: in a component of its own, which can't reach back here.
+          if (this.#cyclic.has(to)) continue;
+          if (!index.has(to)) open(to);
+          else if (onStack.has(to))
+            low.set(frame.id, Math.min(low.get(frame.id) as number, index.get(to) as number));
+          continue;
+        }
+        frames.pop();
+        const parent = frames[frames.length - 1];
+        if (parent)
+          low.set(parent.id, Math.min(low.get(parent.id) as number, low.get(frame.id) as number));
+        if (low.get(frame.id) !== index.get(frame.id)) continue;
+        const members: string[] = [];
+        for (;;) {
+          const id = stack.pop() as string;
+          onStack.delete(id);
+          members.push(id);
+          if (id === frame.id) break;
+        }
+        const cyclic = members.length > 1 || frame.edges.includes(frame.id);
+        for (const id of members) {
+          this.#charge(ENTRY_BYTES);
+          this.#cyclicHeld += ENTRY_BYTES;
+          this.#cyclic.set(id, cyclic);
+        }
       }
-      frames.pop();
-      const parent = frames[frames.length - 1];
-      if (parent)
-        low.set(parent.id, Math.min(low.get(parent.id) as number, low.get(frame.id) as number));
-      if (low.get(frame.id) !== index.get(frame.id)) continue;
-      const members: string[] = [];
-      for (;;) {
-        const id = stack.pop() as string;
-        onStack.delete(id);
-        members.push(id);
-        if (id === frame.id) break;
-      }
-      const cyclic = members.length > 1 || frame.edges.includes(frame.id);
-      for (const id of members) this.#cyclic.set(id, cyclic);
+    } finally {
+      this.#giveBack(searching);
     }
     return this.#cyclic.get(mainId) ?? false;
+  }
+
+  /** Forgets which mains contain themselves (what contains what changed), giving back their charge. */
+  #forgetCyclic(): void {
+    this.#cyclic.clear();
+    this.#giveBack(this.#cyclicHeld);
+    this.#cyclicHeld = 0;
   }
 
   /** The mains a main's layers come from: the one it's an instance of, its instances', its records' swaps. */
@@ -726,196 +751,13 @@ export function ownValues(
 
 // ---------------------------------------------------------------------------
 // Converting
-
-export interface CompactResult {
-  /** The stored form. */
-  readonly nodes: NodeRecord[];
-  /** Each copy layer's id in the input → its derived id. Ids not listed stay as they were. */
-  readonly ids: ReadonlyMap<string, string>;
-  /**
-   * Instances whose layers don't match their main's (other layers, another
-   * order), detached as `pinInstances` would: they keep every layer, unlinked.
-   */
-  readonly detached: readonly string[];
-}
-
-interface Indexed {
-  readonly byId: Map<string, NodeRecord>;
-  readonly children: Map<string, NodeRecord[]>;
-}
-
-function index(nodes: readonly NodeRecord[]): Indexed {
-  const byId = new Map<string, NodeRecord>();
-  const children = new Map<string, NodeRecord[]>();
-  for (const node of nodes) {
-    byId.set(node.id, node);
-    const list = children.get(node.parent);
-    if (list) list.push(node);
-    else children.set(node.parent, [node]);
-  }
-  return { byId, children };
-}
-
-function unlinked(node: NodeRecord): NodeRecord {
-  const props: Record<string, unknown> = { ...node.props };
-  delete props.instanceOf;
-  delete props.mirrors;
-  delete props.overrides;
-  delete props.unset;
-  return { ...node, props: props as Props };
-}
-
-/**
- * The stored form of a document in the materialized form: copy layers equal
- * to what they'd be built as are dropped, the rest become override records
- * with derived ids. The input is taken as materialized, except an instance
- * that has override records and no layers, which is kept as it is.
- */
-export function compact(input: readonly NodeRecord[]): CompactResult {
-  const d = index(input);
-  const isLive = (node: NodeRecord | undefined): node is NodeRecord =>
-    node?.type === "frame" &&
-    !!node.props.instanceOf &&
-    node.props.instanceOf !== node.id &&
-    isMainNode(d.byId.get(node.props.instanceOf));
-
-  // Instance roots not inside another instance, and the copy layers inside them.
-  const roots: NodeRecord[] = [];
-  const inside = new Set<string>();
-  const rootsInMain = new Map<string, string[]>();
-  const walk = (parent: string, mains: readonly string[], inCopy: boolean) => {
-    for (const node of d.children.get(parent) ?? []) {
-      if (node.type === "override") continue;
-      if (inCopy) {
-        inside.add(node.id);
-        walk(node.id, mains, true);
-        continue;
-      }
-      const live = isLive(node);
-      if (live) {
-        roots.push(node);
-        for (const main of mains) {
-          const list = rootsInMain.get(main);
-          if (list) list.push(node.id);
-          else rootsInMain.set(main, [node.id]);
-        }
-      }
-      walk(node.id, isMainNode(node) ? [...mains, node.id] : mains, live);
-    }
-  };
-  walk(ROOT_ID, [], false);
-
-  const store = new MemoryStore(input.filter((node) => !inside.has(node.id)));
-  const view = new CopyView(store);
-  const ids = new Map<string, string>();
-  const detached: string[] = [];
-  const state = new Map<string, "doing" | "done">();
-  const ready = new Set<string>();
-
-  const prepare = (mainId: string) => {
-    if (ready.has(mainId)) return;
-    ready.add(mainId);
-    const main = d.byId.get(mainId);
-    if (main && isLive(main)) process(main);
-    for (const id of rootsInMain.get(mainId) ?? []) process(d.byId.get(id) as NodeRecord);
-  };
-
-  const setProps = (id: string, props: Readonly<Record<string, unknown>>) =>
-    store.replaceProps(id, props as Props);
-
-  const subtree = (id: string): NodeRecord[] => {
-    const out: NodeRecord[] = [];
-    const stack = [...(d.children.get(id) ?? [])];
-    for (let node = stack.pop(); node; node = stack.pop()) {
-      if (node.type === "override") continue;
-      out.push(node);
-      stack.push(...(d.children.get(node.id) ?? []));
-    }
-    return out;
-  };
-
-  function process(root: NodeRecord): void {
-    const at = state.get(root.id);
-    if (at === "done") return;
-    if (at === "doing") return; // A main that contains its own instance: left as it is.
-    state.set(root.id, "doing");
-    const mainId = root.props.instanceOf as string;
-    prepare(mainId);
-    const layers = subtree(root.id);
-    for (const node of layers) {
-      const of = node.type === "frame" ? node.props.instanceOf : undefined;
-      if (of && of !== mainId && isMainNode(d.byId.get(of))) prepare(of);
-    }
-    const written: string[] = [];
-    const originalProps = root.props;
-    /** Another structure than its main's (`why` says how, for a debugger). */
-    const fail = (_why: string) => false;
-    const ok = (() => {
-      // Records and no layers: already stored compact.
-      if (layers.length === 0 && (d.children.get(root.id) ?? []).length > 0) return true;
-      const base = view.base(root.id);
-      if (!base) return false;
-      setProps(root.id, ownValues(base.props, root.props, true) ?? {});
-      view.forget([root.id], [root.id]);
-      const match = (dParent: string, presented: string): boolean => {
-        const dKids = (d.children.get(dParent) ?? []).filter((n) => n.type !== "override");
-        const kids = view.childIds(presented);
-        if (dKids.length !== kids.length)
-          return fail(`${dKids.length} layers under ${dParent}, ${kids.length} built`);
-        const bySource = new Map<string, string>();
-        for (const id of kids) bySource.set((view.slot(id) as CopySlot).source, id);
-        for (const node of dKids) {
-          const mirrors = node.props.mirrors;
-          if (!mirrors) return fail(`${node.id} copies nothing`);
-          const slotId = bySource.get(ids.get(mirrors) ?? mirrors);
-          if (!slotId) return fail(`no copy of ${mirrors} under ${presented}`);
-          bySource.delete(ids.get(mirrors) ?? mirrors);
-          const slot = view.slot(slotId) as CopySlot;
-          const base = view.base(slotId);
-          if (!base || base.type !== node.type || slot.key !== node.key)
-            return fail(`${node.id} isn't its main layer's type or place`);
-          ids.set(node.id, slotId);
-          const write = (own: Record<string, unknown> | null, structural: boolean) => {
-            if (store.get(slotId)) store.remove(slotId);
-            if (own)
-              store.insert({
-                id: slotId,
-                type: "override",
-                parent: root.id,
-                key: OVERRIDE_KEY,
-                props: { path: [...slot.path], ...own } as Props,
-              });
-            view.forget([slotId], structural ? [slotId] : EMPTY);
-          };
-          const own = ownValues(base.props, node.props);
-          if (own) {
-            written.push(slotId);
-            const swaps = node.type === "frame" && swappedTo(own as Props) !== undefined;
-            write(own, swaps);
-            // Swapped: its base is the other main's now, so what it keeps is what differs from that.
-            if (swaps) write(ownValues((view.base(slotId) ?? base).props, node.props), true);
-          }
-          if (!match(node.id, slotId)) return false;
-        }
-        return true;
-      };
-      return match(root.id, root.id);
-    })();
-    if (!ok) {
-      // Another structure than its main's: detached, every layer kept.
-      for (const id of written) store.remove(id);
-      for (const node of layers) ids.delete(node.id);
-      setProps(root.id, unlinked({ ...root, props: originalProps }).props);
-      for (const node of layers) store.insert(unlinked(node));
-      view.clear();
-      detached.push(root.id);
-    }
-    state.set(root.id, "done");
-  }
-
-  for (const root of roots) process(root);
-  return { nodes: [...store.nodes()], ids, detached };
-}
+//
+// One converter turns the materialized form into the compact one:
+// `InstanceConverter` (convert.ts), an instance at a time, each verified and
+// ids layers hold renamed, which the room runs over SQL and `compactByInstance`
+// runs over a document in memory. The one-pass `compact` of phase 4a was
+// removed after it was found still loading history and libraries without
+// those fixes (decision 0029): there is no second converter to drift.
 
 /** The materialized form of a stored document: every copy layer built. */
 export function expand(nodes: Iterable<NodeRecord>): NodeRecord[] {

@@ -8,6 +8,7 @@ import {
   type PropName,
   type Props,
 } from "@drawpane/model";
+import { checkIds, idsRoom } from "./convert";
 import { instanceCycleIn } from "./instance-cycles";
 
 interface NodeRow extends Record<string, SqlStorageValue> {
@@ -93,10 +94,24 @@ export class SqlNodeStore implements NodeStore {
 
   childIds(parent: string): readonly string[] {
     // SQLite compares TEXT bytewise, which matches the order keys' ASCII order.
-    return this.#sql
-      .exec<{ id: string }>("SELECT id FROM nodes WHERE parent = ? ORDER BY key, id", parent)
+    if (!this.#budget)
+      return this.#sql
+        .exec<{ id: string }>("SELECT id FROM nodes WHERE parent = ? ORDER BY key, id", parent)
+        .toArray()
+        .map((row) => row.id);
+    // Metered (copies built from it): no more than the budget has room for, refused before
+    // they're read (a main's layer with more children than a build could hold).
+    const room = idsRoom(this.#budget);
+    const ids = this.#sql
+      .exec<{ id: string }>(
+        "SELECT id FROM nodes WHERE parent = ? ORDER BY key, id LIMIT ?",
+        parent,
+        room + 1,
+      )
       .toArray()
       .map((row) => row.id);
+    checkIds(this.#budget, room, ids.length);
+    return ids;
   }
 
   insert(node: NodeRecord): void {

@@ -7,7 +7,7 @@
 import type { CopiesFormat, Peer, Presence } from "@drawpane/model";
 import {
   type BindingKey,
-  compact,
+  compactByInstance,
   defaultOf,
   expand,
   getProp,
@@ -531,7 +531,9 @@ export class Editor {
     });
     // As the snapshot stores copies (decision 0029), in the form asked for.
     if (copies === as) this.doc.resetStored(nodes, copies);
-    else if (as === "compact") this.doc.resetStored(compact([...nodes]).nodes, "compact");
+    // Converted with the room's converter, so a version or a library shows what the room would
+    // store for it: drawing order kept, ids layers hold renamed (decision 0029).
+    else if (as === "compact") this.doc.resetStored(compactByInstance(nodes).nodes, "compact");
     else this.doc.resetStored(expand(nodes), "materialized");
   }
 

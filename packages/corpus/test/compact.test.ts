@@ -11,7 +11,6 @@ import { readFig } from "@drawpane/fig";
 import { convertFile as convertFigma } from "@drawpane/figma";
 import {
   applyTransaction,
-  compact,
   compactByInstance,
   expand,
   firstDifference,
@@ -60,19 +59,15 @@ interface Checked {
 
 /** Converts, validates the stored form, builds it back and compares. */
 function equivalent(materialized: readonly NodeRecord[]): Checked {
-  const result = compact(materialized);
-  expect(result.detached, "instances whose layers aren't their main's").toEqual([]);
+  // An instance at a time, as a room converts a stored file (phase 4b), every instance checked
+  // as it goes: the one converter there is (the one-pass `compact` of 4a is gone).
+  const result = compactByInstance(materialized);
+  expect([...result.detached], "instances whose layers aren't their main's").toEqual([]);
   validate(result.nodes);
   const difference = firstDifference(renameIds(materialized, result.ids), expand(result.nodes));
   expect(difference).toBeNull();
   // Canonical: the stored form of the built document is the stored form.
-  expect(firstDifference(result.nodes, compact(expand(result.nodes)).nodes)).toBeNull();
-  // An instance at a time, as a room converts a stored file (phase 4b): the same stored form,
-  // every instance checked as it goes and none left behind.
-  const streamed = compactByInstance(materialized);
-  expect([...streamed.detached], "instances the room would detach").toEqual([]);
-  expect(firstDifference(result.nodes, streamed.nodes)).toBeNull();
-  expect(new Map(streamed.ids)).toEqual(new Map(result.ids));
+  expect(firstDifference(result.nodes, compactByInstance(expand(result.nodes)).nodes)).toBeNull();
   return {
     layers: materialized.length,
     stored: result.nodes.length,

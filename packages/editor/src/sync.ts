@@ -637,18 +637,27 @@ export class SyncEngine {
   }
 
   /**
-   * Re-apply pending edits oldest first, each stored again against the
-   * document as it is now. Edits that no longer apply stay queued; the room
-   * will reject them too. When the file has changed form (`reformed`), they
-   * can't be sent as they were: those are dropped instead. Returns how many.
+   * Re-apply pending edits oldest first. An edit already sent is applied as
+   * it was sent (`stored`), exactly as the room will apply it: once sent, its
+   * operations are fixed, so what this client shows for it is what the room
+   * stores. An edit not sent yet is stored again against the document as it
+   * is now (with compact copies, a copy's value equal to its main's again
+   * is no longer stored as an override). Edits that no longer apply stay
+   * queued; the room will reject them too. When the file has changed form
+   * (`reformed`), they can't be sent as they were: those are dropped
+   * instead. Returns how many.
    */
   #redoPending(reformed = false): number {
     let dropped = 0;
     const kept: PendingTxn[] = [];
     for (const txn of this.#pending) {
       try {
-        this.#doc.apply(txn.ops);
-        txn.stored = [...this.#doc.lastStoredOps];
+        if (txn.seq !== null) {
+          this.#doc.applyStored(txn.stored);
+        } else {
+          this.#doc.apply(txn.ops);
+          txn.stored = [...this.#doc.lastStoredOps];
+        }
         txn.inverse = [...this.#doc.lastStoredInverse];
       } catch (error) {
         if (!(error instanceof ModelError)) throw error;

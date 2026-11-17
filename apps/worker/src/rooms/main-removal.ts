@@ -95,38 +95,80 @@ export class RemovalNeedsLooks extends Error {
   }
 }
 
-interface Look {
-  /** The hash of what it showed. */
-  readonly look: string;
-  /** The removed mains it depends on. */
-  readonly mains: ReadonlySet<string>;
-}
+/**
+ * The most removed mains with instances left that a storage transaction
+ * that has to run again (`RemovalNeedsLooks`) carries over, in memory, to
+ * look at first: past it, the removal is refused as too large to check.
+ * Mains whose instances all went with them don't count.
+ */
+export const REMOVAL_CHECK_MAINS = 10_000;
+
+/** The most delete targets carried over to the run again, so instances there aren't built. */
+export const REMOVAL_DELETED_KEPT = 50_000;
+
+/**
+ * What the check keeps, in tables of its own, for the storage transaction
+ * it's run in: everything that grows with the file (the mains noted, the
+ * instances affected, what each showed), so nothing it holds in memory
+ * grows with how many instances a main has (decision 0029).
+ */
+export const REMOVAL_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS removal_noted (
+    id TEXT PRIMARY KEY, removed INTEGER NOT NULL DEFAULT 0, used INTEGER NOT NULL DEFAULT 0
+  ) STRICT, WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS removal_looked (id TEXT PRIMARY KEY, name TEXT) STRICT, WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS removal_reach (
+    main TEXT NOT NULL, origin TEXT NOT NULL, round INTEGER NOT NULL, PRIMARY KEY (main, origin)
+  ) STRICT, WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS removal_reach_round ON removal_reach (round);
+  CREATE TABLE IF NOT EXISTS removal_affected (
+    root TEXT NOT NULL, origin TEXT NOT NULL, PRIMARY KEY (root, origin)
+  ) STRICT, WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS removal_look (
+    root TEXT PRIMARY KEY, look TEXT, name TEXT, skipped INTEGER NOT NULL DEFAULT 0
+  ) STRICT, WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS removal_deleted (id TEXT PRIMARY KEY) STRICT, WITHOUT ROWID;
+`;
+
+const REMOVAL_TABLES = [
+  "removal_noted",
+  "removal_looked",
+  "removal_reach",
+  "removal_affected",
+  "removal_look",
+  "removal_deleted",
+] as const;
+
+/** Rows a page of the check reads at a time. */
+const PAGE = 200;
 
 /** `prefix` and a layer's name in quotes, or `fallback` when it has none. */
-const named = (node: NodeRecord | undefined, prefix: string, fallback: string) => {
-  const name = (node?.props as { name?: unknown } | undefined)?.name;
-  return typeof name === "string" && name.trim() ? `${prefix} “${name.trim()}”` : fallback;
-};
+const named = (name: unknown, prefix: string, fallback: string) =>
+  typeof name === "string" && name.trim() ? `${prefix} “${name.trim()}”` : fallback;
+
+/** The stored instance roots of the mains a query selects (`?` its parameters), or with a copy swapped to one. */
+const instancesOfSql = (mains: string) => `
+  SELECT n.id AS id, json_extract(n.props, '$.instanceOf') AS of FROM nodes n
+   WHERE n.type = 'frame' AND json_extract(n.props, '$.instanceOf') IN (${mains})
+     AND n.id != json_extract(n.props, '$.instanceOf')
+  UNION
+  SELECT n.parent AS id, json_extract(n.props, '$.instanceOf') AS of FROM nodes n
+   WHERE n.type = 'override' AND json_extract(n.props, '$.instanceOf') IN (${mains})`;
+
+const IS_MAIN_SQL = (n: string) =>
+  `${n}.type = 'frame' AND json_extract(${n}.props, '$.isComponent') = 1`;
 
 /** One storage transaction's check (see the module comment). */
 export class MainRemoval {
   readonly #sql: SqlStorage;
   readonly #store: RemovalStore;
-  /** Mains the operations may have removed, noted before each applies. */
-  readonly #noted = new Set<string>();
-  /** Mains whose instances were looked at before anything applied. */
-  readonly #looked = new Set<string>();
-  /** Instances not looked at because the transaction was to delete them. */
-  readonly #skipped = new Set<string>();
   /** The targets of the deletes noted (null once there are too many to keep). */
   #deleted: Set<string> | null = new Set();
-  readonly #looks = new Map<string, Look>();
-  /** What each looked-at main and instance is called, from before. */
-  readonly #names = new Map<string, string>();
   #built = 0;
   readonly #budget: BuildBudget;
   readonly #precount: boolean;
 
+  /** Call inside the storage transaction, before anything applies: what an earlier one kept goes. */
   constructor(
     sql: SqlStorage,
     store: RemovalStore,
@@ -143,6 +185,8 @@ export class MainRemoval {
     this.#store = store;
     this.#budget = new BuildBudget({ bytes: heldBytes, layers: REMOVAL_CHECK_LAYERS });
     this.#precount = precount;
+    sql.exec(REMOVAL_SCHEMA);
+    for (const table of REMOVAL_TABLES) sql.exec(`DELETE FROM ${table}`);
   }
 
   /** What the check has held at most, as its budget estimates it (for the memory check). */
@@ -151,54 +195,147 @@ export class MainRemoval {
   }
 
   /**
-   * The mains `ops` certainly remove (deleted, inside something deleted, or
-   * un-made): what to look at before they apply, in the common case.
+   * Before any operation applies: looks at what the instances of `mains`
+   * show, and of the mains `ops` certainly remove (deleted, inside
+   * something deleted, or un-made), but those at or under `deleted` or what
+   * `ops` delete (they won't be there to compare; `check` makes sure). The
+   * mains `ops` remove are found in SQL, however many a deleted page holds.
    */
-  static predicted(sql: SqlStorage, store: RemovalStore, ops: readonly Op[]): Set<string> {
-    const out = new Set<string>();
+  lookFirst(
+    mains: Iterable<string>,
+    deleted: ReadonlySet<string> = new Set(),
+    ops: readonly Op[] = [],
+  ): void {
+    const sql = this.#sql;
+    const round =
+      sql.exec<{ n: number | null }>("SELECT MAX(round) AS n FROM removal_reach").one().n ?? -1;
+    const base = round + 1;
+    const start = (id: string) => {
+      sql.exec(
+        `INSERT OR IGNORE INTO removal_looked (id, name)
+         SELECT id, json_extract(props, '$.name') FROM nodes WHERE id = ?`,
+        id,
+      );
+      sql.exec(
+        "INSERT OR IGNORE INTO removal_reach (main, origin, round) VALUES (?, ?, ?)",
+        id,
+        id,
+        base,
+      );
+    };
+    for (const id of mains) if (!this.#wasLooked(id)) start(id);
+    for (const id of deleted) sql.exec("INSERT OR IGNORE INTO removal_deleted (id) VALUES (?)", id);
     for (const op of ops) {
-      if (op.op === "delete") for (const id of mainsUnder(sql, op.id)) out.add(id);
-      else if (
+      if (op.op === "delete") {
+        sql.exec("INSERT OR IGNORE INTO removal_deleted (id) VALUES (?)", op.id);
+        sql.exec(
+          `WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id),
+           found AS (SELECT n.id, json_extract(n.props, '$.name') AS name FROM sub CROSS JOIN nodes n ON n.id = sub.id
+                      WHERE ${IS_MAIN_SQL("n")} AND n.id NOT IN (SELECT id FROM removal_looked))
+           INSERT OR IGNORE INTO removal_reach (main, origin, round) SELECT id, id, ? FROM found`,
+          op.id,
+          base,
+        );
+      } else if (
         op.op === "set" &&
         op.prop === "isComponent" &&
         !op.value &&
-        isMainNode(store.get(op.id))
+        !this.#wasLooked(op.id)
+      ) {
+        if (
+          sql.exec(`SELECT 1 FROM nodes n WHERE n.id = ? AND ${IS_MAIN_SQL("n")}`, op.id).toArray()
+            .length > 0
+        )
+          start(op.id);
+      }
+    }
+    // Mains found in SQL are named, as looked at.
+    sql.exec(
+      `INSERT OR IGNORE INTO removal_looked (id, name)
+       SELECT r.main, json_extract(n.props, '$.name') FROM removal_reach r JOIN nodes n ON n.id = r.main
+        WHERE r.round = ? AND r.main = r.origin`,
+      base,
+    );
+    // The instances affected, round by round, in SQL: those of the mains looked at, then, through
+    // every main holding one of them (or being one), that main's instances keeping records.
+    for (let r = base; ; r++) {
+      const ofRound = "SELECT main FROM removal_reach WHERE round = ?1";
+      sql.exec(
+        `INSERT OR IGNORE INTO removal_affected (root, origin)
+         SELECT i.id, f.origin FROM (${instancesOfSql(ofRound)}) i
+           JOIN removal_reach f ON f.main = i.of AND f.round = ?1
+          WHERE ?1 = ?2 OR EXISTS (SELECT 1 FROM nodes o WHERE o.parent = i.id AND o.type = 'override')`,
+        r,
+        base,
+      );
+      const held = sql.exec(
+        `WITH RECURSIVE inst(id, origin) AS (
+           SELECT i.id, f.origin FROM (${instancesOfSql(ofRound)}) i
+             JOIN removal_reach f ON f.main = i.of AND f.round = ?1),
+         up(id, origin) AS (
+           SELECT id, origin FROM inst
+           UNION SELECT n.parent, up.origin FROM up JOIN nodes n ON n.id = up.id WHERE n.parent != ?2)
+         INSERT OR IGNORE INTO removal_reach (main, origin, round)
+         SELECT up.id, up.origin, ?1 + 1 FROM up JOIN nodes m ON m.id = up.id WHERE ${IS_MAIN_SQL("m")}`,
+        r,
+        ROOT_ID,
+      );
+      if (held.rowsWritten === 0) break;
+    }
+    // Instances at or under what's deleted aren't built: marked skipped.
+    if (sql.exec("SELECT 1 FROM removal_deleted LIMIT 1").toArray().length > 0)
+      sql.exec(
+        `WITH RECURSIVE up(root, id) AS (
+           SELECT DISTINCT root, root FROM removal_affected
+            WHERE root NOT IN (SELECT root FROM removal_look)
+           UNION SELECT up.root, n.parent FROM up JOIN nodes n ON n.id = up.id WHERE n.parent != ?)
+         INSERT OR IGNORE INTO removal_look (root, skipped)
+         SELECT DISTINCT root, 1 FROM up WHERE id IN (SELECT id FROM removal_deleted)`,
+        ROOT_ID,
+      );
+    // Counted before anything is built: every instance is a layer at least.
+    const toLook = sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(DISTINCT root) AS n FROM removal_affected
+          WHERE root NOT IN (SELECT root FROM removal_look)`,
       )
-        out.add(op.id);
+      .one().n;
+    if (this.#built + toLook > REMOVAL_CHECK_LAYERS) {
+      const first = sql
+        .exec<{ name: string | null }>(
+          "SELECT l.name FROM removal_reach r JOIN removal_looked l ON l.id = r.main WHERE r.round = ? LIMIT 1",
+          base,
+        )
+        .toArray()[0];
+      throw tooMany(named(first?.name, "the component", "a component"));
     }
-    store.clearCache();
-    return out;
-  }
-
-  /**
-   * Before any operation applies: looks at what the instances of `mains`
-   * show, but those at or under `deleted` (what the transaction deletes:
-   * they won't be there to compare; `check` makes sure).
-   */
-  lookFirst(mains: Iterable<string>, deleted: ReadonlySet<string> = new Set()): void {
-    const fresh = [...mains].filter((id) => !this.#looked.has(id));
-    if (fresh.length === 0) return;
-    for (const id of fresh) {
-      this.#looked.add(id);
-      this.#names.set(id, named(this.#store.get(id), "the component", "a component"));
-    }
-    const counter = new PresentedCounter(this.#sql, "nodes");
+    const counter = new PresentedCounter(sql, "nodes");
     const view = this.#view();
     this.#store.meter?.(this.#budget);
     try {
-      for (const [root, mains] of this.#affected(fresh)) {
-        if (deleted.size > 0 && this.#under(root, deleted)) {
-          this.#skipped.add(root);
-          continue;
+      let after = "";
+      for (;;) {
+        const page = sql
+          .exec<{ root: string; origin: string }>(
+            `SELECT a.root AS root, MIN(a.origin) AS origin FROM removal_affected a
+              WHERE a.root > ? AND NOT EXISTS (SELECT 1 FROM removal_look l WHERE l.root = a.root)
+              GROUP BY a.root ORDER BY a.root LIMIT ${PAGE}`,
+            after,
+          )
+          .toArray();
+        for (const { root, origin } of page) {
+          // As people see it: an instance takes its name from its main unless it has its own.
+          const name = named(view.get(root)?.props.name, "its instance", "one of its instances");
+          const look = this.#lookOf(view, counter, root, this.#mainName(origin), name);
+          sql.exec(
+            "INSERT OR REPLACE INTO removal_look (root, look, name, skipped) VALUES (?, ?, ?, 0)",
+            root,
+            look,
+            name,
+          );
         }
-        const known = this.#looks.get(root);
-        if (known) {
-          this.#looks.set(root, { look: known.look, mains: new Set([...known.mains, ...mains]) });
-          continue;
-        }
-        // As people see it: an instance takes its name from its main unless it has its own.
-        this.#names.set(root, named(view.get(root), "its instance", "one of its instances"));
-        this.#looks.set(root, { look: this.#lookOf(view, counter, root, mains), mains });
+        if (page.length < PAGE) break;
+        after = (page[page.length - 1] as { root: string }).root;
       }
     } finally {
       view.clear();
@@ -207,18 +344,27 @@ export class MainRemoval {
     }
   }
 
-  /** Before each run of operations applies: the mains they may remove. */
+  /** Before each run of operations applies: the mains they may remove, kept in SQL. */
   note(ops: readonly Op[]): void {
+    const sql = this.#sql;
     for (const op of ops) {
       if (op.op === "delete") {
         this.#deleted?.add(op.id);
-        if ((this.#deleted?.size ?? 0) > 200_000) this.#deleted = null;
+        if ((this.#deleted?.size ?? 0) > REMOVAL_DELETED_KEPT) this.#deleted = null;
       }
       if (op.op === "delete" || op.op === "move") {
-        for (const id of mainsUnder(this.#sql, op.id)) this.#noted.add(id);
-      } else if (op.op === "set" && isMainNode(this.#store.get(op.id))) this.#noted.add(op.id);
+        sql.exec(
+          `WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
+           INSERT OR IGNORE INTO removal_noted (id)
+           SELECT n.id FROM sub CROSS JOIN nodes n ON n.id = sub.id WHERE ${IS_MAIN_SQL("n")}`,
+          op.id,
+        );
+      } else if (op.op === "set")
+        sql.exec(
+          `INSERT OR IGNORE INTO removal_noted (id) SELECT n.id FROM nodes n WHERE n.id = ? AND ${IS_MAIN_SQL("n")}`,
+          op.id,
+        );
     }
-    this.#store.clearCache();
   }
 
   /**
@@ -228,28 +374,75 @@ export class MainRemoval {
    * else now (or is too large to check).
    */
   check(): void {
+    const sql = this.#sql;
     this.#store.clearCache();
     try {
-      const removed = [...this.#noted].filter((id) => !this.#isMain(id));
-      if (removed.length === 0) return;
+      // Removed: noted, and not a main now. A page at a time.
+      let removed = 0;
+      for (let after = ""; ; ) {
+        const page = sql
+          .exec<{ id: string }>(
+            `SELECT id FROM removal_noted WHERE id > ? ORDER BY id LIMIT ${PAGE}`,
+            after,
+          )
+          .toArray();
+        for (const { id } of page)
+          if (!this.#isMain(id)) {
+            sql.exec("UPDATE removal_noted SET removed = 1 WHERE id = ?", id);
+            removed++;
+          }
+        this.#store.clearCache();
+        if (page.length < PAGE) break;
+        after = (page[page.length - 1] as { id: string }).id;
+      }
+      if (removed === 0) return;
+      // Those with an instance (or a copy swapped to them) left: one pass over the file.
+      sql.exec(
+        `UPDATE removal_noted SET used = 1 WHERE removed = 1 AND id IN (
+           SELECT of FROM (${instancesOfSql("SELECT id FROM removal_noted WHERE removed = 1")}))`,
+      );
+      const unlooked = sql
+        .exec(
+          `SELECT 1 FROM removal_noted n WHERE n.used = 1
+              AND NOT EXISTS (SELECT 1 FROM removal_looked l WHERE l.id = n.id) LIMIT 1`,
+        )
+        .toArray().length;
       // Not looked at first, or skipped as deleted and there after all: looked at, again.
-      if (removed.some((id) => !this.#looked.has(id)))
-        throw new RemovalNeedsLooks(new Set([...this.#looked, ...removed]), this.#deleted);
-      for (const root of this.#skipped)
-        if (this.#store.get(root)) throw new RemovalNeedsLooks(new Set(this.#looked), null);
-      const gone = new Set(removed);
-      const counter = new PresentedCounter(this.#sql, "nodes");
+      if (unlooked > 0) throw new RemovalNeedsLooks(this.#carried(), this.#deleted);
+      if (
+        sql
+          .exec(
+            "SELECT 1 FROM removal_look l JOIN nodes n ON n.id = l.root WHERE l.skipped = 1 LIMIT 1",
+          )
+          .toArray().length > 0
+      )
+        throw new RemovalNeedsLooks(this.#carried(), null);
+      const counter = new PresentedCounter(sql, "nodes");
       const view = this.#view();
       this.#store.meter?.(this.#budget);
       try {
-        for (const [root, before] of this.#looks) {
-          const main = [...before.mains].find((id) => gone.has(id));
-          if (main === undefined || !this.#store.get(root)) continue;
-          if (this.#lookOf(view, counter, root, before.mains) !== before.look)
-            throw new ModelError(
-              "conflict",
-              `Removing ${this.#names.get(main)} would change how ${this.#names.get(root)} looks, so nothing was changed. If someone just changed that instance or the component, try again; otherwise detach the instance first.`,
-            );
+        for (let after = ""; ; ) {
+          const page = sql
+            .exec<{ root: string; look: string; name: string | null; main: string | null }>(
+              `SELECT l.root AS root, l.look AS look, l.name AS name,
+                      (SELECT a.origin FROM removal_affected a JOIN removal_noted n ON n.id = a.origin
+                        WHERE a.root = l.root AND n.removed = 1 ORDER BY a.origin LIMIT 1) AS main
+                 FROM removal_look l
+                WHERE l.skipped = 0 AND l.root > ? ORDER BY l.root LIMIT ${PAGE}`,
+              after,
+            )
+            .toArray();
+          for (const { root, look, name, main } of page) {
+            if (main === null || !this.#store.get(root)) continue;
+            const instance = name ?? "one of its instances";
+            if (this.#lookOf(view, counter, root, this.#mainName(main), instance) !== look)
+              throw new ModelError(
+                "conflict",
+                `Removing ${this.#mainName(main)} would change how ${instance} looks, so nothing was changed. If someone just changed that instance or the component, try again; otherwise detach the instance first.`,
+              );
+          }
+          if (page.length < PAGE) break;
+          after = (page[page.length - 1] as { root: string }).root;
         }
       } finally {
         view.clear();
@@ -258,6 +451,40 @@ export class MainRemoval {
     } finally {
       this.#store.clearCache();
     }
+  }
+
+  /**
+   * The removed mains with instances left, to look at first when the
+   * transaction runs again; refused when they're too many to carry.
+   */
+  #carried(): Set<string> {
+    const sql = this.#sql;
+    const count = sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM removal_noted WHERE used = 1")
+      .one().n;
+    if (count > REMOVAL_CHECK_MAINS)
+      throw new ModelError(
+        "conflict",
+        `That removes ${count.toLocaleString("en")} components whose instances are still in the file, more than Drawpane can check at once (${REMOVAL_CHECK_MAINS.toLocaleString("en")}), so nothing was changed. Remove fewer at a time, or detach their instances first.`,
+      );
+    return new Set(
+      sql
+        .exec<{ id: string }>("SELECT id FROM removal_noted WHERE used = 1")
+        .toArray()
+        .map((row) => row.id),
+    );
+  }
+
+  #wasLooked(id: string): boolean {
+    return this.#sql.exec("SELECT 1 FROM removal_looked WHERE id = ?", id).toArray().length > 0;
+  }
+
+  /** What a main looked at was called, from before. */
+  #mainName(id: string): string {
+    const row = this.#sql
+      .exec<{ name: string | null }>("SELECT name FROM removal_looked WHERE id = ?", id)
+      .toArray()[0];
+    return named(row?.name, "the component", "a component");
   }
 
   #view(): CopyView {
@@ -287,100 +514,18 @@ export class MainRemoval {
     return true;
   }
 
-  /**
-   * The instances whose look the removal of `mains` may change, each with
-   * the removed mains it depends on: their instances (and instances with a
-   * copy swapped to one), and, through every main holding one of those (or
-   * being one), that main's instances that keep override records, and so
-   * on (see the module comment).
-   */
-  #affected(mains: readonly string[]): Map<string, Set<string>> {
-    const out = new Map<string, Set<string>>();
-    const from = new Map<string, Set<string>>(mains.map((id) => [id, new Set([id])]));
-    const seen = new Set(mains);
-    let frontier = [...mains];
-    let direct = true;
-    while (frontier.length > 0) {
-      const next: string[] = [];
-      for (const main of frontier) {
-        const origin = from.get(main) as Set<string>;
-        for (const { id, records } of this.#instancesOf(main)) {
-          // A main holding this instance, or this instance being one: its own instances follow.
-          for (const holder of this.#mainsHolding(id)) {
-            const was = from.get(holder);
-            if (was) for (const o of origin) was.add(o);
-            else from.set(holder, new Set(origin));
-            if (!seen.has(holder)) {
-              seen.add(holder);
-              next.push(holder);
-            }
-          }
-          if (!direct && !records) continue;
-          const mainsOf = out.get(id);
-          if (mainsOf) for (const o of origin) mainsOf.add(o);
-          else out.set(id, new Set(origin));
-        }
-      }
-      frontier = next;
-      direct = false;
-    }
-    return out;
-  }
-
-  /** The stored instance roots of `main`, or with a copy swapped to it, and whether each keeps records. */
-  #instancesOf(main: string): Array<{ id: string; records: boolean }> {
-    return this.#sql
-      .exec<{ id: string; records: number }>(
-        `SELECT r.id, EXISTS (SELECT 1 FROM nodes o WHERE o.parent = r.id AND o.type = 'override') AS records
-           FROM nodes r
-          WHERE r.id IN (
-            SELECT id FROM nodes WHERE type = 'frame' AND json_extract(props, '$.instanceOf') = ?1 AND id != ?1
-            UNION SELECT parent FROM nodes WHERE type = 'override' AND json_extract(props, '$.instanceOf') = ?1)`,
-        main,
-      )
-      .toArray()
-      .map((row) => ({ id: row.id, records: row.records === 1 }));
-  }
-
-  /** Whether `id` is, or is inside, one of `ids`. */
-  #under(id: string, ids: ReadonlySet<string>): boolean {
-    const seen = new Set<string>();
-    for (let at: string | undefined = id; at && at !== ROOT_ID && !seen.has(at); ) {
-      if (ids.has(at)) return true;
-      seen.add(at);
-      at = this.#store.get(at)?.parent;
-    }
-    return false;
-  }
-
-  /** The mains `id` is, or is inside. */
-  #mainsHolding(id: string): string[] {
-    const out: string[] = [];
-    const seen = new Set<string>();
-    for (let at: string | undefined = id; at && at !== ROOT_ID && !seen.has(at); ) {
-      seen.add(at);
-      const node = this.#store.get(at);
-      if (!node) break;
-      if (isMainNode(node)) out.push(at);
-      at = node.parent;
-    }
-    return out;
-  }
-
   /** What `root` shows, hashed; measured first, and refused when too large to build. */
   #lookOf(
     view: CopyView,
     counter: PresentedCounter,
     root: string,
-    mains: ReadonlySet<string>,
+    main: string,
+    instance: string,
   ): string {
     const size = this.#precount
       ? counter.sizeOf(root)
       : { layers: 0, built: 0, reached: 0, bytes: 0 };
     const limits = INSTANCE_LIMITS;
-    const main = this.#names.get([...mains][0] as string) ?? "a component";
-    const instance =
-      this.#names.get(root) ?? named(this.#store.get(root), "its instance", "one of its instances");
     const tooLarge = (what: string) =>
       new ModelError(
         "conflict",
@@ -399,13 +544,8 @@ export class MainRemoval {
       throw tooLarge(
         `${Math.ceil(cost / 1024 / 1024)} MB to build, more than ${limits.maxInstanceBytes / 1024 / 1024} MB`,
       );
-    const tooMany = () =>
-      new ModelError(
-        "conflict",
-        `Removing ${main} needs Drawpane to check that its instances keep their look, and they show more than ${REMOVAL_CHECK_LAYERS.toLocaleString("en")} layers, too many to check at once, so nothing was changed. Detach some of its instances first.`,
-      );
     this.#built += size.built + 1;
-    if (this.#built > REMOVAL_CHECK_LAYERS) throw tooMany();
+    if (this.#built > REMOVAL_CHECK_LAYERS) throw tooMany(main);
     // What was cached for the instances before (mains built, rows read) counts against this one:
     // past the budget with any of it held, it's let go of and this one is built afresh.
     for (let attempt = 0; ; attempt++) {
@@ -416,7 +556,7 @@ export class MainRemoval {
         if (!(error instanceof BuildTooLarge)) throw error;
         view.clear();
         this.#store.clearCache();
-        if (error.unit === "layers") throw tooMany();
+        if (error.unit === "layers") throw tooMany(main);
         if (attempt > 0 || before === 0)
           throw tooLarge(`more than ${Math.round(error.limit / 1024 / 1024)} MB to build`);
       } finally {
@@ -430,18 +570,12 @@ export class MainRemoval {
   }
 }
 
-/** The mains at or under `id`, in SQL. */
-function mainsUnder(sql: SqlStorage, id: string): string[] {
-  return sql
-    .exec<{ id: string }>(
-      `WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
-       SELECT n.id FROM sub CROSS JOIN nodes n ON n.id = sub.id
-        WHERE n.type = 'frame' AND json_extract(n.props, '$.isComponent') = 1`,
-      id,
-    )
-    .toArray()
-    .map((row) => row.id);
-}
+/** Refusing a removal whose instances show too many layers in all to check. */
+const tooMany = (main: string) =>
+  new ModelError(
+    "conflict",
+    `Removing ${main} needs Drawpane to check that its instances keep their look, and they show more than ${REMOVAL_CHECK_LAYERS.toLocaleString("en")} layers, too many to check at once, so nothing was changed. Detach some of its instances first.`,
+  );
 
 /**
  * What `rootId` shows, as the view builds it, hashed: each layer's depth,

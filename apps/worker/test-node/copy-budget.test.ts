@@ -155,7 +155,7 @@ function removeMain(
   try {
     room.transact(() => {
       removal = new MainRemoval(room.sql, store, { precount });
-      removal.lookFirst(MainRemoval.predicted(room.sql, store, ops), new Set([mainId]));
+      removal.lookFirst([], new Set([mainId]), ops);
       removal.note(ops);
       applyTransaction(store, ops, { rollback: false, inverse: false, cycles: false });
       store.clearCache();

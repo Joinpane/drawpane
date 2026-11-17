@@ -52,7 +52,7 @@ describe("converting a stored file an instance at a time", { timeout: 600_000 },
       if (step.done) break;
     }
     const applied = room.transact(() => applyConversion(room.sql, "nodes", LIVE_CONVERSION));
-    expect(applied.detached).toEqual([]);
+    expect(applied.detached).toBe(0);
     const expected = compactByInstance(kit.nodes);
     expect(firstDifference(expected.nodes, all(room))).toBeNull();
     expect(steps).toBeGreaterThan(10);

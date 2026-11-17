@@ -2,6 +2,7 @@ import {
   applyTransaction,
   type ClientMessage,
   type CopiesFormat,
+  copyId,
   keyBetween,
   MemoryStore,
   ModelError,
@@ -243,8 +244,62 @@ const seed: Op[] = [
   { op: "create", id: PAGE, type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page 1" } },
 ];
 
+/**
+ * The seed with a component: a main holding a layer, and two instances of
+ * it. Stored as the room stores it in this run: compact (instance roots
+ * only, copies presented from the main) or materialized (each copy a
+ * stored layer that mirrors the main's).
+ */
+function componentSeed(): Op[] {
+  const box = { x: 0, y: 0, width: 100, height: 100 };
+  const layer = { x: 0, y: 0, width: 100, height: 10 };
+  const ops: Op[] = [
+    ...seed,
+    {
+      op: "create",
+      id: "M",
+      type: "frame",
+      parent: PAGE,
+      key: "a1",
+      props: { ...box, isComponent: true },
+    },
+    { op: "create", id: "R", type: "rect", parent: "M", key: "a0", props: layer },
+  ];
+  for (const [i, key] of [
+    ["1", "a2"],
+    ["2", "a3"],
+  ] as const) {
+    ops.push({
+      op: "create",
+      id: `I${i}`,
+      type: "frame",
+      parent: PAGE,
+      key,
+      props: { ...box, instanceOf: "M" },
+    });
+    if (roomForm() === "materialized")
+      ops.push({
+        op: "create",
+        id: `C${i}`,
+        type: "rect",
+        parent: `I${i}`,
+        key: "a0",
+        props: { ...layer, mirrors: "R" },
+      });
+  }
+  return ops;
+}
+
+/** Nodes as sorted strings, their values in key order (an edit may store a value again, last). */
 function snapshot(nodes: Iterable<NodeRecord>) {
-  return [...nodes].map((n) => JSON.stringify(n)).sort();
+  return [...nodes]
+    .map((n) => {
+      const props = Object.fromEntries(
+        Object.entries(n.props).sort(([a], [b]) => (a < b ? -1 : 1)),
+      );
+      return JSON.stringify({ ...n, props });
+    })
+    .sort();
 }
 
 type Action =
@@ -262,7 +317,17 @@ function makeEdit(doc: Doc, choice: number, value: number, counter: { n: number 
   const layers = [...doc.nodes()].filter((n) => n.type !== "page");
   const containers = [...doc.nodes()].filter((n) => n.type === "page" || n.type === "frame");
   const pick = <T>(list: T[]): T | undefined => list[value % Math.max(1, list.length)];
-  switch (choice % 5) {
+  switch (choice % 7) {
+    case 5:
+    case 6: {
+      // A width on the main's layer or one of its copies (an override record when compact),
+      // from few values, so a copy's override often comes to equal its main's.
+      const targets = layers.filter((n) => n.id === "R" || n.props.mirrors !== undefined);
+      const node = pick(targets);
+      return node
+        ? [{ op: "set", id: node.id, prop: "width", value: 100 * (1 + (choice % 3)) }]
+        : null;
+    }
     case 0:
     case 1: {
       const parent = pick(containers);
@@ -348,7 +413,7 @@ describe("SyncEngine convergence", () => {
       fc.asyncProperty(
         fc.array(action, { minLength: 60, maxLength: 240, size: "max" }),
         async (actions) => {
-          const room = new FakeRoom(seed);
+          const room = new FakeRoom(componentSeed());
           // Two clients download a large file, one is sent it through the socket.
           const clients = [0, 1, 2].map((i) => new Client(room, `client${i}`, i > 0));
           for (const client of clients) {
@@ -408,20 +473,26 @@ describe("SyncEngine convergence", () => {
             }
             if (!moved) break;
           }
+          // What the room stores, and that presented as a client loading it would.
           const expected = snapshot(room.store.nodes());
+          const presented = new Doc();
+          presented.resetStored(clone([...room.store.nodes()]), room.copies);
+          const shown = snapshot(presented.nodes());
           for (const client of clients)
             expect({
               client: client.id,
               status: client.engine.status,
               revn: client.engine.revn,
               pending: client.engine.pendingCount,
+              stored: snapshot(client.doc.stored()),
               nodes: snapshot(client.doc.nodes()),
             }).toEqual({
               client: client.id,
               status: "live",
               revn: room.revn,
               pending: 0,
-              nodes: expected,
+              stored: expected,
+              nodes: shown,
             });
         },
       ),
@@ -844,5 +915,54 @@ describe("SyncEngine in a file deeper than 128 levels", () => {
     // The room confirms the delete.
     engine.receive({ t: "ack", seq: 1, revn: 3 });
     expect(desyncs).toEqual([]);
+  });
+});
+
+describe("SyncEngine with compact copies", () => {
+  it("rebases an edit already sent as the room will apply it, not stored again", () => {
+    // A copy's width is 100. This client sets it to 200; before the room confirms that, another
+    // client's change to the main's width (to 200 too) arrives. Stored again on top of it, the
+    // edit would store nothing (the copy equals its main), but the room applies what was sent:
+    // a record of 200. So a later change of the main to 300 shows 200 in the room.
+    const nodes: NodeRecord[] = [
+      { id: "P", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      { id: "M", type: "frame", parent: "P", key: "a0", props: { isComponent: true } },
+      { id: "R", type: "rect", parent: "M", key: "a0", props: { width: 100 } },
+      { id: "I", type: "frame", parent: "P", key: "a1", props: { instanceOf: "M" } },
+    ];
+    const room = new Doc();
+    room.resetStored(clone(nodes), "compact");
+    const doc = new Doc();
+    const sent: ClientMessage[] = [];
+    const engine = new SyncEngine(doc, { clientId: "A", setTimer: () => 0 });
+    engine.connected((m) => sent.push(clone(m)));
+    engine.receive({
+      t: "welcome",
+      sessionId: "A",
+      revn: 1,
+      role: "editor",
+      peers: [],
+      mode: "snapshot",
+      lastSeq: 0,
+      copies: "compact",
+    });
+    engine.receive({ t: "snapshot", nodes: clone(nodes), done: true });
+    const copy = copyId("I", ["R"]);
+    engine.commit([{ op: "set", id: copy, prop: "width", value: 200 }]);
+    engine.flush();
+    const txn = sent.find((m) => m.t === "txn");
+    if (txn?.t !== "txn") throw new Error("nothing was sent");
+    const author = { userId: "B", sessionId: "B" };
+    const remote: Op[] = [{ op: "set", id: "R", prop: "width", value: 200 }];
+    room.applyStored(remote);
+    engine.receive({ t: "txn", revn: 2, ops: remote, author });
+    room.applyStored(txn.ops as Op[]);
+    engine.receive({ t: "ack", seq: txn.seq, revn: 3 });
+    expect(snapshot(doc.stored())).toEqual(snapshot(room.stored()));
+    const later: Op[] = [{ op: "set", id: "R", prop: "width", value: 300 }];
+    room.applyStored(later);
+    engine.receive({ t: "txn", revn: 4, ops: later, author });
+    expect(room.get(copy)?.props.width).toBe(200);
+    expect(doc.get(copy)?.props.width).toBe(200);
   });
 });

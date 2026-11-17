@@ -4,7 +4,7 @@ import {
   type CopiesFormat,
   type CopySlot,
   collectSubtree,
-  compact,
+  compactByInstance,
   MemoryStore,
   type NodeRecord,
   type Op,
@@ -244,7 +244,8 @@ export class Doc {
   /** Replaces the whole document, e.g. from a snapshot (in the materialized form). */
   reset(nodes: Iterable<NodeRecord>): void {
     if (this.#compactCopies) {
-      const converted = compact([...nodes]);
+      // The room's converter (decision 0029), so a document converted here is what the room stores.
+      const converted = compactByInstance(nodes);
       this.#compact = new CompactCopies(converted.nodes);
       this.#resetIds = converted.ids;
     } else {

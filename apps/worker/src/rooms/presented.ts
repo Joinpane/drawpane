@@ -15,15 +15,17 @@
  */
 import {
   BuildBudget,
+  BuildTooLarge,
   CopyView,
   type DocReader,
   isMainNode,
   type NodeRecord,
+  ROOT_ID,
   type StoredReader,
 } from "@drawpane/model";
 import type { DocView } from "../mcp/document";
-import { BUILD_HELD_BYTES } from "./convert";
-import { NODE_COLUMNS, type NodeRow, type TableReader, toRecord } from "./node-tables";
+import { BUILD_HELD_BYTES, checkIds, idsRoom } from "./convert";
+import { TableReader } from "./node-tables";
 
 export class PresentedReader implements DocReader {
   readonly #reader: TableReader;
@@ -37,15 +39,19 @@ export class PresentedReader implements DocReader {
     this.#sql = sql;
     this.#table = table;
     this.#limit = limit;
+    const budget = new BuildBudget({ bytes: BUILD_HELD_BYTES });
     const stored: StoredReader = {
       get: (id) => reader.get(id),
-      childIds: (parent) => reader.childIds(parent),
+      // What copies are built from: counted first, and refused (`BuildTooLarge`) before the ids
+      // are read when the budget has no room for them (a main's layer of a million children).
+      childIds: (parent) => {
+        const room = idsRoom(budget);
+        checkIds(budget, room, reader.childCount(parent));
+        return reader.childIds(parent);
+      },
       nodes: () => [],
     };
-    this.#view = new CopyView(stored, {
-      lazy: true,
-      budget: new BuildBudget({ bytes: BUILD_HELD_BYTES }),
-    });
+    this.#view = new CopyView(stored, { lazy: true, budget });
   }
 
   /** Between instances: past the cache's size or half the budget, let go of what's built. */
@@ -81,17 +87,19 @@ export class PresentedReader implements DocReader {
   #search(id: string): NodeRecord | undefined {
     let after = "";
     for (;;) {
-      const roots = this.#sql
-        .exec<NodeRow>(
-          `SELECT ${NODE_COLUMNS} FROM ${this.#table}
+      // Ids only, a page at a time; each root is read through the reader's bounded cache.
+      const ids = this.#sql
+        .exec<{ id: string }>(
+          `SELECT id FROM ${this.#table}
             WHERE id > ? AND type = 'frame' AND json_extract(props, '$.instanceOf') IS NOT NULL
             ORDER BY id LIMIT 200`,
           after,
         )
         .toArray()
-        .map(toRecord);
-      for (const root of roots) {
-        if (!this.#view.mainOf(root)) continue;
+        .map((row) => row.id);
+      for (const rootId of ids) {
+        const root = this.#reader.get(rootId);
+        if (!root || !this.#view.mainOf(root)) continue;
         this.#between();
         const stack = [...this.#view.childIds(root.id)];
         for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
@@ -99,8 +107,8 @@ export class PresentedReader implements DocReader {
           stack.push(...this.#view.childIds(at));
         }
       }
-      if (roots.length < 200) return undefined;
-      after = (roots[roots.length - 1] as NodeRecord).id;
+      if (ids.length < 200) return undefined;
+      after = ids[ids.length - 1] as string;
     }
   }
 
@@ -157,7 +165,40 @@ export class PresentedReader implements DocReader {
   }
 
   *onPages(): Generator<NodeRecord> {
-    const stack: Iterator<string>[] = [this.pageIds()[Symbol.iterator]()];
+    yield* this.#walk(this.pageIds()[Symbol.iterator]());
+  }
+
+  /**
+   * Every node of the file as presented, parents first: the pages and what's
+   * on them, and the document's own nodes (text styles, variable
+   * collections and their variables, libraries). Stored children are read a
+   * page of rows at a time, and copies an instance at a time, so what's held
+   * is bounded by the file's depth, not its size.
+   */
+  *all(): Generator<NodeRecord> {
+    yield* this.#walk(this.#reader.children(ROOT_ID)[Symbol.iterator]());
+  }
+
+  /**
+   * The ids under `id` as presented, parents first, without reading their
+   * values: what's held is an iterator per level (stored children a page of
+   * rows at a time, copies an instance at a time), never a level whole.
+   */
+  *idsUnder(id: string): Generator<string> {
+    const stack: Iterator<string>[] = [this.children(id)[Symbol.iterator]()];
+    while (stack.length > 0) {
+      const next = (stack[stack.length - 1] as Iterator<string>).next();
+      if (next.done) {
+        stack.pop();
+        continue;
+      }
+      yield next.value;
+      stack.push(this.children(next.value)[Symbol.iterator]());
+    }
+  }
+
+  *#walk(top: Iterator<string>): Generator<NodeRecord> {
+    const stack: Iterator<string>[] = [top];
     while (stack.length > 0) {
       const next = (stack[stack.length - 1] as Iterator<string>).next();
       if (next.done) {
@@ -188,4 +229,104 @@ export class PresentedReader implements DocReader {
   componentMains(): NodeRecord[] {
     return this.#reader.componentMains().filter((n) => isMainNode(n));
   }
+}
+
+/**
+ * The most a tab from before compact copies (protocol 1) is sent of a file
+ * stored compact, as presented (JSON characters, as the normal path's
+ * INLINE_SNAPSHOT_CHARS), and in each chunk of it.
+ */
+export const VIEW_MAX_CHARS = 8 << 20;
+export const VIEW_CHUNK_CHARS = 1 << 20;
+/** Nodes in a chunk at most (the protocol's SNAPSHOT_CHUNK_SIZE). */
+const VIEW_CHUNK_NODES = 2_000;
+
+/**
+ * What a tab from before compact copies is shown of a file too large to
+ * send it as presented: one page saying to reload, never stored (it's a
+ * viewer, and its edits are refused telling it the same).
+ */
+export function reloadPlaceholder(): NodeRecord[] {
+  return [
+    {
+      id: "drawpane-reload-page",
+      type: "page",
+      parent: ROOT_ID,
+      key: "a0",
+      props: { name: "Reload" },
+    },
+    {
+      id: "drawpane-reload-text",
+      type: "text",
+      parent: "drawpane-reload-page",
+      key: "a0",
+      props: {
+        name: "Reload",
+        x: 0,
+        y: 0,
+        fontSize: 24,
+        characters: "Drawpane was updated. Reload the page to see this file.",
+      },
+    },
+  ] as NodeRecord[];
+}
+
+/**
+ * Whether the file in `table`, as presented, is at most `maxChars` of JSON:
+ * what's stored is measured first, in SQL; then the presented file is
+ * walked a node at a time, stopping as soon as it's past. An instance too
+ * large to build doesn't fit either.
+ */
+export function presentedFits(sql: SqlStorage, table: string, maxChars: number): boolean {
+  const stored = sql
+    .exec<{ chars: number }>(`SELECT COALESCE(SUM(LENGTH(props)), 0) AS chars FROM ${table}`)
+    .one().chars;
+  if (stored > maxChars) return false;
+  const presented = new PresentedReader(new TableReader(sql, table), sql, table);
+  let chars = 0;
+  try {
+    for (const node of presented.all()) {
+      chars += JSON.stringify(node).length;
+      if (chars > maxChars) return false;
+    }
+  } catch (error) {
+    if (error instanceof BuildTooLarge) return false;
+    throw error;
+  }
+  return true;
+}
+
+/**
+ * Sends a file stored compact to a tab from before compact copies, as it
+ * reads files: as presented (every copy built, an instance at a time, and
+ * the document's own nodes, styles and variables among them), in chunks of
+ * at most VIEW_CHUNK_NODES nodes and VIEW_CHUNK_CHARS. A socket has no
+ * backpressure, so what's sent is held until it leaves: a file past
+ * `maxChars` as presented is sent as `reloadPlaceholder` instead, as a
+ * client that can't download is never sent a large file.
+ */
+export function sendPresented(
+  sql: SqlStorage,
+  send: (nodes: NodeRecord[], done: boolean) => void,
+  { table = "nodes", maxChars = VIEW_MAX_CHARS, chunkChars = VIEW_CHUNK_CHARS } = {},
+): "presented" | "placeholder" {
+  if (!presentedFits(sql, table, maxChars)) {
+    send(reloadPlaceholder(), true);
+    return "placeholder";
+  }
+  const presented = new PresentedReader(new TableReader(sql, table), sql, table);
+  let chunk: NodeRecord[] = [];
+  let chars = 0;
+  for (const node of presented.all()) {
+    const size = JSON.stringify(node).length;
+    if (chunk.length > 0 && (chunk.length >= VIEW_CHUNK_NODES || chars + size > chunkChars)) {
+      send(chunk, false);
+      chunk = [];
+      chars = 0;
+    }
+    chunk.push(node);
+    chars += size;
+  }
+  send(chunk, true);
+  return "presented";
 }

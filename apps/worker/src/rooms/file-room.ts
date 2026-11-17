@@ -55,6 +55,7 @@ import {
   applyConversion,
   CONVERT_STEP_WORK,
   COPIES_LOG_SCHEMA,
+  clearStrayCandidates,
   compactTable,
   convertStep,
   createConvertTables,
@@ -64,8 +65,11 @@ import {
   LIVE_CONVERSION,
   markDirty,
   NotAllConverted,
+  noteStrayCandidates,
   presentedCount,
   readyToApply,
+  STRAY_CHECK_SCHEMA,
+  strayCandidate,
   strayInstance,
 } from "./convert";
 import {
@@ -80,7 +84,7 @@ import {
   stageNodes,
 } from "./import-stage";
 import { CYCLE_CHECK_SCHEMA, CycleCheck } from "./instance-cycles";
-import { MainRemoval, RemovalNeedsLooks } from "./main-removal";
+import { MainRemoval, REMOVAL_SCHEMA, RemovalNeedsLooks } from "./main-removal";
 import {
   copyNodes,
   countRows,
@@ -105,7 +109,7 @@ import {
   pinsRenamed,
   savePinMap,
 } from "./pin-map";
-import { PresentedReader } from "./presented";
+import { PresentedReader, sendPresented } from "./presented";
 import { loadSnapshot, restoreFromTable, SnapshotError } from "./restore";
 import {
   AUTOSAVE_RETENTION_MS,
@@ -200,6 +204,12 @@ export const STALE_MS = 150_000;
 const PRUNE_EVERY_MS = 15_000;
 
 /** How long one step of converting a file to compact copies runs before the room serves others. */
+/** Comment threads a pin sweep reads from D1 at a time (and the most it maps and writes at once). */
+const PIN_SWEEP_PAGE = 500;
+
+/** How many detached instances `copiesFormat` lists (a row each); it counts them all. */
+const COPIES_LOG_LISTED = 1000;
+
 /** How often, at most, a client from before compact copies is sent the file again as it changes. */
 const VIEW_REFRESH_MS = 30_000;
 
@@ -273,14 +283,14 @@ interface Attachment {
 interface CompactCheck {
   /** Mains it removes, and what their instances show before and after (main-removal.ts). */
   readonly removal: MainRemoval;
-  /** Nodes that may now be an instance of a live main storing layers. */
-  readonly candidates: Set<string>;
 }
 
 /** What a storage transaction that removes a main looks at first, when it's run again. */
 interface LookFirst {
   readonly mains: ReadonlySet<string>;
   readonly deleted: ReadonlySet<string>;
+  /** An edit's operations: the mains they certainly remove are looked at first too, found in SQL. */
+  readonly ops?: readonly Op[];
 }
 
 /**
@@ -303,6 +313,7 @@ function withLooks<R>(first: LookFirst, attempt: (look: LookFirst) => R): R {
       look = {
         mains: new Set([...look.mains, ...error.mains]),
         deleted: tries === 0 && error.deleted ? error.deleted : new Set(),
+        ...(look.ops ? { ops: look.ops } : {}),
       };
     }
   }
@@ -494,7 +505,13 @@ export class FileRoom extends DurableObject<Env> {
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
     ctx.blockConcurrencyWhile(async () => {
       this.#sql.exec(
-        NODE_SCHEMA + LOG_SCHEMA + CALL_SCHEMA + COPIES_LOG_SCHEMA + CYCLE_CHECK_SCHEMA,
+        NODE_SCHEMA +
+          LOG_SCHEMA +
+          CALL_SCHEMA +
+          COPIES_LOG_SCHEMA +
+          CYCLE_CHECK_SCHEMA +
+          STRAY_CHECK_SCHEMA +
+          REMOVAL_SCHEMA,
       );
       // Nothing can be reading a transient table yet: any left are from before a restart.
       for (const table of tempTables(this.#sql)) dropTable(this.#sql, table);
@@ -763,13 +780,18 @@ export class FileRoom extends DurableObject<Env> {
     );
   }
 
-  /** How this file stores copies: for the Worker, tests and the health page. */
+  /**
+   * How this file stores copies: for the Worker, tests and the health page.
+   * `detached` lists the first `COPIES_LOG_LISTED` instances left detached;
+   * `detachedCount` says how many there are.
+   */
   async copiesFormat(): Promise<{
     copies: CopiesFormat;
     converting: boolean;
     failed: string | null;
     backup: string | null;
     detached: Array<{ root: string; why: string }>;
+    detachedCount: number;
   }> {
     return {
       copies: this.#copies,
@@ -777,8 +799,12 @@ export class FileRoom extends DurableObject<Env> {
       failed: this.#meta("conv_failed"),
       backup: this.#meta("conv_backup"),
       detached: this.#sql
-        .exec<{ root: string; why: string }>("SELECT root, why FROM copies_log ORDER BY at, root")
+        .exec<{ root: string; why: string }>(
+          "SELECT root, why FROM copies_log ORDER BY at, root LIMIT ?",
+          COPIES_LOG_LISTED,
+        )
         .toArray(),
+      detachedCount: this.#sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM copies_log").one().n,
     };
   }
 
@@ -864,7 +890,7 @@ export class FileRoom extends DurableObject<Env> {
     console.log(
       `compact copies: file ${fileId} converted at revision ${result.next}` +
         (applied
-          ? `: ${applied.removed} copy layers no longer stored, ${applied.records} override records, ${applied.detached.length} instances left detached`
+          ? `: ${applied.removed} copy layers no longer stored, ${applied.records} override records, ${applied.detached} instances left detached`
           : " (no instances)"),
     );
     return true;
@@ -880,11 +906,11 @@ export class FileRoom extends DurableObject<Env> {
       // Listed once more: an instance made since the last step converts first.
       if (tables && !readyToApply(this.#sql, "nodes", LIVE_CONVERSION)) return null;
       const applied = tables ? applyConversion(this.#sql, "nodes", LIVE_CONVERSION) : null;
-      for (const { root, why } of applied?.detached ?? [])
+      // Copied in SQL, however many were detached.
+      if (applied && applied.detached > 0)
         this.#sql.exec(
-          "INSERT OR REPLACE INTO copies_log (root, why, at) VALUES (?, ?, ?)",
-          root,
-          why,
+          `INSERT OR REPLACE INTO copies_log (root, why, at)
+           SELECT root, COALESCE(why, ''), ? FROM ${LIVE_CONVERSION.done} WHERE status = 'detached'`,
           now,
         );
       const next = this.#revn + 1;
@@ -997,31 +1023,36 @@ export class FileRoom extends DurableObject<Env> {
    */
   async #sweepPins(fileId: string, sweep: PinSweep): Promise<boolean> {
     const current = () => this.#copies === sweep.to && this.#pinsGen() === sweep.gen;
-    if (!current()) return false;
-    const { results } = await this.env.DB.prepare(
-      "SELECT id, node_id FROM comment_threads WHERE file_id = ? AND node_id IS NOT NULL",
-    )
-      .bind(fileId)
-      .all<{ id: string; node_id: string }>();
-    await this.pause?.("sweep");
-    if (!current()) return false;
-    const renamed = pinsRenamed(
-      this.#sql,
-      results.map((r) => r.node_id),
-      sweep.to === "compact",
-    );
-    const updates = results
-      .filter((r) => renamed.has(r.node_id))
-      .map((r) =>
-        this.env.DB.prepare(
-          "UPDATE comment_threads SET node_id = ? WHERE id = ? AND node_id = ?",
-        ).bind(renamed.get(r.node_id), r.id, r.node_id),
-      );
-    for (let i = 0; i < updates.length; i += 50) {
+    // A page of pinned threads at a time, however many the file has.
+    for (let after = "", first = true; ; first = false) {
       if (!current()) return false;
-      await this.env.DB.batch(updates.slice(i, i + 50));
+      const { results } = await this.env.DB.prepare(
+        `SELECT id, node_id FROM comment_threads
+          WHERE file_id = ? AND node_id IS NOT NULL AND id > ? ORDER BY id LIMIT ?`,
+      )
+        .bind(fileId, after, PIN_SWEEP_PAGE)
+        .all<{ id: string; node_id: string }>();
+      if (first) await this.pause?.("sweep");
+      if (!current()) return false;
+      const renamed = pinsRenamed(
+        this.#sql,
+        results.map((r) => r.node_id),
+        sweep.to === "compact",
+      );
+      const updates = results
+        .filter((r) => renamed.has(r.node_id))
+        .map((r) =>
+          this.env.DB.prepare(
+            "UPDATE comment_threads SET node_id = ? WHERE id = ? AND node_id = ?",
+          ).bind(renamed.get(r.node_id), r.id, r.node_id),
+        );
+      for (let i = 0; i < updates.length; i += 50) {
+        if (!current()) return false;
+        await this.env.DB.batch(updates.slice(i, i + 50));
+      }
+      if (results.length < PIN_SWEEP_PAGE) return true;
+      after = (results[results.length - 1] as { id: string }).id;
     }
-    return true;
   }
 
   /** When pins need the alarm next (a sweep, a save, a load, the map's end); null when they don't. */
@@ -1082,12 +1113,8 @@ export class FileRoom extends DurableObject<Env> {
     const reader = new PresentedReader(new TableReader(this.#sql, "nodes"), this.#sql, "nodes");
     if (stored) return reader.get(id) !== undefined;
     if (page?.type !== "page") return false;
-    const stack = [page.id];
-    for (let at = stack.pop(); at !== undefined; at = stack.pop())
-      for (const child of reader.children(at)) {
-        if (child === id) return true;
-        stack.push(child);
-      }
+    // Depth first, an iterator a level: a page of a million layers isn't held whole.
+    for (const child of reader.idsUnder(page.id)) if (child === id) return true;
     return false;
   }
 
@@ -2716,16 +2743,9 @@ export class FileRoom extends DurableObject<Env> {
       lastSeq,
       copies: "materialized",
     });
-    // Nothing awaits from here to the last chunk: one revision.
-    const presented = new PresentedReader(new TableReader(this.#sql, "nodes"), this.#sql, "nodes");
-    let chunk: NodeRecord[] = [];
-    for (const node of presented.onPages()) {
-      chunk.push(node);
-      if (chunk.length < SNAPSHOT_CHUNK_SIZE) continue;
-      this.#send(ws, { t: "snapshot", nodes: chunk, done: false });
-      chunk = [];
-    }
-    this.#send(ws, { t: "snapshot", nodes: chunk, done: true });
+    // Nothing awaits from here to the last chunk: one revision. As presented when it's small
+    // enough to send through a socket, else a page saying to reload (presented.ts).
+    sendPresented(this.#sql, (nodes, done) => this.#send(ws, { t: "snapshot", nodes, done }));
     if (!me.guest) this.#broadcast({ t: "peer", peer: this.#peer(me) }, ws);
   }
 
@@ -2958,12 +2978,10 @@ export class FileRoom extends DurableObject<Env> {
   ): number {
     try {
       // A main it removes: what its instances show is looked at first (main-removal.ts).
+      // The mains the edit certainly removes are found inside the storage transaction, in SQL.
       const first: LookFirst =
         this.#copies === "compact"
-          ? {
-              mains: MainRemoval.predicted(this.#sql, this.#store, ops),
-              deleted: new Set(ops.flatMap((op) => (op.op === "delete" ? [op.id] : []))),
-            }
+          ? { mains: new Set(), deleted: new Set(), ops }
           : { mains: new Set(), deleted: new Set() };
       const revn = withLooks(first, (look) =>
         this.ctx.storage.transactionSync(() => {
@@ -3003,8 +3021,9 @@ export class FileRoom extends DurableObject<Env> {
   #compactCheck(look: LookFirst): CompactCheck | null {
     if (this.#copies !== "compact") return null;
     const removal = new MainRemoval(this.#sql, this.#store);
-    removal.lookFirst(look.mains, look.deleted);
-    return { removal, candidates: new Set() };
+    removal.lookFirst(look.mains, look.deleted, look.ops);
+    clearStrayCandidates(this.#sql);
+    return { removal };
   }
 
   /** Before operations apply: the mains they may remove. */
@@ -3013,19 +3032,8 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /** After operations apply: the nodes that may now be an instance storing layers. */
-  #noteCandidates(ops: readonly Op[], check: CompactCheck): void {
-    for (const op of ops) {
-      if (op.op === "create" || op.op === "move") check.candidates.add(op.parent);
-      if (op.op === "set" && op.prop === "instanceOf") check.candidates.add(op.id);
-      if (op.op === "set" && op.prop === "isComponent" && op.value)
-        for (const row of this.#sql
-          .exec<{ id: string }>(
-            "SELECT id FROM nodes WHERE type = 'frame' AND json_extract(props, '$.instanceOf') = ?",
-            op.id,
-          )
-          .toArray())
-          check.candidates.add(row.id);
-    }
+  #noteCandidates(ops: readonly Op[]): void {
+    noteStrayCandidates(this.#sql, ops);
   }
 
   /**
@@ -3037,27 +3045,13 @@ export class FileRoom extends DurableObject<Env> {
    * before removing a main; a client behind the file stores what it saw,
    * and is refused, to make the change again).
    */
-  #checkCompact({ removal, candidates }: CompactCheck): void {
+  #checkCompact({ removal }: CompactCheck): void {
     this.#store.clearCache();
-    const isMain = (id: string) => {
-      const main = this.#store.get(id);
-      return main?.type === "frame" && !!main.props.isComponent;
-    };
-    const isLive = (node: NodeRecord | undefined) => {
-      const of = node?.type === "frame" ? node.props.instanceOf : undefined;
-      return !!of && of !== node?.id && isMain(of);
-    };
-    for (const id of candidates)
-      if (
-        isLive(this.#store.get(id)) &&
-        this.#sql
-          .exec("SELECT 1 FROM nodes WHERE parent = ? AND type != 'override' LIMIT 1", id)
-          .toArray().length > 0
-      )
-        throw new ModelError(
-          "invalid_parent",
-          "Layers inside an instance come from its main component: detach it to change them.",
-        );
+    if (strayCandidate(this.#sql))
+      throw new ModelError(
+        "invalid_parent",
+        "Layers inside an instance come from its main component: detach it to change them.",
+      );
     removal.check();
   }
 
@@ -3094,7 +3088,7 @@ export class FileRoom extends DurableObject<Env> {
       cycles,
     });
     this.#store.clearCache();
-    if (check) this.#noteCandidates(ops, check);
+    if (check) this.#noteCandidates(ops);
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
     const now = Date.now();
     this.#sql.exec(

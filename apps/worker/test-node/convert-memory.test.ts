@@ -288,7 +288,7 @@ describe(`converting a file of about ${NODES.toLocaleString("en")} layers`, {
     // Every overridden label and background is a record; nothing else differs.
     const expectedRecords = Math.ceil(INSTANCES / 10) + Math.ceil(INSTANCES / 15);
     expect(detached).toBe(0);
-    expect(applied.detached).toEqual([]);
+    expect(applied.detached).toBe(0);
     expect(records).toBe(expectedRecords);
     expect(stored).toBe(total - INSTANCES * 6 - BUTTONS * 3 + records);
     const line =
