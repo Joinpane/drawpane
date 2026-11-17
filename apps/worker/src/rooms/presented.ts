@@ -17,7 +17,6 @@ import {
   BuildBudget,
   CopyView,
   type DocReader,
-  isMainNode,
   type NodeRecord,
   ROOT_ID,
   type StoredReader,
@@ -224,8 +223,8 @@ export class PresentedReader implements DocReader {
     };
   }
 
-  /** Main components on the pages, in file order (stored: copies aren't mains). */
-  componentMains(): NodeRecord[] {
-    return this.#reader.componentMains().filter((n) => isMainNode(n));
+  /** What the file offers as components, in file order (stored: copies aren't mains). */
+  componentAssets(max: number): string[] {
+    return this.#reader.componentAssets(max);
   }
 }

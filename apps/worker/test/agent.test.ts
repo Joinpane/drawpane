@@ -5,7 +5,7 @@
  * that step over the session's own calls and never over a person's.
  * Text is measured by the stand-in measurer (vitest.config.ts).
  */
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { keyBetween, type NodeRecord, type Op } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { provideHarfBuzzMeasurer } from "../src/agent/harfbuzz";
@@ -239,6 +239,28 @@ describe("a live session", () => {
     );
     const jsx = ok<{ jsx: string }>(await call(token, "get_jsx", { fileId, id: "note" }));
     expect(jsx.jsx).toContain("w={80}");
+  });
+
+  it("refuses a file of long texts by what the editor would hold, before reading it", async () => {
+    // 90 texts of 200,000 CJK characters: 91 layers, far under the 50,000-layer limit, but
+    // 54 MB of values (the seventh review of #163 aborted a room reading 240 MB of them).
+    const { browser, fileId, token } = await setup();
+    const person = await join(browser, fileId);
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      const props = JSON.stringify({ characters: "界".repeat(200_000) });
+      for (let i = 0; i < 90; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a1', 'text', ?)",
+          `T${i}`,
+          person.page.id,
+          props,
+        );
+    });
+    const refused = await call(token, "get_jsx", { fileId, id: "T0" });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.structuredContent.error)).toMatch(
+      /^This file is too large for agent tools \(editing it would take over \d+ MB of memory, and they work on files of up to 48 MB; long texts take the most\)\. The read tools/,
+    );
   });
 
   it("commits nothing when a tool fails, and says why", async () => {

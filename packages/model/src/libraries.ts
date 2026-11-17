@@ -53,10 +53,13 @@ export interface DocReader {
   childIds(parent: string): readonly string[];
   pageIds(): readonly string[];
   /**
-   * Every main component on the pages, in file order, when the reader can
-   * find them without walking every layer (the Worker's reader over SQLite).
+   * The ids of what the file offers as components (a main, or the set a
+   * main is a variant of), each once, in file order, when the reader can
+   * find them without walking every layer (the Worker's reader over
+   * SQLite). Past `max` of them, any `max + 1` of them, in no order, so
+   * nothing past the limit is read.
    */
-  componentMains?(): NodeRecord[];
+  componentAssets?(max: number): readonly string[];
   /**
    * A node's child ids in order, read a page at a time as they're asked
    * for, when the reader can (SQLite): what a walk over a large file reads
@@ -128,12 +131,23 @@ function setOf(doc: DocReader, id: string): NodeRecord | undefined {
   const parent = node ? doc.get(node.parent) : undefined;
   return isMain(node) && isSet(parent) ? parent : undefined;
 }
-/** Every main component on the file's pages, in order. */
-function mains(doc: DocReader): NodeRecord[] {
-  if (doc.componentMains) return doc.componentMains();
-  const out: NodeRecord[] = [];
+/**
+ * What the file offers, each once, in file order: a main, or the set it's a
+ * variant of. Past `max`, `max + 1` of them (see `DocReader.componentAssets`).
+ */
+function assetIds(doc: DocReader, max: number): readonly string[] {
+  if (doc.componentAssets) return doc.componentAssets(max);
+  const out: string[] = [];
+  const seen = new Set<string>();
   for (const page of doc.pageIds())
-    for (const node of walkSubtree(doc, page)) if (node.id !== page && isMain(node)) out.push(node);
+    for (const node of walkSubtree(doc, page)) {
+      if (node.id === page || !isMain(node)) continue;
+      const id = setOf(doc, node.id)?.id ?? node.id;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+      if (out.length > max) return out;
+    }
   return out;
 }
 
@@ -320,19 +334,29 @@ export function assetHash(doc: DocReader, assetId: string): string {
 
 /** What a library file offers: its components, a set of variants as one, in file order. */
 export function libraryAssets(doc: DocReader): LibraryAsset[] {
+  return libraryAssetsWithin(doc, Number.POSITIVE_INFINITY) ?? [];
+}
+
+/**
+ * What a library offers, or null when that's more than `max` components:
+ * counted before any is hashed or its values read, so a file of 40,000
+ * components is refused without holding them.
+ */
+export function libraryAssetsWithin(doc: DocReader, max: number): LibraryAsset[] | null {
+  const ids = assetIds(doc, max);
+  if (ids.length > max) return null;
   const out: LibraryAsset[] = [];
-  const seen = new Set<string>();
-  for (const component of mains(doc)) {
-    const set = setOf(doc, component.id);
-    const asset = set ?? component;
-    if (seen.has(asset.id)) continue;
-    seen.add(asset.id);
+  for (const id of ids) {
+    const asset = doc.get(id);
+    if (!asset) continue;
+    // A main is offered as itself (it comes before its variants, were it a set too).
+    const set = !isMain(asset);
     out.push({
-      id: asset.id,
+      id,
       name: getProp(asset.props, "name") || (set ? "Set" : "Component"),
       description: getProp(asset.props, "componentDescription"),
-      set: set !== undefined,
-      hash: assetHash(doc, asset.id),
+      set,
+      hash: assetHash(doc, id),
     });
   }
   return out;

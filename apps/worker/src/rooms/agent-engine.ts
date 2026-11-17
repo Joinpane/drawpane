@@ -6,7 +6,10 @@
  * person's.
  *
  * One editor stays warm per room: it follows every transaction the room
- * commits, and is rebuilt from the room's nodes when it falls out of step.
+ * commits, and is rebuilt from the room's nodes when it falls out of step,
+ * or let go when what it follows takes it past what a room can hold
+ * (`agent-admission.ts`), so a file grown large while it was warm is
+ * measured again before it's built.
  * A run collects the operations the editor's sync engine queued (it never
  * connects, so everything it commits waits there) and hands them to the
  * room, which commits them as one transaction.
@@ -24,6 +27,7 @@ import {
 } from "@drawpane/editor";
 import type { CopiesFormat, NodeRecord, Op } from "@drawpane/model";
 import type { HeadlessMeasurer } from "../agent/measurer";
+import { AGENT_MAX_HELD, agentGrowth } from "./agent-admission";
 
 /** Nothing animates in a Worker. */
 const NO_FRAMES: FrameClock = { request: () => 0, cancel: () => {} };
@@ -43,6 +47,8 @@ export class AgentEngine {
   #editor: Editor | null = null;
   /** The room revision the warm editor shows. */
   #revn = -1;
+  /** What the warm editor is estimated to hold (`agentAdmission`), and what it followed since. */
+  #held = 0;
 
   constructor(measurer: HeadlessMeasurer) {
     this.#measurer = measurer;
@@ -57,16 +63,23 @@ export class AgentEngine {
     return this.#editor !== null;
   }
 
+  /** What the editor warm at `revn` is estimated to hold; null when there's none. */
+  heldAt(revn: number): number | null {
+    return this.#editor && this.#revn === revn ? this.#held : null;
+  }
+
   /**
    * The editor at the room's revision `revn`, kept warm or built from `read()`
    * (stored as `copies`: decision 0029) when cold, out of step, or holding a
    * different number of stored nodes than the room (a sign it drifted).
+   * `held` is what the room estimated it holds when it admitted the file.
    */
   editorAt(
     revn: number,
     count: number,
     read: () => NodeRecord[],
     copies: CopiesFormat = "materialized",
+    held = 0,
   ): Editor {
     const warm = this.#editor;
     if (warm && this.#revn === revn && warm.doc.storedSize === count && warm.doc.copies === copies)
@@ -81,6 +94,7 @@ export class AgentEngine {
     editor.state.set({ role: "editor", status: "live" });
     this.#editor = editor;
     this.#revn = revn;
+    this.#held = held;
     return editor;
   }
 
@@ -98,17 +112,28 @@ export class AgentEngine {
       this.#revn = revn;
     } catch {
       this.drop();
+      return;
     }
+    this.#grow(ops);
   }
 
-  /** The engine's own run was committed at `revn`: its editor already shows it. */
-  committed(revn: number): void {
-    if (this.#editor) this.#revn = revn;
+  /** The engine's own run was committed at `revn` as `ops`: its editor already shows it. */
+  committed(revn: number, ops: readonly Op[]): void {
+    if (!this.#editor) return;
+    this.#revn = revn;
+    this.#grow(ops);
+  }
+
+  /** Counts what following `ops` may have added; past the bound, lets the editor go. */
+  #grow(ops: readonly Op[]): void {
+    this.#held += agentGrowth(ops);
+    if (this.#held > AGENT_MAX_HELD) this.drop();
   }
 
   drop(): void {
     this.#editor = null;
     this.#revn = -1;
+    this.#held = 0;
   }
 
   /** Faces the document's text is set in that the measurer hasn't loaded. */

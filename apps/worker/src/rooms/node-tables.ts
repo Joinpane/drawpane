@@ -181,6 +181,66 @@ export function rowLineBytes(row: NodeRow): number {
   );
 }
 
+/**
+ * Pages of an ordered query whose rows may be large, each at most `size`
+ * rows and about `chars` characters (at least one row), as `tablePages`
+ * bounds a page of one table: `sizes(after, size)` gives the keys and sizes
+ * (in characters, measured in SQL) of the next rows after `after`, and
+ * `rows(after, last)` reads those after `after` up to and including `last`.
+ * So a page of rows joined with other tables' values (a restore's, a
+ * merge's) stays small when its layers are large.
+ */
+export function* boundedPages<K, R>(
+  start: K,
+  sizes: (after: K, size: number) => ReadonlyArray<{ readonly key: K; readonly n: number }>,
+  rows: (after: K, last: K) => R[],
+  size = PAGE_ROWS,
+  chars = PAGE_CHARS,
+): Generator<R[]> {
+  let after = start;
+  for (;;) {
+    const next = sizes(after, size);
+    if (next.length === 0) return;
+    let take = 0;
+    let held = 0;
+    while (take < next.length && (take === 0 || held + (next[take] as { n: number }).n <= chars))
+      held += (next[take++] as { n: number }).n;
+    const last = (next[take - 1] as { key: K }).key;
+    yield rows(after, last);
+    after = last;
+    if (take === next.length && next.length < size) return;
+  }
+}
+
+/** Rows a `sumPast` page sums at a time. */
+const SUM_PAGE_ROWS = 2_000;
+
+/**
+ * `SUM(expr)` over a table's rows (`expr` of its columns, never negative),
+ * read in pages in id order that stop once past `limit`: the exact sum
+ * when it's at most `limit`, otherwise some sum past it. So asking whether
+ * a large file fits a bound reads about as many rows as fit in it, not the
+ * whole table.
+ */
+export function sumPast(sql: SqlStorage, table: string, expr: string, limit: number): number {
+  const t = checkName(table);
+  let total = 0;
+  let after = "";
+  for (;;) {
+    const page = sql
+      .exec<{ rows: number; total: number; last: string | null }>(
+        `SELECT COUNT(*) AS rows, COALESCE(SUM(v), 0) AS total, MAX(id) AS last
+           FROM (SELECT id, ${expr} AS v FROM ${t} WHERE id > ? ORDER BY id LIMIT ?)`,
+        after,
+        SUM_PAGE_ROWS,
+      )
+      .one();
+    total += page.total;
+    if (total > limit || page.rows < SUM_PAGE_ROWS || page.last === null) return total;
+    after = page.last;
+  }
+}
+
 /** Every row of a table, PAGE_ROWS at a time in id order. Each page is read when asked for. */
 export function* tablePages(
   sql: SqlStorage,
@@ -271,8 +331,9 @@ export function allowedChildrenSql(): string {
 /**
  * A `DocReader` over a node table, for code that walks a document (a
  * library's manifest, the MCP tools): it reads rows as they're asked for and
- * keeps at most `limit` of them (and `budget` characters of their
- * properties' JSON), so a walk over a large file stays small.
+ * keeps at most `limit` of them (and `budget` bytes of their properties'
+ * JSON as V8 holds it: a byte a character, two past Latin-1), so a walk over
+ * a large file stays small.
  *
  * Children are read a page at a time (`children`, `childNodes`), and what a
  * page keeps while the walk is elsewhere is its ids, not its rows: a
@@ -397,7 +458,7 @@ export class TableReader implements DocReader {
     const cached = this.#nodes.get(row.id);
     if (cached?.node) return cached.node;
     const node = toRecord(row);
-    this.#remember(row.id, node, row.props.length);
+    this.#remember(row.id, node, heldChars(row.props));
     return node;
   }
 
@@ -418,23 +479,59 @@ export class TableReader implements DocReader {
   }
 
   /**
-   * Every main component on the file's pages, in file order, found by query
-   * rather than by walking every layer (see `libraryAssets`).
+   * What the file offers as components, on its pages, in file order (see
+   * `libraryAssets`): each main, or the set it's a variant of, found by
+   * query rather than by walking every layer. They're counted in SQL first,
+   * and past `max` read a page of ids at a time only until `max + 1` are
+   * found on a page, so a file of 40,000 components is refused holding a
+   * page of ids, never their rows (each may hold a long description).
    */
-  componentMains(): NodeRecord[] {
-    const found = this.#sql
-      .exec<NodeRow>(
-        `SELECT ${NODE_COLUMNS} FROM ${this.#table} WHERE type = 'frame' AND json_extract(props, '$.isComponent') = 1`,
-      )
-      .toArray()
-      .map(toRecord);
-    const placed: Array<{ node: NodeRecord; path: string[] }> = [];
-    for (const node of found) {
-      const path = this.#pathOnPage(node);
-      if (path) placed.push({ node, path });
+  componentAssets(max: number): string[] {
+    const t = this.#table;
+    const assets = `SELECT DISTINCT CASE
+        WHEN p.type = 'frame' AND json_extract(p.props, '$.isComponentSet') = 1 THEN p.id
+        ELSE m.id END AS id
+      FROM ${t} m LEFT JOIN ${t} p ON p.id = m.parent
+      WHERE m.type = 'frame' AND json_extract(m.props, '$.isComponent') = 1`;
+    const placed: Array<{ id: string; path: string[] }> = [];
+    /** Keeps those of `ids` on a page; true once past `max`. */
+    const place = (ids: readonly string[]): boolean => {
+      for (const id of ids) {
+        const node = this.get(id);
+        const path = node ? this.#pathOnPage(node) : null;
+        if (!path) continue;
+        placed.push({ id, path });
+        if (placed.length > max) return true;
+      }
+      return false;
+    };
+    const count = this.#sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM (${assets})`).one().n;
+    if (count <= max) {
+      place(
+        this.#sql
+          .exec<{ id: string }>(assets)
+          .toArray()
+          .map((row) => row.id),
+      );
+    } else {
+      // More than may be offered, unless some aren't on a page: found a page at a time.
+      let after = "";
+      for (;;) {
+        const ids = this.#sql
+          .exec<{ id: string }>(
+            `SELECT id FROM (${assets}) WHERE id > ? ORDER BY id LIMIT ?`,
+            after,
+            PAGE_ROWS,
+          )
+          .toArray()
+          .map((row) => row.id);
+        if (place(ids)) return placed.map((p) => p.id);
+        if (ids.length < PAGE_ROWS) break;
+        after = ids[ids.length - 1] as string;
+      }
     }
     placed.sort((a, b) => comparePaths(a.path, b.path));
-    return placed.map((p) => p.node);
+    return placed.map((p) => p.id);
   }
 
   /**
@@ -472,6 +569,14 @@ export class TableReader implements DocReader {
       this.#held -= entry.size;
     }
   }
+}
+
+/** A character past Latin-1: V8 keeps such a string two bytes a character. */
+const WIDE = /[\u0100-\uffff]/;
+
+/** What V8 holds for a string, about: a byte a character, two past Latin-1. */
+function heldChars(text: string): number {
+  return WIDE.test(text) ? 2 * text.length : text.length;
 }
 
 /** Tree order: a parent before its children, siblings by key then id. */

@@ -25,7 +25,7 @@ import {
   type Resolution,
   ROOT_ID,
 } from "@drawpane/model";
-import { type NodeRow, PAGE_ROWS, toRecord } from "./node-tables";
+import { boundedPages, type NodeRow, PAGE_ROWS, toRecord } from "./node-tables";
 import type { OpChunks } from "./op-chunks";
 
 export interface ThreeWayTables {
@@ -69,15 +69,21 @@ interface Joined extends NodeRow {
   parent_base: number;
 }
 
+/** The characters of a joined row's three sides' values, in SQL: what bounds a page of them. */
+const JOINED_CHARS = `LENGTH(o.props) + COALESCE(LENGTH(b.props), 0) + COALESCE(LENGTH(n.props), 0)`;
+
+const JOINED_FROM = (t: ThreeWayTables) => `
+    FROM ${t.other} o
+    LEFT JOIN ${t.base} b ON b.id = o.id
+    LEFT JOIN nodes n ON n.id = o.id`;
+
 const JOINED = (t: ThreeWayTables) => `
   SELECT o.id, o.parent, o.key, o.type, o.props, o.depth,
          b.id AS b_id, b.parent AS b_parent, b.key AS b_key, b.type AS b_type, b.props AS b_props,
          n.id AS n_id, n.parent AS n_parent, n.key AS n_key, n.type AS n_type, n.props AS n_props,
          EXISTS (SELECT 1 FROM nodes p WHERE p.id = o.parent) AS parent_live,
          EXISTS (SELECT 1 FROM ${t.base} p WHERE p.id = o.parent) AS parent_base
-    FROM ${t.other} o
-    LEFT JOIN ${t.base} b ON b.id = o.id
-    LEFT JOIN nodes n ON n.id = o.id`;
+    ${JOINED_FROM(t)}`;
 
 function sideOf(row: Joined, prefix: "b" | "n"): NodeRecord | undefined {
   const r = row as unknown as Record<string, string | null>;
@@ -107,41 +113,61 @@ function changesOf(row: Joined): BranchChange[] {
   return changedFields(was, node, sideOf(row, "n"));
 }
 
-/** Pages of the other side joined with base and the room's nodes, in id order. */
-function* byId(sql: SqlStorage, t: ThreeWayTables): Generator<Joined[]> {
-  let after = "";
-  for (;;) {
-    const rows = sql
-      .exec<Joined>(`${JOINED(t)} WHERE o.id > ? ORDER BY o.id LIMIT ?`, after, PAGE_ROWS)
-      .toArray();
-    if (rows.length === 0) return;
-    yield rows;
-    if (rows.length < PAGE_ROWS) return;
-    after = (rows[rows.length - 1] as Joined).id;
-  }
+/**
+ * Pages of the other side joined with base and the room's nodes, in id
+ * order, bounded by their values' characters as well as rows (a text may
+ * hold 200,000, and a row here holds three sides' values).
+ */
+function byId(sql: SqlStorage, t: ThreeWayTables): Generator<Joined[]> {
+  return boundedPages<string, Joined>(
+    "",
+    (after, size) =>
+      sql
+        .exec<{ id: string; n: number }>(
+          `SELECT o.id, ${JOINED_CHARS} AS n ${JOINED_FROM(t)} WHERE o.id > ? ORDER BY o.id LIMIT ?`,
+          after,
+          size,
+        )
+        .toArray()
+        .map((row) => ({ key: row.id, n: row.n })),
+    (after, last) =>
+      sql
+        .exec<Joined>(`${JOINED(t)} WHERE o.id > ? AND o.id <= ? ORDER BY o.id`, after, last)
+        .toArray(),
+  );
 }
 
-/** Pages of the other side's nodes under the root, level by level (parents first). */
-function* byLevel(sql: SqlStorage, t: ThreeWayTables, where: string): Generator<Joined[]> {
-  let after: [number, string] = [0, ""];
-  for (;;) {
-    const rows = sql
-      .exec<Joined>(
-        `${JOINED(t)} WHERE o.depth IS NOT NULL AND ${where}
-            AND (o.depth > ? OR (o.depth = ? AND o.id > ?))
-          ORDER BY o.depth, o.id LIMIT ?`,
-        after[0],
-        after[0],
-        after[1],
-        PAGE_ROWS,
-      )
-      .toArray();
-    if (rows.length === 0) return;
-    yield rows;
-    if (rows.length < PAGE_ROWS) return;
-    const last = rows[rows.length - 1] as Joined;
-    after = [last.depth as number, last.id];
-  }
+/** Pages of the other side's nodes under the root, level by level (parents first), bounded as `byId`'s. */
+function byLevel(sql: SqlStorage, t: ThreeWayTables, where: string): Generator<Joined[]> {
+  const after = `o.depth IS NOT NULL AND ${where} AND (o.depth > ? OR (o.depth = ? AND o.id > ?))`;
+  return boundedPages<readonly [number, string], Joined>(
+    [0, ""],
+    (from, size) =>
+      sql
+        .exec<{ depth: number; id: string; n: number }>(
+          `SELECT o.depth, o.id, ${JOINED_CHARS} AS n ${JOINED_FROM(t)}
+            WHERE ${after} ORDER BY o.depth, o.id LIMIT ?`,
+          from[0],
+          from[0],
+          from[1],
+          size,
+        )
+        .toArray()
+        .map((row) => ({ key: [row.depth, row.id] as const, n: row.n })),
+    (from, last) =>
+      sql
+        .exec<Joined>(
+          `${JOINED(t)} WHERE ${after} AND (o.depth < ? OR (o.depth = ? AND o.id <= ?))
+            ORDER BY o.depth, o.id`,
+          from[0],
+          from[0],
+          from[1],
+          last[0],
+          last[0],
+          last[1],
+        )
+        .toArray(),
+  );
 }
 
 /**
