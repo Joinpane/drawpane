@@ -8,7 +8,13 @@
  * version opens where you were looking and you come back to where you were.
  */
 import { Editor, Interaction, Store } from "@drawpane/editor";
-import type { NodeRecord, VersionInfo } from "@drawpane/model";
+import type { CopiesFormat, NodeRecord, VersionInfo } from "@drawpane/model";
+
+/** A version's nodes, and how they store copies (decision 0029). */
+export interface VersionNodes {
+  readonly nodes: readonly NodeRecord[];
+  readonly copies: CopiesFormat;
+}
 
 export interface VersionViewState {
   /** The version on screen, or null when looking at now. */
@@ -23,11 +29,11 @@ export class VersionView {
   readonly interaction: Interaction;
   readonly state = new Store<VersionViewState>({ viewing: null, loading: null, error: null });
   readonly #live: Editor;
-  readonly #load: (version: VersionInfo) => Promise<readonly NodeRecord[]>;
+  readonly #load: (version: VersionInfo) => Promise<VersionNodes>;
   /** Bumped on every show or leave, so a slow load can't land after you've moved on. */
   #token = 0;
 
-  constructor(live: Editor, load: (version: VersionInfo) => Promise<readonly NodeRecord[]>) {
+  constructor(live: Editor, load: (version: VersionInfo) => Promise<VersionNodes>) {
     this.#live = live;
     this.#load = load;
     this.preview = new Editor({ measurer: live.measurer });
@@ -47,7 +53,7 @@ export class VersionView {
     if (this.s.viewing?.id === version.id && !this.s.loading) return;
     const token = ++this.#token;
     this.state.set({ loading: version, error: null });
-    let nodes: readonly NodeRecord[];
+    let nodes: VersionNodes;
     try {
       nodes = await this.#load(version);
     } catch (error) {
@@ -60,7 +66,8 @@ export class VersionView {
     }
     if (token !== this.#token) return;
     const entering = this.s.viewing === null;
-    this.preview.loadStatic(nodes);
+    // In the open file's form, so its layers have the ids they have there (decision 0029).
+    this.preview.loadStatic(nodes.nodes, nodes.copies, this.#live.doc.copies);
     if (entering) {
       this.preview.state.set({ selection: [], hover: null });
       follow(this.#live, this.preview);

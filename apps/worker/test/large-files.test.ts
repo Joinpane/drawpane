@@ -161,7 +161,7 @@ async function importBig(browser: Browser, fileId: string, last?: NodeRecord[]) 
 async function editor(browser: Browser, fileId: string, clientId: string) {
   const socket = await openSocket(browser, fileId);
   const { revn } = await roomOf(fileId).stats();
-  socket.send({ t: "hello", protocol: 1, clientId, revn });
+  socket.send({ t: "hello", protocol: 2, clientId, revn, copies: ["materialized", "compact"] });
   await socket.next("welcome", 10_000);
   let seq = 0;
   return async (ops: Op[]) => {
@@ -197,17 +197,34 @@ describe("files larger than one message", () => {
       expect(await good.commit.json()).toMatchObject({ nodes: TOTAL });
       expect((await roomOf(fileId).stats()).nodes).toBe(TOTAL);
 
-      // Someone opening it gets the whole file, in chunks.
+      // Someone opening it downloads it (download.test.ts). A client that can't is never sent
+      // more than the socket's bound (decision 0029): it views a page saying to reload.
+      const reader = await openSocket(owner.browser, fileId);
+      reader.send({
+        t: "hello",
+        protocol: 2,
+        clientId: "reader",
+        revn: null,
+        copies: ["materialized", "compact"],
+        download: true,
+      });
+      expect((await reader.next<{ mode: string }>("welcome", 10_000)).mode).toBe("download");
+      reader.ws.close();
       const socket = await openSocket(owner.browser, fileId);
-      socket.send({ t: "hello", protocol: 1, clientId: "reader", revn: null });
-      await socket.next("welcome", 10_000);
-      let received = 0;
-      for (;;) {
-        const chunk = await socket.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot", 10_000);
-        received += chunk.nodes.length;
-        if (chunk.done) break;
-      }
-      expect(received).toBe(TOTAL);
+      socket.send({
+        t: "hello",
+        protocol: 2,
+        clientId: "no-download",
+        revn: null,
+        copies: ["materialized", "compact"],
+      });
+      expect((await socket.next<{ role: string }>("welcome", 10_000)).role).toBe("viewer");
+      const chunk = await socket.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot", 10_000);
+      expect(chunk.done).toBe(true);
+      expect(chunk.nodes.map((n) => n.id)).toEqual([
+        "drawpane-reload-page",
+        "drawpane-reload-text",
+      ]);
     },
     SLOW,
   );

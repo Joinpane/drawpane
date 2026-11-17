@@ -26,7 +26,13 @@ interface Txn {
 /** A person in the file: their socket, the page, and a way to edit as them. */
 async function join(browser: Browser, fileId: string, clientId = "person") {
   const socket = await openSocket(browser, fileId);
-  socket.send({ t: "hello", protocol: 1, clientId, revn: null });
+  socket.send({
+    t: "hello",
+    protocol: 2,
+    clientId,
+    revn: null,
+    copies: ["materialized", "compact"],
+  });
   await socket.next("welcome");
   const nodes: NodeRecord[] = [];
   for (;;) {

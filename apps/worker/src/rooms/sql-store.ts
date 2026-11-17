@@ -1,4 +1,15 @@
-import type { NodeRecord, NodeStore, NodeType, PropName, Props } from "@drawpane/model";
+import {
+  type BuildBudget,
+  ENTRY_BYTES,
+  type NodeRecord,
+  type NodeStore,
+  type NodeType,
+  nodeBytes,
+  type PropName,
+  type Props,
+} from "@drawpane/model";
+import { checkIds, idsRoom } from "./convert";
+import { instanceCycleIn } from "./instance-cycles";
 
 interface NodeRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -41,6 +52,9 @@ function toRecord(row: NodeRow): NodeRecord {
 export class SqlNodeStore implements NodeStore {
   readonly #sql: SqlStorage;
   readonly #cache = new Map<string, NodeRecord | null>();
+  #budget: BuildBudget | null = null;
+  /** What the cache was charged since it last emptied. */
+  #held = 0;
 
   constructor(sql: SqlStorage) {
     this.#sql = sql;
@@ -48,6 +62,18 @@ export class SqlNodeStore implements NodeStore {
 
   clearCache(): void {
     this.#cache.clear();
+    this.#budget?.release(this.#held);
+    this.#held = 0;
+  }
+
+  /**
+   * Charges every row parsed into the cache to `budget` (null: none), until
+   * the cache empties: for reads that build copies from it (main-removal.ts),
+   * so what it keeps counts against what they may hold. Empties the cache.
+   */
+  meter(budget: BuildBudget | null): void {
+    this.clearCache();
+    this.#budget = budget;
   }
 
   get(id: string): NodeRecord | undefined {
@@ -57,16 +83,35 @@ export class SqlNodeStore implements NodeStore {
       .exec<NodeRow>("SELECT id, parent, key, type, props FROM nodes WHERE id = ?", id)
       .toArray()[0];
     const node = row ? toRecord(row) : null;
+    if (this.#budget) {
+      const cost = ENTRY_BYTES + (node ? nodeBytes(node) : 0);
+      this.#budget.charge(cost);
+      this.#held += cost;
+    }
     this.#cache.set(id, node);
     return node ?? undefined;
   }
 
   childIds(parent: string): readonly string[] {
     // SQLite compares TEXT bytewise, which matches the order keys' ASCII order.
-    return this.#sql
-      .exec<{ id: string }>("SELECT id FROM nodes WHERE parent = ? ORDER BY key, id", parent)
+    if (!this.#budget)
+      return this.#sql
+        .exec<{ id: string }>("SELECT id FROM nodes WHERE parent = ? ORDER BY key, id", parent)
+        .toArray()
+        .map((row) => row.id);
+    // Metered (copies built from it): no more than the budget has room for, refused before
+    // they're read (a main's layer with more children than a build could hold).
+    const room = idsRoom(this.#budget);
+    const ids = this.#sql
+      .exec<{ id: string }>(
+        "SELECT id FROM nodes WHERE parent = ? ORDER BY key, id LIMIT ?",
+        parent,
+        room + 1,
+      )
       .toArray()
       .map((row) => row.id);
+    checkIds(this.#budget, room, ids.length);
+    return ids;
   }
 
   insert(node: NodeRecord): void {
@@ -134,6 +179,11 @@ export class SqlNodeStore implements NodeStore {
         )
         .toArray().length > 0
     );
+  }
+
+  /** Whether a main contains an instance of itself through `id`, in SQL: no values are read. */
+  instanceCycle(id: string, deep: boolean): boolean {
+    return instanceCycleIn(this.#sql, "nodes", id, deep);
   }
 
   count(): number {

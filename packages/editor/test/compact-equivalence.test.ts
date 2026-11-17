@@ -6,7 +6,13 @@
  * documents are compared as trees, layer by layer in order, with the ids
  * layers name (`mirrors`, `instanceOf`) mapped along.
  */
-import { getProp, type NodeRecord, ROOT_ID, samePropValue } from "@drawpane/model";
+import {
+  compactByInstance,
+  getProp,
+  type NodeRecord,
+  ROOT_ID,
+  samePropValue,
+} from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { isInstanceRoot, isMainComponent, wouldCycle } from "../src/components";
@@ -442,6 +448,48 @@ describe("compact copies mean what materialized copies do", () => {
           if (difference) throw new Error(`after ${JSON.stringify(done)}:\n${difference}`);
         }
       }),
+    );
+  });
+
+  it("stays the same document across a room's conversion, edits before and after", {
+    timeout: 600_000,
+  }, () => {
+    fc.assert(
+      fc.property(
+        fc.array(edits, { maxLength: 8 }),
+        fc.array(edits, { minLength: 1, maxLength: 8 }),
+        (before, after) => {
+          const a = kit();
+          const done: Edit[] = [];
+          for (const edit of before) {
+            const run = plan(a, edit);
+            if (!run) continue;
+            done.push(edit);
+            run(a);
+          }
+          // The room converts the file as stored (phase 4b), and a client loads what it stores.
+          const converted = compactByInstance([...a.doc.nodes()]);
+          if (converted.detached.size > 0)
+            throw new Error(`after ${JSON.stringify(done)}: detached ${[...converted.detached]}`);
+          const b = editor(true);
+          b.doc.resetStored(converted.nodes, "compact");
+          b.setPage(a.s.pageId ?? (b.doc.pageIds()[0] as string));
+          // A client loading the file starts its history there; so does this side's.
+          a.history.clear();
+          let difference = treeDifference(a, b);
+          if (difference)
+            throw new Error(`converted after ${JSON.stringify(done)}:\n${difference}`);
+          for (const edit of after) {
+            const run = plan(a, edit);
+            if (!run) continue;
+            done.push(edit);
+            run(a);
+            run(b);
+            difference = treeDifference(a, b);
+            if (difference) throw new Error(`after ${JSON.stringify(done)}:\n${difference}`);
+          }
+        },
+      ),
     );
   });
 });

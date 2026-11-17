@@ -15,7 +15,13 @@ async function seededFile(browser: Browser, projectId: string) {
     { method: "POST", json: { name: "Checkout" } },
   );
   const socket = await openSocket(browser, file.id);
-  socket.send({ t: "hello", protocol: 1, clientId: "seed", revn: null });
+  socket.send({
+    t: "hello",
+    protocol: 2,
+    clientId: "seed",
+    revn: null,
+    copies: ["materialized", "compact"],
+  });
   await socket.next("welcome");
   const nodes: NodeRecord[] = [];
   for (;;) {

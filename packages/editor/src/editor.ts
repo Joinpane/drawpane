@@ -4,10 +4,12 @@
  * the command bar, shortcuts, menus and agents all call the same methods.
  */
 
-import type { Peer, Presence } from "@drawpane/model";
+import type { CopiesFormat, Peer, Presence } from "@drawpane/model";
 import {
   type BindingKey,
+  compactByInstance,
   defaultOf,
+  expand,
   getProp,
   keyBetween,
   keysBetween,
@@ -506,7 +508,17 @@ export class Editor {
    * editor is read-only and already live; the page and selection carry over
    * where the new document still has them.
    */
-  loadStatic(nodes: Iterable<NodeRecord>): void {
+  loadStatic(
+    nodes: Iterable<NodeRecord>,
+    /** How `nodes` store copies (decision 0029), as the snapshot's header says. */
+    copies: CopiesFormat = "materialized",
+    /**
+     * The form to show them in: another document's, so ids match it (a version
+     * of the open file, main beside its branch). Materialized ones are
+     * converted; compact ones are built out.
+     */
+    as: CopiesFormat = copies,
+  ): void {
     this.state.set({
       status: "live",
       role: "viewer",
@@ -517,7 +529,12 @@ export class Editor {
       vectorEdit: null,
       cropping: null,
     });
-    this.doc.reset(nodes);
+    // As the snapshot stores copies (decision 0029), in the form asked for.
+    if (copies === as) this.doc.resetStored(nodes, copies);
+    // Converted with the room's converter, so a version or a library shows what the room would
+    // store for it: drawing order kept, ids layers hold renamed (decision 0029).
+    else if (as === "compact") this.doc.resetStored(compactByInstance(nodes).nodes, "compact");
+    else this.doc.resetStored(expand(nodes), "materialized");
   }
 
   notify(text: string, action?: Notice["action"]): void {

@@ -48,7 +48,13 @@ async function newFile(
 /** Opens a file in the editor (as publishing does from there): its room knows it, and edits go in. */
 async function open(browser: Browser, fileId: string) {
   const socket = await openSocket(browser, fileId);
-  socket.send({ t: "hello", protocol: 1, clientId: `client-${fileId}`, revn: null });
+  socket.send({
+    t: "hello",
+    protocol: 2,
+    clientId: `client-${fileId}`,
+    revn: null,
+    copies: ["materialized", "compact"],
+  });
   await socket.next("welcome");
   const nodes: NodeRecord[] = [];
   for (;;) {

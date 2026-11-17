@@ -5,7 +5,7 @@
  * zoom on either side, or a page change on the branch, carries over.
  */
 import { type Editor, Interaction, Store } from "@drawpane/editor";
-import type { NodeRecord } from "@drawpane/model";
+import type { CopiesFormat, NodeRecord } from "@drawpane/model";
 import { shareImages } from "../media";
 
 export type CompareMode = "side" | "swipe" | "overlay";
@@ -38,9 +38,13 @@ export class CompareView {
     return this.state.get();
   }
 
-  /** Shows main as `nodes`, on the branch's page where main has it. */
-  load(nodes: readonly NodeRecord[]): void {
-    this.main.loadStatic(nodes);
+  /**
+   * Shows main as `nodes` (stored as `copies`: decision 0029), in the
+   * branch's form so its layers have the branch's ids, on the branch's page
+   * where main has it.
+   */
+  load(nodes: readonly NodeRecord[], copies: CopiesFormat = "materialized"): void {
+    this.main.loadStatic(nodes, copies, this.#branch.doc.copies);
     this.main.state.set({ selection: [], hover: null });
     this.#follow(this.#branch, this.main);
   }

@@ -57,8 +57,8 @@ function LibrarySection({ lib, query }: { lib: LibraryRef; query: string }) {
   const current = currentQuery.data ?? null;
   const latest = history.data?.[0] ?? null;
   const source = useQuery({
-    queryKey: ["library-source", current?.id],
-    queryFn: () => librarySource(current as LibraryPublish, editor.measurer),
+    queryKey: ["library-source", current?.id, editor.doc.copies],
+    queryFn: () => librarySource(current as LibraryPublish, editor.measurer, editor.doc.copies),
     enabled: current !== null,
     staleTime: Number.POSITIVE_INFINITY,
   });
@@ -181,7 +181,7 @@ function ReviewUpdatesDialog({
   const changes = assetChanges(current?.assets ?? [], latest.assets);
   const update = useMutation({
     mutationFn: async () => {
-      const source = await librarySource(latest, editor.measurer);
+      const source = await librarySource(latest, editor.measurer, editor.doc.copies);
       // Nothing to change counts as done; a refused edit keeps the dialog open to say so.
       if (
         updateOps(editor.doc, source.doc, refOf(latest)).length > 0 &&

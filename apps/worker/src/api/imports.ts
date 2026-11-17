@@ -11,6 +11,12 @@
  * up. Nothing shows in the file until the commit, and a failed or abandoned
  * import leaves it empty. `POST /files/:id/import` does all three in one
  * request, for imports of one part.
+ *
+ * Both say how the nodes store copies (decision 0029): `copies: "compact"`
+ * when they were converted before sending, else they're taken as
+ * materialized and converted by the room. It can't be told from the nodes:
+ * an instance equal to its main has no layers and no records when compact.
+ * Override records sent without saying so are refused.
  */
 import {
   ID_PATTERN,
@@ -25,21 +31,27 @@ import type { AppContext, Env } from "../env";
 import { readCapped } from "../lib/body";
 import { badRequest, conflict, notFound } from "../lib/http";
 import type { ImportPartResult, ImportResult } from "../rooms/file-room";
-import { NO_COMPACT_COPIES } from "../rooms/import-stage";
-import { requireFileRole } from "./access";
+import { readBody, requireFileRole } from "./access";
 
 /** The most one request sends: a part, or a whole one-request import. */
 export const IMPORT_MAX_BYTES = MAX_IMPORT_PART_BYTES;
 /** Nodes in one part at most: a part is a few MB, so this only stops a flood of tiny ones. */
 const PART_NODES = 100_000;
 const Part = z.object({ nodes: z.array(NodeRecordSchema).min(1).max(PART_NODES) });
+/** A whole import in one request: its nodes, and how they store copies. */
+const Whole = Part.extend({
+  copies: z.enum(["materialized", "compact"]).default("materialized"),
+});
 
 function room(env: Env, fileId: string) {
   return env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
 }
 
-/** A request's nodes: read up to the cap, parsed and shaped (the room checks their values). */
-async function readNodes(request: Request): Promise<NodeRecord[]> {
+/** A request's body: read up to the cap, parsed and shaped (the room checks the nodes' values). */
+async function readImport<S extends z.ZodTypeAny>(
+  request: Request,
+  schema: S,
+): Promise<z.output<S>> {
   const bytes = await readCapped(
     request,
     IMPORT_MAX_BYTES,
@@ -51,13 +63,16 @@ async function readNodes(request: Request): Promise<NodeRecord[]> {
   } catch {
     throw badRequest("The import isn't valid JSON.");
   }
-  const parsed = Part.safeParse(json);
+  const parsed = schema.safeParse(json);
   if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? "Invalid import.");
-  // Override records (decision 0029) wait for rooms that store compact copies (phase 4b).
-  // The room refuses them too, for each part and again at the commit.
-  if (parsed.data.nodes.some((n) => n.type === "override")) throw badRequest(NO_COMPACT_COPIES);
-  return parsed.data.nodes as NodeRecord[];
+  // Override records (decision 0029) come only into a file that stores compact copies: the
+  // room says, for each part and again at the commit.
+  return parsed.data;
 }
+
+/** A part's nodes. */
+const readNodes = async (request: Request) =>
+  (await readImport(request, Part)).nodes as NodeRecord[];
 
 const GONE =
   "That import isn't there any more (it was finished, given up, or left too long). Start again.";
@@ -90,11 +105,12 @@ export const imports = new Hono<AppContext>()
   .post("/files/:fileId/import", async (c) => {
     const user = requireUser(c);
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
-    const nodes = await readNodes(c.req.raw);
+    const { nodes, copies } = await readImport(c.req.raw, Whole);
     const result = (await room(c.env, file.id).importNodes(
       { userId: user.id, name: user.name },
-      nodes,
+      nodes as NodeRecord[],
       file.id,
+      copies,
     )) as ImportResult;
     return c.json(await committed(c.env, file.id, result));
   })
@@ -105,7 +121,11 @@ export const imports = new Hono<AppContext>()
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
     const begun = await room(c.env, file.id).beginImport(file.id);
     if (!begun.ok) throw conflict("This file already has content; import into a new file.");
-    return c.json({ importId: begun.importId, partBytes: IMPORT_MAX_BYTES }, 201);
+    // How the file stores copies (decision 0029): the browser converts before sending when it can.
+    return c.json(
+      { importId: begun.importId, partBytes: IMPORT_MAX_BYTES, copies: begun.copies },
+      201,
+    );
   })
 
   /** One part of an import's nodes, checked and kept for the commit. */
@@ -127,10 +147,20 @@ export const imports = new Hono<AppContext>()
     const user = requireUser(c);
     const { file } = await requireFileRole(c.env, user.id, c.req.param("fileId"), "editor");
     const id = importId(c.req.param("importId"));
+    // How the parts store copies: the browser says `compact` when it converted them.
+    const { copies } = await readBody(
+      c,
+      // An empty body (a client from before compact copies) is materialized.
+      z.preprocess(
+        (body) => body ?? {},
+        z.object({ copies: z.enum(["materialized", "compact"]).default("materialized") }),
+      ),
+    );
     const result = (await room(c.env, file.id).commitImport(
       { userId: user.id, name: user.name },
       file.id,
       id,
+      copies,
     )) as ImportResult;
     return c.json(await committed(c.env, file.id, result));
   })

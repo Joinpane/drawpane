@@ -8,8 +8,10 @@
  * from the table in one storage transaction. Until then the file is as it
  * was.
  */
+
 import {
   checkNode,
+  copyId,
   MAX_DEPTH,
   MAX_IMPORT_BYTES,
   MAX_IMPORT_NODES,
@@ -17,6 +19,7 @@ import {
   type NodeRecord,
   ROOT_ID,
 } from "@drawpane/model";
+import { cyclicMainIn } from "./instance-cycles";
 import {
   allowedChildrenSql,
   countRows,
@@ -42,10 +45,10 @@ export interface ImportLimits {
 export const IMPORT_LIMITS: ImportLimits = { nodes: MAX_IMPORT_NODES, bytes: MAX_IMPORT_BYTES };
 
 /**
- * Override records (decision 0029) wait for rooms that store compact copies
- * (phase 4b): until then an import, like an edit, can't bring them.
+ * Override records (decision 0029) come only into a file that stores
+ * compact copies: one stored materialized can't take them.
  */
-export const NO_COMPACT_COPIES = "This server doesn't store compact copies yet.";
+export const NO_COMPACT_COPIES = "This file doesn't store compact copies.";
 
 /** The running totals of a staged import, beside its table. */
 const sizeTable = (table: string) => `${table}_size`;
@@ -95,6 +98,8 @@ export function stageNodes(
   nodes: readonly NodeRecord[],
   table = IMPORT_TABLE,
   limits: ImportLimits = IMPORT_LIMITS,
+  /** `records`: override records may come (a file that stores compact copies). */
+  { records = false }: { readonly records?: boolean } = {},
 ): number {
   const rows: NodeRow[] = [];
   const seen = new Set<string>();
@@ -107,7 +112,8 @@ export function stageNodes(
       if (error instanceof ModelError) throw new ModelError(error.code, error.message, i);
       throw error;
     }
-    if (checked.type === "override") throw new ModelError("invalid_parent", NO_COMPACT_COPIES, i);
+    if (checked.type === "override" && !records)
+      throw new ModelError("invalid_parent", NO_COMPACT_COPIES, i);
     if (seen.has(node.id))
       throw new ModelError("already_exists", `Node ${node.id} is in the import twice.`, i);
     seen.add(node.id);
@@ -147,6 +153,16 @@ export interface CheckOptions {
    * layers deeper than an edit may make now (see `applyMove`).
    */
   readonly maxDepth?: number;
+  /** Override records may come (into a file that stores compact copies), checked as edits are. */
+  readonly records?: boolean;
+  /**
+   * Refuse a component that contains an instance of itself, directly or
+   * through others (decision 0029): for nodes that land as they are, in the
+   * compact form. Converting what comes materialized detaches such
+   * instances instead, keeping their look; a branch or a duplicate keeps
+   * what its file held.
+   */
+  readonly cycles?: boolean;
 }
 
 /**
@@ -157,13 +173,22 @@ export interface CheckOptions {
 export function checkStaged(
   sql: SqlStorage,
   table = IMPORT_TABLE,
-  { live = "nodes", limits = IMPORT_LIMITS, maxDepth = MAX_DEPTH }: CheckOptions = {},
+  {
+    live = "nodes",
+    limits = IMPORT_LIMITS,
+    maxDepth = MAX_DEPTH,
+    records = false,
+    cycles = false,
+  }: CheckOptions = {},
 ): void {
   const total = countRows(sql, table);
   checkLimits({ nodes: total, bytes: stagedSize(sql, table).bytes }, limits);
 
-  const override = sql.exec(`SELECT 1 FROM ${table} WHERE type = 'override' LIMIT 1`).toArray();
-  if (override.length > 0) throw new ModelError("invalid_parent", NO_COMPACT_COPIES);
+  if (records) checkRecords(sql, table);
+  else {
+    const override = sql.exec(`SELECT 1 FROM ${table} WHERE type = 'override' LIMIT 1`).toArray();
+    if (override.length > 0) throw new ModelError("invalid_parent", NO_COMPACT_COPIES);
+  }
 
   const page = sql
     .exec(`SELECT 1 FROM ${table} WHERE parent = ? AND type = 'page' LIMIT 1`, ROOT_ID)
@@ -208,6 +233,55 @@ export function checkStaged(
       .exec<{ id: string }>(`SELECT id FROM ${table} WHERE depth IS NULL LIMIT 1`)
       .toArray()[0];
     throw new ModelError("cycle", `Layer ${looped?.id ?? ""} is inside itself.`);
+  }
+
+  // Checked once the layers hold together: what a main contains is followed through its parents.
+  if (cycles) {
+    const main = cyclicMainIn(sql, table);
+    if (main !== null)
+      throw new ModelError(
+        "cycle",
+        `Its component ${main} contains an instance of itself, directly or through other components.`,
+      );
+  }
+}
+
+/**
+ * Checks each override record as an edit's would be (decision 0029): under
+ * an instance root, and with the id its path derives. A page of records at
+ * a time.
+ */
+function checkRecords(sql: SqlStorage, table: string): void {
+  let after = "";
+  for (;;) {
+    const rows = sql
+      .exec<{
+        id: string;
+        parent: string;
+        path: string | null;
+        of: string | null;
+        type: string | null;
+      }>(
+        `SELECT s.id, s.parent, json_extract(s.props, '$.path') AS path,
+                json_extract(p.props, '$.instanceOf') AS of, p.type AS type
+           FROM ${table} s LEFT JOIN ${table} p ON p.id = s.parent
+          WHERE s.type = 'override' AND s.id > ? ORDER BY s.id LIMIT 500`,
+        after,
+      )
+      .toArray();
+    for (const row of rows) {
+      if (row.type !== "frame" || row.of === null)
+        throw new ModelError("invalid_parent", "An override record belongs under an instance.");
+      const path = row.path === null ? null : (JSON.parse(row.path) as unknown);
+      if (
+        !Array.isArray(path) ||
+        path.length === 0 ||
+        copyId(row.parent, path as string[]) !== row.id
+      )
+        throw new ModelError("invalid_id", `"${row.id}" isn't the id of the layer its path names.`);
+    }
+    if (rows.length < 500) return;
+    after = (rows[rows.length - 1] as { id: string }).id;
   }
 }
 

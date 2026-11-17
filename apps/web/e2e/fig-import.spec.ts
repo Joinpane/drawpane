@@ -7,6 +7,7 @@
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { expand, type NodeRecord } from "@drawpane/model";
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
 
@@ -103,7 +104,8 @@ test.describe
         })
         .toEqual({
           pages: ["Cover", "Design"],
-          layers: saved.nodes.length - 2,
+          // What was sent is stored compact (decision 0029): counted as built, pages aside.
+          layers: expand(saved.nodes as NodeRecord[]).length - 2,
           linkedInstance: true,
           mirrors: true,
           image: true,

@@ -5,32 +5,41 @@
  * each is kept for the session.
  */
 import { Editor, type LibraryRef, type TextMeasurer } from "@drawpane/editor";
-import type { LibraryPublish } from "@drawpane/model";
+import type { CopiesFormat, LibraryPublish } from "@drawpane/model";
 import { api } from "../../api/client";
 
 const loaded = new Map<string, Promise<Editor>>();
 const ready = new Map<string, Editor>();
 
-/** The publish's snapshot, as a read-only editor (loaded the first time it's asked for). */
-export function librarySource(publish: LibraryPublish, measurer: TextMeasurer): Promise<Editor> {
-  let source = loaded.get(publish.id);
+/**
+ * The publish's snapshot, as a read-only editor (loaded the first time it's
+ * asked for), in the form the file using it keeps copies (`as`, decision
+ * 0029), so copies inserted from it are named as that file names them.
+ */
+export function librarySource(
+  publish: LibraryPublish,
+  measurer: TextMeasurer,
+  as: CopiesFormat,
+): Promise<Editor> {
+  const key = `${publish.id}/${as}`;
+  let source = loaded.get(key);
   if (!source) {
-    source = api.versionNodes(publish.fileId, publish.versionId).then((nodes) => {
+    source = api.versionNodes(publish.fileId, publish.versionId).then(({ nodes, copies }) => {
       const editor = new Editor({ measurer });
-      editor.loadStatic(nodes);
-      ready.set(publish.id, editor);
+      editor.loadStatic(nodes, copies, as);
+      ready.set(key, editor);
       return editor;
     });
     // A failed load is tried again next time.
-    source.catch(() => loaded.delete(publish.id));
-    loaded.set(publish.id, source);
+    source.catch(() => loaded.delete(key));
+    loaded.set(key, source);
   }
   return source;
 }
 
 /** A snapshot already loaded, for a drop on the canvas (which can't wait). */
-export function loadedSource(publishId: string): Editor | null {
-  return ready.get(publishId) ?? null;
+export function loadedSource(publishId: string, as: CopiesFormat): Editor | null {
+  return ready.get(`${publishId}/${as}`) ?? null;
 }
 
 /** How a file refers to a library, at a publish. */

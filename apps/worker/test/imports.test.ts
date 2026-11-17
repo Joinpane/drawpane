@@ -1,5 +1,5 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { keyBetween, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { copyId, keyBetween, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import type { FileRoom } from "../src/rooms/file-room";
 import { IMPORT_TABLE } from "../src/rooms/import-stage";
@@ -42,8 +42,12 @@ async function inParts(browser: Browser, fileId: string) {
       method: "POST",
       json: { nodes },
     });
-  const commit = () =>
-    browser.fetch(`/api/files/${fileId}/imports/${importId}/commit`, { method: "POST", json: {} });
+  /** Commits it, saying how its nodes store copies (decision 0029; materialized when not said). */
+  const commit = (copies?: "compact") =>
+    browser.fetch(`/api/files/${fileId}/imports/${importId}/commit`, {
+      method: "POST",
+      json: copies ? { copies } : {},
+    });
   return { importId, part, commit };
 }
 
@@ -57,7 +61,13 @@ async function lowerLimits(fileId: string, limits: { nodes: number; bytes: numbe
 /** Someone with the file open: its nodes, and a way to send an edit and wait for the ack. */
 async function editor(browser: Browser, fileId: string) {
   const socket = await openSocket(browser, fileId);
-  socket.send({ t: "hello", protocol: 1, clientId: "c-editor", revn: null });
+  socket.send({
+    t: "hello",
+    protocol: 2,
+    clientId: "c-editor",
+    revn: null,
+    copies: ["materialized", "compact"],
+  });
   await socket.next("welcome");
   const nodes: NodeRecord[] = [];
   for (;;) {
@@ -87,7 +97,13 @@ describe("importing into a new file", () => {
 
     // Someone opening it gets the imported pages, not the starting one.
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 1, clientId: "c1", revn: null });
+    socket.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "c1",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
     await socket.next("welcome");
     const got: NodeRecord[] = [];
     for (;;) {
@@ -121,25 +137,64 @@ describe("importing into a new file", () => {
     expect((await roomOf(fileId).stats()).nodes).toBe(1);
   });
 
-  it("refuses compact copies' override records until rooms store them (decision 0029)", async () => {
+  it("takes override records into a file stored compact, checked as edits are (decision 0029)", async () => {
     const { browser, fileId } = await newFile();
     const main = { id: "M1", type: "frame", parent: "P1", key: "a0", props: { isComponent: true } };
+    const inner = { id: "R1", type: "rect", parent: "M1", key: "a0", props: { width: 10 } };
     const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
-    const record = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["X1"] } };
-    const response = await browser.fetch(`/api/files/${fileId}/import`, {
+    const wrong = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["R1"] } };
+    const record = { ...wrong, id: copyId("I1", ["R1"]), props: { path: ["R1"], width: 20 } };
+    // A record whose id isn't the one its path derives is refused.
+    const refused = await browser.fetch(`/api/files/${fileId}/import`, {
       method: "POST",
-      json: { nodes: [page("P1", "Cover", "a0"), main, copy, record] },
+      json: { nodes: [page("P1", "Cover", "a0"), main, inner, copy, wrong], copies: "compact" },
     });
-    expect(response.status).toBe(400);
+    expect(refused.status).toBe(400);
     expect((await roomOf(fileId).stats()).nodes).toBe(1);
+    // One that is comes in as it is.
+    await browser.json(`/api/files/${fileId}/import`, {
+      method: "POST",
+      json: { nodes: [page("P1", "Cover", "a0"), main, inner, copy, record], copies: "compact" },
+    });
+    expect((await roomOf(fileId).stats()).nodes).toBe(5);
 
-    // Nor through a change sent over the socket.
+    // Over the socket, a record is checked too.
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 1, clientId: "c1", revn: null });
-    await socket.next("welcome");
-    socket.send({ t: "txn", seq: 1, ops: [{ op: "create", ...record }] });
-    const reject = await socket.next<{ code: string }>("reject");
-    expect(reject.code).toBe("unsupported");
+    socket.send({ t: "hello", protocol: 2, clientId: "c1", revn: null, copies: ["compact"] });
+    expect((await socket.next<{ copies: string }>("welcome")).copies).toBe("compact");
+    socket.send({ t: "txn", seq: 1, ops: [{ op: "create", ...wrong }] });
+    expect((await socket.next<{ code: string }>("reject")).code).toBe("invalid_id");
+  });
+
+  it("refuses override records into a file stored materialized", async () => {
+    const { browser, fileId } = await newFile();
+    await roomOf(fileId).storeMaterialized([page("P1", "Cover", "a0")]);
+    const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
+    const record = {
+      id: copyId("I1", ["X1"]),
+      type: "override",
+      parent: "I1",
+      key: "a0",
+      props: { path: ["X1"] },
+    };
+    const socket = await openSocket(browser, fileId);
+    socket.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "c1",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
+    expect((await socket.next<{ copies: string }>("welcome")).copies).toBe("materialized");
+    socket.send({
+      t: "txn",
+      seq: 1,
+      ops: [
+        { op: "create", ...copy },
+        { op: "create", ...record },
+      ],
+    });
+    expect((await socket.next<{ code: string }>("reject")).code).toBe("unsupported");
   });
 
   it("is for editors of the file", async () => {
@@ -174,7 +229,13 @@ describe("importing into a new file", () => {
     // The starting page was revision 1; the import is revision 2, not logged as operations.
     expect(stats.revn).toBe(2);
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 1, clientId: "c1", revn: 1 });
+    socket.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "c1",
+      revn: 1,
+      copies: ["materialized", "compact"],
+    });
     expect((await socket.next<{ mode: string }>("welcome")).mode).toBe("snapshot");
   });
 
@@ -323,7 +384,13 @@ describe("importing into a new file", () => {
     // The starting page and the two edits, still there for who edited what.
     expect(logged).toBe(revn);
     const behind = await openSocket(browser, fileId);
-    behind.send({ t: "hello", protocol: 1, clientId: "c2", revn: revn - 1 });
+    behind.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "c2",
+      revn: revn - 1,
+      copies: ["materialized", "compact"],
+    });
     expect((await behind.next<{ mode: string }>("welcome")).mode).toBe("snapshot");
   });
 
@@ -396,18 +463,31 @@ describe("importing into a new file", () => {
     expect((await roomOf(third.fileId).stats()).nodes).toBe(1);
   });
 
-  it("refuses override records in each part and at the commit of an import in parts", async () => {
+  it("checks override records in each part and at the commit of an import in parts", async () => {
     const { browser, fileId } = await newFile();
     const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
     const record = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["X1"] } };
     const { importId, part, commit } = await inParts(browser, fileId);
     expect((await part([page("P1", "Cover", "a0"), copy])).status).toBe(200);
-    // Through the API.
-    const refused = await part([record]);
-    expect(refused.status).toBe(400);
-    expect(JSON.stringify(await refused.json())).toContain("compact copies");
-    // And by the room itself, for a caller that doesn't go through the API (a copy, a branch).
-    const direct = await roomOf(fileId).importPart(fileId, importId, [record as NodeRecord]);
+    // A record comes in a part: the file stores compact copies.
+    expect((await part([record])).status).toBe(200);
+    // At the commit it's checked as an edit's would be: its id isn't its path's.
+    const response = await commit("compact");
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(await response.json())).toContain("path names");
+    expect((await roomOf(fileId).stats()).nodes).toBe(1);
+    expect(importId).toBeTruthy();
+  });
+
+  it("refuses override records in parts of an import into a file stored materialized", async () => {
+    const { fileId } = await newFile();
+    await roomOf(fileId).storeMaterialized([page("P1", "Cover", "a0")]);
+    // An empty starting page again, as the import needs.
+    const record = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["X1"] } };
+    const begun = await roomOf(fileId).beginImport(fileId);
+    expect(begun).toMatchObject({ ok: true, copies: "materialized" });
+    if (!begun.ok) return;
+    const direct = await roomOf(fileId).importPart(fileId, begun.importId, [record as NodeRecord]);
     expect(direct).toMatchObject({ ok: false, reason: "invalid" });
     // A record that got into the staged import some other way is refused at the commit.
     await runInDurableObject(roomOf(fileId), (_room, state) => {
@@ -415,9 +495,12 @@ describe("importing into a new file", () => {
         `INSERT INTO ${IMPORT_TABLE} (id, parent, key, type, props) VALUES ('O1', 'I1', 'a0', 'override', '{"path":["X1"]}')`,
       );
     });
-    const response = await commit();
-    expect(response.status).toBe(400);
-    expect(JSON.stringify(await response.json())).toContain("compact copies");
+    const result = await roomOf(fileId).commitImport(
+      { userId: "u", name: "U" },
+      fileId,
+      begun.importId,
+    );
+    expect(result).toMatchObject({ ok: false, reason: "invalid" });
     expect((await roomOf(fileId).stats()).nodes).toBe(1);
   });
 });

@@ -1,5 +1,5 @@
 import type { Editor } from "@drawpane/editor";
-import type { ServerMessage } from "@drawpane/model";
+import { RELOAD_CLOSE_CODE, type ServerMessage } from "@drawpane/model";
 import { ApiError, api } from "../api/client";
 import { checkForUpdate } from "../app/updates";
 
@@ -74,6 +74,12 @@ export function connectFile(
       if (ws !== socket) return;
       ws = null;
       editor.sync.disconnected();
+      if (event.code === RELOAD_CLOSE_CODE) {
+        // The room needs a newer client (the file stores copies in a way this page can't
+        // read): load the page again, once a minute at most, so a stale cache can't loop.
+        reloadForUpdate(onFatal);
+        return;
+      }
       if (event.code === 4404) {
         onFatal("This file was deleted.");
         return;
@@ -149,4 +155,22 @@ export function connectFile(
       editor.sync.disconnected();
     }
   };
+}
+
+const RELOADED_KEY = "drawpane:reloaded-for-update";
+
+/** Reloads the page for a newer client, unless it did so a moment ago (then says so). */
+function reloadForUpdate(onFatal: (message: string) => void): void {
+  let last = 0;
+  try {
+    last = Number(sessionStorage.getItem(RELOADED_KEY) ?? 0);
+    sessionStorage.setItem(RELOADED_KEY, String(Date.now()));
+  } catch {
+    // Storage blocked: reload anyway.
+  }
+  if (Date.now() - last < 60_000) {
+    onFatal("Drawpane was updated. Reload the page to keep working on this file.");
+    return;
+  }
+  location.reload();
 }

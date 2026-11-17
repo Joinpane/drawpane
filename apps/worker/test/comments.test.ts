@@ -3,12 +3,54 @@ import type { CommentEvent, CommentThread } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { type Browser, openSocket, signedInUser } from "./helpers";
 
+/** A file with a page "page1" holding the layers comments here pin to ("hero", "card"). */
 async function newFile() {
   const owner = await signedInUser("Ana Ruiz");
   const { file } = await owner.browser.json<{ file: { id: string } }>(
     `/api/projects/${owner.projectId}/files`,
     { method: "POST", json: { name: "Comments" } },
   );
+  const socket = await openSocket(owner.browser, file.id);
+  socket.send({
+    t: "hello",
+    protocol: 2,
+    clientId: `c-${file.id}`,
+    revn: null,
+    copies: ["materialized", "compact"],
+  });
+  await socket.next("welcome");
+  socket.send({
+    t: "txn",
+    seq: 1,
+    ops: [
+      {
+        op: "create",
+        id: "page1",
+        type: "page",
+        parent: "root",
+        key: "a5",
+        props: { name: "Comments" },
+      },
+      {
+        op: "create",
+        id: "hero",
+        type: "frame",
+        parent: "page1",
+        key: "a0",
+        props: { name: "Hero" },
+      },
+      {
+        op: "create",
+        id: "card",
+        type: "frame",
+        parent: "page1",
+        key: "a1",
+        props: { name: "Card" },
+      },
+    ],
+  });
+  await socket.next("ack");
+  socket.ws.close();
   return { ...owner, fileId: file.id };
 }
 
@@ -298,10 +340,22 @@ describe("comments in the room", () => {
     const { browser, fileId, teamId } = await newFile();
     const viewer = await signedInUser("Vera", "viewer", teamId);
     const a = await openSocket(browser, fileId);
-    a.send({ t: "hello", protocol: 1, clientId: "clientA", revn: null });
+    a.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "clientA",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
     await a.next("welcome");
     const b = await openSocket(viewer.browser, fileId);
-    b.send({ t: "hello", protocol: 1, clientId: "clientB", revn: null });
+    b.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "clientB",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
     await b.next("welcome");
 
     const { thread } = await startThread(viewer.browser, fileId, { body: "From the viewer." });
@@ -332,7 +386,13 @@ describe("comments in the room", () => {
     const a = await openSocket(browser, fileId);
     // Sockets that haven't said hello yet don't get room traffic.
     expect(await room.broadcastComments({ kind: "deleted", threadId: "x" })).toBe(0);
-    a.send({ t: "hello", protocol: 1, clientId: "clientA", revn: null });
+    a.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "clientA",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
     await a.next("welcome");
     expect(await room.broadcastComments({ kind: "deleted", threadId: "x" })).toBe(1);
     a.ws.close();

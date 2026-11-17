@@ -571,7 +571,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         } catch {
           return;
         }
-        const source = loadedSource(drag.publishId);
+        const source = loadedSource(drag.publishId, editor.doc.copies);
         if (source)
           editor.insertLibraryComponent(
             source.doc,

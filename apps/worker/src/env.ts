@@ -24,6 +24,12 @@ export interface Env {
   /** `off` stops the health page from asking npm whether a newer release is out (api/updates.ts). */
   readonly UPDATE_CHECK?: string;
   /**
+   * `off` stops files converting to compact copies when their room loads, and
+   * new files and imports start materialized (decision 0029). Rooms keep
+   * whatever form they already store.
+   */
+  readonly COMPACT_COPIES?: string;
+  /**
    * The kit store's registry: an index.json URL (by default Joinpane/drawpane-kits),
    * or `off` to turn the store off (api/kits.ts).
    */

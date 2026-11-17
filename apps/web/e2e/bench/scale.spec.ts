@@ -15,9 +15,11 @@
  * - **edit a main**: a fill change on the most used component, through the
  *   editor's own commit, so every copy follows as it does for a person.
  *
- * With BENCH_COMPACT=1 the editor keeps copies compact (decision 0029: the
- * file stored as mains, instance roots and override records, copies
- * presented), and the table says how much the file stores.
+ * With BENCH_COMPACT=1 the file is loaded as a room storing compact copies
+ * sends it (decision 0029, phase 4b): mains, instance roots and override
+ * records, converted here first as the room converts it, and the editor
+ * presents the copies. Without it, as a room storing them materialized
+ * sends it. The table says how much the file stores.
  *
  * Prints a table and attaches the numbers as JSON. Budgets aren't enforced
  * here: this VM draws without a GPU, so compare runs on one machine
@@ -25,7 +27,7 @@
  * Run with `pnpm --filter @drawpane/web bench -- scale`.
  */
 import { generateKit } from "@drawpane/corpus";
-import type { NodeRecord } from "@drawpane/model";
+import { compactByInstance, type NodeRecord } from "@drawpane/model";
 import { type CDPSession, expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { pan, type Summary, summaryRow, zoom } from "./frames";
@@ -55,21 +57,32 @@ async function heapMb(cdp: CDPSession): Promise<number> {
   return Math.round(used / 1048576);
 }
 
-/** Loads `nodes` into the open file as opening it would: one reset, the file's own page kept. */
-async function load(page: Page, chunks: number): Promise<number> {
-  return page.evaluate(async (chunks) => {
-    const e = (
-      window as unknown as {
-        drawpane: { doc: { nodes(): Iterable<unknown>; reset(nodes: Iterable<unknown>): void } };
-      }
-    ).drawpane;
-    const all: unknown[] = [...e.doc.nodes()];
-    for (let i = 0; i < chunks; i++)
-      for (const n of (await (await fetch(`/__corpus/${i}`)).json()) as unknown[]) all.push(n);
-    const t = performance.now();
-    e.doc.reset(all);
-    return performance.now() - t;
-  }, chunks);
+/**
+ * Loads the stored nodes into the open file as opening it would: one reset
+ * with what the room sends, in the form it stores, the file's own page kept.
+ */
+async function load(page: Page, chunks: number, compact: boolean): Promise<number> {
+  return page.evaluate(
+    async ({ chunks, compact }) => {
+      const e = (
+        window as unknown as {
+          drawpane: {
+            doc: {
+              stored(): unknown[];
+              resetStored(nodes: Iterable<unknown>, copies: "materialized" | "compact"): void;
+            };
+          };
+        }
+      ).drawpane;
+      const all: unknown[] = [...e.doc.stored()];
+      for (let i = 0; i < chunks; i++)
+        for (const n of (await (await fetch(`/__corpus/${i}`)).json()) as unknown[]) all.push(n);
+      const t = performance.now();
+      e.doc.resetStored(all, compact ? "compact" : "materialized");
+      return performance.now() - t;
+    },
+    { chunks, compact },
+  );
 }
 
 /** What the loaded document stores: nodes and JSON bytes. */
@@ -156,9 +169,11 @@ test.describe("Scale", () => {
     test(`${layers.toLocaleString("en")} layers`, async () => {
       test.setTimeout(1_800_000);
       const kit = generateKit({ layers });
+      // What the room stores and sends: compact, converted as the room converts it.
+      const sent = COMPACT ? compactByInstance(kit.nodes).nodes : kit.nodes;
       const chunks: string[] = [];
-      for (let i = 0; i < kit.nodes.length; i += CHUNK)
-        chunks.push(JSON.stringify(kit.nodes.slice(i, i + CHUNK)));
+      for (let i = 0; i < sent.length; i += CHUNK)
+        chunks.push(JSON.stringify(sent.slice(i, i + CHUNK)));
       const page = instance.page;
       await page.route("**/__corpus/*", (route) =>
         route.fulfill({
@@ -170,17 +185,13 @@ test.describe("Scale", () => {
       await cdp.send("Performance.enable");
 
       await page.goto("/");
-      await page.evaluate((compact) => {
-        localStorage.setItem("drawpane:debug", "1");
-        if (compact) localStorage.setItem("drawpane:compact-copies", "1");
-        else localStorage.removeItem("drawpane:compact-copies");
-      }, COMPACT);
+      await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
       await page.getByRole("button", { name: "New file" }).first().click();
       await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
         timeout: 30_000,
       });
       const before = await heapMb(cdp);
-      const resetMs = await load(page, chunks.length);
+      const resetMs = await load(page, chunks.length, COMPACT);
       chunks.length = 0;
       const storedNow = await stored(page);
       const shown = await firstFrame(page, largestPage(kit.nodes));

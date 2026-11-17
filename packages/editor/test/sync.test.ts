@@ -1,6 +1,8 @@
 import {
   applyTransaction,
   type ClientMessage,
+  type CopiesFormat,
+  copyId,
   keyBetween,
   MemoryStore,
   ModelError,
@@ -11,7 +13,7 @@ import {
 } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { Doc } from "../src/doc";
+import { compactCopiesDefault, Doc } from "../src/doc";
 import { compactOps, SyncEngine } from "../src/sync";
 
 /** A client further behind than this loads the file again (the room's MAX_CATCHUP_BYTES). */
@@ -20,6 +22,11 @@ const MAX_BEHIND = 3;
 const INLINE_NODES = 3;
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+/** How a room stores copies in this run (the tests' second run turns compact copies on). */
+const roomForm = (): CopiesFormat => (compactCopiesDefault() ? "compact" : "materialized");
+/** What a client says it reads in its hello (protocol 2). */
+const HELLO = { t: "hello", protocol: 2, copies: ["materialized", "compact"] } as const;
 
 /** A FileRoom stand-in with the same ordering, dedupe, catch-up and download rules. */
 class FakeRoom {
@@ -39,14 +46,17 @@ class FakeRoom {
     this.latestSaved = this.revn;
   }
 
+  /** How the room stores copies (decision 0029), which its snapshots' headers say. */
+  readonly copies: CopiesFormat = roomForm();
+
   /** What `GET /api/files/:id/document` answers for a ticket. */
-  download(ticket: string): { revn: number; nodes: NodeRecord[] } {
+  download(ticket: string): { revn: number; nodes: NodeRecord[]; copies: CopiesFormat } {
     const saved = /^saved:(\d+)$/.exec(ticket);
     if (saved) {
       const revn = Number(saved[1]);
-      return { revn, nodes: clone(this.saved.get(revn) as NodeRecord[]) };
+      return { revn, nodes: clone(this.saved.get(revn) as NodeRecord[]), copies: this.copies };
     }
-    return { revn: this.revn, nodes: clone([...this.store.nodes()]) };
+    return { revn: this.revn, nodes: clone([...this.store.nodes()]), copies: this.copies };
   }
 
   constructor(seed: Op[]) {
@@ -73,6 +83,7 @@ class FakeRoom {
         peers: [],
         mode: catchup ? "catchup" : download ? "download" : "snapshot",
         lastSeq: this.lastSeq.get(message.clientId)?.seq ?? 0,
+        copies: this.copies,
         ...(download ? { ticket: from === null ? "live" : `saved:${from}` } : {}),
       });
       const after = catchup ? (message.revn ?? 0) : download && from !== null ? from : null;
@@ -160,7 +171,7 @@ class Client {
   /** Downloads asked for and not yet answered, oldest first, from this and earlier connections. */
   readonly downloads: Array<{
     ticket: string;
-    resolve: (file: { revn: number; nodes: NodeRecord[] }) => void;
+    resolve: (file: { revn: number; nodes: NodeRecord[]; copies: CopiesFormat }) => void;
     reject: (error: Error) => void;
   }> = [];
   /** Timers the engine set; they fire only when the test runs them. */
@@ -233,8 +244,62 @@ const seed: Op[] = [
   { op: "create", id: PAGE, type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page 1" } },
 ];
 
+/**
+ * The seed with a component: a main holding a layer, and two instances of
+ * it. Stored as the room stores it in this run: compact (instance roots
+ * only, copies presented from the main) or materialized (each copy a
+ * stored layer that mirrors the main's).
+ */
+function componentSeed(): Op[] {
+  const box = { x: 0, y: 0, width: 100, height: 100 };
+  const layer = { x: 0, y: 0, width: 100, height: 10 };
+  const ops: Op[] = [
+    ...seed,
+    {
+      op: "create",
+      id: "M",
+      type: "frame",
+      parent: PAGE,
+      key: "a1",
+      props: { ...box, isComponent: true },
+    },
+    { op: "create", id: "R", type: "rect", parent: "M", key: "a0", props: layer },
+  ];
+  for (const [i, key] of [
+    ["1", "a2"],
+    ["2", "a3"],
+  ] as const) {
+    ops.push({
+      op: "create",
+      id: `I${i}`,
+      type: "frame",
+      parent: PAGE,
+      key,
+      props: { ...box, instanceOf: "M" },
+    });
+    if (roomForm() === "materialized")
+      ops.push({
+        op: "create",
+        id: `C${i}`,
+        type: "rect",
+        parent: `I${i}`,
+        key: "a0",
+        props: { ...layer, mirrors: "R" },
+      });
+  }
+  return ops;
+}
+
+/** Nodes as sorted strings, their values in key order (an edit may store a value again, last). */
 function snapshot(nodes: Iterable<NodeRecord>) {
-  return [...nodes].map((n) => JSON.stringify(n)).sort();
+  return [...nodes]
+    .map((n) => {
+      const props = Object.fromEntries(
+        Object.entries(n.props).sort(([a], [b]) => (a < b ? -1 : 1)),
+      );
+      return JSON.stringify({ ...n, props });
+    })
+    .sort();
 }
 
 type Action =
@@ -252,7 +317,17 @@ function makeEdit(doc: Doc, choice: number, value: number, counter: { n: number 
   const layers = [...doc.nodes()].filter((n) => n.type !== "page");
   const containers = [...doc.nodes()].filter((n) => n.type === "page" || n.type === "frame");
   const pick = <T>(list: T[]): T | undefined => list[value % Math.max(1, list.length)];
-  switch (choice % 5) {
+  switch (choice % 7) {
+    case 5:
+    case 6: {
+      // A width on the main's layer or one of its copies (an override record when compact),
+      // from few values, so a copy's override often comes to equal its main's.
+      const targets = layers.filter((n) => n.id === "R" || n.props.mirrors !== undefined);
+      const node = pick(targets);
+      return node
+        ? [{ op: "set", id: node.id, prop: "width", value: 100 * (1 + (choice % 3)) }]
+        : null;
+    }
     case 0:
     case 1: {
       const parent = pick(containers);
@@ -338,7 +413,7 @@ describe("SyncEngine convergence", () => {
       fc.asyncProperty(
         fc.array(action, { minLength: 60, maxLength: 240, size: "max" }),
         async (actions) => {
-          const room = new FakeRoom(seed);
+          const room = new FakeRoom(componentSeed());
           // Two clients download a large file, one is sent it through the socket.
           const clients = [0, 1, 2].map((i) => new Client(room, `client${i}`, i > 0));
           for (const client of clients) {
@@ -398,20 +473,26 @@ describe("SyncEngine convergence", () => {
             }
             if (!moved) break;
           }
+          // What the room stores, and that presented as a client loading it would.
           const expected = snapshot(room.store.nodes());
+          const presented = new Doc();
+          presented.resetStored(clone([...room.store.nodes()]), room.copies);
+          const shown = snapshot(presented.nodes());
           for (const client of clients)
             expect({
               client: client.id,
               status: client.engine.status,
               revn: client.engine.revn,
               pending: client.engine.pendingCount,
+              stored: snapshot(client.doc.stored()),
               nodes: snapshot(client.doc.nodes()),
             }).toEqual({
               client: client.id,
               status: "live",
               revn: room.revn,
               pending: 0,
-              nodes: expected,
+              stored: expected,
+              nodes: shown,
             });
         },
       ),
@@ -499,6 +580,7 @@ describe("SyncEngine room requests", () => {
       peers: [],
       mode: "snapshot",
       lastSeq: 0,
+      copies: compactCopiesDefault() ? "compact" : "materialized",
     });
     engine.receive({ t: "snapshot", nodes: [], done: true });
     return { doc, engine, sent };
@@ -511,7 +593,7 @@ describe("SyncEngine room requests", () => {
     const sent: ClientMessage[] = [];
     const download = () => new Promise<never>(() => {});
     engine.connected((m) => sent.push(m), { download });
-    expect(sent).toEqual([{ t: "hello", protocol: 1, clientId: "c1", revn: null, download: true }]);
+    expect(sent).toEqual([{ ...HELLO, clientId: "c1", revn: null, download: true }]);
     const welcome = (mode: "snapshot" | "download") =>
       engine.receive({
         t: "welcome",
@@ -521,6 +603,7 @@ describe("SyncEngine room requests", () => {
         peers: [],
         mode,
         lastSeq: 0,
+        copies: roomForm(),
         ...(mode === "download" ? { ticket: "t" } : {}),
       });
     for (const mode of ["snapshot", "download"] as const) {
@@ -530,9 +613,7 @@ describe("SyncEngine room requests", () => {
       engine.disconnected();
       sent.length = 0;
       engine.connected((m) => sent.push(m), { download });
-      expect(sent).toEqual([
-        { t: "hello", protocol: 1, clientId: "c1", revn: null, download: true },
-      ]);
+      expect(sent).toEqual([{ ...HELLO, clientId: "c1", revn: null, download: true }]);
       expect(engine.revn).toBeNull();
     }
   });
@@ -554,7 +635,7 @@ describe("SyncEngine room requests", () => {
     engine.disconnected();
     sent.length = 0;
     engine.connected((m) => sent.push(m));
-    expect(sent).toEqual([{ t: "hello", protocol: 1, clientId: "c1", revn: null }]);
+    expect(sent).toEqual([{ ...HELLO, clientId: "c1", revn: null }]);
   });
 
   it("sends one hello at a time, however often the room asks to reload before answering", () => {
@@ -581,6 +662,7 @@ describe("SyncEngine room requests", () => {
         peers: [],
         mode: "download",
         lastSeq: 0,
+        copies: roomForm(),
         ticket: "t",
       });
     engine.connected(() => {}, { download });
@@ -598,7 +680,7 @@ describe("SyncEngine room requests", () => {
     const engine = new SyncEngine(doc, { clientId: "c1", setTimer: (fn) => timers.push(fn) });
     const sent: ClientMessage[] = [];
     const answers: Array<{
-      resolve: (file: { revn: number; nodes: NodeRecord[] }) => void;
+      resolve: (file: { revn: number; nodes: NodeRecord[]; copies: CopiesFormat }) => void;
       reject: (error: Error) => void;
     }> = [];
     engine.connected((m) => sent.push(m), {
@@ -621,6 +703,7 @@ describe("SyncEngine room requests", () => {
         peers: [],
         mode: "download",
         lastSeq: 0,
+        copies: roomForm(),
         ticket: "saved-1",
       });
       engine.receive({
@@ -640,12 +723,66 @@ describe("SyncEngine room requests", () => {
     timers.shift()?.();
     expect(sent.at(-1)).toMatchObject({ t: "hello", revn: null, download: true });
     welcomeAndReplay();
-    answers.shift()?.resolve({ revn: 1, nodes: [page] });
+    answers.shift()?.resolve({ revn: 1, nodes: [page], copies: roomForm() });
     await settle();
     expect(engine.status).toBe("live");
     expect(engine.revn).toBe(2);
     expect(doc.get(PAGE)?.props.name).toBe("Renamed");
     expect(sent.filter((m) => m.t === "hello")).toHaveLength(2);
+  });
+
+  it("doesn't load a download in another form than the welcome said, and asks again later", async () => {
+    // The file changed form between the welcome and the download (decision 0029): the room only
+    // takes changes in the form it welcomed this client in.
+    const doc = new Doc();
+    const timers: Array<() => void> = [];
+    const engine = new SyncEngine(doc, { clientId: "c1", setTimer: (fn) => timers.push(fn) });
+    const sent: ClientMessage[] = [];
+    const other: CopiesFormat = roomForm() === "compact" ? "materialized" : "compact";
+    engine.connected((m) => sent.push(m), {
+      download: async () => ({ revn: 1, nodes: [doc.get(ROOT_ID) as NodeRecord], copies: other }),
+    });
+    engine.receive({
+      t: "welcome",
+      sessionId: "s1",
+      revn: 1,
+      role: "editor",
+      peers: [],
+      mode: "download",
+      lastSeq: 0,
+      copies: roomForm(),
+      ticket: "t",
+    });
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    expect(engine.status).toBe("syncing");
+    expect(engine.revn).toBeNull();
+    // Asked for again after a wait, not at once (no loop with a room that keeps doing it).
+    expect(sent.filter((m) => m.t === "hello")).toHaveLength(1);
+    expect(timers).toHaveLength(1);
+    timers.shift()?.();
+    expect(sent.at(-1)).toMatchObject({ t: "hello", revn: null, download: true });
+  });
+
+  it("asks for the file when a catch-up comes in another form than the document's", () => {
+    const { doc, engine, sent } = live();
+    const other: CopiesFormat = doc.copies === "compact" ? "materialized" : "compact";
+    engine.disconnected();
+    sent.length = 0;
+    engine.connected((m) => sent.push(m));
+    expect(sent).toEqual([{ ...HELLO, clientId: "c1", revn: 1 }]);
+    engine.receive({
+      t: "welcome",
+      sessionId: "s1",
+      revn: 2,
+      role: "editor",
+      peers: [],
+      mode: "catchup",
+      lastSeq: 0,
+      copies: other,
+    });
+    expect(sent.at(-1)).toEqual({ ...HELLO, clientId: "c1", revn: null });
+    expect(engine.status).toBe("syncing");
+    expect(engine.copies).toBe(other);
   });
 
   it("reloads quietly when the room asks, keeping pending edits", () => {
@@ -656,7 +793,15 @@ describe("SyncEngine room requests", () => {
     sent.length = 0;
     engine.receive({ t: "resync" });
     expect(engine.status).toBe("syncing");
-    expect(sent).toEqual([{ t: "hello", protocol: 1, clientId: "c1", revn: null }]);
+    expect(sent).toEqual([
+      {
+        t: "hello",
+        protocol: 2,
+        clientId: "c1",
+        revn: null,
+        copies: ["materialized", "compact"],
+      },
+    ]);
     expect(engine.pendingCount).toBe(1);
     expect(desyncs).toEqual([]);
   });
@@ -696,6 +841,7 @@ describe("SyncEngine room requests", () => {
       peers: [],
       mode: "snapshot",
       lastSeq: 0,
+      copies: compactCopiesDefault() ? "compact" : "materialized",
     });
     engine.receive({ t: "snapshot", nodes: [], done: true });
     engine.commit(seed);
@@ -748,6 +894,7 @@ describe("SyncEngine in a file deeper than 128 levels", () => {
       peers: [],
       mode: "snapshot",
       lastSeq: 0,
+      copies: compactCopiesDefault() ? "compact" : "materialized",
     });
     engine.receive({ t: "snapshot", nodes, done: true });
     const desyncs: string[] = [];
@@ -768,5 +915,54 @@ describe("SyncEngine in a file deeper than 128 levels", () => {
     // The room confirms the delete.
     engine.receive({ t: "ack", seq: 1, revn: 3 });
     expect(desyncs).toEqual([]);
+  });
+});
+
+describe("SyncEngine with compact copies", () => {
+  it("rebases an edit already sent as the room will apply it, not stored again", () => {
+    // A copy's width is 100. This client sets it to 200; before the room confirms that, another
+    // client's change to the main's width (to 200 too) arrives. Stored again on top of it, the
+    // edit would store nothing (the copy equals its main), but the room applies what was sent:
+    // a record of 200. So a later change of the main to 300 shows 200 in the room.
+    const nodes: NodeRecord[] = [
+      { id: "P", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      { id: "M", type: "frame", parent: "P", key: "a0", props: { isComponent: true } },
+      { id: "R", type: "rect", parent: "M", key: "a0", props: { width: 100 } },
+      { id: "I", type: "frame", parent: "P", key: "a1", props: { instanceOf: "M" } },
+    ];
+    const room = new Doc();
+    room.resetStored(clone(nodes), "compact");
+    const doc = new Doc();
+    const sent: ClientMessage[] = [];
+    const engine = new SyncEngine(doc, { clientId: "A", setTimer: () => 0 });
+    engine.connected((m) => sent.push(clone(m)));
+    engine.receive({
+      t: "welcome",
+      sessionId: "A",
+      revn: 1,
+      role: "editor",
+      peers: [],
+      mode: "snapshot",
+      lastSeq: 0,
+      copies: "compact",
+    });
+    engine.receive({ t: "snapshot", nodes: clone(nodes), done: true });
+    const copy = copyId("I", ["R"]);
+    engine.commit([{ op: "set", id: copy, prop: "width", value: 200 }]);
+    engine.flush();
+    const txn = sent.find((m) => m.t === "txn");
+    if (txn?.t !== "txn") throw new Error("nothing was sent");
+    const author = { userId: "B", sessionId: "B" };
+    const remote: Op[] = [{ op: "set", id: "R", prop: "width", value: 200 }];
+    room.applyStored(remote);
+    engine.receive({ t: "txn", revn: 2, ops: remote, author });
+    room.applyStored(txn.ops as Op[]);
+    engine.receive({ t: "ack", seq: txn.seq, revn: 3 });
+    expect(snapshot(doc.stored())).toEqual(snapshot(room.stored()));
+    const later: Op[] = [{ op: "set", id: "R", prop: "width", value: 300 }];
+    room.applyStored(later);
+    engine.receive({ t: "txn", revn: 4, ops: later, author });
+    expect(room.get(copy)?.props.width).toBe(200);
+    expect(doc.get(copy)?.props.width).toBe(200);
   });
 });

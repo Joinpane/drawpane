@@ -8,6 +8,8 @@
  * words, with its size.
  */
 import {
+  type CopiesFormat,
+  compactByInstance,
   IMPORT_PART_BYTES,
   MAX_IMPORT_BYTES,
   MAX_IMPORT_NODES,
@@ -84,7 +86,8 @@ export async function saveImport(
   onProgress?: (sent: number, total: number) => void,
 ): Promise<void> {
   const file = `/files/${encodeURIComponent(fileId)}`;
-  const parts = partsOf(nodes);
+  let parts = partsOf(nodes);
+  let total = nodes.length;
   // The first part is measured before anything is sent: most imports are one.
   let next = parts.next();
   const tooLarge = (bytes: number, sent: number) =>
@@ -97,8 +100,21 @@ export async function saveImport(
   if (!next.done && next.value.bytes > MAX_IMPORT_BYTES)
     throw tooLarge(next.value.bytes, next.value.count);
 
-  const { importId } = await api.post<{ importId: string }>(`${file}/imports`, {});
+  const { importId, copies } = await api.post<{ importId: string; copies?: CopiesFormat }>(
+    `${file}/imports`,
+    {},
+  );
   const imports = `${file}/imports/${encodeURIComponent(importId)}`;
+  // Into a file that stores compact copies (decision 0029), copies go as override records:
+  // about a fifth to send. Converted by the room's own steps (an instance at a time, each
+  // verified, ids layers hold renamed), so it's stored exactly as the room would store it sent
+  // materialized; the room takes what's said to be compact as it is.
+  if (copies === "compact") {
+    const stored = compactByInstance(nodes).nodes;
+    parts = partsOf(stored);
+    next = parts.next();
+    total = stored.length;
+  }
   let sent = 0;
   let bytes = 0;
   try {
@@ -112,9 +128,12 @@ export async function saveImport(
         );
       await api.post(`${imports}/parts`, new JsonText(part.body));
       sent += part.count;
-      onProgress?.(sent, nodes.length);
+      onProgress?.(Math.round((sent / total) * nodes.length), nodes.length);
     }
-    await api.post(`${imports}/commit`, {});
+    // Says how the parts store copies, so the room converts only what came materialized.
+    await api.post(`${imports}/commit`, {
+      copies: copies === "compact" ? "compact" : "materialized",
+    });
   } catch (error) {
     // Nothing of it shows: what was sent is thrown away.
     await api.delete(imports).catch(() => undefined);

@@ -2,10 +2,12 @@
 import {
   type BranchInfo,
   type BranchReviewNodes,
+  type CopiesFormat,
   type LibraryPublish,
   type NodeRecord,
   parseBranchReview,
   type Resolution,
+  snapshotCopies,
   type VersionInfo,
 } from "@drawpane/model";
 
@@ -152,7 +154,11 @@ async function requestText(method: string, path: string): Promise<string> {
 async function requestSnapshot(
   path: string,
   signal?: AbortSignal,
-): Promise<{ readonly revn: number; readonly nodes: NodeRecord[] }> {
+): Promise<{
+  readonly revn: number;
+  readonly nodes: NodeRecord[];
+  readonly copies: CopiesFormat;
+}> {
   const response = await send("GET", path, undefined, signal);
   if (!response.ok) await readJson(response);
   let snapshot: Awaited<ReturnType<typeof readSnapshotStream>>;
@@ -162,7 +168,11 @@ async function requestSnapshot(
     throw new ApiError(0, "network", "The file stopped arriving partway. Trying again.");
   }
   if (!snapshot) throw new ApiError(500, "internal", "That file couldn't be read.");
-  return { revn: snapshot.header.revn, nodes: snapshot.nodes };
+  return {
+    revn: snapshot.header.revn,
+    nodes: snapshot.nodes,
+    copies: snapshotCopies(snapshot.header),
+  };
 }
 
 async function send(
@@ -277,12 +287,20 @@ export const api = {
     versionId: string,
     body: { name?: string | null; description?: string | null },
   ) => request<{ version: VersionInfo }>("PATCH", `/files/${fileId}/versions/${versionId}`, body),
-  /** The file's nodes as they were in a version. */
-  versionNodes: async (fileId: string, versionId: string): Promise<NodeRecord[]> =>
-    (await requestSnapshot(`/files/${fileId}/versions/${versionId}/snapshot`)).nodes,
+  /** The file's nodes as they were in a version, and how they store copies (decision 0029). */
+  versionNodes: async (
+    fileId: string,
+    versionId: string,
+  ): Promise<{ nodes: NodeRecord[]; copies: CopiesFormat }> => {
+    const { nodes, copies } = await requestSnapshot(
+      `/files/${fileId}/versions/${versionId}/snapshot`,
+    );
+    return { nodes, copies };
+  },
   /**
    * A file too large for its room's socket, with the ticket the room gave
-   * (sync mode `download`): its nodes and the revision they're at.
+   * (sync mode `download`): its nodes, the revision they're at, and how they
+   * store copies (decision 0029).
    */
   downloadDocument: (fileId: string, ticket: string, signal?: AbortSignal) =>
     requestSnapshot(

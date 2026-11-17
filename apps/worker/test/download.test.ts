@@ -83,7 +83,8 @@ interface Welcome {
 async function hello(socket: Socket, clientId: string, download: boolean): Promise<Welcome> {
   socket.send({
     t: "hello",
-    protocol: 1,
+    protocol: 2,
+    copies: ["materialized", "compact"],
     clientId,
     revn: null,
     ...(download ? { download: true } : {}),
@@ -110,7 +111,13 @@ async function download(browser: Browser, fileId: string, ticket: string) {
 async function editor(browser: Browser, fileId: string) {
   const socket = await openSocket(browser, fileId);
   const { revn } = await roomOf(fileId).stats();
-  socket.send({ t: "hello", protocol: 1, clientId: "editor1", revn });
+  socket.send({
+    t: "hello",
+    protocol: 2,
+    copies: ["materialized", "compact"],
+    clientId: "editor1",
+    revn,
+  });
   await socket.next("welcome", 10_000);
   let seq = 0;
   return async (ops: Op[]) => {
@@ -348,7 +355,14 @@ describe("opening a file larger than one snapshot chunk", () => {
       try {
         const hello = room.webSocketMessage(
           ws,
-          JSON.stringify({ t: "hello", protocol: 1, clientId: "race", revn: null, download: true }),
+          JSON.stringify({
+            t: "hello",
+            protocol: 2,
+            copies: ["materialized", "compact"],
+            clientId: "race",
+            revn: null,
+            download: true,
+          }),
         );
         await started;
         await env.DB.prepare("UPDATE team_members SET role = 'viewer' WHERE user_id = ?")

@@ -11,6 +11,7 @@
  * (one JSON object, every node in `nodes`) is read as a stream too.
  */
 import {
+  type CopiesFormat,
   type NodeRecord,
   SNAPSHOT_FORMAT,
   type SnapshotHeader,
@@ -59,8 +60,16 @@ const METADATA = (revn: number) => ({
  * gzip bytes. `finished` runs once, when it has been read to the end or let
  * go: where the caller drops the table it reads from.
  */
+export interface WrittenHeader {
+  readonly fileId: string;
+  readonly revn: number;
+  readonly at: number;
+  /** How the rows store copies (decision 0029); materialized when not said. */
+  readonly copies?: CopiesFormat;
+}
+
 export function snapshotStream(
-  header: { readonly fileId: string; readonly revn: number; readonly at: number },
+  header: WrittenHeader,
   pages: Iterator<NodeRow[]>,
   finished: () => void = () => {},
 ): ReadableStream<Uint8Array> {
@@ -78,7 +87,9 @@ export function snapshotStream(
         if (!started) {
           started = true;
           controller.enqueue(
-            encoder.encode(snapshotHeaderLine(header.fileId, header.revn, header.at)),
+            encoder.encode(
+              snapshotHeaderLine(header.fileId, header.revn, header.at, header.copies),
+            ),
           );
           return;
         }
@@ -157,7 +168,7 @@ export async function putStream(
 export function writeSnapshot(
   bucket: R2Bucket,
   key: string,
-  header: { readonly fileId: string; readonly revn: number; readonly at: number },
+  header: WrittenHeader,
   pages: Iterator<NodeRow[]>,
 ): Promise<number> {
   return putStream(bucket, key, snapshotStream(header, pages), header.revn);
@@ -467,9 +478,10 @@ export function reviewStream(
         }
         const [name, source] = upcoming;
         const revn = source.header.revn;
+        const copies = source.header.copies === "compact" ? { copies: "compact" } : {};
         controller.enqueue(
           encoder.encode(
-            `${JSON.stringify({ review: name, ...(revn === undefined ? {} : { revn }) })}\n`,
+            `${JSON.stringify({ review: name, ...(revn === undefined ? {} : { revn }), ...copies })}\n`,
           ),
         );
         return;

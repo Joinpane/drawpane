@@ -212,6 +212,30 @@ async function relay(env: Env, fileId: string, event: CommentEvent): Promise<voi
   }
 }
 
+/**
+ * The layer a pin names, as the file names it now (decision 0029): a copy
+ * layer's id from before the file changed how it stores copies (a tab not
+ * reloaded yet) is translated by its room, from the map it keeps for a
+ * week or the copy of it in R2. Null when the file doesn't have the layer,
+ * or when the room can't say (unreachable, or the map unreadable): the
+ * comment is pinned to its point on the page instead, never to an id the
+ * file may not have.
+ */
+async function pinTarget(
+  env: Env,
+  fileId: string,
+  pageId: string,
+  nodeId: string | null,
+): Promise<string | null> {
+  if (nodeId === null) return null;
+  try {
+    return await env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId)).pinTarget(nodeId, pageId);
+  } catch (error) {
+    console.error("couldn't check a pin's layer; pinned to the page", error);
+    return null;
+  }
+}
+
 interface MessageAccess {
   id: string;
   thread_id: string;
@@ -271,6 +295,9 @@ export const comments = new Hono<AppContext>()
     const { file } = await fileForWrite(c, user);
     const body = await readBody(c, NewCommentThread);
     const mentions = await validMentions(c.env.DB, file, body.mentions);
+    const nodeId = await pinTarget(c.env, file.id, body.pageId, body.nodeId ?? null);
+    // Not pinned to a layer the file doesn't have: to its point on the page.
+    const offset = nodeId === null ? null : (body.offset ?? null);
     const threadId = newId();
     const commentId = newId();
     const now = Date.now();
@@ -284,9 +311,9 @@ export const comments = new Hono<AppContext>()
         body.pageId,
         body.x,
         body.y,
-        body.nodeId,
-        body.offset?.x ?? null,
-        body.offset?.y ?? null,
+        nodeId,
+        offset?.x ?? null,
+        offset?.y ?? null,
         user.id,
         now,
         now,
@@ -356,10 +383,10 @@ export const comments = new Hono<AppContext>()
     const threadId = c.req.param("threadId");
     const { resolved, anchor } = await readBody(c, CommentThreadPatch);
     const row = await c.env.DB.prepare(
-      "SELECT created_by, resolved_at FROM comment_threads WHERE id = ? AND file_id = ?",
+      "SELECT created_by, resolved_at, page_id FROM comment_threads WHERE id = ? AND file_id = ?",
     )
       .bind(threadId, file.id)
-      .first<{ created_by: string | null; resolved_at: number | null }>();
+      .first<{ created_by: string | null; resolved_at: number | null; page_id: string }>();
     if (!row) throw notFound("That comment was deleted. Refresh the comments list.");
     // Anyone who can comment can resolve; moving someone else's pin takes edit access.
     if (anchor && role === "viewer" && row.created_by !== user.id)
@@ -385,20 +412,14 @@ export const comments = new Hono<AppContext>()
       );
     }
     if (anchor) {
+      const nodeId = await pinTarget(c.env, file.id, row.page_id, anchor.nodeId ?? null);
+      const offset = nodeId === null ? null : (anchor.offset ?? null);
       // Moving a pin isn't activity: it leaves updated_at (and list order) alone.
       writes.push(
         c.env.DB.prepare(
           `UPDATE comment_threads SET x = ?, y = ?, node_id = ?, node_x = ?, node_y = ?
             WHERE id = ? AND file_id = ?`,
-        ).bind(
-          anchor.x,
-          anchor.y,
-          anchor.nodeId,
-          anchor.offset?.x ?? null,
-          anchor.offset?.y ?? null,
-          threadId,
-          file.id,
-        ),
+        ).bind(anchor.x, anchor.y, nodeId, offset?.x ?? null, offset?.y ?? null, threadId, file.id),
       );
     }
     await c.env.DB.batch(writes);
