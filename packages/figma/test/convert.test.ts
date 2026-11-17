@@ -88,9 +88,26 @@ describe("a real Figma file", () => {
     const card = nodes.find(
       (n) => n.parent === drawpaneId(findCell("shadows/drop-layered")) && n.type === "rect",
     ) as NodeRecord;
+    // These were built with "Show behind transparent areas" off.
     expect(getProp(card.props, "effects")).toEqual([
-      { type: "drop-shadow", color: "#0000001a", x: 0, y: 1, blur: 2, spread: 0 },
-      { type: "drop-shadow", color: "#0000001f", x: 0, y: 8, blur: 24, spread: 0 },
+      {
+        type: "drop-shadow",
+        color: "#0000001a",
+        x: 0,
+        y: 1,
+        blur: 2,
+        spread: 0,
+        showBehind: false,
+      },
+      {
+        type: "drop-shadow",
+        color: "#0000001f",
+        x: 0,
+        y: 8,
+        blur: 24,
+        spread: 0,
+        showBehind: false,
+      },
     ]);
     // Glass comes in with defaults: Figma's API doesn't give its settings.
     expect(notes.lines()).toContain(
@@ -448,5 +465,76 @@ describe("vectors", () => {
         ],
       }),
     ).toBe("M0 0 L10 0 C15 0 10 5 10 10");
+  });
+});
+
+describe("drop shadows behind the layer", () => {
+  it("keeps Figma's \"Show behind transparent areas\" when it's off", () => {
+    const shadow = (showShadowBehindNode?: boolean): Figma.Effect => ({
+      type: "DROP_SHADOW",
+      color: { r: 1, g: 0, b: 0, a: 0.4 },
+      offset: { x: 0, y: 0 },
+      radius: 0,
+      spread: 3,
+      ...(showShadowBehindNode === undefined ? {} : { showShadowBehindNode }),
+    });
+    const field = (id: string, name: string, effect: Figma.Effect) =>
+      node({
+        id,
+        type: "FRAME",
+        name,
+        size: { x: 200, y: 32 },
+        relativeTransform: at(0, 0),
+        absoluteBoundingBox: { x: 0, y: 0, width: 200, height: 32 },
+        fills: [{ type: "SOLID", color: white, opacity: 0.1 }],
+        effects: [effect],
+      });
+    const { nodes } = convertFile(
+      file(
+        field("1:1", "Off", shadow(false)),
+        field("1:2", "On", shadow(true)),
+        field("1:3", "Unsaid", shadow()),
+      ),
+    );
+    validate(nodes);
+    expect(getProp(byName(nodes, "Off").props, "effects")[0]).toMatchObject({ showBehind: false });
+    // Shown behind is Drawpane's default: nothing to keep.
+    expect(getProp(byName(nodes, "On").props, "effects")[0]).not.toHaveProperty("showBehind");
+    expect(getProp(byName(nodes, "Unsaid").props, "effects")[0]).not.toHaveProperty("showBehind");
+  });
+});
+
+describe("image crops", () => {
+  it("keeps a crop that reaches past the image: a picture inset in its layer", () => {
+    const sha = "a".repeat(64);
+    const card = node({
+      id: "1:1",
+      type: "RECTANGLE",
+      name: "Card",
+      size: { x: 300, y: 170 },
+      relativeTransform: at(0, 0),
+      absoluteBoundingBox: { x: 0, y: 0, width: 300, height: 170 },
+      fills: [
+        { type: "SOLID", color: { r: 0.17, g: 0.17, b: 0.17, a: 1 } },
+        {
+          type: "IMAGE",
+          scaleMode: "STRETCH",
+          imageRef: "ref",
+          // The layer's unit square onto the image's: taller than the image, starting above it.
+          imageTransform: [
+            [1, 0, 0],
+            [0, 1.22, -0.11],
+          ],
+        },
+      ],
+    });
+    const { nodes } = convertFile(file(card), { images: () => sha });
+    validate(nodes);
+    expect(getProp(byName(nodes, "Card").props, "fills")[1]).toEqual({
+      type: "image",
+      ref: sha,
+      scaleMode: "crop",
+      crop: { x: 0, y: -0.11, width: 1, height: 1.22 },
+    });
   });
 });

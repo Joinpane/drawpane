@@ -82,7 +82,9 @@ async function buildParity(figma, suites) {
           spread: e.spread,
           visible,
           blendMode: "NORMAL",
-          ...(e.type === "drop-shadow" ? { showShadowBehindNode: false } : {}),
+          // Drawpane's shadows show behind see-through fills unless they say not to. The goldens
+          // so far were built with it off, on opaque fills, where it makes no difference.
+          ...(e.type === "drop-shadow" ? { showShadowBehindNode: e.showBehind !== false } : {}),
         };
       case "layer-blur":
       case "background-blur":

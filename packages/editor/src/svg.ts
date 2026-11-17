@@ -41,6 +41,7 @@ import { noiseThresholdZ } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { textSpans } from "./rich-text";
 import type { Scene } from "./scene";
+import { dropShadowCast } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
   layoutText,
@@ -563,8 +564,8 @@ export function exportSvg(
 
   /**
    * Drop shadows, under the layer: its shape grown by the spread (or its
-   * glyphs, for text) in the shadow's colour, offset and blurred. Whatever
-   * the fill's opacity, as on the canvas.
+   * glyphs, for text) in the shadow's colour, offset and blurred, and cut
+   * out under the shape where the canvas cuts it out (`dropShadowCast`).
    */
   const dropShadows = (
     node: NodeRecord,
@@ -580,12 +581,20 @@ export function exportSvg(
       const { color, alpha } = splitColor(s.color);
       const ink = `${attr("fill", color)}${alpha < 1 ? attr("fill-opacity", alpha) : ""}`;
       if (shape) {
-        const grown = spreadShapeOf(node, w, h, s.spread);
+        // Cast as on the canvas (decision 0031).
+        const cast = dropShadowCast(node, s);
+        const grown = spreadShapeOf(node, w, h, cast.spread);
         if (!grown) continue;
         const filter = shadowFilter(s, region, false);
-        into.push(
-          `<g filter="url(#${filter})"><${grown.tag}${transformAttr(matrix)}${grown.attrs}${ink}/></g>`,
-        );
+        const drawn = `<g filter="url(#${filter})"><${grown.tag}${transformAttr(matrix)}${grown.attrs}${ink}/></g>`;
+        if (cast.cutOut) {
+          // Masked out under the layer's shape.
+          const mask = out.id("cut");
+          out.defs.push(
+            `<mask id="${mask}" maskUnits="userSpaceOnUse"${region}><rect${region} fill="#fff"/><${shape.tag}${transformAttr(matrix)}${shape.attrs} fill="#000"/></mask>`,
+          );
+          into.push(`<g mask="url(#${mask})">${drawn}</g>`);
+        } else into.push(drawn);
       } else {
         // Text: the glyphs' silhouette, filled with the shadow's colour.
         const glyphs: string[] = [];

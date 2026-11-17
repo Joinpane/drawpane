@@ -84,6 +84,9 @@ export function effectOfType(type: EffectType, from?: Effect): Effect {
     y: shadow.y,
     blur: shadow.blur,
     spread: shadow.spread,
+    ...(type === "drop-shadow" && "showBehind" in shadow && shadow.showBehind === false
+      ? { showBehind: false }
+      : {}),
     ...visible,
   };
 }
@@ -260,6 +263,20 @@ function EffectFields({
             color={effect.color}
             onChange={(color, label) => onChange({ ...effect, color }, label)}
           />
+          {effect.type === "drop-shadow" ? (
+            <>
+              <span aria-hidden="true" />
+              <Switch
+                label="Show behind transparent areas"
+                checked={effect.showBehind !== false}
+                onChange={(show) => {
+                  // Showing is the default: kept off the effect rather than saved as true.
+                  const { showBehind: _, ...rest } = effect;
+                  onChange(show ? rest : { ...rest, showBehind: false }, "Shadow behind layer");
+                }}
+              />
+            </>
+          ) : null}
         </>
       ) : (
         <>

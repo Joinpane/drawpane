@@ -25,6 +25,10 @@ export function convertEffect(e: Figma.Effect, notes: Notes): Effect | null {
         y: round2(e.offset?.y ?? 0),
         blur: round2(Math.max(0, e.radius ?? 0)),
         spread: round2(e.spread ?? 0),
+        // "Show behind transparent areas", off: cut out under the layer (decision 0031).
+        ...(e.type === "DROP_SHADOW" && e.showShadowBehindNode === false
+          ? { showBehind: false }
+          : {}),
         ...visible,
       };
     case "LAYER_BLUR":

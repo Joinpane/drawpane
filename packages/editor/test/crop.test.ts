@@ -67,6 +67,26 @@ describe("crop geometry", () => {
     expect(pannedCrop(crop, { width: 100, height: 100 }, -500, 0).x).toBeCloseTo(0.5, 6);
   });
 
+  it("places and slides a crop from Figma that reaches past a smaller image", () => {
+    // Taller than the image and starting above it: the picture is inset in the box.
+    const inset = { x: 0, y: -0.1, width: 1, height: 1.25 };
+    const at = imagePlacement(
+      "crop",
+      { width: 300, height: 170 },
+      { width: 864, height: 398 },
+      inset,
+    );
+    expect(at).toMatchObject({ width: 300, tile: false });
+    expect(at.x).toBeCloseTo(0, 6);
+    expect(at.height).toBeCloseTo(136, 6);
+    expect(at.y).toBeCloseTo(13.6, 6);
+    // Sliding keeps the image inside the box (it never jumps out of it).
+    const box = { width: 300, height: 170 };
+    expect(pannedCrop(inset, box, 0, 10).y).toBeCloseTo(-0.1 - 10 / 136, 6);
+    expect(pannedCrop(inset, box, 0, 500).y).toBeCloseTo(-0.25, 6);
+    expect(pannedCrop(inset, box, 0, -500).y).toBe(0);
+  });
+
   it("keeps a box inside the image, at least a minimum size, and right side up", () => {
     const image = { x: -50, y: 0, width: 200, height: 100 };
     expect(clampBox({ x: -80, y: -10, width: 300, height: 50 }, image)).toEqual({

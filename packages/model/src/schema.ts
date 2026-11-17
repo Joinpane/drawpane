@@ -150,17 +150,23 @@ export const GradientPaint = z.object({
   stops: z.array(GradientStop).min(2).max(32),
   ...paintBase,
 });
-/** The part of an image a cropped fill shows, in the image's unit square (0,0 top-left to 1,1). */
-export const ImageCrop = z
-  .object({
-    x: unit,
-    y: unit,
-    width: finite.refine((n) => n > 0 && n <= 1, "must be more than 0 and at most 1"),
-    height: finite.refine((n) => n > 0 && n <= 1, "must be more than 0 and at most 1"),
-  })
-  .refine((c) => c.x + c.width <= 1.0001 && c.y + c.height <= 1.0001, {
-    message: "The crop has to stay inside the image.",
-  });
+/** How far a crop may reach past its image: ten images' worth either way. */
+const cropOffset = finite.refine((n) => Math.abs(n) <= 10, "must be between -10 and 10");
+const cropSize = finite.refine((n) => n > 0 && n <= 10, "must be more than 0 and at most 10");
+
+/**
+ * The part of an image a cropped fill shows, stretched to the layer's box,
+ * in the image's unit square (0,0 top-left to 1,1). The crop tool keeps it
+ * inside the image. One from Figma can reach past the image's edges: the
+ * image then covers only part of the box, and the rest shows what's under
+ * the paint (a screenshot inset in a dark card).
+ */
+export const ImageCrop = z.object({
+  x: cropOffset,
+  y: cropOffset,
+  width: cropSize,
+  height: cropSize,
+});
 export type ImageCrop = z.infer<typeof ImageCrop>;
 
 export const ImagePaint = z.object({
@@ -183,6 +189,13 @@ export const Shadow = z.object({
   blur: nonNegative,
   spread: finite,
   visible: z.boolean().optional(),
+  /**
+   * Drop shadows: whether the shadow shows through a see-through fill
+   * (Figma's "Show behind transparent areas"). False cuts it out under the
+   * layer's shape. Missing means it shows, as Drawpane's shadows always
+   * have. Decision 0031 has how a layer casts its drop shadow.
+   */
+  showBehind: z.boolean().optional(),
 });
 export const Blur = z.object({
   type: z.enum(["layer-blur", "background-blur"]),

@@ -34,6 +34,7 @@ import { NoiseTiles, paintNoise } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { effectReach } from "./reach";
 import type { Scene } from "./scene";
+import { dropShadowCast } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
   layoutText,
@@ -1880,6 +1881,14 @@ export class CanvasRenderer {
       ctx.shadowOffsetX = s.x * scale;
       ctx.shadowOffsetY = s.y * scale;
       if (kind === "drop-shadow") {
+        // Cast as Figma casts it (decision 0031): cut out under the shape where it mustn't show there.
+        const cast = dropShadowCast(node, s);
+        if (cast.cutOut) {
+          const outside = new Path2D();
+          outside.rect(-1e5, -1e5, 2e5, 2e5);
+          outside.addPath(shape);
+          ctx.clip(outside, "evenodd");
+        }
         // Paint only the shadow: draw the shape far off-canvas and offset its
         // shadow back into place, so translucent fills don't show a dark copy.
         const t = ctx.getTransform();
@@ -1890,7 +1899,7 @@ export class CanvasRenderer {
         if (node.type === "text") this.#text(ctx, node, width, "#000", scale);
         else {
           ctx.fillStyle = "#000";
-          ctx.fill(this.#spreadShape(node, shape, width, height, s.spread));
+          ctx.fill(this.#spreadShape(node, shape, width, height, cast.spread));
         }
       } else {
         ctx.clip(shape);
