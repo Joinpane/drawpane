@@ -5,7 +5,8 @@
  * dragging a layer out of its groups to the level the pointer is at (even
  * the last layer in a frame, over its own row), and into the empty space
  * below the list. A tree too deep for the panel scrolls sideways with its
- * toggles kept in view, and follows a layer selected on the canvas.
+ * toggles kept in view, follows a layer selected on the canvas, and pins the
+ * ancestors of the rows at the top while scrolling inside them.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -508,14 +509,122 @@ test.describe
         await expect(lock).toBeFocused();
       });
 
+      test("pins the ancestors of the rows at the top while scrolling inside them", async () => {
+        // A shorter window, so the tree scrolls well past Level 1 whatever came before.
+        await page.setViewportSize({ width: 1440, height: 640 });
+        await page.evaluate(() => (window as unknown as W).drawpane.select([]));
+        await scrollTo(page, 0, 0);
+        await expect(page.locator(".layers__pin")).toHaveCount(0);
+        // Where Level 1's row is in the tree.
+        await page.evaluate(
+          (id) => (window as unknown as W).drawpane.select([id]),
+          deep.chain[0] as string,
+        );
+        const level1 = await page
+          .locator(`.layers__list [data-layer-id="${deep.chain[0]}"]`)
+          .evaluate((el) => (el as HTMLElement).offsetTop);
+        await page.evaluate(() => (window as unknown as W).drawpane.select([]));
+
+        // A few rows into it, its row and the frames inside it have scrolled out: each is
+        // pinned at the top, outermost first, one row each, indented as in the tree.
+        await scrollTo(page, 0, level1 + 5 * 28 + 10);
+        const pins = page.locator(".layers__pin");
+        await expect.poll(() => pins.count()).toBeGreaterThan(2);
+        const pinned = await pins.evaluateAll((els) =>
+          els.map((el) => {
+            const row = el.querySelector(".dp-layer") as HTMLElement;
+            const name = row.querySelector(".dp-layer__name") as HTMLElement;
+            return {
+              name: name.textContent,
+              top: el.getBoundingClientRect().top,
+              x: name.getBoundingClientRect().left,
+              guides: getComputedStyle(row).backgroundSize,
+            };
+          }),
+        );
+        const area = await scroller(page).boundingBox();
+        if (!area) throw new Error("no tree");
+        pinned.forEach((pin, i) => {
+          expect(pin.name).toBe(`Level ${i + 1}`);
+          expect(pin.top - area.y).toBeCloseTo(i * 28, 0);
+          expect(pin.x - (pinned[0]?.x ?? 0)).toBeCloseTo(i * 12, 0);
+          // The indent guides, one per level above it.
+          expect(pin.guides.startsWith(`${i * 12}px`)).toBe(true);
+        });
+        // They're copies for the eye: the tree (and what assistive tech reads) has each row once.
+        await expect(page.locator(".layers__pinned")).toHaveAttribute("aria-hidden", "true");
+        await expect(row(page, "Level 2")).toHaveCount(1);
+        // Just under the stack, the tree's own rows carry on.
+        const under = await page.evaluate(
+          ({ x, y }) =>
+            document.elementFromPoint(x, y)?.closest(".dp-layer")?.closest(".layers__list"),
+          { x: area.x + area.width / 2, y: area.y + pinned.length * 28 + 4 },
+        );
+        expect(under).not.toBeNull();
+
+        // Scrolled sideways, the pinned rows move with the tree.
+        await scroller(page).evaluate((el) => {
+          el.scrollLeft = 60;
+        });
+        const moved = await pins
+          .first()
+          .locator(".dp-layer__name")
+          .evaluate((el) => el.getBoundingClientRect().left);
+        expect((pinned[0]?.x ?? 0) - moved).toBeCloseTo(60, 0);
+        await scroller(page).evaluate((el) => {
+          el.scrollLeft = 0;
+        });
+
+        // Clicking a pinned row selects that layer and scrolls to its row, just under its ancestors.
+        await pins.nth(1).click({ position: { x: 60, y: 14 } });
+        await expect.poll(() => selection(page)).toEqual([deep.chain[1]]);
+        const level2 = row(page, "Level 2");
+        await expect(level2).toHaveAttribute("aria-selected", "true");
+        await expect(level2).toBeInViewport();
+        const box = await level2.boundingBox();
+        if (!box) throw new Error("no row");
+        const shown = await page.evaluate(
+          ({ x, y }) =>
+            document.elementFromPoint(x, y)?.closest(".dp-layer")?.getAttribute("data-layer-id"),
+          { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+        );
+        expect(shown).toBe(deep.chain[1]);
+
+        // Back at the top, nothing's pinned.
+        await scrollTo(page, 0, 0);
+        await expect(pins).toHaveCount(0);
+        await page.setViewportSize({ width: 1440, height: 900 });
+      });
+
+      test("keeps a row selected from the keyboard clear of the pinned rows", async () => {
+        await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), deep.leaf);
+        const leaf = row(page, "Deepest layer");
+        await leaf.click();
+        // Up through the chain: each row comes out from under the stack as it's reached.
+        for (let level = DEPTH; level >= DEPTH - 4; level--) {
+          await page.keyboard.press("ArrowUp");
+          const at = row(page, `Level ${level}`);
+          await expect(at).toBeFocused();
+          const box = await at.boundingBox();
+          if (!box) throw new Error("no row");
+          const shown = await page.evaluate(
+            ({ x, y }) =>
+              document.elementFromPoint(x, y)?.closest(".dp-layer")?.getAttribute("data-layer-id"),
+            { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+          );
+          expect(shown).toBe(deep.chain[level - 1]);
+        }
+      });
+
       test("drags by the pointer's level while scrolled sideways", async () => {
         await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), deep.leaf);
         expect(await scrollLeft(page)).toBeGreaterThan(0);
         // The last layer in the deepest frame.
         const bolt = row(page, "Pinned bolt");
+        // Hovering scrolls it into view if it's at an edge: measure it after.
+        await bolt.hover();
         const box = await bolt.boundingBox();
         if (!box) throw new Error("no row");
-        await bolt.hover();
         await page.mouse.down();
         // Over its own row, a level further left than its own: out of its frame.
         const levelX = box.x + 4 + (DEPTH - 1) * 12;

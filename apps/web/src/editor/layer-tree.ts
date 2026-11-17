@@ -336,3 +336,80 @@ export function revealLeft(depth: number, scrollLeft: number, viewport: number):
   if (start >= scrollLeft && nameEnd <= scrollLeft + viewport - TRAIL) return null;
   return Math.max(0, start - INDENT);
 }
+
+/* Pinned ancestors: the rows that stay at the top of the tree while you scroll inside them. */
+
+/** Each row's parent row and where its children end, for finding a row's ancestors without a walk. */
+export interface RowIndex {
+  /** The row index of each row's parent, or -1 at the top level. */
+  readonly parent: Int32Array;
+  /** One past the last row inside each row (its own index + 1 when nothing of it is open). */
+  readonly end: Int32Array;
+}
+
+/** Indexes the rows by nesting, in one pass. */
+export function indexRows(rows: readonly Row[]): RowIndex {
+  const parent = new Int32Array(rows.length);
+  const end = new Int32Array(rows.length);
+  /** The open ancestors of the row being looked at, outermost first. */
+  const stack: number[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const depth = (rows[i] as Row).depth;
+    while (stack.length > 0 && (rows[stack.at(-1) as number] as Row).depth >= depth)
+      end[stack.pop() as number] = i;
+    parent[i] = stack.at(-1) ?? -1;
+    stack.push(i);
+  }
+  for (const i of stack) end[i] = rows.length;
+  return { parent, end };
+}
+
+export interface Pinned {
+  /** The rows pinned at the top, outermost first. */
+  readonly rows: readonly number[];
+  /**
+   * How far the innermost pinned row is pushed up (0 or less), as the end of
+   * what it holds scrolls past it, so the next row takes its place smoothly.
+   */
+  readonly offset: number;
+}
+
+const NONE: Pinned = { rows: [], offset: 0 };
+
+/**
+ * The rows pinned at the top of a tree scrolled to `scrollTop`, as in Figma:
+ * every ancestor of the topmost row in view whose own row has scrolled out,
+ * stacked by depth, each one taking a row's height from the view below it.
+ * At most `max`, outermost first.
+ */
+export function pinnedRows(
+  index: RowIndex,
+  scrollTop: number,
+  rowHeight: number,
+  max: number,
+): Pinned {
+  const count = index.parent.length;
+  if (count === 0 || scrollTop <= 0 || max <= 0) return NONE;
+  const pinned: number[] = [];
+  while (pinned.length < max) {
+    // The row just under what's pinned so far, and its ancestor one level below the last pinned.
+    const at = Math.floor((scrollTop + pinned.length * rowHeight) / rowHeight);
+    if (at >= count) break;
+    const outer = pinned.at(-1) ?? -1;
+    let ancestor = at;
+    let next = index.parent[at] as number;
+    while (next !== outer && next !== -1) {
+      ancestor = next;
+      next = index.parent[next] as number;
+    }
+    // Pinned only once its own row has gone under the rows pinned above it.
+    if (next !== outer || ancestor === at) break;
+    pinned.push(ancestor);
+  }
+  if (pinned.length === 0) return NONE;
+  // The last pinned row slides up as the last row inside it scrolls under the stack.
+  const last = pinned.at(-1) as number;
+  const bottom = (index.end[last] as number) * rowHeight - scrollTop;
+  const offset = Math.min(0, bottom - pinned.length * rowHeight);
+  return { rows: pinned, offset };
+}
