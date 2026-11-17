@@ -183,6 +183,13 @@ export const Shadow = z.object({
   blur: nonNegative,
   spread: finite,
   visible: z.boolean().optional(),
+  /**
+   * Drop shadows: whether the shadow shows through the layer where its own
+   * fill is transparent or translucent (Figma's "Show behind transparent
+   * areas"). False cuts it out under the layer's shape, so a focus ring
+   * stays a ring around a see-through field. Missing means it shows.
+   */
+  behind: z.boolean().optional(),
 });
 export const Blur = z.object({
   type: z.enum(["layer-blur", "background-blur"]),

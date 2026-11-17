@@ -583,9 +583,15 @@ export function exportSvg(
         const grown = spreadShapeOf(node, w, h, s.spread);
         if (!grown) continue;
         const filter = shadowFilter(s, region, false);
-        into.push(
-          `<g filter="url(#${filter})"><${grown.tag}${transformAttr(matrix)}${grown.attrs}${ink}/></g>`,
-        );
+        const cast = `<g filter="url(#${filter})"><${grown.tag}${transformAttr(matrix)}${grown.attrs}${ink}/></g>`;
+        if (s.behind === false) {
+          // Not shown behind the layer: masked out under its shape.
+          const mask = out.id("cut");
+          out.defs.push(
+            `<mask id="${mask}" maskUnits="userSpaceOnUse"${region}><rect${region} fill="#fff"/><${shape.tag}${transformAttr(matrix)}${shape.attrs} fill="#000"/></mask>`,
+          );
+          into.push(`<g mask="url(#${mask})">${cast}</g>`);
+        } else into.push(cast);
       } else {
         // Text: the glyphs' silhouette, filled with the shadow's colour.
         const glyphs: string[] = [];

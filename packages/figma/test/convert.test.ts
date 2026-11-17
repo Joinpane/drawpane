@@ -88,9 +88,10 @@ describe("a real Figma file", () => {
     const card = nodes.find(
       (n) => n.parent === drawpaneId(findCell("shadows/drop-layered")) && n.type === "rect",
     ) as NodeRecord;
+    // Figma's shadows don't show behind transparent areas unless asked (these don't).
     expect(getProp(card.props, "effects")).toEqual([
-      { type: "drop-shadow", color: "#0000001a", x: 0, y: 1, blur: 2, spread: 0 },
-      { type: "drop-shadow", color: "#0000001f", x: 0, y: 8, blur: 24, spread: 0 },
+      { type: "drop-shadow", color: "#0000001a", x: 0, y: 1, blur: 2, spread: 0, behind: false },
+      { type: "drop-shadow", color: "#0000001f", x: 0, y: 8, blur: 24, spread: 0, behind: false },
     ]);
     // Glass comes in with defaults: Figma's API doesn't give its settings.
     expect(notes.lines()).toContain(

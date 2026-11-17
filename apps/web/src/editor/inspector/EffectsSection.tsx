@@ -260,6 +260,21 @@ function EffectFields({
             color={effect.color}
             onChange={(color, label) => onChange({ ...effect, color }, label)}
           />
+          {effect.type === "drop-shadow" ? (
+            <>
+              <span aria-hidden="true" />
+              <Switch
+                label="Show behind transparent areas"
+                checked={effect.behind !== false}
+                onChange={(behind) =>
+                  onChange(
+                    behind ? omitBehind(effect) : { ...effect, behind: false },
+                    "Shadow behind layer",
+                  )
+                }
+              />
+            </>
+          ) : null}
         </>
       ) : (
         <>
@@ -276,6 +291,12 @@ function EffectFields({
       )}
     </div>
   );
+}
+
+/** A shadow shown behind its layer, as every shadow is unless it says otherwise. */
+function omitBehind(effect: Effect): Effect {
+  const { behind: _, ...rest } = effect as Effect & { behind?: boolean };
+  return rest as Effect;
 }
 
 /** The glass's values: its light (a dial, the angle and intensity), then its lens. */

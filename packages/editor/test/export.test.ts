@@ -727,6 +727,39 @@ describe("exportSvg", () => {
     expect(svg.match(/<filter /g)).toHaveLength(2);
   });
 
+  it("cuts a drop shadow out under the layer when it isn't shown behind it", () => {
+    const editor = makeEditor([
+      rect("ring", {
+        cornerRadius: 6,
+        fills: [{ type: "solid", color: "#ffffff00" }],
+        effects: [
+          {
+            type: "drop-shadow",
+            color: "#ff000080",
+            x: 0,
+            y: 0,
+            blur: 0,
+            spread: 3,
+            behind: false,
+          },
+        ],
+      }),
+      rect("glow", {
+        fills: [{ type: "solid", color: "#ffffff00" }],
+        effects: [{ type: "drop-shadow", color: "#ff000080", x: 0, y: 0, blur: 0, spread: 3 }],
+      }),
+    ]);
+    // Masked out where the layer is: white everywhere, black inside its own shape.
+    expect(svgOf(editor, ["ring"])).toMatch(
+      /<mask id="cut\d+" maskUnits="userSpaceOnUse"[^>]*><rect [^>]*fill="#fff"\/><rect transform="translate\(10 20\)" width="100" height="50" rx="6" fill="#000"\/><\/mask>/,
+    );
+    expect(svgOf(editor, ["ring"])).toMatch(
+      /<g mask="url\(#cut\d+\)"><g filter="url\(#shadow\d+\)">/,
+    );
+    // Shown behind (Figma's default for most shadows, and every shadow made here): no mask.
+    expect(svgOf(editor, ["glow"])).not.toContain("<mask");
+  });
+
   it("masks an outside stroke where the layer is on the page, not at the origin", () => {
     const editor = makeEditor([
       rect("r", {

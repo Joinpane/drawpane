@@ -1880,6 +1880,14 @@ export class CanvasRenderer {
       ctx.shadowOffsetX = s.x * scale;
       ctx.shadowOffsetY = s.y * scale;
       if (kind === "drop-shadow") {
+        // Not shown behind the layer: cut out under its shape, so it shows
+        // only around a see-through fill, not through it.
+        if (s.type === "drop-shadow" && s.behind === false && node.type !== "text") {
+          const outside = new Path2D();
+          outside.rect(-1e5, -1e5, 2e5, 2e5);
+          outside.addPath(shape);
+          ctx.clip(outside, "evenodd");
+        }
         // Paint only the shadow: draw the shape far off-canvas and offset its
         // shadow back into place, so translucent fills don't show a dark copy.
         const t = ctx.getTransform();
