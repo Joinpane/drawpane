@@ -138,6 +138,15 @@ describe("coverage", () => {
     expect(f.get("effect/DROP_SHADOW")?.layers).toBe(1);
   });
 
+  it("counts what a collection, variable or property definition reaches", async () => {
+    const f = await run();
+    // The card binds its fill to the collection's variable.
+    expect(f.get("variables/collection")?.layers).toBe(1);
+    expect(f.get("variables/type/COLOR")?.layers).toBe(1);
+    // The button's property reaches its one instance.
+    expect(f.get("props/definition/BOOL")?.layers).toBe(1);
+  });
+
   it("ranks gaps by impact", async () => {
     const result = await measureCoverage(records, output);
     const impacts = result.features.map((x) => x.impact);
@@ -176,5 +185,35 @@ describe("readNodes", () => {
     const read = [];
     for await (const n of readNodes(file)) read.push(n);
     expect(read).toEqual(nodes);
+  });
+});
+
+describe("per-layer values", () => {
+  it("compares each layer with its own record, not the first one found", async () => {
+    const page = { guid: { sessionID: 0, localID: 1 }, type: "CANVAS", name: "Page" };
+    const layer = (local: number, opacity: number) => ({
+      guid: { sessionID: 1, localID: local },
+      type: "ROUNDED_RECTANGLE",
+      name: "Box",
+      opacity,
+      rectangleCornerRadiiIndependent: true,
+      rectangleTopLeftCornerRadius: local,
+      rectangleTopRightCornerRadius: local,
+      rectangleBottomRightCornerRadius: local,
+      rectangleBottomLeftCornerRadius: local,
+      parentIndex: { guid: page.guid, position: `${local}` },
+    });
+    const result = await measureCoverage(
+      [page, layer(1, 0.5), layer(2, 0.25)],
+      [
+        { id: "f0-1", type: "page", parent: "root", props: {} },
+        { id: "f1-1", type: "rect", parent: "f0-1", props: { opacity: 0.5, cornerRadius: 1 } },
+        { id: "f1-2", type: "rect", parent: "f0-1", props: { opacity: 0.25, cornerRadius: 2 } },
+      ],
+    );
+    const f = new Map(result.features.map((x) => [x.key, x]));
+    expect(f.get("layer/opacity")?.faithful).toBe(2);
+    // Four equal corners come through as one radius.
+    expect(f.get("corners/independent")?.faithful).toBe(2);
   });
 });

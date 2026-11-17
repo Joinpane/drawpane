@@ -97,6 +97,8 @@ interface Hit {
   /** The record whose copies the feature reaches (layers affected). */
   readonly owner: string;
   readonly data?: unknown;
+  /** Its layer is named by a path the output may spell otherwise: not judged when missing. */
+  readonly soft?: true;
 }
 
 interface Accumulated {
@@ -125,6 +127,8 @@ export interface FeatureResult {
   readonly lost: number;
   /** Of the lost: layers not in the output at all. */
   readonly absent: number;
+  /** Not judged: layers an override names that the output spells differently (or not at all). */
+  readonly unresolved: number;
   readonly status: "faithful" | "approximate" | "lost" | "unchecked";
   /** Share not carried: lost + half the approximate, over those checked. */
   readonly gap: number;
@@ -384,12 +388,23 @@ export interface CensusOptions {
 
 class Census {
   readonly features = new Map<string, Accumulated>();
+  /** Variables, collections and styles → the records that use them (directly or by alias). */
+  readonly consumers = new Map<string, Set<string>>();
+  /** Component sets → their variants, for how many instances a property definition reaches. */
+  readonly variants = new Map<string, string[]>();
+
+  consume(used: string, by: string) {
+    const set = this.consumers.get(used) ?? new Set<string>();
+    set.add(by);
+    this.consumers.set(used, set);
+  }
 
   hit(
     def: Omit<FeatureDef, "key"> & { key: string },
     owner: string,
     target = owner,
     data?: unknown,
+    soft = false,
   ) {
     let acc = this.features.get(def.key);
     if (!acc) {
@@ -398,7 +413,12 @@ class Census {
     }
     acc.uses++;
     acc.records.add(owner);
-    acc.hits.push(data === undefined ? { target, owner } : { target, owner, data });
+    acc.hits.push({
+      target,
+      owner,
+      ...(data === undefined ? {} : { data }),
+      ...(soft ? { soft: true } : {}),
+    });
   }
 }
 
@@ -474,6 +494,18 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
   const resolveDef = (id: string | null) =>
     defOf(id ?? null) ?? defOf(id ? (subDefs.get(id) ?? null) : null);
 
+  /** Each component set's first variant (by saved position). */
+  const firstComponent = new Map<string, string>();
+  for (const r of [...records].sort((a, b) => {
+    const pa = str(obj(a.parentIndex)?.position) ?? "";
+    const pb = str(obj(b.parentIndex)?.position) ?? "";
+    return pa < pb ? -1 : pa > pb ? 1 : 0;
+  })) {
+    const parent = guidOf(obj(r.parentIndex)?.guid);
+    if (r.type === "SYMBOL" && parent && !firstComponent.has(parent))
+      firstComponent.set(parent, guidOf(r.guid) as string);
+  }
+
   const placed = (g: string) => {
     const p = page(g);
     return p !== null && !internal.has(p);
@@ -490,13 +522,15 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
         importance: "editing",
         code: CODE.variables,
         how: "a collection node of the same name in the output, with as many modes",
-        check: ({ record, out }) => {
+        check: ({ record, out, data }) => {
           const c = out.collections.get(str(record?.name) ?? "");
           if (!c) return "lost";
-          return arr(c.props.modes).length === modes.length ? "faithful" : "approximate";
+          return arr(c.props.modes).length === data ? "faithful" : "approximate";
         },
       },
       g,
+      g,
+      modes.length,
     );
     if (modes.length > 1)
       census.hit(
@@ -507,12 +541,14 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
           importance: "editing",
           code: CODE.variables,
           how: "a collection node of the same name with the same modes",
-          check: ({ record, out }) => {
+          check: ({ record, out, data }) => {
             const c = out.collections.get(str(record?.name) ?? "");
-            return c && arr(c.props.modes).length === modes.length ? "faithful" : "lost";
+            return c && arr(c.props.modes).length === data ? "faithful" : "lost";
           },
         },
         g,
+        g,
+        modes.length,
       );
     if (s.isCollectionExtendable === true)
       census.hit(
@@ -672,8 +708,16 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
   }
 
   // Overrides an instance saved, by the Figma id of the layer they're for.
+  const keyed = new Map<string, string>();
+  for (const r of records) {
+    const k = guidOf(r.overrideKey);
+    if (k) keyed.set(k, guidOf(r.guid) as string);
+  }
   const overrideTarget = (instance: string, o: Obj): string | null => {
-    const path = objs(obj(o.guidPath)?.guids).map((x) => guidOf(x));
+    const path = objs(obj(o.guidPath)?.guids).map((x) => {
+      const k = guidOf(x);
+      return k ? (keyed.get(k) ?? k) : null;
+    });
     if (path.length === 0 || path.some((p) => !p)) return null;
     return `I${[instance, ...path].join(";")}`;
   };
@@ -699,8 +743,9 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
       continue;
     }
     if (!placed(g)) continue;
+    // A layer an override is for may be named in a way the output doesn't spell (soft: not judged).
     const add = (def: Omit<FeatureDef, "key"> & { key: string }, data?: unknown, target = g) =>
-      census.hit(def, g, target, data);
+      census.hit(def, g, target, data, target !== g);
 
     // Kinds of layers.
     const shown =
@@ -744,15 +789,18 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
     // Opacity, blend modes, visibility, masks, booleans.
     const opacity = num(r.opacity);
     if (opacity !== undefined && opacity < 1)
-      add({
-        key: "layer/opacity",
-        area: "layers",
-        label: "Layer opacity below 100%",
-        importance: "visual",
-        code: CODE.geometry,
-        how: "the same opacity on the layer",
-        check: hasProp("opacity", (v) => near(v, opacity)),
-      });
+      add(
+        {
+          key: "layer/opacity",
+          area: "layers",
+          label: "Layer opacity below 100%",
+          importance: "visual",
+          code: CODE.geometry,
+          how: "the same opacity on the layer",
+          check: hasProp("opacity", (v, want) => near(v, want)),
+        },
+        opacity,
+      );
     const blend = str(r.blendMode);
     if (blend && blend !== "NORMAL" && blend !== "PASS_THROUGH")
       add({
@@ -850,7 +898,7 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
             how: "an effect of that kind on the layer (no binding key for effects: baked at best)",
             check: (i) => {
               if (!i.node) return "lost";
-              const t = EFFECT_TYPES[str(e.type) ?? ""];
+              const t = EFFECT_TYPES[str(obj(i.data)?.type) ?? ""];
               return objs(i.node.props.effects).some((x) => x.type === t) ? "approximate" : "lost";
             },
           },
@@ -1016,15 +1064,28 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
           check: hasProp("strokeDashes"),
         });
       if (r.borderStrokeWeightsIndependent === true)
-        add({
-          key: "stroke/per-side",
-          area: "strokes",
-          label: "Per-side stroke widths",
-          importance: "visual",
-          code: CODE.paints,
-          how: "strokeWeights on the layer",
-          check: kept("strokeWeights"),
-        });
+        add(
+          {
+            key: "stroke/per-side",
+            area: "strokes",
+            label: "Per-side stroke widths",
+            importance: "visual",
+            code: CODE.paints,
+            how: "strokeWeights on the layer, or one strokeWeight when every side is the same",
+            check: (i) => {
+              if (!i.node) return "lost";
+              if (i.node.props.strokeWeights) return "faithful";
+              const sides = i.data as (number | undefined)[];
+              const same = sides.every((x) => near(x ?? 0, sides[0] ?? 0, 0.001));
+              return same && near(i.node.props.strokeWeight ?? 1, sides[0] ?? 0)
+                ? "faithful"
+                : "approximate";
+            },
+          },
+          ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"].map(
+            (k) => num(r[k]) ?? num(r.strokeWeight),
+          ),
+        );
       const cap = str(r.strokeCap);
       if (cap && cap !== "NONE")
         add({
@@ -1068,15 +1129,31 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
 
     // Corners.
     if (r.rectangleCornerRadiiIndependent === true)
-      add({
-        key: "corners/independent",
-        area: "corners",
-        label: "Independent corner radii",
-        importance: "visual",
-        code: CODE.geometry,
-        how: "cornerRadii on the layer",
-        check: kept("cornerRadii"),
-      });
+      add(
+        {
+          key: "corners/independent",
+          area: "corners",
+          label: "Independent corner radii",
+          importance: "visual",
+          code: CODE.geometry,
+          how: "cornerRadii on the layer, or one cornerRadius when every corner is the same",
+          check: (i) => {
+            if (!i.node) return "lost";
+            if (i.node.props.cornerRadii) return "faithful";
+            const corners = i.data as (number | undefined)[];
+            const same = corners.every((x) => near(x ?? 0, corners[0] ?? 0, 0.001));
+            return same && near(i.node.props.cornerRadius ?? 0, corners[0] ?? 0)
+              ? "faithful"
+              : "approximate";
+          },
+        },
+        [
+          "rectangleTopLeftCornerRadius",
+          "rectangleTopRightCornerRadius",
+          "rectangleBottomRightCornerRadius",
+          "rectangleBottomLeftCornerRadius",
+        ].map((k) => num(r[k]) ?? num(r.cornerRadius)),
+      );
     const smoothing = num(r.cornerSmoothing);
     if (smoothing !== undefined && smoothing > 0)
       add({
@@ -1220,15 +1297,18 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
       ] as const) {
         const v = num(size[axis]);
         if (v === undefined || v <= 0 || v >= 1e9) continue;
-        add({
-          key: `layout/${prop}`,
-          area: "auto layout",
-          label: `${prop.replace(/([A-Z])/g, " $1").toLowerCase()}`,
-          importance: "visual",
-          code: CODE.layout,
-          how: `${prop} on the layer`,
-          check: hasProp(prop, (x) => near(x, v)),
-        });
+        add(
+          {
+            key: `layout/${prop}`,
+            area: "auto layout",
+            label: `${prop.replace(/([A-Z])/g, " $1").toLowerCase()}`,
+            importance: "visual",
+            code: CODE.layout,
+            how: `${prop} on the layer`,
+            check: hasProp(prop, (x, want) => near(x, want)),
+          },
+          v,
+        );
       }
     }
     if (r.gridRowAnchor || r.gridColumnAnchor || num(r.gridColumnSpan) || num(r.gridRowSpan))
@@ -1280,8 +1360,11 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
       const fontName = obj(r.fontName);
       const family = str(fontName?.family) ?? "?";
       const fstyle = str(fontName?.style) ?? "Regular";
-      const famBound = objs(obj(r.variableConsumptionMap)?.entries).some(
-        (e) => e.variableField === "FONT_FAMILY" || e.variableField === "FONT_STYLE",
+      const textStyle = styles.get(guidOf(obj(r.styleIdForText)?.guid) ?? "");
+      const famBound = [r, ...(textStyle ? [textStyle] : [])].some((x) =>
+        objs(obj(x.variableConsumptionMap)?.entries).some(
+          (e) => e.variableField === "FONT_FAMILY" || e.variableField === "FONT_STYLE",
+        ),
       );
       add(
         {
@@ -1290,7 +1373,7 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
           label: `${family} ${fstyle}`,
           importance: "visual",
           code: CODE.text,
-          how: "the same family, weight and italic on the text layer (layers whose font is bound to a variable aren't judged: a mode may change it)",
+          how: "the same family, weight and italic on the text layer (layers whose font is bound to a variable, themselves or through their text style, aren't judged: a mode may change it)",
           check: (i) => {
             if (!i.node) return "lost";
             if (i.data === "bound") return null;
@@ -1620,6 +1703,7 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
       if (!dt) continue;
       const name = str(d.name) ?? "";
       const isSet = shown === "COMPONENT_SET";
+      void isSet;
       add(
         {
           key: `props/definition/${dt}`,
@@ -1633,11 +1717,16 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
               : "the component (or set) in the output carries the property's name outside its name and text",
           check: (i) => {
             if (!i.node) return "lost";
-            if (dt === "VARIANT") return isSet || i.node.props.variantProps ? "faithful" : "lost";
-            return carries(i.node, name) ? "faithful" : "lost";
+            if (dt === "VARIANT")
+              return obj(i.node.props.variantProps)?.[String(i.data)] !== undefined
+                ? "faithful"
+                : "lost";
+            return carries(i.node, String(i.data)) ? "faithful" : "lost";
           },
         },
         name,
+        // A variant property is carried by each variant: look at the set's first component.
+        dt === "VARIANT" && isSet ? (firstComponent.get(g) ?? g) : g,
       );
     }
     for (const ref of objs(r.componentPropRefs)) {
@@ -1808,6 +1897,84 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
         check: noField("documentationLinks"),
       });
   }
+  // Who uses each variable, collection and style: every alias a record (or its overrides,
+  // runs, paints and effects) holds, every style it links, then along aliases between variables.
+  const aliases = (value: unknown, out: Set<string>, depth = 0): Set<string> => {
+    if (depth > 12 || !value || typeof value !== "object") return out;
+    if (Array.isArray(value)) {
+      for (const v of value) aliases(v, out, depth + 1);
+      return out;
+    }
+    const o = value as Obj;
+    const alias = guidOf(obj(o.alias)?.guid);
+    if (alias) out.add(alias);
+    for (const [k, v] of Object.entries(o))
+      if (k !== "derivedTextData" && k !== "vectorData" && k !== "derivedSymbolData")
+        aliases(v, out, depth + 1);
+    return out;
+  };
+  for (const r of records) {
+    const g = guidOf(r.guid);
+    if (!g || r.type === "VARIABLE" || r.type === "VARIABLE_SET" || str(r.styleType)) continue;
+    if (!placed(g)) continue;
+    const used = aliases(
+      [r.variableConsumptionMap, r.fillPaints, r.strokePaints, r.effects, r.textData, r.symbolData],
+      new Set(),
+    );
+    for (const v of used) census.consume(v, g);
+    for (const k of [
+      "styleIdForText",
+      "styleIdForEffect",
+      "styleIdForFill",
+      "styleIdForStrokeFill",
+      "styleIdForGrid",
+    ]) {
+      const sg = guidOf(obj(r[k])?.guid);
+      if (sg) {
+        census.consume(sg, g);
+        // A style's own bindings reach the layers using it.
+        const st = styles.get(sg);
+        if (st)
+          for (const v of aliases(
+            [st.variableConsumptionMap, st.fillPaints, st.effects],
+            new Set(),
+          ))
+            census.consume(v, g);
+      }
+    }
+  }
+  // Along aliases: a variable another one aliases reaches that one's layers.
+  const aliasOf = new Map<string, Set<string>>();
+  for (const [g, v] of variables) aliasOf.set(g, aliases(v.variableDataValues, new Set()));
+  const reached = new Set<string>();
+  const spread = (from: string, layers: Set<string>, depth: number) => {
+    if (depth > 8) return;
+    for (const to of aliasOf.get(from) ?? []) {
+      const key = `${from}>${to}`;
+      if (reached.has(key) && depth > 0) continue;
+      reached.add(key);
+      for (const l of layers) census.consume(to, l);
+      spread(to, layers, depth + 1);
+    }
+  };
+  for (const g of variables.keys()) {
+    const layers = census.consumers.get(g);
+    if (layers) spread(g, new Set(layers), 0);
+  }
+  // A collection reaches what its variables do.
+  for (const [g, v] of variables) {
+    const set = guidOf(obj(v.variableSetID)?.guid);
+    if (set) for (const l of census.consumers.get(g) ?? []) census.consume(set, l);
+  }
+  for (const r of records)
+    if (r.type === "SYMBOL") {
+      const parent = guidOf(obj(r.parentIndex)?.guid);
+      if (parent)
+        census.variants.set(parent, [
+          ...(census.variants.get(parent) ?? []),
+          guidOf(r.guid) as string,
+        ]);
+    }
   return { pageOf };
 }
 
@@ -1933,6 +2100,8 @@ export async function measureCoverage(
   // One pass over the output.
   const nodes = new Map<string, OutNode>();
   const copies = new Map<string, number>();
+  /** Instances of each main, by its Drawpane id. */
+  const instancesOf = new Map<string, number>();
   const types: Record<string, number> = {};
   const bindingKeys: Record<string, number> = {};
   const collections = new Map<string, OutNode>();
@@ -1965,7 +2134,11 @@ export async function measureCoverage(
     if (arr(p.reactions).length > 0) withReactions++;
     if (p.isComponentSet) componentSets++;
     if (p.isComponent) components++;
-    if (p.instanceOf) instances++;
+    if (p.instanceOf) {
+      instances++;
+      const main = String(p.instanceOf);
+      instancesOf.set(main, (instancesOf.get(main) ?? 0) + 1);
+    }
     if (n.type === "collection") collections.set(str(p.name) ?? "", n);
     if (n.type === "variable") variables.set(str(p.name) ?? "", n);
     if (n.type === "textStyle") textStyles.set(str(p.name) ?? "", n);
@@ -2021,12 +2194,48 @@ export async function measureCoverage(
     copies: copyCount,
   };
 
+  /**
+   * The layers of the output a feature on `owner` reaches: a layer once for itself and once per
+   * copy; a variable, collection or style every layer using it (and their copies); a component
+   * property definition the instances of its component (or of the set's variants).
+   */
+  const own = (g: string) => Math.max(1, copies.get(g) ?? 0);
+  const reachCache = new Map<string, number>();
+  const reach = (owner: string, key: string): number => {
+    const cacheKey = `${key.startsWith("props/definition") ? "d" : "o"}${owner}`;
+    const known = reachCache.get(cacheKey);
+    if (known !== undefined) return known;
+    let n: number;
+    if (key.startsWith("props/definition")) {
+      const mains = [owner, ...(found.variants.get(owner) ?? [])];
+      n = Math.max(
+        1,
+        mains.reduce((sum, m) => sum + (instancesOf.get(drawpaneId(m)) ?? 0), 0),
+      );
+    } else {
+      const users = found.consumers.get(owner);
+      n =
+        users &&
+        (key.startsWith("variables/") ||
+          key.startsWith("styles/definition") ||
+          key.startsWith("styles/bound"))
+          ? [...users].reduce((sum, u) => sum + own(u), 0)
+          : own(owner);
+    }
+    reachCache.set(cacheKey, n);
+    return n;
+  };
+
   const results: FeatureResult[] = [];
   for (const acc of found.features.values()) {
-    const tally = { faithful: 0, approximate: 0, lost: 0, absent: 0, checked: 0 };
+    const tally = { faithful: 0, approximate: 0, lost: 0, absent: 0, checked: 0, unresolved: 0 };
     const failing: string[] = [];
     for (const hit of acc.hits.slice(0, maxChecks)) {
       const node = nodes.get(drawpaneId(hit.target));
+      if (!node && hit.soft) {
+        tally.unresolved++;
+        continue;
+      }
       const outcome = acc.def.check({
         node,
         record: byGuid.get(hit.owner),
@@ -2040,7 +2249,7 @@ export async function measureCoverage(
       if (outcome !== "faithful" && failing.length < 10) failing.push(hit.target);
     }
     let layers = 0;
-    for (const owner of acc.records) layers += Math.max(1, copies.get(owner) ?? 0);
+    for (const owner of acc.records) layers += reach(owner, acc.def.key);
     const { checked } = tally;
     const gap = checked === 0 ? 0 : (tally.lost + tally.approximate / 2) / checked;
     const status: FeatureResult["status"] =
@@ -2066,6 +2275,7 @@ export async function measureCoverage(
       approximate: tally.approximate,
       lost: tally.lost,
       absent: tally.absent,
+      unresolved: tally.unresolved,
       status,
       gap: Math.round(gap * 1000) / 1000,
       impact: Math.round(layers * WEIGHT[acc.def.importance] * gap),
@@ -2127,7 +2337,7 @@ export function coverageMarkdown(c: Coverage, title = "Figma import coverage"): 
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...gaps.map(
       (f, i) =>
-        `| ${i + 1} | ${cell(f.label)} (\`${cell(f.key)}\`) | ${f.area} | ${f.records.toLocaleString("en")} | ${f.layers.toLocaleString("en")} | ${pct(f.faithful, f.checked)} / ${pct(f.approximate, f.checked)} / ${pct(f.lost, f.checked)}${f.absent ? ` (${f.absent} absent)` : ""} | ${f.status} | ${f.impact.toLocaleString("en")} | \`${f.failing[0] ?? f.examples[0] ?? ""}\` | ${cell(f.code)} |`,
+        `| ${i + 1} | ${cell(f.label)} (\`${cell(f.key)}\`) | ${f.area} | ${f.records.toLocaleString("en")} | ${f.layers.toLocaleString("en")} | ${pct(f.faithful, f.checked)} / ${pct(f.approximate, f.checked)} / ${pct(f.lost, f.checked)}${f.absent ? ` (${f.absent} absent)` : ""}${f.unresolved ? ` (${f.unresolved} unresolved)` : ""} | ${f.status} | ${f.impact.toLocaleString("en")} | \`${f.failing[0] ?? f.examples[0] ?? ""}\` | ${cell(f.code)} |`,
     ),
     "",
     "## Overrides copies list",
