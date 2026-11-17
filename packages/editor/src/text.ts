@@ -250,6 +250,9 @@ export function transformCase(text: string, props: Props): string {
   }
 }
 
+/** Hyphens and dashes a word may break after (hyphen-minus, hyphen, en and em dash). */
+const HYPHENS: ReadonlySet<string> = new Set(["-", "\u2010", "\u2013", "\u2014"]);
+
 const WORD = /[\p{L}\p{N}_]/u;
 
 /** `text.slice(a, b)` in its case; title case looks at the character before `a`. */
@@ -438,6 +441,20 @@ function computeLayout(
       marker = listType === "number" ? `${counters[level]}.` : "•";
     }
     const room = maxWidth === null ? null : Math.max(1, maxWidth - indent);
+    /**
+     * Where a word may break after one of its hyphens, as line breaking does
+     * (Unicode's line breaking rules, as Figma breaks): the last place in
+     * text[a, b) after a hyphen or dash, not at the word's start and not
+     * before a digit (so "-1" and "2024-11" stay whole), that leaves at most
+     * `width` before it; -1 when there's none.
+     */
+    const hyphenBreak = (a: number, b: number, width: number): number => {
+      for (let p = b - 1; p > a + 1; p--) {
+        if (!HYPHENS.has(text[p - 1] as string) || /[\d\s]/.test(text[p] as string)) continue;
+        if (m.width(a, p) <= width) return p;
+      }
+      return -1;
+    };
     const lines = breaks.length;
     if (room === null || pEnd === paragraph) {
       breaks.push({ start: paragraph, end: trimEnd(paragraph, pEnd), next: after, para });
@@ -457,16 +474,26 @@ function computeLayout(
         const space = /\s/.test(match[0]);
         const tokenWidth = m.width(a, b);
         // Spaces never push a line over: trailing spaces don't count.
-        if (end === start || space || lineWidth + tokenWidth <= room) {
+        const fits = space || lineWidth + tokenWidth <= room;
+        if (fits || (end === start && hyphenBreak(a, b, room) === -1)) {
           end = b;
           lineWidth += tokenWidth;
           continue;
         }
-        breaks.push({ start, end: trimEnd(start, end), next: a });
-        // A line never starts with the spaces that ended the one before.
-        start = space ? b : a;
-        end = b;
-        lineWidth = space ? 0 : tokenWidth;
+        // A hyphenated word breaks after a hyphen when its start fits, as in Figma.
+        const cut = hyphenBreak(a, b, room - lineWidth);
+        if (cut !== -1) {
+          breaks.push({ start, end: cut, next: cut });
+          start = cut;
+          end = b;
+          lineWidth = m.width(cut, b);
+        } else {
+          breaks.push({ start, end: trimEnd(start, end), next: a });
+          // A line never starts with the spaces that ended the one before.
+          start = space ? b : a;
+          end = b;
+          lineWidth = space ? 0 : tokenWidth;
+        }
         // Break words that don't fit on a line of their own.
         if (lineWidth > room) {
           while (end > start && m.width(start, end) > room) {

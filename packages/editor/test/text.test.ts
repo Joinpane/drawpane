@@ -47,6 +47,32 @@ describe("paragraph spacing", () => {
   });
 });
 
+describe("line breaks", () => {
+  // 10px a character.
+  const lines = (text: string, width: number) =>
+    layoutText(textNode(text), measurer, width).lines.map((l) => l.text);
+
+  it("breaks a hyphenated word after a hyphen when its start fits, as Figma does", () => {
+    // "aaa bbb-ccc" is 110px; "aaa bbb-" is 80.
+    expect(lines("aaa bbb-ccc", 80)).toEqual(["aaa bbb-", "ccc"]);
+    // The last hyphen that fits.
+    expect(lines("aaa b-c-dddd", 80)).toEqual(["aaa b-c-", "dddd"]);
+    expect(lines("aaa b-c-dddd", 70)).toEqual(["aaa b-", "c-dddd"]);
+    // An en dash too.
+    expect(lines("aaa bbb\u2013ccc", 80)).toEqual(["aaa bbb\u2013", "ccc"]);
+  });
+
+  it("keeps numbers whole, and a word whose start doesn't fit moves down whole", () => {
+    expect(lines("aaa -100", 70)).toEqual(["aaa", "-100"]);
+    expect(lines("aaa 2024-11", 90)).toEqual(["aaa", "2024-11"]);
+    expect(lines("aaa bbbbbbb-c", 100)).toEqual(["aaa", "bbbbbbb-c"]);
+  });
+
+  it("breaks a word too long for a line after a hyphen before cutting it", () => {
+    expect(lines("aaaa-bbbbbbbb", 80)).toEqual(["aaaa-", "bbbbbbbb"]);
+  });
+});
+
 describe("truncation", () => {
   it("keeps the first lines and ends the last one in an ellipsis that fits the box", () => {
     // "aaaa bbbb cccc dddd" at 100px: lines "aaaa bbbb", "cccc dddd" (90px each).
