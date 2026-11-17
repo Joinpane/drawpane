@@ -718,6 +718,8 @@ export const PROPS = {
   leadingTrim: prop(z.enum(["none", "cap-height"]), "none", TYPOGRAPHY),
   /** Extra space after each paragraph (each hard line break), in px. */
   paragraphSpacing: prop(ranged(z.number().min(0).max(1000), { min: 0, max: 1000 }), 0, TYPOGRAPHY),
+  /** Space between the items of a list, in px, in place of the paragraph spacing (as in Figma). */
+  listSpacing: prop(ranged(z.number().min(0).max(1000), { min: 0, max: 1000 }), 0, TYPOGRAPHY),
   /** Lists: the layer's own (its characters may differ, paragraph by paragraph; see `ListType`). */
   listType: prop(ListType, "none", ["text"]),
   listLevel: prop(ListLevel, 0, ["text"]),

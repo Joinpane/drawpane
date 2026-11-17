@@ -99,6 +99,8 @@ export interface TypeStyle {
   readonly lineHeightPercentFontSize?: number;
   readonly lineHeightUnit?: "PIXELS" | "FONT_SIZE_%" | "INTRINSIC_%";
   readonly paragraphSpacing?: number;
+  /** Space between list items, in px. */
+  readonly listSpacing?: number;
   readonly leadingTrim?: "CAP_HEIGHT" | "NONE";
   readonly opentypeFlags?: Readonly<Record<string, number>>;
   readonly fills?: readonly Paint[];

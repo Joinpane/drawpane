@@ -97,6 +97,7 @@ export function textProps(node: Figma.Node, images: ImageLookup, notes: Notes): 
   if (s.textTruncation === "ENDING" || s.textAutoResize === "TRUNCATE")
     props.maxLines = Math.max(1, Math.min(1000, s.maxLines ?? 1));
   if (s.paragraphSpacing) props.paragraphSpacing = Math.min(1000, round2(s.paragraphSpacing));
+  if (s.listSpacing) props.listSpacing = Math.min(1000, round2(s.listSpacing));
   if (s.leadingTrim === "CAP_HEIGHT") props.leadingTrim = "cap-height";
   props.fills = convertPaints(node.fills, images, notes);
   const runs = withLists(textRuns(node, images, notes), node);

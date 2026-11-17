@@ -47,6 +47,32 @@ describe("paragraph spacing", () => {
   });
 });
 
+describe("list spacing", () => {
+  it("spaces the items of a list by the list's spacing, other paragraphs by the paragraph spacing", () => {
+    // An intro paragraph, then three numbered items.
+    const text = "intro\none\ntwo\nthree";
+    const runs = [{ start: 6, end: text.length, listType: "number" }];
+    const props = { paragraphSpacing: 16, listSpacing: 4, textRuns: runs };
+    const plain = layoutText(textNode(text, { textRuns: runs }), measurer, 400);
+    const spaced = layoutText(textNode(text, props), measurer, 400);
+    const gaps = spaced.lines.map((l, i) => (l.top ?? 0) - (plain.lines[i]?.top ?? 0));
+    // Intro to the first item: a paragraph's spacing; then the list's, item to item.
+    for (const [i, gap] of [0, 16, 20, 24].entries()) expect(gaps[i]).toBeCloseTo(gap);
+  });
+
+  it("keeps a list's items together without it, whatever the paragraph spacing (as in Figma)", () => {
+    const text = "one\ntwo";
+    const runs = [{ start: 0, end: text.length, listType: "bullet" }];
+    const plain = layoutText(textNode(text, { textRuns: runs }), measurer, 400);
+    const spaced = layoutText(
+      textNode(text, { textRuns: runs, paragraphSpacing: 10 }),
+      measurer,
+      400,
+    );
+    expect((spaced.lines[1]?.top ?? 0) - (plain.lines[1]?.top ?? 0)).toBe(0);
+  });
+});
+
 describe("truncation", () => {
   it("keeps the first lines and ends the last one in an ellipsis that fits the box", () => {
     // "aaaa bbbb cccc dddd" at 100px: lines "aaaa bbbb", "cccc dddd" (90px each).

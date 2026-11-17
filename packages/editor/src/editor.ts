@@ -3449,6 +3449,7 @@ export class Editor {
     "textDecoration",
     "textCase",
     "paragraphSpacing",
+    "listSpacing",
     "leadingTrim",
     "maxLines",
     "bindings",

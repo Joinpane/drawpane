@@ -410,6 +410,8 @@ function computeLayout(
     para?: boolean;
     indent?: number;
     marker?: string | null;
+    /** Whether its paragraph is a list item. */
+    list?: boolean;
   };
   const breaks: Break[] = [];
   // Numbered lists count per level; a paragraph out of the list starts them over.
@@ -487,6 +489,7 @@ function computeLayout(
       const br = breaks[k] as Break;
       br.indent = indent;
       br.marker = k === lines ? marker : null;
+      br.list = listType !== "none";
     }
     paragraph = after;
   }
@@ -604,6 +607,7 @@ function computeLayout(
   };
 
   const spacing = getProp(props, "paragraphSpacing");
+  const listSpacing = getProp(props, "listSpacing");
   const maxLines = whole ? null : getProp(props, "maxLines");
   const kept = maxLines !== null && breaks.length > maxLines ? breaks.slice(0, maxLines) : breaks;
   // Lines stack baseline to baseline, each its own line height below the last (as in Figma:
@@ -616,8 +620,10 @@ function computeLayout(
     const prev = lines[lines.length - 1];
     const baseline = prev ? prev.baseline + after + built.step : built.baseline;
     lines.push({ ...built, top: baseline - built.baseline, baseline });
-    // Space after a paragraph, not after the last line shown.
-    after = br.para && i < kept.length - 1 ? spacing : 0;
+    // Space after a paragraph, not after the last line shown: between two items of a list,
+    // the list's spacing; anywhere else, the paragraph spacing (as in Figma).
+    const next = kept[i + 1];
+    after = br.para && next ? (br.list && next.list ? listSpacing : spacing) : 0;
   }
   const trimmed = trim(lines, getProp(props, "leadingTrim"));
   const last = trimmed.lines[trimmed.lines.length - 1];
