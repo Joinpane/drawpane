@@ -76,14 +76,12 @@ describe("importing component properties", () => {
   });
 
   it("doesn't count where an instance sits as a change: its constraints are its own", () => {
-    const pinned = structuredClone(file) as { document: { children: unknown[] } };
+    const moved = structuredClone(file);
     const find = (n: Figma.Node, id: string): Figma.Node | undefined =>
       n.id === id ? n : (n.children ?? []).map((c) => find(c, id)).find(Boolean);
-    const outline = find(pinned.document as unknown as Figma.Node, "6:1") as {
-      constraints?: unknown;
-    };
+    const outline = find(moved.document, "6:1") as { constraints?: unknown };
     outline.constraints = { horizontal: "RIGHT", vertical: "BOTTOM" };
-    const nodes = pinInstances(convertFile(pinned as unknown as Figma.File).nodes).nodes;
+    const nodes = pinInstances(convertFile(moved).nodes).nodes;
     const root = nodes.find((n) => n.id === "f6-1");
     expect(getProp(root?.props ?? {}, "constraintH")).toBe("end");
     expect(getProp(root?.props ?? {}, "overrides")).toEqual([]);
