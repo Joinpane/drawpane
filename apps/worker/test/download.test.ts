@@ -278,8 +278,8 @@ describe("opening a file larger than one snapshot chunk", () => {
     const { fileId } = await fileOf(INLINE_SNAPSHOT_NODES + 500);
     await runInDurableObject(roomOf(fileId), async (room: FileRoom, state) => {
       const copies = () => tempTables(state.storage.sql).length;
-      const first = await room.exportDocument();
-      const second = await room.exportDocument();
+      const first = (await room.exportDocument()) as ReadableStream<Uint8Array>;
+      const second = (await room.exportDocument()) as ReadableStream<Uint8Array>;
       expect(copies()).toBe(1);
       await first.cancel();
       expect(copies()).toBe(1);
@@ -374,6 +374,40 @@ describe("opening a file larger than one snapshot chunk", () => {
         release();
         spy.mockRestore();
       }
+    });
+  });
+
+  it("streams a file whose pages end on the character bound, and drops its copy", async () => {
+    // 45 text layers of 200,000 characters: pages end on characters before rows.
+    const { browser, fileId } = await fileOf(45, 200_000);
+    const socket = await openSocket(browser, fileId);
+    const { ticket } = await hello(socket, "reader", true);
+    expect((await download(browser, fileId, ticket as string)).nodes).toHaveLength(46);
+    await runInDurableObject(roomOf(fileId), (_room: FileRoom, state) => {
+      expect(tempTables(state.storage.sql)).toEqual([]);
+    });
+  });
+
+  it("serves a few downloads of the file as it is at once, and asks the rest to wait", async () => {
+    const { fileId } = await fileOf(INLINE_SNAPSHOT_NODES + 500);
+    await runInDurableObject(roomOf(fileId), async (room: FileRoom) => {
+      const open: ReadableStream<Uint8Array>[] = [];
+      for (;;) {
+        const stream = await room.exportDocument();
+        if (!stream) break;
+        open.push(stream);
+        expect(open.length).toBeLessThan(10);
+      }
+      expect(open.length).toBeGreaterThan(1);
+      await (open.pop() as ReadableStream<Uint8Array>).cancel();
+      // The cancel reaches the reader through the gzip stage a moment later.
+      let again: ReadableStream<Uint8Array> | null = null;
+      for (let i = 0; i < 100 && !again; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        again = await room.exportDocument();
+      }
+      expect(again).not.toBeNull();
+      for (const stream of [...open, again as ReadableStream<Uint8Array>]) await stream.cancel();
     });
   });
 });

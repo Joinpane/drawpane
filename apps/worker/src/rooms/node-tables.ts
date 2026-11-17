@@ -191,27 +191,32 @@ export function* tablePages(
   const t = checkName(table);
   let after = "";
   for (;;) {
-    // Read a row at a time, so a page of large layers ends once it holds `chars` of properties
-    // rather than after `size` of them (a text layer may hold 200,000 characters).
-    const rows: NodeRow[] = [];
+    // How many of the next rows fit in `chars` of properties, measured in SQL (their lengths, not
+    // their properties), so a page of large layers ends early (a text layer may hold 200,000
+    // characters). Every cursor is read to its end: one left open keeps its table locked.
+    const sizes = sql
+      .exec<{ id: string; n: number }>(
+        `SELECT id, LENGTH(props) AS n FROM ${t} WHERE id > ? ORDER BY id LIMIT ?`,
+        after,
+        size,
+      )
+      .toArray();
+    if (sizes.length === 0) return;
+    let take = 0;
     let held = 0;
-    let full = false;
-    for (const row of sql.exec<NodeRow>(
-      `SELECT ${NODE_COLUMNS} FROM ${t} WHERE id > ? ORDER BY id LIMIT ?`,
-      after,
-      size,
-    )) {
-      rows.push(row);
-      held += row.props.length;
-      if (held >= chars) {
-        full = true;
-        break;
-      }
-    }
-    if (rows.length === 0) return;
+    while (take < sizes.length && (take === 0 || held + (sizes[take] as { n: number }).n <= chars))
+      held += (sizes[take++] as { n: number }).n;
+    const last = (sizes[take - 1] as { id: string }).id;
+    const rows = sql
+      .exec<NodeRow>(
+        `SELECT ${NODE_COLUMNS} FROM ${t} WHERE id > ? AND id <= ? ORDER BY id`,
+        after,
+        last,
+      )
+      .toArray();
     yield rows;
-    after = (rows[rows.length - 1] as NodeRow).id;
-    if (!full && rows.length < size) return;
+    after = last;
+    if (take === sizes.length && sizes.length < size) return;
   }
 }
 

@@ -59,6 +59,7 @@ import {
   copyNodes,
   countRows,
   dropTable,
+  PAGE_ROWS,
   type RoomSql,
   TableReader,
   tablePages,
@@ -134,6 +135,15 @@ const MAX_REPLAY_BYTES = 8 << 20;
  * 200,000): anything more is downloaded, by a client that can.
  */
 const INLINE_SNAPSHOT_CHARS = 8 << 20;
+/**
+ * Downloads of the file as it is a room serves at once, each holding a page
+ * of DOWNLOAD_PAGE_CHARS and its gzip: more are refused (503), and the
+ * browser asks again in a while.
+ */
+const MAX_DOWNLOADS = 4;
+const DOWNLOAD_PAGE_CHARS = 1 << 20;
+/** A download not finished in this long no longer counts toward MAX_DOWNLOADS. */
+const DOWNLOAD_HELD_MS = 10 * 60_000;
 
 /**
  * Clients ping every 25 s (connection.ts); the runtime answers for the room
@@ -327,6 +337,8 @@ export class FileRoom extends DurableObject<Env> {
   #rendering: Promise<HeadlessRenderer> | null = null;
   /** Copies of the file set aside for downloads, by revision (see exportDocument). */
   readonly #sharedCopies = new Map<number, { table: string; readers: number }>();
+  /** Downloads of the file as it is under way, and when each began (see exportDocument). */
+  readonly #downloads = new Map<symbol, number>();
   /** The update from main under way, which the next waits for: one at a time. */
   #updating: Promise<unknown> = Promise.resolve();
 
@@ -998,7 +1010,13 @@ export class FileRoom extends DurableObject<Env> {
    * set aside, dropped when the last of them finishes, so many people opening
    * a large file at once don't each copy it.
    */
-  async exportDocument(): Promise<ReadableStream<Uint8Array>> {
+  async exportDocument(): Promise<ReadableStream<Uint8Array> | null> {
+    // Each download holds a page and its gzip as it goes: a few at once, the rest asked to wait.
+    // One that never finished (a reader that went away unnoticed) stops counting in a while.
+    const now = Date.now();
+    for (const [reader, started] of this.#downloads)
+      if (now - started > DOWNLOAD_HELD_MS) this.#downloads.delete(reader);
+    if (this.#downloads.size >= MAX_DOWNLOADS) return null;
     const fileId = this.#meta("file_id") ?? "";
     const revn = this.#revn;
     let shared = this.#sharedCopies.get(revn);
@@ -1017,12 +1035,15 @@ export class FileRoom extends DurableObject<Env> {
     }
     const copy = shared;
     copy.readers++;
+    const reader = Symbol("download");
+    this.#downloads.set(reader, now);
     // Should a reader let go without finishing, the alarm drops the copy in time.
     void this.#scheduleAlarm();
     return snapshotStream(
-      { fileId, revn, at: Date.now() },
-      tablePages(this.#sql, copy.table),
+      { fileId, revn, at: now },
+      tablePages(this.#sql, copy.table, PAGE_ROWS, DOWNLOAD_PAGE_CHARS),
       () => {
+        this.#downloads.delete(reader);
         copy.readers--;
         if (copy.readers > 0) return;
         if (this.#sharedCopies.get(revn) === copy) this.#sharedCopies.delete(revn);

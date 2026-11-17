@@ -141,6 +141,9 @@ export function connectFile(
     if (socket) {
       editor.sync.flush();
       socket.close(1000, "leaving");
+      // Its close is no longer this connection's to handle (ws is cleared), so the engine is told
+      // here: whatever was loading stops (a large file's download is aborted).
+      editor.sync.disconnected();
     }
   };
 }

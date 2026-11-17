@@ -99,7 +99,14 @@ app.get("/api/files/:fileId/document", async (c) => {
     await object?.body.cancel();
   }
   const room = c.env.FILE_ROOM.get(c.env.FILE_ROOM.idFromName(ticket.fid));
-  return gzip(await room.exportDocument());
+  const document = await room.exportDocument();
+  if (!document)
+    throw new HttpError(
+      503,
+      "rate_limited",
+      "Many people are opening this file. Trying again shortly.",
+    );
+  return gzip(document);
 });
 
 app.route("/api", api);
