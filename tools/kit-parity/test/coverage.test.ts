@@ -232,3 +232,32 @@ describe("per-layer values", () => {
     expect(f.get("corners/independent")?.faithful).toBe(2);
   });
 });
+
+describe("booleans", () => {
+  it("doesn't judge a boolean's operands, which become one path with it", async () => {
+    const page = { guid: { sessionID: 0, localID: 1 }, type: "CANVAS", name: "Page" };
+    const result = await measureCoverage(
+      [
+        page,
+        {
+          guid: { sessionID: 1, localID: 1 },
+          type: "BOOLEAN_OPERATION",
+          booleanOperation: "SUBTRACT",
+          parentIndex: { guid: page.guid, position: "a" },
+        },
+        {
+          guid: { sessionID: 1, localID: 2 },
+          type: "ELLIPSE",
+          parentIndex: { guid: { sessionID: 1, localID: 1 }, position: "a" },
+        },
+      ],
+      [
+        { id: "f0-1", type: "page", parent: "root", props: {} },
+        { id: "f1-1", type: "path", parent: "f0-1", props: { pathData: "M0 0 L1 1 Z" } },
+      ],
+    );
+    const f = new Map(result.features.map((x) => [x.key, x]));
+    expect(f.get("boolean/SUBTRACT")?.status).toBe("approximate");
+    expect(f.has("layer/ELLIPSE")).toBe(false);
+  });
+});

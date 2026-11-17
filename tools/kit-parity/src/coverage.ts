@@ -506,9 +506,20 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
       firstComponent.set(parent, guidOf(r.guid) as string);
   }
 
+  // A boolean's operands become one path with it: nothing of theirs is placed on its own.
+  const operand = new Map<string, boolean>();
+  const inBoolean = (g: string): boolean => {
+    const known = operand.get(g);
+    if (known !== undefined) return known;
+    const parent = guidOf(obj(byGuid.get(g)?.parentIndex)?.guid);
+    const p = parent ? byGuid.get(parent) : undefined;
+    const out = !!parent && (p?.type === "BOOLEAN_OPERATION" || inBoolean(parent));
+    operand.set(g, out);
+    return out;
+  };
   const placed = (g: string) => {
     const p = page(g);
-    return p !== null && !internal.has(p);
+    return p !== null && !internal.has(p) && !inBoolean(g);
   };
 
   // Variable collections and variables.
