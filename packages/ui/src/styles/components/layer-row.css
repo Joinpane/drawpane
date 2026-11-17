@@ -1,4 +1,6 @@
 .dp-layer {
+  /* What's behind the row, for the toggles that float over a scrolled name (see .dp-layer__actions). */
+  --dp-layer-ground: var(--surface);
   position: relative;
   display: flex;
   align-items: center;
@@ -9,15 +11,30 @@
   /* 4px, plus 12px per nesting level (LayerRow sets --dp-depth). */
   padding-left: calc(var(--space-100) + var(--dp-depth, 0) * var(--space-300));
   border-radius: var(--radius-sm);
+  /*
+   * Indent guides: a faint line per level, under each ancestor's caret, so depth
+   * still reads when a deep tree is scrolled sideways. Each 12px tile draws one.
+   */
+  background-image: repeating-linear-gradient(
+    to right,
+    transparent 0 5px,
+    var(--line) 5px 6px,
+    transparent 6px var(--space-300)
+  );
+  background-position: var(--space-100) 0;
+  background-size: calc(var(--dp-depth, 0) * var(--space-300)) 100%;
+  background-repeat: no-repeat;
   color: var(--ink);
   font: var(--type-ui-body);
   cursor: default;
 }
 .dp-layer:hover {
-  background: var(--surface-hover);
+  --dp-layer-ground: var(--surface-hover);
+  background-color: var(--surface-hover);
 }
 .dp-layer.is-selected {
-  background: var(--signal-soft);
+  --dp-layer-ground: var(--signal-soft);
+  background-color: var(--signal-soft);
   font-weight: 600;
 }
 .dp-layer__caret {
@@ -90,16 +107,26 @@
   height: 6px;
   border-radius: var(--radius-full);
 }
+/*
+ * The lock and the eye, at the row's end. In a tree that scrolls sideways they
+ * stick to its right edge, where they sit when it isn't scrolled (inset by the
+ * row's end padding), so they stay in reach however far it's scrolled. While a
+ * toggle shows, it covers the name under it with the row's own ground, out to
+ * the edge (the shadow).
+ */
 .dp-layer__actions {
+  position: sticky;
+  right: 6px;
   display: inline-flex;
+  flex: none;
   gap: var(--space-100);
-  color: var(--icon);
-  opacity: 0;
+  margin-left: auto;
 }
 .dp-layer:hover .dp-layer__actions,
 .dp-layer:focus-within .dp-layer__actions,
-.dp-layer__actions.is-pinned {
-  opacity: 1;
+.dp-layer__actions:has(.is-on) {
+  background: var(--dp-layer-ground);
+  box-shadow: 6px 0 0 var(--dp-layer-ground);
 }
 .dp-layer__toggle {
   display: inline-grid;
@@ -114,9 +141,6 @@
   color: inherit;
   cursor: pointer;
 }
-.dp-layer__toggle:hover {
-  color: var(--ink);
-}
 /*
  * A clickable caret takes the same 12px slot as an empty one, so leaf rows line
  * up with their siblings; it reaches 2px past each side for a 16px target.
@@ -124,16 +148,33 @@
 .dp-layer__caret.dp-layer__toggle {
   margin-inline: -2px;
 }
-/* Locking is offered on hover; a locked layer's lock stays pinned. */
-.dp-layer__actions.is-pinned .dp-layer__toggle.is-offer {
-  visibility: hidden;
+/* A read-only row's lock or eye, in the same 16px slot as a button's (over `.dp-icon[width]`). */
+.dp-layer .dp-layer__actions .dp-layer__state {
+  flex: none;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  padding: 2px;
 }
-.dp-layer:hover .dp-layer__actions.is-pinned .dp-layer__toggle.is-offer,
-.dp-layer:focus-within .dp-layer__actions.is-pinned .dp-layer__toggle.is-offer {
-  visibility: visible;
+/*
+ * On (locked, hidden): a solid padlock or a slashed eye, always shown at full ink.
+ * Off: a faint offer to lock or hide, only while the row is hovered or focused.
+ */
+.dp-layer__actions .is-on {
+  color: var(--ink);
 }
-.dp-layer__actions > .dp-icon {
-  margin: 2px;
+.dp-layer__actions .is-offer {
+  color: var(--ink-muted);
+  opacity: 0;
+  transition: opacity var(--duration-hover) ease-out;
+}
+.dp-layer:hover .dp-layer__actions .is-offer,
+.dp-layer:focus-within .dp-layer__actions .is-offer {
+  opacity: 1;
+}
+.dp-layer__toggle:hover,
+.dp-layer__actions .dp-layer__toggle:hover {
+  color: var(--ink);
 }
 
 /* A tag after the name (a frame's variable mode): a small outlined pill, quieter than the name. */

@@ -68,9 +68,15 @@ export interface LayerRowProps extends Omit<ComponentPropsWithRef<"div">, "child
    * for an Alt-click, which opens or closes everything inside too.
    */
   onToggleExpanded?: (deep: boolean) => void;
-  /** Makes the eye a button. */
+  /**
+   * Makes the eye a button. A hidden layer shows a slashed eye at full ink; a
+   * visible one offers to hide only while the row is hovered or focused.
+   */
   onToggleHidden?: () => void;
-  /** Makes the lock a button: it unlocks while locked, and offers to lock on hover. */
+  /**
+   * Makes the lock a button. A locked layer shows a solid closed padlock at full
+   * ink; an unlocked one offers a faint open padlock while hovered or focused.
+   */
   onToggleLocked?: () => void;
   /** Marks where the name matches a search, case-insensitively. */
   highlight?: string;
@@ -171,14 +177,9 @@ export function LayerRow({
   const caret = hasChildren && (
     <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
   );
-  const eye = (
-    <Icon
-      name={hidden ? "eye-off" : "eye"}
-      size={12}
-      label={onToggleHidden ? undefined : hidden ? "Hidden" : "Visible"}
-    />
-  );
-  const lock = <Icon name="lock" size={12} label={onToggleLocked ? undefined : "Locked"} />;
+  // The row holding the tree's roving focus lets Tab reach its toggles; other rows' toggles
+  // stay out of the tab order (the tree's arrow keys and ⌘⇧L, ⌘⇧H reach them too).
+  const toggleTabIndex = rest.tabIndex === 0 ? 0 : -1;
 
   return (
     <div
@@ -276,42 +277,96 @@ export function LayerRow({
           style={{ background: presenceColor(presence) }}
         />
       )}
-      <span className={cx("dp-layer__actions", (hidden || locked) && "is-pinned")}>
-        {onToggleLocked ? (
-          <button
-            type="button"
-            className={cx("dp-layer__toggle", !locked && "is-offer")}
-            tabIndex={-1}
-            aria-label={locked ? "Unlock layer" : "Lock layer"}
-            onDoubleClick={stop}
-            onClick={(event) => {
-              stop(event);
-              onToggleLocked();
-            }}
-          >
-            {locked ? lock : <Icon name="unlock" size={12} />}
-          </button>
-        ) : (
-          locked && lock
-        )}
-        {onToggleHidden ? (
-          <button
-            type="button"
-            className="dp-layer__toggle"
-            tabIndex={-1}
-            aria-label={hidden ? "Show layer" : "Hide layer"}
-            onDoubleClick={stop}
-            onClick={(event) => {
-              stop(event);
-              onToggleHidden();
-            }}
-          >
-            {eye}
-          </button>
-        ) : (
-          eye
-        )}
+      <span className="dp-layer__actions">
+        <StateToggle
+          on={locked}
+          label="Lock"
+          onIcon="lock"
+          offIcon="unlock"
+          onLabel="Locked"
+          offTitle="Lock"
+          onTitle="Unlock"
+          tabIndex={toggleTabIndex}
+          onToggle={onToggleLocked}
+        />
+        <StateToggle
+          on={hidden}
+          label="Hide"
+          onIcon="eye-off"
+          offIcon="eye"
+          onLabel="Hidden"
+          offLabel="Visible"
+          offTitle="Hide"
+          onTitle="Show"
+          tabIndex={toggleTabIndex}
+          onToggle={onToggleHidden}
+        />
       </span>
     </div>
+  );
+}
+
+/**
+ * A row's lock or eye. On (locked, hidden): always shown, at full ink. Off: an
+ * offer, faint and only while the row is hovered or focused. A slot is kept
+ * either way, so every row's toggles line up. With `onToggle` it's a toggle
+ * button: its name stays put ("Lock") and `aria-pressed` says the state; the
+ * tooltip says what a click does ("Unlock").
+ */
+function StateToggle({
+  on,
+  label,
+  onIcon,
+  offIcon,
+  onLabel,
+  offLabel,
+  onTitle,
+  offTitle,
+  tabIndex,
+  onToggle,
+}: {
+  on: boolean;
+  label: string;
+  onIcon: IconName;
+  offIcon: IconName;
+  /** The state, said for read-only rows ("Locked"). */
+  onLabel: string;
+  /** Read-only rows show the off state only if this is set ("Visible"). */
+  offLabel?: string;
+  onTitle: string;
+  offTitle: string;
+  tabIndex: number;
+  onToggle: (() => void) | undefined;
+}) {
+  const state = on ? "is-on" : "is-offer";
+  if (!onToggle) {
+    if (on)
+      return <Icon className="dp-layer__state is-on" name={onIcon} size={12} label={onLabel} />;
+    if (offLabel)
+      return (
+        <Icon className="dp-layer__state is-offer" name={offIcon} size={12} label={offLabel} />
+      );
+    return <span className="dp-layer__state" aria-hidden="true" />;
+  }
+  return (
+    <button
+      type="button"
+      className={cx("dp-layer__toggle", state)}
+      tabIndex={tabIndex}
+      aria-label={label}
+      aria-pressed={on}
+      title={on ? onTitle : offTitle}
+      onDoubleClick={stop}
+      onClick={(event) => {
+        stop(event);
+        onToggle();
+      }}
+      // Space and Enter press the button; arrow keys still move through the tree.
+      onKeyDown={(event) => {
+        if (event.key === " " || event.key === "Enter") event.stopPropagation();
+      }}
+    >
+      <Icon name={on ? onIcon : offIcon} size={12} />
+    </button>
   );
 }

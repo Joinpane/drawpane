@@ -220,6 +220,7 @@ export const iconData = {
         width: "9",
         height: "6.5",
         rx: "1.5",
+        fill: "currentColor",
       },
     ],
     [
@@ -233,9 +234,9 @@ export const iconData = {
     [
       "rect",
       {
-        x: "3.5",
+        x: "2.5",
         y: "7",
-        width: "9",
+        width: "8.5",
         height: "6.5",
         rx: "1.5",
       },
@@ -243,7 +244,7 @@ export const iconData = {
     [
       "path",
       {
-        d: "M5.5 7V5.5a2.5 2.5 0 0 1 4.9-.7",
+        d: "M8.75 7V4.5a2.5 2.5 0 0 1 5 0v1",
       },
     ],
   ],

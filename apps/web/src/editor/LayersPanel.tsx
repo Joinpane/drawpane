@@ -23,12 +23,16 @@ import {
   containersWithin,
   type DropTarget,
   dropPlacement,
+  INDENT,
+  INDENT_START,
   kindOf,
   LAYER_FILTERS,
   type LayerFilter,
   layerName,
   layerRows,
   type Row,
+  revealLeft,
+  rowWidthFor,
 } from "./layer-tree";
 import { openMenu, uiFor, useUi } from "./ui-state";
 
@@ -42,10 +46,6 @@ interface DragState {
   /** ⌥ held: the drop duplicates instead of moving. */
   readonly copy: boolean;
 }
-
-/** Each nesting level indents a row this much (the LayerRow's 12px), from its 4px start. */
-const INDENT = 12;
-const INDENT_START = 4;
 
 export function LayersPanel() {
   const editor = useEditor();
@@ -66,7 +66,7 @@ export function LayersPanel() {
   const scroller = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const searchField = useRef<HTMLInputElement>(null);
-  const [scroll, setScroll] = useState({ top: 0, height: 400 });
+  const [scroll, setScroll] = useState({ top: 0, height: 400, width: 264 });
 
   // ⌘F opens the search in the same render, so the field (which focuses
   // itself, see LayerSearch) catches the very next keystroke.
@@ -111,6 +111,14 @@ export function LayersPanel() {
     return layerRows(editor.doc, pageId, active ? { collapsed, query, filter } : { collapsed });
   }, [editor, pageId, version, collapsed, active, query, filter]);
 
+  // As wide as the deepest open row needs: a deep tree scrolls sideways. All
+  // the open rows, not just the drawn ones, so the width holds while scrolling down.
+  const treeWidth = useMemo(() => {
+    let deepest = 0;
+    for (const row of rows) if (row.depth > deepest) deepest = row.depth;
+    return rowWidthFor(deepest);
+  }, [rows]);
+
   const presenceBy = useMemo(() => {
     const map = new Map<string, { slot: PresenceSlot; name: string }>();
     for (const peer of peers.values()) {
@@ -133,23 +141,42 @@ export function LayersPanel() {
     focusRow.current = null;
   }, [selection, scroll]);
 
-  // Keep the focused or newly selected row scrolled into view.
+  // Keep the focused or newly selected row scrolled into view: down to it, and
+  // across to its name in a deep tree (once per selection, so scrolling sideways
+  // by hand isn't undone by the next edit).
+  const revealed = useRef<string | null>(null);
   useLayoutEffect(() => {
     const id = selection[0];
     const el = scroller.current;
+    // Selecting it again later (after something else, or nothing) reveals it again.
+    if (revealed.current !== (id ?? null)) revealed.current = null;
     if (!id || !el) return;
     const index = rows.findIndex((r) => r.node.id === id);
-    if (index === -1) return;
+    const row = rows[index];
+    if (!row) return;
     const top = index * ROW_HEIGHT;
     if (top < el.scrollTop) el.scrollTop = top;
     else if (top + ROW_HEIGHT > el.scrollTop + el.clientHeight)
       el.scrollTop = top + ROW_HEIGHT - el.clientHeight;
+    if (revealed.current === id) return;
+    revealed.current = id;
+    const left = revealLeft(row.depth, el.scrollLeft, el.clientWidth);
+    if (left !== null) el.scrollLeft = left;
   }, [selection, rows]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    const update = () => setScroll({ top: el.scrollTop, height: el.clientHeight });
+    // Only a vertical scroll or a resize draws other rows: scrolling sideways
+    // moves them all at once, with no render (the toggles stick by CSS).
+    const update = () =>
+      setScroll((prev) =>
+        prev.top === el.scrollTop &&
+        prev.height === el.clientHeight &&
+        prev.width === el.clientWidth
+          ? prev
+          : { top: el.scrollTop, height: el.clientHeight, width: el.clientWidth },
+      );
     update();
     const observer = new ResizeObserver(update);
     observer.observe(el);
@@ -252,6 +279,8 @@ export function LayersPanel() {
     e.preventDefault();
     e.dataTransfer.dropEffect = e.altKey ? "copy" : "move";
     // The pointer's level: where it is across the row, against the rows' indents.
+    // `left` is the row's (or list's) left on screen, so it already moves with
+    // the tree when that's scrolled sideways.
     const depth = (e.clientX - left - INDENT_START - INDENT / 2) / INDENT;
     const parentOf = (id: string) => {
       const parent = editor.doc.get(id)?.parent;
@@ -399,7 +428,7 @@ export function LayersPanel() {
       ) : null}
       <div
         ref={scroller}
-        className="layers__scroll"
+        className={treeWidth > scroll.width ? "layers__scroll is-wide" : "layers__scroll"}
         role="tree"
         aria-label="Layers"
         aria-multiselectable="true"
@@ -423,7 +452,11 @@ export function LayersPanel() {
             <p className="layers__empty">Layers you draw appear here.</p>
           )
         ) : (
-          <div ref={listRef} style={{ height: rows.length * ROW_HEIGHT, position: "relative" }}>
+          <div
+            ref={listRef}
+            className="layers__list"
+            style={{ height: rows.length * ROW_HEIGHT, width: treeWidth }}
+          >
             {rows.slice(start, end).map((row, i) => {
               const { node } = row;
               const presence = presenceBy.get(node.id);

@@ -4,7 +4,8 @@
  * with ⌥-click and ⌥L, locking from a row, duplicating with ⌥-drag, and
  * dragging a layer out of its groups to the level the pointer is at (even
  * the last layer in a frame, over its own row), and into the empty space
- * below the list.
+ * below the list. A tree too deep for the panel scrolls sideways with its
+ * toggles kept in view, and follows a layer selected on the canvas.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -138,8 +139,13 @@ test.describe
 
     test("locks a layer from its row, and unlocks it again", async () => {
       const title = row(page, "Title");
+      const lock = title.getByRole("button", { name: "Lock" });
+      // Unlocked: a faint open padlock, only on hover.
+      await expect(lock).toHaveAttribute("aria-pressed", "false");
+      await expect(lock).toHaveCSS("opacity", "0");
       await title.hover();
-      await title.getByRole("button", { name: "Lock layer" }).click();
+      await expect(lock).toHaveCSS("opacity", "1");
+      await lock.click();
       await expect
         .poll(() =>
           page.evaluate(
@@ -148,7 +154,17 @@ test.describe
           ),
         )
         .toBe(true);
-      await title.getByRole("button", { name: "Unlock layer" }).click();
+      // Locked: pressed, and a solid closed padlock that stays when the pointer leaves.
+      await expect(lock).toHaveAttribute("aria-pressed", "true");
+      await expect(lock).toHaveAttribute("title", "Unlock");
+      await expect(lock.locator("rect")).toHaveAttribute("fill", "currentColor");
+      await page.mouse.move(700, 760);
+      await expect(lock).toHaveCSS("opacity", "1");
+      await expect(row(page, "Event list").getByRole("button", { name: "Lock" })).toHaveCSS(
+        "opacity",
+        "0",
+      );
+      await lock.click();
       await expect
         .poll(() =>
           page.evaluate(
@@ -323,5 +339,202 @@ test.describe
         pageId,
       );
       expect(order[0]).toBe(labelId);
+    });
+
+    test.describe("a tree deeper than the panel", () => {
+      const DEPTH = 14;
+      let deep: { chain: string[]; leaf: string; locked: string };
+
+      test.beforeAll(async () => {
+        deep = await page.evaluate((depth) => {
+          const e = (window as unknown as W).drawpane;
+          // Frames in frames, each a little inside the last, far from the other layers.
+          const chain: string[] = [];
+          let parent = e.s.pageId;
+          for (let i = 0; i < depth; i++) {
+            parent = e.createLayer(
+              "frame",
+              { x: 3000 + i * 4, y: i * 4, width: 400 - i * 8, height: 400 - i * 8 },
+              parent,
+              { name: `Level ${i + 1}` },
+            ) as string;
+            chain.push(parent);
+          }
+          const locked = e.createLayer("rect", { x: 3060, y: 60, width: 20, height: 20 }, parent, {
+            name: "Pinned bolt",
+            locked: true,
+          }) as string;
+          const leaf = e.createLayer("rect", { x: 3100, y: 100, width: 160, height: 160 }, parent, {
+            name: "Deepest layer",
+          }) as string;
+          // Enough layers above it that its row starts out of view, below the fold.
+          for (let i = 0; i < 30; i++)
+            e.createLayer("rect", { x: 2000, y: i * 30, width: 20, height: 20 }, e.s.pageId, {
+              name: `Filler ${i + 1}`,
+            });
+          e.select([]);
+          return { chain, leaf, locked };
+        }, DEPTH);
+      });
+
+      const scroller = (p: Page) => p.locator(".layers__scroll");
+      const scrollTo = (p: Page, left: number, top: number) =>
+        scroller(p).evaluate(
+          (el, [l, t]) => {
+            el.scrollLeft = l as number;
+            el.scrollTop = t as number;
+          },
+          [left, top],
+        );
+      const scrollLeft = (p: Page) => scroller(p).evaluate((el) => el.scrollLeft);
+      /** Whether `box` lies across inside the tree's visible area. */
+      const inView = async (p: Page, name: string, part: string) => {
+        const area = await scroller(p).boundingBox();
+        const box = await row(p, name).locator(part).first().boundingBox();
+        if (!area || !box) return false;
+        return box.x >= area.x - 0.5 && box.x + box.width <= area.x + area.width + 0.5;
+      };
+
+      test("scrolls sideways, keeping its lock and eye in view at the panel's edge", async () => {
+        await scrollTo(page, 0, 0);
+        await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), deep.locked);
+        const locked = row(page, "Pinned bolt");
+        await expect(locked).toBeVisible();
+        await page.evaluate(() => (window as unknown as W).drawpane.select([]));
+        const wide = await scroller(page).evaluate((el) => ({
+          scroll: el.scrollWidth,
+          client: el.clientWidth,
+        }));
+        expect(wide.scroll).toBeGreaterThan(wide.client);
+        await expect(scroller(page)).toHaveClass(/is-wide/);
+
+        // At either end of the scroll, the locked row's padlock sits inside the panel,
+        // pressed and shown, lined up with a shallow row's toggles.
+        const lock = locked.getByRole("button", { name: "Lock" });
+        for (const left of [0, wide.scroll]) {
+          await scroller(page).evaluate((el, l) => {
+            el.scrollLeft = l;
+          }, left);
+          expect(await inView(page, "Pinned bolt", ".dp-layer__actions")).toBe(true);
+          await expect(lock).toHaveAttribute("aria-pressed", "true");
+          await expect(lock).toHaveCSS("opacity", "1");
+          const shallow = await row(page, /^Level 1(?!\d)/)
+            .getByRole("button", { name: "Lock" })
+            .boundingBox();
+          const deepBox = await lock.boundingBox();
+          expect(Math.abs((shallow?.x ?? 0) - (deepBox?.x ?? -99))).toBeLessThan(1);
+        }
+        // A name deep down keeps its room: it isn't squeezed to an ellipsis.
+        const name = locked.locator(".dp-layer__name");
+        const fits = await name.evaluate((el) => el.scrollWidth <= el.clientWidth);
+        expect(fits).toBe(true);
+      });
+
+      test("scrolls sideways with Shift and the wheel, or a sideways swipe", async () => {
+        await scrollTo(page, 0, 0);
+        const area = await scroller(page).boundingBox();
+        if (!area) throw new Error("no tree");
+        await page.mouse.move(area.x + area.width / 2, area.y + 100);
+        await page.keyboard.down("Shift");
+        await page.mouse.wheel(0, 60);
+        await page.keyboard.up("Shift");
+        await expect.poll(() => scrollLeft(page)).toBeGreaterThan(0);
+        await scrollTo(page, 0, 0);
+        await page.mouse.wheel(60, 0);
+        await expect.poll(() => scrollLeft(page)).toBeGreaterThan(0);
+      });
+
+      test("brings a deep layer's row into view when it's selected on the canvas", async () => {
+        await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), deep.leaf);
+        await page.keyboard.press("Shift+2");
+        await page.waitForFunction(
+          () =>
+            !(window as unknown as { drawpane: { cameraAnimating?: boolean } }).drawpane
+              .cameraAnimating,
+        );
+        await page.evaluate(() => (window as unknown as W).drawpane.select([]));
+        await scrollTo(page, 0, 0);
+        await expect(row(page, "Deepest layer")).toHaveCount(0);
+
+        // ⌘-click (Ctrl-click) picks the deepest layer under the pointer, as in Figma.
+        const canvas = await page.locator(".canvas__overlay").boundingBox();
+        if (!canvas) throw new Error("no canvas");
+        await page.locator(".canvas__overlay").click({
+          position: { x: canvas.width / 2, y: canvas.height / 2 },
+          modifiers: ["ControlOrMeta"],
+        });
+        await expect.poll(() => selection(page)).toEqual([deep.leaf]);
+        const leaf = row(page, "Deepest layer");
+        await expect(leaf).toBeInViewport();
+        expect(await inView(page, "Deepest layer", ".dp-layer__name")).toBe(true);
+        expect(await inView(page, "Deepest layer", ".dp-layer__caret")).toBe(true);
+        expect(await scrollLeft(page)).toBeGreaterThan(0);
+        // And back to a top-level layer: the tree scrolls back to its start.
+        await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), ids.home);
+        await expect.poll(() => scrollLeft(page)).toBe(0);
+      });
+
+      test("follows the keyboard, and Tab reaches the focused row's toggles", async () => {
+        await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), deep.locked);
+        const bolt = row(page, "Pinned bolt");
+        await bolt.click();
+        await expect(bolt).toBeFocused();
+        // Up to its parent frame's row, whose name comes into view, then back.
+        await page.keyboard.press("ArrowLeft");
+        expect(await inView(page, `Level ${DEPTH}`, ".dp-layer__name")).toBe(true);
+        // Down past Deepest layer (the frame's topmost) to the bolt again.
+        await page.keyboard.press("ArrowDown");
+        await page.keyboard.press("ArrowDown");
+        await expect(bolt).toBeFocused();
+        // Tab goes to its lock (pressed: it's locked), then its eye; Enter unlocks.
+        await page.keyboard.press("Tab");
+        const lock = bolt.getByRole("button", { name: "Lock" });
+        await expect(lock).toBeFocused();
+        await page.keyboard.press("Enter");
+        await expect(lock).toHaveAttribute("aria-pressed", "false");
+        await expect
+          .poll(() =>
+            page.evaluate(
+              (id) => (window as unknown as W).drawpane.doc.get(id)?.props.locked ?? false,
+              deep.locked,
+            ),
+          )
+          .toBe(false);
+        // Pressing Enter on the toggle did nothing else: the selection stayed put.
+        expect(await selection(page)).toEqual([deep.locked]);
+        await page.keyboard.press("Tab");
+        await expect(bolt.getByRole("button", { name: "Hide" })).toBeFocused();
+        await page.keyboard.press("Shift+Tab");
+        await expect(lock).toBeFocused();
+      });
+
+      test("drags by the pointer's level while scrolled sideways", async () => {
+        await page.evaluate((id) => (window as unknown as W).drawpane.select([id]), deep.leaf);
+        expect(await scrollLeft(page)).toBeGreaterThan(0);
+        // The last layer in the deepest frame.
+        const bolt = row(page, "Pinned bolt");
+        const box = await bolt.boundingBox();
+        if (!box) throw new Error("no row");
+        await bolt.hover();
+        await page.mouse.down();
+        // Over its own row, a level further left than its own: out of its frame.
+        const levelX = box.x + 4 + (DEPTH - 1) * 12;
+        await page.mouse.move(levelX + 8, box.y + box.height * 0.85, { steps: 4 });
+        await page.mouse.move(levelX + 9, box.y + box.height * 0.85);
+        await expect(
+          page
+            .getByRole("status")
+            .filter({ hasText: `moving below Level ${DEPTH} in Level ${DEPTH - 1}` }),
+        ).toBeVisible();
+        await page.mouse.up();
+        await expect
+          .poll(() =>
+            page.evaluate(
+              (id) => (window as unknown as W).drawpane.doc.get(id)?.parent,
+              deep.locked,
+            ),
+          )
+          .toBe(deep.chain[DEPTH - 2]);
+      });
     });
   });

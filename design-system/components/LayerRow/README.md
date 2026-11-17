@@ -1,6 +1,14 @@
 # LayerRow
 
-One row in the Layers tree. Rows are 28px tall, indent 12px per level, and show visibility and lock actions on hover, or permanently when a layer is hidden or locked.
+One row in the Layers tree. Rows are 28px tall and indent 12px per level, with a faint `line` indent guide under each ancestor's caret so depth still reads when a deep tree is scrolled sideways.
+
+**Lock and visibility** sit at the row's end, in fixed slots so every row's toggles line up:
+
+- **Locked:** a solid, closed padlock (`lock`), always shown, in `ink`.
+- **Hidden:** a slashed eye (`eye-off`), always shown, in `ink`; the name and glyph dim to `ink-muted`.
+- **Unlocked or visible:** nothing, until the row is hovered or focused; then a faint open padlock (`unlock`) and eye in `ink-muted` offer to lock or hide it.
+- Each is a toggle button with a fixed name ("Lock", "Hide") and `aria-pressed` for its state; its tooltip says what a click does ("Unlock", "Show"). On the row holding the tree's focus, Tab reaches them; ⌘⇧L and ⌘⇧H work on the selection.
+- In a tree that scrolls sideways, they stick to the panel's right edge over the row's own ground, and names fade out under them.
 
 **Consumer provides:** `name`, `kind` (sets the glyph), `depth`, and the state flags `selected`, `hidden`, `locked`, `hasChildren`, `expanded`. Pass `presence` (1–8) when a collaborator has the layer selected.
 
