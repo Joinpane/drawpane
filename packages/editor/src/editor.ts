@@ -15,6 +15,7 @@ import {
   keysBetween,
   type LayerType,
   type ListType,
+  MAX_MODES,
   type NodeRecord,
   type NodeType,
   newId,
@@ -121,13 +122,7 @@ import {
   textStyleFixupOps,
   textStyleUsers,
 } from "./text-styles";
-import {
-  BINDING_TARGETS,
-  unbindOps,
-  type VariableType,
-  variableFixupOps,
-  variablesIn,
-} from "./variables";
+import { BINDING_TARGETS, unbindOps, type VariableType, variablesIn } from "./variables";
 
 import type { BooleanEngine, BooleanEngineLoader, BooleanOp } from "./vector/boolean";
 import * as vector from "./vector/commands";
@@ -607,11 +602,16 @@ export class Editor {
       const pathOps = pathResizeOps(this.doc, [...ops, ...constrained]);
       const extra = [...marks, ...constrained, ...pathOps];
       const first = extra.length > 0 ? [...ops, ...extra] : ops;
+      // What changes to variables, styles and modes lay out again is this edit's, not a collaborator's.
+      this.doc.takeTokenLayout();
       let inverse = this.sync.commit(first);
       // A group whose last layer left (moved, deleted, cut) goes too, like Figma's.
       const emptied = this.#emptiedGroupOps(inverse);
       if (emptied.length > 0) inverse = [...this.sync.commit(emptied), ...inverse];
       let touched = this.#touchedBy([...ops, ...emptied], inverse);
+      // Layers whose bound layout values now resolve differently (a padding variable, a mode
+      // switch) are laid out here, by the client that made the change (decision 0034).
+      for (const id of this.doc.takeTokenLayout()) touched.add(id);
       let lastOps: readonly Op[] = first;
       // Derived writes until nothing changes: instances follow their main
       // component, bound properties follow their variables, text sizes to its
@@ -622,12 +622,10 @@ export class Editor {
         const relayout = relayoutTargets(this.doc, live, lastOps);
         const synced = propagationOps(this.doc, live);
         let roundInverse: Op[] = synced.length > 0 ? this.sync.commit(synced) : [];
-        const resolved = variableFixupOps(this.doc, [...lastOps, ...synced]);
-        if (resolved.length > 0) roundInverse = [...this.sync.commit(resolved), ...roundInverse];
         // Text layers follow their text style.
-        const styled = textStyleFixupOps(this.doc, [...lastOps, ...synced, ...resolved]);
+        const styled = textStyleFixupOps(this.doc, [...lastOps, ...synced]);
         if (styled.length > 0) roundInverse = [...this.sync.commit(styled), ...roundInverse];
-        const derivedSoFar = [...synced, ...resolved, ...styled];
+        const derivedSoFar = [...synced, ...styled];
         const text = this.#textFixups([...live, ...derivedSoFar.map((o) => o.id), ...relayout]);
         if (text.length > 0) roundInverse = [...this.sync.commit(text), ...roundInverse];
         const derived = [...derivedSoFar, ...text];
@@ -2719,8 +2717,8 @@ export class Editor {
     const collection = this.doc.get(collectionId);
     if (collection?.type !== "collection") return null;
     const modes = getProp(collection.props, "modes");
-    if (modes.length >= 16) {
-      this.notify("A collection can have up to 16 modes.");
+    if (modes.length >= MAX_MODES) {
+      this.notify(`A collection can have up to ${MAX_MODES} modes.`);
       return null;
     }
     const mode = { id: newId(8), name };

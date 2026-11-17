@@ -16,6 +16,9 @@ export const NODE_TYPES = [
   "collection",
   "variable",
   "textStyle",
+  // Shared styles (decision 0034): paints and effects layers link by reference.
+  "paintStyle",
+  "effectStyle",
   "library",
   "frame",
   "group",
@@ -47,13 +50,15 @@ export type LayerType = (typeof LAYER_TYPES)[number];
 
 /** Which child types each parent type accepts. The virtual root holds pages only. */
 export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]>> = {
-  root: ["page", "collection", "textStyle", "library"],
+  root: ["page", "collection", "textStyle", "paintStyle", "effectStyle", "library"],
   page: LAYER_TYPES,
   collection: ["variable"],
   variable: [],
   textStyle: [],
+  paintStyle: [],
+  effectStyle: [],
   // A team library a file uses (decision 0010): read-only copies of its components and what they need.
-  library: [...LAYER_TYPES, "textStyle", "collection"],
+  library: [...LAYER_TYPES, "textStyle", "paintStyle", "effectStyle", "collection"],
   // Override records sit only under instance roots (frames with `instanceOf`); `applyOp` checks.
   frame: [...LAYER_TYPES, "override"],
   group: LAYER_TYPES,
@@ -129,14 +134,35 @@ export type BlendMode = z.infer<typeof BlendMode>;
 
 const Point = z.object({ x: finite, y: finite });
 
+/** A variable a field is bound to, by id (decision 0034). */
+const VariableRef = z.string().regex(ID_PATTERN);
+
+/**
+ * A paint's fields bound to variables (decision 0034): its colour (alpha
+ * included; the paint's own opacity still applies) and its opacity (a
+ * percentage, as layer opacity is). The bound fields show what the
+ * variables resolve to where the layer is; the stored values are what
+ * shows when they don't resolve.
+ */
+export const PaintBindings = z.object({
+  color: VariableRef.optional(),
+  opacity: VariableRef.optional(),
+});
+export type PaintBindings = z.infer<typeof PaintBindings>;
+
 const paintBase = {
   visible: z.boolean().optional(),
   opacity: unit.optional(),
   blendMode: BlendMode.optional(),
+  bind: PaintBindings.optional(),
 };
 
 export const SolidPaint = z.object({ type: z.literal("solid"), color: Color, ...paintBase });
-export const GradientStop = z.object({ position: unit, color: Color });
+export const GradientStop = z.object({
+  position: unit,
+  color: Color,
+  bind: z.object({ color: VariableRef.optional() }).optional(),
+});
 export const GradientPaint = z.object({
   /**
    * Linear runs from `from` to `to`; radial spreads from `from` out to the
@@ -196,11 +222,23 @@ export const Shadow = z.object({
    * have. Decision 0031 has how a layer casts its drop shadow.
    */
   showBehind: z.boolean().optional(),
+  /** Fields bound to variables (decision 0034), as Figma binds a shadow's. */
+  bind: z
+    .object({
+      x: VariableRef.optional(),
+      y: VariableRef.optional(),
+      blur: VariableRef.optional(),
+      spread: VariableRef.optional(),
+      color: VariableRef.optional(),
+      visible: VariableRef.optional(),
+    })
+    .optional(),
 });
 export const Blur = z.object({
   type: z.enum(["layer-blur", "background-blur"]),
   radius: nonNegative,
   visible: z.boolean().optional(),
+  bind: z.object({ radius: VariableRef.optional(), visible: VariableRef.optional() }).optional(),
 });
 /** 0–100: how much of a glass property (refraction, dispersion, light…). */
 const amount = ranged(
@@ -484,24 +522,84 @@ const PathData = z
 
 export const Mode = z.object({ id: z.string().regex(ID_PATTERN), name: z.string().min(1).max(64) });
 export type Mode = z.infer<typeof Mode>;
-/** A variable's value in one mode: a literal, or an alias to another variable (DTCG `{group.token}`). */
+/** How many modes a collection holds: past Figma's largest plan, so no file Figma saves is refused. */
+export const MAX_MODES = 64;
+/**
+ * A variable's value in one mode: a literal, or an alias to another variable
+ * (DTCG `{group.token}`), in any collection. A colour alias may compose the
+ * colour at an `opacity` (0 to 1), as Figma's `COMPOSE_COLOR` does.
+ */
+export const VariableAlias = z.object({
+  alias: z.string().regex(ID_PATTERN),
+  opacity: unit.optional(),
+});
+export type VariableAlias = z.infer<typeof VariableAlias>;
 export const VariableValue = z.union([
   Color,
   finite,
+  z.boolean(),
   z.string().max(10_000),
-  z.object({ alias: z.string().regex(ID_PATTERN) }),
+  VariableAlias,
 ]);
 export type VariableValue = z.infer<typeof VariableValue>;
+export const VARIABLE_TYPES = ["color", "number", "string", "boolean"] as const;
+export type VariableType = (typeof VARIABLE_TYPES)[number];
+
+/** Where a variable may be bound, by Figma's names; the pickers filter by them (decision 0034). */
+export const VARIABLE_SCOPES = [
+  "ALL_SCOPES",
+  "TEXT_CONTENT",
+  "CORNER_RADIUS",
+  "WIDTH_HEIGHT",
+  "GAP",
+  "ALL_FILLS",
+  "FRAME_FILL",
+  "SHAPE_FILL",
+  "TEXT_FILL",
+  "STROKE_COLOR",
+  "STROKE_FLOAT",
+  "EFFECT_FLOAT",
+  "EFFECT_COLOR",
+  "OPACITY",
+  "FONT_FAMILY",
+  "FONT_STYLE",
+  "FONT_WEIGHT",
+  "FONT_SIZE",
+  "LINE_HEIGHT",
+  "LETTER_SPACING",
+  "PARAGRAPH_SPACING",
+  "PARAGRAPH_INDENT",
+  "FONT_VARIATIONS",
+  "TRANSFORM",
+] as const;
+export type VariableScope = (typeof VARIABLE_SCOPES)[number];
+
+/** A variable's name in code, per platform, as Figma's Dev Mode shows it. */
+export const CodeSyntax = z.object({
+  web: z.string().max(256).optional(),
+  ios: z.string().max(256).optional(),
+  android: z.string().max(256).optional(),
+});
+export type CodeSyntax = z.infer<typeof CodeSyntax>;
 
 /**
- * Properties a variable can drive. `fill` and `stroke` drive the colour of the
- * first solid paint; the rest are the property of the same name.
+ * A layer's own properties a variable can drive (decision 0034). Most are
+ * the property of the same name. `fill` and `stroke` (older files) drive the
+ * colour of the first solid paint; paints, gradient stops and effects bind
+ * their fields with `bind` on themselves instead. The corner radii and
+ * stroke sides drive one entry of `cornerRadii` and `strokeWeights`;
+ * `fontStyle` takes a style name ("Semi Bold Italic") into `fontWeight` and
+ * `fontStyle`.
  */
 export const BINDING_KEYS = [
   "fill",
   "stroke",
   "width",
   "height",
+  "minWidth",
+  "maxWidth",
+  "minHeight",
+  "maxHeight",
   "gap",
   "rowGap",
   "paddingTop",
@@ -509,11 +607,25 @@ export const BINDING_KEYS = [
   "paddingBottom",
   "paddingLeft",
   "cornerRadius",
+  "topLeftRadius",
+  "topRightRadius",
+  "bottomRightRadius",
+  "bottomLeftRadius",
   "strokeWeight",
+  "strokeTopWeight",
+  "strokeRightWeight",
+  "strokeBottomWeight",
+  "strokeLeftWeight",
   "opacity",
-  "fontSize",
-  "fontFamily",
+  "visible",
   "characters",
+  "fontFamily",
+  "fontStyle",
+  "fontWeight",
+  "fontSize",
+  "lineHeight",
+  "letterSpacing",
+  "paragraphSpacing",
 ] as const;
 export type BindingKey = (typeof BINDING_KEYS)[number];
 
@@ -575,7 +687,7 @@ export const PROPS = {
   /** Keep width and height in proportion when either changes (the inspector's lock, handles). */
   lockAspect: prop(z.boolean(), false, GEOMETRY),
 
-  fills: prop(z.array(Paint).max(32), [], SHAPES),
+  fills: prop(z.array(Paint).max(32), [], [...SHAPES, "paintStyle"]),
   strokes: prop(z.array(Paint).max(32), [], SHAPES),
   strokeWeight: prop(nonNegative, 1, SHAPES),
   strokeAlign: prop(z.enum(["inside", "center", "outside"]), "inside", SHAPES),
@@ -595,7 +707,7 @@ export const PROPS = {
     null,
     CORNERS,
   ),
-  effects: prop(z.array(Effect).max(32), [], LAYERS),
+  effects: prop(z.array(Effect).max(32), [], [...LAYERS, "effectStyle"]),
   /**
    * A mask: its outline clips the layers above it in the same parent (up to
    * the next mask), and it isn't drawn itself, like Figma's "Use as mask".
@@ -756,10 +868,32 @@ export const PROPS = {
 
   // Variables (design tokens). A collection holds variables and names the
   // modes (light, dark, compact…); each variable has one value per mode.
-  modes: prop(z.array(Mode).min(1).max(16), [{ id: "m1", name: "Default" }], ["collection"]),
-  variableType: prop(z.enum(["color", "number", "string"]), "color", ["variable"]),
+  modes: prop(z.array(Mode).min(1).max(MAX_MODES), [{ id: "m1", name: "Default" }], ["collection"]),
+  variableType: prop(z.enum(VARIABLE_TYPES), "color", ["variable"]),
   values: prop(z.record(z.string().regex(ID_PATTERN), VariableValue), {}, ["variable"]),
-  description: prop(z.string().max(2000), "", ["variable", "collection", "textStyle"]),
+  description: prop(z.string().max(2000), "", [
+    "variable",
+    "collection",
+    "textStyle",
+    "paintStyle",
+    "effectStyle",
+  ]),
+  /** Where the variable may be bound (Figma's scopes); empty means anywhere. */
+  scopes: prop(z.array(z.enum(VARIABLE_SCOPES)).max(VARIABLE_SCOPES.length), [], ["variable"]),
+  codeSyntax: prop(CodeSyntax, {}, ["variable"]),
+  /** Left out when the file is published as a library (Figma's "Hide from publishing"). */
+  hiddenFromPublishing: prop(z.boolean(), false, [
+    "variable",
+    "collection",
+    "textStyle",
+    "paintStyle",
+    "effectStyle",
+  ]),
+  // Shared styles a layer links (decision 0034): while linked, it shows the style's paints or
+  // effects, resolved where the layer is; its own are what shows if the style is gone.
+  fillStyle: prop(z.string().regex(ID_PATTERN).nullable(), null, SHAPES),
+  strokeStyle: prop(z.string().regex(ID_PATTERN).nullable(), null, SHAPES),
+  effectStyle: prop(z.string().regex(ID_PATTERN).nullable(), null, LAYERS),
   // A library this file uses (decision 0010): the library's file, and the publish its copies are from.
   libraryFile: prop(z.string().regex(ID_PATTERN).nullable(), null, ["library"]),
   libraryPublish: prop(z.string().regex(ID_PATTERN).nullable(), null, ["library"]),

@@ -10,6 +10,13 @@ import type { Effect, Fill } from "@open-pencil/scene-graph";
 import { gradientHandles, type Matrix, rows } from "./geometry";
 import type { FigNotes } from "./notes";
 import { type RawEffect, type RawPaint, rawImageRef } from "./raw";
+import type { AliasOf } from "./tokens";
+
+/** What a paint's fields are bound to (decision 0034): its colour, from the graph; its stops', from the record. */
+export interface PaintBinds {
+  readonly color: (index: number) => Figma.VariableAlias | undefined;
+  readonly aliasOf: AliasOf;
+}
 
 const rgba = (c: { r: number; g: number; b: number; a?: number }): Figma.RGBA => ({
   r: c.r,
@@ -98,19 +105,68 @@ export function convertFills(
   fills: readonly Fill[],
   raw: readonly RawPaint[] | undefined,
   notes: FigNotes,
+  binds?: PaintBinds,
 ): Figma.Paint[] {
   const out: Figma.Paint[] = [];
   fills.forEach((f, i) => {
     const p = convertFill(f, raw?.[i], notes);
-    if (p) out.push(p);
+    if (p) out.push(binds ? withBinds(p, i, raw?.[i], binds) : p);
   });
   return out;
 }
+
+/** A paint with what its colour and its gradient's stops are bound to. */
+function withBinds(
+  p: Figma.Paint,
+  index: number,
+  raw: RawPaint | undefined,
+  binds: PaintBinds,
+): Figma.Paint {
+  if (p.type === "SOLID") {
+    const color = binds.color(index);
+    return color ? { ...p, boundVariables: { color } } : p;
+  }
+  const stopsVar = (raw as { type?: string; stopsVar?: unknown } | undefined)?.stopsVar;
+  if (!p.gradientStops || raw?.type !== p.type || !Array.isArray(stopsVar) || stopsVar.length === 0)
+    return p;
+  let any = false;
+  const gradientStops = p.gradientStops.map((stop, j) => {
+    const color = binds.aliasOf((stopsVar[j] as { colorVar?: unknown } | undefined)?.colorVar);
+    if (!color) return stop;
+    any = true;
+    return { ...stop, boundVariables: { color } };
+  });
+  return any ? { ...p, gradientStops } : p;
+}
+
+/** An effect's fields bound to variables, from its record (`xVar`, `colorVar`...). */
+function effectBinds(
+  same: RawEffect | undefined,
+  aliasOf: AliasOf | undefined,
+  fields: Readonly<Record<string, string>>,
+): { boundVariables: NonNullable<Figma.Effect["boundVariables"]> } | Record<string, never> {
+  if (!same || !aliasOf) return {};
+  const out: Record<string, Figma.VariableAlias> = {};
+  for (const [field, rest] of Object.entries(fields)) {
+    const alias = aliasOf((same as Record<string, unknown>)[field]);
+    if (alias) out[rest] = alias;
+  }
+  return Object.keys(out).length > 0 ? { boundVariables: out } : {};
+}
+
+const SHADOW_VARS = {
+  xVar: "offsetX",
+  yVar: "offsetY",
+  radiusVar: "radius",
+  spreadVar: "spread",
+  colorVar: "color",
+} as const;
 
 export function convertEffect(
   e: Effect,
   raw: RawEffect | undefined,
   notes: FigNotes,
+  aliasOf?: AliasOf,
 ): Figma.Effect | null {
   const type = e.type as string;
   const same = raw?.type === type ? raw : undefined;
@@ -129,6 +185,7 @@ export function convertEffect(
           ? { showShadowBehindNode: e.showShadowBehindNode }
           : {}),
         ...visible,
+        ...effectBinds(same, aliasOf, SHADOW_VARS),
       };
     case "FOREGROUND_BLUR":
     case "LAYER_BLUR":
@@ -138,6 +195,7 @@ export function convertEffect(
         radius: e.radius,
         ...(same?.blurOpType === "PROGRESSIVE" ? { blurType: "PROGRESSIVE" as const } : {}),
         ...visible,
+        ...effectBinds(raw?.type === e.type ? raw : undefined, aliasOf, { radiusVar: "radius" }),
       };
     case "NOISE":
       return {
@@ -170,10 +228,11 @@ export function convertEffects(
   effects: readonly Effect[],
   raw: readonly RawEffect[] | undefined,
   notes: FigNotes,
+  aliasOf?: AliasOf,
 ): Figma.Effect[] {
   const out: Figma.Effect[] = [];
   effects.forEach((e, i) => {
-    const converted = convertEffect(e, raw?.[i], notes);
+    const converted = convertEffect(e, raw?.[i], notes, aliasOf);
     if (converted) out.push(converted);
   });
   return out;

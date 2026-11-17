@@ -36,6 +36,7 @@ import { guidString, indexRecords, type RawRecord } from "./raw";
 import { indexChildren } from "./slots";
 import { prepareStyles } from "./styles";
 import { applySwappedLooks } from "./swaps";
+import { aliasReader, styleFinder } from "./tokens";
 import { prepareVariables } from "./variables";
 
 /** Larger files are refused before reading: decoding one needs several times its size in memory. */
@@ -246,6 +247,7 @@ async function buildPages(
   const chosen = new Set(options.pageIds ?? pages.map((p) => p.id));
   const whole = chosen.size === pages.length && pages.every((p) => chosen.has(p.id));
   const raw = indexRecords(records as unknown as RawRecord[]);
+  const findStyle = styleFinder(raw);
   const saved = { records: raw, children: indexChildren(raw.values()) };
 
   const notes = new FigNotes();
@@ -277,6 +279,7 @@ async function buildPages(
   const omitted = new Set(pages.filter((p) => !chosen.has(p.id)).map((p) => p.id));
   const builder = new RestFileBuilder();
   let built = 0;
+  let aliasOf: ReturnType<typeof aliasReader> | null = null;
   for (const pass of passes) {
     progress({ stage: "pages", done: built, total });
     await breathe();
@@ -292,7 +295,15 @@ async function buildPages(
     const layers = recordLayers(state);
     const ids = new RestIds(state.graph, layers, saved);
     applySwappedLooks(state.graph, ids, raw, layers);
-    const ctx = { graph: state.graph, ids, records: raw, notes };
+    const ctx = {
+      graph: state.graph,
+      ids,
+      records: raw,
+      notes,
+      aliasOf: aliasReader(state.graph, raw),
+      findStyle,
+    };
+    aliasOf = ctx.aliasOf;
     for (const page of state.graph.getPages(false)) {
       const guid = ids.sourceGuid(page);
       // A pass's graph also holds the pages of components its pages use.
@@ -308,6 +319,7 @@ async function buildPages(
       );
   }
   progress({ stage: "pages", done: total, total });
+  if (aliasOf) builder.addUnusedStyles(raw, aliasOf);
   if (missing.size > 0) notes.add("component-missing", missing.size);
 
   progress({ stage: "mapping" });

@@ -1,58 +1,38 @@
 /**
  * Variables (design tokens): collections of named values with one value per
- * mode, bound to layer properties.
+ * mode, bound to layer properties, and to the fields of paints and effects.
  *
- * Bindings are materialized like components: a bound property always holds
- * the resolved value, written by the client that changed the variable, the
- * mode or the binding, in the same transaction. The renderer, layout and
- * exports only ever see plain values; `bindings` remembers where they came
- * from.
+ * Bindings are resolved where they're read (decision 0034): the document
+ * presents every bound field as what its variable resolves to in the modes
+ * around the layer (`Doc.get`, token-view.ts), and nothing writes resolved
+ * values back when a variable or a mode changes. The value a layer stores
+ * for a bound field is what shows when the binding can't be followed.
  */
 import {
+  BINDING_FIELDS,
+  BINDING_FIELDS_BY_PROP,
   type BindingKey,
+  type Effect,
   getProp,
+  type VariableType as ModelVariableType,
   type NodeRecord,
   type Op,
   type Paint,
   type PropName,
-  ROOT_ID,
   type VariableValue,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { textStyles, typographyToken } from "./text-styles";
 
-export type VariableType = "color" | "number" | "string";
+export type VariableType = ModelVariableType;
 
 /** Which property a binding key drives, and the variable type it takes. */
 export const BINDING_TARGETS: Readonly<Record<BindingKey, { prop: PropName; type: VariableType }>> =
-  {
-    fill: { prop: "fills", type: "color" },
-    stroke: { prop: "strokes", type: "color" },
-    width: { prop: "width", type: "number" },
-    height: { prop: "height", type: "number" },
-    gap: { prop: "gap", type: "number" },
-    rowGap: { prop: "rowGap", type: "number" },
-    paddingTop: { prop: "paddingTop", type: "number" },
-    paddingRight: { prop: "paddingRight", type: "number" },
-    paddingBottom: { prop: "paddingBottom", type: "number" },
-    paddingLeft: { prop: "paddingLeft", type: "number" },
-    cornerRadius: { prop: "cornerRadius", type: "number" },
-    strokeWeight: { prop: "strokeWeight", type: "number" },
-    opacity: { prop: "opacity", type: "number" },
-    fontSize: { prop: "fontSize", type: "number" },
-    fontFamily: { prop: "fontFamily", type: "string" },
-    characters: { prop: "characters", type: "string" },
-  };
-
-/** Binding keys that drive a given property (for detaching when it's edited by hand). */
-const KEYS_BY_PROP = new Map<string, BindingKey[]>();
-for (const [key, target] of Object.entries(BINDING_TARGETS) as Array<
-  [BindingKey, { prop: PropName }]
->) {
-  const list = KEYS_BY_PROP.get(target.prop) ?? [];
-  list.push(key);
-  KEYS_BY_PROP.set(target.prop, list);
-}
+  Object.fromEntries(
+    (
+      Object.entries(BINDING_FIELDS) as Array<[BindingKey, (typeof BINDING_FIELDS)[BindingKey]]>
+    ).map(([key, target]) => [key, { prop: target.props[0] as PropName, type: target.type }]),
+  ) as Record<BindingKey, { prop: PropName; type: VariableType }>;
 
 export function listCollections(doc: Doc): NodeRecord[] {
   return doc
@@ -111,200 +91,92 @@ export function modeTag(doc: Doc, node: NodeRecord): { text: string; label: stri
  * page that sets one, else the collection's first mode.
  */
 export function activeMode(doc: Doc, nodeId: string, collectionId: string): string | null {
-  const collection = doc.get(collectionId);
-  if (collection?.type !== "collection") return null;
-  const modes = getProp(collection.props, "modes");
-  for (
-    let node = doc.get(nodeId);
-    node;
-    node = node.parent === ROOT_ID ? undefined : doc.get(node.parent)
-  ) {
-    if (node.type === "frame" || node.type === "page") {
-      const mode = getProp(node.props, "variableModes")[collectionId];
-      if (mode && modes.some((m) => m.id === mode)) return mode;
-    }
-  }
-  return modes[0]?.id ?? null;
+  return doc.tokens.resolver.modeAt(nodeId, collectionId);
 }
 
-const MAX_ALIAS_DEPTH = 16;
-
 /**
- * A variable's value at `nodeId` (or in its collection's first mode when no
- * node is given), following aliases. Undefined when unset, missing or cyclic.
+ * A variable's value at `nodeId` (or in its collections' default modes when
+ * no node is given), following aliases. Undefined when unset, missing or cyclic.
  */
 export function resolveVariable(
   doc: Doc,
   variableId: string,
   nodeId?: string,
-): string | number | undefined {
-  let current = doc.get(variableId);
-  for (let depth = 0; current && depth < MAX_ALIAS_DEPTH; depth++) {
-    if (current.type !== "variable") return undefined;
-    const collection = current.parent;
-    const mode = nodeId
-      ? activeMode(doc, nodeId, collection)
-      : (getProp(doc.get(collection)?.props ?? {}, "modes")[0]?.id ?? null);
-    const values = getProp(current.props, "values");
-    const value: VariableValue | undefined =
-      (mode ? values[mode] : undefined) ?? Object.values(values)[0];
-    if (value === undefined) return undefined;
-    if (typeof value === "object") {
-      current = doc.get(value.alias);
-      continue;
-    }
-    return value;
-  }
-  return undefined;
+): string | number | boolean | undefined {
+  return doc.tokens.resolver.value(variableId, nodeId)?.value;
 }
 
-/** Writes a resolved colour into the first visible solid paint, adding one if needed. */
-function withColor(paints: readonly Paint[], color: string): Paint[] {
-  const index = paints.findIndex((p) => p.type === "solid");
-  if (index === -1) return [{ type: "solid", color }, ...paints];
-  return paints.map((p, i) => (i === index && p.type === "solid" ? { ...p, color } : p));
-}
-
-/** Operations that make a node's bound properties hold their resolved values. */
-export function resolveBindingOps(doc: Doc, node: NodeRecord): Op[] {
-  const ops: Op[] = [];
-  const bindings = getProp(node.props, "bindings");
-  for (const [key, variableId] of Object.entries(bindings) as Array<[BindingKey, string]>) {
-    const target = BINDING_TARGETS[key];
-    if (!target) continue;
-    const value = resolveVariable(doc, variableId, node.id);
-    if (value === undefined) continue;
-    if (target.type === "color") {
-      if (typeof value !== "string" || !/^#[0-9a-f]{6}([0-9a-f]{2})?$/.test(value)) continue;
-      const current = getProp(node.props, target.prop as "fills" | "strokes");
-      const next = withColor(current, value);
-      if (JSON.stringify(next) !== JSON.stringify(current))
-        ops.push({ op: "set", id: node.id, prop: target.prop, value: next });
-      continue;
-    }
-    if (target.type === "number" && typeof value !== "number") continue;
-    if (target.type === "string" && typeof value !== "string") continue;
-    let resolved: string | number = value;
-    if (key === "opacity" && typeof resolved === "number")
-      resolved = Math.min(1, Math.max(0, resolved > 1 ? resolved / 100 : resolved));
-    if (node.props[target.prop] !== resolved)
-      ops.push({ op: "set", id: node.id, prop: target.prop, value: resolved });
-  }
-  return ops;
-}
-
-const boundCache = new WeakMap<Doc, { version: number; byVariable: Map<string, string[]> }>();
-
-/** Ids of nodes bound to each variable, cached per document version. */
-function nodesBoundTo(doc: Doc, variableId: string): readonly string[] {
-  let cached = boundCache.get(doc);
-  if (!cached || cached.version !== doc.version) {
-    const byVariable = new Map<string, string[]>();
-    for (const node of doc.nodes()) {
-      const bindings = node.props.bindings;
-      if (!bindings) continue;
-      for (const id of Object.values(bindings)) {
-        if (!id) continue;
-        const list = byVariable.get(id) ?? [];
-        list.push(node.id);
-        byVariable.set(id, list);
+/** A list of paints or effects with the bindings of fields whose values were changed by hand taken off. */
+function unbindChanged<T extends Paint | Effect>(
+  next: readonly T[],
+  before: readonly T[],
+): T[] | null {
+  let changed = false;
+  const out = next.map((item, i) => {
+    const prior = before[i] as (T & { bind?: Record<string, string> }) | undefined;
+    const bind = (item as { bind?: Record<string, string> }).bind;
+    let result = item;
+    if (bind && prior && prior.type === item.type) {
+      const kept: Record<string, string> = {};
+      for (const [field, id] of Object.entries(bind)) {
+        const a = (item as Record<string, unknown>)[field];
+        const b = (prior as Record<string, unknown>)[field];
+        if (JSON.stringify(a) === JSON.stringify(b)) kept[field] = id;
+      }
+      if (Object.keys(kept).length !== Object.keys(bind).length) {
+        changed = true;
+        const { bind: _gone, ...rest } = item as T & { bind?: unknown };
+        result = (Object.keys(kept).length > 0 ? { ...rest, bind: kept } : rest) as T;
       }
     }
-    cached = { version: doc.version, byVariable };
-    boundCache.set(doc, cached);
-  }
-  return cached.byVariable.get(variableId) ?? [];
-}
-
-/** Variables whose value depends (through aliases) on `variableId`, including itself. */
-function dependents(doc: Doc, variableId: string): Set<string> {
-  const out = new Set([variableId]);
-  let grew = true;
-  const variables = allVariables(doc);
-  while (grew) {
-    grew = false;
-    for (const v of variables) {
-      if (out.has(v.id)) continue;
-      const values = Object.values(getProp(v.props, "values"));
-      if (values.some((value) => typeof value === "object" && out.has(value.alias))) {
-        out.add(v.id);
-        grew = true;
-      }
+    const stops = (result as { stops?: Array<{ color: string; bind?: { color?: string } }> }).stops;
+    const priorStops = (prior as { stops?: Array<{ color: string }> } | undefined)?.stops;
+    if (
+      stops &&
+      priorStops &&
+      stops.some((stop, j) => stop.bind?.color && stop.color !== priorStops[j]?.color)
+    ) {
+      changed = true;
+      result = {
+        ...result,
+        stops: stops.map((stop, j) => {
+          if (!stop.bind?.color || stop.color === priorStops[j]?.color) return stop;
+          const { bind: _gone, ...rest } = stop;
+          return rest;
+        }),
+      } as T;
     }
-  }
-  return out;
-}
-
-/**
- * Re-resolution operations after `ops` applied: for nodes whose bindings,
- * mode context or bound variables changed, and for bound nodes whose bound
- * property was overwritten by a derived write (an instance sync).
- */
-export function variableFixupOps(doc: Doc, ops: readonly Op[]): Op[] {
-  const candidates = new Set<string>();
-  const addSubtree = (id: string) => {
-    const stack = [id];
-    while (stack.length > 0) {
-      const current = stack.pop() as string;
-      const node = doc.get(current);
-      if (!node) continue;
-      if (node.props.bindings && Object.keys(node.props.bindings).length > 0)
-        candidates.add(current);
-      stack.push(...doc.childIds(current));
-    }
-  };
-  const addVariable = (variableId: string) => {
-    for (const id of dependents(doc, variableId))
-      for (const nodeId of nodesBoundTo(doc, id)) candidates.add(nodeId);
-  };
-
-  for (const op of ops) {
-    const node = doc.get(op.id);
-    if (op.op === "delete") {
-      // A deleted variable leaves its bound nodes with their last value.
-      continue;
-    }
-    if (!node) continue;
-    if (node.type === "variable") {
-      addVariable(node.id);
-      continue;
-    }
-    if (node.type === "collection") {
-      for (const v of variablesIn(doc, node.id)) addVariable(v.id);
-      continue;
-    }
-    if (op.op === "move" || (op.op === "set" && op.prop === "variableModes")) {
-      addSubtree(node.id);
-      continue;
-    }
-    if (op.op === "create") {
-      addSubtree(node.id);
-      continue;
-    }
-    if (op.op === "set" && node.props.bindings && Object.keys(node.props.bindings).length > 0)
-      candidates.add(node.id);
-  }
-
-  const out: Op[] = [];
-  for (const id of candidates) {
-    const node = doc.get(id);
-    if (node) out.push(...resolveBindingOps(doc, node));
-  }
-  return out;
+    return result;
+  });
+  return changed ? out : null;
 }
 
 /**
  * Detaches bindings when a person sets a bound property by hand, unless the
  * same edit also sets the node's bindings (binding a variable sets both).
+ * For paints and effects, only the fields whose values changed lose their
+ * binding (compared with what they showed, resolved).
  */
 export function unbindOps(doc: Doc, ops: readonly Op[]): Op[] {
   const settingBindings = new Set(
     ops.filter((o) => o.op === "set" && o.prop === "bindings").map((o) => o.id),
   );
   const removals = new Map<string, Set<BindingKey>>();
+  const out: Op[] = [];
   for (const op of ops) {
     if (op.op !== "set" || op.prop === "bindings" || settingBindings.has(op.id)) continue;
-    const keys = KEYS_BY_PROP.get(op.prop);
+    if (
+      (op.prop === "fills" || op.prop === "strokes" || op.prop === "effects") &&
+      Array.isArray(op.value)
+    ) {
+      const node = doc.get(op.id);
+      if (node) {
+        const before = getProp(node.props, op.prop) as readonly (Paint | Effect)[];
+        const next = unbindChanged(op.value as readonly (Paint | Effect)[], before);
+        if (next) out.push({ op: "set", id: op.id, prop: op.prop, value: next });
+      }
+    }
+    const keys = BINDING_FIELDS_BY_PROP.get(op.prop);
     if (!keys) continue;
     const node = doc.get(op.id);
     const bindings = node ? getProp(node.props, "bindings") : {};
@@ -315,7 +187,6 @@ export function unbindOps(doc: Doc, ops: readonly Op[]): Op[] {
       removals.set(op.id, set);
     }
   }
-  const out: Op[] = [];
   for (const [id, keys] of removals) {
     const node = doc.get(id);
     if (!node) continue;
@@ -340,7 +211,8 @@ export function cssVariableName(name: string): string {
     .replace(/^-+|-+$/g, "")}`;
 }
 
-function cssValue(value: string | number, type: VariableType): string {
+function cssValue(value: string | number | boolean, type: VariableType): string {
+  if (typeof value === "boolean") return value ? "1" : "0";
   if (type === "number") return typeof value === "number" ? `${value}px` : String(value);
   if (type === "string") return JSON.stringify(String(value));
   return String(value);
@@ -417,7 +289,14 @@ export function exportDtcg(doc: Doc): Record<string, unknown> {
         group = group[part] as Record<string, unknown>;
       }
       const token: Record<string, unknown> = {
-        $type: type === "color" ? "color" : type === "number" ? "dimension" : "string",
+        $type:
+          type === "color"
+            ? "color"
+            : type === "number"
+              ? "dimension"
+              : type === "boolean"
+                ? "boolean"
+                : "string",
         $value: toDtcg(values[modes[0]?.id ?? ""]),
       };
       const description = getProp(variable.props, "description");

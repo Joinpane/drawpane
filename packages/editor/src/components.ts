@@ -15,6 +15,10 @@
  * written at all: the document presents them from their main, an edit to a
  * main is the main's own, and only the instances whose layout differs are
  * laid out again (`relayoutTargets`).
+ *
+ * Everything here reads layers unresolved (`Doc.getUnresolved`): a copy
+ * copies its main's own values and bindings, and resolves them where it is
+ * (decision 0034), rather than taking the values they resolve to in the main.
  */
 import {
   copyChildId,
@@ -67,7 +71,11 @@ export function isInstanceRoot(node: NodeRecord | undefined): boolean {
 
 /** The nearest instance root at or above `id`, if any. */
 export function instanceRootOf(doc: Doc, id: string): NodeRecord | undefined {
-  for (let node = doc.get(id); node && node.type !== "page"; node = doc.get(node.parent)) {
+  for (
+    let node = doc.getUnresolved(id);
+    node && node.type !== "page";
+    node = doc.getUnresolved(node.parent)
+  ) {
     if (isInstanceRoot(node)) return node;
   }
   return undefined;
@@ -79,7 +87,11 @@ export function instanceRootOf(doc: Doc, id: string): NodeRecord | undefined {
  */
 export function outermostInstanceOf(doc: Doc, id: string): NodeRecord | undefined {
   let found: NodeRecord | undefined;
-  for (let node = doc.get(id); node && node.type !== "page"; node = doc.get(node.parent)) {
+  for (
+    let node = doc.getUnresolved(id);
+    node && node.type !== "page";
+    node = doc.getUnresolved(node.parent)
+  ) {
     if (isInstanceRoot(node)) found = node;
     if (isMainComponent(node)) break;
   }
@@ -88,7 +100,11 @@ export function outermostInstanceOf(doc: Doc, id: string): NodeRecord | undefine
 
 /** The nearest main component at or above `id`, if any. */
 export function componentOf(doc: Doc, id: string): NodeRecord | undefined {
-  for (let node = doc.get(id); node && node.type !== "page"; node = doc.get(node.parent)) {
+  for (
+    let node = doc.getUnresolved(id);
+    node && node.type !== "page";
+    node = doc.getUnresolved(node.parent)
+  ) {
     if (isMainComponent(node)) return node;
   }
   return undefined;
@@ -96,7 +112,7 @@ export function componentOf(doc: Doc, id: string): NodeRecord | undefined {
 
 /** True when `id` is a layer inside an instance (not the instance root itself). */
 export function isInsideInstance(doc: Doc, id: string): boolean {
-  const node = doc.get(id);
+  const node = doc.getUnresolved(id);
   if (!node) return false;
   const root = instanceRootOf(doc, node.parent);
   return root !== undefined;
@@ -134,7 +150,7 @@ export function swapTargets(
   doc: Doc,
   instanceId: string,
 ): { readonly id: string; readonly label: string }[] {
-  const instance = doc.get(instanceId);
+  const instance = doc.getUnresolved(instanceId);
   const current = instance ? getProp(instance.props, "instanceOf") : null;
   if (!instance || current === null) return [];
   return listComponents(doc)
@@ -151,7 +167,7 @@ export function listComponents(doc: Doc): NodeRecord[] {
   const out: NodeRecord[] = [];
   const walk = (parent: string) => {
     for (const id of doc.childIds(parent)) {
-      const node = doc.get(id);
+      const node = doc.getUnresolved(id);
       if (!node) continue;
       if (isMainComponent(node)) out.push(node);
       walk(id);
@@ -170,7 +186,7 @@ export function wouldCycle(doc: Doc, componentId: string, parent: string): boole
     const stack = [rootId];
     while (stack.length > 0) {
       const id = stack.pop() as string;
-      const node = doc.get(id);
+      const node = doc.getUnresolved(id);
       if (!node) continue;
       const of = node.type === "frame" ? getProp(node.props, "instanceOf") : null;
       if (of === target) return true;
@@ -181,7 +197,11 @@ export function wouldCycle(doc: Doc, componentId: string, parent: string): boole
   };
   // Placing inside the component itself, or inside any component that the
   // placed component (transitively) contains.
-  for (let node = doc.get(parent); node && node.type !== "page"; node = doc.get(node.parent)) {
+  for (
+    let node = doc.getUnresolved(parent);
+    node && node.type !== "page";
+    node = doc.getUnresolved(node.parent)
+  ) {
     if (node.id === componentId) return true;
     if (isMainComponent(node) && containsInstanceOf(componentId, node.id)) return true;
   }
@@ -193,7 +213,7 @@ function instancedIn(doc: Doc, id: string): Set<string> {
   const out = new Set<string>();
   const stack = [id];
   while (stack.length > 0) {
-    const node = doc.get(stack.pop() as string);
+    const node = doc.getUnresolved(stack.pop() as string);
     if (!node) continue;
     const of = node.type === "frame" ? getProp(node.props, "instanceOf") : null;
     if (of) out.add(of);
@@ -228,7 +248,7 @@ export function instantiateOps(
   key: string,
   origin: { x: number; y: number },
 ): { ops: Op[]; rootId: string } | null {
-  const main = doc.get(componentId);
+  const main = doc.getUnresolved(componentId);
   if (!isMainComponent(main) || !main) return null;
   const ops: Op[] = [];
   const rootId = newId();
@@ -268,7 +288,7 @@ export function instantiateOps(
     // Compact copies: the root is all there is to write; its layers come from the main.
     if (doc.compactCopies) return;
     for (const childId of doc.childIds(node.id)) {
-      const child = doc.get(childId);
+      const child = doc.getUnresolved(childId);
       if (child) visit(child, newId(), copyId, child.key, false);
     }
   };
@@ -288,10 +308,10 @@ function sameValue(a: unknown, b: unknown): boolean {
  * layers and order. Returns [] when the main component is gone.
  */
 export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
-  const instance = doc.get(instanceId);
+  const instance = doc.getUnresolved(instanceId);
   const componentId =
     instance && instance.type === "frame" ? getProp(instance.props, "instanceOf") : null;
-  const main = componentId ? doc.get(componentId) : undefined;
+  const main = componentId ? doc.getUnresolved(componentId) : undefined;
   if (!instance || !main || !isMainComponent(main)) return [];
 
   // Map each main node id to its counterpart in this instance.
@@ -299,7 +319,7 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
   const stray: NodeRecord[] = [];
   const walk = (id: string) => {
     for (const childId of doc.childIds(id)) {
-      const child = doc.get(childId);
+      const child = doc.getUnresolved(childId);
       if (!child) continue;
       const mirrors = getProp(child.props, "mirrors");
       if (mirrors && !counterpart.has(mirrors)) counterpart.set(mirrors, child);
@@ -321,7 +341,7 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
     const overridden = new Set(getProp(to.props, "overrides"));
     // Auto layout decides where its children go and how big Hug and Fill
     // children are; the instance runs its own layout, so never copy those.
-    const parent = isRoot ? undefined : doc.get(to.parent);
+    const parent = isRoot ? undefined : doc.getUnresolved(to.parent);
     if (
       parent?.type === "frame" &&
       getProp(parent.props, "layoutMode") !== "none" &&
@@ -372,13 +392,13 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
     const own = getProp(copy.props, "instanceOf");
     if (!own || own === getProp(mainLayer.props, "instanceOf")) return undefined;
     if (!getProp(copy.props, "overrides").includes("instanceOf")) return undefined;
-    const swapped = doc.get(own);
+    const swapped = doc.getUnresolved(own);
     return isMainNode(swapped) ? swapped : undefined;
   };
 
   const visit = (mainNode: NodeRecord, instanceParent: NodeRecord) => {
     for (const childId of doc.childIds(mainNode.id)) {
-      const mainChild = doc.get(childId);
+      const mainChild = doc.getUnresolved(childId);
       if (!mainChild) continue;
       mainIds.add(mainChild.id);
       const existing = counterpart.get(mainChild.id);
@@ -443,7 +463,7 @@ function createMirror(doc: Doc, mainNode: NodeRecord, parent: string, ops: Op[])
   };
   ops.push({ op: "create", ...record });
   for (const childId of doc.childIds(mainNode.id)) {
-    const child = doc.get(childId);
+    const child = doc.getUnresolved(childId);
     if (child) createMirror(doc, child, id, ops);
   }
   return record;
@@ -463,7 +483,11 @@ export function affectedComponents(doc: Doc, ids: Iterable<string>): Set<string>
   // Every main component around the layer, not just the nearest: an edit
   // inside a component nested in another reaches the outer one's instances too.
   for (const id of ids)
-    for (let node = doc.get(id); node && node.type !== "page"; node = doc.get(node.parent))
+    for (
+      let node = doc.getUnresolved(id);
+      node && node.type !== "page";
+      node = doc.getUnresolved(node.parent)
+    )
       if (isMainComponent(node)) out.add(node.id);
   return out;
 }
@@ -481,7 +505,7 @@ export function propagationOps(doc: Doc, ids: Iterable<string>): Op[] {
       // A nested instance inside another instance mirrors the outer component's
       // copy, so it follows that copy (through the outer sync), not its main directly;
       // one swapped for this component follows it, through its outer instance's sync.
-      const props = doc.get(instanceId)?.props ?? {};
+      const props = doc.getUnresolved(instanceId)?.props ?? {};
       let root = instanceId;
       if (getProp(props, "mirrors") !== null) {
         if (!getProp(props, "overrides").includes("instanceOf")) continue;
@@ -517,8 +541,8 @@ export function relayoutTargets(doc: Doc, ids: Iterable<string>, ops: readonly O
   const isLayout = (node: NodeRecord | undefined) =>
     node?.type === "frame" && getProp(node.props, "layoutMode") !== "none";
   const inLayout = (node: NodeRecord) => {
-    let parent = doc.get(node.parent);
-    while (parent?.type === "group") parent = doc.get(parent.parent);
+    let parent = doc.getUnresolved(node.parent);
+    while (parent?.type === "group") parent = doc.getUnresolved(parent.parent);
     return isLayout(parent);
   };
   /** Mains whose layout inside may have changed. */
@@ -527,7 +551,7 @@ export function relayoutTargets(doc: Doc, ids: Iterable<string>, ops: readonly O
   const sized = new Set<string>();
   for (const op of ops) {
     if (!reads(op)) continue;
-    const node = op.op === "delete" ? undefined : doc.get(op.id);
+    const node = op.op === "delete" ? undefined : doc.getUnresolved(op.id);
     if (!node) {
       // Gone: whatever held it may have changed.
       for (const id of affectedComponents(doc, ids)) inner.add(id);
@@ -620,7 +644,7 @@ export function pinInstances(input: readonly NodeRecord[]): {
     for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
       // An instance inside it that copies nothing (what it put in a slot) is an instance root of
       // its own, kept or unlinked as it is.
-      const node = doc.get(id);
+      const node = doc.getUnresolved(id);
       if (id !== root.id && isInstanceRoot(node) && getProp(node?.props ?? {}, "mirrors") === null)
         continue;
       unlinked.add(id);
@@ -671,7 +695,7 @@ export function pinInstances(input: readonly NodeRecord[]): {
       if (op.op !== "set" || LINK_PROPS.has(op.prop)) continue;
       let set = marks.get(op.id);
       if (!set) {
-        set = new Set(getProp(doc.get(op.id)?.props ?? {}, "overrides"));
+        set = new Set(getProp(doc.getUnresolved(op.id)?.props ?? {}, "overrides"));
         marks.set(op.id, set);
       }
       set.add(op.prop);
@@ -711,7 +735,7 @@ export function overrideOps(doc: Doc, ops: readonly Op[]): Op[] {
   const marks = new Map<string, Set<string>>();
   for (const op of ops) {
     if (op.op !== "set" || LINK_PROPS.has(op.prop)) continue;
-    const node = doc.get(op.id);
+    const node = doc.getUnresolved(op.id);
     if (!node) continue;
     const isRoot = isInstanceRoot(node);
     const inInstance =
@@ -727,7 +751,7 @@ export function overrideOps(doc: Doc, ops: readonly Op[]): Op[] {
   }
   const out: Op[] = [];
   for (const [id, set] of marks) {
-    const node = doc.get(id);
+    const node = doc.getUnresolved(id);
     const before = node ? getProp(node.props, "overrides") : [];
     const after = [...set].sort();
     if (!sameValue([...before].sort(), after))
@@ -742,7 +766,7 @@ export function resetOverridesOps(doc: Doc, instanceId: string): Op[] {
   const stack = [instanceId];
   while (stack.length > 0) {
     const id = stack.pop() as string;
-    const node = doc.get(id);
+    const node = doc.getUnresolved(id);
     if (!node) continue;
     if (getProp(node.props, "overrides").length > 0)
       ops.push({ op: "set", id, prop: "overrides", value: null });
@@ -759,7 +783,7 @@ export function detachOps(doc: Doc, instanceId: string): Op[] {
   const stack = [...doc.childIds(instanceId)];
   while (stack.length > 0) {
     const id = stack.pop() as string;
-    const node = doc.get(id);
+    const node = doc.getUnresolved(id);
     if (!node) continue;
     if (isInstanceRoot(node)) {
       // Nested instances stay instances of their own components.
@@ -801,7 +825,7 @@ function swapCompactOps(doc: Doc, instance: NodeRecord, target: NodeRecord): Op[
   const stack = [...doc.childIds(instance.id)];
   while (stack.length > 0) {
     const id = stack.pop() as string;
-    const node = doc.get(id);
+    const node = doc.getUnresolved(id);
     if (!node) continue;
     const overridden = getProp(node.props, "overrides");
     if (overridden.length > 0) {
@@ -816,7 +840,7 @@ function swapCompactOps(doc: Doc, instance: NodeRecord, target: NodeRecord): Op[
   ops.push(...nestedSwapMark(instance));
   const walk = (mainParent: string, copyParent: string, path: string) => {
     for (const childId of doc.childIds(mainParent)) {
-      const child = doc.get(childId);
+      const child = doc.getUnresolved(childId);
       if (!child) continue;
       const id = copyChildId(copyParent, childId);
       const name = getProp(child.props, "name") || child.type;
@@ -843,8 +867,8 @@ export function isComponentSet(node: NodeRecord | undefined): boolean {
 
 /** The component set a main component belongs to, if it is a variant. */
 export function componentSetOf(doc: Doc, componentId: string): NodeRecord | undefined {
-  const component = doc.get(componentId);
-  const parent = component ? doc.get(component.parent) : undefined;
+  const component = doc.getUnresolved(componentId);
+  const parent = component ? doc.getUnresolved(component.parent) : undefined;
   return isMainComponent(component) && isComponentSet(parent) ? parent : undefined;
 }
 
@@ -852,7 +876,7 @@ export function componentSetOf(doc: Doc, componentId: string): NodeRecord | unde
 export function variantsOf(doc: Doc, setId: string): NodeRecord[] {
   return doc
     .childIds(setId)
-    .map((id) => doc.get(id))
+    .map((id) => doc.getUnresolved(id))
     .filter((n): n is NodeRecord => !!n && isMainComponent(n));
 }
 
@@ -901,7 +925,11 @@ export function findVariant(
 /** Path of layer names from an instance root down to `id` ("Content/Title"), for matching across variants. */
 function namePath(doc: Doc, rootId: string, id: string): string {
   const parts: string[] = [];
-  for (let node = doc.get(id); node && node.id !== rootId; node = doc.get(node.parent)) {
+  for (
+    let node = doc.getUnresolved(id);
+    node && node.id !== rootId;
+    node = doc.getUnresolved(node.parent)
+  ) {
     parts.unshift(layerName(node));
   }
   return parts.join("/");
@@ -913,8 +941,8 @@ function namePath(doc: Doc, rootId: string, id: string): string {
  * matches in the new component, like Figma.
  */
 export function swapInstanceOps(doc: Doc, instanceId: string, componentId: string): Op[] {
-  const instance = doc.get(instanceId);
-  const target = doc.get(componentId);
+  const instance = doc.getUnresolved(instanceId);
+  const target = doc.getUnresolved(componentId);
   if (!instance || !isInstanceRoot(instance) || !target || !isMainComponent(target)) return [];
   if (doc.compactCopies) return swapCompactOps(doc, instance, target);
 
@@ -923,7 +951,7 @@ export function swapInstanceOps(doc: Doc, instanceId: string, componentId: strin
   const stack = [...doc.childIds(instanceId)];
   while (stack.length > 0) {
     const id = stack.pop() as string;
-    const node = doc.get(id);
+    const node = doc.getUnresolved(id);
     if (!node) continue;
     const overridden = getProp(node.props, "overrides");
     if (overridden.length > 0) {
@@ -941,7 +969,7 @@ export function swapInstanceOps(doc: Doc, instanceId: string, componentId: strin
   ops.push(...nestedSwapMark(instance));
   const created: Op[] = [];
   for (const childId of doc.childIds(componentId)) {
-    const child = doc.get(childId);
+    const child = doc.getUnresolved(childId);
     if (child) createMirror(doc, child, instanceId, created);
   }
   // Re-apply carried overrides onto the new layers with the same name path.

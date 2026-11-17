@@ -23,7 +23,13 @@ import {
   parseSvgPath,
   serializePath,
 } from "@drawpane/import-kit";
-import { keysBetween, type NodeRecord, propAllowed, ROOT_ID } from "@drawpane/model";
+import {
+  BINDING_FIELDS_BY_PROP,
+  keysBetween,
+  type NodeRecord,
+  propAllowed,
+  ROOT_ID,
+} from "@drawpane/model";
 import { convertEffects } from "./effects";
 import { drawpaneId, mirroredId, mirroredUnder } from "./ids";
 import { childLayout, containerLayout, layoutGrids } from "./layout";
@@ -31,6 +37,15 @@ import { Notes } from "./notes";
 import { blendMode, convertPaints, hexColor, type ImageLookup } from "./paint";
 import type * as Figma from "./rest";
 import { textProps } from "./text";
+import {
+  convertStyles,
+  convertVariables,
+  layerBindings,
+  layerModes,
+  layerStyles,
+  type VariableLookup,
+  variableLookup,
+} from "./tokens";
 
 type Props = Record<string, unknown>;
 
@@ -132,6 +147,21 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
   /** Instances found, to work out what each one overrides once everything is converted. */
   const instances: string[] = [];
 
+  // Variables and styles (decision 0034): converted first, so layers bind and link only what came.
+  const pages = (file.document.children ?? []).filter((p) => p.type === "CANVAS");
+  const pageKeys = keysBetween(null, null, pages.length);
+  const variables = variableLookup(file);
+  const tokens = convertVariables(file, notes, pageKeys.at(-1) ?? null);
+  const lastCollection = tokens.nodes.filter((n) => n.parent === ROOT_ID).at(-1)?.key;
+  const styles = convertStyles(
+    file,
+    images,
+    notes,
+    variables,
+    lastCollection ?? pageKeys.at(-1) ?? null,
+  );
+  const styleKinds = new Map(styles.map((s) => [s.id, s.type]));
+
   /**
    * Converts `node` and its children. `abs` is its parent's page affine,
    * `space` the page affine of the nearest frame (or page) it's placed in,
@@ -175,7 +205,7 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
       props.opacity = Math.round(node.opacity * 10_000) / 10_000;
     const blend = blendMode(node.blendMode);
     if (blend) props.blendMode = blend;
-    const effects = convertEffects(node.effects, notes);
+    const effects = convertEffects(node.effects, notes, variables);
     if (effects.length > 0) props.effects = effects;
     let type: NodeRecord["type"];
     const isGroup = node.type === "GROUP";
@@ -220,12 +250,19 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     }
 
     if (type !== "group" && type !== "text") {
-      const fills = convertPaints(node.fills, images, notes);
+      const fills = convertPaints(node.fills, images, notes, variables);
       if (fills.length > 0 || type === "frame") props.fills = fills;
-      Object.assign(props, strokeProps(node, type, images, notes));
+      Object.assign(props, strokeProps(node, type, images, notes, variables));
     }
     if (type === "rect" || type === "frame") Object.assign(props, corners(node));
-    if (type === "text") Object.assign(props, textProps(node, images, notes));
+    if (type === "text") Object.assign(props, textProps(node, images, notes, variables));
+    const bindings = layerBindings(node, type, variables);
+    if (Object.keys(bindings).length > 0) props.bindings = bindings;
+    Object.assign(props, layerStyles(node, type, styleKinds));
+    if (type === "frame") {
+      const modes = layerModes(node, tokens.modes);
+      if (modes) props.variableModes = modes;
+    }
     if (type === "path") Object.assign(props, pathProps(node, notes));
 
     if (type === "frame") {
@@ -310,12 +347,12 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     });
   };
 
-  const pages = (file.document.children ?? []).filter((p) => p.type === "CANVAS");
-  const pageKeys = keysBetween(null, null, pages.length);
   pages.forEach((page, i) => {
     const id = drawpaneId(page.id);
     const props: Props = { name: page.name.slice(0, 256) || "Page" };
     if (page.backgroundColor) props.backgroundColor = hexColor(page.backgroundColor, 1);
+    const modes = layerModes(page, tokens.modes);
+    if (modes) props.variableModes = modes;
     add({ id, type: "page", parent: ROOT_ID, key: pageKeys[i] as string, props } as NodeRecord);
     const children = page.children ?? [];
     const keys = keysBetween(null, null, children.length);
@@ -324,6 +361,7 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     });
   });
 
+  for (const node of [...tokens.nodes, ...styles]) add(node);
   markOverrides(instances, nodes, byId);
   return { name: file.name, nodes, notes };
 }
@@ -368,8 +406,9 @@ function strokeProps(
   type: NodeRecord["type"],
   images: ImageLookup,
   notes: Notes,
+  variables: VariableLookup,
 ): Props {
-  const strokes = convertPaints(node.strokes, images, notes);
+  const strokes = convertPaints(node.strokes, images, notes, variables);
   if (strokes.length === 0) return {};
   const props: Props = { strokes };
   const sides = node.individualStrokeWeights;
@@ -461,6 +500,47 @@ const NOT_OVERRIDES = new Set([
   "variantProps",
 ]);
 
+type Bindings = Readonly<Record<string, string>> | undefined;
+const CORNER_KEYS = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"];
+const SIDE_KEYS = [
+  "strokeTopWeight",
+  "strokeRightWeight",
+  "strokeBottomWeight",
+  "strokeLeftWeight",
+];
+
+/** Paints or effects with the fields they bind blanked: what's their own, whatever variables give. */
+function unboundList(list: unknown): unknown {
+  if (!Array.isArray(list)) return list;
+  return list.map((item: Record<string, unknown>) => {
+    const out: Record<string, unknown> = { ...item };
+    const bind = item.bind as Record<string, string> | undefined;
+    if (bind) for (const field of Object.keys(bind)) out[field] = null;
+    if (Array.isArray(item.stops))
+      out.stops = (item.stops as Array<Record<string, unknown>>).map((stop) =>
+        stop.bind ? { ...stop, color: null } : stop,
+      );
+    return out;
+  });
+}
+
+/**
+ * Whether a copy's value differs from its main's only where both bind the
+ * same variables (decision 0034): Figma saved each resolved in its own
+ * modes, and Drawpane resolves them where each is, so it's no override.
+ */
+function boundAlike(prop: string, a: unknown, b: unknown, la: Bindings, lb: Bindings): boolean {
+  if (prop === "fills" || prop === "strokes" || prop === "effects")
+    return JSON.stringify(unboundList(a)) === JSON.stringify(unboundList(b));
+  const same = (key: string) => !!la?.[key] && la[key] === lb?.[key];
+  if (prop === "cornerRadii" || prop === "strokeWeights") {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    const keys = prop === "cornerRadii" ? CORNER_KEYS : SIDE_KEYS;
+    return a.every((v, i) => v === b[i] || same(keys[i] as string));
+  }
+  return (BINDING_FIELDS_BY_PROP.get(prop) ?? []).some(same);
+}
+
 /**
  * Marks what each instance's layers change from the main component's: the
  * props whose values differ, so syncing from the main leaves them be. The
@@ -480,11 +560,19 @@ function markOverrides(
   const diff = (layer: NodeRecord, main: NodeRecord, root: boolean) => {
     const changed: string[] = [];
     const keys = new Set([...Object.keys(layer.props), ...Object.keys(main.props)]);
+    const la = (layer.props as Props).bindings as Bindings;
+    const lb = (main.props as Props).bindings as Bindings;
     for (const k of keys) {
       if (NOT_OVERRIDES.has(k) || (root && (k === "x" || k === "y"))) continue;
       const a = (layer.props as Props)[k];
       const b = (main.props as Props)[k];
-      if (JSON.stringify(a) !== JSON.stringify(b)) changed.push(k);
+      if (JSON.stringify(a) === JSON.stringify(b)) continue;
+      if (b !== undefined && boundAlike(k, a, b, la, lb)) {
+        // Stored as the main's: the copy shows what its variables give where it is.
+        (layer.props as Props)[k] = structuredClone(b);
+        continue;
+      }
+      changed.push(k);
     }
     // A nested instance swapped for another component overrides which one it is.
     const of = (layer.props as Props).instanceOf;

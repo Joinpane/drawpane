@@ -3,10 +3,11 @@
  * holds, shared by the API and the editor.
  */
 import { z } from "zod";
+import { heldNodeIds } from "./convert";
 import type { VersionPerson } from "./history";
 import { ID_PATTERN, ROOT_ID } from "./ids";
 import type { NodeRecord } from "./ops";
-import { getProp } from "./schema";
+import { getProp, type Props } from "./schema";
 
 /** A content hash of everything a published component draws: what tells a change. */
 export const ASSET_HASH = /^[0-9a-f]{16}$/;
@@ -265,6 +266,17 @@ function references(doc: DocReader, node: NodeRecord): string[] {
     }
   if (p.variableModes && typeof p.variableModes === "object")
     out.push(...Object.keys(p.variableModes as Record<string, string>));
+  // Shared styles it links, and the collections of what its paints and effects bind (decision 0034).
+  for (const link of [p.fillStyle, p.strokeStyle, p.effectStyle])
+    if (typeof link === "string") out.push(link);
+  for (const variableId of heldNodeIds({
+    fills: p.fills,
+    strokes: p.strokes,
+    effects: p.effects,
+  } as Props).others) {
+    const collection = collectionOf(doc, variableId);
+    if (collection) out.push(collection);
+  }
   return out;
 }
 

@@ -97,8 +97,9 @@ export function renameHeldIds(
  * `renameHeldIds` renames (a reading order's entries, prototype
  * destinations, flows' starting screens), which can name a copy layer;
  * `others` name mains, styles, variables and collections (`instanceOf`,
- * `mirrors`, an override record's `path`, `textStyle`, `bindings`, the
- * collections `variableModes` sets, a variable's aliases), which never name
+ * `mirrors`, an override record's `path`, `textStyle` and the other style
+ * links, `bindings` and what paints and effects bind, the collections
+ * `variableModes` sets, a variable's aliases), which never name
  * a copy layer. Ids that aren't nodes' (a reaction's or flow's own id, a
  * mode's) aren't listed. Every id-valued property in the schema is one of
  * these (checked by a test against `PROPS`).
@@ -126,6 +127,25 @@ export function heldNodeIds(props: Readonly<Props>): { layers: string[]; others:
   if (p.values && typeof p.values === "object")
     for (const value of Object.values(p.values as Record<string, unknown>))
       if (value && typeof value === "object") str((value as { alias?: unknown }).alias, others);
+  str(p.fillStyle, others);
+  str(p.strokeStyle, others);
+  str(p.effectStyle, others);
+  // Variables that paints, their gradient stops and effects bind (decision 0034).
+  const binds = (item: unknown) => {
+    const bind = (item as { bind?: unknown } | null)?.bind;
+    if (bind && typeof bind === "object")
+      for (const id of Object.values(bind as Record<string, unknown>)) str(id, others);
+  };
+  const runFills = Array.isArray(p.textRuns)
+    ? (p.textRuns as Array<{ fills?: unknown }>).map((run) => run?.fills)
+    : [];
+  for (const list of [p.fills, p.strokes, p.effects, ...runFills])
+    if (Array.isArray(list))
+      for (const item of list) {
+        binds(item);
+        const stops = (item as { stops?: unknown } | null)?.stops;
+        if (Array.isArray(stops)) for (const stop of stops) binds(stop);
+      }
   return { layers, others };
 }
 
@@ -141,6 +161,13 @@ export const NODE_ID_PROPS: readonly string[] = [
   "bindings",
   "variableModes",
   "values",
+  "fills",
+  "strokes",
+  "effects",
+  "textRuns",
+  "fillStyle",
+  "strokeStyle",
+  "effectStyle",
 ];
 
 /** Whether a node's properties hold ids of other layers (see `renameHeldIds`). */

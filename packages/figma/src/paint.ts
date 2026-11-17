@@ -51,7 +51,17 @@ export type ImageLookup = (imageRef: string) => string | null;
 const round4 = (n: number) => Math.round(n * 10_000) / 10_000;
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
-export function convertPaint(p: Figma.Paint, images: ImageLookup, notes: Notes): Paint | null {
+/** A variable a REST alias names, as a Drawpane id, when the file brings it (tokens.ts). */
+type Lookup = (alias: unknown) => string | undefined;
+
+export function convertPaint(
+  p: Figma.Paint,
+  images: ImageLookup,
+  notes: Notes,
+  variables?: Lookup,
+): Paint | null {
+  const color = variables?.(p.boundVariables?.color);
+  const bind = color ? { bind: { color } } : {};
   const common = {
     ...(p.visible === false ? { visible: false } : {}),
     ...(p.opacity !== undefined && p.opacity < 0.999 ? { opacity: round4(p.opacity) } : {}),
@@ -59,16 +69,20 @@ export function convertPaint(p: Figma.Paint, images: ImageLookup, notes: Notes):
   };
   switch (p.type) {
     case "SOLID":
-      return p.color ? { type: "solid", color: hexColor(p.color), ...common } : null;
+      return p.color ? { type: "solid", color: hexColor(p.color), ...common, ...bind } : null;
     case "GRADIENT_LINEAR":
     case "GRADIENT_RADIAL":
     case "GRADIENT_ANGULAR":
     case "GRADIENT_DIAMOND": {
       const [from, to, width] = p.gradientHandlePositions ?? [];
-      const stops = (p.gradientStops ?? []).map((s) => ({
-        position: round4(Math.min(1, Math.max(0, s.position))),
-        color: hexColor(s.color),
-      }));
+      const stops = (p.gradientStops ?? []).map((s) => {
+        const bound = variables?.(s.boundVariables?.color);
+        return {
+          position: round4(Math.min(1, Math.max(0, s.position))),
+          color: hexColor(s.color),
+          ...(bound ? { bind: { color: bound } } : {}),
+        };
+      });
       if (!from || !to || stops.length < 2) return null;
       if (p.type === "GRADIENT_DIAMOND") notes.add("gradient-diamond");
       // Drawpane's width handle is always a quarter turn from the main one, as long.
@@ -140,10 +154,11 @@ export function convertPaints(
   paints: readonly Figma.Paint[] | undefined,
   images: ImageLookup,
   notes: Notes,
+  variables?: Lookup,
 ): Paint[] {
   const out: Paint[] = [];
   for (const p of paints ?? []) {
-    const converted = convertPaint(p, images, notes);
+    const converted = convertPaint(p, images, notes, variables);
     if (converted) out.push(converted);
   }
   return out.slice(0, 32);

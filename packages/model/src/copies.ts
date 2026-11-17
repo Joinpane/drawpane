@@ -404,6 +404,23 @@ export class CopyView {
   }
 
   /**
+   * The presented ids built from these, however nested (copy layers of
+   * them, copies of those), the ids themselves included. Only what's been
+   * built: a copy built later reads what's current then.
+   */
+  builtFrom(ids: Iterable<string>): Set<string> {
+    const out = new Set<string>();
+    const queue = [...ids];
+    for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
+      if (out.has(id)) continue;
+      out.add(id);
+      const copies = this.#copiesOf.get(id);
+      if (copies) for (const copy of copies) queue.push(copy);
+    }
+    return out;
+  }
+
+  /**
    * Lets go of what was built for an instance (its copy layers and their
    * cache), without building it again: a reader working an instance at a
    * time keeps only what it's at. It's built again when next read.

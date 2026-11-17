@@ -24,7 +24,16 @@ import {
   type RawTrackSizes,
   type RawTrackSizing,
 } from "./raw";
+import { styleFromRecord } from "./style-records";
 import { textFields } from "./text";
+import {
+  type AliasOf,
+  explicitModes,
+  layerBoundVariables,
+  paintColor,
+  restVariables,
+  styleLinks,
+} from "./tokens";
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] };
 type RestNode = Writable<Figma.Node> & { vectorNetwork?: unknown };
@@ -93,6 +102,17 @@ export interface AdaptContext {
   /** Records by guid, as saved. */
   readonly records: ReadonlyMap<string, RawRecord>;
   readonly notes: FigNotes;
+  /** Reads variable references (decision 0034); none are brought without it. */
+  readonly aliasOf?: AliasOf;
+  /** Finds the style record a layer's link names (decision 0034). */
+  readonly findStyle?: (link: unknown) => string | undefined;
+}
+
+/** What a layer's paints are bound to, when variables are read. */
+function paintBinds(n: SceneNode, list: "fills" | "strokes", ctx: AdaptContext) {
+  const aliasOf = ctx.aliasOf;
+  if (!aliasOf) return undefined;
+  return { aliasOf, color: (i: number) => paintColor(n, list, i, aliasOf) };
 }
 
 /** The node's REST kind: Open Pencil's, except where it read a kind it doesn't know as a rectangle. */
@@ -144,13 +164,14 @@ function strokeFields(
   n: SceneNode,
   raw: RawRecord | undefined,
   notes: FigNotes,
+  ctx: AdaptContext,
 ): Partial<RestNode> {
   const strokes = n.strokes as Stroke[];
   if (strokes.length === 0) return {};
   // Each stroke carries the node's weight and alignment while it has strokes.
   const first = strokes[0] as Stroke;
   const out: Partial<RestNode> = {
-    strokes: convertFills(strokes, raw?.strokePaints, notes),
+    strokes: convertFills(strokes, raw?.strokePaints, notes, paintBinds(n, "strokes", ctx)),
     strokeWeight: first.weight ?? n.strokeWeight,
     strokeAlign: first.align ?? n.strokeAlign,
     strokeJoin: n.strokeJoin,
@@ -345,10 +366,18 @@ export function adaptNode(
     // Open Pencil reads a mask with only the older outline flag as an alpha mask.
     node.maskType = n.maskIsOutline && !raw?.maskType ? "VECTOR" : n.maskType;
   }
-  const effects = convertEffects(n.effects, raw?.effects, notes);
+  const effects = convertEffects(n.effects, raw?.effects, notes, ctx.aliasOf);
   if (effects.length > 0) node.effects = effects;
-  node.fills = convertFills(n.fills, raw?.fillPaints, notes);
-  Object.assign(node, strokeFields(n, raw, notes));
+  node.fills = convertFills(n.fills, raw?.fillPaints, notes, paintBinds(n, "fills", ctx));
+  Object.assign(node, strokeFields(n, raw, notes, ctx));
+  if (ctx.aliasOf) {
+    const bound = layerBoundVariables(n, ctx.aliasOf);
+    if (bound) node.boundVariables = bound;
+    const modes = explicitModes(n, ctx.graph);
+    if (modes) node.explicitVariableModes = modes;
+  }
+  const links = ctx.findStyle ? styleLinks(n, raw, ctx.findStyle) : undefined;
+  if (links) node.styles = links;
   if (n.independentCorners)
     node.rectangleCornerRadii = [
       n.topLeftRadius,
@@ -425,7 +454,12 @@ export class RestFileBuilder {
     { key?: string; name?: string; componentSetId?: string; remote?: boolean; omitted?: boolean }
   > = {};
   readonly #componentSets: Record<string, { name?: string }> = {};
-  readonly #styles: Record<string, { name?: string; styleType?: string }> = {};
+  readonly #styles: Record<
+    string,
+    { name?: string; styleType?: string; description?: string; hiddenFromPublishing?: boolean }
+  > = {};
+  readonly #styleNodes: Record<string, RestNode> = {};
+  #variables: Figma.LocalVariables | undefined;
   /** Layers in the document, pages not counted. */
   layers = 0;
 
@@ -439,12 +473,14 @@ export class RestFileBuilder {
       if (child) children.push(adaptNode(child, page, IDENTITY, ctx));
     }
     for (const c of children) this.#count(c);
+    const modes = ctx.aliasOf ? explicitModes(page, ctx.graph) : undefined;
     this.#pages.push({
       id: ctx.ids.of(page),
       name: page.name,
       type: "CANVAS",
       children,
       ...(raw?.backgroundColor ? { backgroundColor: raw.backgroundColor } : {}),
+      ...(modes ? { explicitVariableModes: modes } : {}),
     });
   }
 
@@ -469,8 +505,42 @@ export class RestFileBuilder {
             this.#components[id] = { ...this.#components[id], name: node.name, omitted: true };
         }
       }
-      if (node.sharedStyleType)
-        this.#styles[ctx.ids.of(node)] = { name: node.name, styleType: node.sharedStyleType };
+      if (node.sharedStyleType) this.#addStyle(node, ctx);
+    }
+    // The file's variables (decision 0034): every pass's graph has them all, so the first is read.
+    if (ctx.aliasOf && !this.#variables) this.#variables = restVariables(ctx.graph, ctx.records);
+  }
+
+  /** A style, with its definition (its node, as REST's nodes endpoint gives it). Soft-deleted ones aren't. */
+  #addStyle(node: SceneNode, ctx: AdaptContext): void {
+    const id = ctx.ids.of(node);
+    if (this.#styleNodes[id]) return;
+    const guid = ctx.ids.sourceGuid(node);
+    const raw = (guid ? ctx.records.get(guid) : undefined) as
+      | (RawRecord & { isSoftDeleted?: boolean; description?: string; isPublishable?: boolean })
+      | undefined;
+    if (raw?.isSoftDeleted) return;
+    this.#styles[id] = {
+      name: node.name,
+      styleType: node.sharedStyleType as string,
+      ...(raw?.description ? { description: raw.description } : {}),
+      ...(raw?.isPublishable === false ? { hiddenFromPublishing: true } : {}),
+    };
+    const parent = (node.parentId ? ctx.graph.getNode(node.parentId) : undefined) ?? node;
+    this.#styleNodes[id] = adaptNode(node, parent, IDENTITY, ctx);
+  }
+
+  /**
+   * The file's styles no page read uses (Open Pencil builds only what pages
+   * need), from their records, so every live style comes in (decision 0034).
+   */
+  addUnusedStyles(records: ReadonlyMap<string, RawRecord>, aliasOf: AliasOf): void {
+    for (const [id, record] of records) {
+      if (this.#styleNodes[id] || !(record as { styleType?: unknown }).styleType) continue;
+      const style = styleFromRecord(id, record, aliasOf);
+      if (!style) continue;
+      this.#styles[id] = style.meta;
+      this.#styleNodes[id] = style.node as RestNode;
     }
   }
 
@@ -495,6 +565,8 @@ export class RestFileBuilder {
       components: this.#components,
       componentSets: this.#componentSets,
       styles: this.#styles,
+      ...(this.#variables ? { variables: this.#variables } : {}),
+      ...(Object.keys(this.#styleNodes).length > 0 ? { styleNodes: this.#styleNodes } : {}),
     };
   }
 }
