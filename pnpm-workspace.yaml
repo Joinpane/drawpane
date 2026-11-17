@@ -30,4 +30,6 @@ minimumReleaseAgeExclude:
   - "@cloudflare/vitest-plugin@1.8.1"
 
 patchedDependencies:
+  "@open-pencil/fig@0.16.0": patches/@open-pencil__fig@0.16.0.patch
+  "@open-pencil/scene-graph@0.16.0": patches/@open-pencil__scene-graph@0.16.0.patch
   harfbuzzjs@1.6.4: patches/harfbuzzjs@1.6.4.patch

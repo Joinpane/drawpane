@@ -6,9 +6,11 @@
  * 500,000-layer kit takes many minutes to read: nodes as lines of JSON, the
  * images by hash, and what the import noted.
  *
- * The cache is keyed by the .fig's bytes and by the source of every package
- * the conversion runs through, so a change to the reader or the converter
- * (the changes this harness judges) converts again, and nothing else does.
+ * The cache is keyed by the .fig's bytes, by the source of every package
+ * the conversion runs through, and by the lockfile and the patches to
+ * dependencies (Open Pencil's reader is patched), so a change to the reader
+ * or the converter (the changes this harness judges) converts again, and
+ * nothing else does.
  * A change to this file's own steps should be run with a fresh cache folder.
  */
 import { createHash } from "node:crypto";
@@ -40,6 +42,8 @@ const SOURCES = [
   "packages/model",
   "packages/editor",
   "packages/import-kit",
+  "pnpm-lock.yaml",
+  "patches",
 ];
 
 function walk(path: string, out: string[]): void {
