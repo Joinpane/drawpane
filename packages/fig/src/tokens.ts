@@ -129,14 +129,12 @@ const UNIT: Readonly<Record<string, number>> = { opacity: 0.01 };
 export function layerBoundVariables(
   n: SceneNode,
   aliasOf: AliasOf,
-  graph: SceneGraph,
 ): Record<string, Figma.VariableAlias> | undefined {
   const out: Record<string, Figma.VariableAlias> = {};
   for (const [field, id] of Object.entries(n.boundVariables)) {
     if (field.includes("/") || NOT_BROUGHT.has(field)) continue;
     const scale = n.variableBindingScales?.[field];
     if (scale !== undefined && Math.abs(scale - (UNIT[field] ?? 1)) > 1e-9) continue;
-    if (!showsSaved(n, field, id, graph)) continue;
     const alias = aliasOf(id);
     if (alias) out[FIELD_NAMES[field] ?? field] = alias;
   }
@@ -144,24 +142,13 @@ export function layerBoundVariables(
 }
 
 /**
- * Whether a binding gives, at the layer, the number Figma saved for it. A
- * copy of a component swapped for another can carry the binding of the
- * layer it replaced (Open Pencil keeps it), while its saved value is right:
- * such a binding is stale, and the layer keeps its value. Fields that
- * aren't numbers on the layer aren't checked.
- */
-function showsSaved(n: SceneNode, field: string, variableId: string, graph: SceneGraph): boolean {
-  const saved = (n as unknown as Record<string, unknown>)[field];
-  if (typeof saved !== "number") return true;
-  const value = graph.resolveNumberVariableForNode(n.id, variableId);
-  if (value === undefined) return true;
-  const resolved = value * (UNIT[field] ?? 1);
-  return Math.abs(resolved - saved) <= 0.01 + Math.abs(saved) * 1e-4;
-}
-
-/**
  * The variable a paint's colour is bound to (`fills/0/color`), as REST's
- * alias, when it gives, at the layer, the colour Figma saved (see `showsSaved`).
+ * alias, when it gives, at the layer, the colour Figma saved. A copy of a
+ * component swapped for another variant can carry the colour binding of the
+ * layer it replaced (Open Pencil keeps it) while its saved colour is right:
+ * such a binding is stale, and the paint keeps its colour. Numbers aren't
+ * checked this way: a copy's saved size is often its main's, which is what
+ * resolving fixes (a slider's thumb in another style).
  */
 export function paintColor(
   n: SceneNode,

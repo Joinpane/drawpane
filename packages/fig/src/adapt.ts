@@ -371,7 +371,7 @@ export function adaptNode(
   node.fills = convertFills(n.fills, raw?.fillPaints, notes, paintBinds(n, "fills", ctx));
   Object.assign(node, strokeFields(n, raw, notes, ctx));
   if (ctx.aliasOf) {
-    const bound = layerBoundVariables(n, ctx.aliasOf, ctx.graph);
+    const bound = layerBoundVariables(n, ctx.aliasOf);
     if (bound) node.boundVariables = bound;
     const modes = explicitModes(n, ctx.graph);
     if (modes) node.explicitVariableModes = modes;
