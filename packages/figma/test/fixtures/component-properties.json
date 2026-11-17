@@ -97,7 +97,6 @@
            "y": 16
           },
           "componentId": "3:1",
-          "fills": [],
           "children": [
            {
             "id": "I1:3;3:2",
@@ -138,6 +137,7 @@
           ],
           "layoutSizingHorizontal": "FIXED",
           "layoutSizingVertical": "FIXED",
+          "fills": [],
           "componentPropertyReferences": {
            "visible": "Show Icon#10:1",
            "mainComponent": "Icon#10:3"
@@ -268,7 +268,6 @@
            "y": 16
           },
           "componentId": "3:1",
-          "fills": [],
           "children": [
            {
             "id": "I1:6;3:2",
@@ -309,6 +308,7 @@
           ],
           "layoutSizingHorizontal": "FIXED",
           "layoutSizingVertical": "FIXED",
+          "fills": [],
           "componentPropertyReferences": {
            "visible": "Show Icon#10:1",
            "mainComponent": "Icon#10:3"
@@ -476,7 +476,17 @@
        "x": 16,
        "y": 16
       },
-      "fills": [],
+      "fills": [
+       {
+        "type": "SOLID",
+        "color": {
+         "r": 0.9,
+         "g": 0.9,
+         "b": 0.9,
+         "a": 1
+        }
+       }
+      ],
       "children": [
        {
         "id": "4:2",
@@ -661,7 +671,6 @@
            "y": 16
           },
           "componentId": "3:1",
-          "fills": [],
           "children": [
            {
             "id": "I5:3;1:3;3:2",
@@ -702,6 +711,7 @@
           ],
           "layoutSizingHorizontal": "FIXED",
           "layoutSizingVertical": "FIXED",
+          "fills": [],
           "componentPropertyReferences": {
            "visible": "Show Icon#10:1",
            "mainComponent": "Icon#10:3"
@@ -775,7 +785,7 @@
       ],
       "size": {
        "x": 240,
-       "y": 160
+       "y": 200
       },
       "fills": [
        {
@@ -873,7 +883,6 @@
            "y": 16
           },
           "componentId": "3:1",
-          "fills": [],
           "children": [
            {
             "id": "I6:1;1:6;3:2",
@@ -914,6 +923,7 @@
           ],
           "layoutSizingHorizontal": "FIXED",
           "layoutSizingVertical": "FIXED",
+          "fills": [],
           "componentPropertyReferences": {
            "visible": "Show Icon#10:1",
            "mainComponent": "Icon#10:3"
@@ -1107,7 +1117,6 @@
              "y": 16
             },
             "componentId": "3:1",
-            "fills": [],
             "children": [
              {
               "id": "I6:2;5:3;1:3;3:2",
@@ -1148,6 +1157,7 @@
             ],
             "layoutSizingHorizontal": "FIXED",
             "layoutSizingVertical": "FIXED",
+            "fills": [],
             "visible": false,
             "componentPropertyReferences": {
              "visible": "Show Icon#10:1",
@@ -1201,6 +1211,176 @@
             }
            }
           ]
+         }
+        ]
+       },
+       {
+        "id": "6:3",
+        "type": "INSTANCE",
+        "name": "Button",
+        "relativeTransform": [
+         [
+          1,
+          0,
+          0
+         ],
+         [
+          0,
+          1,
+          130
+         ]
+        ],
+        "size": {
+         "x": 77,
+         "y": 32
+        },
+        "componentId": "1:2",
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.9,
+           "g": 0.9,
+           "b": 0.9,
+           "a": 1
+          }
+         }
+        ],
+        "cornerRadius": 6,
+        "layoutMode": "HORIZONTAL",
+        "primaryAxisSizingMode": "AUTO",
+        "counterAxisSizingMode": "AUTO",
+        "counterAxisAlignItems": "CENTER",
+        "itemSpacing": 4,
+        "paddingLeft": 8,
+        "paddingRight": 8,
+        "paddingTop": 6,
+        "paddingBottom": 6,
+        "layoutSizingHorizontal": "HUG",
+        "layoutSizingVertical": "HUG",
+        "children": [
+         {
+          "id": "I6:3;1:3",
+          "type": "INSTANCE",
+          "name": "Arrow",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            8
+           ],
+           [
+            0,
+            1,
+            8
+           ]
+          ],
+          "size": {
+           "x": 16,
+           "y": 16
+          },
+          "componentId": "4:1",
+          "children": [
+           {
+            "id": "I6:3;1:3;4:2",
+            "type": "RECTANGLE",
+            "name": "Shape",
+            "relativeTransform": [
+             [
+              1,
+              0,
+              2
+             ],
+             [
+              0,
+              1,
+              2
+             ]
+            ],
+            "size": {
+             "x": 12,
+             "y": 12
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.04,
+               "g": 0.04,
+               "b": 0.04,
+               "a": 1
+              }
+             }
+            ],
+            "constraints": {
+             "horizontal": "SCALE",
+             "vertical": "SCALE"
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "FIXED",
+          "layoutSizingVertical": "FIXED",
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.9,
+             "g": 0.9,
+             "b": 0.9,
+             "a": 1
+            }
+           }
+          ],
+          "componentPropertyReferences": {
+           "visible": "Show Icon#10:1",
+           "mainComponent": "Icon#10:3"
+          }
+         },
+         {
+          "id": "I6:3;1:4",
+          "type": "TEXT",
+          "name": "Label",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            28
+           ],
+           [
+            0,
+            1,
+            6
+           ]
+          ],
+          "size": {
+           "x": 41,
+           "y": 20
+          },
+          "characters": "Button",
+          "style": {
+           "fontFamily": "Inter",
+           "fontSize": 14,
+           "fontWeight": 400,
+           "lineHeightUnit": "PIXELS",
+           "lineHeightPx": 20,
+           "textAutoResize": "WIDTH_AND_HEIGHT"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.04,
+             "g": 0.04,
+             "b": 0.04,
+             "a": 1
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "HUG",
+          "layoutSizingVertical": "HUG",
+          "componentPropertyReferences": {
+           "characters": "Label#10:2"
+          }
          }
         ]
        }

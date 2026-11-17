@@ -537,17 +537,33 @@ function markOverrides(
       parent: root ? undefined : byId.get(layer.parent),
       parentSource: root ? undefined : byId.get(main.parent),
     });
-    const keys = new Set([...Object.keys(layer.props), ...Object.keys(main.props)]);
+    // A nested instance swapped for another component is that component's instance, placed
+    // where its main layer is: it's compared with the component, but for where it sits.
+    const of = (layer.props as Props).instanceOf;
+    const swappedTo =
+      !root && typeof of === "string" && of !== (main.props as Props).instanceOf
+        ? byId.get(of)
+        : undefined;
+    const laidOutSwapped = swappedTo ? laidOutProps(layer, swappedTo, { root: true }) : null;
+    const keys = new Set([
+      ...Object.keys(layer.props),
+      ...Object.keys(main.props),
+      ...Object.keys(swappedTo?.props ?? {}),
+    ]);
     for (const k of keys) {
       if (NOT_OVERRIDES.has(k) || laidOut.has(k)) continue;
       // Where an instance sits, and how it's used in the main around it, are its own.
       if (root && ROOT_LOCAL_PROPS.has(k)) continue;
+      let against = main;
+      if (swappedTo && !ROOT_LOCAL_PROPS.has(k)) {
+        if (laidOutSwapped?.has(k)) continue;
+        against = swappedTo;
+      }
       const a = (layer.props as Props)[k];
-      const b = (main.props as Props)[k];
+      const b = (against.props as Props)[k];
       if (JSON.stringify(a) !== JSON.stringify(b)) changed.push(k);
     }
     // A nested instance swapped for another component overrides which one it is.
-    const of = (layer.props as Props).instanceOf;
     if (!root && of !== undefined && of !== (main.props as Props).instanceOf)
       changed.unshift("instanceOf");
     if (changed.length > 0) (layer.props as Props).overrides = changed.slice(0, 64);

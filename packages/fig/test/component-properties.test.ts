@@ -70,6 +70,8 @@ describe("importing component properties", () => {
       "fI6-2_5-2": ["characters"],
       "fI6-2_5-3_1-3": ["visible"],
       "fI6-2_5-3_1-4": ["characters"],
+      // A button whose icon is swapped: the swap, not the swapped-in icon's own fill.
+      "fI6-3_1-3": ["instanceOf"],
     });
     // An instance of a variant holds no variant values of its own.
     expect(props("f6-1").variantProps).toBeUndefined();
