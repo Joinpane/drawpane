@@ -44,6 +44,7 @@ import type { Scene } from "./scene";
 import { dropShadowCast } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
+  decorationBar,
   drawnBaseline,
   layoutText,
   lineOffset,
@@ -106,6 +107,17 @@ function splitColor(hex: string): { color: string; alpha: number } {
 
 const attr = (name: string, value: string | number) =>
   ` ${name}="${typeof value === "number" ? svgNumber(value) : escapeXml(value)}"`;
+
+/** A run's underline or strikethrough bar from `x`, on `baseline`, where the canvas draws it. */
+const barRect = (
+  decoration: "underline" | "strikethrough",
+  x: number,
+  baseline: number,
+  frag: TextFragment,
+) => {
+  const bar = decorationBar(decoration, baseline, frag.fontSize);
+  return `<rect${attr("x", round2(x))}${attr("y", round2(bar.y))}${attr("width", round2(frag.width))}${attr("height", round2(bar.height))}/>`;
+};
 
 /** Wedges in an exported angular gradient: two per degree. */
 const ANGULAR_WEDGES = 180;
@@ -1078,11 +1090,8 @@ export function exportSvg(
             : attr("stroke-width", round2((strokeWidth / s) * 100) / 100);
         svg += `<path transform="${prefix}matrix(${s} 0 0 ${-s} ${x} ${y})"${width}${attr("d", g.d)}/>`;
       }
-      if (frag.decoration !== "none" && strokeWidth === undefined) {
-        const size = frag.fontSize;
-        const y = frag.decoration === "underline" ? y0 + size * 0.1 : y0 - size * 0.3;
-        svg += `<rect${attr("x", round2(x0))}${attr("y", round2(y))}${attr("width", round2(frag.width))}${attr("height", round2(Math.max(1, size / 16)))}/>`;
-      }
+      if (frag.decoration !== "none" && strokeWidth === undefined)
+        svg += barRect(frag.decoration, x0, y0, frag);
       return svg;
     };
     const ownOutlines = [...outlined].filter(([frag]) => frag.fills);
@@ -1095,10 +1104,8 @@ export function exportSvg(
     const bars = (frag: TextFragment) => {
       const line = layout.lines.find((l) => l.fragments.includes(frag));
       if (!grid || !line || frag.decoration === "none" || outlined.has(frag)) return "";
-      const size = frag.fontSize;
-      const baseline = drawnBaseline(line, dy);
-      const y = frag.decoration === "underline" ? baseline + size * 0.1 : baseline - size * 0.3;
-      return `<rect${attr("x", round2(lineOffset(line, w, base) + frag.x))}${attr("y", round2(y))}${attr("width", round2(frag.width))}${attr("height", round2(Math.max(1, size / 16)))}/>`;
+      const x = lineOffset(line, w, base) + frag.x;
+      return barRect(frag.decoration, x, drawnBaseline(line, dy), frag);
     };
     const fragments = layout.lines.flatMap((l) => l.fragments);
     const layerBars = fragments
