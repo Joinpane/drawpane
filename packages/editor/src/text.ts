@@ -729,6 +729,33 @@ export function drawnBaseline(line: TextLine, dy: number): number {
   return Math.round(line.baseline + dy);
 }
 
+/**
+ * An underline's or strikethrough's bar, for a run at `fontSize` drawn on
+ * `baseline` (`drawnBaseline`): its top and height, in the text box's units.
+ * As Figma draws them, measured on its renders:
+ *
+ * - An underline's top is a fifth of the size below the drawn baseline, and
+ *   it's a fifteenth of the size thick, at every size from 12 to 20 px and
+ *   at every fraction the baseline rounds by. That isn't the font's own
+ *   underline (Inter's post table puts its top at 0.170 em and makes it
+ *   0.068 em thick), so it's taken as Figma's own rule, for every font.
+ * - A strikethrough is where Inter's OS/2 table puts it: its top 671/2048 em
+ *   above the baseline, 140/2048 em thick. Nothing struck in another font
+ *   has been measured; every font draws it there, so the canvas (which
+ *   can't read a font's tables) and the headless renderer agree.
+ *
+ * Neither is snapped to a pixel: Figma's bars are antialiased across rows.
+ */
+export function decorationBar(
+  decoration: "underline" | "strikethrough",
+  baseline: number,
+  fontSize: number,
+): { readonly y: number; readonly height: number } {
+  return decoration === "underline"
+    ? { y: baseline + fontSize / 5, height: fontSize / 15 }
+    : { y: baseline - (fontSize * 671) / 2048, height: (fontSize * 140) / 2048 };
+}
+
 /** The line a caret at `index` is on: the last one starting at or before it. */
 export function lineOf(layout: TextLayout, index: number): number {
   let k = 0;

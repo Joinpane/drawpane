@@ -37,6 +37,7 @@ import type { Scene } from "./scene";
 import { dropShadowCast } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
+  decorationBar,
   drawnBaseline,
   layoutText,
   lineHeightPx,
@@ -2359,10 +2360,8 @@ export class CanvasRenderer {
             );
           else ctx.fillText(frag.text, x, baseline);
           if (frag.decoration !== "none") {
-            const size = frag.fontSize;
-            const y =
-              frag.decoration === "underline" ? baseline + size * 0.1 : baseline - size * 0.3;
-            ctx.fillRect(x, y, frag.width, Math.max(1, size / 16));
+            const bar = decorationBar(frag.decoration, baseline, frag.fontSize);
+            ctx.fillRect(x, bar.y, frag.width, bar.height);
           }
         }
       }

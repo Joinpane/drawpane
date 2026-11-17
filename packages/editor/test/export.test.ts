@@ -412,9 +412,9 @@ describe("exportSvg", () => {
     expect(plain).not.toContain("<rect");
     const raster = exportSvg(editor.scene, measurer, ["t"], bounds, { raster: 2 });
     expect(raster).not.toContain("text-decoration");
-    // As wide as the run, 1 unit thick (16 / 16), a tenth of an em under the baseline.
+    // As wide as the run, a fifteenth of the size thick (see `decorationBar`).
     expect(raster).toMatch(
-      /<g fill="#ff0000"><rect x="0" y="[\d.]+" width="16" height="1"\/><\/g>/,
+      /<g fill="#ff0000"><rect x="0" y="[\d.]+" width="16" height="1.07"\/><\/g>/,
     );
   });
 
