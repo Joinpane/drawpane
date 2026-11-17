@@ -29,6 +29,7 @@ import {
 } from "@drawpane/model";
 import { LAYOUT_NEUTRAL } from "./compact-copies";
 import { type Doc, Doc as DocCtor } from "./doc";
+import { gridImportOps } from "./layout";
 import { layerName } from "./names";
 
 /** Never copied from a main component: they link instances or describe the main itself. */
@@ -587,8 +588,12 @@ export function relayoutTargets(doc: Doc, ids: Iterable<string>, ops: readonly O
  *   copy a plain layer from then on, so they aren't instances either.
  *
  * Either way the file opens looking as it did where it was made.
+ *
+ * Grids are laid out first (`gridImportOps`): their saved items can lag the
+ * layout the grid shows where it was made. A copy whose grid then differs
+ * from its main's is kept as it is like any other.
  */
-export function pinInstances(nodes: readonly NodeRecord[]): {
+export function pinInstances(input: readonly NodeRecord[]): {
   nodes: NodeRecord[];
   /** Properties marked overridden. */
   pinned: number;
@@ -603,7 +608,9 @@ export function pinInstances(nodes: readonly NodeRecord[]): {
   // Copies sync can't keep as they are lose their link, everything inside them too.
   // Read as materialized: this is about the file as it was made.
   let doc = new DocCtor({ compactCopies: false });
-  doc.reset(nodes);
+  doc.reset(input);
+  const nodes = withSets(input, gridImportOps(doc));
+  if (nodes !== input) doc.reset(nodes);
   const unlinked = new Set<string>();
   let detached = 0;
   for (const root of roots(doc)) {
@@ -678,6 +685,22 @@ export function pinInstances(nodes: readonly NodeRecord[]): {
     return { ...node, props: { ...node.props, overrides: [...set].sort() as PropName[] } };
   });
   return { nodes: out, pinned, detached };
+}
+
+/** `nodes` with `set` operations applied (the same array when there are none). */
+function withSets(nodes: readonly NodeRecord[], ops: readonly Op[]): readonly NodeRecord[] {
+  const sets = new Map<string, Record<string, unknown>>();
+  for (const op of ops) {
+    if (op.op !== "set") continue;
+    const props = sets.get(op.id) ?? {};
+    props[op.prop] = op.value;
+    sets.set(op.id, props);
+  }
+  if (sets.size === 0) return nodes;
+  return nodes.map((node) => {
+    const props = sets.get(node.id);
+    return props ? { ...node, props: { ...node.props, ...props } as Props } : node;
+  });
 }
 
 /**

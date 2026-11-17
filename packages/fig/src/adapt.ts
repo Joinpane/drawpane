@@ -16,7 +16,14 @@ import { commandsToPath } from "./geometry";
 import type { RestIds } from "./ids";
 import type { FigNotes } from "./notes";
 import { convertEffects, convertFills } from "./paint";
-import type { RawRecord } from "./raw";
+import {
+  guidString,
+  type RawGuid,
+  type RawRecord,
+  type RawTrackOrder,
+  type RawTrackSizes,
+  type RawTrackSizing,
+} from "./raw";
 import { textFields } from "./text";
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] };
@@ -160,13 +167,115 @@ function strokeFields(
   return out;
 }
 
-function layoutFields(n: SceneNode, parent: SceneNode): Partial<RestNode> {
+/** A grid's tracks in order (by position), each one's id and size as CSS ("32px", "1fr", "auto"). */
+function gridTracks(
+  order: RawTrackOrder | undefined,
+  sizes: RawTrackSizes | undefined,
+): { ids: string[]; list: string } {
+  const entries = (order?.entries ?? []).filter((e) => e.id);
+  entries.sort((a, b) => {
+    const p = a.position ?? "";
+    const q = b.position ?? "";
+    return p < q ? -1 : p > q ? 1 : 0;
+  });
+  const ids = entries.map((e) => guidString(e.id as RawGuid));
+  const byId = new Map<string, NonNullable<RawTrackSizes["entries"]>[number]["trackSize"]>();
+  for (const e of sizes?.entries ?? []) if (e.id) byId.set(guidString(e.id), e.trackSize);
+  const css = (s: RawTrackSizing | undefined) =>
+    s?.type === "FIXED"
+      ? `${Math.max(0, s.value ?? 0)}px`
+      : s?.type === "HUG"
+        ? "auto"
+        : `${(s?.value ?? 1) > 0 ? (s?.value ?? 1) : 1}fr`;
+  const list = ids.map((id) => {
+    const size = byId.get(id);
+    const min = css(size?.minSizing ?? size?.maxSizing);
+    const max = css(size?.maxSizing ?? size?.minSizing);
+    return min === max ? max : `minmax(${min}, ${max})`;
+  });
+  return { ids, list: list.join(" ") };
+}
+
+/** A grid frame's tracks and gaps; Open Pencil's graph doesn't keep them, so they're read from its record. */
+function gridFields(raw: RawRecord | undefined): Partial<RestNode> {
+  const rows = gridTracks(raw?.gridRows, raw?.gridRowsSizing);
+  const columns = gridTracks(raw?.gridColumns, raw?.gridColumnsSizing);
+  return {
+    ...(rows.list ? { gridRowsSizing: rows.list } : {}),
+    ...(columns.list ? { gridColumnsSizing: columns.list } : {}),
+    gridRowGap: raw?.gridRowGap ?? 0,
+    gridColumnGap: raw?.gridColumnGap ?? 0,
+  };
+}
+
+/** A grid auto layout frame: Open Pencil (0.16) reads one as no auto layout, so its record says. */
+const isGrid = (n: SceneNode, raw: RawRecord | undefined) =>
+  (n.layoutMode as string) === "GRID" || raw?.stackMode === "GRID";
+
+const CELL_ALIGN = new Set(["AUTO", "MIN", "CENTER", "MAX"]);
+
+/**
+ * Where a grid's item sits: the row and column it's anchored at (by its parent's track ids), its
+ * spans and alignment. A grid that reflows places its items in order, whatever anchors they
+ * kept from before (Figma shows them so), so their anchors are left out.
+ */
+function gridItemFields(raw: RawRecord | undefined, parentRaw: RawRecord | undefined) {
+  const out: Partial<RestNode> = {};
+  if (raw?.gridRowAnchor && raw.gridColumnAnchor && parentRaw?.gridReflowEnabled !== true) {
+    const row = gridTracks(parentRaw?.gridRows, undefined).ids.indexOf(
+      guidString(raw.gridRowAnchor),
+    );
+    const column = gridTracks(parentRaw?.gridColumns, undefined).ids.indexOf(
+      guidString(raw.gridColumnAnchor),
+    );
+    if (row >= 0 && column >= 0) {
+      out.gridRowAnchorIndex = row;
+      out.gridColumnAnchorIndex = column;
+      out.gridRowSpan = Math.max(1, raw.gridRowSpan ?? 1);
+      out.gridColumnSpan = Math.max(1, raw.gridColumnSpan ?? 1);
+    }
+  }
+  const h = raw?.gridChildHorizontalAlign;
+  const v = raw?.gridChildVerticalAlign;
+  if (h && CELL_ALIGN.has(h))
+    out.gridChildHorizontalAlign = h as NonNullable<RestNode["gridChildHorizontalAlign"]>;
+  if (v && CELL_ALIGN.has(v))
+    out.gridChildVerticalAlign = v as NonNullable<RestNode["gridChildVerticalAlign"]>;
+  return out;
+}
+
+function layoutFields(
+  n: SceneNode,
+  parent: SceneNode,
+  raw: RawRecord | undefined,
+  parentRaw: RawRecord | undefined,
+): Partial<RestNode> {
   const out: Partial<RestNode> = {
     constraints: {
       horizontal: CONSTRAINT_H[n.horizontalConstraint],
       vertical: CONSTRAINT_V[n.verticalConstraint],
     },
   };
+  if (isGrid(n, raw)) {
+    // A grid's primary axis is across: its sizing modes read as a row's.
+    Object.assign(out, {
+      layoutMode: "GRID",
+      primaryAxisSizingMode: n.primaryAxisSizing === "HUG" ? "AUTO" : "FIXED",
+      counterAxisSizingMode: n.counterAxisSizing === "HUG" ? "AUTO" : "FIXED",
+      paddingTop: n.paddingTop,
+      paddingRight: n.paddingRight,
+      paddingBottom: n.paddingBottom,
+      paddingLeft: n.paddingLeft,
+      ...gridFields(raw),
+    } satisfies Partial<RestNode>);
+  }
+  if (isGrid(parent, parentRaw)) {
+    // Its item grows across and stretches down its cells, saved as a row's child does.
+    out.layoutGrow = n.layoutGrow;
+    out.layoutAlign = n.layoutAlignSelf === "STRETCH" ? "STRETCH" : "INHERIT";
+    if (n.layoutPositioning === "ABSOLUTE") out.layoutPositioning = "ABSOLUTE";
+    Object.assign(out, gridItemFields(raw, parentRaw));
+  }
   if (n.layoutMode === "HORIZONTAL" || n.layoutMode === "VERTICAL") {
     Object.assign(out, {
       layoutMode: n.layoutMode,
@@ -249,7 +358,9 @@ export function adaptNode(
     ];
   else if (n.cornerRadius > 0) node.cornerRadius = n.cornerRadius;
   if (n.clipsContent) node.clipsContent = true;
-  Object.assign(node, layoutFields(n, parent));
+  const parentGuid = ids.sourceGuid(parent);
+  const parentRaw = parentGuid ? ctx.records.get(parentGuid) : undefined;
+  Object.assign(node, layoutFields(n, parent, raw, parentRaw));
   const grids = n.layoutGrids.map((g) => layoutGrid(g, n)).filter((g) => g !== null);
   if (grids.length > 0) node.layoutGrids = grids;
 

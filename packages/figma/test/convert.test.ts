@@ -9,6 +9,7 @@ import {
 } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { convertFile, drawpaneId, type Figma, mirroredId, networkPath, variantProps } from "../src";
+import { parseTrackList } from "../src/layout";
 
 /** Creates the nodes in a store the way the room does, parents first: throws on anything invalid. */
 function validate(nodes: readonly NodeRecord[]): MemoryStore {
@@ -298,6 +299,91 @@ describe("auto layout and components", () => {
     expect(mirroredId("I1:2;3:4")).toBe("3:4");
     expect(mirroredId("I1:2;5:6;3:4")).toBe("I5:6;3:4");
     expect(drawpaneId("I1:2;3:4")).toBe("fI1-2_3-4");
+  });
+
+  it("reads a grid's tracks and gaps, and where its items sit", () => {
+    const cell = (id: string, extra: Partial<Figma.Node> = {}) =>
+      node({
+        id,
+        type: "FRAME",
+        name: `Cell ${id}`,
+        size: { x: 40, y: 20 },
+        relativeTransform: at(0, 0),
+        layoutSizingHorizontal: "FILL",
+        layoutSizingVertical: "FILL",
+        ...extra,
+      });
+    const grid = node({
+      id: "4:1",
+      type: "FRAME",
+      name: "Grid",
+      size: { x: 300, y: 100 },
+      relativeTransform: at(0, 0),
+      layoutMode: "GRID",
+      paddingLeft: 4,
+      gridColumnsSizing: "32px repeat(2, minmax(0, 1fr)) auto",
+      gridRowsSizing: "auto 2.5fr",
+      gridColumnGap: 8,
+      gridRowGap: 6,
+      layoutSizingHorizontal: "FIXED",
+      layoutSizingVertical: "HUG",
+      children: [
+        cell("4:2"),
+        cell("4:3", {
+          gridRowAnchorIndex: 1,
+          gridColumnAnchorIndex: 2,
+          gridColumnSpan: 2,
+          gridChildHorizontalAlign: "CENTER",
+          gridChildVerticalAlign: "MAX",
+          layoutSizingHorizontal: "FIXED",
+          layoutSizingVertical: "FIXED",
+        }),
+        cell("4:4", { layoutMode: "HORIZONTAL", counterAxisSizingMode: "AUTO" }),
+      ],
+    });
+    const { nodes } = convertFile(file(grid));
+    validate(nodes);
+    expect(byName(nodes, "Grid").props).toMatchObject({
+      layoutMode: "grid",
+      gap: 8,
+      rowGap: 6,
+      paddingLeft: 4,
+      sizingV: "hug",
+      gridColumns: [
+        { unit: "px", value: 32 },
+        { unit: "fr", value: 1 },
+        { unit: "fr", value: 1 },
+        { unit: "auto" },
+      ],
+      gridRows: [{ unit: "auto" }, { unit: "fr", value: 2.5 }],
+    });
+    // Without an anchor an item flows into the next free cell. Filling its cells with a fixed
+    // height of its own, its row is never shorter than that; hugging, its content decides.
+    const flowing = byName(nodes, "Cell 4:2").props;
+    expect(flowing).toMatchObject({ sizingH: "fill", sizingV: "fill", minHeight: 20 });
+    expect(getProp(flowing, "gridArea")).toBeNull();
+    expect(getProp(byName(nodes, "Cell 4:4").props, "minHeight")).toBeNull();
+    expect(byName(nodes, "Cell 4:3").props).toMatchObject({
+      gridArea: { column: 3, row: 2, columnSpan: 2, rowSpan: 1 },
+      justifySelf: "center",
+      alignSelf: "end",
+    });
+  });
+
+  it("reads CSS track lists as Figma writes them", () => {
+    expect(parseTrackList("repeat(3, 1fr) 44px")).toEqual([
+      { unit: "fr", value: 1 },
+      { unit: "fr", value: 1 },
+      { unit: "fr", value: 1 },
+      { unit: "px", value: 44 },
+    ]);
+    expect(parseTrackList("minmax(40px, auto) 0.5fr")).toEqual([
+      { unit: "auto" },
+      { unit: "fr", value: 0.5 },
+    ]);
+    expect(parseTrackList("1fr wide")).toBeNull();
+    expect(parseTrackList("")).toBeNull();
+    expect(parseTrackList(undefined)).toBeNull();
   });
 });
 
