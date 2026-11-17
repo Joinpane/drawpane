@@ -98,4 +98,5 @@ What's left after that is real in Drawpane's model: a resized instance, a change
 - An override is defined by layout, not by comparison: a value layout would give a copy isn't one, whatever produced it.
 - A copy laid out differently from its main doesn't take its main's values for what layout decides when the main changes; layout gives them again. That's what layout-decided values already did inside auto layout.
 - Until decision 0034, copies in a frame of another variable mode list their mode's fills and strokes as overrides.
-- Instances of variants hold no `variantProps`: compact files store less (the kit's 18,890 marks, and an `unset` on each such instance).
+- Instances of variants hold no `variantProps`, nor an override or an `unset` for it (the kit's 18,890 marks). The number of override records doesn't change: those instances have other differences too.
+- Measured with phase 1 on the kit: override marks fall from 294,708 to 160,968, instances with any from 17,825 to 9,282, and what's drawn doesn't change.
