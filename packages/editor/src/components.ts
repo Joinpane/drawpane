@@ -102,27 +102,87 @@ export function isInsideInstance(doc: Doc, id: string): boolean {
   return root !== undefined;
 }
 
-const indexCache = new WeakMap<Doc, { version: number; instances: Map<string, string[]> }>();
+/** Each main component's instances, and what each instance is of, as of `version`. */
+interface InstanceIndex {
+  version: number;
+  readonly of: Map<string, string>;
+  readonly instances: Map<string, Set<string>>;
+  /** `instances` as lists, made when asked for and dropped when they change. */
+  readonly lists: Map<string, readonly string[]>;
+}
 
-/** Instance ids of each main component, cached per document version. */
-export function instancesOf(doc: Doc, componentId: string): readonly string[] {
-  let cached = indexCache.get(doc);
-  if (!cached || cached.version !== doc.version) {
-    const instances = new Map<string, string[]>();
-    for (const node of doc.nodes()) {
-      const of = node.type === "frame" ? getProp(node.props, "instanceOf") : null;
-      if (!of) continue;
-      let list = instances.get(of);
-      if (!list) {
-        list = [];
-        instances.set(of, list);
-      }
-      list.push(node.id);
+const indexCache = new WeakMap<Doc, InstanceIndex>();
+
+const instanceOf = (node: NodeRecord | undefined) =>
+  node?.type === "frame" ? getProp(node.props, "instanceOf") : null;
+
+/**
+ * The instances index, caught up with the document. It's read whole once,
+ * then follows the document's change log (`changesSince`), so in a kit-sized
+ * file an edit doesn't mean reading every layer again; it's read whole again
+ * only when the log can't say what changed (a reset, or a long way behind).
+ */
+function instanceIndex(doc: Doc): InstanceIndex {
+  const cached = indexCache.get(doc);
+  if (cached) {
+    if (cached.version === doc.version) return cached;
+    const changes = doc.changesSince(cached.version);
+    if (changes && !changes.some((c) => c.reset)) {
+      for (const change of changes)
+        for (const id of change.ids) {
+          const now = instanceOf(doc.get(id));
+          const was = cached.of.get(id) ?? null;
+          if (now === was) continue;
+          if (was !== null) {
+            cached.instances.get(was)?.delete(id);
+            cached.lists.delete(was);
+            cached.of.delete(id);
+          }
+          if (now !== null) {
+            let set = cached.instances.get(now);
+            if (!set) {
+              set = new Set();
+              cached.instances.set(now, set);
+            }
+            set.add(id);
+            cached.lists.delete(now);
+            cached.of.set(id, now);
+          }
+        }
+      cached.version = doc.version;
+      return cached;
     }
-    cached = { version: doc.version, instances };
-    indexCache.set(doc, cached);
   }
-  return cached.instances.get(componentId) ?? [];
+  const index: InstanceIndex = {
+    version: doc.version,
+    of: new Map(),
+    instances: new Map(),
+    lists: new Map(),
+  };
+  for (const node of doc.nodes()) {
+    const of = instanceOf(node);
+    if (!of) continue;
+    index.of.set(node.id, of);
+    let set = index.instances.get(of);
+    if (!set) {
+      set = new Set();
+      index.instances.set(of, set);
+    }
+    set.add(node.id);
+  }
+  indexCache.set(doc, index);
+  return index;
+}
+
+/** Instance ids of each main component, kept up to date with the document. */
+export function instancesOf(doc: Doc, componentId: string): readonly string[] {
+  const index = instanceIndex(doc);
+  let list = index.lists.get(componentId);
+  if (!list) {
+    list = [...(index.instances.get(componentId) ?? [])];
+    index.lists.set(componentId, list);
+  }
+  return list;
 }
 
 /**

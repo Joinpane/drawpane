@@ -5,19 +5,43 @@
 import type { Editor } from "@drawpane/editor";
 import type { NodeRecord } from "@drawpane/model";
 import { ColorPicker, Popover, PropertySection } from "@drawpane/ui";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { HexField } from "./PaintSection";
 import { rgbaOf, swatchCss } from "./paint";
 import { replaceColorOps, selectionColors } from "./selection-colors";
 
 const COLLAPSED = 8;
+/**
+ * Past this many layers, the colors are read only when asked for (as in
+ * Figma): reading a kit-sized frame's paints is more than a click should wait for.
+ */
+export const SELECTION_COLORS_LIMIT = 4000;
 
 export function SelectionColors({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
-  const colors = selectionColors(editor.doc, ids);
+  const key = ids.join(",");
+  // Asked for in a large selection: kept until the selection changes.
+  const [asked, setAsked] = useState<string | null>(null);
+  const version = editor.doc.version;
+  const colors = useMemo(() => {
+    void version;
+    return selectionColors(
+      editor.doc,
+      key.split(","),
+      asked === key ? Infinity : SELECTION_COLORS_LIMIT,
+    );
+  }, [editor, version, key, asked]);
   const [all, setAll] = useState(false);
   // Only worth showing when there's more than one layer's worth of color to manage.
   const containers = nodes.some((n) => editor.doc.childIds(n.id).length > 0);
+  if (!colors)
+    return (
+      <PropertySection title="Selection colors">
+        <button type="button" className="inspector__more" onClick={() => setAsked(key)}>
+          Show selection colors
+        </button>
+      </PropertySection>
+    );
   if (colors.length < 2 && !containers) return null;
   if (colors.length === 0) return null;
   const replace = (from: string, to: string, label = "Selection color") => {
