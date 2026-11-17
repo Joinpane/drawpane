@@ -15,7 +15,8 @@
  *
  * The sixth review's three aborts are here: marking the wide fan dirty, the
  * removal check's discovery of it, and the old-client snapshot of the large
- * rows. Each aborted at 128 MB before its fix.
+ * rows. Each aborted at 128 MB before its fix. So is the seventh's: the same
+ * rows sent as stored to a client that can't download.
  */
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,7 +44,8 @@ import {
 } from "../src/rooms/convert";
 import { MainRemoval } from "../src/rooms/main-removal";
 import { insertNodes, TableReader } from "../src/rooms/node-tables";
-import { PresentedReader, reloadPlaceholder, sendPresented } from "../src/rooms/presented";
+import { PresentedReader } from "../src/rooms/presented";
+import { reloadPlaceholder, sendBounded } from "../src/rooms/socket-snapshot";
 import { NODE_SCHEMA, SqlNodeStore } from "../src/rooms/sql-store";
 import { sqlDouble } from "./doubles";
 
@@ -278,7 +280,7 @@ describe(`700,000 instances of one main (heap capped at ${HEAP_MB} MB)`, {
     const r = wide(true);
     const sent: Array<{ nodes: NodeRecord[]; done: boolean }> = [];
     const { result, peak } = measured(() =>
-      sendPresented(r.sql, (nodes, done) => sent.push({ nodes, done })),
+      sendBounded(r.sql, (nodes, done) => sent.push({ nodes, done }), { presented: true }),
     );
     report("the old-client snapshot of 700,000 instances", peak);
     expect(result).toBe("placeholder");
@@ -295,11 +297,47 @@ describe(`a main of 400 texts of 200,000 characters (heap capped at ${HEAP_MB} M
     const r = largeRows();
     const sent: Array<{ nodes: NodeRecord[]; done: boolean }> = [];
     const { result, peak } = measured(() =>
-      sendPresented(r.sql, (nodes, done) => sent.push({ nodes, done })),
+      sendBounded(r.sql, (nodes, done) => sent.push({ nodes, done }), { presented: true }),
     );
     report("the old-client snapshot of 240 MB of text", peak);
     expect(result).toBe("placeholder");
     expect(sent).toHaveLength(1);
+    r.close();
+  });
+
+  it("sends a client that can't download the file as stored a page saying to reload", () => {
+    // The seventh review's: a file still materialized (conversion pending, refused, or turned
+    // off) was sent to such a client 2,000 stored rows at a time, with no bound on their bytes.
+    const r = largeRows();
+    const sent: Array<{ nodes: NodeRecord[]; done: boolean }> = [];
+    const { result, peak } = measured(() =>
+      sendBounded(r.sql, (nodes, done) => sent.push({ nodes, done })),
+    );
+    report("the no-download snapshot of 240 MB of text, as stored", peak);
+    expect(result).toBe("placeholder");
+    expect(sent).toEqual([{ nodes: reloadPlaceholder(), done: true }]);
+    r.close();
+  });
+
+  it("sends a file of large texts that fits in chunks of at most 1 MB", () => {
+    const r = largeRows();
+    // 12 of the texts: 2.4 million characters, under the socket's 8 MB.
+    r.sql.exec("DELETE FROM nodes WHERE type = 'text' AND CAST(SUBSTR(id, 2) AS INTEGER) >= 12");
+    const chunks: number[] = [];
+    let nodes = 0;
+    let done = 0;
+    const { result, peak } = measured(() =>
+      sendBounded(r.sql, (chunk, last) => {
+        chunks.push(JSON.stringify(chunk).length);
+        nodes += chunk.length;
+        if (last) done++;
+      }),
+    );
+    report("the no-download snapshot of 12 texts of 200,000 characters", peak);
+    expect(result).toBe("sent");
+    expect({ nodes, done }).toEqual({ nodes: 15, done: 1 });
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...chunks)).toBeLessThanOrEqual((1 << 20) + 1_000);
     r.close();
   });
 
@@ -370,14 +408,14 @@ describe(`very deep files (heap capped at ${HEAP_MB} MB)`, { timeout: 1_800_000 
           check.check();
         }),
       );
-      const how = sendPresented(r.sql, (nodes) => sent.push(...nodes));
+      const how = sendBounded(r.sql, (nodes) => sent.push(...nodes), { presented: true });
       const reader = new PresentedReader(new TableReader(r.sql, "nodes"), r.sql, "nodes");
       let walked = 0;
       for (const _ of reader.idsUnder("P")) walked++;
       return { dirty, removal: removal.split(":")[0], how, walked };
     });
     report("a file 3,000 levels deep", peak);
-    expect(result).toEqual({ dirty: 1, removal: "conflict", how: "presented", walked: 6_004 });
+    expect(result).toEqual({ dirty: 1, removal: "conflict", how: "sent", walked: 6_004 });
     expect(sent.find((n) => n.id === copyId("I", ["T"]))?.props.characters).toBe("deep");
     r.close();
   });

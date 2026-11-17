@@ -109,7 +109,7 @@ import {
   pinsRenamed,
   savePinMap,
 } from "./pin-map";
-import { PresentedReader, sendPresented } from "./presented";
+import { PresentedReader } from "./presented";
 import { loadSnapshot, restoreFromTable, SnapshotError } from "./restore";
 import {
   AUTOSAVE_RETENTION_MS,
@@ -123,6 +123,7 @@ import {
   snapshotStream,
   writeSnapshot,
 } from "./snapshots";
+import { reloadPlaceholder, sendSocketSnapshot, socketFits } from "./socket-snapshot";
 import { NODE_SCHEMA, SqlNodeStore } from "./sql-store";
 import { applyThreeWay, planThreeWay, type ThreeWayTables } from "./three-way";
 
@@ -171,12 +172,6 @@ export const DOCUMENT_TICKET_TTL_MS = 5 * 60_000;
  * downloads the file as it is instead.
  */
 const MAX_REPLAY_BYTES = 8 << 20;
-/**
- * A file is sent through the socket only when it's at most INLINE_SNAPSHOT_NODES
- * nodes in at most this many characters of properties (a text layer may hold
- * 200,000): anything more is downloaded, by a client that can.
- */
-const INLINE_SNAPSHOT_CHARS = 8 << 20;
 /**
  * Downloads of the file as it is a room serves at once, each holding a page
  * of DOWNLOAD_PAGE_CHARS and its gzip: more are refused (503), and the
@@ -2524,18 +2519,18 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * Whether the file is too large to send through the socket: more than
-   * INLINE_SNAPSHOT_NODES nodes, or more than INLINE_SNAPSHOT_CHARS of their
-   * properties, reading no more than that many nodes and one (in SQL).
+   * Whether a client that can download the file should: it's more than
+   * INLINE_SNAPSHOT_NODES nodes (counting no more than that and one, in
+   * SQL), or more than the socket's bound (socket-snapshot.ts).
    */
   #tooLargeToSend(): boolean {
-    const { n, chars } = this.#sql
-      .exec<{ n: number; chars: number }>(
-        "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(props)), 0) AS chars FROM (SELECT props FROM nodes LIMIT ?)",
+    const n = this.#sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM (SELECT 1 FROM nodes LIMIT ?)",
         INLINE_SNAPSHOT_NODES + 1,
       )
-      .one();
-    return n > INLINE_SNAPSHOT_NODES || chars > INLINE_SNAPSHOT_CHARS;
+      .one().n;
+    return n > INLINE_SNAPSHOT_NODES || !socketFits(this.#sql);
   }
 
   /**
@@ -2634,7 +2629,7 @@ export class FileRoom extends DurableObject<Env> {
     if (!reads.includes(this.#copies)) {
       // A tab from before compact copies: the file to view, every copy built, as it reads it.
       if (protocol === 1 && this.#copies === "compact") {
-        this.#helloToView(ws, me, clientId);
+        this.#helloToView(ws, me, clientId, ["materialized"], true);
         return;
       }
       // Anything else that can't read the file's form is told to reload, for a newer client.
@@ -2646,31 +2641,27 @@ export class FileRoom extends DurableObject<Env> {
       this.#close(ws, RELOAD_CLOSE_CODE, "Reload");
       return;
     }
-    me.clientId = clientId;
-    // Its changes are in the form the file has now; should that change, they're checked for it.
-    me.copies = this.#copies;
-    me.reads = [...reads];
-    me.viewing = false;
-    me.stale = false;
-    ws.serializeAttachment(me);
-    const lastSeq =
-      this.#sql
-        .exec<{ last_seq: number }>("SELECT last_seq FROM clients WHERE client_id = ?", clientId)
-        .toArray()[0]?.last_seq ?? 0;
+    // A client that can't download (protocol 1, or no `download`) is never sent more than the
+    // socket's bound, in either form: past it, it views the reload placeholder (#helloToView).
+    // That placeholder is welcomed at revision 0, so a client that can't download, at 0, in a
+    // file too large to send it, holds the placeholder (or an empty file): it isn't caught up.
+    let fits: boolean | undefined;
+    const fitsSocket = () => (fits ??= socketFits(this.#sql));
+    const from = tickets === null && revn === 0 && !fitsSocket() ? null : revn;
     const oldest = this.#sql
       .exec<{ revn: number | null }>("SELECT MIN(revn) AS revn FROM log")
       .one().revn;
     const canCatchUp =
-      revn !== null &&
-      revn <= this.#revn &&
-      revn >= this.#catchupFrom() &&
-      (revn === this.#revn ||
+      from !== null &&
+      from <= this.#revn &&
+      from >= this.#catchupFrom() &&
+      (from === this.#revn ||
         (oldest !== null &&
-          oldest <= revn + 1 &&
+          oldest <= from + 1 &&
           this.#sql
             .exec<{ bytes: number }>(
               "SELECT COALESCE(SUM(LENGTH(ops)), 0) AS bytes FROM log WHERE revn > ?",
-              revn,
+              from,
             )
             .one().bytes <= MAX_CATCHUP_BYTES));
 
@@ -2684,7 +2675,23 @@ export class FileRoom extends DurableObject<Env> {
           ? { ticket: tickets.saved.ticket, after: tickets.saved.revn }
           : { ticket: tickets.live, after: null }
         : null;
+    // Sent through the socket: a client with tickets only when it fits (#tooLargeToSend).
+    if (!canCatchUp && !download && tickets === null && !fitsSocket()) {
+      this.#helloToView(ws, me, clientId, reads, false, false);
+      return;
+    }
 
+    me.clientId = clientId;
+    // Its changes are in the form the file has now; should that change, they're checked for it.
+    me.copies = this.#copies;
+    me.reads = [...reads];
+    me.viewing = false;
+    me.stale = false;
+    ws.serializeAttachment(me);
+    const lastSeq =
+      this.#sql
+        .exec<{ last_seq: number }>("SELECT last_seq FROM clients WHERE client_id = ?", clientId)
+        .toArray()[0]?.last_seq ?? 0;
     const peers = me.guest ? [] : this.#peers().filter((p) => p.sessionId !== me.sessionId);
     this.#send(ws, {
       t: "welcome",
@@ -2698,32 +2705,43 @@ export class FileRoom extends DurableObject<Env> {
       ...(download ? { ticket: download.ticket } : {}),
     });
     if (canCatchUp) {
-      this.#sendLog(ws, me, revn ?? 0);
+      this.#sendLog(ws, me, from ?? 0);
     } else if (download) {
       if (download.after !== null) this.#sendLog(ws, me, download.after);
     } else {
-      for (const nodes of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) {
-        this.#send(ws, { t: "snapshot", nodes, done: false });
-      }
-      this.#send(ws, { t: "snapshot", nodes: [], done: true });
+      // Nothing awaits from here to the last chunk: one revision.
+      sendSocketSnapshot(this.#sql, (nodes, done) =>
+        this.#send(ws, { t: "snapshot", nodes, done }),
+      );
     }
     if (!me.guest) this.#broadcast({ t: "peer", peer: this.#peer(me) }, ws);
   }
 
   /**
-   * Welcomes a client from before compact copies (protocol 1) into a file
-   * stored compact, as it can be: a viewer, sent the file as presented
-   * (every copy layer built from its main and its record, an instance at a
-   * time, as the MCP tools read it), in the form it reads. Its edits are
-   * refused, telling it to reload (see #transaction), and it's sent the file
-   * again as it changes, every VIEW_REFRESH_MS at most. The pre-compact
-   * client shows a viewer's file and a refusal's message as they are; a
-   * close it doesn't know would have it reconnect over and over.
+   * Welcomes a client as a viewer of what it can be sent through the socket
+   * (socket-snapshot.ts): a client from before compact copies (protocol 1)
+   * in a file stored compact, sent the file as presented (`presented`:
+   * every copy layer built from its main and its record, an instance at a
+   * time, as the MCP tools read it), in the form it reads; or a client that
+   * can't download a file too large to send it (`fits` false). Either is
+   * sent the reload placeholder when the file is too large, never stored,
+   * at revision 0 (see #hello). Its edits are refused, telling it to reload
+   * (see #transaction), and it's sent the file again as it changes, every
+   * VIEW_REFRESH_MS at most. The pre-compact client shows a viewer's file
+   * and a refusal's message as they are; a close it doesn't know would have
+   * it reconnect over and over.
    */
-  #helloToView(ws: WebSocket, me: Attachment, clientId: string): void {
+  #helloToView(
+    ws: WebSocket,
+    me: Attachment,
+    clientId: string,
+    reads: readonly CopiesFormat[],
+    presented: boolean,
+    fits = socketFits(this.#sql, { presented }),
+  ): void {
     me.clientId = clientId;
-    me.copies = "materialized";
-    me.reads = ["materialized"];
+    me.copies = presented ? "materialized" : this.#copies;
+    me.reads = [...reads];
     me.viewing = true;
     me.servedAt = Date.now();
     me.stale = false;
@@ -2736,16 +2754,23 @@ export class FileRoom extends DurableObject<Env> {
     this.#send(ws, {
       t: "welcome",
       sessionId: me.sessionId,
-      revn: this.#revn,
+      revn: fits ? this.#revn : 0,
       role: "viewer",
       peers,
       mode: "snapshot",
       lastSeq,
-      copies: "materialized",
+      copies: me.copies,
     });
-    // Nothing awaits from here to the last chunk: one revision. As presented when it's small
-    // enough to send through a socket, else a page saying to reload (presented.ts).
-    sendPresented(this.#sql, (nodes, done) => this.#send(ws, { t: "snapshot", nodes, done }));
+    // Nothing awaits from here to the last chunk: one revision.
+    if (fits)
+      sendSocketSnapshot(
+        this.#sql,
+        (nodes, done) => this.#send(ws, { t: "snapshot", nodes, done }),
+        {
+          presented,
+        },
+      );
+    else this.#send(ws, { t: "snapshot", nodes: reloadPlaceholder(), done: true });
     if (!me.guest) this.#broadcast({ t: "peer", peer: this.#peer(me) }, ws);
   }
 

@@ -1903,3 +1903,84 @@ describe("what the sixth review found", { timeout: 120_000 }, () => {
     );
   });
 });
+
+describe("what the seventh review found", { timeout: 120_000 }, () => {
+  /** A hello, its welcome, and every chunk of the snapshot after it. */
+  async function hello(browser: Browser, fileId: string, message: Record<string, unknown>) {
+    const socket = await openSocket(browser, fileId);
+    socket.send({ t: "hello", clientId: `c-${newId()}`, revn: null, ...message });
+    const welcome = await socket.next<{ role: string; revn: number; mode: string }>("welcome");
+    const nodes: NodeRecord[] = [];
+    if (welcome.mode === "snapshot")
+      for (;;) {
+        const chunk = await socket.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot");
+        nodes.push(...chunk.nodes);
+        if (chunk.done) break;
+      }
+    return { socket, welcome, nodes };
+  }
+
+  it("sends a client that can't download a file stored materialized, too large to send it, a page saying to reload", async () => {
+    // 45 texts of 200,000 characters, stored materialized with conversion turned off (as after a
+    // rollback; a conversion pending or refused leaves it the same): past the socket's 8 MB.
+    const nodes: NodeRecord[] = [{ id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} }];
+    for (let i = 0; i < 45; i++)
+      nodes.push({
+        id: `T${i}`,
+        parent: "P",
+        key: "a0",
+        type: "text",
+        props: { characters: "x".repeat(200_000) },
+      });
+    const { browser, fileId } = await materializedFile(nodes);
+    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
+      room.compactCopiesOff = true;
+    });
+    await runDurableObjectAlarm(roomOf(fileId));
+    expect((await roomOf(fileId).copiesFormat()).copies).toBe("materialized");
+    const placeholder = ["drawpane-reload-page", "drawpane-reload-text"];
+
+    // A tab from before compact copies, and a client that doesn't say it can download.
+    for (const message of [{ protocol: 1 }, { protocol: 2, copies: BOTH }]) {
+      const { socket, welcome, nodes: seen } = await hello(browser, fileId, message);
+      expect(welcome).toMatchObject({ role: "viewer", revn: 0, mode: "snapshot" });
+      expect(seen.map((n) => n.id)).toEqual(placeholder);
+      // Its edits are refused (the placeholder is never stored), telling it to reload.
+      socket.send({
+        t: "txn",
+        seq: 1,
+        ops: [{ op: "set", id: "drawpane-reload-page", prop: "name", value: "Mine" }],
+      });
+      const reject = await socket.next<{ code: string; message: string }>("reject");
+      expect(reject).toMatchObject({ code: "format", message: expect.stringMatching(/Reload/) });
+      socket.ws.close();
+      // Reconnecting at the revision it was welcomed at, it isn't caught up onto the placeholder.
+      const again = await hello(browser, fileId, { ...message, revn: 0 });
+      expect(again.welcome).toMatchObject({ role: "viewer", revn: 0, mode: "snapshot" });
+      expect(again.nodes.map((n) => n.id)).toEqual(placeholder);
+      again.socket.ws.close();
+    }
+    // A client that can download does.
+    const current = await hello(browser, fileId, { protocol: 2, copies: BOTH, download: true });
+    expect(current.welcome).toMatchObject({ role: "owner", mode: "download" });
+    current.socket.ws.close();
+    expect(await stored(fileId)).toHaveLength(46);
+  });
+
+  it("still sends a small file stored materialized to a tab from before compact copies, to edit", async () => {
+    const nodes: NodeRecord[] = [
+      { id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} },
+      { id: "T", parent: "P", key: "a0", type: "text", props: { characters: "Hi" } },
+    ];
+    const { browser, fileId } = await materializedFile(nodes);
+    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
+      room.compactCopiesOff = true;
+    });
+    const { socket, welcome, nodes: seen } = await hello(browser, fileId, { protocol: 1 });
+    expect(welcome).toMatchObject({ role: "owner", mode: "snapshot" });
+    expect(seen.map((n) => n.id).sort()).toEqual(["P", "T"]);
+    socket.send({ t: "txn", seq: 1, ops: [{ op: "set", id: "T", prop: "x", value: 5 }] });
+    expect((await socket.next<{ seq: number }>("ack")).seq).toBe(1);
+    socket.ws.close();
+  });
+});

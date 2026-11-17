@@ -32,6 +32,7 @@ import {
   type ServerMessage,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
+import { FormChange } from "./form-change";
 
 interface PendingTxn {
   /** The edit as made, on layers as presented: what's applied again after a rebase. */
@@ -528,12 +529,21 @@ export class SyncEngine {
     }
     let dropped = 0;
     this.#doc.batch(() => {
-      const before = this.#doc.copies;
+      // Ids pending edits hold that name copy layers change with the form: what they name is
+      // read from the document in the old form, to find it in the new (form-change.ts).
+      const reformed =
+        this.#doc.copies !== copies
+          ? new FormChange(
+              this.#doc,
+              this.#pending.map((txn) => (txn.seq === null ? txn.ops : txn.stored)),
+            )
+          : null;
       // As the room stores it: the document takes the file's form.
       this.#doc.resetStored(nodes, copies);
       // Edits made before the file changed form that don't apply now (a copy layer's old
-      // id) are dropped: the room couldn't take them in the old form.
-      dropped = this.#redoPending(before !== this.#doc.copies);
+      // id, or one held that can't be found) are dropped: the room couldn't take them in the
+      // old form either.
+      dropped = this.#redoPending(reformed);
     });
     this.#revn = revn;
     if (dropped > 0)
@@ -644,25 +654,40 @@ export class SyncEngine {
    * is now (with compact copies, a copy's value equal to its main's again
    * is no longer stored as an override). Edits that no longer apply stay
    * queued; the room will reject them too. When the file has changed form
-   * (`reformed`), they can't be sent as they were: those are dropped
-   * instead. Returns how many.
+   * (`reformed`), they can't be sent as they were: the layer ids they hold
+   * are found in the new form first, and those that don't apply, or hold an
+   * id that can't be found, are dropped instead. Returns how many.
+   *
+   * A welcome makes every edit the room hasn't applied unsent again, so
+   * after a change of form (always loaded after a welcome) none is sent. One
+   * that were would have gone in the old form, which the room translates
+   * with the conversion's map (`#fromOldForm`) or refuses: it's applied here
+   * translated the same way, and left unapplied, for the room to refuse,
+   * when it can't be.
    */
-  #redoPending(reformed = false): number {
+  #redoPending(reformed: FormChange | null = null): number {
     let dropped = 0;
     const kept: PendingTxn[] = [];
     for (const txn of this.#pending) {
       try {
         if (txn.seq !== null) {
-          this.#doc.applyStored(txn.stored);
+          const stored = reformed ? reformed.remap(this.#doc, txn.stored) : txn.stored;
+          if (!stored) throw new ModelError("not_found", "it names layers the file no longer has");
+          txn.stored = stored;
+          this.#doc.applyStored(stored);
         } else {
-          this.#doc.apply(txn.ops);
+          const ops = reformed ? reformed.remap(this.#doc, txn.ops) : txn.ops;
+          if (!ops) throw new ModelError("not_found", "it names layers the file no longer has");
+          txn.ops = ops;
+          this.#doc.apply(ops);
           txn.stored = [...this.#doc.lastStoredOps];
         }
         txn.inverse = [...this.#doc.lastStoredInverse];
       } catch (error) {
         if (!(error instanceof ModelError)) throw error;
         txn.inverse = null;
-        if (reformed) {
+        // A sent edit stays: the room answers it (it refuses what can't be translated).
+        if (reformed && txn.seq === null) {
           dropped++;
           continue;
         }

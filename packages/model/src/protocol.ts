@@ -79,7 +79,8 @@ export const ClientMessage = z.discriminatedUnion("t", [
       .optional(),
     /**
      * The client can download the file over HTTP (welcome mode `download`).
-     * Without it, a file comes through the socket whatever its size.
+     * Without it, a file comes through the socket when it's small enough
+     * (8 MB of JSON); a larger one is a viewer's page saying to reload.
      */
     download: z.literal(true).optional(),
   }),

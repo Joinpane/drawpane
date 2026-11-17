@@ -15,7 +15,6 @@
  */
 import {
   BuildBudget,
-  BuildTooLarge,
   CopyView,
   type DocReader,
   isMainNode,
@@ -25,7 +24,7 @@ import {
 } from "@drawpane/model";
 import type { DocView } from "../mcp/document";
 import { BUILD_HELD_BYTES, checkIds, idsRoom } from "./convert";
-import { TableReader } from "./node-tables";
+import type { TableReader } from "./node-tables";
 
 export class PresentedReader implements DocReader {
   readonly #reader: TableReader;
@@ -229,104 +228,4 @@ export class PresentedReader implements DocReader {
   componentMains(): NodeRecord[] {
     return this.#reader.componentMains().filter((n) => isMainNode(n));
   }
-}
-
-/**
- * The most a tab from before compact copies (protocol 1) is sent of a file
- * stored compact, as presented (JSON characters, as the normal path's
- * INLINE_SNAPSHOT_CHARS), and in each chunk of it.
- */
-export const VIEW_MAX_CHARS = 8 << 20;
-export const VIEW_CHUNK_CHARS = 1 << 20;
-/** Nodes in a chunk at most (the protocol's SNAPSHOT_CHUNK_SIZE). */
-const VIEW_CHUNK_NODES = 2_000;
-
-/**
- * What a tab from before compact copies is shown of a file too large to
- * send it as presented: one page saying to reload, never stored (it's a
- * viewer, and its edits are refused telling it the same).
- */
-export function reloadPlaceholder(): NodeRecord[] {
-  return [
-    {
-      id: "drawpane-reload-page",
-      type: "page",
-      parent: ROOT_ID,
-      key: "a0",
-      props: { name: "Reload" },
-    },
-    {
-      id: "drawpane-reload-text",
-      type: "text",
-      parent: "drawpane-reload-page",
-      key: "a0",
-      props: {
-        name: "Reload",
-        x: 0,
-        y: 0,
-        fontSize: 24,
-        characters: "Drawpane was updated. Reload the page to see this file.",
-      },
-    },
-  ] as NodeRecord[];
-}
-
-/**
- * Whether the file in `table`, as presented, is at most `maxChars` of JSON:
- * what's stored is measured first, in SQL; then the presented file is
- * walked a node at a time, stopping as soon as it's past. An instance too
- * large to build doesn't fit either.
- */
-export function presentedFits(sql: SqlStorage, table: string, maxChars: number): boolean {
-  const stored = sql
-    .exec<{ chars: number }>(`SELECT COALESCE(SUM(LENGTH(props)), 0) AS chars FROM ${table}`)
-    .one().chars;
-  if (stored > maxChars) return false;
-  const presented = new PresentedReader(new TableReader(sql, table), sql, table);
-  let chars = 0;
-  try {
-    for (const node of presented.all()) {
-      chars += JSON.stringify(node).length;
-      if (chars > maxChars) return false;
-    }
-  } catch (error) {
-    if (error instanceof BuildTooLarge) return false;
-    throw error;
-  }
-  return true;
-}
-
-/**
- * Sends a file stored compact to a tab from before compact copies, as it
- * reads files: as presented (every copy built, an instance at a time, and
- * the document's own nodes, styles and variables among them), in chunks of
- * at most VIEW_CHUNK_NODES nodes and VIEW_CHUNK_CHARS. A socket has no
- * backpressure, so what's sent is held until it leaves: a file past
- * `maxChars` as presented is sent as `reloadPlaceholder` instead, as a
- * client that can't download is never sent a large file.
- */
-export function sendPresented(
-  sql: SqlStorage,
-  send: (nodes: NodeRecord[], done: boolean) => void,
-  { table = "nodes", maxChars = VIEW_MAX_CHARS, chunkChars = VIEW_CHUNK_CHARS } = {},
-): "presented" | "placeholder" {
-  if (!presentedFits(sql, table, maxChars)) {
-    send(reloadPlaceholder(), true);
-    return "placeholder";
-  }
-  const presented = new PresentedReader(new TableReader(sql, table), sql, table);
-  let chunk: NodeRecord[] = [];
-  let chars = 0;
-  for (const node of presented.all()) {
-    const size = JSON.stringify(node).length;
-    if (chunk.length > 0 && (chunk.length >= VIEW_CHUNK_NODES || chars + size > chunkChars)) {
-      send(chunk, false);
-      chunk = [];
-      chars = 0;
-    }
-    chunk.push(node);
-    chars += size;
-  }
-  send(chunk, true);
-  return "presented";
 }
