@@ -29,6 +29,7 @@ export const TEXT_STYLE_PROPS = [
   "fontFeatures",
   "fontVariations",
   "paragraphSpacing",
+  "listSpacing",
   "leadingTrim",
 ] as const satisfies readonly PropName[];
 export type TextStyleProp = (typeof TEXT_STYLE_PROPS)[number];

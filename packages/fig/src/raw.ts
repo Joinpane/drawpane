@@ -65,6 +65,8 @@ export interface RawRecord {
   readonly componentPropRefs?: readonly RawPropRef[];
   readonly componentPropAssignments?: readonly RawPropAssignment[];
   readonly symbolData?: {
+    /** The component an instance copies. */
+    readonly symbolID?: RawGuid;
     readonly symbolOverrides?: readonly {
       readonly guidPath?: { readonly guids?: readonly RawGuid[] };
       readonly componentPropAssignments?: readonly RawPropAssignment[];

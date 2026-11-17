@@ -35,6 +35,7 @@ import { FigNotes } from "./notes";
 import { guidString, indexRecords, type RawRecord } from "./raw";
 import { indexChildren } from "./slots";
 import { prepareStyles } from "./styles";
+import { applySwappedLooks } from "./swaps";
 import { prepareVariables } from "./variables";
 
 /** Larger files are refused before reading: decoding one needs several times its size in memory. */
@@ -288,7 +289,9 @@ async function buildPages(
     } catch (error) {
       throw corruptError(error);
     }
-    const ids = new RestIds(state.graph, recordLayers(state), saved);
+    const layers = recordLayers(state);
+    const ids = new RestIds(state.graph, layers, saved);
+    applySwappedLooks(state.graph, ids, raw, layers);
     const ctx = { graph: state.graph, ids, records: raw, notes };
     for (const page of state.graph.getPages(false)) {
       const guid = ids.sourceGuid(page);
