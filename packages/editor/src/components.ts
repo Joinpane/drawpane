@@ -581,7 +581,10 @@ export function relayoutTargets(doc: Doc, ids: Iterable<string>, ops: readonly O
  * - Structure: a copy whose layers can't be matched to its main's (one the
  *   main doesn't have, a missing one, another order, a reference to a layer
  *   the main no longer has). Sync would rebuild it from the main, so it's
- *   detached instead: it keeps every layer as it is, without the link.
+ *   detached instead: it keeps every layer as it is, without the link. An
+ *   instance in it that copies nothing (what it put in a slot) stays one,
+ *   kept or detached on its own; copies of it in that main's instances
+ *   copy a plain layer from then on, so they aren't instances either.
  *
  * Either way the file opens looking as it did where it was made.
  */
@@ -608,16 +611,47 @@ export function pinInstances(nodes: readonly NodeRecord[]): {
     detached++;
     const queue = [root.id];
     for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
+      // An instance inside it that copies nothing (what it put in a slot) is an instance root of
+      // its own, kept or unlinked as it is.
+      const node = doc.get(id);
+      if (id !== root.id && isInstanceRoot(node) && getProp(node?.props ?? {}, "mirrors") === null)
+        continue;
       unlinked.add(id);
       queue.push(...doc.childIds(id));
     }
   }
+  // A copy of a nested instance unlinked in its main copies a plain layer now, so it isn't an
+  // instance either (nor copies of it, in mains holding that main), unless it was swapped for
+  // another component: then it still is one.
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const plain = new Map<string, boolean>();
+  const copiesPlain = (id: string): boolean => {
+    const known = plain.get(id);
+    if (known !== undefined) return known;
+    plain.set(id, false);
+    const node = byId.get(id);
+    const mirrors = node ? getProp(node.props, "mirrors") : null;
+    const is =
+      !!node &&
+      !!mirrors &&
+      !unlinked.has(id) &&
+      getProp(node.props, "instanceOf") !== null &&
+      !getProp(node.props, "overrides").includes("instanceOf") &&
+      (unlinked.has(mirrors) || copiesPlain(mirrors));
+    plain.set(id, is);
+    return is;
+  };
   let out: NodeRecord[] = nodes.map((node) => {
-    if (!unlinked.has(node.id)) return node;
+    if (unlinked.has(node.id)) {
+      const props: Record<string, unknown> = { ...node.props };
+      delete props.instanceOf;
+      delete props.mirrors;
+      delete props.overrides;
+      return { ...node, props: props as Props };
+    }
+    if (!copiesPlain(node.id)) return node;
     const props: Record<string, unknown> = { ...node.props };
     delete props.instanceOf;
-    delete props.mirrors;
-    delete props.overrides;
     return { ...node, props: props as Props };
   });
 
