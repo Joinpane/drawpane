@@ -626,6 +626,37 @@ importers:
         specifier: 'catalog:'
         version: 5.1.0(@types/node@26.6.6)(jsdom@31.0.0(@noble/hashes@2.4.0))(vite@8.3.8(@types/node@26.6.6)(esbuild@0.28.2))
 
+  tools/kit-parity:
+    dependencies:
+      '@drawpane/editor':
+        specifier: workspace:*
+        version: link:../../packages/editor
+      '@drawpane/fig':
+        specifier: workspace:*
+        version: link:../../packages/fig
+      '@drawpane/figma':
+        specifier: workspace:*
+        version: link:../../packages/figma
+      '@drawpane/model':
+        specifier: workspace:*
+        version: link:../../packages/model
+      '@open-pencil/fig':
+        specifier: 0.16.0
+        version: 0.16.0(@open-pencil/kiwi@0.16.0)(@open-pencil/scene-graph@0.16.0(typescript@7.0.2))(typescript@7.0.2)
+      '@open-pencil/kiwi':
+        specifier: 0.16.0
+        version: 0.16.0
+      vite:
+        specifier: 'catalog:'
+        version: 8.3.8(@types/node@26.6.6)(esbuild@0.28.2)
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.6
+        version: 26.6.6
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
 packages:
 
   '@babel/code-frame@7.29.7':

@@ -1,6 +1,7 @@
 packages:
   - apps/*
   - packages/*
+  - tools/kit-parity
 
 catalog:
   typescript: 7.0.2

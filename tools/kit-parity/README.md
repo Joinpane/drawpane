@@ -1,0 +1,56 @@
+# Kit parity
+
+How close a real Figma file comes out in Drawpane, frame by frame: Figma's own render and layout of a sample of the file's frames, against the same file imported into Drawpane (the `.fig` read and converted exactly as the dashboard's import does it), drawn by Drawpane's canvas renderer. It measures what a hill-climb needs: one score per frame, a scoreboard, and a report that shows the worst frames first with their layout deltas. Fixes are then judged by running it again.
+
+The parity suites in `tools/figma-parity` hold small, synthetic scenes to thresholds in CI. This works on any real file, too large and usually too private to commit, so it runs by hand and keeps its output outside the repo (decision 0030).
+
+## What it needs
+
+- The file as a `.fig` (Figma: **File → Save local copy**) and its Figma file key.
+- A Figma account with **edit** access to that file, in a browser session (`FIGMA_EMAIL` or `FIGMA_LOGIN_USERNAME`, and `FIGMA_PASSWORD`; the session is kept in `FIGMA_PROFILE`, by default `/tmp/figma-parity-profile`). Figma runs no plugins in a file you can only view, and the plugin API is how Figma's renders and layout are read. Nothing is written to the file: see "Read only" below. The REST image API is not used; it's rationed.
+- `pnpm build` done (the Drawpane side runs the built app in a local Worker).
+- An output folder outside the repo, or in a gitignored one, when the file isn't yours to publish.
+
+## Running it
+
+```sh
+OUT=/path/outside/the/repo/my-kit
+node tools/kit-parity/kit-parity.mjs sample   --fig kit.fig --out $OUT     # pick the frames
+node tools/kit-parity/kit-parity.mjs figma    --key <key>   --out $OUT     # Figma's renders and trees
+node tools/kit-parity/kit-parity.mjs drawpane --fig kit.fig --out $OUT --port 8951
+node tools/kit-parity/kit-parity.mjs compare  --out $OUT --port 8951
+# or all four in turn:
+node tools/kit-parity/kit-parity.mjs all --fig kit.fig --key <key> --out $OUT --port 8951
+```
+
+For a large file give Node room: `node --max-old-space-size=12000 tools/kit-parity/kit-parity.mjs …`.
+
+### The steps
+
+1. **sample** (`src/sample.ts`) reads the `.fig` and picks about 400 units (`--count`): each page's top-level frames, with sections opened up and anything too large to export at 2× replaced by its children; component sets and their components; then the frames built from the most instances, as screens. Every page gets an even share, picked at even intervals in Figma's order, so the same file always gives the same sample. It's saved by Figma node id in `$OUT/sample.json`.
+2. **figma** (`src/figma-truth.mjs`) opens the file in a headless browser, signed in, and for each sampled frame saves Figma's PNG at 2× (`exportAsync`, the node's own box) and its node tree as Figma lays it out: id, name, type, visibility, absolute box and render bounds, auto layout and sizing, and for text the fonts and whether Figma has them. It's resumable (saved frames are skipped) and slow on purpose: one frame at a time, a new session when one fails. Each frame's name and page are checked against the sample, so ids that name another node in Figma are caught.
+3. **drawpane** converts the `.fig` (`src/convert.ts`: `openFig`, `read`, images as the server stores them, `convertFile`, `pinInstances`) into `$OUT/drawpane-cache/<key>/`, cached by the file's bytes and the source of the packages conversion runs through (a large kit takes minutes), then runs the opt-in spec `apps/web/e2e/kit-parity.spec.ts`. It imports the converted nodes into a fresh local instance on `--port` the way the dashboard saves an import, opens the file in the editor, and for each frame loads and checks its fonts, reads its layout (`scene.bounds` of every layer) and draws it at 2× over the page rect Figma exported (`drawpaneParity` on the debug handle). Output goes to `$OUT/runs/<timestamp>/drawpane/`. Missing fonts fail the step, since they'd swamp every other difference.
+4. **compare** scores each frame in the browser, both sides over white: the mean difference over RGB (0 to 255) and its 99th percentile, as `e2e/parity/pixels.ts` measures them, and a heat map. Layout is compared layer by layer, matched by Figma id (`src/layout-diff.ts`): moves relative to the parent and size changes past 0.5 px, text boxes, visibility, layers missing on either side (boolean operands, which import as one path, are counted apart). It writes `scoreboard.json` and `report.html` into the run's folder (`--run` picks a run; the latest by default).
+
+Two runs on the same code give the same scores. To check, run `drawpane` twice and compare the second with `--against <first run>/scoreboard.json`: any frame whose scores or layout deltas differ fails it.
+
+## Read only
+
+The Figma file is never edited. The session types only into Figma's quick actions box once it has focus (so no keys land on the canvas as shortcuts), runs a plugin only to get the plugin API on the page, and reads: node properties, styled text segments, and exports. Every page visited is watched for changes made from the session (`nodechange`); one stops the run. Shared plugin data on the document is compared at the end, and the session has no plugin id, so it can't write private plugin data.
+
+## Output
+
+```
+$OUT/
+  sample.json
+  figma/<id>.png, <id>.json, failed.json
+  drawpane-cache/<key>/nodes.ndjson, images/, meta.json
+  runs/<timestamp>/
+    run.json            what was drawn, git head, timings, missing fonts
+    drawpane/<id>.png, <id>.json
+    heat/<id>.png
+    scoreboard.json     per-frame scores and layout deltas, and a summary
+    report.html         worst first: Figma, Drawpane and the difference side by side
+```
+
+Ids in file names spell `:` as `-` and `;` as `_`.
