@@ -42,10 +42,15 @@ import { getProp, isPropName, PROPS, type Props, propAllowed } from "./schema";
 import { sha256 } from "./sha256";
 import { MemoryStore } from "./store";
 
-/** Never copied from a main's layer: they link copies, or describe the main itself. */
+/**
+ * Never copied from a main's layer: they link copies, or describe the main
+ * itself (its variant values and its properties, decision 0035).
+ */
 export const COPY_LINK_PROPS: ReadonlySet<string> = new Set([
   "isComponent",
   "componentDescription",
+  "variantProps",
+  "componentProps",
   "mirrors",
   "overrides",
   "unset",
@@ -67,6 +72,10 @@ export const ROOT_LOCAL_PROPS: ReadonlySet<string> = new Set([
   "constraintH",
   "constraintV",
   "instanceOf",
+  // How it's used in the main around it (decision 0035): which properties drive it, and
+  // whether it shows its own on that main's instances.
+  "propRefs",
+  "exposeProps",
 ]);
 
 /** The order key every override record has: records aren't layers, so their order means nothing. */

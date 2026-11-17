@@ -1,5 +1,7 @@
 import {
   componentSetOf,
+  countChanges,
+  instanceProperties,
   instanceRootOf,
   instancesOf,
   isComponentSet,
@@ -10,12 +12,8 @@ import { getProp, type NodeRecord } from "@drawpane/model";
 import { Button, DropdownMenu, Icon, IconButton, PropertySection } from "@drawpane/ui";
 import { useEffect, useState } from "react";
 import { useEditor } from "./hooks";
-import {
-  ComponentSetSection,
-  InstanceVariantControls,
-  OverridesList,
-  VariantSection,
-} from "./VariantSections";
+import { InstancePropertiesPanel } from "./InstanceProperties";
+import { ComponentPropertiesList, ComponentSetSection, VariantSection } from "./VariantSections";
 
 /**
  * What a component, an instance or a layer inside one is, and what you can do
@@ -45,7 +43,11 @@ export function ComponentSection({ nodes }: { nodes: readonly NodeRecord[] }) {
   if (isMainComponent(only)) {
     return (
       <>
-        {componentSetOf(editor.doc, only.id) ? <VariantSection variant={only} /> : null}
+        {componentSetOf(editor.doc, only.id) ? (
+          <VariantSection variant={only} />
+        ) : (
+          <ComponentPropertiesList owner={only} />
+        )}
         <MainComponent node={only} />
       </>
     );
@@ -56,7 +58,7 @@ export function ComponentSection({ nodes }: { nodes: readonly NodeRecord[] }) {
   const mainId = getProp(root.props, "instanceOf");
   const main = mainId ? editor.doc.get(mainId) : undefined;
   const isRoot = root.id === only.id;
-  const changed = countOverrides(editor.doc, root.id);
+  const changed = countChanges(editor.doc, root.id, instanceProperties(editor.doc, root.id));
 
   return (
     <PropertySection
@@ -96,13 +98,12 @@ export function ComponentSection({ nodes }: { nodes: readonly NodeRecord[] }) {
           Changes here stay on this instance when the main component changes.
         </p>
       ) : null}
-      {isRoot && main ? <InstanceVariantControls instance={only} main={main} /> : null}
-      {isRoot ? <OverridesList instance={only} /> : null}
+      {isRoot && main ? <InstancePropertiesPanel instance={only} /> : null}
       {changed > 0 || isRoot ? (
         <div className="component-actions">
           {changed > 0 ? (
             <Button size="sm" onClick={() => editor.resetInstances()}>
-              {`Reset ${changed} ${changed === 1 ? "change" : "changes"}`}
+              {changed === 1 ? "Reset 1 change" : `Reset all ${changed} changes`}
             </Button>
           ) : null}
           {isRoot ? <SwapInstance instanceId={only.id} /> : null}
@@ -203,18 +204,4 @@ function MainComponent({ node }: { node: NodeRecord }) {
       ) : null}
     </PropertySection>
   );
-}
-
-function countOverrides(doc: ReturnType<typeof useEditor>["doc"], rootId: string): number {
-  let count = 0;
-  const stack = [rootId];
-  while (stack.length > 0) {
-    const id = stack.pop() as string;
-    const node = doc.get(id);
-    if (!node) continue;
-    count += getProp(node.props, "overrides").length;
-    if (id !== rootId && getProp(node.props, "instanceOf") !== null) continue;
-    stack.push(...doc.childIds(id));
-  }
-  return count;
 }

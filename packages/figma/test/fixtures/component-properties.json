@@ -1,0 +1,1243 @@
+{
+ "name": "Component properties",
+ "document": {
+  "id": "0:0",
+  "name": "Document",
+  "type": "DOCUMENT",
+  "children": [
+   {
+    "id": "0:1",
+    "name": "Page",
+    "type": "CANVAS",
+    "children": [
+     {
+      "id": "1:1",
+      "type": "COMPONENT_SET",
+      "name": "Button",
+      "relativeTransform": [
+       [
+        1,
+        0,
+        0
+       ],
+       [
+        0,
+        1,
+        0
+       ]
+      ],
+      "size": {
+       "x": 200,
+       "y": 40
+      },
+      "fills": [],
+      "children": [
+       {
+        "id": "1:2",
+        "type": "COMPONENT",
+        "name": "Variant=default",
+        "relativeTransform": [
+         [
+          1,
+          0,
+          0
+         ],
+         [
+          0,
+          1,
+          0
+         ]
+        ],
+        "size": {
+         "x": 77,
+         "y": 32
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.9,
+           "g": 0.9,
+           "b": 0.9,
+           "a": 1
+          }
+         }
+        ],
+        "cornerRadius": 6,
+        "layoutMode": "HORIZONTAL",
+        "primaryAxisSizingMode": "AUTO",
+        "counterAxisSizingMode": "AUTO",
+        "counterAxisAlignItems": "CENTER",
+        "itemSpacing": 4,
+        "paddingLeft": 8,
+        "paddingRight": 8,
+        "paddingTop": 6,
+        "paddingBottom": 6,
+        "layoutSizingHorizontal": "HUG",
+        "layoutSizingVertical": "HUG",
+        "children": [
+         {
+          "id": "1:3",
+          "type": "INSTANCE",
+          "name": "Icon",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            8
+           ],
+           [
+            0,
+            1,
+            8
+           ]
+          ],
+          "size": {
+           "x": 16,
+           "y": 16
+          },
+          "componentId": "3:1",
+          "fills": [],
+          "children": [
+           {
+            "id": "I1:3;3:2",
+            "type": "RECTANGLE",
+            "name": "Shape",
+            "relativeTransform": [
+             [
+              1,
+              0,
+              2
+             ],
+             [
+              0,
+              1,
+              2
+             ]
+            ],
+            "size": {
+             "x": 12,
+             "y": 12
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.04,
+               "g": 0.04,
+               "b": 0.04,
+               "a": 1
+              }
+             }
+            ],
+            "constraints": {
+             "horizontal": "SCALE",
+             "vertical": "SCALE"
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "FIXED",
+          "layoutSizingVertical": "FIXED",
+          "componentPropertyReferences": {
+           "visible": "Show Icon#10:1",
+           "mainComponent": "Icon#10:3"
+          }
+         },
+         {
+          "id": "1:4",
+          "type": "TEXT",
+          "name": "Label",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            28
+           ],
+           [
+            0,
+            1,
+            6
+           ]
+          ],
+          "size": {
+           "x": 41,
+           "y": 20
+          },
+          "characters": "Button",
+          "style": {
+           "fontFamily": "Inter",
+           "fontSize": 14,
+           "fontWeight": 400,
+           "lineHeightUnit": "PIXELS",
+           "lineHeightPx": 20,
+           "textAutoResize": "WIDTH_AND_HEIGHT"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.04,
+             "g": 0.04,
+             "b": 0.04,
+             "a": 1
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "HUG",
+          "layoutSizingVertical": "HUG",
+          "componentPropertyReferences": {
+           "characters": "Label#10:2"
+          }
+         }
+        ]
+       },
+       {
+        "id": "1:5",
+        "type": "COMPONENT",
+        "name": "Variant=outline",
+        "relativeTransform": [
+         [
+          1,
+          0,
+          100
+         ],
+         [
+          0,
+          1,
+          0
+         ]
+        ],
+        "size": {
+         "x": 77,
+         "y": 32
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1,
+           "g": 1,
+           "b": 1,
+           "a": 1
+          }
+         }
+        ],
+        "cornerRadius": 6,
+        "layoutMode": "HORIZONTAL",
+        "primaryAxisSizingMode": "AUTO",
+        "counterAxisSizingMode": "AUTO",
+        "counterAxisAlignItems": "CENTER",
+        "itemSpacing": 4,
+        "paddingLeft": 8,
+        "paddingRight": 8,
+        "paddingTop": 6,
+        "paddingBottom": 6,
+        "layoutSizingHorizontal": "HUG",
+        "layoutSizingVertical": "HUG",
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.9,
+           "g": 0.9,
+           "b": 0.9,
+           "a": 1
+          }
+         }
+        ],
+        "strokeWeight": 1,
+        "children": [
+         {
+          "id": "1:6",
+          "type": "INSTANCE",
+          "name": "Icon",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            8
+           ],
+           [
+            0,
+            1,
+            8
+           ]
+          ],
+          "size": {
+           "x": 16,
+           "y": 16
+          },
+          "componentId": "3:1",
+          "fills": [],
+          "children": [
+           {
+            "id": "I1:6;3:2",
+            "type": "RECTANGLE",
+            "name": "Shape",
+            "relativeTransform": [
+             [
+              1,
+              0,
+              2
+             ],
+             [
+              0,
+              1,
+              2
+             ]
+            ],
+            "size": {
+             "x": 12,
+             "y": 12
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.04,
+               "g": 0.04,
+               "b": 0.04,
+               "a": 1
+              }
+             }
+            ],
+            "constraints": {
+             "horizontal": "SCALE",
+             "vertical": "SCALE"
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "FIXED",
+          "layoutSizingVertical": "FIXED",
+          "componentPropertyReferences": {
+           "visible": "Show Icon#10:1",
+           "mainComponent": "Icon#10:3"
+          }
+         },
+         {
+          "id": "1:7",
+          "type": "TEXT",
+          "name": "Label",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            28
+           ],
+           [
+            0,
+            1,
+            6
+           ]
+          ],
+          "size": {
+           "x": 41,
+           "y": 20
+          },
+          "characters": "Button",
+          "style": {
+           "fontFamily": "Inter",
+           "fontSize": 14,
+           "fontWeight": 400,
+           "lineHeightUnit": "PIXELS",
+           "lineHeightPx": 20,
+           "textAutoResize": "WIDTH_AND_HEIGHT"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.04,
+             "g": 0.04,
+             "b": 0.04,
+             "a": 1
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "HUG",
+          "layoutSizingVertical": "HUG",
+          "componentPropertyReferences": {
+           "characters": "Label#10:2"
+          }
+         }
+        ]
+       }
+      ],
+      "componentPropertyDefinitions": {
+       "Variant": {
+        "type": "VARIANT",
+        "defaultValue": "default",
+        "variantOptions": [
+         "default",
+         "outline"
+        ]
+       },
+       "Show Icon#10:1": {
+        "type": "BOOLEAN",
+        "defaultValue": true
+       },
+       "Label#10:2": {
+        "type": "TEXT",
+        "defaultValue": "Button"
+       },
+       "Icon#10:3": {
+        "type": "INSTANCE_SWAP",
+        "defaultValue": "3:1",
+        "preferredValues": [
+         {
+          "type": "COMPONENT",
+          "key": "k-check"
+         },
+         {
+          "type": "COMPONENT",
+          "key": "k-arrow"
+         }
+        ]
+       }
+      }
+     },
+     {
+      "id": "3:1",
+      "type": "COMPONENT",
+      "name": "Check",
+      "relativeTransform": [
+       [
+        1,
+        0,
+        0
+       ],
+       [
+        0,
+        1,
+        100
+       ]
+      ],
+      "size": {
+       "x": 16,
+       "y": 16
+      },
+      "fills": [],
+      "children": [
+       {
+        "id": "3:2",
+        "type": "RECTANGLE",
+        "name": "Shape",
+        "relativeTransform": [
+         [
+          1,
+          0,
+          2
+         ],
+         [
+          0,
+          1,
+          2
+         ]
+        ],
+        "size": {
+         "x": 12,
+         "y": 12
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.04,
+           "g": 0.04,
+           "b": 0.04,
+           "a": 1
+          }
+         }
+        ],
+        "constraints": {
+         "horizontal": "SCALE",
+         "vertical": "SCALE"
+        }
+       }
+      ]
+     },
+     {
+      "id": "4:1",
+      "type": "COMPONENT",
+      "name": "Arrow",
+      "relativeTransform": [
+       [
+        1,
+        0,
+        40
+       ],
+       [
+        0,
+        1,
+        100
+       ]
+      ],
+      "size": {
+       "x": 16,
+       "y": 16
+      },
+      "fills": [],
+      "children": [
+       {
+        "id": "4:2",
+        "type": "RECTANGLE",
+        "name": "Shape",
+        "relativeTransform": [
+         [
+          1,
+          0,
+          2
+         ],
+         [
+          0,
+          1,
+          2
+         ]
+        ],
+        "size": {
+         "x": 12,
+         "y": 12
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.04,
+           "g": 0.04,
+           "b": 0.04,
+           "a": 1
+          }
+         }
+        ],
+        "constraints": {
+         "horizontal": "SCALE",
+         "vertical": "SCALE"
+        }
+       }
+      ]
+     },
+     {
+      "id": "5:1",
+      "type": "COMPONENT",
+      "name": "Field",
+      "relativeTransform": [
+       [
+        1,
+        0,
+        0
+       ],
+       [
+        0,
+        1,
+        200
+       ]
+      ],
+      "size": {
+       "x": 120,
+       "y": 66
+      },
+      "fills": [],
+      "layoutMode": "VERTICAL",
+      "primaryAxisSizingMode": "AUTO",
+      "counterAxisSizingMode": "FIXED",
+      "itemSpacing": 6,
+      "componentPropertyDefinitions": {
+       "Label Text#20:1": {
+        "type": "TEXT",
+        "defaultValue": "Label"
+       }
+      },
+      "children": [
+       {
+        "id": "5:2",
+        "type": "TEXT",
+        "name": "Label",
+        "relativeTransform": [
+         [
+          1,
+          0,
+          0
+         ],
+         [
+          0,
+          1,
+          0
+         ]
+        ],
+        "size": {
+         "x": 40,
+         "y": 20
+        },
+        "characters": "Label",
+        "style": {
+         "fontFamily": "Inter",
+         "fontSize": 14,
+         "fontWeight": 400,
+         "lineHeightUnit": "PIXELS",
+         "lineHeightPx": 20,
+         "textAutoResize": "WIDTH_AND_HEIGHT"
+        },
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.04,
+           "g": 0.04,
+           "b": 0.04,
+           "a": 1
+          }
+         }
+        ],
+        "layoutSizingHorizontal": "HUG",
+        "layoutSizingVertical": "HUG",
+        "componentPropertyReferences": {
+         "characters": "Label Text#20:1"
+        }
+       },
+       {
+        "id": "5:3",
+        "type": "INSTANCE",
+        "name": "Button",
+        "relativeTransform": [
+         [
+          1,
+          0,
+          0
+         ],
+         [
+          0,
+          1,
+          26
+         ]
+        ],
+        "size": {
+         "x": 77,
+         "y": 32
+        },
+        "componentId": "1:2",
+        "isExposedInstance": true,
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.9,
+           "g": 0.9,
+           "b": 0.9,
+           "a": 1
+          }
+         }
+        ],
+        "cornerRadius": 6,
+        "layoutMode": "HORIZONTAL",
+        "primaryAxisSizingMode": "AUTO",
+        "counterAxisSizingMode": "AUTO",
+        "counterAxisAlignItems": "CENTER",
+        "itemSpacing": 4,
+        "paddingLeft": 8,
+        "paddingRight": 8,
+        "paddingTop": 6,
+        "paddingBottom": 6,
+        "layoutSizingHorizontal": "HUG",
+        "layoutSizingVertical": "HUG",
+        "children": [
+         {
+          "id": "I5:3;1:3",
+          "type": "INSTANCE",
+          "name": "Icon",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            8
+           ],
+           [
+            0,
+            1,
+            8
+           ]
+          ],
+          "size": {
+           "x": 16,
+           "y": 16
+          },
+          "componentId": "3:1",
+          "fills": [],
+          "children": [
+           {
+            "id": "I5:3;1:3;3:2",
+            "type": "RECTANGLE",
+            "name": "Shape",
+            "relativeTransform": [
+             [
+              1,
+              0,
+              2
+             ],
+             [
+              0,
+              1,
+              2
+             ]
+            ],
+            "size": {
+             "x": 12,
+             "y": 12
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.04,
+               "g": 0.04,
+               "b": 0.04,
+               "a": 1
+              }
+             }
+            ],
+            "constraints": {
+             "horizontal": "SCALE",
+             "vertical": "SCALE"
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "FIXED",
+          "layoutSizingVertical": "FIXED",
+          "componentPropertyReferences": {
+           "visible": "Show Icon#10:1",
+           "mainComponent": "Icon#10:3"
+          }
+         },
+         {
+          "id": "I5:3;1:4",
+          "type": "TEXT",
+          "name": "Label",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            28
+           ],
+           [
+            0,
+            1,
+            6
+           ]
+          ],
+          "size": {
+           "x": 41,
+           "y": 20
+          },
+          "characters": "Button",
+          "style": {
+           "fontFamily": "Inter",
+           "fontSize": 14,
+           "fontWeight": 400,
+           "lineHeightUnit": "PIXELS",
+           "lineHeightPx": 20,
+           "textAutoResize": "WIDTH_AND_HEIGHT"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.04,
+             "g": 0.04,
+             "b": 0.04,
+             "a": 1
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "HUG",
+          "layoutSizingVertical": "HUG",
+          "componentPropertyReferences": {
+           "characters": "Label#10:2"
+          }
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": "7:1",
+      "type": "FRAME",
+      "name": "Screen",
+      "relativeTransform": [
+       [
+        1,
+        0,
+        400
+       ],
+       [
+        0,
+        1,
+        0
+       ]
+      ],
+      "size": {
+       "x": 240,
+       "y": 160
+      },
+      "fills": [
+       {
+        "type": "SOLID",
+        "color": {
+         "r": 1,
+         "g": 1,
+         "b": 1,
+         "a": 1
+        }
+       }
+      ],
+      "layoutMode": "VERTICAL",
+      "itemSpacing": 16,
+      "paddingLeft": 16,
+      "paddingTop": 16,
+      "primaryAxisSizingMode": "FIXED",
+      "counterAxisSizingMode": "FIXED",
+      "children": [
+       {
+        "id": "6:1",
+        "type": "INSTANCE",
+        "name": "Button",
+        "relativeTransform": [
+         [
+          1,
+          0,
+          0
+         ],
+         [
+          0,
+          1,
+          0
+         ]
+        ],
+        "size": {
+         "x": 91,
+         "y": 32
+        },
+        "componentId": "1:5",
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1,
+           "g": 1,
+           "b": 1,
+           "a": 1
+          }
+         }
+        ],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.9,
+           "g": 0.9,
+           "b": 0.9,
+           "a": 1
+          }
+         }
+        ],
+        "strokeWeight": 1,
+        "cornerRadius": 6,
+        "layoutMode": "HORIZONTAL",
+        "primaryAxisSizingMode": "AUTO",
+        "counterAxisSizingMode": "AUTO",
+        "counterAxisAlignItems": "CENTER",
+        "itemSpacing": 4,
+        "paddingLeft": 8,
+        "paddingRight": 8,
+        "paddingTop": 6,
+        "paddingBottom": 6,
+        "layoutSizingHorizontal": "HUG",
+        "layoutSizingVertical": "HUG",
+        "children": [
+         {
+          "id": "I6:1;1:6",
+          "type": "INSTANCE",
+          "name": "Icon",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            8
+           ],
+           [
+            0,
+            1,
+            8
+           ]
+          ],
+          "size": {
+           "x": 16,
+           "y": 16
+          },
+          "componentId": "3:1",
+          "fills": [],
+          "children": [
+           {
+            "id": "I6:1;1:6;3:2",
+            "type": "RECTANGLE",
+            "name": "Shape",
+            "relativeTransform": [
+             [
+              1,
+              0,
+              2
+             ],
+             [
+              0,
+              1,
+              2
+             ]
+            ],
+            "size": {
+             "x": 12,
+             "y": 12
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.04,
+               "g": 0.04,
+               "b": 0.04,
+               "a": 1
+              }
+             }
+            ],
+            "constraints": {
+             "horizontal": "SCALE",
+             "vertical": "SCALE"
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "FIXED",
+          "layoutSizingVertical": "FIXED",
+          "componentPropertyReferences": {
+           "visible": "Show Icon#10:1",
+           "mainComponent": "Icon#10:3"
+          }
+         },
+         {
+          "id": "I6:1;1:7",
+          "type": "TEXT",
+          "name": "Label",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            28
+           ],
+           [
+            0,
+            1,
+            6
+           ]
+          ],
+          "size": {
+           "x": 55,
+           "y": 20
+          },
+          "characters": "Outline",
+          "style": {
+           "fontFamily": "Inter",
+           "fontSize": 14,
+           "fontWeight": 400,
+           "lineHeightUnit": "PIXELS",
+           "lineHeightPx": 20,
+           "textAutoResize": "WIDTH_AND_HEIGHT"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.04,
+             "g": 0.04,
+             "b": 0.04,
+             "a": 1
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "HUG",
+          "layoutSizingVertical": "HUG",
+          "componentPropertyReferences": {
+           "characters": "Label#10:2"
+          }
+         }
+        ]
+       },
+       {
+        "id": "6:2",
+        "type": "INSTANCE",
+        "name": "Field",
+        "relativeTransform": [
+         [
+          1,
+          0,
+          0
+         ],
+         [
+          0,
+          1,
+          48
+         ]
+        ],
+        "size": {
+         "x": 120,
+         "y": 66
+        },
+        "componentId": "5:1",
+        "fills": [],
+        "layoutMode": "VERTICAL",
+        "primaryAxisSizingMode": "AUTO",
+        "counterAxisSizingMode": "FIXED",
+        "itemSpacing": 6,
+        "children": [
+         {
+          "id": "I6:2;5:2",
+          "type": "TEXT",
+          "name": "Label",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            0
+           ],
+           [
+            0,
+            1,
+            0
+           ]
+          ],
+          "size": {
+           "x": 24,
+           "y": 20
+          },
+          "characters": "Bio",
+          "style": {
+           "fontFamily": "Inter",
+           "fontSize": 14,
+           "fontWeight": 400,
+           "lineHeightUnit": "PIXELS",
+           "lineHeightPx": 20,
+           "textAutoResize": "WIDTH_AND_HEIGHT"
+          },
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.04,
+             "g": 0.04,
+             "b": 0.04,
+             "a": 1
+            }
+           }
+          ],
+          "layoutSizingHorizontal": "HUG",
+          "layoutSizingVertical": "HUG",
+          "componentPropertyReferences": {
+           "characters": "Label Text#20:1"
+          }
+         },
+         {
+          "id": "I6:2;5:3",
+          "type": "INSTANCE",
+          "name": "Button",
+          "relativeTransform": [
+           [
+            1,
+            0,
+            0
+           ],
+           [
+            0,
+            1,
+            26
+           ]
+          ],
+          "size": {
+           "x": 77,
+           "y": 32
+          },
+          "componentId": "1:2",
+          "isExposedInstance": true,
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 0.9,
+             "g": 0.9,
+             "b": 0.9,
+             "a": 1
+            }
+           }
+          ],
+          "cornerRadius": 6,
+          "layoutMode": "HORIZONTAL",
+          "primaryAxisSizingMode": "AUTO",
+          "counterAxisSizingMode": "AUTO",
+          "counterAxisAlignItems": "CENTER",
+          "itemSpacing": 4,
+          "paddingLeft": 8,
+          "paddingRight": 8,
+          "paddingTop": 6,
+          "paddingBottom": 6,
+          "layoutSizingHorizontal": "HUG",
+          "layoutSizingVertical": "HUG",
+          "children": [
+           {
+            "id": "I6:2;5:3;1:3",
+            "type": "INSTANCE",
+            "name": "Icon",
+            "relativeTransform": [
+             [
+              1,
+              0,
+              8
+             ],
+             [
+              0,
+              1,
+              8
+             ]
+            ],
+            "size": {
+             "x": 16,
+             "y": 16
+            },
+            "componentId": "3:1",
+            "fills": [],
+            "children": [
+             {
+              "id": "I6:2;5:3;1:3;3:2",
+              "type": "RECTANGLE",
+              "name": "Shape",
+              "relativeTransform": [
+               [
+                1,
+                0,
+                2
+               ],
+               [
+                0,
+                1,
+                2
+               ]
+              ],
+              "size": {
+               "x": 12,
+               "y": 12
+              },
+              "fills": [
+               {
+                "type": "SOLID",
+                "color": {
+                 "r": 0.04,
+                 "g": 0.04,
+                 "b": 0.04,
+                 "a": 1
+                }
+               }
+              ],
+              "constraints": {
+               "horizontal": "SCALE",
+               "vertical": "SCALE"
+              }
+             }
+            ],
+            "layoutSizingHorizontal": "FIXED",
+            "layoutSizingVertical": "FIXED",
+            "visible": false,
+            "componentPropertyReferences": {
+             "visible": "Show Icon#10:1",
+             "mainComponent": "Icon#10:3"
+            }
+           },
+           {
+            "id": "I6:2;5:3;1:4",
+            "type": "TEXT",
+            "name": "Label",
+            "relativeTransform": [
+             [
+              1,
+              0,
+              28
+             ],
+             [
+              0,
+              1,
+              6
+             ]
+            ],
+            "size": {
+             "x": 34,
+             "y": 20
+            },
+            "characters": "Save",
+            "style": {
+             "fontFamily": "Inter",
+             "fontSize": 14,
+             "fontWeight": 400,
+             "lineHeightUnit": "PIXELS",
+             "lineHeightPx": 20,
+             "textAutoResize": "WIDTH_AND_HEIGHT"
+            },
+            "fills": [
+             {
+              "type": "SOLID",
+              "color": {
+               "r": 0.04,
+               "g": 0.04,
+               "b": 0.04,
+               "a": 1
+              }
+             }
+            ],
+            "layoutSizingHorizontal": "HUG",
+            "layoutSizingVertical": "HUG",
+            "componentPropertyReferences": {
+             "characters": "Label#10:2"
+            }
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "components": {
+  "1:2": {
+   "key": "k-default",
+   "name": "Variant=default",
+   "componentSetId": "1:1"
+  },
+  "1:5": {
+   "key": "k-outline",
+   "name": "Variant=outline",
+   "componentSetId": "1:1"
+  },
+  "3:1": {
+   "key": "k-check",
+   "name": "Check"
+  },
+  "4:1": {
+   "key": "k-arrow",
+   "name": "Arrow"
+  },
+  "5:1": {
+   "key": "k-field",
+   "name": "Field"
+  }
+ },
+ "componentSets": {
+  "1:1": {
+   "key": "k-button",
+   "name": "Button"
+  }
+ }
+}

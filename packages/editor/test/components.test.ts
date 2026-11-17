@@ -334,6 +334,48 @@ describe("pinInstances (files made elsewhere)", () => {
     return editor;
   };
 
+  it("pins nothing layout decides, nor a variant's values (decision 0035)", () => {
+    const pinnedMarks = (nodes: NodeRecord[]) =>
+      Object.fromEntries(
+        pinInstances(nodes)
+          .nodes.filter((n) => getProp(n.props, "overrides").length > 0)
+          .map((n) => [n.id, getProp(n.props, "overrides")]),
+      );
+    // Filling its parent: its width is its own, as its place is.
+    expect(
+      pinnedMarks([
+        ...file({ sizingH: "fill", width: 300 }).map((n) =>
+          n.id === "copy" ? { ...n, parent: "row" } : n,
+        ),
+        node("row", "frame", "p", "a2", { layoutMode: "row", width: 300, height: 40 }),
+      ]),
+    ).toEqual({});
+    // Stretched by its constraint in a copy made wider: laid out, not changed.
+    expect(
+      pinnedMarks(
+        file({ width: 160 }).map((n) =>
+          n.id === "label"
+            ? { ...n, props: { ...n.props, constraintH: "stretch" } }
+            : n.id === "copyLabel"
+              ? { ...n, props: { ...n.props, constraintH: "stretch", width: 140 } }
+              : n,
+        ),
+      ),
+    ).toEqual({ copy: ["width"] });
+    // A variant's values describe the variant: its instances don't hold them.
+    const variant = file({}).map((n) =>
+      n.id === "main"
+        ? { ...n, parent: "set", props: { ...n.props, variantProps: { Size: "Large" } } }
+        : n,
+    );
+    variant.push(node("set", "frame", "p", "a3", { isComponentSet: true, width: 200, height: 60 }));
+    expect(pinnedMarks(variant)).toEqual({});
+    // A hand-made change is still one.
+    expect(pinnedMarks(file({ fills: [{ type: "solid", color: "#ff0000" }] }))).toEqual({
+      copy: ["fills"],
+    });
+  });
+
   it("lays out imported grids, and what hugs them, from their content", () => {
     // A table: a toolbar, a grid of a header row and a body row, a footer. As saved, the body
     // row is 36 tall; its button needs 28 + 8 + 8, so the grid lays it out 44 tall.

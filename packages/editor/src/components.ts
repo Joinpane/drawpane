@@ -21,6 +21,7 @@ import {
   getProp,
   isMainNode,
   isPropName,
+  laidOutProps,
   type NodeRecord,
   newId,
   type Op,
@@ -32,10 +33,15 @@ import { type Doc, Doc as DocCtor } from "./doc";
 import { gridImportOps } from "./layout";
 import { layerName } from "./names";
 
-/** Never copied from a main component: they link instances or describe the main itself. */
+/**
+ * Never copied from a main component: they link instances or describe the
+ * main itself (its variant values and its properties, decision 0035).
+ */
 const LINK_PROPS: ReadonlySet<string> = new Set([
   "isComponent",
   "componentDescription",
+  "variantProps",
+  "componentProps",
   "mirrors",
   "overrides",
 ]);
@@ -55,6 +61,10 @@ const ROOT_LOCAL_PROPS: ReadonlySet<string> = new Set([
   "constraintH",
   "constraintV",
   "instanceOf",
+  // How it's used in the main around it (decision 0035): which properties drive it, and
+  // whether it shows its own on that main's instances.
+  "propRefs",
+  "exposeProps",
 ]);
 
 export function isMainComponent(node: NodeRecord | undefined): boolean {
@@ -318,28 +328,15 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
     isRoot: boolean,
     only?: (prop: string) => boolean,
   ) => {
-    const overridden = new Set(getProp(to.props, "overrides"));
-    // Auto layout decides where its children go and how big Hug and Fill
-    // children are; the instance runs its own layout, so never copy those.
-    const parent = isRoot ? undefined : doc.get(to.parent);
-    if (
-      parent?.type === "frame" &&
-      getProp(parent.props, "layoutMode") !== "none" &&
-      getProp(to.props, "positioning") === "auto"
-    ) {
-      overridden.add("x");
-      overridden.add("y");
-      if (getProp(from.props, "sizingH") !== "fixed") overridden.add("width");
-      if (getProp(from.props, "sizingV") !== "fixed") overridden.add("height");
-    }
-    if (getProp(from.props, "sizingH") === "hug") overridden.add("width");
-    if (getProp(from.props, "sizingV") === "hug") overridden.add("height");
-    if (from.type === "text") {
-      // Auto-sized text measures itself in the instance.
-      const resize = getProp(from.props, "textAutoResize");
-      if (resize === "width") overridden.add("width");
-      if (resize !== "none") overridden.add("height");
-    }
+    const overridden = new Set<string>(getProp(to.props, "overrides"));
+    // What layout decides (auto layout, hug and fill, auto-sized text, constraints in a resized
+    // frame): the instance runs its own layout, so never copy those (decision 0035).
+    const laidOut = laidOutProps(to, from, {
+      root: isRoot,
+      parent: isRoot ? undefined : doc.get(to.parent),
+      parentSource: isRoot ? undefined : doc.get(from.parent),
+    });
+    for (const prop of laidOut) overridden.add(prop);
     const keys = new Set([...Object.keys(from.props), ...Object.keys(to.props)]);
     for (const prop of keys) {
       if (!isPropName(prop) || LINK_PROPS.has(prop) || overridden.has(prop)) continue;
@@ -748,6 +745,25 @@ export function resetOverridesOps(doc: Doc, instanceId: string): Op[] {
       ops.push({ op: "set", id, prop: "overrides", value: null });
     // Nested instances keep their own overrides relative to their own main.
     if (id !== instanceId && isInstanceRoot(node)) continue;
+    stack.push(...doc.childIds(id));
+  }
+  return ops;
+}
+
+/**
+ * Clears every change in an instance, those in its nested instances
+ * included, as Figma's "Reset all changes" does. Syncing then restores its
+ * main's look.
+ */
+export function resetAllOverridesOps(doc: Doc, instanceId: string): Op[] {
+  const ops: Op[] = [];
+  const stack = [instanceId];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    const node = doc.get(id);
+    if (!node) continue;
+    if (getProp(node.props, "overrides").length > 0)
+      ops.push({ op: "set", id, prop: "overrides", value: null });
     stack.push(...doc.childIds(id));
   }
   return ops;

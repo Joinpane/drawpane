@@ -63,6 +63,11 @@ export interface RawRecord {
   readonly parentIndex?: { readonly guid?: RawGuid; readonly position?: string };
   readonly overrideKey?: RawGuid;
   readonly componentPropRefs?: readonly RawPropRef[];
+  /** A component's property definitions as saved: only the order Figma shows them in is read. */
+  readonly componentPropDefs?: readonly {
+    readonly id?: RawGuid;
+    readonly sortPosition?: unknown;
+  }[];
   readonly componentPropAssignments?: readonly RawPropAssignment[];
   readonly symbolData?: {
     /** The component an instance copies. */

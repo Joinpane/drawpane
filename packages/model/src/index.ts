@@ -8,6 +8,7 @@ export * from "./fonts";
 export * from "./history";
 export * from "./ids";
 export * from "./imports";
+export * from "./laid-out";
 export * from "./libraries";
 export * from "./media";
 export * from "./ops";

@@ -35,6 +35,7 @@ export * from "./noise";
 export * from "./overlay";
 export * from "./post-effects";
 export * from "./presets";
+export * from "./properties";
 export * from "./prototype";
 export * from "./reading-order";
 export * from "./render";
