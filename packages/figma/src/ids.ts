@@ -35,3 +35,22 @@ export function mirroredId(figmaId: string): string | null {
   // main's copy of the inner instance's layer, which is itself "I<inner instance>;<layer>".
   return parts.length === 2 ? (parts[1] as string) : `I${parts.slice(1).join(";")}`;
 }
+
+/**
+ * The layer a copy's layer copies when it's inside a nested instance that
+ * isn't a copy of its main's layer as it is (`base`, that instance's Figma
+ * id): one swapped for another component, or one copying nothing, as slot
+ * content. Figma names a layer by its path of instances, the last element
+ * the layer in the innermost one's component, so under such an instance
+ * the path goes on in its own component: "<base>;<layer>" is that
+ * component's own layer, and deeper ones its copies, as `mirroredId` reads
+ * them from there. Null when the id isn't under `base`.
+ */
+export function mirroredUnder(figmaId: string, base: string): string | null {
+  if (!figmaId.startsWith("I") || !base.startsWith("I")) return null;
+  const parts = figmaId.slice(1).split(";");
+  const prefix = base.slice(1).split(";");
+  if (parts.length <= prefix.length || prefix.some((p, i) => parts[i] !== p)) return null;
+  const rest = parts.slice(prefix.length);
+  return rest.length === 1 ? (rest[0] as string) : `I${rest.join(";")}`;
+}
