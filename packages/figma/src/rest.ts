@@ -169,6 +169,18 @@ export interface Node {
   readonly maxWidth?: number | null;
   readonly minHeight?: number | null;
   readonly maxHeight?: number | null;
+  // Grid auto layout (`layoutMode: "GRID"`): tracks as CSS track lists ("32px 1fr auto"), gaps.
+  readonly gridRowsSizing?: string;
+  readonly gridColumnsSizing?: string;
+  readonly gridRowGap?: number;
+  readonly gridColumnGap?: number;
+  // A grid's item: the row and column it starts at (from 0), its spans, and how it sits in its cells.
+  readonly gridRowAnchorIndex?: number;
+  readonly gridColumnAnchorIndex?: number;
+  readonly gridRowSpan?: number;
+  readonly gridColumnSpan?: number;
+  readonly gridChildHorizontalAlign?: "AUTO" | "MIN" | "CENTER" | "MAX";
+  readonly gridChildVerticalAlign?: "AUTO" | "MIN" | "CENTER" | "MAX";
   readonly layoutGrids?: readonly LayoutGrid[];
   readonly backgroundColor?: RGBA;
   // Text

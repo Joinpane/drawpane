@@ -11,6 +11,7 @@ import { commandsToPath, gradientHandles, ImportError, imageMime, sniffFig } fro
 import { adaptNode } from "../src/adapt";
 import { RestIds } from "../src/ids";
 import { FigNotes } from "../src/notes";
+import type { RawRecord } from "../src/raw";
 import { prepareStyles } from "../src/styles";
 import { textFields } from "../src/text";
 
@@ -201,13 +202,13 @@ function scene() {
     if (guid) records.set(guid, node.id);
     return node;
   };
-  const adapt = (node: SceneNode) => {
+  const adapt = (node: SceneNode, raw: ReadonlyMap<string, RawRecord> = new Map()) => {
     const notes = new FigNotes();
     const parent = graph.getNode(node.parentId ?? "") ?? page;
     return adaptNode(node, parent, [1, 0, 0, 0, 1, 0, 0, 0, 1], {
       graph,
       ids: new RestIds(graph, records),
-      records: new Map(),
+      records: raw,
       notes,
     });
   };
@@ -260,6 +261,126 @@ describe("layers", () => {
       type: "RECTANGLE",
       layoutGrow: 1,
       layoutAlign: "STRETCH",
+    });
+  });
+
+  it("reads a grid's tracks, gaps and items from its records, which Open Pencil's graph drops", () => {
+    const { page, add, adapt } = scene();
+    const grid = add("FRAME", page.id, "5:1", {
+      name: "Grid",
+      width: 300,
+      height: 100,
+      layoutMode: "GRID",
+      primaryAxisSizing: "FIXED",
+      counterAxisSizing: "HUG",
+      paddingTop: 4,
+    });
+    add("FRAME", grid.id, "5:2", {
+      name: "Cell",
+      width: 40,
+      height: 20,
+      layoutGrow: 1,
+      layoutAlignSelf: "STRETCH",
+    });
+    add("RECTANGLE", grid.id, "5:3", { name: "Badge", width: 8, height: 8 });
+    const guid = (localID: number) => ({ sessionID: 9, localID });
+    const size = (type: "FIXED" | "FLEX" | "HUG", value: number) => ({
+      minSizing: { type, value },
+      maxSizing: { type, value },
+    });
+    const raw = new Map<string, RawRecord>([
+      [
+        "5:1",
+        {
+          // Tracks are kept by id, in the order of their positions, not as listed.
+          gridColumns: {
+            entries: [
+              { id: guid(2), position: "#" },
+              { id: guid(1), position: "!" },
+              { id: guid(3), position: "$" },
+            ],
+          },
+          gridColumnsSizing: {
+            entries: [
+              { id: guid(1), trackSize: size("FIXED", 32) },
+              { id: guid(2), trackSize: size("FLEX", 1) },
+              {
+                id: guid(3),
+                trackSize: {
+                  minSizing: { type: "FIXED", value: 40 },
+                  maxSizing: { type: "HUG", value: 1 },
+                },
+              },
+            ],
+          },
+          gridRows: {
+            entries: [
+              { id: guid(4), position: "!" },
+              { id: guid(5), position: '"' },
+            ],
+          },
+          gridRowsSizing: {
+            entries: [
+              { id: guid(4), trackSize: size("HUG", 1) },
+              { id: guid(5), trackSize: size("HUG", 1) },
+            ],
+          },
+          gridColumnGap: 8,
+          gridRowGap: 6,
+        },
+      ],
+      [
+        "5:3",
+        {
+          gridRowAnchor: guid(5),
+          gridColumnAnchor: guid(3),
+          gridChildHorizontalAlign: "CENTER",
+        },
+      ],
+    ]);
+    const rest = adapt(grid, raw);
+    expect(rest).toMatchObject({
+      layoutMode: "GRID",
+      primaryAxisSizingMode: "FIXED",
+      counterAxisSizingMode: "AUTO",
+      paddingTop: 4,
+      gridColumnsSizing: "32px 1fr minmax(40px, auto)",
+      gridRowsSizing: "auto auto",
+      gridColumnGap: 8,
+      gridRowGap: 6,
+    });
+    // An item grows across and stretches down, as a row's child does.
+    expect(rest.children?.[0]).toMatchObject({ layoutGrow: 1, layoutAlign: "STRETCH" });
+    expect(rest.children?.[1]).toMatchObject({
+      gridRowAnchorIndex: 1,
+      gridColumnAnchorIndex: 2,
+      gridRowSpan: 1,
+      gridColumnSpan: 1,
+      gridChildHorizontalAlign: "CENTER",
+    });
+    // And the converter reads it as Drawpane's grid.
+    const { nodes } = convertFile({
+      name: "Grid",
+      document: {
+        id: "0:0",
+        name: "Document",
+        type: "DOCUMENT",
+        children: [{ id: "0:1", name: "Page", type: "CANVAS", children: [rest] }],
+      },
+    });
+    const props = (name: string) => nodes.find((n) => n.props.name === name)?.props;
+    expect(props("Grid")).toMatchObject({
+      layoutMode: "grid",
+      sizingV: "hug",
+      gap: 8,
+      rowGap: 6,
+      gridColumns: [{ unit: "px", value: 32 }, { unit: "fr", value: 1 }, { unit: "auto" }],
+      gridRows: [{ unit: "auto" }, { unit: "auto" }],
+    });
+    expect(props("Cell")).toMatchObject({ sizingH: "fill", sizingV: "fill" });
+    expect(props("Badge")).toMatchObject({
+      gridArea: { column: 3, row: 2, columnSpan: 1, rowSpan: 1 },
+      justifySelf: "center",
     });
   });
 

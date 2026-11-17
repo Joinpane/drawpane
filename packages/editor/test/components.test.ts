@@ -10,6 +10,7 @@ import {
   swapTargets,
 } from "../src/components";
 import { Editor } from "../src/editor";
+import { layoutOps } from "../src/layout";
 import type { TextMeasurer } from "../src/text";
 
 const measurer: TextMeasurer = {
@@ -332,6 +333,71 @@ describe("pinInstances (files made elsewhere)", () => {
     editor.state.set({ role: "editor" });
     return editor;
   };
+
+  it("lays out imported grids, and what hugs them, from their content", () => {
+    // A table: a toolbar, a grid of a header row and a body row, a footer. As saved, the body
+    // row is 36 tall; its button needs 28 + 8 + 8, so the grid lays it out 44 tall.
+    const cellRow = { layoutMode: "row", alignItems: "center", sizingH: "fill", sizingV: "fill" };
+    const pad = { paddingTop: 8, paddingRight: 8, paddingBottom: 8, paddingLeft: 8 };
+    const nodes = [
+      node("p", "page", ROOT_ID, "a0", {}),
+      node("table", "frame", "p", "a0", {
+        layoutMode: "column",
+        sizingV: "hug",
+        width: 200,
+        height: 106,
+      }),
+      node("toolbar", "frame", "table", "a0", { layoutMode: "row", width: 200, height: 20 }),
+      // Not where the toolbar's layout would put it: outside the grid, as saved.
+      node("dot", "rect", "toolbar", "a0", { x: 50, width: 10, height: 10 }),
+      node("grid", "frame", "table", "a1", {
+        layoutMode: "grid",
+        sizingV: "hug",
+        y: 20,
+        width: 200,
+        height: 76,
+        gridColumns: [
+          { unit: "px", value: 32 },
+          { unit: "fr", value: 1 },
+        ],
+        gridRows: [{ unit: "auto" }, { unit: "auto" }],
+      }),
+      node("h1", "rect", "grid", "a0", { width: 32, height: 40 }),
+      node("h2", "rect", "grid", "a1", { x: 32, width: 168, height: 40, sizingH: "fill" }),
+      node("b1", "frame", "grid", "a2", { ...cellRow, ...pad, y: 40, width: 32, height: 36 }),
+      node("button", "rect", "b1", "a0", { x: 8, y: 4, width: 16, height: 28 }),
+      node("b2", "frame", "grid", "a3", {
+        ...cellRow,
+        ...pad,
+        x: 32,
+        y: 40,
+        width: 168,
+        height: 36,
+      }),
+      node("label", "rect", "b2", "a0", { x: 8, y: 8, width: 40, height: 20 }),
+      node("footer", "rect", "table", "a2", { y: 96, width: 200, height: 10 }),
+      // Auto layout away from any grid stays as saved too.
+      node("row", "frame", "p", "a1", { layoutMode: "row", y: 200, width: 100, height: 20 }),
+      node("item", "rect", "row", "a0", { x: 30, width: 10, height: 10 }),
+    ];
+    const out = pinInstances(nodes).nodes;
+    const box = (id: string) => {
+      const p = (out.find((n) => n.id === id) as NodeRecord).props;
+      return [getProp(p, "x"), getProp(p, "y"), getProp(p, "width"), getProp(p, "height")];
+    };
+    expect(box("b1")).toEqual([0, 40, 32, 44]);
+    expect(box("b2")).toEqual([32, 40, 168, 44]);
+    expect(box("button")).toEqual([8, 8, 16, 28]);
+    expect(box("label")).toEqual([8, 12, 40, 20]);
+    expect(box("grid")).toEqual([0, 20, 200, 84]);
+    expect(box("footer")).toEqual([0, 104, 200, 10]);
+    expect(box("table")).toEqual([0, 0, 200, 114]);
+    expect(box("dot")).toEqual([50, 0, 10, 10]);
+    expect(box("item")).toEqual([30, 0, 10, 10]);
+    // As an edit lays it out again (the toolbar's own layout aside).
+    const again = layoutOps(opened(out).doc, ["grid"]);
+    expect(again.filter((op) => op.op === "set" && op.id !== "dot")).toEqual([]);
+  });
 
   it("keeps a copy as the file has it: what syncing would change is overridden", () => {
     const { nodes, pinned, detached } = pinInstances(file({ width: 160, height: 56 }));

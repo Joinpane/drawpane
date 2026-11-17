@@ -435,9 +435,17 @@ const total = (sizes: readonly number[], gap: number) =>
 export class LayoutEngine {
   readonly #doc: Doc;
   readonly boxes = new Map<string, LayoutBox>();
+  /** Which layout frames below the one run are laid out too; the rest keep their insides as they are. */
+  readonly #enters: (frame: NodeRecord) => boolean;
 
-  constructor(doc: Doc) {
+  constructor(doc: Doc, options: { enters?: (frame: NodeRecord) => boolean } = {}) {
     this.#doc = doc;
+    this.#enters = options.enters ?? (() => true);
+  }
+
+  /** A child that is a layout frame this run lays out inside. */
+  #nested(node: NodeRecord | undefined): node is NodeRecord {
+    return isLayoutFrame(node) && this.#enters(node);
   }
 
   /** Where each group placed in a flow was before, to move its contents by the difference. */
@@ -479,7 +487,7 @@ export class LayoutEngine {
     for (const id of this.#doc.childIds(groupId)) {
       const node = this.#doc.get(id);
       if (node?.type === "group") this.#settleGroup(id);
-      else if (isLayoutFrame(node)) this.run(id);
+      else if (this.#nested(node)) this.run(id);
     }
   }
 
@@ -520,7 +528,7 @@ export class LayoutEngine {
     const out: NodeRecord[] = [];
     for (const id of this.#doc.childIds(frame.id)) {
       const child = this.#doc.get(id);
-      if (child && isLayoutFrame(child) && !inFlow(child)) out.push(child);
+      if (child && this.#nested(child) && !inFlow(child)) out.push(child);
     }
     return out;
   }
@@ -542,7 +550,7 @@ export class LayoutEngine {
   /** Bottom-up: settle the size of a hugging layout frame from its content. */
   measure(frame: NodeRecord): void {
     const children = this.#children(frame);
-    for (const child of children) if (isLayoutFrame(child)) this.measure(child);
+    for (const child of children) if (this.#nested(child)) this.measure(child);
     // Layout frames out of the flow (absolute or hidden) still size themselves
     // and their contents; the flow just doesn't place them. The frames in a
     // group settle before the group's box is read.
@@ -677,7 +685,7 @@ export class LayoutEngine {
     const children = this.#children(frame);
     if (isGrid(frame)) this.#arrangeGrid(frame, children);
     else this.#arrangeFlex(frame, children);
-    for (const child of children) if (isLayoutFrame(child)) this.arrange(child);
+    for (const child of children) if (this.#nested(child)) this.arrange(child);
   }
 
   #arrangeFlex(frame: NodeRecord, children: NodeRecord[]): void {
@@ -724,7 +732,7 @@ export class LayoutEngine {
 
     // Children that are layout frames settle their own content first, so a
     // hugging child has its final size before we position it.
-    for (const child of children) if (isLayoutFrame(child)) this.measure(child);
+    for (const child of children) if (this.#nested(child)) this.measure(child);
 
     const justify = getProp(frame.props, "justifyContent");
     let crossStart = row ? pad.top : pad.left;
@@ -759,6 +767,63 @@ export class LayoutEngine {
     });
   }
 
+  /**
+   * What a grid item brings to the tracks it's in: its size, or when it
+   * stretches to its cells, what its content needs, as CSS sizes a grid's
+   * tracks by their items' content. (A stretched layer's own size is the
+   * track's, so it can't size the track; a stretched layer with no layout
+   * brings its minimum.)
+   */
+  #contribution(child: NodeRecord, axis: Axis, stretching: boolean): number {
+    if (stretching && isLayoutFrame(child)) return this.#contentSize(child, axis);
+    return this.#intrinsic(child, axis, stretching);
+  }
+
+  /**
+   * The size a layout frame's content needs on an axis, with its padding and
+   * within its limits: what it would hug to, its Fill and stretched layout
+   * frames at what their own content needs, other Fill and stretched layers
+   * at their minimum.
+   */
+  #contentSize(frame: NodeRecord, axis: Axis): number {
+    const children = this.#children(frame);
+    const pad = padding(frame);
+    let content: number;
+    if (isGrid(frame)) {
+      const { cells, rowCount } = placeGridItems(frame, children);
+      const defs = this.#gridDefs(frame, rowCount);
+      const sizes = this.#gridTracks(
+        frame,
+        children,
+        cells,
+        axis,
+        axis === "h" ? defs.columns : defs.rows,
+        null,
+      );
+      content = total(sizes, getProp(frame.props, axis === "h" ? "gap" : "rowGap"));
+    } else {
+      const axes = this.#flexAxes(frame);
+      if (axis === axes.main) {
+        const sizes = children.map((c) =>
+          this.#contribution(c, axis, c.type !== "group" && sizing(c, axis) === "fill"),
+        );
+        content = total(sizes, axes.gap);
+      } else {
+        const lines = this.#lines(children, axes);
+        const thickness = lines.map((line) =>
+          line.reduce(
+            (m, c) =>
+              Math.max(m, this.#contribution(c, axis, stretches(c, axis, crossAlign(frame, c)))),
+            0,
+          ),
+        );
+        content = total(thickness, axes.lineGap);
+      }
+    }
+    const [min, max] = limits(frame, axis);
+    return clamp(content + (axis === "h" ? pad.left + pad.right : pad.top + pad.bottom), min, max);
+  }
+
   /** Track sizes on one axis of a grid; `inner` null when the frame hugs that axis. */
   #gridTracks(
     frame: NodeRecord,
@@ -773,7 +838,11 @@ export class LayoutEngine {
       return {
         start: axis === "h" ? cell.column : cell.row,
         span: axis === "h" ? cell.columnSpan : cell.rowSpan,
-        size: this.#intrinsic(child, axis, stretches(child, axis, cellAlign(frame, child, axis))),
+        size: this.#contribution(
+          child,
+          axis,
+          stretches(child, axis, cellAlign(frame, child, axis)),
+        ),
       };
     });
     const gap = getProp(frame.props, axis === "h" ? "gap" : "rowGap");
@@ -842,7 +911,7 @@ export class LayoutEngine {
         clamp(span(columns, cell.column, cell.columnSpan, columnGap), min, max),
       );
     }
-    for (const child of children) if (isLayoutFrame(child)) this.measure(child);
+    for (const child of children) if (this.#nested(child)) this.measure(child);
 
     const rows = this.#gridTracks(
       frame,
@@ -858,7 +927,7 @@ export class LayoutEngine {
       const [min, max] = limits(child, "v");
       this.#claim(child, "v", clamp(span(rows, cell.row, cell.rowSpan, rowGap), min, max));
     }
-    for (const child of children) if (isLayoutFrame(child)) this.measure(child);
+    for (const child of children) if (this.#nested(child)) this.measure(child);
 
     const columnTracks = trackStarts(columns, columnGap, pad.left);
     const rowTracks = trackStarts(rows, rowGap, pad.top);
@@ -1050,6 +1119,59 @@ export function layoutOps(doc: Doc, ids: Iterable<string>): Op[] {
   const roots = layoutRoots(doc, ids);
   if (roots.length === 0) return [];
   const engine = new LayoutEngine(doc);
+  for (const root of roots) engine.run(root);
+  return engine.diff();
+}
+
+/**
+ * Lays out the grids in a file made elsewhere (an import), and what hugs
+ * them. Such a file's layout is otherwise kept as it was saved, but a grid's
+ * saved items can lag what the grid lays out where it was made (Figma lays
+ * its grids out as they're shown, from their tracks and their items'
+ * content). So each grid is laid out, with everything inside it; then, where
+ * that changed its size, the layout frames above it that hug it, up to the
+ * first that doesn't (whose layers it places again). Their other layers keep
+ * their insides as they were.
+ */
+export function gridImportOps(doc: Doc): Op[] {
+  const grids: NodeRecord[] = [];
+  for (const node of doc.nodes()) if (isLayoutFrame(node) && isGrid(node)) grids.push(node);
+  if (grids.length === 0) return [];
+  // Layout frames in a grid (through anything), and those above a grid that changed.
+  const inGrid = new Map<string, boolean>();
+  const insideGrid = (node: NodeRecord): boolean => {
+    const known = inGrid.get(node.id);
+    if (known !== undefined) return known;
+    const parent = doc.get(node.parent);
+    const is = isGrid(node) || (parent !== undefined && insideGrid(parent));
+    inGrid.set(node.id, is);
+    return is;
+  };
+  const above = new Set<string>();
+  const engine = new LayoutEngine(doc, {
+    enters: (frame) => above.has(frame.id) || insideGrid(frame),
+  });
+  for (const grid of grids) engine.run(grid.id);
+  const roots = new Set<string>();
+  for (const grid of grids) {
+    const box = engine.box(grid.id);
+    const resized =
+      round2(box.width) !== round2(getProp(grid.props, "width")) ||
+      round2(box.height) !== round2(getProp(grid.props, "height"));
+    if (!resized) continue;
+    let node = grid;
+    let top: string | null = null;
+    while (inFlow(node)) {
+      const parent = doc.get(node.parent);
+      if (!isLayoutFrame(parent)) break;
+      above.add(parent.id);
+      top = parent.id;
+      if (sizing(parent, "h") !== "hug" && sizing(parent, "v") !== "hug") break;
+      node = parent;
+    }
+    if (top) roots.add(top);
+  }
+  // Outermost first; a root inside another's run is laid out again there, from the same boxes.
   for (const root of roots) engine.run(root);
   return engine.diff();
 }

@@ -70,6 +70,42 @@ export interface RawRecord {
       readonly componentPropAssignments?: readonly RawPropAssignment[];
     }[];
   };
+  // Grid auto layout (`stackMode: "GRID"`), which Open Pencil's graph (0.16) reads but drops.
+  /** The grid's tracks, each an id ordered by its position. */
+  readonly gridRows?: RawTrackOrder;
+  readonly gridColumns?: RawTrackOrder;
+  /** Each track's size, by id. */
+  readonly gridRowsSizing?: RawTrackSizes;
+  readonly gridColumnsSizing?: RawTrackSizes;
+  readonly gridRowGap?: number;
+  readonly gridColumnGap?: number;
+  /** A grid item's first row and column (track ids), and how many it spans. */
+  readonly gridRowAnchor?: RawGuid;
+  readonly gridColumnAnchor?: RawGuid;
+  readonly gridRowSpan?: number;
+  readonly gridColumnSpan?: number;
+  readonly gridChildHorizontalAlign?: string;
+  readonly gridChildVerticalAlign?: string;
+}
+
+export interface RawTrackOrder {
+  readonly entries?: readonly { readonly id?: RawGuid; readonly position?: string }[];
+}
+
+/** How a grid track sizes: Figma's FIXED (px), FLEX (fr) or HUG (auto), between a min and a max. */
+export interface RawTrackSizing {
+  readonly type?: "FIXED" | "FLEX" | "HUG";
+  readonly value?: number;
+}
+
+export interface RawTrackSizes {
+  readonly entries?: readonly {
+    readonly id?: RawGuid;
+    readonly trackSize?: {
+      readonly minSizing?: RawTrackSizing;
+      readonly maxSizing?: RawTrackSizing;
+    };
+  }[];
 }
 
 /** A layer's link to a component property: which of its fields the property sets. */
