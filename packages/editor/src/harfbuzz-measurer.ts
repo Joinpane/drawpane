@@ -26,7 +26,8 @@
  * - Ascent and descent are chosen as Chromium (Skia on FreeType) chooses
  *   them: OS/2 typo metrics when the font sets USE_TYPO_METRICS, else hhea,
  *   else typo, else win, with MVAR's deltas. Cap height is the top of "H".
- *   Both are rounded as the canvas measurer reads them (`verticalMetrics`).
+ *   Both are rounded as the canvas measurer reads them (`verticalMetrics`,
+ *   `capHeightEm`).
  *
  * Measuring is synchronous, as the editor's is: `load` the faces a document
  * needs first (`measuredFaces` lists them). A face with no file is measured
@@ -39,6 +40,7 @@ import { getProp } from "@drawpane/model";
 import { textSpans } from "./rich-text";
 import { type FontBytesLoader, Shaper, type ShapingFace, shapingFace } from "./shaping";
 import {
+  capHeightEm,
   type FontMetrics,
   type ShapedText,
   type ShapingRun,
@@ -603,8 +605,8 @@ function verticalMetrics(
     ascent: Math.round((ascent / upem) * 1000) / 1000,
     descent: Math.round((descent / upem) * 1000) / 1000,
     // Skia measures glyph bounds for text over 256 px at 64 px, in whole pixels rounded
-    // out, so the canvas's cap height (the top of "H" at 1000 px) is in 64ths of an em.
-    cap: top > 0 ? Math.ceil(top * CANONICAL - 1e-9) / CANONICAL : null,
+    // out, so the canvas reads the top of "H" at 1000 px in 64ths of an em (`capHeightEm`).
+    cap: top > 0 ? capHeightEm(Math.ceil(top * CANONICAL - 1e-9) / CANONICAL) : null,
   };
 }
 

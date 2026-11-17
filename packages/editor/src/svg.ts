@@ -44,6 +44,7 @@ import type { Scene } from "./scene";
 import { dropShadowCast } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
+  drawnBaseline,
   layoutText,
   lineOffset,
   type ShapedText,
@@ -1011,7 +1012,7 @@ export function exportSvg(
             const fill = pass === 0 && top ? out.paint("fill", top, w, h) : null;
             return fill ?? ' fill="none"';
           };
-          const y = round2(baselineY(line.baseline + dy));
+          const y = round2(baselineY(drawnBaseline(line, dy)));
           // A line with outlined runs (PDF): its other fragments are placed one by one, where
           // the layout put them, since the viewer measures text without the outlined runs' features.
           if (line.fragments.some((f) => outlined.has(f))) {
@@ -1057,7 +1058,7 @@ export function exportSvg(
       const line = layout.lines.find((l) => l.fragments.includes(frag));
       if (!line) return "";
       const x0 = lineOffset(line, w, base) + frag.x;
-      const y0 = line.baseline + dy;
+      const y0 = drawnBaseline(line, dy);
       // Letter spacing follows each character, as on the canvas.
       const before: number[] = [];
       for (let i = 0, n = 0; i <= frag.text.length; i++) {
@@ -1095,7 +1096,7 @@ export function exportSvg(
       const line = layout.lines.find((l) => l.fragments.includes(frag));
       if (!grid || !line || frag.decoration === "none" || outlined.has(frag)) return "";
       const size = frag.fontSize;
-      const baseline = line.baseline + dy;
+      const baseline = drawnBaseline(line, dy);
       const y = frag.decoration === "underline" ? baseline + size * 0.1 : baseline - size * 0.3;
       return `<rect${attr("x", round2(lineOffset(line, w, base) + frag.x))}${attr("y", round2(y))}${attr("width", round2(frag.width))}${attr("height", round2(Math.max(1, size / 16)))}/>`;
     };

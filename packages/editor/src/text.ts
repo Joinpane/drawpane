@@ -196,6 +196,20 @@ export interface FontMetrics {
   readonly capHeight?: number;
 }
 
+/**
+ * A cap height in em from the top of "H" as Chromium's canvas reads it at
+ * 1000 px. Skia measures glyph bounds for text over 256 px at 64 px, in
+ * whole pixels rounded out, so the reading is the cap height rounded up to a
+ * 64th of an em: the cap height is somewhere in the 64th below it. Its
+ * middle is the best guess. The top would be up to a 64th too tall (Inter's
+ * 0.7275 read as 0.7344: 17.63 px at 24 px, where Figma trims to 17.46,
+ * which then draws a pixel low once baselines are rounded); the middle
+ * (0.7266) is at most half a 64th out either way.
+ */
+export function capHeightEm(reading: number): number {
+  return reading - 1 / 128;
+}
+
 /** Where fonts can't be measured: a typical ascent, descent and cap height, in em. */
 const FALLBACK_ASCENT = 0.8;
 const FALLBACK_CAP = 0.7;
@@ -702,6 +716,19 @@ export function textBlockOffset(node: NodeRecord, layout: TextLayout): number {
       : 0;
 }
 
+/**
+ * Where a line's glyphs (and their underline or strikethrough) are drawn:
+ * its baseline, after the block's vertical offset `dy`, rounded to a whole
+ * unit from the top of the text box. Figma lays text out unrounded (the
+ * baselines it saves for Inter 16/24 sit at 17.82) but draws each line's
+ * glyphs on a whole unit (at 18, at any zoom or export scale), so text is
+ * placed up to half a unit from where its layout says. The layout itself
+ * (line boxes, carets, selections, sizes) stays unrounded, as Figma's does.
+ */
+export function drawnBaseline(line: TextLine, dy: number): number {
+  return Math.round(line.baseline + dy);
+}
+
 /** The line a caret at `index` is on: the last one starting at or before it. */
 export function lineOf(layout: TextLayout, index: number): number {
   let k = 0;
@@ -870,7 +897,7 @@ export class CanvasTextMeasurer implements TextMeasurer {
           ? {
               ascent: t.fontBoundingBoxAscent / 1000,
               descent: t.fontBoundingBoxDescent / 1000,
-              ...(h > 0 ? { capHeight: h / 1000 } : {}),
+              ...(h > 0 ? { capHeight: capHeightEm(h / 1000) } : {}),
             }
           : null;
       this.#metrics.set(key, em);

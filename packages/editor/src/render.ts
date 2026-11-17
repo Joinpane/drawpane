@@ -37,6 +37,7 @@ import type { Scene } from "./scene";
 import { dropShadowCast } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
+  drawnBaseline,
   layoutText,
   lineHeightPx,
   lineOffset,
@@ -2134,7 +2135,7 @@ export class CanvasRenderer {
           typeset(c, frag.font);
           if (spaced)
             (c as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
-          paint(frag, x0 + frag.x, line.baseline + dy);
+          paint(frag, x0 + frag.x, drawnBaseline(line, dy));
         }
       }
     };
@@ -2311,7 +2312,7 @@ export class CanvasRenderer {
     };
     for (const line of layout.lines) {
       const x0 = lineOffset(line, width, node.props);
-      const baseline = line.baseline + dy;
+      const baseline = drawnBaseline(line, dy);
       // A list item's bullet or number, in its first character's style.
       const marker = line.marker;
       if (marker && !(this.#detail && marker.fontSize * scale < GREEK_BELOW)) {
