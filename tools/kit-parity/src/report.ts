@@ -92,7 +92,15 @@ export function reportHtml(
   meta: Record<string, unknown>,
   summary: Summary,
   frames: readonly FrameScore[],
+  /** Each frame's score in the run compared against, when there is one. */
+  was?: ReadonlyMap<string, number>,
 ): string {
+  const change = (f: FrameScore) => {
+    const before = was?.get(f.id);
+    if (before === undefined) return "";
+    const d = Math.round((f.mean - before) * 100) / 100;
+    return d === 0 ? " (same)" : ` (was ${before}, ${d > 0 ? "+" : ""}${d})`;
+  };
   const worst = [...frames].sort((a, b) => b.mean - a.mean);
   const rows = worst
     .map((f, i) => {
@@ -136,7 +144,7 @@ export function reportHtml(
       const img = (src: string) =>
         `<a href="${esc(src)}" target="_blank"><img loading="lazy" src="${esc(src)}"></a>`;
       return `<section id="f${i}"><h3>#${i + 1} ${esc(f.name)} <small><code>${esc(f.id)}</code> · ${esc(f.pageName)} · ${f.kind} · ${f.width}×${f.height}</small></h3>
-<p class="score">mean <b>${f.mean}</b> · p99 ${f.p99} · ${(f.changed * 100).toFixed(1)}% of pixels off · layout: ${l.moved.length} moved, ${l.resized.length} resized, ${l.text.length} text, ${l.visibility.length} visibility, ${l.missing.length} missing (${l.flattened} flattened), ${l.extra.length} extra, ${l.byPlace.length} matched by place (ids differ) ${flags}</p>
+<p class="score">mean <b>${f.mean}</b>${change(f)} · p99 ${f.p99} · ${(f.changed * 100).toFixed(1)}% of pixels off · layout: ${l.moved.length} moved, ${l.resized.length} resized, ${l.text.length} text, ${l.visibility.length} visibility, ${l.missing.length} missing (${l.flattened} flattened), ${l.extra.length} extra, ${l.byPlace.length} matched by place (ids differ) ${flags}</p>
 <div class="row"><figure>${img(f.images.figma)}<figcaption>Figma</figcaption></figure><figure>${img(f.images.drawpane)}<figcaption>Drawpane</figcaption></figure><figure>${img(f.images.heat)}<figcaption>Difference</figcaption></figure></div>
 ${lists ? `<details><summary>Layout deltas</summary>${lists}</details>` : ""}</section>`;
     })
@@ -144,7 +152,7 @@ ${lists ? `<details><summary>Layout deltas</summary>${lists}</details>` : ""}</s
   const index = worst
     .map(
       (f, i) =>
-        `<tr><td><a href="#f${i}">${i + 1}</a></td><td>${f.mean}</td><td>${f.p99}</td><td>${esc(f.name)}</td><td><code>${esc(f.id)}</code></td><td>${esc(f.pageName)}</td><td>${f.kind}</td><td>${f.layout.moved.length}/${f.layout.resized.length}/${f.layout.text.length}/${f.layout.missing.length}</td></tr>`,
+        `<tr><td><a href="#f${i}">${i + 1}</a></td><td>${f.mean}${change(f)}</td><td>${f.p99}</td><td>${esc(f.name)}</td><td><code>${esc(f.id)}</code></td><td>${esc(f.pageName)}</td><td>${f.kind}</td><td>${f.layout.moved.length}/${f.layout.resized.length}/${f.layout.text.length}/${f.layout.missing.length}</td></tr>`,
     )
     .join("");
   return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
