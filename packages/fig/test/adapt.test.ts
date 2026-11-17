@@ -270,7 +270,6 @@ describe("layers", () => {
       name: "Grid",
       width: 300,
       height: 100,
-      layoutMode: "GRID",
       primaryAxisSizing: "FIXED",
       counterAxisSizing: "HUG",
       paddingTop: 4,
@@ -292,6 +291,8 @@ describe("layers", () => {
       [
         "5:1",
         {
+          // Open Pencil's graph reads a grid as no auto layout; its record says it's one.
+          stackMode: "GRID",
           // Tracks are kept by id, in the order of their positions, not as listed.
           gridColumns: {
             entries: [

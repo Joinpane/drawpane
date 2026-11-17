@@ -70,7 +70,8 @@ export interface RawRecord {
       readonly componentPropAssignments?: readonly RawPropAssignment[];
     }[];
   };
-  // Grid auto layout (`stackMode: "GRID"`), which Open Pencil's graph (0.16) reads but drops.
+  // Grid auto layout (`stackMode: "GRID"`), which Open Pencil's graph (0.16) reads as none.
+  readonly stackMode?: string;
   /** The grid's tracks, each an id ordered by its position. */
   readonly gridRows?: RawTrackOrder;
   readonly gridColumns?: RawTrackOrder;

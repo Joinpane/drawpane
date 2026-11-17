@@ -208,6 +208,10 @@ function gridFields(raw: RawRecord | undefined): Partial<RestNode> {
   };
 }
 
+/** A grid auto layout frame: Open Pencil (0.16) reads one as no auto layout, so its record says. */
+const isGrid = (n: SceneNode, raw: RawRecord | undefined) =>
+  (n.layoutMode as string) === "GRID" || raw?.stackMode === "GRID";
+
 const CELL_ALIGN = new Set(["AUTO", "MIN", "CENTER", "MAX"]);
 
 /** Where a grid's item sits: the row and column it's anchored at (by its parent's track ids), its spans and alignment. */
@@ -248,7 +252,7 @@ function layoutFields(
       vertical: CONSTRAINT_V[n.verticalConstraint],
     },
   };
-  if (n.layoutMode === "GRID") {
+  if (isGrid(n, raw)) {
     // A grid's primary axis is across: its sizing modes read as a row's.
     Object.assign(out, {
       layoutMode: "GRID",
@@ -261,7 +265,7 @@ function layoutFields(
       ...gridFields(raw),
     } satisfies Partial<RestNode>);
   }
-  if (parent.layoutMode === "GRID") {
+  if (isGrid(parent, parentRaw)) {
     // Its item grows across and stretches down its cells, saved as a row's child does.
     out.layoutGrow = n.layoutGrow;
     out.layoutAlign = n.layoutAlignSelf === "STRETCH" ? "STRETCH" : "INHERIT";
@@ -350,7 +354,7 @@ export function adaptNode(
     ];
   else if (n.cornerRadius > 0) node.cornerRadius = n.cornerRadius;
   if (n.clipsContent) node.clipsContent = true;
-  const parentGuid = parent.layoutMode === "GRID" ? ids.sourceGuid(parent) : null;
+  const parentGuid = ids.sourceGuid(parent);
   const parentRaw = parentGuid ? ctx.records.get(parentGuid) : undefined;
   Object.assign(node, layoutFields(n, parent, raw, parentRaw));
   const grids = n.layoutGrids.map((g) => layoutGrid(g, n)).filter((g) => g !== null);
