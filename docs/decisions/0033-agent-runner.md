@@ -165,3 +165,12 @@ The runner hosts what's in the room today: the editor, measurer, renderer and to
 4. **Free-plan installs**: run agent tools there at all, given 10 ms of CPU on Free? Or say plainly that they need Paid?
 5. **A Container runner for large files**, which would lift the 50,000-layer agent limit: worth planning now as phase 2 of this, or only once someone asks?
 6. **Who runs migration step 0**, and on which scratch account?
+
+## Answers (2026-11-17)
+
+1. **#173 lands narrowed.** It keeps what bounds the room: the document built in bounded pages and metered, the store's read cache, publish counting, the socket size check, and restore, merge and undo paging. It drops limits that refuse ordinary work: no refusal of an agent delete by undo size, and a photo too large to decode is drawn as a marked placeholder listed in the tool's result. The review's remaining findings (rasterising, fonts, layout, SVG expansion, held replay) are this runner's to solve.
+2. **Caps fit under 128 MB together**, with the baseline. Instances of one class can share an isolate, so a runner that overcommits on one file's call can take down another file's call in the same isolate. Disposable isn't the same as alone.
+3. **`stale` as proposed**: a call is refused only when someone changed the layers it touched, by the overlap check agent undo already uses. An exact-revision rule would make agents unusable in a busy file.
+4. **Free plans: agent tools are off,** and say plainly that they need the Paid plan. 10 ms of CPU can't build an editor for any real file.
+5. **No Container runner yet.** Revisit when someone needs agents on files past 50,000 layers.
+6. **Step 0** waits for the user's choice of account: a scratch account, or throwaway scripts with their own names on the existing account, deleted afterwards and never touching the instance's own Worker, database or bucket.
