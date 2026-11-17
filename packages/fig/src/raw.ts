@@ -55,6 +55,10 @@ export interface RawRecord {
   };
   readonly fontSize?: number;
   readonly textCase?: string;
+  /** Figma's own layout of the text when it was saved: each line's height, among others. */
+  readonly derivedTextData?: {
+    readonly baselines?: readonly { readonly lineHeight?: number }[];
+  };
   readonly maskType?: string;
   readonly parentIndex?: { readonly guid?: RawGuid; readonly position?: string };
   readonly overrideKey?: RawGuid;

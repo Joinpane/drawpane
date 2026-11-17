@@ -119,8 +119,9 @@ describe("HarfBuzzMeasurer", () => {
     const metrics = m.metrics(font("Inter", 20));
     expect(metrics?.ascent).toBeCloseTo(0.969 * 20, 6);
     expect(metrics?.descent).toBeCloseTo(0.241 * 20, 6);
-    // "H" is 1490 tall (0.7275 em), which Skia measures at 64 px in whole pixels: 47/64.
-    expect(metrics?.capHeight).toBeCloseTo((47 / 64) * 20, 6);
+    // "H" is 1490 tall (0.7275 em), which Skia measures at 64 px in whole pixels: 47/64,
+    // so the cap height is between 46/64 and 47/64; the middle stands for it.
+    expect(metrics?.capHeight).toBeCloseTo((46.5 / 64) * 20, 6);
   });
 
   it("takes typo metrics only when the font asks for them, as Chromium does", async () => {

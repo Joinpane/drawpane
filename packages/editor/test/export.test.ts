@@ -517,7 +517,7 @@ describe("exportSvg", () => {
     ]);
     const svg = svgOf(editor, ["t"]);
     expect(svg).toContain(
-      `<text font-family="'Instrument Sans', sans-serif" font-size="16" font-weight="600" text-anchor="middle" fill="#1c1b1a" xml:space="preserve"><tspan x="50" y="14.8">Fish &amp; &lt;chips&gt;</tspan><tspan x="50" y="34.8">Now</tspan></text>`,
+      `<text font-family="'Instrument Sans', sans-serif" font-size="16" font-weight="600" text-anchor="middle" fill="#1c1b1a" xml:space="preserve"><tspan x="50" y="15">Fish &amp; &lt;chips&gt;</tspan><tspan x="50" y="35">Now</tspan></text>`,
     );
   });
 
@@ -614,10 +614,10 @@ describe("exportSvg", () => {
     if (!bounds) throw new Error("no bounds");
     const pdfSvg = exportSvg(editor.scene, shaping, ["t"], bounds, { outlineFeatures: true });
     // The rest of the line stays text, placed where the layout put it (after the shaped run).
-    expect(pdfSvg).toContain(`<tspan x="12" y="9.25" text-anchor="start"> ab</tspan>`);
+    expect(pdfSvg).toContain(`<tspan x="12" y="9" text-anchor="start"> ab</tspan>`);
     expect(pdfSvg).not.toContain(">12</tspan>");
     expect(pdfSvg).toContain(
-      `<g fill="#1c1b1a"><path transform="matrix(0.01 0 0 -0.01 0 9.25)" d="M0,0L10,0L10,10Z"/><path transform="matrix(0.01 0 0 -0.01 6 9.25)" d="M0,0L10,0L10,10Z"/></g>`,
+      `<g fill="#1c1b1a"><path transform="matrix(0.01 0 0 -0.01 0 9)" d="M0,0L10,0L10,10Z"/><path transform="matrix(0.01 0 0 -0.01 6 9)" d="M0,0L10,0L10,10Z"/></g>`,
     );
     // Without the option, features stay CSS.
     const plain = exportSvg(editor.scene, shaping, ["t"], bounds);

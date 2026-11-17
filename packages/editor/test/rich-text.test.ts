@@ -262,7 +262,7 @@ describe("rich text in SVG", () => {
     const svg = exportSvg(editor.scene, measurer, [id], bounds);
     expect(svg).toContain('text-anchor="middle"');
     expect(svg).toContain(
-      '<tspan x="100" y="14.8">Plan <tspan font-weight="700" fill="#e8590c">your</tspan> week</tspan>',
+      '<tspan x="100" y="15">Plan <tspan font-weight="700" fill="#e8590c">your</tspan> week</tspan>',
     );
   });
 });

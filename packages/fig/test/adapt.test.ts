@@ -12,6 +12,7 @@ import { adaptNode } from "../src/adapt";
 import { RestIds } from "../src/ids";
 import { FigNotes } from "../src/notes";
 import { prepareStyles } from "../src/styles";
+import { textFields } from "../src/text";
 
 /** A path blob: opcodes and little-endian float32 arguments. */
 function blob(...commands: [number, ...number[]][]): Uint8Array {
@@ -316,6 +317,28 @@ describe("layers", () => {
     });
     expect(rest.lineTypes).toEqual(["NONE", "UNORDERED", "UNORDERED"]);
     expect(rest.lineIndentations).toEqual([0, 1, 2]);
+  });
+
+  it("keeps a percentage line height, unless Figma's saved layout put its lines whole pixels apart", () => {
+    const { page, add } = scene();
+    // 162.5% of 14 px: 22.75 px, which Figma lays out as 23 for some layers and not others.
+    const text = add("TEXT", page.id, "3:2", { text: "Hi", fontSize: 14, lineHeight: 22.75 });
+    const percent = { lineHeight: { value: 1.625, units: "RAW" as const }, fontSize: 14 };
+    const laidOut = (lineHeight: number) => ({
+      ...percent,
+      derivedTextData: { baselines: [{ lineHeight }] },
+    });
+    const style = (raw: Parameters<typeof textFields>[1]) =>
+      (textFields(text, raw, new FigNotes()) as { style: Figma.TypeStyle }).style;
+    expect(style(percent)).toMatchObject({
+      lineHeightUnit: "FONT_SIZE_%",
+      lineHeightPercentFontSize: 162.5,
+    });
+    expect(style(laidOut(22.75))).toMatchObject({
+      lineHeightUnit: "FONT_SIZE_%",
+      lineHeightPercentFontSize: 162.5,
+    });
+    expect(style(laidOut(23))).toMatchObject({ lineHeightUnit: "PIXELS", lineHeightPx: 23 });
   });
 
   it("names an instance's layers after the instance and the component layers they copy", () => {

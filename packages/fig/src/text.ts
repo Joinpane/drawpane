@@ -6,7 +6,9 @@
  * Open Pencil keeps line heights in pixels; Figma's own record says when one
  * is a percentage of the font size, which the converter keeps as one so the
  * text scales with its size. The record's value is used only when it gives
- * the same pixels.
+ * the same pixels. Some percentages Figma lays out in whole pixels (162.5%
+ * of 14 px as 23, not 22.75): its saved layout says which, and those come in
+ * as the pixels Figma used.
  */
 import type { Figma } from "@drawpane/figma";
 import type { CharacterStyleOverride, FontFeature, SceneNode } from "@open-pencil/scene-graph";
@@ -35,6 +37,8 @@ function lineHeight(
   const r = raw?.lineHeight;
   if (r?.value !== undefined && (r.units === "RAW" || r.units === "PERCENT")) {
     const percent = r.units === "RAW" ? r.value * 100 : r.value;
+    if (Math.abs((percent / 100) * fontSize - px) < 0.01 && laidOutWhole(raw, px))
+      return { lineHeightUnit: "PIXELS", lineHeightPx: Math.round(px) };
     if (Math.abs((percent / 100) * fontSize - px) < 0.01)
       return {
         lineHeightUnit: "FONT_SIZE_%",
@@ -43,6 +47,19 @@ function lineHeight(
       };
   }
   return { lineHeightUnit: "PIXELS", lineHeightPx: px };
+}
+
+/**
+ * Whether Figma laid a fractional line height out as whole pixels, as its
+ * saved layout (`derivedTextData`) shows: its lines are the rounded height
+ * apart. In a 500k-layer commercial UI kit, 72 of the 105 text layers with a
+ * fractional percentage were laid out whole, nearly all with their font size
+ * bound to a variable; the same percentage on the others stayed exact.
+ */
+function laidOutWhole(raw: RawRecord | undefined, px: number): boolean {
+  const saved = raw?.derivedTextData?.baselines?.[0]?.lineHeight;
+  if (saved === undefined || Math.abs(px - Math.round(px)) < 0.01) return false;
+  return Math.abs(saved - Math.round(px)) < 0.001;
 }
 
 /** The style of a stretch of characters that differs from the text's own. */
