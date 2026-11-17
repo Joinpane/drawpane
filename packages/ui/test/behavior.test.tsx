@@ -592,9 +592,68 @@ describe("LayerRow", () => {
     const onToggleHidden = vi.fn();
     const onClick = vi.fn();
     render(<LayerRow name="Tab bar" hidden onToggleHidden={onToggleHidden} onClick={onClick} />);
-    await user.click(screen.getByRole("button", { name: "Show layer" }));
+    const hide = screen.getByRole("button", { name: "Hide" });
+    expect(hide.getAttribute("aria-pressed")).toBe("true");
+    expect(hide.title).toBe("Show");
+    await user.click(hide);
     expect(onToggleHidden).toHaveBeenCalledTimes(1);
     expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it("shows a locked layer's solid padlock, and only offers one on an unlocked layer", () => {
+    const { container } = render(
+      <div role="tree" aria-label="Layers">
+        <LayerRow name="Tab bar" locked onToggleLocked={vi.fn()} onToggleHidden={vi.fn()} />
+        <LayerRow name="Header" onToggleLocked={vi.fn()} onToggleHidden={vi.fn()} />
+      </div>,
+    );
+    const [locked, unlocked] = screen.getAllByRole("button", { name: "Lock" });
+    if (!locked || !unlocked) throw new Error("no lock buttons");
+    // Locked: pressed, always shown (is-on), the closed padlock, and a click unlocks.
+    expect(locked.getAttribute("aria-pressed")).toBe("true");
+    expect(locked.classList.contains("is-on")).toBe(true);
+    expect(locked.title).toBe("Unlock");
+    // Unlocked: not pressed, an offer shown on hover or focus, the open padlock.
+    expect(unlocked.getAttribute("aria-pressed")).toBe("false");
+    expect(unlocked.classList.contains("is-offer")).toBe(true);
+    expect(unlocked.title).toBe("Lock");
+    // The two padlocks are different glyphs: the closed one's body is filled.
+    const body = (button: HTMLElement) => button.querySelector("rect")?.getAttribute("fill");
+    expect(body(locked)).toBe("currentColor");
+    expect(body(unlocked)).toBeNull();
+    expect(container.querySelectorAll(".dp-layer__actions .is-on")).toHaveLength(1);
+  });
+
+  it("lets Tab reach the toggles on the row that holds the tree's focus, and only that row", () => {
+    render(
+      <div role="tree" aria-label="Layers">
+        <LayerRow name="Focused" tabIndex={0} onToggleLocked={vi.fn()} onToggleHidden={vi.fn()} />
+        <LayerRow name="Other" tabIndex={-1} onToggleLocked={vi.fn()} onToggleHidden={vi.fn()} />
+      </div>,
+    );
+    const tabbable = screen
+      .getAllByRole("button")
+      .filter((b) => b.getAttribute("tabindex") === "0")
+      .map((b) => b.getAttribute("aria-label"));
+    expect(tabbable).toEqual(["Lock", "Hide"]);
+  });
+
+  it("keeps Space and Enter on a toggle from reaching the tree", async () => {
+    const user = userEvent.setup();
+    const onToggleLocked = vi.fn();
+    const onTreeKey = vi.fn();
+    render(
+      // biome-ignore lint/a11y/noStaticElementInteractions: a stand-in for the tree's key handler
+      <div onKeyDown={(e) => onTreeKey(e.key)}>
+        <LayerRow name="Tab bar" tabIndex={0} onToggleLocked={onToggleLocked} />
+      </div>,
+    );
+    screen.getByRole("button", { name: "Lock" }).focus();
+    await user.keyboard("{Enter}");
+    expect(onToggleLocked).toHaveBeenCalledTimes(1);
+    expect(onTreeKey).not.toHaveBeenCalledWith("Enter");
+    await user.keyboard("{ArrowDown}");
+    expect(onTreeKey).toHaveBeenCalledWith("ArrowDown");
   });
 });
 

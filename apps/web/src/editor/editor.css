@@ -529,12 +529,39 @@
   display: flex;
   flex-direction: column;
 }
+/*
+ * A deep tree scrolls sideways (Shift+wheel, a trackpad swipe) rather than
+ * squeezing its names, as in Figma. A swipe that reaches the end stays in the
+ * panel instead of paging the browser back.
+ */
 .layers__scroll {
   flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 0 var(--space-200) var(--space-200);
+  overflow: auto;
+  overscroll-behavior-x: contain;
+  /*
+   * Inset by margin, not padding, so a scrolled tree is clipped 8px in from the
+   * pane's edges, as the rows are when it isn't, and the toggles stick to that edge.
+   */
+  margin: 0 var(--space-200);
+  padding: 0 0 var(--space-200);
   outline: none;
+}
+/* As wide as the deepest open row needs (LayersPanel sets the width), and never narrower than the panel. */
+.layers__list {
+  position: relative;
+  min-width: 100%;
+}
+/* While the tree is wider than the panel, names fade out under the toggles stuck to its edge. */
+.layers__scroll.is-wide :is(.dp-layer:hover, .dp-layer:focus-within) .dp-layer__actions::before,
+.layers__scroll.is-wide .dp-layer__actions:has(.is-on)::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 100%;
+  bottom: 0;
+  width: var(--space-200);
+  background: linear-gradient(to right, transparent, var(--dp-layer-ground));
+  pointer-events: none;
 }
 .layers__empty {
   margin: var(--space-300);

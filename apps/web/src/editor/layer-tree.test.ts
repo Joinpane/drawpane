@@ -1,7 +1,15 @@
 import { Doc } from "@drawpane/editor";
 import { type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { containersWithin, dropTarget, kindOf, layerRows } from "./layer-tree";
+import {
+  containersWithin,
+  dropTarget,
+  INDENT,
+  kindOf,
+  layerRows,
+  revealLeft,
+  rowWidthFor,
+} from "./layer-tree";
 
 /**
  * Home (frame, auto layout)
@@ -152,5 +160,31 @@ describe("dropTarget", () => {
       depth: 2,
     });
     expect(dropTarget(rows, 1, 0.1, 1, parentOf)).toMatchObject({ id: "frame1", where: "before" });
+  });
+});
+
+describe("deep trees", () => {
+  it("widens the tree a level at a time, so a deep name keeps its room", () => {
+    expect(rowWidthFor(1) - rowWidthFor(0)).toBe(INDENT);
+    // The narrowest pane (240px, less its 8px insets) fits about 8 levels before it scrolls.
+    expect(rowWidthFor(0)).toBeLessThan(224);
+    expect(rowWidthFor(14)).toBeGreaterThan(224);
+  });
+
+  it("leaves a row in view alone", () => {
+    expect(revealLeft(0, 0, 224)).toBeNull();
+    expect(revealLeft(2, 0, 224)).toBeNull();
+  });
+
+  it("scrolls across to a deep row's name, keeping a level of its parent in view", () => {
+    const left = revealLeft(13, 0, 224);
+    expect(left).toBe(4 + 12 * INDENT);
+    // From there, the row is in view.
+    expect(revealLeft(13, left ?? 0, 224)).toBeNull();
+  });
+
+  it("scrolls back to a shallow row", () => {
+    expect(revealLeft(1, 150, 224)).toBe(4);
+    expect(revealLeft(0, 150, 224)).toBe(0);
   });
 });

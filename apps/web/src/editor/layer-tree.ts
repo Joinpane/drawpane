@@ -303,3 +303,36 @@ export function dropPlacement(
     ? { parent: into, below: node.id, above: siblings[index + 1] ?? null }
     : { parent: into, below: siblings[index - 1] ?? null, above: node.id };
 }
+
+/* Geometry: how wide the tree draws, and where it scrolls to show a row. */
+
+/** Each nesting level indents a row this much (the LayerRow's 12px), from its 4px start. */
+export const INDENT = 12;
+export const INDENT_START = 4;
+/** A row's caret, icon and the gaps around them, before its name starts. */
+const LEAD = 12 + 4 + 16 + 4;
+/**
+ * The room a name keeps however deep its row (about a dozen characters): past
+ * that, the tree scrolls sideways rather than squeezing names to "K…".
+ */
+const NAME_MIN = 96;
+/** The lock and the eye at a row's end, the gap before them and the row's end padding. */
+const TRAIL = 4 + 16 + 4 + 16 + 6;
+
+/** How wide a row at `depth` must be to keep its name readable. */
+export function rowWidthFor(depth: number): number {
+  return INDENT_START + depth * INDENT + LEAD + NAME_MIN + TRAIL;
+}
+
+/**
+ * Where to scroll a tree `viewport` wide (now at `scrollLeft`) so a row at
+ * `depth` shows its caret and the start of its name, clear of the toggles over
+ * the right edge; null if it already does. It keeps a level of the parent in
+ * view, so the row still reads as nested.
+ */
+export function revealLeft(depth: number, scrollLeft: number, viewport: number): number | null {
+  const start = INDENT_START + depth * INDENT;
+  const nameEnd = start + LEAD + NAME_MIN;
+  if (start >= scrollLeft && nameEnd <= scrollLeft + viewport - TRAIL) return null;
+  return Math.max(0, start - INDENT);
+}
