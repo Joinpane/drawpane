@@ -32,7 +32,22 @@ For a large file give Node room: `node --max-old-space-size=12000 tools/kit-pari
 3. **drawpane** converts the `.fig` (`src/convert.ts`: `openFig`, `read`, images as the server stores them, `convertFile`, `pinInstances`) into `$OUT/drawpane-cache/<key>/`, cached by the file's bytes and the source of the packages conversion runs through (a large kit takes minutes), then runs the opt-in spec `apps/web/e2e/kit-parity.spec.ts`. It imports the converted nodes into a fresh local instance on `--port` the way the dashboard saves an import, opens the file in the editor, and for each frame loads and checks its fonts, reads its layout (`scene.bounds` of every layer) and draws it at 2× over the page rect Figma exported (`drawpaneParity` on the debug handle). Output goes to `$OUT/runs/<timestamp>/drawpane/`. Missing fonts fail the step, since they'd swamp every other difference.
 4. **compare** scores each frame in the browser, both sides over white: the mean difference over RGB (0 to 255) and its 99th percentile, as `e2e/parity/pixels.ts` measures them, and a heat map. Layout is compared layer by layer, matched by Figma id (`src/layout-diff.ts`): moves relative to the parent and size changes past 0.5 px, text boxes, visibility, layers missing on either side (boolean operands, which import as one path, are counted apart). It writes `scoreboard.json` and `report.html` into the run's folder (`--run` picks a run; the latest by default).
 
-Two runs on the same code give the same scores. To check, run `drawpane` twice and compare the second with `--against <first run>/scoreboard.json`: any frame whose scores or layout deltas differ fails it.
+## Judging a fix
+
+Run `drawpane` on the fix (a new run folder, with `--run`), then `compare --against <baseline run>/scoreboard.json`. It prints the median, p90 and total before and after and how many frames got better or worse, writes the lists to the run's `against.json` (worst regressions first), and shows each frame's change in the report. A fix should make its frames better and none worse. With `--same` it fails instead unless nothing changed at all: that's how two runs on the same code are checked to score the same.
+
+The conversion cache key covers the packages conversion runs through, `pnpm-lock.yaml` and `patches/`, so a fix there, or a patch to Open Pencil, converts again; nothing else does.
+
+The `drawpane` step holds a lock in the temp folder while it converts and draws: a large kit takes several GB, and two or three at once run a machine out of memory. A second run waits and says whose run it's waiting for. `KIT_PARITY_NO_LOCK=1` skips it.
+
+## Another file
+
+Every file gets its own output folder (`--out`), so files never mix: the sample, Figma's truth, the conversion cache and the runs all live there. For a new file:
+
+1. Save a local copy from Figma (**File → Save local copy**) and note its file key. The Figma account needs edit access to that file (or to your own duplicate of it, which has the same node ids).
+2. `sample`, then `figma` (resumable, about 7 s a frame on a VM without a GPU, faster for small frames), then `drawpane` and `compare`. That run is the file's baseline.
+3. Check `figma/failed.json` (frames Figma couldn't export) and the compare log's id check (`idsMismatched` must be 0: the sample's ids must name the same nodes in Figma).
+4. Fonts: a run fails when Drawpane can't draw a face the file uses. Google fonts load by themselves; anything else needs a team font upload first.
 
 ## Read only
 
@@ -50,6 +65,7 @@ $OUT/
     drawpane/<id>.png, <id>.json
     heat/<id>.png
     scoreboard.json     per-frame scores and layout deltas, and a summary
+    against.json        with --against: before and after, what got better and worse
     report.html         worst first: Figma, Drawpane and the difference side by side
 ```
 

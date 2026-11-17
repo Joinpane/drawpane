@@ -35,18 +35,20 @@ import { convertFile } from "@drawpane/figma";
 import { mediaProblem, sniffImage } from "@drawpane/model";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
-/** What a conversion runs through: a change to any of these converts again. */
+/** What a conversion runs through: a change to any of these converts again. Missing ones are skipped. */
 const SOURCES = [
   "packages/fig",
   "packages/figma",
   "packages/model",
   "packages/editor",
   "packages/import-kit",
+  // Dependencies, and patches to them, convert too (the reader is Open Pencil's).
   "pnpm-lock.yaml",
   "patches",
 ];
 
 function walk(path: string, out: string[]): void {
+  if (!existsSync(path)) return;
   const stat = statSync(path);
   if (stat.isFile()) {
     out.push(path);

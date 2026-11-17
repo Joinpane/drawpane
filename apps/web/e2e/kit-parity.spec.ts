@@ -15,8 +15,9 @@
  * - Stage "compare": each frame's pixels against Figma's (mean and p99 as
  *   e2e/parity/pixels.ts measures them, both over white) and its layout,
  *   matched by Figma id; then scoreboard.json and report.html in the run's
- *   folder. With E2E_KIT_PARITY_AGAINST (another run's scoreboard.json) the
- *   scores must be the same.
+ *   folder. With E2E_KIT_PARITY_AGAINST (another run's scoreboard.json) it
+ *   lists what got better and worse (against.json, and in the report); with
+ *   E2E_KIT_PARITY_SAME=1 as well, the scores must be the same.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -456,38 +457,95 @@ test.describe
         join(runDir, "scoreboard.json"),
         `${JSON.stringify({ meta, summary, frames }, null, 1)}\n`,
       );
-      writeFileSync(join(runDir, "report.html"), reportHtml("Kit parity", meta, summary, frames));
-      console.log(
-        `Scored ${frames.length} frames in ${seconds(started)} s: median ${summary.median}, p90 ${summary.p90}, over ${JSON.stringify(summary.over)}. Report: ${join(runDir, "report.html")}`,
-      );
-      await context.close();
-
+      // Against another run: what got better and worse, frame by frame.
       const against = process.env.E2E_KIT_PARITY_AGAINST;
+      let was: Map<string, FrameScore> | null = null;
+      let changed: string[] = [];
       if (against) {
         const before = readJson<{ frames: FrameScore[] }>(against);
-        const was = new Map(before.frames.map((f) => [f.id, f]));
+        was = new Map(before.frames.map((f) => [f.id, f]));
+        const prior = was;
         // Frames both runs scored; any one only scored is listed, not counted as changed.
-        const both = frames.filter((f) => was.has(f.id));
+        const both = frames.filter((f) => prior.has(f.id));
         const onlyOne = frames.length - both.length + (before.frames.length - both.length);
-        const changed = both
+        const delta = (f: FrameScore) => ({
+          id: f.id,
+          name: f.name,
+          was: (prior.get(f.id) as FrameScore).mean,
+          now: f.mean,
+        });
+        const better = both
+          .filter((f) => f.mean < (prior.get(f.id) as FrameScore).mean - 0.01)
+          .map(delta)
+          .sort((a, b) => a.now - a.was - (b.now - b.was));
+        const worse = both
+          .filter((f) => f.mean > (prior.get(f.id) as FrameScore).mean + 0.01)
+          .map(delta)
+          .sort((a, b) => b.now - b.was - (a.now - a.was));
+        changed = both
           .filter((f) => {
-            const b = was.get(f.id) as FrameScore;
+            const b = prior.get(f.id) as FrameScore;
             return (
               b.mean !== f.mean ||
               b.p99 !== f.p99 ||
               JSON.stringify(b.layout) !== JSON.stringify(f.layout)
             );
           })
-          .map((f) => `${f.id}: ${was.get(f.id)?.mean} → ${f.mean}`);
+          .map((f) => `${f.id}: ${prior.get(f.id)?.mean} → ${f.mean}`);
+        const beforeSummary = summarize(
+          before.frames.filter((f) => frames.some((g) => g.id === f.id)),
+        );
+        const afterSummary = summarize(both);
+        const sum = (list: readonly FrameScore[]) =>
+          Math.round(list.reduce((a, f) => a + f.mean, 0) * 100) / 100;
         writeFileSync(
           join(runDir, "against.json"),
-          `${JSON.stringify({ against, compared: both.length, onlyOne, changed }, null, 2)}\n`,
+          `${JSON.stringify(
+            {
+              against,
+              compared: both.length,
+              onlyOne,
+              before: {
+                median: beforeSummary.median,
+                p90: beforeSummary.p90,
+                sum: sum(both.map((f) => prior.get(f.id) as FrameScore)),
+                over: beforeSummary.over,
+              },
+              after: {
+                median: afterSummary.median,
+                p90: afterSummary.p90,
+                sum: sum(both),
+                over: afterSummary.over,
+              },
+              better,
+              worse,
+              changed: changed.length,
+            },
+            null,
+            2,
+          )}\n`,
         );
         console.log(
-          `Against ${against}: ${both.length} frames compared, ${changed.length} differ, ${onlyOne} scored by one run only.`,
+          `Against ${against}: ${both.length} frames compared; median ${beforeSummary.median} → ${afterSummary.median}, p90 ${beforeSummary.p90} → ${afterSummary.p90}, total ${sum(both.map((f) => prior.get(f.id) as FrameScore))} → ${sum(both)}; ${better.length} better, ${worse.length} worse, ${changed.length} changed, ${onlyOne} scored by one run only.`,
         );
-        expect(changed, `Scores differ from ${against}`).toEqual([]);
+        for (const w of worse.slice(0, 10)) console.log(`  worse: ${w.id} ${w.was} → ${w.now}`);
       }
+      writeFileSync(
+        join(runDir, "report.html"),
+        reportHtml(
+          "Kit parity",
+          meta,
+          summary,
+          frames,
+          was ? new Map([...was].map(([id, f]) => [id, f.mean])) : undefined,
+        ),
+      );
+      console.log(
+        `Scored ${frames.length} frames in ${seconds(started)} s: median ${summary.median}, p90 ${summary.p90}, over ${JSON.stringify(summary.over)}. Report: ${join(runDir, "report.html")}`,
+      );
+      await context.close();
+      if (process.env.E2E_KIT_PARITY_SAME === "1")
+        expect(changed, `Scores differ from ${against}`).toEqual([]);
       expect(idsMismatched, "Sampled ids that name another node in Figma").toBe(0);
       expect(
         Object.keys(run.missingFonts),

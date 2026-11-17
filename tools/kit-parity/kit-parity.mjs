@@ -11,8 +11,13 @@
 //                                              Figma's renders and trees (resumable)
 //   drawpane  --fig <file.fig> [--port 8951] [--run <dir>]
 //                                              Drawpane's renders and layout (a new run)
-//   compare   [--run <dir>] [--against <scoreboard.json>]
-//                                              scores, scoreboard.json and report.html
+//   compare   [--run <dir>] [--against <scoreboard.json>] [--same]
+//                                              scores, scoreboard.json and report.html;
+//                                              with --against, what got better and worse
+//                                              (--same: fail unless nothing changed)
+//
+// The drawpane step converts and draws a whole file: one at a time per
+// machine (a lock in the temp folder), since each takes several GB.
 //
 // Everything a run makes stays in <dir>, which should be outside the repo
 // (or in a gitignored folder) when the file isn't yours to publish.
@@ -35,6 +40,7 @@ const { positionals, values } = parseArgs({
     port: { type: "string" },
     run: { type: "string" },
     against: { type: "string" },
+    same: { type: "boolean" },
   },
 });
 const step = positionals[0];
@@ -117,11 +123,14 @@ function spec(stage, extra = {}) {
 }
 
 async function drawpane() {
-  const cache = await convert();
-  if (!existsSync(join(out, "sample.json"))) await sample();
-  spec("render", {
-    E2E_KIT_PARITY_CACHE: cache,
-    ...(values.run ? { E2E_KIT_PARITY_RUN: resolve(values.run) } : {}),
+  const { withMachineLock } = await import("./src/lock.mjs");
+  await withMachineLock(`drawpane step for ${out}`, async () => {
+    const cache = await convert();
+    if (!existsSync(join(out, "sample.json"))) await sample();
+    spec("render", {
+      E2E_KIT_PARITY_CACHE: cache,
+      ...(values.run ? { E2E_KIT_PARITY_RUN: resolve(values.run) } : {}),
+    });
   });
 }
 
@@ -129,6 +138,7 @@ function compare() {
   spec("compare", {
     ...(values.run ? { E2E_KIT_PARITY_RUN: resolve(values.run) } : {}),
     ...(values.against ? { E2E_KIT_PARITY_AGAINST: resolve(values.against) } : {}),
+    ...(values.same ? { E2E_KIT_PARITY_SAME: "1" } : {}),
   });
 }
 
