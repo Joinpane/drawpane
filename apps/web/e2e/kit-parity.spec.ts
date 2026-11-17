@@ -243,14 +243,16 @@ async function score(page: Page, figma: string, drawpane: string) {
   );
 }
 
-test.use({
-  // A 500,000-layer file in one tab.
-  launchOptions: { args: ["--js-flags=--max-old-space-size=8192"] },
-  // No traces or screenshots: they'd hold hundreds of MB of import, and the file's content
-  // belongs in the harness's own output folder, not in test-results.
-  trace: "off",
-  screenshot: "off",
-});
+// Only when it runs: otherwise these options would start a browser of their own just to skip.
+if (OUT)
+  test.use({
+    // A 500,000-layer file in one tab.
+    launchOptions: { args: ["--js-flags=--max-old-space-size=8192"] },
+    // No traces or screenshots: they'd hold hundreds of MB of import, and the file's content
+    // belongs in the harness's own output folder, not in test-results.
+    trace: "off",
+    screenshot: "off",
+  });
 
 test.describe
   .serial("kit parity", () => {
