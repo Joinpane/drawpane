@@ -1,0 +1,66 @@
+diff --git a/dist/chunks/index.js b/dist/chunks/index.js
+index 36f50085870ae6ed0ed0c785a8f0318f1ee3ecc6..0aba1038dfc6dcc6cc06c60a81692d03e748e320 100644
+--- a/dist/chunks/index.js
++++ b/dist/chunks/index.js
+@@ -454,7 +454,7 @@ function modesDefaultFirst(collection) {
+ 	const [defaults, rest] = partition(collection.modes, (m) => m.modeId === collection.defaultModeId);
+ 	return [...defaults, ...rest];
+ }
+-function resolveVariable(graph, variableId, modeId, visited) {
++function resolveVariable(graph, variableId, modeId, visited, node) {
+ 	if (visited?.has(variableId)) return void 0;
+ 	const variable = graph.variables.get(variableId);
+ 	if (!variable) return void 0;
+@@ -467,7 +467,18 @@ function resolveVariable(graph, variableId, modeId, visited) {
+ 	if (value && typeof value === "object" && "aliasId" in value) {
+ 		const seen = visited ?? /* @__PURE__ */ new Set();
+ 		seen.add(variableId);
+-		return resolveVariable(graph, value.aliasId, preferredModeId, seen);
++		// Drawpane patch: an alias into another collection resolves in that collection's mode where
++		// the layer is (else its active mode), as Figma does. A mode of this collection means
++		// nothing there, and would fall back to that collection's default mode.
++		const target = graph.variables.get(value.aliasId);
++		const aliasModeId = target && target.collectionId !== variable.collectionId ? node ? getNodeVariableModeId(graph, node.id, target.collectionId, node.fallback) : getActiveModeId(graph, target.collectionId) : preferredModeId;
++		const resolved = resolveVariable(graph, value.aliasId, aliasModeId, seen, node);
++		// Drawpane patch: an alias that composes a colour at an opacity (COMPOSE_COLOR) applies it.
++		if (typeof value.opacity === "number" && resolved && typeof resolved === "object" && "r" in resolved) return {
++			...resolved,
++			a: resolved.a * value.opacity
++		};
++		return resolved;
+ 	}
+ 	return value;
+ }
+@@ -482,20 +493,29 @@ function resolveNumberVariable(graph, variableId) {
+ function resolveColorVariableForNode(graph, nodeId, variableId, fallback = "active") {
+ 	const variable = graph.variables.get(variableId);
+ 	if (!variable) return void 0;
+-	const value = resolveVariable(graph, variableId, getNodeVariableModeId(graph, nodeId, variable.collectionId, fallback));
++	const value = resolveVariable(graph, variableId, getNodeVariableModeId(graph, nodeId, variable.collectionId, fallback), void 0, {
++		id: nodeId,
++		fallback
++	});
+ 	if (value && typeof value === "object" && "r" in value) return value;
+ }
+ function resolveNumberVariableForNode(graph, nodeId, variableId, fallback = "active") {
+ 	const variable = graph.variables.get(variableId);
+ 	if (!variable) return void 0;
+-	const value = resolveVariable(graph, variableId, getNodeVariableModeId(graph, nodeId, variable.collectionId, fallback));
++	const value = resolveVariable(graph, variableId, getNodeVariableModeId(graph, nodeId, variable.collectionId, fallback), void 0, {
++		id: nodeId,
++		fallback
++	});
+ 	return typeof value === "number" ? value : void 0;
+ }
+ /** A variable's value in the mode a node is in, aliases followed. */
+ function resolveVariableForNode(graph, nodeId, variableId, fallback = "active") {
+ 	const variable = graph.variables.get(variableId);
+ 	if (!variable) return void 0;
+-	return resolveVariable(graph, variableId, getNodeVariableModeId(graph, nodeId, variable.collectionId, fallback));
++	return resolveVariable(graph, variableId, getNodeVariableModeId(graph, nodeId, variable.collectionId, fallback), void 0, {
++		id: nodeId,
++		fallback
++	});
+ }
+ function resolveStringVariableForNode(graph, nodeId, variableId, fallback = "active") {
+ 	const value = resolveVariableForNode(graph, nodeId, variableId, fallback);
