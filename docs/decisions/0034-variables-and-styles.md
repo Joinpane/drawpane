@@ -77,7 +77,7 @@ A binding names a variable by id. Bindings live with what they bind, so they mov
   | `paragraphSpacing` | `paragraphSpacing` | `paragraphSpacing`; `PARAGRAPH_SPACING` | number |
 
   The old keys `fill` and `stroke` (the first solid paint) are still read, and become paint bindings when a file is migrated (section 12).
-- **Paints** (fills and strokes, on layers and in paint styles): `bind: { color, opacity }` on the paint, and `bind: { color }` on each gradient stop. A bound colour gives the paint its colour with its alpha; the paint's own opacity still applies on top, as in Figma. A bound paint opacity is Drawpane's (Figma binds colours only), a percentage like layer opacity.
+- **Paints** (fills and strokes, on layers and in paint styles): `bind: { color, opacity }` on the paint, and `bind: { color }` on each gradient stop. A bound colour gives the paint its colour and its alpha, replacing the paint's opacity: Figma saves the variable's alpha as the paint's opacity, so applying both would count it twice (measured on the kit: translucent overlays and invalid fills came out nearly clear). A bound paint opacity is Drawpane's (Figma binds colours only), a percentage like layer opacity.
 - **Effects** (on layers and in effect styles): shadows `bind: { x, y, blur, spread, color, visible }`, blurs `bind: { radius, visible }`. Figma's are `offsetX`, `offsetY`, `radius`, `spread` and `color` (REST), `xVar`, `yVar`, `radiusVar`, `spreadVar` and `colorVar` (`.fig`).
 - **Text runs** carry `bindings` with the typography keys, for styled ranges, as Figma's style overrides do.
 - **Layout grids** (on frames and in grid styles): `bind: { count, gutter, offset, size }` on a grid.
