@@ -92,6 +92,7 @@ import { PagesList } from "./PagesList";
 import { PaneResizer } from "./PaneResizer";
 import { usePageZoomLock } from "./page-zoom";
 import { clampPane, PANE, panelLayout, setPanelLayout, usePanelLayout } from "./panel-layout";
+import { parityDebug } from "./parity-debug";
 import { useInspectorRoom } from "./popover-room";
 import { PrototypePanel } from "./prototype/PrototypePanel";
 import { RULER, RULER_GAP, Rulers } from "./Rulers";
@@ -419,9 +420,12 @@ function FileEditor({ fileId }: { fileId: string }) {
       drawpaneHeadless?: ReturnType<typeof headlessDebug>;
       /** The canvas and HarfBuzz text measurers, for the text parity test. */
       drawpaneMeasurers?: () => Promise<typeof import("./measure-parity")>;
+      /** Fonts, layout and exact renders of a layer, for kit parity (tools/kit-parity). */
+      drawpaneParity?: ReturnType<typeof parityDebug>;
     };
     w.drawpane = editor;
     w.drawpaneHeadless = headlessDebug(editor);
+    w.drawpaneParity = parityDebug(editor);
     w.drawpaneMeasurers = () => import("./measure-parity");
     w.drawpaneGlass = { set: setGlassTuning, get: glassTuning };
     w.drawpaneFrames = frameStatsFor(editor);
@@ -430,6 +434,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       delete w.drawpane;
       delete w.drawpaneFrames;
       delete w.drawpaneHeadless;
+      delete w.drawpaneParity;
       delete w.drawpaneVersion;
     };
   }, [editor, history.view]);
