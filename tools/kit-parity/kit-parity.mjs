@@ -15,6 +15,9 @@
 //                                              scores, scoreboard.json and report.html;
 //                                              with --against, what got better and worse
 //                                              (--same: fail unless nothing changed)
+//   detach    --fig <file.fig> | --nodes <lines.json> [--name <label>]
+//                                              which instances the compact form keeps and
+//                                              why the rest are detached (detach-<label>.json)
 //
 // The drawpane step converts and draws a whole file: one at a time per
 // machine (a lock in the temp folder), since each takes several GB.
@@ -41,6 +44,8 @@ const { positionals, values } = parseArgs({
     run: { type: "string" },
     against: { type: "string" },
     same: { type: "boolean" },
+    nodes: { type: "string" },
+    name: { type: "string" },
   },
 });
 const step = positionals[0];
@@ -142,7 +147,40 @@ function compare() {
   });
 }
 
-const steps = { sample, convert, figma, drawpane, compare };
+async function detach() {
+  const { withMachineLock } = await import("./src/lock.mjs");
+  await withMachineLock(`detach step for ${out}`, async () => {
+    const { importTs } = await import("./src/ts.mjs");
+    const { readNodes, measureDetaches, measurePins } = await importTs("detach.ts");
+    // What pinInstances unlinked is measured on what the converter gave before it.
+    process.env.KIT_PARITY_KEEP_UNPINNED = "1";
+    const cache = values.nodes ? null : await convert();
+    const source = values.nodes ? resolve(values.nodes) : join(cache, "nodes.ndjson");
+    // Next to the nodes, when they're a conversion's.
+    const unpinned = join(dirname(source), "unpinned.ndjson");
+    let pins = null;
+    if (existsSync(unpinned)) {
+      console.log(`Reading ${unpinned}`);
+      pins = measurePins(readNodes(unpinned));
+      console.log(`pinInstances: ${pins.detached} of ${pins.roots} instance roots unlinked.`);
+      for (const reason of pins.reasons.slice(0, 15))
+        console.log(`  ${reason.count}  ${reason.kind}`);
+    }
+    console.log(`Reading ${source}`);
+    const report = measureDetaches(readNodes(source), console.log);
+    const file = join(out, `detach-${values.name ?? "latest"}.json`);
+    writeFileSync(file, `${JSON.stringify({ source, pins, ...report }, null, 1)}\n`);
+    const { topLevel: t, instanceRoots: r } = report;
+    console.log(
+      `Top-level instances: ${t.total}, ${t.kept} kept, ${t.detached} detached. Instance roots: ${r.before}, ${r.keptStored} stored, ${r.compacted} compacted, ${r.detached} detached. ${report.overrides} override records, ${report.stored} records stored.`,
+    );
+    for (const reason of report.reasons.slice(0, 15))
+      console.log(`  ${reason.count}  ${reason.kind}`);
+    console.log(`Saved ${file}`);
+  });
+}
+
+const steps = { sample, convert, figma, drawpane, compare, detach };
 if (step === "all") {
   const started = Date.now();
   if (!existsSync(join(out, "sample.json"))) await sample();

@@ -40,6 +40,20 @@ The conversion cache key covers the packages conversion runs through, `pnpm-lock
 
 The `drawpane` step holds a lock in the temp folder while it converts and draws: a large kit takes several GB, and two or three at once run a machine out of memory. A second run waits and says whose run it's waiting for. `KIT_PARITY_NO_LOCK=1` skips it.
 
+## Copies that stay copies
+
+```sh
+node --max-old-space-size=12000 tools/kit-parity/kit-parity.mjs detach --fig kit.fig --out $OUT --name <label>
+node --max-old-space-size=12000 tools/kit-parity/kit-parity.mjs detach --nodes <lines.json> --out $OUT --name <label>
+```
+
+How many of the file's instances the import keeps linked to their mains, and why it unlinks the rest (`src/detach.ts`). With `--fig` it converts as the `drawpane` step does (cached), keeping what the converter gave before `pinInstances` too (`unpinned.ndjson`, with `KIT_PARITY_KEEP_UNPINNED=1`); `--nodes` takes nodes as lines of JSON instead, a stored snapshot's included. Two stages unlink copies, and both are measured:
+
+1. `pinInstances`, at import: a copy that syncing with its main would change in structure (a layer created, deleted or moved) is unlinked, with what's inside it. Each is grouped by the first such change and what it's about (measured when `unpinned.ndjson` is next to the nodes).
+2. `compactByInstance`, before upload into a file that stores compact copies (decision 0029): an instance whose compact form wouldn't rebuild it exactly is detached, and the reason given. "No copy of X" ones are grouped by what the layer and X are.
+
+It prints the counts and the commonest reasons, and writes everything to `$OUT/detach-<label>.json`. It holds the machine's lock, as `drawpane` does.
+
 ## Another file
 
 Every file gets its own output folder (`--out`), so files never mix: the sample, Figma's truth, the conversion cache and the runs all live there. For a new file:

@@ -1,4 +1,4 @@
-import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { compactByInstance, getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   canMoveInto,
@@ -361,6 +361,96 @@ describe("pinInstances (files made elsewhere)", () => {
     const editor = opened(nodes);
     expect(propagationOps(editor.doc, ["main", "label"])).toEqual([]);
     expect(editor.doc.childIds("copy")).toEqual(["copyLabel", "badge"]);
+  });
+
+  it("unlinks the copies of a nested instance it unlinks, so they copy it as it is now", () => {
+    // A button whose icon has a layer its main doesn't (so it's unlinked), a copy of the button,
+    // and a bar holding a button, with a copy of the bar: copies of copies.
+    const nodes = [
+      node("p", "page", ROOT_ID, "a0", {}),
+      node("icon", "frame", "p", "a0", { isComponent: true, width: 16, height: 16 }),
+      node("dot", "rect", "icon", "a0", { width: 4, height: 4 }),
+      node("button", "frame", "p", "a1", { isComponent: true, width: 80, height: 32 }),
+      node("slot", "frame", "button", "a0", { instanceOf: "icon", width: 16, height: 16 }),
+      node("slotDot", "rect", "slot", "a0", { mirrors: "dot", width: 4, height: 4 }),
+      node("extra", "rect", "slot", "a1", { width: 2, height: 2 }),
+      node("copy", "frame", "p", "a2", { instanceOf: "button", width: 80, height: 32 }),
+      node("copySlot", "frame", "copy", "a0", {
+        instanceOf: "icon",
+        mirrors: "slot",
+        width: 16,
+        height: 16,
+      }),
+      node("copyDot", "rect", "copySlot", "a0", { mirrors: "slotDot", width: 4, height: 4 }),
+      node("copyExtra", "rect", "copySlot", "a1", { mirrors: "extra", width: 2, height: 2 }),
+      node("bar", "frame", "p", "a3", { isComponent: true, width: 200, height: 40 }),
+      node("barButton", "frame", "bar", "a0", { instanceOf: "button", width: 80, height: 32 }),
+      node("barSlot", "frame", "barButton", "a0", {
+        instanceOf: "icon",
+        mirrors: "slot",
+        width: 16,
+        height: 16,
+      }),
+      node("barDot", "rect", "barSlot", "a0", { mirrors: "slotDot", width: 4, height: 4 }),
+      node("barExtra", "rect", "barSlot", "a1", { mirrors: "extra", width: 2, height: 2 }),
+      node("barCopy", "frame", "p", "a4", { instanceOf: "bar", width: 200, height: 40 }),
+      node("bcButton", "frame", "barCopy", "a0", {
+        instanceOf: "button",
+        mirrors: "barButton",
+        width: 80,
+        height: 32,
+      }),
+      node("bcSlot", "frame", "bcButton", "a0", {
+        instanceOf: "icon",
+        mirrors: "barSlot",
+        width: 16,
+        height: 16,
+      }),
+      node("bcDot", "rect", "bcSlot", "a0", { mirrors: "barDot", width: 4, height: 4 }),
+      node("bcExtra", "rect", "bcSlot", "a1", { mirrors: "barExtra", width: 2, height: 2 }),
+    ];
+    const { nodes: out, detached } = pinInstances(nodes);
+    expect(detached).toBe(1);
+    const props = (id: string) => (out.find((n) => n.id === id) as NodeRecord).props;
+    expect(getProp(props("slot"), "instanceOf")).toBeNull();
+    // Its copies, and copies of those, are plain copies of it, not swapped for the icon.
+    for (const id of ["copySlot", "barSlot", "bcSlot"]) {
+      expect(getProp(props(id), "instanceOf")).toBeNull();
+      expect(getProp(props(id), "overrides")).not.toContain("instanceOf");
+      expect(getProp(props(id), "mirrors")).not.toBeNull();
+    }
+    expect(getProp(props("bcButton"), "instanceOf")).toBe("button");
+    // Nothing to rebuild when it opens, and every instance keeps its link in the compact form.
+    expect(propagationOps(opened(out).doc, ["button", "bar", "icon"])).toEqual([]);
+    expect([...compactByInstance(out).detached]).toEqual([]);
+  });
+
+  it("keeps an instance a detached copy put in a slot", () => {
+    // The copy's slot holds an icon its main's slot doesn't: the copy is detached, the icon (an
+    // instance copying nothing, its layers its own main's copies) stays an instance.
+    const nodes = [
+      node("p", "page", ROOT_ID, "a0", {}),
+      node("icon", "frame", "p", "a0", { isComponent: true, width: 16, height: 16 }),
+      node("dot", "rect", "icon", "a0", { width: 4, height: 4 }),
+      node("card", "frame", "p", "a1", { isComponent: true, width: 80, height: 32 }),
+      node("slot", "frame", "card", "a0", { width: 80, height: 32 }),
+      node("copy", "frame", "p", "a2", { instanceOf: "card", width: 80, height: 32 }),
+      node("copySlot", "frame", "copy", "a0", { mirrors: "slot", width: 80, height: 32 }),
+      node("content", "frame", "copySlot", "a0", { instanceOf: "icon", width: 16, height: 16 }),
+      node("contentDot", "rect", "content", "a0", { mirrors: "dot", width: 4, height: 4 }),
+    ];
+    const { nodes: out, detached } = pinInstances(nodes);
+    expect(detached).toBe(1);
+    const props = (id: string) => (out.find((n) => n.id === id) as NodeRecord).props;
+    expect(getProp(props("copy"), "instanceOf")).toBeNull();
+    expect(getProp(props("copySlot"), "mirrors")).toBeNull();
+    expect(getProp(props("content"), "instanceOf")).toBe("icon");
+    expect(getProp(props("contentDot"), "mirrors")).toBe("dot");
+    expect(propagationOps(opened(out).doc, ["card", "icon"])).toEqual([]);
+    // In the compact form it's an instance like any other: its layer isn't stored.
+    const compact = compactByInstance(out);
+    expect([...compact.detached]).toEqual([]);
+    expect(compact.nodes.some((n) => n.id === "contentDot")).toBe(false);
   });
 
   it("leaves a file whose copies match their mains as it is", () => {

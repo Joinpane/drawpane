@@ -80,6 +80,20 @@ export interface Converted {
   readonly cached: boolean;
 }
 
+function writeLines(path: string, nodes: readonly unknown[]): void {
+  const fd = openSync(path, "w");
+  let chunk: string[] = [];
+  for (const node of nodes) {
+    chunk.push(JSON.stringify(node));
+    if (chunk.length >= 5000) {
+      writeSync(fd, `${chunk.join("\n")}\n`);
+      chunk = [];
+    }
+  }
+  if (chunk.length > 0) writeSync(fd, `${chunk.join("\n")}\n`);
+  closeSync(fd);
+}
+
 const seconds = (since: number) => `${((Date.now() - since) / 1000).toFixed(1)} s`;
 
 /**
@@ -144,17 +158,10 @@ export async function convertFig(
     `  pinned: ${pinned.pinned} properties kept, ${pinned.detached} copies detached (${seconds(started)})`,
   );
 
-  const fd = openSync(join(tmp, "nodes.ndjson"), "w");
-  let chunk: string[] = [];
-  for (const node of pinned.nodes) {
-    chunk.push(JSON.stringify(node));
-    if (chunk.length >= 5000) {
-      writeSync(fd, `${chunk.join("\n")}\n`);
-      chunk = [];
-    }
-  }
-  if (chunk.length > 0) writeSync(fd, `${chunk.join("\n")}\n`);
-  closeSync(fd);
+  writeLines(join(tmp, "nodes.ndjson"), pinned.nodes);
+  // What the converter gave before `pinInstances` (which copies it unlinked, and why), on request.
+  if (process.env.KIT_PARITY_KEEP_UNPINNED === "1")
+    writeLines(join(tmp, "unpinned.ndjson"), converted.nodes);
   writeFileSync(
     join(tmp, "meta.json"),
     `${JSON.stringify(

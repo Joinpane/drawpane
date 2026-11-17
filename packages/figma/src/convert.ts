@@ -25,7 +25,7 @@ import {
 } from "@drawpane/import-kit";
 import { keysBetween, type NodeRecord, propAllowed, ROOT_ID } from "@drawpane/model";
 import { convertEffects } from "./effects";
-import { drawpaneId, mirroredId } from "./ids";
+import { drawpaneId, mirroredId, mirroredUnder } from "./ids";
 import { childLayout, containerLayout, layoutGrids } from "./layout";
 import { Notes } from "./notes";
 import { blendMode, convertPaints, hexColor, type ImageLookup } from "./paint";
@@ -119,9 +119,12 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
   };
 
   // Every node id in the file: an instance whose main component isn't here is from a library.
-  const present = new Set<string>();
+  const present = new Map<string, Figma.Node>();
+  /** Each instance's component, by the instance's Figma id: to tell a swapped nested instance. */
+  const componentOf = new Map<string, string>();
   const index = (n: Figma.Node) => {
-    present.add(n.id);
+    present.set(n.id, n);
+    if (n.type === "INSTANCE" && n.componentId) componentOf.set(n.id, n.componentId);
     for (const c of n.children ?? []) index(c);
   };
   index(file.document);
@@ -132,8 +135,14 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
   /**
    * Converts `node` and its children. `abs` is its parent's page affine,
    * `space` the page affine of the nearest frame (or page) it's placed in,
-   * `parentId` its Drawpane parent, and `mirrors` whether it's inside an
-   * instance (its layers copy the main component's).
+   * `parentId` its Drawpane parent, and `inInstance` whether it's inside an
+   * instance (its layers copy the main component's). `base` is the
+   * nearest nested instance around it that isn't a copy of its main's
+   * layer as it is: one swapped for another component, or one that copies
+   * nothing (slot content, a layer the main doesn't have). Its layers copy
+   * that instance's component's, so its layers' ids are read from there.
+   * `parentMirror` is the Figma id of the layer its parent's layers copy
+   * the children of: its main layer, or its component for an instance.
    */
   const visit = (
     node: Figma.Node,
@@ -144,6 +153,8 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     parentId: string,
     key: string,
     inInstance: boolean,
+    base: string | null,
+    parentMirror: string | null,
   ): void => {
     if (SKIPPED.has(node.type)) return;
     const rel = relative(node.relativeTransform);
@@ -247,8 +258,23 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
       }
     }
     // A layer inside an instance copies the main component's layer its id names.
-    const mirrored = inInstance ? mirroredId(node.id) : null;
+    let mirrored = inInstance
+      ? ((base && mirroredUnder(node.id, base)) ?? mirroredId(node.id))
+      : null;
+    // Content a main put in a slot of its nested instance is named under the slot there, and
+    // without it in the main's copies: it's the child of its parent's main layer named alike.
+    if (inInstance && parentMirror && !(mirrored && present.has(mirrored))) {
+      const last = lastStep(node.id);
+      const named = present.get(parentMirror)?.children?.find((c) => lastStep(c.id) === last);
+      if (named) mirrored = named.id;
+    }
     if (mirrored && present.has(mirrored)) props.mirrors = drawpaneId(mirrored);
+    // A nested instance of another component than the layer it copies (an instance swap), or
+    // copying none: what's inside it copies its own component's layers.
+    const rebases =
+      inInstance &&
+      props.instanceOf !== undefined &&
+      (props.mirrors === undefined || componentOf.get(mirrored as string) !== node.componentId);
 
     add({ id, type, parent: parentId, key, props } as NodeRecord);
     if (type === "path" && node.type === "BOOLEAN_OPERATION") return;
@@ -260,8 +286,27 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     const childContainer = SPACELESS.has(node.type) ? containerAbs : abs;
     const nowInInstance =
       inInstance || (node.type === "INSTANCE" && props.instanceOf !== undefined);
+    // What its children copy: its component's layers when it's an instance that isn't a copy
+    // as it is, its main layer's otherwise.
+    const ownsLayers = props.instanceOf !== undefined && (!inInstance || rebases);
+    const layersFrom = ownsLayers
+      ? (node.componentId ?? null)
+      : props.mirrors !== undefined
+        ? mirrored
+        : null;
     children.forEach((child, i) => {
-      visit(child, node, abs, childContainer, childSpace, id, keys[i] as string, nowInInstance);
+      visit(
+        child,
+        node,
+        abs,
+        childContainer,
+        childSpace,
+        id,
+        keys[i] as string,
+        nowInInstance,
+        rebases ? node.id : base,
+        layersFrom,
+      );
     });
   };
 
@@ -275,12 +320,18 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     const children = page.children ?? [];
     const keys = keysBetween(null, null, children.length);
     children.forEach((child, j) => {
-      visit(child, page, IDENTITY, IDENTITY, IDENTITY, id, keys[j] as string, false);
+      visit(child, page, IDENTITY, IDENTITY, IDENTITY, id, keys[j] as string, false, null, null);
     });
   });
 
   markOverrides(instances, nodes, byId);
   return { name: file.name, nodes, notes };
+}
+
+/** The last element of a Figma id's path: the layer in the innermost component. */
+function lastStep(figmaId: string): string {
+  const at = figmaId.lastIndexOf(";");
+  return at < 0 ? figmaId : figmaId.slice(at + 1);
 }
 
 /** A mask Figma draws by its alpha that Drawpane's outline mask would draw differently. */
@@ -435,13 +486,19 @@ function markOverrides(
       const b = (main.props as Props)[k];
       if (JSON.stringify(a) !== JSON.stringify(b)) changed.push(k);
     }
+    // A nested instance swapped for another component overrides which one it is.
+    const of = (layer.props as Props).instanceOf;
+    if (!root && of !== undefined && of !== (main.props as Props).instanceOf)
+      changed.unshift("instanceOf");
     if (changed.length > 0) (layer.props as Props).overrides = changed.slice(0, 64);
   };
   for (const id of instances) {
     const root = byId.get(id);
     const mainId = (root?.props as Props | undefined)?.instanceOf as string | undefined;
     const main = mainId ? byId.get(mainId) : undefined;
-    if (root && main) diff(root, main, true);
+    // A nested copy differs from the main layer it copies (the walk of the instance it's in):
+    // only an instance copying nothing is compared with its component as a whole.
+    if (root && main && (root.props as Props).mirrors === undefined) diff(root, main, true);
     const walk = (parent: string) => {
       for (const layer of children.get(parent) ?? []) {
         const mirror = (layer.props as Props).mirrors as string | undefined;
