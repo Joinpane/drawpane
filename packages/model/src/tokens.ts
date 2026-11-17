@@ -381,12 +381,17 @@ export class TokenResolver {
       let next: Paint = paint;
       const bind = paint.bind;
       if (bind) {
-        const opacity = this.#number(bind.opacity, at);
-        if (opacity !== undefined) next = { ...next, opacity: clampUnit(opacity / 100) };
         if (next.type === "solid") {
           const color = this.#color(bind.color, at);
-          if (color !== undefined && color !== next.color) next = { ...next, color };
+          // As Figma: a bound colour gives the paint its alpha too. Figma saves that alpha as the
+          // paint's opacity, so the stored opacity is the variable's, not one on top of it.
+          if (color !== undefined) {
+            const { opacity: _saved, ...rest } = next;
+            next = { ...rest, color };
+          }
         }
+        const opacity = this.#number(bind.opacity, at);
+        if (opacity !== undefined) next = { ...next, opacity: clampUnit(opacity / 100) };
       }
       if (next.type === "linear" || next.type === "radial" || next.type === "angular") {
         let changed = false;

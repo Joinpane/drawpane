@@ -100,7 +100,7 @@ describe("resolving variables", () => {
       }),
       node("r", "rect", "dark", {
         fills: [
-          { type: "solid", color: "#ff0000", bind: { color: "veil" } },
+          { type: "solid", color: "#ff0000", opacity: 0.5, bind: { color: "veil" } },
           {
             type: "linear",
             from: { x: 0, y: 0 },
@@ -129,6 +129,8 @@ describe("resolving variables", () => {
       string,
       unknown
     >;
+    // The bound colour's alpha replaces the saved opacity (Figma saves the alpha there).
+    expect((p.fills as Array<{ opacity?: number }>)[0]?.opacity).toBeUndefined();
     expect(p.fills).toMatchObject([
       { color: "#00000080" },
       { stops: [{ color: "#000000" }, { color: "#00ff00" }] },

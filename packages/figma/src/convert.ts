@@ -516,6 +516,8 @@ function unboundList(list: unknown): unknown {
     const out: Record<string, unknown> = { ...item };
     const bind = item.bind as Record<string, string> | undefined;
     if (bind) for (const field of Object.keys(bind)) out[field] = null;
+    // A bound colour's alpha is saved as the paint's opacity: it's the variable's too.
+    if (bind?.color && item.type === "solid") out.opacity = null;
     if (Array.isArray(item.stops))
       out.stops = (item.stops as Array<Record<string, unknown>>).map((stop) =>
         stop.bind ? { ...stop, color: null } : stop,
