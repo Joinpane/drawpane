@@ -149,3 +149,36 @@ body {
     animation: none;
   }
 }
+
+/* Offered once a newer Drawpane is deployed (UpdateBanner). Top centre, clear of the editor's own notices. */
+.update-banner {
+  position: fixed;
+  z-index: 1000;
+  top: var(--space-300);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 32px);
+  display: flex;
+  align-items: center;
+  gap: var(--space-300);
+  padding: var(--space-200) var(--space-400);
+  border-radius: var(--radius-md);
+  background: var(--surface-inverse);
+  color: var(--ink-inverse);
+  font: 500 12px / 16px var(--font-ui);
+  box-shadow: var(--shadow-popover);
+}
+.update-banner__action {
+  flex: none;
+  height: 24px;
+  margin: -4px calc(var(--space-200) * -1) -4px 0;
+  padding: 0 var(--space-200);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-inverse);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  font: 600 12px / 16px var(--font-ui);
+  cursor: pointer;
+}

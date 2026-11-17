@@ -1,6 +1,7 @@
 import type { Editor } from "@drawpane/editor";
 import type { ServerMessage } from "@drawpane/model";
 import { ApiError, api } from "../api/client";
+import { checkForUpdate } from "../app/updates";
 
 const MIN_BACKOFF = 500;
 const MAX_BACKOFF = 10_000;
@@ -41,6 +42,8 @@ export function connectFile(
     ws = socket;
     let opened = false;
     socket.addEventListener("open", () => {
+      // A reconnect is often a deploy restarting the room: perhaps there's a newer app too.
+      if (attempt > 0) void checkForUpdate();
       opened = true;
       attempt = 0;
       editor.sync.connected(

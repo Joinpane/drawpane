@@ -22,6 +22,7 @@ import {
 } from "react";
 import { api } from "../api/client";
 import { isMac } from "../app/format";
+import { holdReloadWhile } from "../app/updates";
 import { fonts } from "../fonts/fonts";
 import { refreshInbox } from "../inbox/inbox";
 import { ShareDialog } from "../prototype/ShareDialog";
@@ -349,6 +350,9 @@ function FileEditor({ fileId }: { fileId: string }) {
     comparing,
     compareMode,
   ]);
+
+  // A reload for a newer Drawpane waits until this file's edits are saved.
+  useEffect(() => holdReloadWhile(() => editor.sync.pendingCount > 0), [editor]);
 
   useEffect(
     () =>

@@ -1,11 +1,33 @@
 import react from "@vitejs/plugin-react";
+import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
+
+/**
+ * This build's id, compiled in and written beside the app as `version.json`,
+ * so an open tab can tell that a newer build was deployed (app/updates.ts).
+ */
+const BUILD_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+function buildVersion(): Plugin {
+  return {
+    name: "drawpane-build-version",
+    apply: "build",
+    config: () => ({ define: { __BUILD_ID__: JSON.stringify(BUILD_ID) } }),
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "version.json",
+        source: `${JSON.stringify({ build: BUILD_ID })}\n`,
+      });
+    },
+  };
+}
 
 // In development the Worker runs under `wrangler dev` on :8787; Vite proxies
 // API and websocket traffic to it so the app and API share one origin, as in
 // production.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), buildVersion()],
   // HarfBuzz finds its .wasm next to its module (new URL(…, import.meta.url)):
   // pre-bundling would move the module away from it.
   optimizeDeps: { exclude: ["harfbuzzjs"] },

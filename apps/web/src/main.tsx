@@ -5,6 +5,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError } from "./api/client";
+import { UpdateBanner } from "./app/UpdateBanner";
 import { router } from "./router";
 
 const queryClient = new QueryClient({
@@ -25,6 +26,7 @@ createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} context={{ queryClient }} />
+      <UpdateBanner />
     </QueryClientProvider>
   </StrictMode>,
 );
