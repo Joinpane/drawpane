@@ -123,8 +123,10 @@ function SwapInstance({ instanceId }: { instanceId: string }) {
   const editor = useEditor();
   const [button, setButton] = useState<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
-  const targets = swapTargets(editor.doc, instanceId);
-  if (targets.length === 0 || !editor.canEdit) return null;
+  // Read only when the menu opens: finding them reads every component in the
+  // file, which in a kit-sized file is more than selecting an instance should wait for.
+  const targets = open ? swapTargets(editor.doc, instanceId) : [];
+  if (!editor.canEdit) return null;
   return (
     <>
       <Button
@@ -142,11 +144,15 @@ function SwapInstance({ instanceId }: { instanceId: string }) {
           anchor={button}
           label="Swap instance with"
           align="start"
-          items={targets.map((t) => ({
-            id: t.id,
-            label: t.label,
-            onSelect: () => editor.swapInstance(instanceId, t.id),
-          }))}
+          items={
+            targets.length > 0
+              ? targets.map((t) => ({
+                  id: t.id,
+                  label: t.label,
+                  onSelect: () => editor.swapInstance(instanceId, t.id),
+                }))
+              : [{ id: "none", label: "No other components", disabled: true, onSelect: () => {} }]
+          }
           onClose={() => setOpen(false)}
         />
       ) : null}

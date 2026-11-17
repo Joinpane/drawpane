@@ -551,6 +551,32 @@
   position: relative;
   min-width: 100%;
 }
+/*
+ * The ancestors of the rows at the top, pinned there while you scroll inside
+ * them, as in Figma: each on the pane's own ground, outermost on top, with a
+ * line under the stack. It takes no room of its own (it floats over the rows
+ * it covers) and scrolls sideways with them, guides and all.
+ */
+.layers__pinned {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 0;
+  min-width: 100%;
+}
+.layers__pin {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+}
+.layers__pin:last-child {
+  box-shadow: 0 1px 0 var(--line);
+}
+/* While dragging, what's under the stack takes the drop. */
+.layers__scroll.is-dragging .layers__pinned {
+  pointer-events: none;
+}
 /* While the tree is wider than the panel, names fade out under the toggles stuck to its edge. */
 .layers__scroll.is-wide :is(.dp-layer:hover, .dp-layer:focus-within) .dp-layer__actions::before,
 .layers__scroll.is-wide .dp-layer__actions:has(.is-on)::before {

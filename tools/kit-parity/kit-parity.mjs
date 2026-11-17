@@ -18,6 +18,13 @@
 //   detach    --fig <file.fig> | --nodes <lines.json> [--name <label>]
 //                                              which instances the compact form keeps and
 //                                              why the rest are detached (detach-<label>.json)
+//   coverage  --fig <file.fig> [--nodes <lines.json>] [--name <label>]
+//                                              every Figma feature the file uses and what the
+//                                              import makes of it, judged on the converted
+//                                              output (coverage[-<label>].json and .md)
+//   text-widths [--run <dir>] [--only id,id] [--name <label>]
+//                                              Figma's text widths against Drawpane's, per font
+//                                              (text-widths[-<label>].json and .md in the run)
 //
 // The drawpane step converts and draws a whole file: one at a time per
 // machine (a lock in the temp folder), since each takes several GB.
@@ -25,7 +32,7 @@
 // Everything a run makes stays in <dir>, which should be outside the repo
 // (or in a gitignored folder) when the file isn't yours to publish.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -180,7 +187,52 @@ async function detach() {
   });
 }
 
-const steps = { sample, convert, figma, drawpane, compare, detach };
+async function coverage() {
+  const { withMachineLock } = await import("./src/lock.mjs");
+  await withMachineLock(`coverage step for ${out}`, async () => {
+    const { importTs } = await import("./src/ts.mjs");
+    const { coverage: measure, coverageMarkdown } = await importTs("coverage.ts");
+    const fig = resolve(need("fig"));
+    const nodes = values.nodes ? resolve(values.nodes) : join(await convert(), "nodes.ndjson");
+    console.log(`Reading ${fig} and ${nodes}`);
+    const result = await measure(new Uint8Array(readFileSync(fig)), nodes);
+    const base = join(out, `coverage${values.name ? `-${values.name}` : ""}`);
+    writeFileSync(`${base}.json`, `${JSON.stringify({ fig, nodes, ...result }, null, 1)}\n`);
+    writeFileSync(`${base}.md`, coverageMarkdown(result));
+    const gaps = result.features.filter((f) => f.status !== "faithful" && f.status !== "unchecked");
+    console.log(
+      `${result.features.length} features: ${result.features.length - gaps.length} faithful or unjudged, ${gaps.length} gaps. Top 10 by impact:`,
+    );
+    for (const f of gaps.slice(0, 10))
+      console.log(`  ${f.impact}  ${f.label} (${f.status}, ${f.layers} layers)`);
+    console.log(`Saved ${base}.json and ${base}.md`);
+  });
+}
+
+async function textWidthsStep() {
+  const { importTs } = await import("./src/ts.mjs");
+  const { textWidths, textWidthsMarkdown } = await importTs("text-widths.ts");
+  const runs = join(out, "runs");
+  const run = values.run ? resolve(values.run) : join(runs, readdirSync(runs).sort().at(-1) ?? "");
+  const result = textWidths(out, run, values.only ? new Set(values.only.split(",")) : undefined);
+  const base = join(run, `text-widths${values.name ? `-${values.name}` : ""}`);
+  writeFileSync(`${base}.json`, `${JSON.stringify(result, null, 1)}\n`);
+  writeFileSync(`${base}.md`, textWidthsMarkdown(result));
+  console.log(
+    `${result.textLayers} text layers in ${result.frames} frames. Saved ${base}.json and .md`,
+  );
+}
+
+const steps = {
+  sample,
+  convert,
+  figma,
+  drawpane,
+  compare,
+  detach,
+  coverage,
+  "text-widths": textWidthsStep,
+};
 if (step === "all") {
   const started = Date.now();
   if (!existsSync(join(out, "sample.json"))) await sample();

@@ -6,7 +6,7 @@
 import type { Editor } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { ColorPicker, IconButton, Popover, PropertySection } from "@drawpane/ui";
-import { useRef, useState } from "react";
+import { memo, useDeferredValue, useRef, useState } from "react";
 import { ComponentSection } from "../ComponentSection";
 import { useDocVersion, useEditor, useEditorState } from "../hooks";
 import { layerKind } from "../layer-kinds";
@@ -29,10 +29,24 @@ import "./inspector.css";
 import { shortcutFor } from "../actions";
 import { AccessibilitySection } from "./AccessibilitySection";
 
+/**
+ * The inspector follows the selection a beat behind the rest: a click in
+ * Layers or on the canvas shows first, and the inspector (which, for a large
+ * component, is a lot to render) catches up in the background, where React can
+ * stop to let the next frame paint or the next click land.
+ */
 export function Inspector() {
+  const selection = useEditorState((s) => s.selection);
+  return <SelectionInspector selection={useDeferredValue(selection)} />;
+}
+
+const SelectionInspector = memo(function SelectionInspector({
+  selection,
+}: {
+  selection: readonly string[];
+}) {
   const editor = useEditor();
   useDocVersion();
-  const selection = useEditorState((s) => s.selection);
   const tool = useEditorState((s) => s.tool);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   // While editing text, its typography and fill follow the selected characters.
@@ -120,7 +134,7 @@ export function Inspector() {
       <PathSection editor={editor} nodes={nodes} />
     </fieldset>
   );
-}
+});
 
 function PageInspector() {
   const editor = useEditor();

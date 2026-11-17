@@ -165,6 +165,12 @@ describe("colors in a file", () => {
     const ops = replaceColorOps(d, ["card"], "#ffffff", "#ff5a1f");
     expect(ops.map((o) => o.id)).toEqual(["title", "chip"]);
   });
+
+  it("gives up on selection colors past a number of layers", () => {
+    const d = doc();
+    expect(selectionColors(d, ["card"], 1)).toBeNull();
+    expect(selectionColors(d, ["card"], 100)).toEqual(selectionColors(d, ["card"]));
+  });
 });
 
 describe("typed text values", () => {

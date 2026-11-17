@@ -1,5 +1,18 @@
+diff --git a/dist/dependencies.js b/dist/dependencies.js
+index a29c539958f911dd244a52f3438f40420a2f5408..1a2ab25f160a4fee25ea46adad74236a340076a3 100644
+--- a/dist/dependencies.js
++++ b/dist/dependencies.js
+@@ -257,6 +257,8 @@ function applyDerivedEntry(target, entry) {
+ 	if (entry.size) {
+ 		props.size = structuredClone(entry.size);
+ 		target.derivedSize = structuredClone(entry.size);
++		// Drawpane patch: a size Figma saved for this copy, not the main's.
++		target.derivedSizeSaved = true;
+ 	}
+ 	if (entry.transform) props.transform = structuredClone(entry.transform);
+ 	const { fillGeometry, strokeGeometry, vectorData } = entry;
 diff --git a/dist/index.js b/dist/index.js
-index ac85b19ac446dad507de42ff629970d7a3ca7cfb..ec39afd589b1830397c0472d4ade4fadb000760a 100644
+index ac85b19ac446dad507de42ff629970d7a3ca7cfb..0c3d31d2959c7bc0e0e9206b1f6b5ebf8def1c33 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -722,8 +722,9 @@ function applyDocumentLayoutBindings(graph, savedSizeNodes, materialized, layout
@@ -50,3 +63,28 @@ index ac85b19ac446dad507de42ff629970d7a3ca7cfb..ec39afd589b1830397c0472d4ade4fad
  function modeValues(resource, modes, resolve) {
  	const entries = resource.variableDataValues?.entries ?? [];
  	if (!entries.length) throw new Error("Missing mode values");
+@@ -1701,10 +1726,13 @@ function materializeReaderInto(pages, plan, blobs, state, resumed) {
+ 	const layoutScales = /* @__PURE__ */ new Map();
+ 	/** The sizes Figma derived for this pass's instance layers, as materialized. */
+ 	const derivedSizes = /* @__PURE__ */ new Map();
+-	const rememberDerivedSizes = (nodes) => {
++	const rememberDerivedSizes = (nodes, copy) => {
+ 		for (const [occurrence, node] of nodes) {
+ 			if (occurrence.derivedSize) {
+-				savedSizeNodes.add(node.id);
++				// Drawpane patch: in a copy, a nested instance's own size is its main's, saved in the
++				// main's modes; only the copy's root and the sizes Figma saved for the copy hold
++				// against a size bound to a variable, which resolves in the copy's mode.
++				if (!copy || occurrence === copy || occurrence.derivedSizeSaved) savedSizeNodes.add(node.id);
+ 				derivedSizes.set(node.id, {
+ 					width: node.width,
+ 					height: node.height
+@@ -1772,7 +1800,7 @@ function materializeReaderInto(pages, plan, blobs, state, resumed) {
+ 					blobs,
+ 					sourceChildren: mapInstanceSourceChildren(child, components)
+ 				});
+-				rememberDerivedSizes(materialized.nodes);
++				rememberDerivedSizes(materialized.nodes, child);
+ 				linkInstanceSourceChildren(child, materialized, components);
+ 				if (resumed) {
+ 					reconcileLiveComponentEdits(graph, materialized);

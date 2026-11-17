@@ -25,19 +25,37 @@ import {
   dropPlacement,
   INDENT,
   INDENT_START,
+  indexRows,
   kindOf,
   LAYER_FILTERS,
   type LayerFilter,
   layerName,
   layerRows,
+  pinnedRows,
   type Row,
+  type RowIndex,
   revealLeft,
   rowWidthFor,
 } from "./layer-tree";
 import { openMenu, uiFor, useUi } from "./ui-state";
 
 const ROW_HEIGHT = 28;
-const OVERSCAN = 8;
+/**
+ * The rows drawn move a block at a time: scrolling within a block draws
+ * nothing new, so most scroll frames render nothing at all.
+ */
+const BLOCK = 8;
+
+/** At most half the tree's height is pinned ancestors, so there's always room to see what's in them. */
+const maxPinsFor = (height: number) => Math.max(1, Math.floor(height / ROW_HEIGHT / 2));
+
+/** What the scroll position decides for the tree, kept only when it changes. */
+interface View {
+  /** The block of rows at the top of the view (see BLOCK). */
+  readonly block: number;
+  readonly height: number;
+  readonly width: number;
+}
 
 interface DragState {
   readonly id: string;
@@ -66,7 +84,7 @@ export function LayersPanel() {
   const scroller = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const searchField = useRef<HTMLInputElement>(null);
-  const [scroll, setScroll] = useState({ top: 0, height: 400, width: 264 });
+  const [view, setView] = useState<View>({ block: 0, height: 400, width: 264 });
 
   // ⌘F opens the search in the same render, so the field (which focuses
   // itself, see LayerSearch) catches the very next keystroke.
@@ -111,6 +129,8 @@ export function LayersPanel() {
     return layerRows(editor.doc, pageId, active ? { collapsed, query, filter } : { collapsed });
   }, [editor, pageId, version, collapsed, active, query, filter]);
 
+  const rowIndex = useMemo(() => indexRows(rows), [rows]);
+
   // As wide as the deepest open row needs: a deep tree scrolls sideways. All
   // the open rows, not just the drawn ones, so the width holds while scrolling down.
   const treeWidth = useMemo(() => {
@@ -139,7 +159,7 @@ export function LayersPanel() {
     if (!el) return;
     el.focus({ preventScroll: true });
     focusRow.current = null;
-  }, [selection, scroll]);
+  }, [selection, view]);
 
   // Keep the focused or newly selected row scrolled into view: down to it, and
   // across to its name in a deep tree (once per selection, so scrolling sideways
@@ -155,28 +175,39 @@ export function LayersPanel() {
     const row = rows[index];
     if (!row) return;
     const top = index * ROW_HEIGHT;
-    if (top < el.scrollTop) el.scrollTop = top;
+    // Under the pinned ancestors counts as out of view: it goes just below them.
+    const pins = pinnedRows(rowIndex, el.scrollTop, ROW_HEIGHT, maxPinsFor(el.clientHeight));
+    const covered = pins.rows.length * ROW_HEIGHT + pins.offset;
+    if (top < el.scrollTop + covered)
+      el.scrollTop = top - Math.min(row.depth, maxPinsFor(el.clientHeight)) * ROW_HEIGHT;
     else if (top + ROW_HEIGHT > el.scrollTop + el.clientHeight)
       el.scrollTop = top + ROW_HEIGHT - el.clientHeight;
     if (revealed.current === id) return;
     revealed.current = id;
     const left = revealLeft(row.depth, el.scrollLeft, el.clientWidth);
     if (left !== null) el.scrollLeft = left;
-  }, [selection, rows]);
+  }, [selection, rows, rowIndex]);
 
+  // The scroll position, read on every scroll event and resize, renders the
+  // tree only when it brings another block of rows into view. Scrolling
+  // sideways moves the drawn rows all at once, with no render (the toggles
+  // stick by CSS). The pinned rows keep their own state (see PinnedRows),
+  // updated from the same listener so both render together, once.
+  const placePins = useRef(() => {});
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    // Only a vertical scroll or a resize draws other rows: scrolling sideways
-    // moves them all at once, with no render (the toggles stick by CSS).
-    const update = () =>
-      setScroll((prev) =>
-        prev.top === el.scrollTop &&
-        prev.height === el.clientHeight &&
-        prev.width === el.clientWidth
+    const update = () => {
+      placePins.current();
+      const block = Math.floor(el.scrollTop / ROW_HEIGHT / BLOCK);
+      const height = el.clientHeight;
+      const width = el.clientWidth;
+      setView((prev) =>
+        prev.block === block && prev.height === height && prev.width === width
           ? prev
-          : { top: el.scrollTop, height: el.clientHeight, width: el.clientWidth },
+          : { block, height, width },
       );
+    };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(el);
@@ -373,12 +404,64 @@ export function LayersPanel() {
     editor.endGesture();
   };
 
-  const start = Math.max(0, Math.floor(scroll.top / ROW_HEIGHT) - OVERSCAN);
-  const end = Math.min(
-    rows.length,
-    Math.ceil((scroll.top + scroll.height) / ROW_HEIGHT) + OVERSCAN,
-  );
+  // The block in view, a block above and two below: whichever way it scrolls next, those rows are drawn.
+  const start = Math.max(0, (view.block - 1) * BLOCK);
+  const end = Math.min(rows.length, (view.block + 2) * BLOCK + Math.ceil(view.height / ROW_HEIGHT));
   const tabStop = focusId ?? selection[0] ?? rows[0]?.node.id;
+
+  /** How a row looks and what its toggles, icon and menu do: the same in the tree and pinned above it. */
+  const look = (row: Row) => {
+    const { node } = row;
+    const presence = presenceBy.get(node.id);
+    const visible = getProp(node.props, "visible");
+    const locked = getProp(node.props, "locked");
+    return {
+      name: layerName(node),
+      ...(row.note ? { note: row.note } : {}),
+      ...modeBadge(editor, node),
+      ...(active && query.trim() ? { highlight: query } : {}),
+      context: row.context === true,
+      kind: kindOf(node),
+      depth: row.depth,
+      selected: selection.includes(node.id),
+      hidden: !visible,
+      hiddenByParent: row.hiddenByParent === true,
+      locked,
+      hasChildren: row.hasChildren,
+      // Search results always show what's inside them.
+      expanded: active || !collapsed.has(node.id),
+      ...(presence
+        ? { presence: presence.slot, presenceLabel: `Selected by ${presence.name}` }
+        : {}),
+      ...(canEdit
+        ? {
+            onToggleHidden: () =>
+              editor.setProp(
+                [node.id],
+                "visible",
+                visible ? false : null,
+                visible ? "Hide" : "Show",
+              ),
+            onToggleLocked: () =>
+              editor.setProp([node.id], "locked", locked ? null : true, locked ? "Unlock" : "Lock"),
+          }
+        : {}),
+      // Double-clicking the icon zooms to the layer, as in Figma (Shift+2, gliding).
+      onIconDoubleClick: () => {
+        setFocusId(node.id);
+        editor.select([node.id]);
+        editor.zoomToLayers([node.id], { animate: true });
+      },
+      onContextMenu: (e: React.MouseEvent) => {
+        e.preventDefault();
+        // Right-clicking outside the selection selects that row first.
+        if (!selection.includes(node.id)) editor.select([node.id]);
+        openMenu(editor, { kind: "layers", x: e.clientX, y: e.clientY });
+      },
+      onMouseEnter: () => editor.state.set({ hover: node.id }),
+      onMouseLeave: () => editor.state.set({ hover: null }),
+    };
+  };
 
   return (
     <div className="layers">
@@ -428,7 +511,13 @@ export function LayersPanel() {
       ) : null}
       <div
         ref={scroller}
-        className={treeWidth > scroll.width ? "layers__scroll is-wide" : "layers__scroll"}
+        className={[
+          "layers__scroll",
+          treeWidth > view.width ? "is-wide" : "",
+          drag ? "is-dragging" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
         role="tree"
         aria-label="Layers"
         aria-multiselectable="true"
@@ -452,108 +541,173 @@ export function LayersPanel() {
             <p className="layers__empty">Layers you draw appear here.</p>
           )
         ) : (
-          <div
-            ref={listRef}
-            className="layers__list"
-            style={{ height: rows.length * ROW_HEIGHT, width: treeWidth }}
-          >
-            {rows.slice(start, end).map((row, i) => {
-              const { node } = row;
-              const presence = presenceBy.get(node.id);
-              const drop = drag?.target?.row === node.id ? drag.target : null;
-              return (
-                <LayerRow
-                  key={node.id}
-                  className={drop ? `layers__row--drop-${drop.show}` : undefined}
-                  style={
-                    {
-                      position: "absolute",
-                      top: (start + i) * ROW_HEIGHT,
-                      left: 0,
-                      right: 0,
-                      ...(drop ? { "--drop-depth": drop.depth } : {}),
-                    } as React.CSSProperties
-                  }
-                  name={layerName(node)}
-                  {...(row.note ? { note: row.note } : {})}
-                  {...modeBadge(editor, node)}
-                  {...(active && query.trim() ? { highlight: query } : {})}
-                  context={row.context === true}
-                  kind={kindOf(node)}
-                  depth={row.depth}
-                  selected={selection.includes(node.id)}
-                  hidden={!getProp(node.props, "visible")}
-                  hiddenByParent={row.hiddenByParent === true}
-                  locked={getProp(node.props, "locked")}
-                  hasChildren={row.hasChildren}
-                  // Search results always show what's inside them.
-                  expanded={active || !collapsed.has(node.id)}
-                  tabIndex={node.id === tabStop ? 0 : -1}
-                  data-layer-id={node.id}
-                  {...(presence
-                    ? { presence: presence.slot, presenceLabel: `Selected by ${presence.name}` }
-                    : {})}
-                  {...(active
-                    ? {}
-                    : { onToggleExpanded: (deep: boolean) => toggle(node.id, deep) })}
-                  {...(canEdit
-                    ? {
-                        onToggleHidden: () =>
-                          editor.setProp(
-                            [node.id],
-                            "visible",
-                            getProp(node.props, "visible") ? false : null,
-                            getProp(node.props, "visible") ? "Hide" : "Show",
-                          ),
-                        onToggleLocked: () =>
-                          editor.setProp(
-                            [node.id],
-                            "locked",
-                            getProp(node.props, "locked") ? null : true,
-                            getProp(node.props, "locked") ? "Unlock" : "Lock",
-                          ),
-                        onRename: (name: string) => editor.rename(node.id, name),
-                        renaming: renaming === node.id,
-                        onRenamingChange: (on: boolean) =>
-                          uiFor(editor).set({ renaming: on ? node.id : null }),
-                        draggable: true,
-                        onDragStart: (e: React.DragEvent) => {
-                          e.dataTransfer.effectAllowed = "copyMove";
-                          setDrag({ id: node.id, target: null, copy: e.altKey });
-                        },
-                        onDragOver: (e: React.DragEvent<HTMLDivElement>) =>
-                          onDragOver(start + i, e),
-                        onDrop: (e: React.DragEvent) => {
-                          // The list below hears drops on its empty space; this one's handled.
-                          e.stopPropagation();
-                          e.preventDefault();
-                          onDrop();
-                        },
-                        onDragEnd: () => setDrag(null),
-                      }
-                    : {})}
-                  onClick={(e) => select(node.id, e)}
-                  // Double-clicking the icon zooms to the layer, as in Figma (Shift+2, gliding).
-                  onIconDoubleClick={() => {
-                    setFocusId(node.id);
-                    editor.select([node.id]);
-                    editor.zoomToLayers([node.id], { animate: true });
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    // Right-clicking outside the selection selects that row first.
-                    if (!selection.includes(node.id)) editor.select([node.id]);
-                    openMenu(editor, { kind: "layers", x: e.clientX, y: e.clientY });
-                  }}
-                  onMouseEnter={() => editor.state.set({ hover: node.id })}
-                  onMouseLeave={() => editor.state.set({ hover: null })}
-                />
-              );
-            })}
-          </div>
+          <>
+            <PinnedRows
+              scroller={scroller}
+              place={placePins}
+              rows={rows}
+              index={rowIndex}
+              width={treeWidth}
+            >
+              {(row, index, slot) => {
+                const { node } = row;
+                // Shown where the row would be if it were scrolled to: just under its own pinned ancestors.
+                const scrollTo = () => {
+                  const el = scroller.current;
+                  if (el) el.scrollTop = (index - slot) * ROW_HEIGHT;
+                };
+                return (
+                  <LayerRow
+                    {...look(row)}
+                    tabIndex={-1}
+                    data-pinned-id={node.id}
+                    {...(active
+                      ? {}
+                      : {
+                          onToggleExpanded: (deep: boolean) => {
+                            // Folding it keeps it in place, as the top row under its ancestors.
+                            scrollTo();
+                            toggle(node.id, deep);
+                          },
+                        })}
+                    onClick={(e) => {
+                      select(node.id, e);
+                      scrollTo();
+                    }}
+                  />
+                );
+              }}
+            </PinnedRows>
+            <div
+              ref={listRef}
+              className="layers__list"
+              style={{ height: rows.length * ROW_HEIGHT, width: treeWidth }}
+            >
+              {rows.slice(start, end).map((row, i) => {
+                const { node } = row;
+                const drop = drag?.target?.row === node.id ? drag.target : null;
+                return (
+                  <LayerRow
+                    key={node.id}
+                    {...look(row)}
+                    className={drop ? `layers__row--drop-${drop.show}` : undefined}
+                    style={
+                      {
+                        position: "absolute",
+                        top: (start + i) * ROW_HEIGHT,
+                        left: 0,
+                        right: 0,
+                        ...(drop ? { "--drop-depth": drop.depth } : {}),
+                      } as React.CSSProperties
+                    }
+                    tabIndex={node.id === tabStop ? 0 : -1}
+                    data-layer-id={node.id}
+                    {...(active
+                      ? {}
+                      : { onToggleExpanded: (deep: boolean) => toggle(node.id, deep) })}
+                    {...(canEdit
+                      ? {
+                          onRename: (name: string) => editor.rename(node.id, name),
+                          renaming: renaming === node.id,
+                          onRenamingChange: (on: boolean) =>
+                            uiFor(editor).set({ renaming: on ? node.id : null }),
+                          draggable: true,
+                          onDragStart: (e: React.DragEvent) => {
+                            e.dataTransfer.effectAllowed = "copyMove";
+                            setDrag({ id: node.id, target: null, copy: e.altKey });
+                          },
+                          onDragOver: (e: React.DragEvent<HTMLDivElement>) =>
+                            onDragOver(start + i, e),
+                          onDrop: (e: React.DragEvent) => {
+                            // The list below hears drops on its empty space; this one's handled.
+                            e.stopPropagation();
+                            e.preventDefault();
+                            onDrop();
+                          },
+                          onDragEnd: () => setDrag(null),
+                        }
+                      : {})}
+                    onClick={(e) => select(node.id, e)}
+                  />
+                );
+              })}
+            </div>
+          </>
         )}
       </div>
       {drag?.target ? <DragStatus editor={editor} drag={drag} selection={selection} /> : null}
+    </div>
+  );
+}
+
+/**
+ * The ancestors of the rows at the top of the tree, pinned there while you
+ * scroll inside them (see `pinnedRows`). They keep their own state, which the
+ * tree's scroll listener updates through `place`: a scroll that pins other
+ * rows renders just these, one that only moves the innermost (sliding it up
+ * as the end of what it holds passes) renders nothing. They're copies of rows
+ * the tree has, so hidden from assistive tech.
+ */
+function PinnedRows({
+  scroller,
+  place,
+  rows,
+  index,
+  width,
+  children,
+}: {
+  scroller: React.RefObject<HTMLDivElement | null>;
+  place: React.RefObject<() => void>;
+  rows: readonly Row[];
+  index: RowIndex;
+  width: number;
+  children: (row: Row, index: number, slot: number) => React.ReactNode;
+}) {
+  const [pinned, setPinned] = useState<{ rows: readonly number[]; of: RowIndex | null }>({
+    rows: [],
+    of: null,
+  });
+  const host = useRef<HTMLDivElement>(null);
+  place.current = () => {
+    const el = scroller.current;
+    if (!el) return;
+    const pins = pinnedRows(index, el.scrollTop, ROW_HEIGHT, maxPinsFor(el.clientHeight));
+    setPinned((prev) =>
+      prev.of === index &&
+      prev.rows.length === pins.rows.length &&
+      prev.rows.every((r, i) => r === pins.rows[i])
+        ? prev
+        : { rows: pins.rows, of: index },
+    );
+    // Only the innermost slides; one that was innermost before is back in place.
+    const pinEls = host.current?.children ?? [];
+    for (let i = 0; i < pinEls.length; i++) {
+      const style = (pinEls[i] as HTMLElement).style;
+      const to = i === pinEls.length - 1 && pins.offset < 0 ? `0 ${pins.offset}px` : "";
+      if (style.translate !== to) style.translate = to;
+    }
+  };
+  // Other rows (a fold, an edit, a search) pin other ancestors; and after each
+  // render the innermost is placed again.
+  useLayoutEffect(() => place.current());
+  // Positions in `rows`: only good for the rows they were found in.
+  const shown = pinned.of === index ? pinned.rows : [];
+  if (shown.length === 0) return null;
+  return (
+    <div ref={host} className="layers__pinned" aria-hidden="true" style={{ width }}>
+      {shown.map((at, slot) => {
+        const row = rows[at];
+        if (!row) return null;
+        return (
+          <div
+            key={row.node.id}
+            className="layers__pin"
+            style={{ top: slot * ROW_HEIGHT, zIndex: shown.length - slot }}
+          >
+            {children(row, at, slot)}
+          </div>
+        );
+      })}
     </div>
   );
 }
