@@ -187,7 +187,9 @@ export const Shadow = z.object({
    * Drop shadows: whether the shadow shows through the layer where its own
    * fill is transparent or translucent (Figma's "Show behind transparent
    * areas"). False cuts it out under the layer's shape, so a focus ring
-   * stays a ring around a see-through field. Missing means it shows.
+   * stays a ring around a see-through field. Missing means it shows through
+   * a partly see-through fill; under a layer that fills nothing visible it
+   * never shows, as in Figma (the editor's `shadowCutOut`).
    */
   behind: z.boolean().optional(),
 });

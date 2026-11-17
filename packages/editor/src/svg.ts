@@ -41,6 +41,7 @@ import { noiseThresholdZ } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { textSpans } from "./rich-text";
 import type { Scene } from "./scene";
+import { shadowCutOut } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
   layoutText,
@@ -584,7 +585,7 @@ export function exportSvg(
         if (!grown) continue;
         const filter = shadowFilter(s, region, false);
         const cast = `<g filter="url(#${filter})"><${grown.tag}${transformAttr(matrix)}${grown.attrs}${ink}/></g>`;
-        if (s.behind === false) {
+        if (shadowCutOut(node, s)) {
           // Not shown behind the layer: masked out under its shape.
           const mask = out.id("cut");
           out.defs.push(

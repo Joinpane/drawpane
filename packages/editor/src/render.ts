@@ -34,6 +34,7 @@ import { NoiseTiles, paintNoise } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { effectReach } from "./reach";
 import type { Scene } from "./scene";
+import { shadowCutOut } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
 import {
   layoutText,
@@ -1880,9 +1881,9 @@ export class CanvasRenderer {
       ctx.shadowOffsetX = s.x * scale;
       ctx.shadowOffsetY = s.y * scale;
       if (kind === "drop-shadow") {
-        // Not shown behind the layer: cut out under its shape, so it shows
-        // only around a see-through fill, not through it.
-        if (s.type === "drop-shadow" && s.behind === false && node.type !== "text") {
+        // Not shown behind the layer (asked not to, or nothing the layer fills is
+        // visible): cut out under its shape, so a ring around a see-through field stays a ring.
+        if (shadowCutOut(node, s)) {
           const outside = new Path2D();
           outside.rect(-1e5, -1e5, 2e5, 2e5);
           outside.addPath(shape);

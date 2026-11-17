@@ -731,7 +731,7 @@ describe("exportSvg", () => {
     const editor = makeEditor([
       rect("ring", {
         cornerRadius: 6,
-        fills: [{ type: "solid", color: "#ffffff00" }],
+        fills: [{ type: "solid", color: "#ffffff80" }],
         effects: [
           {
             type: "drop-shadow",
@@ -745,6 +745,10 @@ describe("exportSvg", () => {
         ],
       }),
       rect("glow", {
+        fills: [{ type: "solid", color: "#ffffff80" }],
+        effects: [{ type: "drop-shadow", color: "#ff000080", x: 0, y: 0, blur: 0, spread: 3 }],
+      }),
+      rect("field", {
         fills: [{ type: "solid", color: "#ffffff00" }],
         effects: [{ type: "drop-shadow", color: "#ff000080", x: 0, y: 0, blur: 0, spread: 3 }],
       }),
@@ -756,7 +760,9 @@ describe("exportSvg", () => {
     expect(svgOf(editor, ["ring"])).toMatch(
       /<g mask="url\(#cut\d+\)"><g filter="url\(#shadow\d+\)">/,
     );
-    // Shown behind (Figma's default for most shadows, and every shadow made here): no mask.
+    // Nothing it fills is visible: cut out too, as Figma draws a ring around a see-through field.
+    expect(svgOf(editor, ["field"])).toMatch(/<g mask="url\(#cut\d+\)">/);
+    // A partly see-through fill shows the shadow through it, unless asked not to.
     expect(svgOf(editor, ["glow"])).not.toContain("<mask");
   });
 
