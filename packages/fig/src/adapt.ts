@@ -112,7 +112,7 @@ export interface AdaptContext {
 function paintBinds(n: SceneNode, list: "fills" | "strokes", ctx: AdaptContext) {
   const aliasOf = ctx.aliasOf;
   if (!aliasOf) return undefined;
-  return { aliasOf, color: (i: number) => paintColor(n, list, i, aliasOf) };
+  return { aliasOf, color: (i: number) => paintColor(n, list, i, aliasOf, ctx.graph) };
 }
 
 /** The node's REST kind: Open Pencil's, except where it read a kind it doesn't know as a rectangle. */
@@ -371,7 +371,7 @@ export function adaptNode(
   node.fills = convertFills(n.fills, raw?.fillPaints, notes, paintBinds(n, "fills", ctx));
   Object.assign(node, strokeFields(n, raw, notes, ctx));
   if (ctx.aliasOf) {
-    const bound = layerBoundVariables(n, ctx.aliasOf);
+    const bound = layerBoundVariables(n, ctx.aliasOf, ctx.graph);
     if (bound) node.boundVariables = bound;
     const modes = explicitModes(n, ctx.graph);
     if (modes) node.explicitVariableModes = modes;
