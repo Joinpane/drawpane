@@ -15,7 +15,7 @@
  * as it's past.
  */
 import { BuildTooLarge, type NodeRecord, ROOT_ID } from "@drawpane/model";
-import { TableReader, tablePages, toRecord } from "./node-tables";
+import { sumPast, TableReader, tablePages, toRecord } from "./node-tables";
 import { PresentedReader } from "./presented";
 
 /** The most JSON a file sent through the socket is, in characters (a text may hold 200,000). */
@@ -84,10 +84,8 @@ export function socketFits(
   sql: SqlStorage,
   { table = "nodes", presented = false, maxChars = SOCKET_MAX_CHARS }: SocketSnapshot = {},
 ): boolean {
-  const stored = sql
-    .exec<{ chars: number }>(`SELECT COALESCE(SUM(LENGTH(props)), 0) AS chars FROM ${table}`)
-    .one().chars;
-  if (stored > maxChars) return false;
+  // What's stored, read only until it's past (a hello reads about as many rows as fit, not 500,000).
+  if (sumPast(sql, table, "LENGTH(props)", maxChars) > maxChars) return false;
   let chars = 0;
   try {
     for (const node of nodesOf(sql, table, presented)) {

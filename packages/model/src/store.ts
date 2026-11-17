@@ -1,3 +1,4 @@
+import { type BuildBudget, propBytes, storedBytes } from "./budget";
 import { ROOT_ID } from "./ids";
 import type { NodeRecord } from "./ops";
 import { compareSiblings } from "./order-key";
@@ -35,6 +36,12 @@ export interface NodeStore {
    * (SQLite): what's checked can be a main of any size.
    */
   instanceCycle?(id: string, deep: boolean): boolean;
+  /**
+   * How many pages the file has, counting no further than `atMost`, for a
+   * store that can tell without reading every page's id (SQLite: a file may
+   * hold a million pages).
+   */
+  pagesUpTo?(atMost: number): number;
 }
 
 /**
@@ -53,6 +60,16 @@ export function deeperThan(store: NodeStore, id: string, levels: number): boolea
   return false;
 }
 
+export interface MemoryStoreOptions {
+  /**
+   * Counts what the store keeps (`storedBytes` a node) in this budget, as
+   * it's kept: building the store refuses (`BuildTooLarge`) the node that
+   * would take it past the limit, before keeping it; a change made to it
+   * is counted whole (`BuildBudget.hold`), for its holder to check `over`.
+   */
+  readonly meter?: BuildBudget | null;
+}
+
 /**
  * In-memory store with an ordered child index, kept sorted on every change so
  * reads never sort.
@@ -60,9 +77,16 @@ export function deeperThan(store: NodeStore, id: string, levels: number): boolea
 export class MemoryStore implements NodeStore {
   readonly #nodes = new Map<string, NodeRecord>();
   readonly #children = new Map<string, string[]>();
+  readonly #meter: BuildBudget | null;
 
-  constructor(nodes: Iterable<NodeRecord> = []) {
-    for (const node of nodes) this.#nodes.set(node.id, node);
+  constructor(nodes: Iterable<NodeRecord> = [], { meter = null }: MemoryStoreOptions = {}) {
+    this.#meter = meter;
+    if (meter)
+      for (const node of nodes) {
+        meter.charge(storedBytes(node));
+        this.#nodes.set(node.id, node);
+      }
+    else for (const node of nodes) this.#nodes.set(node.id, node);
     for (const node of this.#nodes.values()) this.#list(node.parent).push(node.id);
     for (const ids of this.#children.values()) ids.sort(this.#compareIds);
   }
@@ -92,6 +116,11 @@ export class MemoryStore implements NodeStore {
   }
 
   insert(node: NodeRecord): void {
+    const before = this.#nodes.get(node.id);
+    if (this.#meter) {
+      if (before) this.#meter.release(storedBytes(before));
+      this.#meter.hold(storedBytes(node));
+    }
     this.#nodes.set(node.id, node);
     this.#insertChild(node.parent, node);
   }
@@ -99,6 +128,7 @@ export class MemoryStore implements NodeStore {
   setProp(id: string, prop: PropName, value: unknown): void {
     const node = this.#require(id);
     const props: Record<string, unknown> = { ...node.props };
+    this.#count(propBytes(props[prop], value));
     if (value === undefined) delete props[prop];
     else props[prop] = value;
     this.#nodes.set(id, { ...node, props });
@@ -106,13 +136,17 @@ export class MemoryStore implements NodeStore {
 
   /** Replaces a node's properties at once (its place unchanged): for building a store, not for edits. */
   replaceProps(id: string, props: NodeRecord["props"]): void {
-    this.#nodes.set(id, { ...this.#require(id), props });
+    const node = this.#require(id);
+    const next = { ...node, props };
+    if (this.#meter) this.#count(storedBytes(next) - storedBytes(node));
+    this.#nodes.set(id, next);
   }
 
   move(id: string, parent: string, key: string): void {
     const node = this.#require(id);
     this.#removeChild(node.parent, id);
     const moved = { ...node, parent, key };
+    this.#count(parent.length + key.length - node.parent.length - node.key.length);
     this.#nodes.set(id, moved);
     this.#insertChild(parent, moved);
   }
@@ -120,9 +154,17 @@ export class MemoryStore implements NodeStore {
   remove(id: string): void {
     const node = this.#nodes.get(id);
     if (!node) return;
+    this.#meter?.release(storedBytes(node));
     this.#removeChild(node.parent, id);
     this.#nodes.delete(id);
     this.#children.delete(id);
+  }
+
+  /** Counts a change in what's kept: held when it grows, given back when it shrinks. */
+  #count(bytes: number): void {
+    if (!this.#meter) return;
+    if (bytes > 0) this.#meter.hold(bytes);
+    else if (bytes < 0) this.#meter.release(-bytes);
   }
 
   #require(id: string): NodeRecord {

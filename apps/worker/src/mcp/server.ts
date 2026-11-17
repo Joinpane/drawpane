@@ -183,7 +183,7 @@ const READ_TOOLS: readonly Tool[] = [
   tool(
     "get_outline",
     "Get a file's outline",
-    "A file's pages, and the layer tree of one page (the first, unless pageId is given): ids, kinds, names, sizes and text. Deep or large trees are cut short and say how many children were left out; ask again from a layer with rootId.",
+    "A file's pages (at most limit of them; morePages counts the rest), and the layer tree of one page (the first, unless pageId is given): ids, kinds, names, sizes and text. Deep or large trees are cut short and say how many children were left out; ask again from a layer with rootId.",
     {
       fileId: FileId,
       pageId: NodeId.optional().describe("The page to outline; the first page when left out."),

@@ -542,10 +542,17 @@ function paddingAttrs(node: NodeRecord): { attrs: string[]; covered: boolean } {
 export function nodeToJsx(
   doc: Doc,
   id: string,
-  options: { depth?: number; ids?: boolean } = {},
+  options: { depth?: number; ids?: boolean; maxChars?: number } = {},
 ): string {
-  const { depth = 20, ids = true } = options;
+  const { depth = 20, ids = true, maxChars = Number.POSITIVE_INFINITY } = options;
+  let chars = 0;
   const lines: string[] = [];
+  // Past `maxChars` it stops writing at once, so what it holds is bounded by that, not the tree.
+  const push = (...more: string[]) => {
+    for (const line of more) chars += line.length + 1;
+    if (chars > maxChars) throw new JsxTooLong(maxChars);
+    lines.push(...more);
+  };
   const write = (nodeId: string, level: number, inLayout: boolean) => {
     const node = doc.get(nodeId);
     if (!node || !(node.type in TAG_OF)) return;
@@ -570,27 +577,29 @@ export function nodeToJsx(
     const open = `${pad}<${tag}${parts.length ? ` ${parts.join(" ")}` : ""}`;
     if (type === "text") {
       const text = getProp(node.props, "characters");
-      lines.push(`${open}>${escapeText(text)}</${tag}>`);
+      push(`${open}>${escapeText(text)}</${tag}>`);
       return;
     }
     if (children.length === 0) {
-      lines.push(`${open} />`);
+      push(`${open} />`);
       return;
     }
     if (level >= depth) {
-      lines.push(`${open}>`);
-      lines.push(`${pad}  {/* ${children.length} layers not shown: read ${node.id} for them */}`);
-      lines.push(`${pad}</${tag}>`);
+      push(
+        `${open}>`,
+        `${pad}  {/* ${children.length} layers not shown: read ${node.id} for them */}`,
+        `${pad}</${tag}>`,
+      );
       return;
     }
-    lines.push(`${open}>`);
+    push(`${open}>`);
     const auto = type === "frame" && getProp(node.props, "layoutMode") !== "none";
     for (const child of children) {
       const c = doc.get(child);
       const absolute = c ? getProp(c.props, "positioning") === "absolute" : false;
       write(child, level + 1, auto && !absolute);
     }
-    lines.push(`${pad}</${tag}>`);
+    push(`${pad}</${tag}>`);
   };
   const root = doc.get(id);
   const parent = root ? doc.get(root.parent) : undefined;
@@ -601,6 +610,14 @@ export function nodeToJsx(
     getProp(root.props, "positioning") !== "absolute";
   write(id, 0, inLayout);
   return lines.join("\n");
+}
+
+/** JSX longer than a reader asked for (`nodeToJsx`'s `maxChars`). */
+export class JsxTooLong extends Error {
+  override name = "JsxTooLong";
+  constructor(readonly maxChars: number) {
+    super(`more than ${maxChars.toLocaleString("en")} characters of JSX`);
+  }
 }
 
 function escapeText(text: string): string {

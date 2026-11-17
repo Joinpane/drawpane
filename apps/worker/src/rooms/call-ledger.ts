@@ -12,6 +12,7 @@
  * calls, never anyone else's.
  */
 import type { Op } from "@drawpane/model";
+import { boundedPages } from "./node-tables";
 
 /** Calls are kept this long: a repeated id within it answers as recorded, and undo reaches back as far. */
 export const CALL_RETENTION_MS = 24 * 60 * 60_000;
@@ -106,6 +107,49 @@ export function overlap(theirs: readonly Op[], ids: ReadonlySet<string>): string
     if ((op.op === "create" || op.op === "move") && ids.has(op.parent)) hit.add(op.parent);
   }
   return [...hit];
+}
+
+/**
+ * The first logged transaction after `since`, by anyone but `sessionId`,
+ * whose operations overlap `ids`: who, and which. The log keeps 10,000
+ * transactions of up to a message each (typing in a text of 200,000
+ * characters logs all of them every keystroke), so it's read a page bounded
+ * by characters at a time, stopping at the first.
+ */
+export function firstOverlap(
+  sql: SqlStorage,
+  since: number,
+  sessionId: string,
+  ids: ReadonlySet<string>,
+): { userId: string; ids: string[] } | null {
+  const pages = boundedPages<number, { user_id: string; ops: string }>(
+    since,
+    (after, size) =>
+      sql
+        .exec<{ revn: number; n: number }>(
+          "SELECT revn, LENGTH(ops) AS n FROM log WHERE revn > ? AND session_id != ? ORDER BY revn LIMIT ?",
+          after,
+          sessionId,
+          size,
+        )
+        .toArray()
+        .map((row) => ({ key: row.revn, n: row.n })),
+    (after, last) =>
+      sql
+        .exec<{ user_id: string; ops: string }>(
+          "SELECT user_id, ops FROM log WHERE revn > ? AND revn <= ? AND session_id != ? ORDER BY revn",
+          after,
+          last,
+          sessionId,
+        )
+        .toArray(),
+  );
+  for (const rows of pages)
+    for (const row of rows) {
+      const hit = overlap(JSON.parse(row.ops) as Op[], ids);
+      if (hit.length > 0) return { userId: row.user_id, ids: hit };
+    }
+  return null;
 }
 
 export class CallLedger {

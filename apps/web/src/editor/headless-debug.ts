@@ -36,6 +36,8 @@ type RemoteRasterise = (
     fonts: FontRef[];
     fallbackFamily: string | null;
     background: string | null;
+    /** Image files by the URL the SVG names them by, base64. */
+    images: { href: string; data: string }[];
   },
 ) => Promise<{ png: string; width: number; height: number }>;
 
@@ -79,6 +81,10 @@ export function headlessDebug(editor: Editor) {
         fonts,
         fallbackFamily: options.fallbackFamily ?? null,
         background: options.background ?? null,
+        images: [...(options.images ?? [])].map(([href, bytes]) => ({
+          href,
+          data: toBase64(bytes),
+        })),
       });
       return { ...out, png: fromBase64(out.png) };
     },

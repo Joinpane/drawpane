@@ -17,6 +17,7 @@ import {
   type FaceFileLoader,
   type HeadlessRenderer,
   type ImageBytesLoader,
+  imageCost,
   type TextMeasurer,
 } from "@drawpane/editor";
 import { cachedFontLoader, type FontBytesLoader, resvgRasteriser } from "@drawpane/raster";
@@ -41,19 +42,26 @@ export function renderFonts(loadFile: FaceFileLoader): FontBytesLoader {
 /**
  * A file's images by hash: the bytes from R2, the type and size from when
  * its team uploaded them. Another team's images aren't drawn, as they can't
- * be fetched from the file's editor either.
+ * be fetched from the file's editor either. One whose `imageCost` is past
+ * `room` is "too-large", known from its record (and its object's size)
+ * before its bytes are read.
  */
 export function renderImages(env: Env, fileId: string): ImageBytesLoader {
-  return async (ref) => {
+  return async (ref, room) => {
     const row = await env.DB.prepare(
-      `SELECT m.mime, m.width, m.height FROM media m JOIN files f ON f.team_id = m.team_id
+      `SELECT m.mime, m.width, m.height, m.bytes FROM media m JOIN files f ON f.team_id = m.team_id
        WHERE f.id = ? AND m.sha = ?`,
     )
       .bind(fileId, ref)
-      .first<{ mime: string; width: number; height: number }>();
+      .first<{ mime: string; width: number; height: number; bytes: number }>();
     if (!row) return null;
+    if (imageCost(row.bytes, row.width, row.height) > room) return "too-large";
     const object = await env.FILES.get(mediaKey(ref));
     if (!object) return null;
+    if (imageCost(object.size, row.width, row.height) > room) {
+      await object.body.cancel();
+      return "too-large";
+    }
     return {
       bytes: new Uint8Array(await object.arrayBuffer()),
       type: row.mime,

@@ -10,6 +10,7 @@
  */
 import { NODE_TYPES, type NodeRecord, ROOT_ID, restoreNodeOps } from "@drawpane/model";
 import {
+  boundedPages,
   countRows,
   createNodeTable,
   fillDepths,
@@ -98,25 +99,42 @@ interface JoinedRow extends NodeRow {
  */
 export function restoreFromTable(sql: SqlStorage, version: string, out: OpChunks): number {
   const count = { dropped: 0 };
-  let after: [number, string] = [0, ""];
-  for (;;) {
-    const rows = sql
-      .exec<JoinedRow>(
-        `SELECT v.id, v.parent, v.key, v.type, v.props, v.depth,
-                n.parent AS n_parent, n.key AS n_key, n.type AS n_type, n.props AS n_props
-           FROM ${version} v LEFT JOIN nodes n ON n.id = v.id
-          WHERE v.depth IS NOT NULL AND (v.depth > ? OR (v.depth = ? AND v.id > ?))
-          ORDER BY v.depth, v.id LIMIT ?`,
-        after[0],
-        after[0],
-        after[1],
-        PAGE_ROWS,
-      )
-      .toArray();
-    if (rows.length === 0) break;
+  // A page is bounded by the characters of both sides' values (a text may hold 200,000).
+  const from = `FROM ${version} v LEFT JOIN nodes n ON n.id = v.id
+    WHERE v.depth IS NOT NULL AND (v.depth > ? OR (v.depth = ? AND v.id > ?))`;
+  const pages = boundedPages<readonly [number, string], JoinedRow>(
+    [0, ""],
+    (after, size) =>
+      sql
+        .exec<{ depth: number; id: string; n: number }>(
+          `SELECT v.depth, v.id, LENGTH(v.props) + COALESCE(LENGTH(n.props), 0) AS n ${from}
+            ORDER BY v.depth, v.id LIMIT ?`,
+          after[0],
+          after[0],
+          after[1],
+          size,
+        )
+        .toArray()
+        .map((row) => ({ key: [row.depth, row.id] as const, n: row.n })),
+    (after, last) =>
+      sql
+        .exec<JoinedRow>(
+          `SELECT v.id, v.parent, v.key, v.type, v.props, v.depth,
+                  n.parent AS n_parent, n.key AS n_key, n.type AS n_type, n.props AS n_props
+             ${from} AND (v.depth < ? OR (v.depth = ? AND v.id <= ?))
+            ORDER BY v.depth, v.id`,
+          after[0],
+          after[0],
+          after[1],
+          last[0],
+          last[0],
+          last[1],
+        )
+        .toArray(),
+  );
+  for (const rows of pages) {
     // Level by level, so each node's parent is placed (by an earlier operation) before it.
     for (const row of rows) {
-      after = [row.depth, row.id];
       // Unchanged, byte for byte: nothing to do, and nothing to parse.
       if (
         row.n_props === row.props &&
@@ -140,7 +158,6 @@ export function restoreFromTable(sql: SqlStorage, version: string, out: OpChunks
       if (place) out.push(place);
       for (const op of sets) out.push(op);
     }
-    if (rows.length < PAGE_ROWS) break;
   }
 
   // The topmost of the file's nodes the version doesn't have; what's inside them goes with them.

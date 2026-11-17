@@ -1,6 +1,7 @@
 import {
   type ApplyOptions,
   applyTransaction,
+  type BuildBudget,
   type CopiesFormat,
   type CopySlot,
   collectSubtree,
@@ -26,6 +27,8 @@ type Listener = (change: DocChange) => void;
 /** How many recent changes `changesSince` can replay, and how many ids they may hold in all. */
 const LOG_CHANGES = 256;
 const LOG_IDS = 2_000_000;
+/** What the change log holds for an id it keeps (a set's entry), counted in a meter. */
+const LOG_ID_BYTES = 48;
 
 export interface DocOptions {
   /**
@@ -74,6 +77,9 @@ export class Doc {
   readonly #log: Array<{ version: number; change: DocChange }> = [];
   #logIds = 0;
 
+  /** What this document counts what it keeps in (`resetStored`); null when nothing does. */
+  #meter: BuildBudget | null = null;
+
   #lastStored: readonly Op[] = [];
   #lastStoredInverse: readonly Op[] = [];
   #resetIds: ReadonlyMap<string, string> = new Map();
@@ -81,6 +87,11 @@ export class Doc {
   constructor(options: DocOptions = {}) {
     this.#compactCopies = options.compactCopies ?? compactByDefault;
     this.#compact = this.#compactCopies ? new CompactCopies() : null;
+  }
+
+  /** What the document counts what it keeps in (`resetStored`), if anything. */
+  get meter(): BuildBudget | null {
+    return this.#meter;
   }
 
   /** Whether copies are kept compact (decision 0029): as the file's room stores them. */
@@ -243,6 +254,7 @@ export class Doc {
 
   /** Replaces the whole document, e.g. from a snapshot (in the materialized form). */
   reset(nodes: Iterable<NodeRecord>): void {
+    this.#meter = null;
     if (this.#compactCopies) {
       // The room's converter (decision 0029), so a document converted here is what the room stores.
       const converted = compactByInstance(nodes);
@@ -259,15 +271,33 @@ export class Doc {
    * Replaces the whole document with nodes as a room stores them: in
    * `copies` form when said (which this document then keeps, as a file's
    * room tells it), else in the form it keeps.
+   *
+   * With a `meter`, everything the document keeps from then on is counted
+   * in it as it's kept: its nodes, the copy layers it builds, its change
+   * log. Building past the meter's limit throws `BuildTooLarge` before what
+   * would pass it is kept, so `nodes` can be read a page at a time and a
+   * file too large is refused partway, never held whole. A change applied
+   * later is counted whole (`BuildBudget.over` says whether it went past);
+   * copy layers it builds are still refused past the limit.
    */
-  resetStored(nodes: Iterable<NodeRecord>, copies?: CopiesFormat): void {
+  resetStored(
+    nodes: Iterable<NodeRecord>,
+    copies?: CopiesFormat,
+    { meter = null }: { readonly meter?: BuildBudget | null } = {},
+  ): void {
     if (copies !== undefined) this.#compactCopies = copies === "compact";
+    if (meter) {
+      // The meter counts from what's kept now: the log so far is let go of (a reset replays nothing).
+      this.#log.length = 0;
+      this.#logIds = 0;
+    }
+    this.#meter = meter;
     if (this.#compactCopies) {
-      this.#compact = new CompactCopies(nodes);
+      this.#compact = new CompactCopies(nodes, { meter });
       this.#store = new MemoryStore();
     } else {
       this.#compact = null;
-      this.#store = new MemoryStore(nodes);
+      this.#store = new MemoryStore(nodes, { meter });
     }
     this.#resetIds = new Map();
     this.#record(new Set(), new Set(), true);
@@ -347,10 +377,15 @@ export class Doc {
     this.#pending = null;
     this.#version++;
     this.#log.push({ version: this.#version, change });
-    this.#logIds += change.ids.size + change.parents.size;
+    const added = change.ids.size + change.parents.size;
+    this.#logIds += added;
+    this.#meter?.hold(LOG_ID_BYTES * added);
     while (this.#log.length > LOG_CHANGES || (this.#log.length > 1 && this.#logIds > LOG_IDS)) {
       const dropped = this.#log.shift();
-      if (dropped) this.#logIds -= dropped.change.ids.size + dropped.change.parents.size;
+      if (!dropped) continue;
+      const gone = dropped.change.ids.size + dropped.change.parents.size;
+      this.#logIds -= gone;
+      this.#meter?.release(LOG_ID_BYTES * gone);
     }
     for (const listener of this.#listeners) listener(change);
   }

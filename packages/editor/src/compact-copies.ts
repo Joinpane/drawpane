@@ -27,6 +27,7 @@
 import {
   type ApplyOptions,
   applyOp,
+  type BuildBudget,
   CopyView,
   collectSubtree,
   isMainNode,
@@ -38,6 +39,7 @@ import {
   OVERRIDE_KEY,
   ownValues,
   type Props,
+  presentedBytes,
   propAllowed,
   ROOT_LOCAL_PROPS,
   sameValue,
@@ -124,10 +126,18 @@ export class CompactCopies {
   /** Override records that swap their copy to another main. */
   readonly #swapRecords = new Set<string>();
 
-  /** `nodes` in the stored form. */
-  constructor(nodes: Iterable<NodeRecord> = []) {
-    this.store = new MemoryStore(nodes);
-    this.view = new CopyView(this.store);
+  /**
+   * `nodes` in the stored form. With a `meter`, what the store keeps and
+   * every copy layer the view builds are counted in it (`MemoryStore`,
+   * `CopyView`): building past it throws `BuildTooLarge`.
+   */
+  constructor(
+    nodes: Iterable<NodeRecord> = [],
+    { meter = null }: { meter?: BuildBudget | null } = {},
+  ) {
+    this.store = new MemoryStore(nodes, { meter });
+    // The store counts the values; a presented copy only adds its record and an object pointing at them.
+    this.view = new CopyView(this.store, { budget: meter, cost: presentedBytes });
     for (const node of this.store.nodes()) {
       if (node.type === "override") {
         this.#records++;
@@ -185,11 +195,28 @@ export class CompactCopies {
     };
   }
 
-  /** Applies operations on the stored form as they are (a room's, or a test's). */
+  /**
+   * Applies operations on the stored form as they are (a room's, or a
+   * test's). A run of operations other than deletes (which read the view
+   * for what they remove) invalidates the view once, at its end: 80 layers
+   * created in a main of 1,000 instances build its copies again once, not
+   * 80 times.
+   */
   applyStored(ops: readonly Op[], { held = false }: ApplyOptions = {}): CompactApplied {
     const tx = this.#tx(held);
     try {
-      for (const op of ops) tx.inverse.push(this.#put(tx, op));
+      for (let i = 0; i < ops.length; ) {
+        if ((ops[i] as Op).op === "delete") {
+          tx.inverse.push(this.#put(tx, ops[i] as Op));
+          i++;
+          continue;
+        }
+        let end = i;
+        while (end < ops.length && (ops[end] as Op).op !== "delete") end++;
+        this.#group(tx, () => {
+          for (; i < end; i++) tx.inverse.push(this.#put(tx, ops[i] as Op));
+        });
+      }
     } catch (error) {
       this.#rollback(tx);
       throw error;

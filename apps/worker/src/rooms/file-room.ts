@@ -21,7 +21,7 @@ import {
   keyBetween,
   LATENCY_BUCKETS_MS,
   type LibraryAsset,
-  libraryAssets,
+  libraryAssetsWithin,
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_LIBRARY_ASSETS,
   ModelError,
@@ -49,8 +49,9 @@ import { FILE_ACCESS, FILE_ROLE } from "../api/access";
 import type { Env, Role } from "../env";
 import { signPayload, verifyPayload } from "../lib/crypto";
 import { answerDocument, type DocumentRequest, SqlFileDoc } from "../mcp/document";
+import { AgentTooLarge, agentPrecheck } from "./agent-admission";
 import { AgentEngine, type EngineRun } from "./agent-engine";
-import { CALL_SCHEMA, CallLedger, changedIds, overlap, type StepCall } from "./call-ledger";
+import { CALL_SCHEMA, CallLedger, changedIds, firstOverlap, type StepCall } from "./call-ledger";
 import {
   applyConversion,
   CONVERT_STEP_WORK,
@@ -372,13 +373,6 @@ const UNLIMITED: ImportLimits = {
   nodes: Number.POSITIVE_INFINITY,
   bytes: Number.POSITIVE_INFINITY,
 };
-/**
- * The most nodes a file may have for agents to work on it: the headless
- * editor (decision 0021) holds the whole file in memory: its document alone
- * measured 34 MB at 50,000 layers (about 700 bytes each), and building it
- * reads them all at once first.
- */
-export const AGENT_MAX_NODES = 50_000;
 
 /** Who a change is logged as. */
 interface Author {
@@ -511,9 +505,8 @@ export class FileRoom extends DurableObject<Env> {
       // Nothing can be reading a transient table yet: any left are from before a restart.
       for (const table of tempTables(this.#sql)) dropTable(this.#sql, table);
       this.#revn = Number(this.#meta("revn") ?? 0);
-      const hasPage = this.#store
-        .childIds(ROOT_ID)
-        .some((id) => this.#store.get(id)?.type === "page");
+      // Counted in SQL: a file may hold a million pages, never all read to see whether it has one.
+      const hasPage = this.#store.pagesUpTo(1) > 0;
       const copies = this.#meta("copies");
       if (!hasPage) {
         // A new file: stored compact, unless conversion is turned off (COMPACT_COPIES=off).
@@ -1470,11 +1463,13 @@ export class FileRoom extends DurableObject<Env> {
     try {
       // With compact copies, components are hashed as they're presented (decision 0029).
       const reader = new TableReader(this.#sql, frozen.table);
-      const assets = libraryAssets(
+      // Counted before any is read or hashed: past the limit, refused holding none of them.
+      const assets = libraryAssetsWithin(
         frozen.copies === "compact" ? new PresentedReader(reader, this.#sql, frozen.table) : reader,
+        MAX_LIBRARY_ASSETS,
       );
+      if (assets === null) return { ok: false, reason: "too-many" };
       if (assets.length === 0) return { ok: false, reason: "empty" };
-      if (assets.length > MAX_LIBRARY_ASSETS) return { ok: false, reason: "too-many" };
       const version = await this.#saveVersion(
         fileId,
         { reason: "named", by: by.userId, name, description },
@@ -1656,9 +1651,15 @@ export class FileRoom extends DurableObject<Env> {
 
   /** The starting page, when it's all the file has (and still empty). */
   #seedPage(): NodeRecord | null {
-    const roots = this.#store.childIds(ROOT_ID);
-    const seed = roots.length === 1 ? this.#store.get(roots[0] as string) : undefined;
-    const empty = seed?.type === "page" && this.#store.childIds(seed.id).length === 0;
+    const roots = this.#sql
+      .exec<{ id: string }>("SELECT id FROM nodes WHERE parent = ? LIMIT 2", ROOT_ID)
+      .toArray();
+    const seed = roots.length === 1 ? this.#store.get((roots[0] as { id: string }).id) : undefined;
+    // Whether it holds anything, not its every child (a page may hold 500,000).
+    const empty =
+      seed?.type === "page" &&
+      this.#sql.exec("SELECT 1 FROM nodes WHERE parent = ? LIMIT 1", seed.id).toArray().length ===
+        0;
     this.#store.clearCache();
     return empty ? (seed as NodeRecord) : null;
   }
@@ -2122,6 +2123,16 @@ export class FileRoom extends DurableObject<Env> {
     name: string,
     input: unknown,
   ): Promise<AgentCallResult> {
+    return refusedAsFailure(() => this.#runAgentTool(by, session, callId, name, input));
+  }
+
+  async #runAgentTool(
+    by: Requester,
+    session: AgentSessionRef,
+    callId: string,
+    name: string,
+    input: unknown,
+  ): Promise<AgentCallResult> {
     this.#adopt(session.fileId);
     const tool = findTool(name);
     if (tool?.level !== "write") return { ok: false, message: `There's no write tool ${name}.` };
@@ -2169,6 +2180,10 @@ export class FileRoom extends DurableObject<Env> {
    * editor: nothing is committed or recorded.
    */
   async readAgentTool(fileId: string, name: string, input: unknown): Promise<AgentCallResult> {
+    return refusedAsFailure(() => this.#readAgentTool(fileId, name, input));
+  }
+
+  async #readAgentTool(fileId: string, name: string, input: unknown): Promise<AgentCallResult> {
     this.#adopt(fileId);
     const tool = findTool(name);
     if (!tool || tool.level === "write")
@@ -2291,18 +2306,26 @@ export class FileRoom extends DurableObject<Env> {
     return { ok: true, revn, result, replayed: false };
   }
 
-  /** A refusal when the file is more than the headless editor holds (AGENT_MAX_NODES). */
+  /**
+   * A refusal when the file is more than the headless editor may hold
+   * (`agent-admission.ts`). A warm editor at this revision is within it
+   * (its meter lets it go when it isn't). Otherwise the SQL pre-check, a
+   * fast filter before anything is read; a file it passes is measured as
+   * the editor is built (`#warmEditor`), and a refusal then is kept for the
+   * revision, so asking again doesn't read the file again.
+   */
   #tooLargeForAgents(): AgentCallResult | null {
-    const stored = this.#store.count();
-    // With compact copies the editor holds every copy layer as built: counted as presented.
-    const nodes =
-      this.#copies === "compact" && stored <= AGENT_MAX_NODES ? this.#presentedLayers() : stored;
-    if (nodes <= AGENT_MAX_NODES) return null;
-    return {
-      ok: false,
-      message: `This file is too large for agent tools (${nodes.toLocaleString("en")} layers; they work on files of up to ${AGENT_MAX_NODES.toLocaleString("en")}). The read tools (get_outline, find_nodes, get_node) still work.`,
-    };
+    if (this.#engine?.heldAt(this.#revn) != null) return null;
+    if (this.#agentRefusal?.revn !== this.#revn) {
+      const pre = agentPrecheck(this.#sql, this.#copies, () => this.#presentedLayers());
+      this.#agentRefusal = { revn: this.#revn, message: pre.ok ? null : pre.message };
+    }
+    const message = this.#agentRefusal.message;
+    return message === null ? null : { ok: false, message };
   }
+
+  /** Whether the file at a revision was refused for agents, and why (null: not refused). */
+  #agentRefusal: { revn: number; message: string | null } | null = null;
 
   /** Layers the file presents (compact copies), worked out once a revision. */
   #presented: { revn: number; count: number } | null = null;
@@ -2326,8 +2349,30 @@ export class FileRoom extends DurableObject<Env> {
     return this.#engine;
   }
 
+  /**
+   * The headless editor at this revision, built when there's none warm:
+   * from pages of the room's rows (`SqlNodeStore.records`), metered as it's
+   * built. A file that's more than it may hold, or that grew past it while
+   * the call awaited (its fonts), is refused (`AgentTooLarge`, a
+   * `ToolFailure`, answered as the tool's failure).
+   */
   #warmEditor(engine: AgentEngine) {
-    return engine.editorAt(this.#revn, this.#store.count(), () => this.#readAll(), this.#copies);
+    if (engine.heldAt(this.#revn) === null) {
+      const tooLarge = this.#tooLargeForAgents();
+      if (tooLarge && !tooLarge.ok) throw new AgentTooLarge(tooLarge.message);
+    }
+    try {
+      return engine.editorAt(
+        this.#revn,
+        this.#store.count(),
+        () => this.#store.records(),
+        this.#copies,
+      );
+    } catch (error) {
+      if (error instanceof AgentTooLarge)
+        this.#agentRefusal = { revn: this.#revn, message: error.message };
+      throw error;
+    }
   }
 
   /** Commits an engine run as one transaction, with its ledger row in the same storage transaction. */
@@ -2388,18 +2433,7 @@ export class FileRoom extends DurableObject<Env> {
       .exec<{ revn: number | null }>("SELECT MIN(revn) AS revn FROM log")
       .one().revn;
     if (oldest === null || oldest > since + 1) return "unknown";
-    const rows = this.#sql
-      .exec<{ user_id: string; ops: string }>(
-        "SELECT user_id, ops FROM log WHERE revn > ? AND session_id != ? ORDER BY revn",
-        since,
-        sessionId,
-      )
-      .toArray();
-    for (const row of rows) {
-      const hit = overlap(JSON.parse(row.ops) as Op[], ids);
-      if (hit.length > 0) return { userId: row.user_id, ids: hit };
-    }
-    return null;
+    return firstOverlap(this.#sql, since, sessionId, ids);
   }
 
   async #blockedMessage(
@@ -3670,6 +3704,16 @@ export class FileRoom extends DurableObject<Env> {
  * A tool that failed, as its answer: its own failure as worded, anything
  * else (a bug) logged, with the engine let go in case it was left half-done.
  */
+/** A tool call refused outside a run (the file grew past what agents work on) answered as a failure. */
+async function refusedAsFailure(call: () => Promise<AgentCallResult>): Promise<AgentCallResult> {
+  try {
+    return await call();
+  } catch (error) {
+    if (error instanceof ToolFailure) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
 function failedRun(engine: AgentEngine, name: string, error: unknown): AgentCallResult {
   if (error instanceof ToolFailure) return { ok: false, message: error.message };
   console.error(`agent tool ${name} failed`, error);

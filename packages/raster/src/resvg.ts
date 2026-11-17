@@ -25,6 +25,14 @@ export interface RasterOptions {
   readonly fallbackFamily?: string;
   /** Painted behind everything, as a CSS colour; transparent when absent. */
   readonly background?: string | null;
+  /**
+   * Image files by the `https:` URL the SVG names each by (never fetched):
+   * handed to resvg as bytes, so the SVG needn't carry them as data: URLs.
+   * An image the SVG names that isn't here, or that resvg can't decode, is
+   * left out. Images inside a `<pattern>` aren't resolved from here (resvg
+   * doesn't list them): a pattern needs its image as a data: URL.
+   */
+  readonly images?: ReadonlyMap<string, Uint8Array>;
 }
 
 /** A rendered picture. */
@@ -106,6 +114,16 @@ function draw<T>(svg: string, options: RasterOptions, read: (image: Rendered) =>
     imageRendering: 0,
   });
   try {
+    if (options.images)
+      for (const href of resvg.imagesToResolve() as string[]) {
+        const bytes = options.images.get(href);
+        if (!bytes) continue;
+        try {
+          resvg.resolveImage(href, bytes);
+        } catch {
+          // A file it can't decode is left out, as a broken data: URL is.
+        }
+      }
     const image = resvg.render();
     try {
       return read(image);

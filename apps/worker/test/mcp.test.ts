@@ -5,6 +5,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import type { NodeRecord, Op } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import { TableReader } from "../src/rooms/node-tables";
 import { Browser, openSocket, signedInUser } from "./helpers";
 import { call, makeToken, rpc } from "./mcp-helpers";
 
@@ -306,6 +307,41 @@ describe("the read tools", () => {
     expect(components.structuredContent.components).toEqual([
       expect.objectContaining({ id: "btn", instances: 1 }),
     ]);
+  });
+
+  it("list as many pages as the outline's limit, and count the rest", async () => {
+    const ana = await signedInUser("Ana");
+    const { fileId } = await seededFile(ana.browser, ana.projectId);
+    const { token } = await makeToken(ana.browser);
+    const stub = env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
+    // 2,500 more pages, written straight into the room's table (#173's review: a million),
+    // 1,500 of them with one key, so a read of ids (1,000) ends among equal keys.
+    await runInDurableObject(stub, (_room, state) => {
+      state.storage.sql.exec(
+        `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 2499)
+         INSERT INTO nodes (id, parent, key, type, props)
+         SELECT 'pg' || i, 'root', CASE WHEN i < 1500 THEN 'z' ELSE 'z' || printf('%05d', i) END,
+           'page', '{}' FROM n`,
+      );
+      const sql = state.storage.sql;
+      const all = sql
+        .exec<{ id: string }>(
+          "SELECT id FROM nodes WHERE parent = 'root' AND type = 'page' ORDER BY key, id",
+        )
+        .toArray()
+        .map((r) => r.id);
+      const reader = new TableReader(sql, "nodes");
+      expect([...reader.pageIds()]).toEqual(all);
+      expect(reader.pageCount()).toBe(all.length);
+    });
+    const outline = await call(token, "get_outline", { fileId, depth: 1, limit: 10 });
+    expect(outline.isError).toBe(false);
+    const answer = outline.structuredContent as { pages: { id: string }[]; morePages?: number };
+    expect(answer.pages).toHaveLength(10);
+    expect(answer.pages.length + (answer.morePages ?? 0)).toBeGreaterThan(2_500);
+    // A page past the first read of ids (1,000) is still found by id.
+    const last = await call(token, "get_outline", { fileId, pageId: "pg2499", depth: 1 });
+    expect(last.isError).toBe(false);
   });
 
   it("read comments and history", async () => {

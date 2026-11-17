@@ -5,14 +5,18 @@
  * that step over the session's own calls and never over a person's.
  * Text is measured by the stand-in measurer (vitest.config.ts).
  */
-import { env } from "cloudflare:test";
-import { keyBetween, type NodeRecord, type Op } from "@drawpane/model";
+import { env, runInDurableObject } from "cloudflare:test";
+import { keyBetween, keysBetween, type NodeRecord, type Op } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { provideHarfBuzzMeasurer } from "../src/agent/harfbuzz";
 import { provideMeasurer } from "../src/agent/measurer";
 import type { Env } from "../src/env";
 import { offered } from "../src/mcp/server";
 import { type Browser, openSocket, signedInUser } from "./helpers";
+
+const TOO_LARGE =
+  /^This file is too large for agent tools \(editing it would take more than the 48 MB of memory they work in; long texts take the most\)\. The read tools/;
+
 import { call, makeToken, rpc } from "./mcp-helpers";
 
 const roomOf = (fileId: string) => env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
@@ -239,6 +243,132 @@ describe("a live session", () => {
     );
     const jsx = ok<{ jsx: string }>(await call(token, "get_jsx", { fileId, id: "note" }));
     expect(jsx.jsx).toContain("w={80}");
+  });
+
+  it("refuses a file of long texts by what the editor would hold, before reading it", async () => {
+    // 260 texts of 200,000 characters: 261 layers, far under the 50,000-layer limit, but at
+    // least 52 MB held (#163's seventh review aborted a room reading 240 MB of them). The SQL
+    // pre-check counts their characters: refused before a row is read.
+    const { browser, fileId, token } = await setup();
+    const person = await join(browser, fileId);
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      const props = JSON.stringify({ characters: "x".repeat(200_000) });
+      for (let i = 0; i < 260; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a1', 'text', ?)",
+          `T${i}`,
+          person.page.id,
+          props,
+        );
+    });
+    const refused = await call(token, "get_jsx", { fileId, id: "T0" });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.structuredContent.error)).toMatch(TOO_LARGE);
+  });
+
+  it("refuses a file the editor's meter stops partway, and remembers it for the revision", {
+    timeout: 60_000,
+  }, async () => {
+    // Rectangles of 32 gradients of 32 stops: 36 KB of JSON each, which SQL can't tell from
+    // anything else of that size, but over 100 KB each as parsed objects. 500 of them pass
+    // the pre-check; building the editor stops at 48 MB (#173's review aborted at 50 MB).
+    const { browser, fileId, token } = await setup();
+    const person = await join(browser, fileId);
+    const stop = { position: 0, color: "#000000" };
+    const fill = {
+      type: "linear",
+      from: { x: 0, y: 0 },
+      to: { x: 1, y: 1 },
+      stops: Array(32).fill(stop),
+    };
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      const props = JSON.stringify({ fills: Array(32).fill(fill) });
+      for (let i = 0; i < 500; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, 'a1', 'rect', ?)",
+          `R${i}`,
+          person.page.id,
+          props,
+        );
+    });
+    const refused = await call(token, "get_jsx", { fileId, id: "R0" });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.structuredContent.error)).toMatch(TOO_LARGE);
+    // Asked again at the same revision: refused as before, without building it again.
+    const again = await call(token, "get_jsx", { fileId, id: "R1" });
+    expect(String(again.structuredContent.error)).toMatch(TOO_LARGE);
+    // Smaller, it's admitted again.
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      state.storage.sql.exec("DELETE FROM nodes WHERE id LIKE 'R%' AND id != 'R0'");
+    });
+    await person.edit([{ op: "set", id: "R0", prop: "name", value: "Gradients" }]);
+    const jsx = await call(token, "get_jsx", { fileId, id: "R0" });
+    expect(jsx.isError).toBeFalsy();
+  });
+
+  it("deletes a frame of 2,000 styled children, and undoes and redoes it", async () => {
+    // #173's second review: 1.26 MB of values to put back, which an undo cap of 1 MB refused.
+    const { browser, fileId, token } = await setup();
+    const person = await join(browser, fileId);
+    const session = await start(token, fileId, "live");
+    const frame = ok<{ ids: string[] }>(
+      await call(token, "render", {
+        sessionId: session.sessionId,
+        jsx: "<Frame w={400} h={400} />",
+      }),
+    ).ids[0] as string;
+    const button = {
+      name: "Primary button / default",
+      x: 16,
+      y: 16,
+      width: 120,
+      height: 40,
+      fills: [
+        {
+          type: "linear",
+          from: { x: 0, y: 0 },
+          to: { x: 0, y: 1 },
+          stops: [
+            { position: 0, color: "#2563eb" },
+            { position: 1, color: "#1d4ed8" },
+          ],
+        },
+      ],
+      strokes: [{ type: "solid", color: "#1e40af" }],
+      strokeWeight: 1,
+      cornerRadius: 8,
+      clipContent: true,
+      layoutMode: "row",
+      gap: 8,
+      paddingLeft: 16,
+      paddingRight: 16,
+      paddingTop: 8,
+      paddingBottom: 8,
+      alignItems: "center",
+      justifyContent: "center",
+      effects: [{ type: "drop-shadow", x: 0, y: 1, blur: 2, spread: 0, color: "#00000020" }],
+    };
+    await runInDurableObject(roomOf(fileId), (_room, state) => {
+      const props = JSON.stringify(button);
+      const keys = keysBetween(null, null, 2000);
+      for (let i = 0; i < 2000; i++)
+        state.storage.sql.exec(
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, ?, 'frame', ?)",
+          `B${i}`,
+          frame,
+          keys[i],
+          props,
+        );
+    });
+    // The room's file changed underneath: a person's edit moves its revision on.
+    await person.edit([{ op: "set", id: frame, prop: "name", value: "Buttons" }]);
+    const before = (await roomOf(fileId).stats()).nodes;
+    ok(await call(token, "delete_nodes", { sessionId: session.sessionId, ids: [frame] }));
+    expect((await roomOf(fileId).stats()).nodes).toBe(before - 2001);
+    ok(await call(token, "undo", { sessionId: session.sessionId }));
+    expect((await roomOf(fileId).stats()).nodes).toBe(before);
+    ok(await call(token, "redo", { sessionId: session.sessionId }));
+    expect((await roomOf(fileId).stats()).nodes).toBe(before - 2001);
   });
 
   it("commits nothing when a tool fails, and says why", async () => {

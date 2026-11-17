@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_TOOLS,
   EXPORT_IMAGE_FIT,
+  MAX_JSX_CHARS,
   runTool,
   ToolFailure,
   type ToolServices,
@@ -205,6 +206,7 @@ describe("agent tools", () => {
           approximate: ["glass"],
           missingFonts: ["Fraunces 700"],
           missingImages: ["abc"],
+          skippedImages: ["def"],
         };
       },
     };
@@ -216,6 +218,7 @@ describe("agent tools", () => {
       expect.stringContaining("glass"),
       expect.stringContaining("Fraunces 700"),
       expect.stringContaining("1 image(s)"),
+      expect.stringMatching(/too large to draw here.*placeholders \(def\)/),
     ]);
     await runTool(editor, "export_image", { id: rect, scale: 3, background: "#fff" }, services);
     expect(asked[1]).toEqual({ scale: 3, background: "#fff" });
@@ -231,6 +234,29 @@ describe("agent tools", () => {
     await expect(runTool(editor, "export_image", { id: "nope" }, services)).rejects.toThrow(
       /no layer nope/,
     );
+  });
+
+  it("refuses JSX longer than one read returns, and reads a part of it", async () => {
+    const editor = setup();
+    // Texts hold at most 200,000 characters: enough of them to pass the bound.
+    const long = "x".repeat(200_000);
+    const count = Math.ceil(MAX_JSX_CHARS / long.length) + 1;
+    editor.doc.apply([
+      { op: "create", id: "f", type: "frame", parent: "p", key: "a0", props: {} },
+      ...Array.from({ length: count }, (_, i) => ({
+        op: "create" as const,
+        id: `t${i}`,
+        type: "text" as const,
+        parent: "f",
+        key: `a${String.fromCharCode(65 + i)}`,
+        props: { characters: long },
+      })),
+    ]);
+    await expect(runTool(editor, "get_jsx", { id: "f" })).rejects.toThrow(
+      /more JSX than one read returns/,
+    );
+    const one = data<{ jsx: string }>(await runTool(editor, "get_jsx", { id: "t0" }));
+    expect(one.jsx.length).toBeGreaterThan(long.length);
   });
 
   it("checks input against the schema, and refuses to write for a viewer", async () => {

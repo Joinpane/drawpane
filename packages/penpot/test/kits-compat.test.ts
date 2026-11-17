@@ -226,7 +226,7 @@ describe.skipIf(!DIR)("Penpot kits: layers land where Penpot put them", () => {
           for (const [id, shape] of shapes) {
             if (id === "00000000-0000-0000-0000-000000000000") continue;
             const points = shape.points as Point[] | undefined;
-            if (!points || points.length !== 4) continue;
+            if (points?.length !== 4) continue;
             totals.shapes++;
             const type = String(shape.type);
             const context = contextOf(shape, shapes);

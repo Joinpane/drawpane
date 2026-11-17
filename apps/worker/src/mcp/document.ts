@@ -15,11 +15,25 @@ export interface DocView {
   /** A node's children's ids in order, as they're asked for. */
   childIds(id: string): Iterable<string>;
   childCount(id: string): number;
-  pages(): NodeRecord[];
+  /** Page ids in file order, read as they're asked for (a file may have any number of pages). */
+  pageIds(): Iterable<string>;
+  pageCount(): number;
   /** The page a node is on, when it's on one (library copies and tokens aren't). */
   pageOf(id: string): NodeRecord | undefined;
   /** Every node on a page, parents first. */
   onPages(): Generator<NodeRecord>;
+}
+
+/** The first `limit` pages, in file order: only they are read. */
+function firstPages(doc: DocView, limit: number): NodeRecord[] {
+  const out: NodeRecord[] = [];
+  if (limit <= 0) return out;
+  for (const id of doc.pageIds()) {
+    const page = doc.get(id);
+    if (page) out.push(page);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 /** Children listed in full by `get_node`; past this they're counted. */
@@ -32,12 +46,7 @@ export const DETAIL_CHILDREN = 500;
  * down. A node is read when it's reached and let go when the walk moves on.
  */
 function* walkPages(doc: DocView): Generator<NodeRecord> {
-  const stack: Iterator<string>[] = [
-    doc
-      .pages()
-      .map((p) => p.id)
-      [Symbol.iterator](),
-  ];
+  const stack: Iterator<string>[] = [doc.pageIds()[Symbol.iterator]()];
   while (stack.length > 0) {
     const next = (stack[stack.length - 1] as Iterator<string>).next();
     if (next.done) {
@@ -90,8 +99,14 @@ export class FileDoc implements DocView {
     return this.children(id).length;
   }
 
-  pages(): NodeRecord[] {
-    return this.children(ROOT_ID).filter((n) => n.type === "page");
+  pageIds(): string[] {
+    return this.children(ROOT_ID)
+      .filter((n) => n.type === "page")
+      .map((n) => n.id);
+  }
+
+  pageCount(): number {
+    return this.pageIds().length;
   }
 
   pageOf(id: string): NodeRecord | undefined {
@@ -131,13 +146,12 @@ export class SqlFileDoc implements DocView {
     return this.#reader.childCount(id);
   }
 
-  pages(): NodeRecord[] {
-    const out: NodeRecord[] = [];
-    for (const id of this.#reader.pageIds()) {
-      const page = this.#reader.get(id);
-      if (page) out.push(page);
-    }
-    return out;
+  pageIds(): Iterable<string> {
+    return this.#reader.pageIds();
+  }
+
+  pageCount(): number {
+    return this.#reader.pageCount();
   }
 
   pageOf(id: string): NodeRecord | undefined {
@@ -172,15 +186,18 @@ export type DocumentRequest =
 export function answerDocument(doc: DocView, request: DocumentRequest): unknown {
   switch (request.kind) {
     case "outline": {
-      const pages = doc.pages();
+      // The limit first: no more pages are read than are listed (a file may have a million).
+      const pages = firstPages(doc, request.limit);
       const page = request.pageId ? doc.get(request.pageId) : pages[0];
       if (request.pageId && page?.type !== "page")
         return { error: `No page ${request.pageId} in this file.` };
       if (request.rootId && !doc.get(request.rootId))
         return { error: `No layer ${request.rootId} in this file.` };
       const start = request.rootId ?? page?.id;
+      const morePages = pages.length < request.limit ? 0 : doc.pageCount() - pages.length;
       return {
         pages: pages.map((p) => ({ id: p.id, name: p.props.name ?? "Page" })),
+        ...(morePages > 0 ? { morePages } : {}),
         outline: start ? outline(doc, start, request.depth, request.limit) : null,
       };
     }

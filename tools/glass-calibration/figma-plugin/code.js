@@ -62,7 +62,7 @@ async function main() {
     const settings = { ...defaults, ...spec };
     const glassBox = { ...SCENES.glass, ...(spec.glass || {}) };
     const frame = figma.createFrame();
-    frame.name = "glass-" + spec.id;
+    frame.name = `glass-${spec.id}`;
     frame.resize(cell.width, cell.height);
     frame.x = (i % cell.columns) * (cell.width + cell.gap);
     frame.y = Math.floor(i / cell.columns) * (cell.height + cell.gap);
@@ -126,7 +126,7 @@ async function main() {
     frame.appendChild(glass);
   });
   figma.viewport.scrollAndZoomIntoView(page.children);
-  figma.closePlugin("Made " + cells.length + " glass calibration cells.");
+  figma.closePlugin(`Made ${cells.length} glass calibration cells.`);
 }
 
-main().catch((error) => figma.closePlugin("Couldn't make the cells: " + error.message));
+main().catch((error) => figma.closePlugin(`Couldn't make the cells: ${error.message}`));
