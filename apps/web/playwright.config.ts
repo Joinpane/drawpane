@@ -33,6 +33,8 @@ export default defineConfig({
           url: `http://localhost:${port}/api/health`,
           reuseExistingServer: false,
           timeout: 120_000,
+          // Stopped gently, so server.mjs removes the run's database (Playwright kills outright otherwise).
+          gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
         },
       }),
   projects: [
