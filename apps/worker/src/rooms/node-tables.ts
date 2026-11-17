@@ -38,6 +38,8 @@ export const NODE_COLUMNS = "id, parent, key, type, props";
 
 /** Rows read at a time when a table is paged through. */
 export const PAGE_ROWS = 1_000;
+/** At most about this many characters of properties in a page (see `tablePages`). */
+export const PAGE_CHARS = 4 << 20;
 
 /** Bound parameters SQLite takes in one statement here (Durable Objects allow 100). */
 const MAX_PARAMS = 100;
@@ -184,21 +186,37 @@ export function* tablePages(
   sql: SqlStorage,
   table: string,
   size = PAGE_ROWS,
+  chars = PAGE_CHARS,
 ): Generator<NodeRow[]> {
   const t = checkName(table);
   let after = "";
   for (;;) {
-    const rows = sql
-      .exec<NodeRow>(
-        `SELECT ${NODE_COLUMNS} FROM ${t} WHERE id > ? ORDER BY id LIMIT ?`,
+    // How many of the next rows fit in `chars` of properties, measured in SQL (their lengths, not
+    // their properties), so a page of large layers ends early (a text layer may hold 200,000
+    // characters). Every cursor is read to its end: one left open keeps its table locked.
+    const sizes = sql
+      .exec<{ id: string; n: number }>(
+        `SELECT id, LENGTH(props) AS n FROM ${t} WHERE id > ? ORDER BY id LIMIT ?`,
         after,
         size,
       )
       .toArray();
-    if (rows.length === 0) return;
+    if (sizes.length === 0) return;
+    let take = 0;
+    let held = 0;
+    while (take < sizes.length && (take === 0 || held + (sizes[take] as { n: number }).n <= chars))
+      held += (sizes[take++] as { n: number }).n;
+    const last = (sizes[take - 1] as { id: string }).id;
+    const rows = sql
+      .exec<NodeRow>(
+        `SELECT ${NODE_COLUMNS} FROM ${t} WHERE id > ? AND id <= ? ORDER BY id`,
+        after,
+        last,
+      )
+      .toArray();
     yield rows;
-    after = (rows[rows.length - 1] as NodeRow).id;
-    if (rows.length < size) return;
+    after = last;
+    if (take === sizes.length && sizes.length < size) return;
   }
 }
 

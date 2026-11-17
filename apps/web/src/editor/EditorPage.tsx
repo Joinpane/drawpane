@@ -1324,7 +1324,10 @@ function SyncStatus() {
         ? pending > 0
           ? "Saving…"
           : `Saved · revision ${revn}`
-        : "Connecting…";
+        : // Connected and reading the file: a large one takes a while to download.
+          status === "syncing"
+          ? "Loading the file…"
+          : "Connecting…";
   return (
     <div
       className={`sync pane sync--${status}`}
