@@ -206,6 +206,7 @@ describe("agent tools", () => {
           approximate: ["glass"],
           missingFonts: ["Fraunces 700"],
           missingImages: ["abc"],
+          skippedImages: ["def"],
         };
       },
     };
@@ -217,6 +218,7 @@ describe("agent tools", () => {
       expect.stringContaining("glass"),
       expect.stringContaining("Fraunces 700"),
       expect.stringContaining("1 image(s)"),
+      expect.stringMatching(/too large to draw here.*placeholders \(def\)/),
     ]);
     await runTool(editor, "export_image", { id: rect, scale: 3, background: "#fff" }, services);
     expect(asked[1]).toEqual({ scale: 3, background: "#fff" });

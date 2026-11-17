@@ -7,15 +7,19 @@
  * What the SVG can't hold travels with it: the font files its text is set
  * in (the caller's loader: the font proxy's upstream, R2 for team fonts) and
  * its images, as files the rasteriser takes beside the SVG (named by a URL
- * that's never fetched), never as data: URLs. Runs with OpenType features or
+ * that's never fetched). A tiled fill's image is the exception: resvg reads
+ * files it's handed only for images outside patterns, so a tile's pattern
+ * carries its image as a data: URL. Runs with OpenType features or
  * variable axes are written as glyph outlines from the measurer's shaper,
  * so they don't depend on the rasteriser's support for either.
  *
  * Images are bounded (decision 0021): only those the render draws are
  * loaded, one at a time, each charged before its file is read
  * (`imageCost`: the file, and its pixels decoded at their natural size, as
- * resvg decodes them), and a render whose images come to more than
- * HEADLESS_IMAGE_BYTES is refused.
+ * resvg decodes them). An image that would take the render past
+ * HEADLESS_IMAGE_BYTES isn't drawn: its fills are a marked placeholder
+ * (grey, crossed) and it's listed in `skippedImages`, so the rest can still
+ * be checked.
  *
  * Effects SVG can only approximate (glass, noise, texture) or can't draw at
  * all (background blur) are listed with the picture, so a tool can say the
@@ -30,7 +34,7 @@ import { ExportError, exportBounds, fitScale, imageRefs, snapToPixels } from "./
 import type { Rect } from "./geometry";
 import { textSpans } from "./rich-text";
 import { Scene } from "./scene";
-import { exportSvg, type SvgImageSource } from "./svg";
+import { exportSvg, IMAGE_PLACEHOLDER, type SvgImageSource } from "./svg";
 import type { TextMeasurer } from "./text";
 
 /** An image's file, with its natural size in pixels. */
@@ -70,6 +74,13 @@ export const HEADLESS_IMAGE_BYTES = 32 << 20;
 export function imageCost(bytes: number, width: number, height: number): number {
   return 2 * bytes + 4 * width * height;
 }
+
+/**
+ * What a tiled image holds besides `imageCost`: its data: URL (a third
+ * more than the file), in the SVG string too, copied into resvg, and decoded
+ * back to the file there.
+ */
+const tiledExtra = (bytes: number) => 5 * bytes;
 
 /** Where the SVG says an image is: a URL never fetched, which the rasteriser is handed the file for. */
 const imageHref = (ref: string) => `https://media.invalid/${ref}`;
@@ -113,6 +124,11 @@ export interface HeadlessPng {
   readonly missingFonts: readonly string[];
   /** Images left out because their files couldn't be had, by hash. */
   readonly missingImages: readonly string[];
+  /**
+   * Images drawn as a marked placeholder (grey, crossed) because drawing
+   * them would hold more than a render may (HEADLESS_IMAGE_BYTES), by hash.
+   */
+  readonly skippedImages: readonly string[];
 }
 
 /** A Worker has 128 MB: a picture's pixels, and the layers its filters draw into, must fit well inside. */
@@ -208,13 +224,16 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
 
   /**
    * The images the render draws (`drawn`: the refs of the image fills the
-   * SVG draws), loaded one at a time, each charged before it's read
-   * (`imageCost`); past HEADLESS_IMAGE_BYTES the render is refused.
+   * SVG draws; `tiled`: those a tiled fill repeats), loaded one at a time,
+   * each charged before it's read (`imageCost`, and a tiled one's data:
+   * URL). One past what's left of HEADLESS_IMAGE_BYTES is skipped, drawn as
+   * a placeholder, and the rest are still loaded.
    */
-  const imagesFor = async (drawn: readonly string[]) => {
+  const imagesFor = async (drawn: readonly string[], tiled: ReadonlySet<string>) => {
     const sources = new Map<string, SvgImageSource>();
     const files = new Map<string, Uint8Array>();
     const missing: string[] = [];
+    const skipped: string[] = [];
     let held = 0;
     for (const ref of drawn) {
       const room = HEADLESS_IMAGE_BYTES - held;
@@ -223,16 +242,30 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
         missing.push(ref);
         continue;
       }
-      if (file === "too-large" || imageCost(file.bytes.length, file.width, file.height) > room)
-        throw new ExportError(
-          `The images in that render take more memory than drawing here may (up to ${HEADLESS_IMAGE_BYTES >> 20} MB, as their pixels are decoded at full size). Render a part without the largest images, or open the file in the editor and export it there.`,
-        );
-      held += imageCost(file.bytes.length, file.width, file.height);
+      if (file === "too-large") {
+        skipped.push(ref);
+        continue;
+      }
+      const cost =
+        imageCost(file.bytes.length, file.width, file.height) +
+        (tiled.has(ref) ? tiledExtra(file.bytes.length) : 0);
+      if (cost > room) {
+        skipped.push(ref);
+        continue;
+      }
+      held += cost;
       const href = imageHref(ref);
-      sources.set(ref, { href, width: file.width, height: file.height });
+      sources.set(ref, {
+        href,
+        width: file.width,
+        height: file.height,
+        ...(tiled.has(ref)
+          ? { patternHref: `data:${file.type};base64,${base64(file.bytes)}` }
+          : {}),
+      });
       files.set(href, file.bytes);
     }
-    return { sources, files, missing: missing.sort() };
+    return { sources, files, missing: missing.sort(), skipped: skipped.sort() };
   };
 
   return {
@@ -269,21 +302,24 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
       // The images the SVG draws (visible fills of visible layers, inside what's drawn), found by
       // writing it once without them: only when the layers have an image fill at all.
       const drawn = new Set<string>();
+      const tiled = new Set<string>();
       if (imageRefs(doc, ids).length > 0)
         exportSvg(scene, deps.measurer, ids, bounds, {
           ...svgOptions,
-          images: (ref) => {
+          images: (ref, tile) => {
             drawn.add(ref);
+            if (tile) tiled.add(ref);
             return null;
           },
         });
       const [fonts, images] = await Promise.all([
         fontsFor(facesUsed(doc, ids)),
-        imagesFor([...drawn].sort()),
+        imagesFor([...drawn].sort(), tiled),
       ]);
+      const skipped = new Set(images.skipped);
       const svg = exportSvg(scene, deps.measurer, ids, bounds, {
         ...svgOptions,
-        images: (ref) => images.sources.get(ref) ?? null,
+        images: (ref) => images.sources.get(ref) ?? (skipped.has(ref) ? IMAGE_PLACEHOLDER : null),
       });
       const raster = await deps.rasteriser.rasterise(svg, {
         scale,
@@ -299,6 +335,7 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
         approximate: approximations(doc, ids),
         missingFonts: fonts.missing,
         missingImages: images.missing,
+        skippedImages: images.skipped,
       };
     },
   };

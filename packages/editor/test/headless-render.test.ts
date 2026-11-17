@@ -169,6 +169,44 @@ describe("renderPng", () => {
     expect([...px.data.subarray(middle, middle + 4)]).toEqual([0, 0, 255, 255]);
   });
 
+  it("draws a tiled fill's image, carried in its pattern as resvg needs", async () => {
+    const d = doc([
+      layer("a", "rect", {
+        width: 10,
+        height: 10,
+        fills: [{ type: "image", ref: SHA, scaleMode: "tile" }],
+      }),
+    ]);
+    const svgs: string[] = [];
+    const r = createHeadlessRenderer({
+      measurer,
+      fonts: async () => null,
+      images: async () => ({ bytes: BLUE, type: "image/png", width: 1, height: 1 }),
+      rasteriser: {
+        rasterise: (svg, options) => {
+          svgs.push(svg);
+          return rasteriser.rasterise(svg, options);
+        },
+      },
+    });
+    const out = await r.renderPng(d, "a");
+    expect(out.skippedImages).toEqual([]);
+    // resvg reads files it's handed only outside patterns: the tile's image is inline.
+    expect(svgs.join("")).toMatch(/<pattern[^>]*><image[^>]*href="data:image\/png;base64,/);
+    const px = rasteriser.pixels(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="10" height="10" href="data:image/png;base64,${base64(out.png)}"/></svg>`,
+      { scale: 1, fonts: [] },
+    );
+    for (const [x, y] of [
+      [1, 1],
+      [5, 5],
+      [8, 3],
+    ] as const) {
+      const at = (y * 10 + x) * 4;
+      expect([...px.data.subarray(at, at + 4)], `${x},${y}`).toEqual([0, 0, 255, 255]);
+    }
+  });
+
   it("loads only the images it draws", async () => {
     const hidden = "e".repeat(64);
     const off = "f".repeat(64);
@@ -192,7 +230,7 @@ describe("renderPng", () => {
     expect(asked.images).toEqual([SHA]);
   });
 
-  it("refuses images past what a render may hold, before reading the one past it", async () => {
+  it("skips images past what a render may hold, before reading them, and draws the rest", async () => {
     // The review's shape (#173): 32 image fills of 4 MiB files on a 100 × 100 rectangle.
     const refs = Array.from({ length: 32 }, (_, i) => String(i).padStart(64, "0"));
     const d = doc([
@@ -213,23 +251,53 @@ describe("renderPng", () => {
         return { bytes: new Uint8Array(size), type: "image/png", width: 1, height: 1 };
       },
     });
-    await expect(r.renderPng(d, "r")).rejects.toThrow(/take more memory than drawing here may/);
+    const out = await r.renderPng(d, "r");
     const fit = Math.floor(HEADLESS_IMAGE_BYTES / cost);
     expect(read).toBe(fit);
-    // One at a time, each asked with what's left.
+    // One at a time, each asked with what's left; those past it are asked and not read.
     expect(asked.rooms[1]).toBe(HEADLESS_IMAGE_BYTES - cost);
-    expect(asked.images.length).toBe(fit + 1);
+    expect(asked.images.length).toBe(32);
+    expect(out.skippedImages).toEqual(refs.slice(fit));
+    expect(out.missingImages).toEqual([]);
   });
 
-  it("refuses an image whose pixels are past it, whatever its loader says", async () => {
+  it("draws a photo too large to decode as a marked placeholder, and the rest as they are", async () => {
+    // The review's shape (#173): a 4000 × 3000 photo on an otherwise small frame, at scale 0.05.
     const d = doc([
-      layer("a", "rect", { fills: [{ type: "image", ref: SHA, scaleMode: "fill" }] }),
+      layer("f", "frame", {
+        width: 200,
+        height: 100,
+        fills: [{ type: "solid", color: "#ff0000" }],
+      }),
+      layer(
+        "photo",
+        "rect",
+        { width: 100, height: 100, fills: [{ type: "image", ref: SHA, scaleMode: "fill" }] },
+        "f",
+      ),
     ]);
     const { r } = renderer({
       // A 12-megapixel photo: 48 MB decoded.
       images: { [SHA]: { bytes: BLUE, type: "image/png", width: 4000, height: 3000 } },
     });
-    await expect(r.renderPng(d, "a")).rejects.toThrow(/up to 32 MB/);
+    const small = await r.renderPng(d, "f", { scale: 0.05 });
+    expect(small.skippedImages).toEqual([SHA]);
+    const out = await r.renderPng(d, "f", { scale: 1 });
+    expect(out.skippedImages).toEqual([SHA]);
+    expect(out.missingImages).toEqual([]);
+    const px = rasteriser.pixels(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><image width="200" height="100" href="data:image/png;base64,${base64(out.png)}"/></svg>`,
+      { scale: 1, fonts: [] },
+    );
+    const at = (x: number, y: number) => [
+      ...px.data.subarray((y * 200 + x) * 4, (y * 200 + x) * 4 + 4),
+    ];
+    // The frame's own red is drawn beside it; the photo's box is a neutral grey, crossed.
+    expect(at(150, 50)).toEqual([255, 0, 0, 255]);
+    expect(at(80, 20)).toEqual([229, 229, 229, 255]);
+    const diagonal = at(50, 50);
+    expect(diagonal[0]).toBeLessThan(229);
+    expect(diagonal[0]).toBe(diagonal[2]);
   });
 
   it("says when effects are approximate", async () => {

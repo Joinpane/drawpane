@@ -51,14 +51,7 @@ import { signPayload, verifyPayload } from "../lib/crypto";
 import { answerDocument, type DocumentRequest, SqlFileDoc } from "../mcp/document";
 import { AgentTooLarge, agentPrecheck } from "./agent-admission";
 import { AgentEngine, type EngineRun } from "./agent-engine";
-import {
-  CALL_SCHEMA,
-  CallLedger,
-  changedIds,
-  firstOverlap,
-  inverseCharsPast,
-  type StepCall,
-} from "./call-ledger";
+import { CALL_SCHEMA, CallLedger, changedIds, firstOverlap, type StepCall } from "./call-ledger";
 import {
   applyConversion,
   CONVERT_STEP_WORK,
@@ -420,12 +413,6 @@ export type AgentCallResult =
 
 /** The largest change one agent call may make, in JSON bytes (one log row, well under SQLite's cap). */
 const MAX_AGENT_CHANGE_BYTES = 1 << 20;
-/**
- * Why an agent's change that would take back more than that is refused: its
- * undo is kept with the call (decision 0026, item 8).
- */
-const TOO_MUCH_TO_UNDO =
-  "That changes too much at once to keep its undo (it would take back over 1 MB of layers' values). Change it in parts: fewer or smaller layers per call.";
 /** How often a call runs again because the file changed under it, before giving up. */
 const AGENT_ATTEMPTS = 3;
 const NO_ENGINE =
@@ -2288,9 +2275,6 @@ export class FileRoom extends DurableObject<Env> {
       return { ok: false, message: await this.#blockedMessage(direction, target, blocked) };
 
     const ops = direction === "undo" ? target.inverse : target.ops;
-    // What it takes back is kept for the step after; past what a call keeps, refused.
-    if (inverseCharsPast(this.#sql, ops, MAX_AGENT_CHANGE_BYTES) > MAX_AGENT_CHANGE_BYTES)
-      return { ok: false, message: `Can't ${direction} “${target.label}”: ${TOO_MUCH_TO_UNDO}` };
     const author = { clientId: "agent", seq: 0, userId: by.userId, sessionId: session.id };
     const result = {
       [direction === "undo" ? "undone" : "redone"]: { tool: target.tool, label: target.label },
@@ -2413,11 +2397,6 @@ export class FileRoom extends DurableObject<Env> {
         ok: false,
         message: "That's too much to change in one call. Build it in parts: one section per call.",
       };
-    }
-    if (inverseCharsPast(this.#sql, run.ops, MAX_AGENT_CHANGE_BYTES) > MAX_AGENT_CHANGE_BYTES) {
-      // Its editor already shows it: built again next time.
-      engine.drop();
-      return { ok: false, message: TOO_MUCH_TO_UNDO };
     }
     const author = { clientId: "agent", seq: 0, userId: by.userId, sessionId: session.id };
     let revn: number;

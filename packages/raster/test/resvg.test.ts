@@ -63,6 +63,23 @@ describe("resvg rasteriser", () => {
     expect(at(r.pixels(svg, { scale: 1, fonts: [] }), 2, 2)).toEqual([0, 0, 255, 255]);
   });
 
+  it("draws images handed to it as files, and leaves out one it can't decode", () => {
+    const blue = new Uint8Array(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC",
+        "base64",
+      ),
+    );
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4" viewBox="0 0 8 4"><image width="4" height="4" href="https://media.invalid/a" preserveAspectRatio="none"/><image x="4" width="4" height="4" href="https://media.invalid/b" preserveAspectRatio="none"/></svg>`;
+    const images = new Map([
+      ["https://media.invalid/a", blue],
+      ["https://media.invalid/b", new Uint8Array(16)],
+    ]);
+    const px = r.pixels(svg, { scale: 1, fonts: [], images });
+    expect(at(px, 2, 2)).toEqual([0, 0, 255, 255]);
+    expect(at(px, 6, 2)).toEqual([0, 0, 0, 0]);
+  });
+
   it("masks by alpha when the mask says so", () => {
     // Black at full alpha: shows through an alpha mask, hides under a luminance one.
     const svg = (type: string) =>

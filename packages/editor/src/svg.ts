@@ -474,11 +474,27 @@ export interface SvgImageSource {
   readonly href: string;
   readonly width: number;
   readonly height: number;
+  /**
+   * Where a tiled fill's pattern loads it from, when that isn't `href`:
+   * resvg is handed files only for images outside patterns, so a pattern
+   * needs the image inline (a data: URL).
+   */
+  readonly patternHref?: string;
 }
 
+/** An image fill drawn as a marked placeholder: a grey box with a cross, for an image that wasn't drawn. */
+export const IMAGE_PLACEHOLDER = "placeholder";
+
 export interface SvgExportOptions {
-  /** Images by content hash; image fills without one are left out. */
-  readonly images?: (ref: string) => SvgImageSource | null;
+  /**
+   * Images by content hash (`tiled`: the fill repeats it, as a pattern);
+   * image fills without one are left out, and those given
+   * `IMAGE_PLACEHOLDER` are drawn as one.
+   */
+  readonly images?: (
+    ref: string,
+    tiled: boolean,
+  ) => SvgImageSource | typeof IMAGE_PLACEHOLDER | null;
   /**
    * Draw text runs with OpenType features as glyph outlines (from the
    * measurer's shaper) instead of relying on `font-feature-settings`: for
@@ -513,8 +529,17 @@ export function exportSvg(
     transform: string,
     blendStyle: string,
   ): string | null => {
-    const source = options.images?.(paint.ref);
+    const source = options.images?.(paint.ref, paint.scaleMode === "tile");
     if (!source) return null;
+    const opacity =
+      paint.opacity !== undefined && paint.opacity < 1 ? attr("opacity", paint.opacity) : "";
+    if (source === IMAGE_PLACEHOLDER) {
+      // The layer's box in neutral grey, crossed corner to corner, clipped to its shape.
+      const clip = out.id("clip");
+      out.defs.push(`<clipPath id="${clip}"><${shape.tag}${transform}${shape.attrs}/></clipPath>`);
+      const cross = `<path d="M0 0L${w} ${h}M${w} 0L0 ${h}" fill="none" stroke="#a3a3a3" stroke-width="1"/>`;
+      return `<g clip-path="url(#${clip})"${opacity}${blendStyle}><g${transform}><rect${attr("width", w)}${attr("height", h)} fill="#e5e5e5"/>${cross}</g></g>`;
+    }
     const p = imagePlacement(
       paint.scaleMode,
       { width: w, height: h },
@@ -527,15 +552,14 @@ export function exportSvg(
     let body: string;
     if (p.tile) {
       const tile = out.id("tile");
+      const inPattern = attr("href", source.patternHref ?? source.href);
       out.defs.push(
-        `<pattern id="${tile}" patternUnits="userSpaceOnUse"${attr("width", round2(p.width))}${attr("height", round2(p.height))}><image${attr("width", round2(p.width))}${attr("height", round2(p.height))}${href} preserveAspectRatio="none"/></pattern>`,
+        `<pattern id="${tile}" patternUnits="userSpaceOnUse"${attr("width", round2(p.width))}${attr("height", round2(p.height))}><image${attr("width", round2(p.width))}${attr("height", round2(p.height))}${inPattern} preserveAspectRatio="none"/></pattern>`,
       );
       body = `<rect${attr("width", w)}${attr("height", h)} fill="url(#${tile})"/>`;
     } else {
       body = `<image${attr("x", round2(p.x))}${attr("y", round2(p.y))}${attr("width", round2(p.width))}${attr("height", round2(p.height))}${href} preserveAspectRatio="none"/>`;
     }
-    const opacity =
-      paint.opacity !== undefined && paint.opacity < 1 ? attr("opacity", paint.opacity) : "";
     return `<g clip-path="url(#${clip})"${opacity}${blendStyle}><g${transform}>${body}</g></g>`;
   };
 

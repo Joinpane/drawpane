@@ -121,7 +121,7 @@ describe("export_image, headless", () => {
     expect(out.data.approximate).toBeUndefined();
   });
 
-  it("refuses images more than a render may hold, known before their files are read", async () => {
+  it("draws an image more than a render may hold as a placeholder, and says so", async () => {
     const { browser, fileId, token, render } = await setup();
     const png = Uint8Array.from(
       atob(
@@ -142,11 +142,12 @@ describe("export_image, headless", () => {
     const photo = await render(
       `<Rect w={100} h={50} fill={${JSON.stringify([{ type: "image", ref: sha, scaleMode: "fill" }])}} />`,
     );
-    const refused = await call(token, "export_image", { fileId, id: photo, scale: 1 });
-    expect(refused.isError).toBe(true);
-    expect(String(refused.structuredContent.error)).toMatch(
-      /images in that render take more memory than drawing here may \(up to 32 MB/,
-    );
+    // Known from its record before its file is read; the rest of the picture is drawn.
+    const out = picture(await call(token, "export_image", { fileId, id: photo, scale: 0.05 }));
+    expect([out.width, out.height]).toEqual([5, 3]);
+    expect(out.data.approximate).toEqual([
+      expect.stringMatching(new RegExp(`too large to draw here.*placeholders \\(${sha}\\)`)),
+    ]);
   });
 
   it("explains what it can't draw", async () => {

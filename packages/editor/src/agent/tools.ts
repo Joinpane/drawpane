@@ -217,7 +217,7 @@ const exportImage = defineTool({
     "Renders a layer, or a whole page by its id, as a PNG you can see: look at your work after render or set_props,",
     "and check spacing, alignment, contrast and text wrapping as a person would.",
     `Without a scale, it's sized to about ${EXPORT_IMAGE_FIT} px on its longest side (up to 2×). Returns the image, its size,`,
-    "and anything drawn only approximately or left out (a font or image that couldn't be had).",
+    "and anything drawn only approximately or left out (a font or image that couldn't be had, or an image too large to draw here, shown as a grey crossed placeholder).",
   ].join(" "),
   input: z.object({
     id,
@@ -245,6 +245,11 @@ const exportImage = defineTool({
       ...png.missingFonts.map((f) => `${f} isn't available, so its text is drawn in the fallback`),
       ...(png.missingImages.length > 0
         ? [`${png.missingImages.length} image(s) couldn't be loaded and are left out`]
+        : []),
+      ...(png.skippedImages.length > 0
+        ? [
+            `${png.skippedImages.length} image(s) are too large to draw here, so they're drawn as grey crossed placeholders (${png.skippedImages.join(", ")}); the rest of the picture is as it is`,
+          ]
         : []),
     ];
     return {

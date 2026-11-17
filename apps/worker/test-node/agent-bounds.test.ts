@@ -20,14 +20,18 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getHeapStatistics } from "node:v8";
-import { createHeadlessRenderer, ToolFailure } from "@drawpane/editor";
+import {
+  createHeadlessRenderer,
+  HEADLESS_IMAGE_BYTES,
+  imageCost,
+  ToolFailure,
+} from "@drawpane/editor";
 import { applyTransaction, checkNode, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
 import { afterAll, describe, expect, it } from "vitest";
 import { STANDIN } from "../src/agent/measurer";
 import { answerDocument, SqlFileDoc } from "../src/mcp/document";
 import { AGENT_MAX_HELD, AgentTooLarge, agentPrecheck } from "../src/rooms/agent-admission";
 import { AgentEngine } from "../src/rooms/agent-engine";
-import { inverseCharsPast } from "../src/rooms/call-ledger";
 import { presentedCount } from "../src/rooms/convert";
 import { insertNodes, TableReader } from "../src/rooms/node-tables";
 import { NODE_SCHEMA, SqlNodeStore } from "../src/rooms/sql-store";
@@ -305,34 +309,6 @@ describe(`the largest file of long texts agent tools take (heap capped at ${HEAP
   });
 });
 
-describe(`an agent's change past what its undo keeps (heap capped at ${HEAP_MB} MB)`, {
-  timeout: 1_800_000,
-}, () => {
-  it("is refused before the room gathers what it takes back", async () => {
-    // Found re-checking #173's audit: deleting a frame that holds a file the editor takes, the
-    // room gathered the subtree from SQL for the call's undo, beside the editor, and aborted.
-    const count = Math.floor((LIMIT - 64 * 1024) / 200_300);
-    const r = texts(count, "x");
-    r.sql.exec("INSERT INTO nodes VALUES ('F', 'P', 'a1', 'frame', '{}')");
-    r.sql.exec("UPDATE nodes SET parent = 'F' WHERE type = 'text'");
-    const engine = new AgentEngine(STANDIN, { limit: LIMIT });
-    const { result, peak } = await measured(async () => {
-      const run = await engine.run(build(engine, r, "materialized"), "delete_nodes", {
-        ids: ["F"],
-      });
-      sample();
-      // What the room asks before committing it (`#commitAgentCall`).
-      return inverseCharsPast(r.sql, run.ops, 1 << 20);
-    });
-    report(`an agent deleting a frame of ${count} texts of 200,000 characters`, peak);
-    expect(result).toBeGreaterThan(1 << 20);
-    // A text's own deletion is under it.
-    expect(inverseCharsPast(r.sql, [{ op: "delete", id: "N0" }], 1 << 20)).toBeLessThan(1 << 20);
-    engine.drop();
-    r.close();
-  });
-});
-
 describe(`the headless editor following edits (heap capped at ${HEAP_MB} MB)`, {
   timeout: 1_800_000,
 }, () => {
@@ -435,7 +411,7 @@ describe(`the headless editor following edits (heap capped at ${HEAP_MB} MB)`, {
 describe(`export_image on a small file of large images (heap capped at ${HEAP_MB} MB)`, {
   timeout: 1_800_000,
 }, () => {
-  it("refuses the render past what its images may hold, before reading them all", async () => {
+  it("draws the images past what a render may hold as placeholders, one file at a time", async () => {
     // #173's review: a 100 × 100 rectangle with 32 image fills of 4 MiB files. Every file was
     // read at once and kept as a data: URL, and the room aborted before rasterising.
     const fills = Array.from({ length: 32 }, (_, i) => ({
@@ -486,10 +462,13 @@ describe(`export_image on a small file of large images (heap capped at ${HEAP_MB
         .catch((e: unknown) => e),
     );
     report("export_image of 32 image fills of 4 MiB", peak);
-    expect(result).toBeInstanceOf(ToolFailure);
-    expect((result as Error).message).toMatch(/take more memory than drawing here may/);
-    // One at a time: the render stopped at the first past the bound.
-    expect(read).toBeLessThan(32);
+    // Three fit in what a render may hold; the rest are let go of as they're read, and drawn as
+    // placeholders the answer lists.
+    const fit = Math.floor(HEADLESS_IMAGE_BYTES / imageCost(4 << 20, 1, 1));
+    const notes = (result as { result: { data: { approximate: string[] } } }).result.data
+      .approximate;
+    expect(notes).toEqual([expect.stringContaining(`${32 - fit} image(s) are too large`)]);
+    expect(read).toBe(32);
     engine.drop();
     r.close();
   });

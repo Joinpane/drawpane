@@ -6,7 +6,7 @@
  * Text is measured by the stand-in measurer (vitest.config.ts).
  */
 import { env, runInDurableObject } from "cloudflare:test";
-import { keyBetween, type NodeRecord, type Op } from "@drawpane/model";
+import { keyBetween, keysBetween, type NodeRecord, type Op } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { provideHarfBuzzMeasurer } from "../src/agent/harfbuzz";
 import { provideMeasurer } from "../src/agent/measurer";
@@ -306,41 +306,69 @@ describe("a live session", () => {
     expect(jsx.isError).toBeFalsy();
   });
 
-  it("refuses a change whose undo would take back more than a call keeps", async () => {
-    // Deleting a frame of six texts of 200,000 characters: 1.2 MB to put back. The room kept
-    // every call's undo, so it gathered all of it (a whole file's worth aborted a room).
+  it("deletes a frame of 2,000 styled children, and undoes and redoes it", async () => {
+    // #173's second review: 1.26 MB of values to put back, which an undo cap of 1 MB refused.
     const { browser, fileId, token } = await setup();
     const person = await join(browser, fileId);
     const session = await start(token, fileId, "live");
     const frame = ok<{ ids: string[] }>(
       await call(token, "render", {
         sessionId: session.sessionId,
-        jsx: "<Frame w={100} h={100} />",
+        jsx: "<Frame w={400} h={400} />",
       }),
     ).ids[0] as string;
+    const button = {
+      name: "Primary button / default",
+      x: 16,
+      y: 16,
+      width: 120,
+      height: 40,
+      fills: [
+        {
+          type: "linear",
+          from: { x: 0, y: 0 },
+          to: { x: 0, y: 1 },
+          stops: [
+            { position: 0, color: "#2563eb" },
+            { position: 1, color: "#1d4ed8" },
+          ],
+        },
+      ],
+      strokes: [{ type: "solid", color: "#1e40af" }],
+      strokeWeight: 1,
+      cornerRadius: 8,
+      clipContent: true,
+      layoutMode: "row",
+      gap: 8,
+      paddingLeft: 16,
+      paddingRight: 16,
+      paddingTop: 8,
+      paddingBottom: 8,
+      alignItems: "center",
+      justifyContent: "center",
+      effects: [{ type: "drop-shadow", x: 0, y: 1, blur: 2, spread: 0, color: "#00000020" }],
+    };
     await runInDurableObject(roomOf(fileId), (_room, state) => {
-      const props = JSON.stringify({ characters: "x".repeat(200_000) });
-      for (let i = 0; i < 6; i++)
+      const props = JSON.stringify(button);
+      const keys = keysBetween(null, null, 2000);
+      for (let i = 0; i < 2000; i++)
         state.storage.sql.exec(
-          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, ?, 'text', ?)",
-          `L${i}`,
+          "INSERT INTO nodes (id, parent, key, type, props) VALUES (?, ?, ?, 'frame', ?)",
+          `B${i}`,
           frame,
-          `a${i}`,
+          keys[i],
           props,
         );
     });
     // The room's file changed underneath: a person's edit moves its revision on.
-    await person.edit([{ op: "set", id: frame, prop: "name", value: "Long texts" }]);
-    const refused = await call(token, "delete_nodes", {
-      sessionId: session.sessionId,
-      ids: [frame],
-    });
-    expect(refused.isError).toBe(true);
-    expect(String(refused.structuredContent.error)).toMatch(/too much at once to keep its undo/);
-    expect((await roomOf(fileId).stats()).nodes).toBeGreaterThan(6);
-    // One of them is under it, and undone.
-    ok(await call(token, "delete_nodes", { sessionId: session.sessionId, ids: ["L0"] }));
+    await person.edit([{ op: "set", id: frame, prop: "name", value: "Buttons" }]);
+    const before = (await roomOf(fileId).stats()).nodes;
+    ok(await call(token, "delete_nodes", { sessionId: session.sessionId, ids: [frame] }));
+    expect((await roomOf(fileId).stats()).nodes).toBe(before - 2001);
     ok(await call(token, "undo", { sessionId: session.sessionId }));
+    expect((await roomOf(fileId).stats()).nodes).toBe(before);
+    ok(await call(token, "redo", { sessionId: session.sessionId }));
+    expect((await roomOf(fileId).stats()).nodes).toBe(before - 2001);
   });
 
   it("commits nothing when a tool fails, and says why", async () => {
