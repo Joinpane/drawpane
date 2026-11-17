@@ -39,13 +39,28 @@ const records: Obj[] = [
     ...under(INTERNAL),
   },
   {
+    guid: guid(1, 102),
+    type: "VARIABLE",
+    name: "space/2",
+    variableResolvedType: "FLOAT",
+    variableSetID: { guid: guid(1, 100) },
+    ...under(INTERNAL),
+  },
+  {
     guid: guid(1, 1),
     type: "FRAME",
     name: "Card",
     stackMode: "HORIZONTAL",
     effects: [{ type: "DROP_SHADOW", radius: 4, offset: { x: 0, y: 2 }, spread: 0 }],
     fillPaints: [{ type: "SOLID", colorVar: { value: { alias: { guid: guid(1, 101) } } } }],
-    variableConsumptionMap: { entries: [{ variableField: "STACK_SPACING" }] },
+    variableConsumptionMap: {
+      entries: [
+        {
+          variableField: "STACK_SPACING",
+          variableData: { value: { alias: { guid: guid(1, 102) } } },
+        },
+      ],
+    },
     ...under(PAGE),
   },
   {
@@ -140,7 +155,7 @@ describe("coverage", () => {
 
   it("counts what a collection, variable or property definition reaches", async () => {
     const f = await run();
-    // The card binds its fill to the collection's variable.
+    // The card binds its fill and its gap to two of the collection's variables: one layer.
     expect(f.get("variables/collection")?.layers).toBe(1);
     expect(f.get("variables/type/COLOR")?.layers).toBe(1);
     // The button's property reaches its one instance.

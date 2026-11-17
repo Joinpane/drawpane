@@ -2200,30 +2200,18 @@ export async function measureCoverage(
    * property definition the instances of its component (or of the set's variants).
    */
   const own = (g: string) => Math.max(1, copies.get(g) ?? 0);
-  const reachCache = new Map<string, number>();
+  /** Features whose owners are variables, collections or styles: they reach the layers using them. */
+  const byUse = (key: string) =>
+    (key.startsWith("variables/") && key !== "variables/explicit-mode") ||
+    key.startsWith("styles/definition") ||
+    key.startsWith("styles/bound");
   const reach = (owner: string, key: string): number => {
-    const cacheKey = `${key.startsWith("props/definition") ? "d" : "o"}${owner}`;
-    const known = reachCache.get(cacheKey);
-    if (known !== undefined) return known;
-    let n: number;
-    if (key.startsWith("props/definition")) {
-      const mains = [owner, ...(found.variants.get(owner) ?? [])];
-      n = Math.max(
-        1,
-        mains.reduce((sum, m) => sum + (instancesOf.get(drawpaneId(m)) ?? 0), 0),
-      );
-    } else {
-      const users = found.consumers.get(owner);
-      n =
-        users &&
-        (key.startsWith("variables/") ||
-          key.startsWith("styles/definition") ||
-          key.startsWith("styles/bound"))
-          ? [...users].reduce((sum, u) => sum + own(u), 0)
-          : own(owner);
-    }
-    reachCache.set(cacheKey, n);
-    return n;
+    if (!key.startsWith("props/definition")) return own(owner);
+    const mains = [owner, ...(found.variants.get(owner) ?? [])];
+    return Math.max(
+      1,
+      mains.reduce((sum, m) => sum + (instancesOf.get(drawpaneId(m)) ?? 0), 0),
+    );
   };
 
   const results: FeatureResult[] = [];
@@ -2249,7 +2237,14 @@ export async function measureCoverage(
       if (outcome !== "faithful" && failing.length < 10) failing.push(hit.target);
     }
     let layers = 0;
-    for (const owner of acc.records) layers += reach(owner, acc.def.key);
+    if (byUse(acc.def.key)) {
+      // Each layer once, however many of the feature's variables or styles it uses.
+      const users = new Set<string>();
+      for (const owner of acc.records)
+        for (const u of found.consumers.get(owner) ?? []) users.add(u);
+      for (const u of users) layers += own(u);
+      layers = Math.max(layers, acc.records.size);
+    } else for (const owner of acc.records) layers += reach(owner, acc.def.key);
     const { checked } = tally;
     const gap = checked === 0 ? 0 : (tally.lost + tally.approximate / 2) / checked;
     const status: FeatureResult["status"] =
@@ -2342,7 +2337,7 @@ export function coverageMarkdown(c: Coverage, title = "Figma import coverage"): 
     "",
     "## Overrides copies list",
     "",
-    `${c.overrides.copiesWithOverrides.toLocaleString("en")} layers inside copies list overrides: ${c.overrides.listed.toLocaleString("en")} names, ${c.overrides.unexplained.toLocaleString("en")} (${pct(c.overrides.unexplained, c.overrides.listed)}) with no override Figma saved for that layer (sizes and layout Figma worked out, listed as if someone changed them).`,
+    `${c.overrides.copiesWithOverrides.toLocaleString("en")} layers inside copies list overrides: ${c.overrides.listed.toLocaleString("en")} names, ${c.overrides.unexplained.toLocaleString("en")} (${pct(c.overrides.unexplained, c.overrides.listed)}) with no override Figma saved for that layer (sizes, places and layout Figma worked out, or values a component property set, listed as if someone changed them).`,
     "",
     "| Property | Listed | With a Figma override |",
     "| --- | --- | --- |",
