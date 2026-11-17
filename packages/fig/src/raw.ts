@@ -4,7 +4,8 @@
  * (unknown kinds become rectangles there), the settings of noise, texture
  * and progressive blur effects, image adjustments, line heights in percent,
  * a font's style name, whether a mask was saved with a type, a page's
- * background. Only the fields read here are typed.
+ * background, and what slots hold (slots.ts). Only the fields read here are
+ * typed.
  */
 import type { Figma } from "@drawpane/figma";
 
@@ -55,6 +56,31 @@ export interface RawRecord {
   readonly fontSize?: number;
   readonly textCase?: string;
   readonly maskType?: string;
+  readonly parentIndex?: { readonly guid?: RawGuid; readonly position?: string };
+  readonly overrideKey?: RawGuid;
+  readonly componentPropRefs?: readonly RawPropRef[];
+  readonly componentPropAssignments?: readonly RawPropAssignment[];
+  readonly symbolData?: {
+    readonly symbolOverrides?: readonly {
+      readonly guidPath?: { readonly guids?: readonly RawGuid[] };
+      readonly componentPropAssignments?: readonly RawPropAssignment[];
+    }[];
+  };
+}
+
+/** A layer's link to a component property: which of its fields the property sets. */
+export interface RawPropRef {
+  readonly defID?: RawGuid;
+  readonly componentPropNodeField?: string;
+  readonly isDeleted?: boolean;
+}
+
+/** An instance's value for a component property (only slot content is typed). */
+export interface RawPropAssignment {
+  readonly defID?: RawGuid;
+  readonly varValue?: {
+    readonly value?: { readonly slotContentIdValue?: { readonly guid?: RawGuid } };
+  };
 }
 
 export const guidString = (g: RawGuid) => `${g.sessionID}:${g.localID}`;

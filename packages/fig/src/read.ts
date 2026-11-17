@@ -33,6 +33,7 @@ import { RestIds, recordLayers } from "./ids";
 import { collectImages, type FigImage } from "./images";
 import { FigNotes } from "./notes";
 import { guidString, indexRecords, type RawRecord } from "./raw";
+import { indexChildren } from "./slots";
 import { prepareStyles } from "./styles";
 import { prepareVariables } from "./variables";
 
@@ -244,10 +245,18 @@ async function buildPages(
   const chosen = new Set(options.pageIds ?? pages.map((p) => p.id));
   const whole = chosen.size === pages.length && pages.every((p) => chosen.has(p.id));
   const raw = indexRecords(records as unknown as RawRecord[]);
+  const saved = { records: raw, children: indexChildren(raw.values()) };
 
   const notes = new FigNotes();
   const missing = new Set<string>();
   const assembly: DocumentAssemblyOptions = {
+    // Figma saves the sizes, places and shapes it worked out for the layers of each copy
+    // (`derivedSymbolData`): an icon placeholder shrunk to 16 resizes its icons uniformly
+    // whatever their constraints, overridden text keeps the width its own characters take,
+    // slot content sits inside its instance's padding. Without them Open Pencil works those out
+    // from the main's layers and constraints alone, which gets them wrong; with them, it applies
+    // what Figma saved, as Figma shows it.
+    derivedBounds: true,
     // Figma keeps overrides whose layer is gone and ignores them; so does the import.
     onUnresolvedProperty: () => {},
     onUnresolvedAssignment: () => {},
@@ -279,7 +288,7 @@ async function buildPages(
     } catch (error) {
       throw corruptError(error);
     }
-    const ids = new RestIds(state.graph, recordLayers(state));
+    const ids = new RestIds(state.graph, recordLayers(state), saved);
     const ctx = { graph: state.graph, ids, records: raw, notes };
     for (const page of state.graph.getPages(false)) {
       const guid = ids.sourceGuid(page);
