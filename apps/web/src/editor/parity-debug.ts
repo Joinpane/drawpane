@@ -10,6 +10,8 @@ import {
   type Editor,
   exportBounds,
   imageRefs,
+  layoutText,
+  layoutTextNode,
   type Rect,
   textFaces,
 } from "@drawpane/editor";
@@ -29,6 +31,11 @@ export interface ParityNode {
   readonly extent: Rect | null;
   /** For text: the faces it's set in. */
   readonly faces?: readonly string[];
+  /**
+   * For text, as Drawpane measures it: the width its widest line takes
+   * unwrapped, and how many lines it breaks into in its box.
+   */
+  readonly text?: { readonly width: number; readonly lines: number };
 }
 
 const toBase64 = (bytes: Uint8Array) => {
@@ -101,6 +108,10 @@ export function parityDebug(editor: Editor) {
           ...(node.type === "text"
             ? {
                 faces: textFaces(node).map((f) => `${f.family}/${f.weight}${f.italic ? "i" : ""}`),
+                text: {
+                  width: Math.round(layoutText(node, editor.measurer, null).width * 1000) / 1000,
+                  lines: layoutTextNode(node, editor.measurer).lines.length,
+                },
               }
             : {}),
         };

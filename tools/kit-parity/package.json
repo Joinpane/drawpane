@@ -6,7 +6,8 @@
   "description": "Compares a real Figma file, as Figma renders and lays it out, with the same file imported into Drawpane. Run by hand; see README.md.",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@types/node": "26.6.6",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   }
 }
