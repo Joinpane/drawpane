@@ -23,7 +23,14 @@ import {
   parseSvgPath,
   serializePath,
 } from "@drawpane/import-kit";
-import { keysBetween, laidOutProps, type NodeRecord, propAllowed, ROOT_ID } from "@drawpane/model";
+import {
+  keysBetween,
+  laidOutProps,
+  type NodeRecord,
+  propAllowed,
+  ROOT_ID,
+  ROOT_LOCAL_PROPS,
+} from "@drawpane/model";
 import { convertEffects } from "./effects";
 import { drawpaneId, mirroredId, mirroredUnder } from "./ids";
 import { childLayout, containerLayout, layoutGrids } from "./layout";
@@ -533,8 +540,8 @@ function markOverrides(
     const keys = new Set([...Object.keys(layer.props), ...Object.keys(main.props)]);
     for (const k of keys) {
       if (NOT_OVERRIDES.has(k) || laidOut.has(k)) continue;
-      // How an instance is used in the main around it is its own, like its place.
-      if (root && (k === "propRefs" || k === "exposeProps")) continue;
+      // Where an instance sits, and how it's used in the main around it, are its own.
+      if (root && ROOT_LOCAL_PROPS.has(k)) continue;
       const a = (layer.props as Props)[k];
       const b = (main.props as Props)[k];
       if (JSON.stringify(a) !== JSON.stringify(b)) changed.push(k);

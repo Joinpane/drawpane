@@ -74,6 +74,20 @@ describe("importing component properties", () => {
     // An instance of a variant holds no variant values of its own.
     expect(props("f6-1").variantProps).toBeUndefined();
   });
+
+  it("doesn't count where an instance sits as a change: its constraints are its own", () => {
+    const pinned = structuredClone(file) as { document: { children: unknown[] } };
+    const find = (n: Figma.Node, id: string): Figma.Node | undefined =>
+      n.id === id ? n : (n.children ?? []).map((c) => find(c, id)).find(Boolean);
+    const outline = find(pinned.document as unknown as Figma.Node, "6:1") as {
+      constraints?: unknown;
+    };
+    outline.constraints = { horizontal: "RIGHT", vertical: "BOTTOM" };
+    const nodes = pinInstances(convertFile(pinned as unknown as Figma.File).nodes).nodes;
+    const root = nodes.find((n) => n.id === "f6-1");
+    expect(getProp(root?.props ?? {}, "constraintH")).toBe("end");
+    expect(getProp(root?.props ?? {}, "overrides")).toEqual([]);
+  });
 });
 
 for (const compact of [false, true]) {

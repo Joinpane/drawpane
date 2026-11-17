@@ -15,6 +15,7 @@ import {
   getProp,
   type NodeRecord,
   type PropRefField,
+  ROOT_LOCAL_PROPS,
 } from "@drawpane/model";
 import { componentSetOf, isInstanceRoot, isMainComponent, variantProperties } from "./components";
 import type { Doc } from "./doc";
@@ -329,8 +330,8 @@ export function overrideGroups(
     const byLabel = new Map<string, string[]>();
     for (const prop of getProp(node.props, "overrides")) {
       if (UNLISTED.has(prop) || hidden?.has(prop)) continue;
-      // An instance root's place in its parent is its own, never a change.
-      if (id === instanceId && (prop === "x" || prop === "y")) continue;
+      // Where an instance sits in its parent is its own, never a change.
+      if (id === instanceId && ROOT_LOCAL_PROPS.has(prop)) continue;
       const label = labelFor(doc, node, prop);
       const list = byLabel.get(label);
       if (list) list.push(prop);
