@@ -74,6 +74,17 @@ describe("line breaks", () => {
 });
 
 describe("truncation", () => {
+  it("fits as much of the text as it can before the dots, whatever broke the line", () => {
+    // "aaaa-bbbbbbbb" breaks after the hyphen, but one line shows "aaaa-bbb…" (90px), as Figma truncates.
+    const node = textNode("aaaa-bbbbbbbb", { maxLines: 1 });
+    expect(layoutText(node, measurer, 90).lines.map((l) => l.text)).toEqual(["aaaa-bbb…"]);
+  });
+
+  it("ends a word too wide for its one line in an ellipsis", () => {
+    const node = textNode("abcdefghijkl", { maxLines: 1 });
+    expect(layoutText(node, measurer, 60).lines.map((l) => l.text)).toEqual(["abcde…"]);
+  });
+
   it("keeps the first lines and ends the last one in an ellipsis that fits the box", () => {
     // "aaaa bbbb cccc dddd" at 100px: lines "aaaa bbbb", "cccc dddd" (90px each).
     const node = textNode("aaaa bbbb cccc dddd eeee", { maxLines: 2 });

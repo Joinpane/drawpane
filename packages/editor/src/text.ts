@@ -549,11 +549,20 @@ function computeLayout(
       const s = styles[m.styleAt(Math.max(br.start, at - 1))] as SpanStyle;
       return { s, width: measurer.width(s.font, "…", s.run) + s.spacing };
     };
-    let cut = br.end;
-    while (cut > br.start && m.width(br.start, cut) + dots(cut).width > room) {
-      cut--;
-      if (cut > br.start && isLow(text.charCodeAt(cut))) cut--;
+    // As much of the rest of the paragraph as fits before the dots, as Figma truncates: not just
+    // what the line break left on this line (a word broken after a hyphen would end it early).
+    const nl = text.indexOf("\n", br.start);
+    const paraEnd = nl === -1 ? text.length : nl;
+    const fits = (at: number) => m.width(br.start, at) + dots(at).width <= room;
+    let lo = br.start;
+    let hi = Math.max(br.end, paraEnd);
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (fits(mid)) lo = mid;
+      else hi = mid - 1;
     }
+    let cut = lo;
+    if (cut > br.start && isLow(text.charCodeAt(cut))) cut--;
     // No dangling space before the dots.
     while (cut > br.start && /\s/.test(text[cut - 1] as string)) cut--;
     const line = makeLine({ ...br, end: cut }, top);
@@ -638,8 +647,12 @@ function computeLayout(
   const lines: TextLine[] = [];
   let after = 0;
   for (const [i, br] of kept.entries()) {
-    const truncated = kept !== breaks && i === kept.length - 1;
-    const built = truncated ? ellipsize(br, 0) : makeLine(br, 0);
+    let built = makeLine(br, 0);
+    // The last line shown ends in "…" when lines are cut off after it, or when it's too wide
+    // for the box itself (a word longer than the line).
+    const last = i === kept.length - 1;
+    const overflows = maxWidth !== null && built.indent + built.width > maxWidth + 0.01;
+    if (last && maxLines !== null && (kept !== breaks || overflows)) built = ellipsize(br, 0);
     const prev = lines[lines.length - 1];
     const baseline = prev ? prev.baseline + after + built.step : built.baseline;
     lines.push({ ...built, top: baseline - built.baseline, baseline });
