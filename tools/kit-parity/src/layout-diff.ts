@@ -29,6 +29,8 @@ export interface FigmaNode {
   readonly render: Box | null;
   readonly text?: {
     readonly fonts: readonly string[];
+    readonly sizes?: readonly number[];
+    readonly chars?: number;
     readonly missingFont: boolean;
     readonly autoResize?: string;
   };
@@ -41,6 +43,10 @@ export interface DrawpaneNode {
   readonly name: string;
   readonly visible: boolean;
   readonly box: Box | null;
+  /** For text: the faces it's drawn in ("Inter/500", "Inter/400i"). */
+  readonly faces?: readonly string[];
+  /** For text: its widest line unwrapped, and its lines in its box, as Drawpane measures them. */
+  readonly text?: { readonly width: number; readonly lines: number };
 }
 
 export interface Delta {

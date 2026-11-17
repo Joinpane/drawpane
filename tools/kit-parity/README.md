@@ -54,6 +54,31 @@ How many of the file's instances the import keeps linked to their mains, and why
 
 It prints the counts and the commonest reasons, and writes everything to `$OUT/detach-<label>.json`. It holds the machine's lock, as `drawpane` does.
 
+## What the file uses, and what comes across
+
+```sh
+node --max-old-space-size=14000 tools/kit-parity/kit-parity.mjs coverage --fig kit.fig --out $OUT [--name <label>]
+```
+
+A census of every Figma feature the file uses, each judged on the converted output (`src/coverage.ts`). It reads the `.fig`'s raw records (Open Pencil's parsed `NodeChange`s, before anything resolves) and lists, with counts:
+
+- **node fields:** kinds of layers, effects by type (and whether a shadow shows behind transparent areas), paints by type, blend mode and image scale mode, strokes (alignment, dashes, per-side widths, caps and joins), corners (independent radii, smoothing), constraints, auto layout (direction, wrap, min and max sizes, absolute children, baseline alignment, spacing modes, strokes in layout), grid layout, text (fonts by family and style, case, decorations, OpenType, variable axes, truncation, lists, styled runs, links, vertical trim), vectors, masks and booleans;
+- **component properties:** definitions by type (variant, boolean, text, instance swap, slot), the layers that reference them by field, and the instances that set them;
+- **variables:** collections and their modes, variables by type, aliases, expressions, scopes, code syntax, hidden ones, and frames that set a mode;
+- **bound variables** by field: on layers, in instances' overrides, in stretches of text, on paints and on effects;
+- **styles** by type, whether they're bound to variables, and the layers using them;
+- **prototype** interactions by trigger and action, scrolling, export settings, guides, plugin data and dev mode status.
+
+Each use is a hit: the layer to look at in the output (a saved layer's Figma id, or the id an instance gives a layer it overrides). The step converts the file as `drawpane` does (cached, under the machine's lock), finds each hit's layer by its Drawpane id and compares: **faithful** when the output carries the feature (the same effect with the same values, a binding, a collection with the same modes), **approximate** when it carries the look but not the feature (a bound value baked, a boolean made a path, a property applied to each copy and gone as a property), **lost** when neither or the layer is missing. Impact is layers affected (a component's layer counts once for itself and once per copy) × importance (visual 3, editing 2, metadata 1) × the share not faithful (lost whole, approximate half). It also compares the overrides each copy lists with the ones Figma saved for that layer.
+
+It writes `$OUT/coverage[-<label>].json` (every feature, with up to ten failing ids each) and `.md` (gaps ranked by impact, the override comparison, what came across, and how each gap was judged). `--nodes <lines.json>` judges a conversion already made instead.
+
+```sh
+node tools/kit-parity/kit-parity.mjs text-widths --out $OUT [--run <dir>] [--only id,id] [--name <label>]
+```
+
+Text widths per font, from a run (`src/text-widths.ts`): for auto-width text, Figma's box against the width Drawpane measures for the same characters (recorded by the `drawpane` step as each text layer's `text.width`, its widest line unwrapped), and the text layers Drawpane draws in another face than Figma's. A font Drawpane measures wider cuts or wraps the text of hug-sized buttons and chips. Writes `text-widths[-<label>].json` and `.md` into the run.
+
 ## Another file
 
 Every file gets its own output folder (`--out`), so files never mix: the sample, Figma's truth, the conversion cache and the runs all live there. For a new file:
@@ -72,6 +97,7 @@ The Figma file is never edited. The session types only into Figma's quick action
 ```
 $OUT/
   sample.json
+  coverage.json, coverage.md   what the file uses and what comes across
   figma/<id>.png, <id>.json, failed.json
   drawpane-cache/<key>/nodes.ndjson, images/, meta.json
   runs/<timestamp>/
@@ -81,6 +107,7 @@ $OUT/
     scoreboard.json     per-frame scores and layout deltas, and a summary
     against.json        with --against: before and after, what got better and worse
     report.html         worst first: Figma, Drawpane and the difference side by side
+    text-widths.json    with text-widths: Figma's text widths against Drawpane's, per font
 ```
 
 Ids in file names spell `:` as `-` and `;` as `_`.
