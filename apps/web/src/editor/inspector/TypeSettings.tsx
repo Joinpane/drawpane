@@ -360,6 +360,16 @@ function Basics({
             min={0}
           />
         </Row>
+        <Row label="List spacing">
+          <Num
+            editor={editor}
+            nodes={nodes}
+            prop="listSpacing"
+            label="≡"
+            ariaLabel="List spacing"
+            min={0}
+          />
+        </Row>
         {layer ? (
           <Row label="Truncate text">
             <Select<string>

@@ -538,3 +538,24 @@ describe("image crops", () => {
     });
   });
 });
+
+describe("list spacing", () => {
+  it("keeps the space between list items apart from the paragraph spacing", () => {
+    const text = node({
+      id: "1:1",
+      type: "TEXT",
+      name: "Steps",
+      characters: "One\nTwo",
+      size: { x: 200, y: 48 },
+      relativeTransform: at(0, 0),
+      absoluteBoundingBox: { x: 0, y: 0, width: 200, height: 48 },
+      style: { fontFamily: "Inter", fontSize: 14, paragraphSpacing: 16, listSpacing: 8 },
+      fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 0, a: 1 } }],
+    });
+    const { nodes } = convertFile(file(text));
+    validate(nodes);
+    const props = byName(nodes, "Steps").props;
+    expect(getProp(props, "paragraphSpacing")).toBe(16);
+    expect(getProp(props, "listSpacing")).toBe(8);
+  });
+});

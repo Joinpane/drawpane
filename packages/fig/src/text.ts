@@ -111,6 +111,7 @@ export function textFields(
     textCase,
     textDecoration: n.textDecoration,
     ...(n.paragraphSpacing ? { paragraphSpacing: n.paragraphSpacing } : {}),
+    ...(n.listSpacing ? { listSpacing: n.listSpacing } : {}),
     ...(n.textTruncation === "ENDING" ? { textTruncation: "ENDING" } : {}),
     ...(n.maxLines !== null ? { maxLines: n.maxLines } : {}),
     ...(n.leadingTrim === "CAP_HEIGHT" ? { leadingTrim: "CAP_HEIGHT" as const } : {}),
