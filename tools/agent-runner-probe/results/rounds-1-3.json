@@ -1,0 +1,5370 @@
+{
+  "summary": {
+    "durationS": 206.684,
+    "sent": 2027,
+    "acked": 2027,
+    "missing": [],
+    "dupes": 0,
+    "closes": [],
+    "errors": [],
+    "socketOpenAtEnd": true,
+    "roomDoStarts": [1794953641265],
+    "roomDoIsolates": ["61ca8dcc"],
+    "countGaps": [],
+    "maxAckMs": 2310
+  },
+  "calls": [
+    {
+      "path": "/info",
+      "at": 302,
+      "wallMs": 104,
+      "txnsSentDuring": 1,
+      "acksDuring": 0,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "roomWorker": "35f2d20e",
+        "roomDo": {
+          "iid": "61ca8dcc",
+          "started": 1794953641265,
+          "sockets": 1
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&file=a",
+      "at": 1406,
+      "wallMs": 205,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 142,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "16c3d91b",
+              "isolateCalls": 2,
+              "ms": 0
+            }
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 17,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "d55dcc82",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&file=a",
+      "at": 2612,
+      "wallMs": 353,
+      "txnsSentDuring": 3,
+      "acksDuring": 3,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 279,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "d55dcc82",
+              "isolateCalls": 2,
+              "ms": 0
+            }
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 28,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "2b109cde",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&mb=1024&file=a",
+      "at": 3965,
+      "wallMs": 212,
+      "txnsSentDuring": 2,
+      "acksDuring": 3,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 170,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 16,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "5bd5150a",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&mb=1024&file=a",
+      "at": 5177,
+      "wallMs": 230,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 173,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 14,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "657ba33c",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=heap&file=a",
+      "at": 6407,
+      "wallMs": 1710,
+      "txnsSentDuring": 17,
+      "acksDuring": 17,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1648,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "12415053",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=heap&file=a",
+      "at": 9118,
+      "wallMs": 1928,
+      "txnsSentDuring": 20,
+      "acksDuring": 19,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1870,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 32,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "1f642bf4",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&file=a",
+      "at": 12046,
+      "wallMs": 184,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 137,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "1f642bf4",
+            "isolateCalls": 2,
+            "ms": 0
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 16,
+          "value": {
+            "op": "ping",
+            "iid": "34d03205",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&file=a",
+      "at": 13231,
+      "wallMs": 299,
+      "txnsSentDuring": 3,
+      "acksDuring": 3,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 254,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "34d03205",
+            "isolateCalls": 2,
+            "ms": 0
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "op": "ping",
+            "iid": "7efca15f",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&mb=1024&file=a",
+      "at": 14531,
+      "wallMs": 226,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 182,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 19,
+          "value": {
+            "op": "ping",
+            "iid": "20200999",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&mb=1024&file=a",
+      "at": 15757,
+      "wallMs": 252,
+      "txnsSentDuring": 2,
+      "acksDuring": 3,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 182,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 23,
+          "value": {
+            "op": "ping",
+            "iid": "b8f6dc3b",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=heap&file=a",
+      "at": 17009,
+      "wallMs": 2609,
+      "txnsSentDuring": 26,
+      "acksDuring": 24,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2567,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "op": "ping",
+            "iid": "90ea8d7d",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=heap&file=a",
+      "at": 20618,
+      "wallMs": 2059,
+      "txnsSentDuring": 21,
+      "acksDuring": 20,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1982,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 19,
+          "value": {
+            "op": "ping",
+            "iid": "c5bca88e",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&file=a",
+      "at": 23677,
+      "wallMs": 943,
+      "txnsSentDuring": 9,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 195,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "5e2d2e09",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953664713
+            }
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 195,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "d53f32e2",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953665071
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 26,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "d53f32e2",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953665071
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&file=a",
+      "at": 25620,
+      "wallMs": 1049,
+      "txnsSentDuring": 11,
+      "acksDuring": 11,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 200,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "d53f32e2",
+              "isolateCalls": 3,
+              "ms": 0,
+              "objectCalls": 3,
+              "objectStarted": 1794953665071
+            }
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 262,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "c51ee8c1",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953667103
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 38,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "c51ee8c1",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953667103
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&mb=1024&file=a",
+      "at": 27669,
+      "wallMs": 976,
+      "txnsSentDuring": 9,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 240,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 196,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "dc0b4e7e",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953669100
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "dc0b4e7e",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953669100
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&mb=1024&file=a",
+      "at": 29645,
+      "wallMs": 981,
+      "txnsSentDuring": 10,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 213,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 198,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "ad7f297b",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953671087
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 21,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "ad7f297b",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953671087
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=heap&file=a",
+      "at": 31626,
+      "wallMs": 2943,
+      "txnsSentDuring": 29,
+      "acksDuring": 30,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2163,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 185,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "a73b9589",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953675006
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 35,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "a73b9589",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953675006
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=heap&file=a",
+      "at": 35569,
+      "wallMs": 2771,
+      "txnsSentDuring": 28,
+      "acksDuring": 27,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1975,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 186,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "2f9200f7",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953678735
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 85,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "2f9200f7",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953678735
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&file=a",
+      "at": 39340,
+      "wallMs": 881,
+      "txnsSentDuring": 9,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 180,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "2f9200f7",
+            "isolateCalls": 3,
+            "ms": 0,
+            "objectCalls": 3,
+            "objectStarted": 1794953678735
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 156,
+          "value": {
+            "op": "ping",
+            "iid": "d45f034a",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953680687
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 23,
+          "value": {
+            "op": "ping",
+            "iid": "d45f034a",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953680687
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&file=a",
+      "at": 41222,
+      "wallMs": 938,
+      "txnsSentDuring": 9,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 168,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "d45f034a",
+            "isolateCalls": 3,
+            "ms": 0,
+            "objectCalls": 3,
+            "objectStarted": 1794953680687
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 226,
+          "value": {
+            "op": "ping",
+            "iid": "8abe79d5",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953682621
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 23,
+          "value": {
+            "op": "ping",
+            "iid": "8abe79d5",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953682621
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&mb=1024&file=a",
+      "at": 43161,
+      "wallMs": 968,
+      "txnsSentDuring": 10,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 257,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 166,
+          "value": {
+            "op": "ping",
+            "iid": "9efea672",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953684597
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 21,
+          "value": {
+            "op": "ping",
+            "iid": "9efea672",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953684597
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&mb=1024&file=a",
+      "at": 45129,
+      "wallMs": 943,
+      "txnsSentDuring": 9,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 189,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 1,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 216,
+          "value": {
+            "op": "ping",
+            "iid": "464da183",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953686548
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 15,
+          "value": {
+            "op": "ping",
+            "iid": "464da183",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953686548
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=heap&file=a",
+      "at": 47072,
+      "wallMs": 2506,
+      "txnsSentDuring": 25,
+      "acksDuring": 24,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1795,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 1,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 169,
+          "value": {
+            "op": "ping",
+            "iid": "9e60478c",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953690052
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "op": "ping",
+            "iid": "9e60478c",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953690052
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=heap&file=a",
+      "at": 50578,
+      "wallMs": 2508,
+      "txnsSentDuring": 25,
+      "acksDuring": 25,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1773,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 1,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 172,
+          "value": {
+            "op": "ping",
+            "iid": "22cecada",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953693559
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 15,
+          "value": {
+            "op": "ping",
+            "iid": "22cecada",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953693559
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&mb=1024&via=room",
+      "at": 54086,
+      "wallMs": 1101,
+      "txnsSentDuring": 11,
+      "acksDuring": 11,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "room",
+        "roomWorker": "35f2d20e",
+        "result": {
+          "ok": true,
+          "ms": 1077,
+          "value": {
+            "target": "do-rpc",
+            "op": "wasm",
+            "call": {
+              "ok": false,
+              "ms": 323,
+              "error": {
+                "name": "Error",
+                "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+                "remote": true,
+                "overloaded": true,
+                "durableObjectReset": true
+              }
+            },
+            "sameStub": {
+              "ok": false,
+              "ms": 14,
+              "error": {
+                "name": "Error",
+                "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+                "overloaded": true,
+                "durableObjectReset": true
+              }
+            },
+            "freshStub": {
+              "ok": true,
+              "ms": 166,
+              "value": {
+                "op": "ping",
+                "iid": "0b51b54d",
+                "isolateCalls": 1,
+                "ms": 0,
+                "objectCalls": 1,
+                "objectStarted": 1794953695624
+              }
+            },
+            "freshStubLater": {
+              "ok": true,
+              "ms": 29,
+              "value": {
+                "op": "ping",
+                "iid": "0b51b54d",
+                "isolateCalls": 2,
+                "ms": 0,
+                "objectCalls": 2,
+                "objectStarted": 1794953695624
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=heap&via=room",
+      "at": 56187,
+      "wallMs": 2046,
+      "txnsSentDuring": 21,
+      "acksDuring": 20,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "room",
+        "roomWorker": "35f2d20e",
+        "result": {
+          "ok": true,
+          "ms": 2014,
+          "value": {
+            "target": "svc-rpc",
+            "op": "heap",
+            "call": {
+              "ok": false,
+              "ms": 28,
+              "error": {
+                "name": "Error",
+                "message": "Worker exceeded memory limit.",
+                "remote": true,
+                "overloaded": true
+              }
+            },
+            "next": {
+              "ok": true,
+              "ms": 1301,
+              "value": {
+                "op": "ping",
+                "iid": "a172e420",
+                "isolateCalls": 1,
+                "ms": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/twofiles?op=wasm&mb=1024",
+      "at": 59233,
+      "wallMs": 1599,
+      "txnsSentDuring": 16,
+      "acksDuring": 16,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "op": "wasm",
+        "before": {
+          "a": {
+            "ok": true,
+            "ms": 24,
+            "value": {
+              "iid": "0b51b54d",
+              "objectCalls": 2,
+              "objectStarted": 1794953695624
+            }
+          },
+          "b1": {
+            "ok": true,
+            "ms": 390,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953700655
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 283,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953700931
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 171,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953701115
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 224,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953701336
+            }
+          }
+        },
+        "abort": {
+          "ok": false,
+          "ms": 231,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "after": {
+          "b1": {
+            "ok": true,
+            "ms": 33,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953700655
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 18,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953700931
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 5,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953701115
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 9,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953701336
+            }
+          }
+        },
+        "afterFresh": {
+          "b1": {
+            "ok": true,
+            "ms": 81,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953700655
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 56,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953700931
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 11,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953701115
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 35,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953701336
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/twofiles?op=heap",
+      "at": 61832,
+      "wallMs": 2749,
+      "txnsSentDuring": 27,
+      "acksDuring": 27,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "op": "heap",
+        "before": {
+          "a": {
+            "ok": true,
+            "ms": 97,
+            "value": {
+              "iid": "a0bf6b5b",
+              "objectCalls": 0,
+              "objectStarted": 1794953702934
+            }
+          },
+          "b1": {
+            "ok": true,
+            "ms": 69,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953700655
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 38,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953700931
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 11,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953701115
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 29,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953701336
+            }
+          }
+        },
+        "abort": {
+          "ok": false,
+          "ms": 2231,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "after": {
+          "b1": {
+            "ok": true,
+            "ms": 12,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953700655
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 18,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953700931
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 6,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953701115
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 22,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953701336
+            }
+          }
+        },
+        "afterFresh": {
+          "b1": {
+            "ok": true,
+            "ms": 107,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953700655
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 35,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953700931
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 21,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953701115
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 28,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953701336
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/shared?mb=80",
+      "at": 65581,
+      "wallMs": 488,
+      "txnsSentDuring": 5,
+      "acksDuring": 5,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "mb": 80,
+        "roomMb": 60,
+        "ids": {
+          "roomWorker": "35f2d20e",
+          "roomDo": {
+            "ok": true,
+            "ms": 27,
+            "value": {
+              "iid": "61ca8dcc",
+              "started": 1794953641265,
+              "sockets": 1
+            }
+          },
+          "runnerSvc": {
+            "ok": true,
+            "ms": 8,
+            "value": {
+              "op": "ping",
+              "iid": "c5bca88e",
+              "isolateCalls": 2,
+              "ms": 0
+            }
+          },
+          "runnerDo": {
+            "ok": true,
+            "ms": 91,
+            "value": {
+              "op": "ping",
+              "iid": "93c6b9c5",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953706722
+            }
+          }
+        },
+        "roomDoHold": {
+          "ok": true,
+          "ms": 69,
+          "value": {
+            "iid": "61ca8dcc",
+            "holding": 60
+          }
+        },
+        "runnerSvcHold": {
+          "ok": true,
+          "ms": 109,
+          "value": {
+            "holding": 80,
+            "op": "ballast",
+            "iid": "c5bca88e",
+            "isolateCalls": 3,
+            "ms": 0
+          }
+        },
+        "runnerDoHold": {
+          "ok": true,
+          "ms": 96,
+          "value": {
+            "holding": 80,
+            "op": "ballast",
+            "iid": "93c6b9c5",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953706722
+          }
+        },
+        "after": {
+          "roomWorker": "35f2d20e",
+          "roomDo": {
+            "ok": true,
+            "ms": 16,
+            "value": {
+              "iid": "61ca8dcc",
+              "started": 1794953641265,
+              "sockets": 1
+            }
+          }
+        },
+        "release": {
+          "roomDo": {
+            "ok": true,
+            "ms": 13,
+            "value": {
+              "iid": "61ca8dcc",
+              "holding": 0
+            }
+          },
+          "runnerSvc": {
+            "ok": true,
+            "ms": 4,
+            "value": {
+              "holding": 0,
+              "op": "ballast",
+              "iid": "c5bca88e",
+              "isolateCalls": 4,
+              "ms": 0
+            }
+          },
+          "runnerDo": {
+            "ok": true,
+            "ms": 24,
+            "value": {
+              "holding": 0,
+              "op": "ballast",
+              "iid": "93c6b9c5",
+              "isolateCalls": 3,
+              "ms": 0,
+              "objectCalls": 3,
+              "objectStarted": 1794953706722
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/info",
+      "at": 67069,
+      "wallMs": 56,
+      "txnsSentDuring": 0,
+      "acksDuring": 1,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "roomWorker": "35f2d20e",
+        "roomDo": {
+          "iid": "61ca8dcc",
+          "started": 1794953641265,
+          "sockets": 1
+        }
+      }
+    },
+    {
+      "path": "/info",
+      "at": 68125,
+      "wallMs": 86,
+      "txnsSentDuring": 1,
+      "acksDuring": 1,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "roomWorker": "35f2d20e",
+        "roomDo": {
+          "iid": "61ca8dcc",
+          "started": 1794953641265,
+          "sockets": 1
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&file=a",
+      "at": 69211,
+      "wallMs": 211,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 157,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "c5bca88e",
+              "isolateCalls": 5,
+              "ms": 0
+            }
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 29,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "ed813c50",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&file=a",
+      "at": 70422,
+      "wallMs": 175,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 131,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "ed813c50",
+              "isolateCalls": 2,
+              "ms": 0
+            }
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 20,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "2414a0a3",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&mb=1024&file=a",
+      "at": 71597,
+      "wallMs": 222,
+      "txnsSentDuring": 2,
+      "acksDuring": 3,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 181,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 20,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "b26c0502",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&mb=1024&file=a",
+      "at": 72820,
+      "wallMs": 245,
+      "txnsSentDuring": 3,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 196,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 27,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "3f246716",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=heap&file=a",
+      "at": 74065,
+      "wallMs": 1864,
+      "txnsSentDuring": 18,
+      "acksDuring": 19,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1823,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "e5a4d6fb",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=heap&file=a",
+      "at": 76929,
+      "wallMs": 2083,
+      "txnsSentDuring": 21,
+      "acksDuring": 21,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2023,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 17,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "c87ffa6b",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&file=a",
+      "at": 80012,
+      "wallMs": 209,
+      "txnsSentDuring": 2,
+      "acksDuring": 3,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 160,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "c87ffa6b",
+            "isolateCalls": 2,
+            "ms": 0
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 22,
+          "value": {
+            "op": "ping",
+            "iid": "9afcc018",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&file=a",
+      "at": 81221,
+      "wallMs": 213,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 161,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "9afcc018",
+            "isolateCalls": 2,
+            "ms": 0
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 28,
+          "value": {
+            "op": "ping",
+            "iid": "59a852a2",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&mb=1024&file=a",
+      "at": 82434,
+      "wallMs": 279,
+      "txnsSentDuring": 3,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 226,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 28,
+          "value": {
+            "op": "ping",
+            "iid": "f1944250",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&mb=1024&file=a",
+      "at": 83715,
+      "wallMs": 272,
+      "txnsSentDuring": 3,
+      "acksDuring": 3,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 221,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 28,
+          "value": {
+            "op": "ping",
+            "iid": "81bec45d",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=heap&file=a",
+      "at": 84988,
+      "wallMs": 2198,
+      "txnsSentDuring": 22,
+      "acksDuring": 22,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1894,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 275,
+          "value": {
+            "op": "ping",
+            "iid": "a9a4b68e",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=heap&file=a",
+      "at": 88187,
+      "wallMs": 3040,
+      "txnsSentDuring": 30,
+      "acksDuring": 30,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2996,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "op": "ping",
+            "iid": "f425f6f7",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&file=a",
+      "at": 92227,
+      "wallMs": 1005,
+      "txnsSentDuring": 10,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 214,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "93c6b9c5",
+              "isolateCalls": 4,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953733272
+            }
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 230,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "5202b0cb",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953733668
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 37,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "5202b0cb",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953733668
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&file=a",
+      "at": 94232,
+      "wallMs": 1059,
+      "txnsSentDuring": 11,
+      "acksDuring": 11,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 247,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "5202b0cb",
+              "isolateCalls": 3,
+              "ms": 0,
+              "objectCalls": 3,
+              "objectStarted": 1794953733668
+            }
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 241,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "0a857d71",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953735718
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 47,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "0a857d71",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953735718
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&mb=1024&file=a",
+      "at": 96291,
+      "wallMs": 1030,
+      "txnsSentDuring": 10,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 235,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 243,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "4b12c3b4",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953737763
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 29,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "4b12c3b4",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953737763
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&mb=1024&file=a",
+      "at": 98322,
+      "wallMs": 1018,
+      "txnsSentDuring": 10,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 203,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 240,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "b9c6ad98",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953739763
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 50,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "b9c6ad98",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953739763
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=heap&file=a",
+      "at": 100340,
+      "wallMs": 2756,
+      "txnsSentDuring": 28,
+      "acksDuring": 28,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1984,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 211,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "28bf48b1",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953743538
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 39,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "28bf48b1",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953743538
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=heap&file=a",
+      "at": 104097,
+      "wallMs": 3232,
+      "txnsSentDuring": 32,
+      "acksDuring": 32,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2445,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 218,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "fa0af938",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953747756
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 44,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "fa0af938",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953747756
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&file=a",
+      "at": 108330,
+      "wallMs": 983,
+      "txnsSentDuring": 10,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 180,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "fa0af938",
+            "isolateCalls": 3,
+            "ms": 0,
+            "objectCalls": 3,
+            "objectStarted": 1794953747756
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 242,
+          "value": {
+            "op": "ping",
+            "iid": "92b212e9",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953749764
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 32,
+          "value": {
+            "op": "ping",
+            "iid": "92b212e9",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953749764
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&file=a",
+      "at": 110313,
+      "wallMs": 959,
+      "txnsSentDuring": 10,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 190,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "92b212e9",
+            "isolateCalls": 3,
+            "ms": 0,
+            "objectCalls": 3,
+            "objectStarted": 1794953749764
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 224,
+          "value": {
+            "op": "ping",
+            "iid": "46015c06",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953751740
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 22,
+          "value": {
+            "op": "ping",
+            "iid": "46015c06",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953751740
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&mb=1024&file=a",
+      "at": 112273,
+      "wallMs": 939,
+      "txnsSentDuring": 9,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 208,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 1,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 192,
+          "value": {
+            "op": "ping",
+            "iid": "bbe88a38",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953753684
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 14,
+          "value": {
+            "op": "ping",
+            "iid": "bbe88a38",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953753684
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&mb=1024&file=a",
+      "at": 114212,
+      "wallMs": 1001,
+      "txnsSentDuring": 10,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 243,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 220,
+          "value": {
+            "op": "ping",
+            "iid": "c4030e39",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953755679
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 15,
+          "value": {
+            "op": "ping",
+            "iid": "c4030e39",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953755679
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=heap&file=a",
+      "at": 116214,
+      "wallMs": 2950,
+      "txnsSentDuring": 29,
+      "acksDuring": 29,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2201,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 1,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 195,
+          "value": {
+            "op": "ping",
+            "iid": "6389d674",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953759628
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "op": "ping",
+            "iid": "6389d674",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953759628
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=heap&file=a",
+      "at": 120167,
+      "wallMs": 2879,
+      "txnsSentDuring": 29,
+      "acksDuring": 28,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2102,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 2,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 190,
+          "value": {
+            "op": "ping",
+            "iid": "5fd1e33d",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953763475
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 57,
+          "value": {
+            "op": "ping",
+            "iid": "5fd1e33d",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953763475
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&mb=1024&via=room",
+      "at": 124046,
+      "wallMs": 1128,
+      "txnsSentDuring": 11,
+      "acksDuring": 12,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "room",
+        "roomWorker": "35f2d20e",
+        "result": {
+          "ok": true,
+          "ms": 1082,
+          "value": {
+            "target": "do-rpc",
+            "op": "wasm",
+            "call": {
+              "ok": false,
+              "ms": 257,
+              "error": {
+                "name": "Error",
+                "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+                "remote": true,
+                "overloaded": true,
+                "durableObjectReset": true
+              }
+            },
+            "sameStub": {
+              "ok": false,
+              "ms": 0,
+              "error": {
+                "name": "Error",
+                "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+                "overloaded": true,
+                "durableObjectReset": true
+              }
+            },
+            "freshStub": {
+              "ok": true,
+              "ms": 251,
+              "value": {
+                "op": "ping",
+                "iid": "a087e4b7",
+                "isolateCalls": 1,
+                "ms": 0,
+                "objectCalls": 1,
+                "objectStarted": 1794953765614
+              }
+            },
+            "freshStubLater": {
+              "ok": true,
+              "ms": 23,
+              "value": {
+                "op": "ping",
+                "iid": "a087e4b7",
+                "isolateCalls": 2,
+                "ms": 0,
+                "objectCalls": 2,
+                "objectStarted": 1794953765614
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=heap&via=room",
+      "at": 126174,
+      "wallMs": 2498,
+      "txnsSentDuring": 25,
+      "acksDuring": 25,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "room",
+        "roomWorker": "35f2d20e",
+        "result": {
+          "ok": true,
+          "ms": 2475,
+          "value": {
+            "target": "svc-rpc",
+            "op": "heap",
+            "call": {
+              "ok": false,
+              "ms": 102,
+              "error": {
+                "name": "Error",
+                "message": "Worker exceeded memory limit.",
+                "remote": true,
+                "overloaded": true
+              }
+            },
+            "next": {
+              "ok": true,
+              "ms": 2270,
+              "value": {
+                "op": "ping",
+                "iid": "ea9e819a",
+                "isolateCalls": 1,
+                "ms": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/twofiles?op=wasm&mb=1024",
+      "at": 129672,
+      "wallMs": 904,
+      "txnsSentDuring": 9,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "op": "wasm",
+        "before": {
+          "a": {
+            "ok": true,
+            "ms": 22,
+            "value": {
+              "iid": "a087e4b7",
+              "objectCalls": 2,
+              "objectStarted": 1794953765614
+            }
+          },
+          "b1": {
+            "ok": true,
+            "ms": 101,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953770802
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 31,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953770835
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 20,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953770860
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 212,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953771023
+            }
+          }
+        },
+        "abort": {
+          "ok": false,
+          "ms": 181,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "after": {
+          "b1": {
+            "ok": true,
+            "ms": 18,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953770802
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 14,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953770835
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 10,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953770860
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 42,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953771023
+            }
+          }
+        },
+        "afterFresh": {
+          "b1": {
+            "ok": true,
+            "ms": 73,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953770802
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 42,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953770835
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 20,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953770860
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 92,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953771023
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/twofiles?op=heap",
+      "at": 131576,
+      "wallMs": 2571,
+      "txnsSentDuring": 26,
+      "acksDuring": 26,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "op": "heap",
+        "before": {
+          "a": {
+            "ok": true,
+            "ms": 98,
+            "value": {
+              "iid": "e865a779",
+              "objectCalls": 0,
+              "objectStarted": 1794953772684
+            }
+          },
+          "b1": {
+            "ok": true,
+            "ms": 76,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953770802
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 49,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953770835
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 27,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953770860
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 16,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953771023
+            }
+          }
+        },
+        "abort": {
+          "ok": false,
+          "ms": 2065,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "after": {
+          "b1": {
+            "ok": true,
+            "ms": 15,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953770802
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 17,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953770835
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 6,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953770860
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 8,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953771023
+            }
+          }
+        },
+        "afterFresh": {
+          "b1": {
+            "ok": true,
+            "ms": 79,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953770802
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 31,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953770835
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 23,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953770860
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 37,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953771023
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/shared?mb=80",
+      "at": 135147,
+      "wallMs": 494,
+      "txnsSentDuring": 5,
+      "acksDuring": 5,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "mb": 80,
+        "roomMb": 60,
+        "ids": {
+          "roomWorker": "35f2d20e",
+          "roomDo": {
+            "ok": true,
+            "ms": 42,
+            "value": {
+              "iid": "61ca8dcc",
+              "started": 1794953641265,
+              "sockets": 1
+            }
+          },
+          "runnerSvc": {
+            "ok": true,
+            "ms": 5,
+            "value": {
+              "op": "ping",
+              "iid": "f425f6f7",
+              "isolateCalls": 2,
+              "ms": 0
+            }
+          },
+          "runnerDo": {
+            "ok": true,
+            "ms": 102,
+            "value": {
+              "op": "ping",
+              "iid": "0a7fc70b",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953776305
+            }
+          }
+        },
+        "roomDoHold": {
+          "ok": true,
+          "ms": 66,
+          "value": {
+            "iid": "61ca8dcc",
+            "holding": 60
+          }
+        },
+        "runnerSvcHold": {
+          "ok": true,
+          "ms": 66,
+          "value": {
+            "holding": 80,
+            "op": "ballast",
+            "iid": "f425f6f7",
+            "isolateCalls": 3,
+            "ms": 0
+          }
+        },
+        "runnerDoHold": {
+          "ok": true,
+          "ms": 82,
+          "value": {
+            "holding": 80,
+            "op": "ballast",
+            "iid": "0a7fc70b",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953776305
+          }
+        },
+        "after": {
+          "roomWorker": "35f2d20e",
+          "roomDo": {
+            "ok": true,
+            "ms": 21,
+            "value": {
+              "iid": "61ca8dcc",
+              "started": 1794953641265,
+              "sockets": 1
+            }
+          }
+        },
+        "release": {
+          "roomDo": {
+            "ok": true,
+            "ms": 54,
+            "value": {
+              "iid": "61ca8dcc",
+              "holding": 0
+            }
+          },
+          "runnerSvc": {
+            "ok": true,
+            "ms": 8,
+            "value": {
+              "holding": 0,
+              "op": "ballast",
+              "iid": "f425f6f7",
+              "isolateCalls": 4,
+              "ms": 0
+            }
+          },
+          "runnerDo": {
+            "ok": true,
+            "ms": 21,
+            "value": {
+              "holding": 0,
+              "op": "ballast",
+              "iid": "0a7fc70b",
+              "isolateCalls": 3,
+              "ms": 0,
+              "objectCalls": 3,
+              "objectStarted": 1794953776305
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/info",
+      "at": 136641,
+      "wallMs": 77,
+      "txnsSentDuring": 1,
+      "acksDuring": 1,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "roomWorker": "35f2d20e",
+        "roomDo": {
+          "iid": "61ca8dcc",
+          "started": 1794953641265,
+          "sockets": 1
+        }
+      }
+    },
+    {
+      "path": "/info",
+      "at": 137718,
+      "wallMs": 51,
+      "txnsSentDuring": 1,
+      "acksDuring": 1,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "roomWorker": "35f2d20e",
+        "roomDo": {
+          "iid": "61ca8dcc",
+          "started": 1794953641265,
+          "sockets": 1
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&file=a",
+      "at": 138769,
+      "wallMs": 211,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 155,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "f425f6f7",
+              "isolateCalls": 5,
+              "ms": 0
+            }
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 32,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "bf2e1136",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&file=a",
+      "at": 139980,
+      "wallMs": 207,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 152,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "bf2e1136",
+              "isolateCalls": 2,
+              "ms": 0
+            }
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 30,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "4045ef85",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&mb=1024&file=a",
+      "at": 141188,
+      "wallMs": 277,
+      "txnsSentDuring": 3,
+      "acksDuring": 3,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 187,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 35,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "e59208ea",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=wasm&mb=1024&file=a",
+      "at": 142466,
+      "wallMs": 216,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 176,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 17,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "b30ef65a",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=heap&file=a",
+      "at": 143682,
+      "wallMs": 1784,
+      "txnsSentDuring": 18,
+      "acksDuring": 18,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1721,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 34,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "db69cb0a",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-fetch&op=heap&file=a",
+      "at": 146466,
+      "wallMs": 1756,
+      "txnsSentDuring": 18,
+      "acksDuring": 17,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1708,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 20,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "62445a08",
+              "isolateCalls": 1,
+              "ms": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&file=a",
+      "at": 149222,
+      "wallMs": 179,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 137,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "62445a08",
+            "isolateCalls": 2,
+            "ms": 0
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "op": "ping",
+            "iid": "032b1eea",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&file=a",
+      "at": 150402,
+      "wallMs": 183,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 144,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "032b1eea",
+            "isolateCalls": 2,
+            "ms": 0
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 19,
+          "value": {
+            "op": "ping",
+            "iid": "f6170cd8",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&mb=1024&file=a",
+      "at": 151586,
+      "wallMs": 220,
+      "txnsSentDuring": 3,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 179,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 16,
+          "value": {
+            "op": "ping",
+            "iid": "625ba71c",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=wasm&mb=1024&file=a",
+      "at": 152806,
+      "wallMs": 219,
+      "txnsSentDuring": 2,
+      "acksDuring": 2,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 175,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 17,
+          "value": {
+            "op": "ping",
+            "iid": "08a51cf2",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=heap&file=a",
+      "at": 154025,
+      "wallMs": 2008,
+      "txnsSentDuring": 20,
+      "acksDuring": 20,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1967,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 19,
+          "value": {
+            "op": "ping",
+            "iid": "579a3a15",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=heap&file=a",
+      "at": 157033,
+      "wallMs": 1920,
+      "txnsSentDuring": 19,
+      "acksDuring": 19,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "svc-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1871,
+          "error": {
+            "name": "Error",
+            "message": "Worker exceeded memory limit.",
+            "remote": true,
+            "overloaded": true
+          }
+        },
+        "next": {
+          "ok": true,
+          "ms": 22,
+          "value": {
+            "op": "ping",
+            "iid": "79f072d6",
+            "isolateCalls": 1,
+            "ms": 0
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&file=a",
+      "at": 159953,
+      "wallMs": 959,
+      "txnsSentDuring": 9,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 191,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "0a7fc70b",
+              "isolateCalls": 4,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953800987
+            }
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 179,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "bb9384b7",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953801329
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 67,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "bb9384b7",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953801329
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&file=a",
+      "at": 161913,
+      "wallMs": 1036,
+      "txnsSentDuring": 11,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 148,
+          "value": {
+            "status": 200,
+            "body": {
+              "grewTo": 200.0625,
+              "refused": false,
+              "op": "wasm",
+              "iid": "bb9384b7",
+              "isolateCalls": 3,
+              "ms": 0,
+              "objectCalls": 3,
+              "objectStarted": 1794953801329
+            }
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 195,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "2eeddee1",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953803260
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 166,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "2eeddee1",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953803260
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&mb=1024&file=a",
+      "at": 163949,
+      "wallMs": 1062,
+      "txnsSentDuring": 10,
+      "acksDuring": 11,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 177,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 347,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "4098528f",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953805465
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 15,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "4098528f",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953805465
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=wasm&mb=1024&file=a",
+      "at": 166011,
+      "wallMs": 975,
+      "txnsSentDuring": 10,
+      "acksDuring": 10,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 220,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 199,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "caae9cc0",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953807437
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 31,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "caae9cc0",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953807437
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=heap&file=a",
+      "at": 167985,
+      "wallMs": 2852,
+      "txnsSentDuring": 28,
+      "acksDuring": 29,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2002,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 300,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "47150d08",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953811286
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 23,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "47150d08",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953811286
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-fetch&op=heap&file=a",
+      "at": 171838,
+      "wallMs": 2960,
+      "txnsSentDuring": 30,
+      "acksDuring": 29,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-fetch",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2168,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 235,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "96b26094",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953815239
+            }
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 35,
+          "value": {
+            "status": 200,
+            "body": {
+              "op": "ping",
+              "iid": "96b26094",
+              "isolateCalls": 2,
+              "ms": 0,
+              "objectCalls": 2,
+              "objectStarted": 1794953815239
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&file=a",
+      "at": 175802,
+      "wallMs": 899,
+      "txnsSentDuring": 9,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 147,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "96b26094",
+            "isolateCalls": 3,
+            "ms": 0,
+            "objectCalls": 3,
+            "objectStarted": 1794953815239
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 199,
+          "value": {
+            "op": "ping",
+            "iid": "6f9e5f15",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953817168
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 16,
+          "value": {
+            "op": "ping",
+            "iid": "6f9e5f15",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953817168
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&file=a",
+      "at": 177702,
+      "wallMs": 900,
+      "txnsSentDuring": 9,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": true,
+          "ms": 147,
+          "value": {
+            "grewTo": 200.0625,
+            "refused": false,
+            "op": "wasm",
+            "iid": "6f9e5f15",
+            "isolateCalls": 3,
+            "ms": 0,
+            "objectCalls": 3,
+            "objectStarted": 1794953817168
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 193,
+          "value": {
+            "op": "ping",
+            "iid": "d55b29c2",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953819057
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 28,
+          "value": {
+            "op": "ping",
+            "iid": "d55b29c2",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953819057
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&mb=1024&file=a",
+      "at": 179602,
+      "wallMs": 943,
+      "txnsSentDuring": 10,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 218,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 0,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 184,
+          "value": {
+            "op": "ping",
+            "iid": "50a80ca9",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953821012
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "op": "ping",
+            "iid": "50a80ca9",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953821012
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&mb=1024&file=a",
+      "at": 181547,
+      "wallMs": 914,
+      "txnsSentDuring": 9,
+      "acksDuring": 9,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "wasm",
+        "call": {
+          "ok": false,
+          "ms": 187,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 1,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 185,
+          "value": {
+            "op": "ping",
+            "iid": "4df34c4b",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953822932
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 18,
+          "value": {
+            "op": "ping",
+            "iid": "4df34c4b",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953822932
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=heap&file=a",
+      "at": 183462,
+      "wallMs": 2781,
+      "txnsSentDuring": 27,
+      "acksDuring": 27,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 2075,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 1,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 159,
+          "value": {
+            "op": "ping",
+            "iid": "b110ba21",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953826716
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 14,
+          "value": {
+            "op": "ping",
+            "iid": "b110ba21",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953826716
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=heap&file=a",
+      "at": 187243,
+      "wallMs": 2364,
+      "txnsSentDuring": 24,
+      "acksDuring": 24,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "worker",
+        "roomWorker": "35f2d20e",
+        "target": "do-rpc",
+        "op": "heap",
+        "call": {
+          "ok": false,
+          "ms": 1644,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "sameStub": {
+          "ok": false,
+          "ms": 1,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "freshStub": {
+          "ok": true,
+          "ms": 181,
+          "value": {
+            "op": "ping",
+            "iid": "719f75ac",
+            "isolateCalls": 1,
+            "ms": 0,
+            "objectCalls": 1,
+            "objectStarted": 1794953830078
+          }
+        },
+        "freshStubLater": {
+          "ok": true,
+          "ms": 13,
+          "value": {
+            "op": "ping",
+            "iid": "719f75ac",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953830078
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=do-rpc&op=wasm&mb=1024&via=room",
+      "at": 190607,
+      "wallMs": 1060,
+      "txnsSentDuring": 10,
+      "acksDuring": 11,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "room",
+        "roomWorker": "35f2d20e",
+        "result": {
+          "ok": true,
+          "ms": 1034,
+          "value": {
+            "target": "do-rpc",
+            "op": "wasm",
+            "call": {
+              "ok": false,
+              "ms": 231,
+              "error": {
+                "name": "Error",
+                "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+                "remote": true,
+                "overloaded": true,
+                "durableObjectReset": true
+              }
+            },
+            "sameStub": {
+              "ok": false,
+              "ms": 0,
+              "error": {
+                "name": "Error",
+                "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+                "overloaded": true,
+                "durableObjectReset": true
+              }
+            },
+            "freshStub": {
+              "ok": true,
+              "ms": 236,
+              "value": {
+                "op": "ping",
+                "iid": "f33ae547",
+                "isolateCalls": 1,
+                "ms": 0,
+                "objectCalls": 1,
+                "objectStarted": 1794953832115
+              }
+            },
+            "freshStubLater": {
+              "ok": true,
+              "ms": 28,
+              "value": {
+                "op": "ping",
+                "iid": "f33ae547",
+                "isolateCalls": 2,
+                "ms": 0,
+                "objectCalls": 2,
+                "objectStarted": 1794953832115
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/call?target=svc-rpc&op=heap&via=room",
+      "at": 192667,
+      "wallMs": 2197,
+      "txnsSentDuring": 22,
+      "acksDuring": 22,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "via": "room",
+        "roomWorker": "35f2d20e",
+        "result": {
+          "ok": true,
+          "ms": 2160,
+          "value": {
+            "target": "svc-rpc",
+            "op": "heap",
+            "call": {
+              "ok": false,
+              "ms": 64,
+              "error": {
+                "name": "Error",
+                "message": "Worker exceeded memory limit.",
+                "remote": true,
+                "overloaded": true
+              }
+            },
+            "next": {
+              "ok": true,
+              "ms": 2015,
+              "value": {
+                "op": "ping",
+                "iid": "c20eaa6c",
+                "isolateCalls": 1,
+                "ms": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/twofiles?op=wasm&mb=1024",
+      "at": 195865,
+      "wallMs": 521,
+      "txnsSentDuring": 5,
+      "acksDuring": 6,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "op": "wasm",
+        "before": {
+          "a": {
+            "ok": true,
+            "ms": 12,
+            "value": {
+              "iid": "f33ae547",
+              "objectCalls": 2,
+              "objectStarted": 1794953832115
+            }
+          },
+          "b1": {
+            "ok": true,
+            "ms": 28,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953836913
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 50,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953836960
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 22,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953836991
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 25,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953837017
+            }
+          }
+        },
+        "abort": {
+          "ok": false,
+          "ms": 165,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "after": {
+          "b1": {
+            "ok": true,
+            "ms": 19,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953836913
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 50,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953836960
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 7,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953836991
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 6,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953837017
+            }
+          }
+        },
+        "afterFresh": {
+          "b1": {
+            "ok": true,
+            "ms": 26,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953836913
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 51,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953836960
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 16,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953836991
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 16,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953837017
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/twofiles?op=heap",
+      "at": 197386,
+      "wallMs": 2661,
+      "txnsSentDuring": 27,
+      "acksDuring": 26,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "op": "heap",
+        "before": {
+          "a": {
+            "ok": true,
+            "ms": 108,
+            "value": {
+              "iid": "f0aed91b",
+              "objectCalls": 0,
+              "objectStarted": 1794953838512
+            }
+          },
+          "b1": {
+            "ok": true,
+            "ms": 74,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953836913
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 45,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953836960
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 17,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953836991
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 25,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953837017
+            }
+          }
+        },
+        "abort": {
+          "ok": false,
+          "ms": 2187,
+          "error": {
+            "name": "Error",
+            "message": "Durable Object's isolate exceeded its memory limit and was reset.",
+            "remote": true,
+            "overloaded": true,
+            "durableObjectReset": true
+          }
+        },
+        "after": {
+          "b1": {
+            "ok": true,
+            "ms": 18,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953836913
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 16,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953836960
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 7,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953836991
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 7,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953837017
+            }
+          }
+        },
+        "afterFresh": {
+          "b1": {
+            "ok": true,
+            "ms": 31,
+            "value": {
+              "iid": "07a5ace4",
+              "objectCalls": 0,
+              "objectStarted": 1794953836913
+            }
+          },
+          "b2": {
+            "ok": true,
+            "ms": 34,
+            "value": {
+              "iid": "3a171128",
+              "objectCalls": 0,
+              "objectStarted": 1794953836960
+            }
+          },
+          "b3": {
+            "ok": true,
+            "ms": 15,
+            "value": {
+              "iid": "16cf3993",
+              "objectCalls": 0,
+              "objectStarted": 1794953836991
+            }
+          },
+          "b4": {
+            "ok": true,
+            "ms": 45,
+            "value": {
+              "iid": "2f161c09",
+              "objectCalls": 0,
+              "objectStarted": 1794953837017
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/shared?mb=80",
+      "at": 201047,
+      "wallMs": 566,
+      "txnsSentDuring": 6,
+      "acksDuring": 6,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "mb": 80,
+        "roomMb": 60,
+        "ids": {
+          "roomWorker": "35f2d20e",
+          "roomDo": {
+            "ok": true,
+            "ms": 41,
+            "value": {
+              "iid": "61ca8dcc",
+              "started": 1794953641265,
+              "sockets": 1
+            }
+          },
+          "runnerSvc": {
+            "ok": true,
+            "ms": 5,
+            "value": {
+              "op": "ping",
+              "iid": "79f072d6",
+              "isolateCalls": 2,
+              "ms": 0
+            }
+          },
+          "runnerDo": {
+            "ok": true,
+            "ms": 123,
+            "value": {
+              "op": "ping",
+              "iid": "e3f3bd34",
+              "isolateCalls": 1,
+              "ms": 0,
+              "objectCalls": 1,
+              "objectStarted": 1794953842226
+            }
+          }
+        },
+        "roomDoHold": {
+          "ok": true,
+          "ms": 77,
+          "value": {
+            "iid": "61ca8dcc",
+            "holding": 60
+          }
+        },
+        "runnerSvcHold": {
+          "ok": true,
+          "ms": 63,
+          "value": {
+            "holding": 80,
+            "op": "ballast",
+            "iid": "79f072d6",
+            "isolateCalls": 3,
+            "ms": 0
+          }
+        },
+        "runnerDoHold": {
+          "ok": true,
+          "ms": 107,
+          "value": {
+            "holding": 80,
+            "op": "ballast",
+            "iid": "e3f3bd34",
+            "isolateCalls": 2,
+            "ms": 0,
+            "objectCalls": 2,
+            "objectStarted": 1794953842226
+          }
+        },
+        "after": {
+          "roomWorker": "35f2d20e",
+          "roomDo": {
+            "ok": true,
+            "ms": 25,
+            "value": {
+              "iid": "61ca8dcc",
+              "started": 1794953641265,
+              "sockets": 1
+            }
+          }
+        },
+        "release": {
+          "roomDo": {
+            "ok": true,
+            "ms": 59,
+            "value": {
+              "iid": "61ca8dcc",
+              "holding": 0
+            }
+          },
+          "runnerSvc": {
+            "ok": true,
+            "ms": 6,
+            "value": {
+              "holding": 0,
+              "op": "ballast",
+              "iid": "79f072d6",
+              "isolateCalls": 4,
+              "ms": 0
+            }
+          },
+          "runnerDo": {
+            "ok": true,
+            "ms": 34,
+            "value": {
+              "holding": 0,
+              "op": "ballast",
+              "iid": "e3f3bd34",
+              "isolateCalls": 3,
+              "ms": 0,
+              "objectCalls": 3,
+              "objectStarted": 1794953842226
+            }
+          }
+        }
+      }
+    },
+    {
+      "path": "/info",
+      "at": 202613,
+      "wallMs": 66,
+      "txnsSentDuring": 0,
+      "acksDuring": 1,
+      "socketOpen": true,
+      "status": 200,
+      "json": {
+        "roomWorker": "35f2d20e",
+        "roomDo": {
+          "iid": "61ca8dcc",
+          "started": 1794953641265,
+          "sockets": 1
+        }
+      }
+    }
+  ]
+}

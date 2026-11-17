@@ -1,0 +1,99 @@
+[0.3s] socket open
+[0.3s] --- round 1
+[0.4s] /info {"status":200,"json":{"roomWorker":"35f2d20e","roomDo":{"iid":"61ca8dcc","started":1794953641265,"sockets":1}}} | acks during 0/1
+[1.6s] /call?target=svc-fetch&op=wasm&file=a ok 142 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"16c3d91b","isolateCalls":2,"ms":0}} | acks during 2/2
+[3.0s] /call?target=svc-fetch&op=wasm&file=a ok 279 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"d55dcc82","isolateCalls":2,"ms":0}} | acks during 3/3
+[4.2s] /call?target=svc-fetch&op=wasm&mb=1024&file=a FAILED 170 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 3/2
+[5.4s] /call?target=svc-fetch&op=wasm&mb=1024&file=a FAILED 173 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 2/2
+[8.1s] /call?target=svc-fetch&op=heap&file=a FAILED 1648 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 17/17
+[11.0s] /call?target=svc-fetch&op=heap&file=a FAILED 1870 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 19/20
+[12.2s] /call?target=svc-rpc&op=wasm&file=a ok 137 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"1f642bf4","isolateCalls":2,"ms":0} | acks during 2/2
+[13.5s] /call?target=svc-rpc&op=wasm&file=a ok 254 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"34d03205","isolateCalls":2,"ms":0} | acks during 3/3
+[14.8s] /call?target=svc-rpc&op=wasm&mb=1024&file=a FAILED 182 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 2/2
+[16.0s] /call?target=svc-rpc&op=wasm&mb=1024&file=a FAILED 182 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 3/2
+[19.6s] /call?target=svc-rpc&op=heap&file=a FAILED 2567 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 24/26
+[22.7s] /call?target=svc-rpc&op=heap&file=a FAILED 1982 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 20/21
+[24.6s] /call?target=do-fetch&op=wasm&file=a ok 195 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"5e2d2e09","isolateCalls":2,"ms":0,"objectCall | acks during 9/9
+[26.7s] /call?target=do-fetch&op=wasm&file=a ok 200 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"d53f32e2","isolateCalls":3,"ms":0,"objectCall | acks during 11/11
+[28.6s] /call?target=do-fetch&op=wasm&mb=1024&file=a FAILED 240 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 10/9
+[30.6s] /call?target=do-fetch&op=wasm&mb=1024&file=a FAILED 213 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 9/10
+[34.6s] /call?target=do-fetch&op=heap&file=a FAILED 2163 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 30/29
+[38.3s] /call?target=do-fetch&op=heap&file=a FAILED 1975 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 27/28
+[40.2s] /call?target=do-rpc&op=wasm&file=a ok 180 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"2f9200f7","isolateCalls":3,"ms":0,"objectCalls":3,"objectStarted": | acks during 9/9
+[42.2s] /call?target=do-rpc&op=wasm&file=a ok 168 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"d45f034a","isolateCalls":3,"ms":0,"objectCalls":3,"objectStarted": | acks during 10/9
+[44.1s] /call?target=do-rpc&op=wasm&mb=1024&file=a FAILED 257 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 10/10
+[46.1s] /call?target=do-rpc&op=wasm&mb=1024&file=a FAILED 189 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 10/9
+[49.6s] /call?target=do-rpc&op=heap&file=a FAILED 1795 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 24/25
+[53.1s] /call?target=do-rpc&op=heap&file=a FAILED 1773 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 25/25
+[55.2s] /call?target=do-rpc&op=wasm&mb=1024&via=room FAILED 323 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 11/11
+[58.2s] /call?target=svc-rpc&op=heap&via=room FAILED 28 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 20/21
+[60.8s] /twofiles?op=wasm&mb=1024 FAILED 231 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 16/16
+[64.6s] /twofiles?op=heap FAILED 2231 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 27/27
+[66.1s] /shared?mb=80 {"status":200,"json":{"mb":80,"roomMb":60,"ids":{"roomWorker":"35f2d20e","roomDo":{"ok":true,"ms":27,"value":{"iid":"61ca8dcc","started":1794953641265,"sockets":1}},"runnerSvc":{"ok":true,"ms":8,"valu | acks during 5/5
+[67.1s] /info {"status":200,"json":{"roomWorker":"35f2d20e","roomDo":{"iid":"61ca8dcc","started":1794953641265,"sockets":1}}} | acks during 1/0
+[68.1s] --- round 2
+[68.2s] /info {"status":200,"json":{"roomWorker":"35f2d20e","roomDo":{"iid":"61ca8dcc","started":1794953641265,"sockets":1}}} | acks during 1/1
+[69.4s] /call?target=svc-fetch&op=wasm&file=a ok 157 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"c5bca88e","isolateCalls":5,"ms":0}} | acks during 2/2
+[70.6s] /call?target=svc-fetch&op=wasm&file=a ok 131 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"ed813c50","isolateCalls":2,"ms":0}} | acks during 2/2
+[71.8s] /call?target=svc-fetch&op=wasm&mb=1024&file=a FAILED 181 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 3/2
+[73.1s] /call?target=svc-fetch&op=wasm&mb=1024&file=a FAILED 196 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 2/3
+[75.9s] /call?target=svc-fetch&op=heap&file=a FAILED 1823 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 19/18
+[79.0s] /call?target=svc-fetch&op=heap&file=a FAILED 2023 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 21/21
+[80.2s] /call?target=svc-rpc&op=wasm&file=a ok 160 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"c87ffa6b","isolateCalls":2,"ms":0} | acks during 3/2
+[81.4s] /call?target=svc-rpc&op=wasm&file=a ok 161 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"9afcc018","isolateCalls":2,"ms":0} | acks during 2/2
+[82.7s] /call?target=svc-rpc&op=wasm&mb=1024&file=a FAILED 226 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 2/3
+[84.0s] /call?target=svc-rpc&op=wasm&mb=1024&file=a FAILED 221 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 3/3
+[87.2s] /call?target=svc-rpc&op=heap&file=a FAILED 1894 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 22/22
+[91.2s] /call?target=svc-rpc&op=heap&file=a FAILED 2996 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 30/30
+[93.2s] /call?target=do-fetch&op=wasm&file=a ok 214 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"93c6b9c5","isolateCalls":4,"ms":0,"objectCall | acks during 10/10
+[95.3s] /call?target=do-fetch&op=wasm&file=a ok 247 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"5202b0cb","isolateCalls":3,"ms":0,"objectCall | acks during 11/11
+[97.3s] /call?target=do-fetch&op=wasm&mb=1024&file=a FAILED 235 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 10/10
+[99.3s] /call?target=do-fetch&op=wasm&mb=1024&file=a FAILED 203 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 10/10
+[103.1s] /call?target=do-fetch&op=heap&file=a FAILED 1984 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 28/28
+[107.3s] /call?target=do-fetch&op=heap&file=a FAILED 2445 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 32/32
+[109.3s] /call?target=do-rpc&op=wasm&file=a ok 180 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"fa0af938","isolateCalls":3,"ms":0,"objectCalls":3,"objectStarted": | acks during 10/10
+[111.3s] /call?target=do-rpc&op=wasm&file=a ok 190 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"92b212e9","isolateCalls":3,"ms":0,"objectCalls":3,"objectStarted": | acks during 9/10
+[113.2s] /call?target=do-rpc&op=wasm&mb=1024&file=a FAILED 208 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 9/9
+[115.2s] /call?target=do-rpc&op=wasm&mb=1024&file=a FAILED 243 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 10/10
+[119.2s] /call?target=do-rpc&op=heap&file=a FAILED 2201 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 29/29
+[123.0s] /call?target=do-rpc&op=heap&file=a FAILED 2102 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 28/29
+[125.2s] /call?target=do-rpc&op=wasm&mb=1024&via=room FAILED 257 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 12/11
+[128.7s] /call?target=svc-rpc&op=heap&via=room FAILED 102 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 25/25
+[130.6s] /twofiles?op=wasm&mb=1024 FAILED 181 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 9/9
+[134.1s] /twofiles?op=heap FAILED 2065 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 26/26
+[135.6s] /shared?mb=80 {"status":200,"json":{"mb":80,"roomMb":60,"ids":{"roomWorker":"35f2d20e","roomDo":{"ok":true,"ms":42,"value":{"iid":"61ca8dcc","started":1794953641265,"sockets":1}},"runnerSvc":{"ok":true,"ms":5,"valu | acks during 5/5
+[136.7s] /info {"status":200,"json":{"roomWorker":"35f2d20e","roomDo":{"iid":"61ca8dcc","started":1794953641265,"sockets":1}}} | acks during 1/1
+[137.7s] --- round 3
+[137.8s] /info {"status":200,"json":{"roomWorker":"35f2d20e","roomDo":{"iid":"61ca8dcc","started":1794953641265,"sockets":1}}} | acks during 1/1
+[139.0s] /call?target=svc-fetch&op=wasm&file=a ok 155 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"f425f6f7","isolateCalls":5,"ms":0}} | acks during 2/2
+[140.2s] /call?target=svc-fetch&op=wasm&file=a ok 152 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"bf2e1136","isolateCalls":2,"ms":0}} | acks during 2/2
+[141.5s] /call?target=svc-fetch&op=wasm&mb=1024&file=a FAILED 187 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 3/3
+[142.7s] /call?target=svc-fetch&op=wasm&mb=1024&file=a FAILED 176 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 2/2
+[145.5s] /call?target=svc-fetch&op=heap&file=a FAILED 1721 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 18/18
+[148.2s] /call?target=svc-fetch&op=heap&file=a FAILED 1708 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 17/18
+[149.4s] /call?target=svc-rpc&op=wasm&file=a ok 137 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"62445a08","isolateCalls":2,"ms":0} | acks during 2/2
+[150.6s] /call?target=svc-rpc&op=wasm&file=a ok 144 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"032b1eea","isolateCalls":2,"ms":0} | acks during 2/2
+[151.8s] /call?target=svc-rpc&op=wasm&mb=1024&file=a FAILED 179 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 2/3
+[153.0s] /call?target=svc-rpc&op=wasm&mb=1024&file=a FAILED 175 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 2/2
+[156.0s] /call?target=svc-rpc&op=heap&file=a FAILED 1967 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 20/20
+[159.0s] /call?target=svc-rpc&op=heap&file=a FAILED 1871 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 19/19
+[160.9s] /call?target=do-fetch&op=wasm&file=a ok 191 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"0a7fc70b","isolateCalls":4,"ms":0,"objectCall | acks during 10/9
+[162.9s] /call?target=do-fetch&op=wasm&file=a ok 148 ms {"status":200,"body":{"grewTo":200.0625,"refused":false,"op":"wasm","iid":"bb9384b7","isolateCalls":3,"ms":0,"objectCall | acks during 10/11
+[165.0s] /call?target=do-fetch&op=wasm&mb=1024&file=a FAILED 177 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 11/10
+[167.0s] /call?target=do-fetch&op=wasm&mb=1024&file=a FAILED 220 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 10/10
+[170.8s] /call?target=do-fetch&op=heap&file=a FAILED 2002 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 29/28
+[174.8s] /call?target=do-fetch&op=heap&file=a FAILED 2168 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 29/30
+[176.7s] /call?target=do-rpc&op=wasm&file=a ok 147 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"96b26094","isolateCalls":3,"ms":0,"objectCalls":3,"objectStarted": | acks during 9/9
+[178.6s] /call?target=do-rpc&op=wasm&file=a ok 147 ms {"grewTo":200.0625,"refused":false,"op":"wasm","iid":"6f9e5f15","isolateCalls":3,"ms":0,"objectCalls":3,"objectStarted": | acks during 9/9
+[180.5s] /call?target=do-rpc&op=wasm&mb=1024&file=a FAILED 218 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 9/10
+[182.5s] /call?target=do-rpc&op=wasm&mb=1024&file=a FAILED 187 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 9/9
+[186.2s] /call?target=do-rpc&op=heap&file=a FAILED 2075 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 27/27
+[189.6s] /call?target=do-rpc&op=heap&file=a FAILED 1644 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 24/24
+[191.7s] /call?target=do-rpc&op=wasm&mb=1024&via=room FAILED 231 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 11/10
+[194.9s] /call?target=svc-rpc&op=heap&via=room FAILED 64 ms {"name":"Error","message":"Worker exceeded memory limit.","remote":true,"overloaded":true} | acks during 22/22
+[196.4s] /twofiles?op=wasm&mb=1024 FAILED 165 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 6/5
+[200.0s] /twofiles?op=heap FAILED 2187 ms {"name":"Error","message":"Durable Object's isolate exceeded its memory limit and was reset.","remote":true,"overloaded":true,"durableObjectReset":true} | acks during 26/27
+[201.6s] /shared?mb=80 {"status":200,"json":{"mb":80,"roomMb":60,"ids":{"roomWorker":"35f2d20e","roomDo":{"ok":true,"ms":41,"value":{"iid":"61ca8dcc","started":1794953641265,"sockets":1}},"runnerSvc":{"ok":true,"ms":5,"valu | acks during 6/6
+[202.7s] /info {"status":200,"json":{"roomWorker":"35f2d20e","roomDo":{"iid":"61ca8dcc","started":1794953641265,"sockets":1}}} | acks during 1/0
+[206.7s] summary {"durationS":206.684,"sent":2027,"acked":2027,"missing":[],"dupes":0,"closes":[],"errors":[],"socketOpenAtEnd":true,"roomDoStarts":[1794953641265],"roomDoIsolates":["61ca8dcc"],"countGaps":[],"maxAckMs":2310}
+[206.7s] SOCKET CLOSED 1000 done
