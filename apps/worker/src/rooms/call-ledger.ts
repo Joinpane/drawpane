@@ -110,8 +110,9 @@ export function overlap(theirs: readonly Op[], ids: ReadonlySet<string>): string
 }
 
 /**
- * The first logged transaction after `since`, by anyone but `sessionId`,
- * whose operations overlap `ids`: who, and which. The log keeps 10,000
+ * The first logged transaction after `since`, by anyone but `sessionId`
+ * (by anyone at all when it's null), whose operations overlap `ids`: who,
+ * and which. The log keeps 10,000
  * transactions of up to a message each (typing in a text of 200,000
  * characters logs all of them every keystroke), so it's read a page bounded
  * by characters at a time, stopping at the first.
@@ -119,17 +120,19 @@ export function overlap(theirs: readonly Op[], ids: ReadonlySet<string>): string
 export function firstOverlap(
   sql: SqlStorage,
   since: number,
-  sessionId: string,
+  sessionId: string | null,
   ids: ReadonlySet<string>,
 ): { userId: string; ids: string[] } | null {
+  // Null leaves nobody out: `session_id IS NOT ?` with null is true of every row.
+  const except = sessionId;
   const pages = boundedPages<number, { user_id: string; ops: string }>(
     since,
     (after, size) =>
       sql
         .exec<{ revn: number; n: number }>(
-          "SELECT revn, LENGTH(ops) AS n FROM log WHERE revn > ? AND session_id != ? ORDER BY revn LIMIT ?",
+          "SELECT revn, LENGTH(ops) AS n FROM log WHERE revn > ? AND session_id IS NOT ? ORDER BY revn LIMIT ?",
           after,
-          sessionId,
+          except,
           size,
         )
         .toArray()
@@ -137,10 +140,10 @@ export function firstOverlap(
     (after, last) =>
       sql
         .exec<{ user_id: string; ops: string }>(
-          "SELECT user_id, ops FROM log WHERE revn > ? AND revn <= ? AND session_id != ? ORDER BY revn",
+          "SELECT user_id, ops FROM log WHERE revn > ? AND revn <= ? AND session_id IS NOT ? ORDER BY revn",
           after,
           last,
-          sessionId,
+          except,
         )
         .toArray(),
   );
