@@ -50,14 +50,20 @@ export function cropOfBox(image: Rect, box: Rect): CropRect {
   };
 }
 
-/** The crop after sliding the image by (dx, dy) local units under a box of size `box`. */
+/**
+ * The crop after sliding the image by (dx, dy) local units under a box of
+ * size `box`. The box stays inside the image, or, for a crop from Figma that
+ * reaches past a smaller image, the image stays inside the box.
+ */
 export function pannedCrop(crop: CropRect, box: Size, dx: number, dy: number): CropRect {
   const imageW = box.width / crop.width;
   const imageH = box.height / crop.height;
+  const slide = (at: number, size: number, by: number) =>
+    round(clamp(at - by, Math.min(0, 1 - size), Math.max(0, 1 - size)));
   return {
     ...crop,
-    x: round(clamp(crop.x - dx / imageW, 0, 1 - crop.width)),
-    y: round(clamp(crop.y - dy / imageH, 0, 1 - crop.height)),
+    x: slide(crop.x, crop.width, dx / imageW),
+    y: slide(crop.y, crop.height, dy / imageH),
   };
 }
 

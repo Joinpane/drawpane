@@ -49,6 +49,7 @@ export function blendMode(mode: string | undefined): BlendMode | undefined {
 export type ImageLookup = (imageRef: string) => string | null;
 
 const round4 = (n: number) => Math.round(n * 10_000) / 10_000;
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
 export function convertPaint(p: Figma.Paint, images: ImageLookup, notes: Notes): Paint | null {
   const common = {
@@ -107,13 +108,12 @@ export function convertPaint(p: Figma.Paint, images: ImageLookup, notes: Notes):
         // The image's part the layer shows: the transform takes the layer's unit square into the image's.
         const [[a, c, e], [b, d, f]] = p.imageTransform;
         if (Math.abs(b) < 1e-6 && Math.abs(c) < 1e-6 && a > 0 && d > 0) {
-          const x = Math.min(1, Math.max(0, e));
-          const y = Math.min(1, Math.max(0, f));
+          // It may reach past the image (a smaller picture inset in the layer): kept as it is.
           const crop = {
-            x: round4(x),
-            y: round4(y),
-            width: round4(Math.max(1e-4, Math.min(a, 1 - x))),
-            height: round4(Math.max(1e-4, Math.min(d, 1 - y))),
+            x: round4(clamp(e, -10, 10)),
+            y: round4(clamp(f, -10, 10)),
+            width: round4(clamp(a, 1e-4, 10)),
+            height: round4(clamp(d, 1e-4, 10)),
           };
           const whole = crop.x === 0 && crop.y === 0 && crop.width === 1 && crop.height === 1;
           return whole
