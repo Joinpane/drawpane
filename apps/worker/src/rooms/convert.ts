@@ -572,14 +572,15 @@ class SqlConversion implements ConvertReader, ConvertSink {
     // Charged a row at a time as it's read (the converter gives them back): a row past the
     // budget stops the read there.
     let charged = 0;
+    const cursor = this.#sql.exec<NodeRow>(
+      `WITH RECURSIVE sub(id) AS (
+         SELECT id FROM ${this.#src} WHERE parent = ?
+         UNION ALL SELECT n.id FROM ${this.#src} n JOIN sub ON n.parent = sub.id
+       ) SELECT ${NODE_COLUMNS} FROM ${this.#src} WHERE id IN (SELECT id FROM sub)`,
+      rootId,
+    );
     try {
-      for (const row of this.#sql.exec<NodeRow>(
-        `WITH RECURSIVE sub(id) AS (
-           SELECT id FROM ${this.#src} WHERE parent = ?
-           UNION ALL SELECT n.id FROM ${this.#src} n JOIN sub ON n.parent = sub.id
-         ) SELECT ${NODE_COLUMNS} FROM ${this.#src} WHERE id IN (SELECT id FROM sub)`,
-        rootId,
-      )) {
+      for (const row of cursor) {
         this.bytes += row.props.length;
         const node = toRecord(row);
         if (this.#budget) {
@@ -591,6 +592,9 @@ class SqlConversion implements ConvertReader, ConvertSink {
       }
     } catch (error) {
       this.#budget?.release(charged);
+      // Read to its end, rows let go as they come: a cursor left open keeps its table locked, and
+      // a version's staged copy is dropped next (see tablePages).
+      while (!cursor.next().done);
       throw error;
     }
     this.work += 1 + layers.length;

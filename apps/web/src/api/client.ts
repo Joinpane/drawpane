@@ -6,11 +6,12 @@ import {
   type LibraryPublish,
   type NodeRecord,
   parseBranchReview,
-  parseSnapshot,
   type Resolution,
   snapshotCopies,
   type VersionInfo,
 } from "@drawpane/model";
+
+import { readSnapshotStream } from "./snapshot-stream";
 
 export type Role = "owner" | "editor" | "viewer";
 
@@ -139,19 +140,53 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return (await send(method, path, body).then(readJson)) as T;
 }
 
-/** A response's text (a snapshot, a review: lines of JSON, decision 0026), or its error. */
+/** A response's text (a review: lines of JSON, decision 0026), or its error. */
 async function requestText(method: string, path: string): Promise<string> {
   const response = await send(method, path);
   if (!response.ok) await readJson(response);
   return response.text();
 }
 
-async function send(method: string, path: string, body?: unknown): Promise<Response> {
+/**
+ * A snapshot (decision 0026) read as it arrives, never held as one string (a
+ * browser's longest is about 512 MB), or its error.
+ */
+async function requestSnapshot(
+  path: string,
+  signal?: AbortSignal,
+): Promise<{
+  readonly revn: number;
+  readonly nodes: NodeRecord[];
+  readonly copies: CopiesFormat;
+}> {
+  const response = await send("GET", path, undefined, signal);
+  if (!response.ok) await readJson(response);
+  let snapshot: Awaited<ReturnType<typeof readSnapshotStream>>;
+  try {
+    snapshot = response.body ? await readSnapshotStream(response.body) : null;
+  } catch {
+    throw new ApiError(0, "network", "The file stopped arriving partway. Trying again.");
+  }
+  if (!snapshot) throw new ApiError(500, "internal", "That file couldn't be read.");
+  return {
+    revn: snapshot.header.revn,
+    nodes: snapshot.nodes,
+    copies: snapshotCopies(snapshot.header),
+  };
+}
+
+async function send(
+  method: string,
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<Response> {
   let response: Response;
   try {
     response = await fetch(`/api${path}`, {
       method,
       credentials: "same-origin",
+      ...(signal ? { signal } : {}),
       headers: body === undefined ? {} : { "content-type": "application/json" },
       ...(body === undefined
         ? {}
@@ -257,11 +292,21 @@ export const api = {
     fileId: string,
     versionId: string,
   ): Promise<{ nodes: NodeRecord[]; copies: CopiesFormat }> => {
-    const text = await requestText("GET", `/files/${fileId}/versions/${versionId}/snapshot`);
-    const snapshot = parseSnapshot(text);
-    if (!snapshot) throw new ApiError(500, "internal", "That version couldn't be read.");
-    return { nodes: snapshot.nodes, copies: snapshotCopies(snapshot.header) };
+    const { nodes, copies } = await requestSnapshot(
+      `/files/${fileId}/versions/${versionId}/snapshot`,
+    );
+    return { nodes, copies };
   },
+  /**
+   * A file too large for its room's socket, with the ticket the room gave
+   * (sync mode `download`): its nodes, the revision they're at, and how they
+   * store copies (decision 0029).
+   */
+  downloadDocument: (fileId: string, ticket: string, signal?: AbortSignal) =>
+    requestSnapshot(
+      `/files/${encodeURIComponent(fileId)}/document?ticket=${encodeURIComponent(ticket)}`,
+      signal,
+    ),
   /** Publishes the file as a team library (decision 0010): a named version, and what it offers. */
   publishLibrary: (fileId: string, body: { description?: string }) =>
     request<{ publish: LibraryPublish }>("POST", `/files/${fileId}/library/publish`, body),

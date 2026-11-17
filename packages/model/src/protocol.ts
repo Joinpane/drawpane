@@ -25,6 +25,14 @@ export const RELOAD_CLOSE_CODE = 4426;
 /** Nodes per snapshot chunk, so a big file never becomes one huge frame. */
 export const SNAPSHOT_CHUNK_SIZE = 2_000;
 
+/**
+ * A file of more nodes than this is downloaded (`GET /api/files/:id/document`)
+ * by a client that can, instead of sent through the socket: a socket has no
+ * backpressure, so a room sending a large file at once holds all of it, and a
+ * room has 128 MB. A file this small fits in one snapshot chunk.
+ */
+export const INLINE_SNAPSHOT_NODES = SNAPSHOT_CHUNK_SIZE;
+
 /** Largest client message accepted, in bytes. */
 export const MAX_CLIENT_MESSAGE_BYTES = 4 * 1024 * 1024;
 
@@ -69,6 +77,11 @@ export const ClientMessage = z.discriminatedUnion("t", [
       .array(z.enum(["materialized", "compact"]))
       .max(4)
       .optional(),
+    /**
+     * The client can download the file over HTTP (welcome mode `download`).
+     * Without it, a file comes through the socket whatever its size.
+     */
+    download: z.literal(true).optional(),
   }),
   z.object({
     t: z.literal("txn"),
@@ -113,8 +126,16 @@ export type ServerMessage =
       readonly revn: number;
       readonly role: "owner" | "editor" | "viewer";
       readonly peers: readonly Peer[];
-      /** `snapshot`: chunks follow. `catchup`: the missed transactions follow as `txn`. */
-      readonly mode: "snapshot" | "catchup";
+      /**
+       * `snapshot`: chunks follow. `catchup`: the missed transactions follow as
+       * `txn`. `download`: the file is fetched with `ticket` (a client that
+       * said it can, and a file of more than INLINE_SNAPSHOT_NODES); the
+       * snapshot's header says its revision, and every transaction after it
+       * follows as `txn`, some perhaps before it's read.
+       */
+      readonly mode: "snapshot" | "catchup" | "download";
+      /** With `download`: what `GET /api/files/:id/document?ticket=` takes, for a few minutes. */
+      readonly ticket?: string;
       /** Highest `seq` the room has accepted from this client id, so it can drop acknowledged resends. */
       readonly lastSeq: number;
       /**

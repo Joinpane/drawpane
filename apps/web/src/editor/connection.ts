@@ -43,9 +43,13 @@ export function connectFile(
     socket.addEventListener("open", () => {
       opened = true;
       attempt = 0;
-      editor.sync.connected((message) => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
-      });
+      editor.sync.connected(
+        (message) => {
+          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+        },
+        // A large file comes over HTTP, streamed, not through the socket.
+        { download: (ticket, signal) => api.downloadDocument(fileId, ticket, signal) },
+      );
       ping = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ t: "ping" }));
       }, PING_MS);
@@ -143,6 +147,9 @@ export function connectFile(
     if (socket) {
       editor.sync.flush();
       socket.close(1000, "leaving");
+      // Its close is no longer this connection's to handle (ws is cleared), so the engine is told
+      // here: whatever was loading stops (a large file's download is aborted).
+      editor.sync.disconnected();
     }
   };
 }

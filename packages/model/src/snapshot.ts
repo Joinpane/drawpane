@@ -56,7 +56,8 @@ export function snapshotHeaderLine(
   })}\n`;
 }
 
-function isHeader(value: unknown): value is SnapshotHeader {
+/** Whether `value` is a snapshot header (either version). */
+export function isSnapshotHeader(value: unknown): value is SnapshotHeader {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -80,7 +81,7 @@ export function parseSnapshot(
     } catch {
       header = null;
     }
-    if (isHeader(header) && header.version === 2) {
+    if (isSnapshotHeader(header) && header.version === 2) {
       const nodes: NodeRecord[] = [];
       let start = newline + 1;
       while (start < text.length) {
@@ -98,7 +99,7 @@ export function parseSnapshot(
   } catch {
     return null;
   }
-  if (!isHeader(file) || !Array.isArray((file as { nodes?: unknown }).nodes)) return null;
+  if (!isSnapshotHeader(file) || !Array.isArray((file as { nodes?: unknown }).nodes)) return null;
   const { nodes, ...header } = file as SnapshotHeader & { nodes: NodeRecord[] };
   return { header: { ...header, version: 1 }, nodes };
 }

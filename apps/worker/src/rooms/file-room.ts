@@ -17,6 +17,7 @@ import {
   type CopiesFormat,
   heldNodeIds,
   IMPORT_TTL_MS,
+  INLINE_SNAPSHOT_NODES,
   keyBetween,
   LATENCY_BUCKETS_MS,
   type LibraryAsset,
@@ -46,7 +47,7 @@ import { agentMeasurer } from "../agent/measurer";
 import { headlessRenderer } from "../agent/render";
 import { FILE_ACCESS, FILE_ROLE } from "../api/access";
 import type { Env, Role } from "../env";
-import { verifyPayload } from "../lib/crypto";
+import { signPayload, verifyPayload } from "../lib/crypto";
 import { answerDocument, type DocumentRequest, SqlFileDoc } from "../mcp/document";
 import { AgentEngine, type EngineRun } from "./agent-engine";
 import { CALL_SCHEMA, CallLedger, changedIds, overlap, type StepCall } from "./call-ledger";
@@ -84,6 +85,7 @@ import {
   copyNodes,
   countRows,
   dropTable,
+  PAGE_ROWS,
   type RoomSql,
   TableReader,
   tablePages,
@@ -138,6 +140,50 @@ export interface RoomClaim {
 export const CLAIM_HEADER = "x-drawpane-claim";
 
 /**
+ * What a room hands a client, in its welcome, to download a file too large
+ * to send through the socket (`GET /api/files/:id/document?ticket=`).
+ */
+export interface DocumentTicket {
+  readonly purpose: "document";
+  readonly fid: string;
+  /**
+   * Who it was given to (a room claim's `uid`: a person, or `guest:<link>`),
+   * so a download checks they still have the file.
+   */
+  readonly uid: string;
+  /**
+   * The saved version to read, from R2, the transactions after it sent
+   * through the socket; null for the file as it is when downloaded.
+   */
+  readonly revn: number | null;
+  readonly exp: number;
+}
+
+/** A download ticket is good for this long: it is used at once, and asked for again on a retry. */
+export const DOCUMENT_TICKET_TTL_MS = 5 * 60_000;
+/**
+ * A client that downloads a saved version is sent the transactions after it
+ * through the socket: this much of them at most (JSON bytes). Past that it
+ * downloads the file as it is instead.
+ */
+const MAX_REPLAY_BYTES = 8 << 20;
+/**
+ * A file is sent through the socket only when it's at most INLINE_SNAPSHOT_NODES
+ * nodes in at most this many characters of properties (a text layer may hold
+ * 200,000): anything more is downloaded, by a client that can.
+ */
+const INLINE_SNAPSHOT_CHARS = 8 << 20;
+/**
+ * Downloads of the file as it is a room serves at once, each holding a page
+ * of DOWNLOAD_PAGE_CHARS and its gzip: more are refused (503), and the
+ * browser asks again in a while.
+ */
+const MAX_DOWNLOADS = 4;
+const DOWNLOAD_PAGE_CHARS = 1 << 20;
+/** A download not finished in this long no longer counts toward MAX_DOWNLOADS. */
+const DOWNLOAD_HELD_MS = 10 * 60_000;
+
+/**
  * Clients ping every 25 s (connection.ts); the runtime answers for the room
  * (setWebSocketAutoResponse), so a ping doesn't wake it, and notes when.
  */
@@ -177,6 +223,12 @@ export const BEFORE_COMPACT = "Before compact copies";
 
 /** The author guests see on every change: nobody in particular. */
 const ANONYMOUS = { userId: "", sessionId: "" } as const;
+
+/** Download tickets signed for a hello (see #documentTickets). */
+interface DocumentTickets {
+  readonly live: string;
+  readonly saved: { readonly revn: number; readonly ticket: string } | null;
+}
 
 /** Per-socket state that survives hibernation. */
 interface Attachment {
@@ -417,6 +469,13 @@ export class FileRoom extends DurableObject<Env> {
   /** The warm headless editor agents' calls run on (decision 0021); made on the first call. */
   #engine: AgentEngine | null = null;
   #rendering: Promise<HeadlessRenderer> | null = null;
+  /** Copies of the file set aside for downloads, by revision (see exportDocument). */
+  readonly #sharedCopies = new Map<
+    number,
+    { table: string; copies: CopiesFormat; readers: number }
+  >();
+  /** Downloads of the file as it is under way, and when each began (see exportDocument). */
+  readonly #downloads = new Map<symbol, number>();
   /** The update from main under way, which the next waits for: one at a time. */
   #updating: Promise<unknown> = Promise.resolve();
   /** How this file stores copies (decision 0029); in meta as `copies`. */
@@ -537,7 +596,15 @@ export class FileRoom extends DurableObject<Env> {
         // materialized. Which form the file has is decided when it's welcomed (see #hello).
         const reads: readonly CopiesFormat[] =
           message.protocol === 1 ? ["materialized"] : (message.copies ?? ["materialized"]);
-        return this.#checkedHello(ws, me, message.clientId, message.revn, reads, message.protocol);
+        return this.#checkedHello(
+          ws,
+          me,
+          message.clientId,
+          message.revn,
+          reads,
+          message.protocol,
+          message.download === true,
+        );
       }
       case "txn": {
         // Edits from someone whose access hasn't been confirmed lately wait for a check first.
@@ -1686,6 +1753,56 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
+   * The file as it is, for a download (`GET /api/files/:id/document`): as
+   * `exportSnapshot` streams it, but downloads of one revision share one copy
+   * set aside, dropped when the last of them finishes, so many people opening
+   * a large file at once don't each copy it.
+   */
+  async exportDocument(): Promise<ReadableStream<Uint8Array> | null> {
+    // Each download holds a page and its gzip as it goes: a few at once, the rest asked to wait.
+    // One that never finished (a reader that went away unnoticed) stops counting in a while.
+    const now = Date.now();
+    for (const [reader, started] of this.#downloads)
+      if (now - started > DOWNLOAD_HELD_MS) this.#downloads.delete(reader);
+    if (this.#downloads.size >= MAX_DOWNLOADS) return null;
+    const fileId = this.#meta("file_id") ?? "";
+    const revn = this.#revn;
+    let shared = this.#sharedCopies.get(revn);
+    // Shared only while young: the alarm drops copies an hour old, readers or not.
+    if (
+      shared &&
+      (tempTableAge(shared.table, Date.now()) > STALE_TABLE_MS / 4 ||
+        !tempTables(this.#sql).includes(shared.table))
+    ) {
+      this.#sharedCopies.delete(revn);
+      shared = undefined;
+    }
+    if (!shared) {
+      // A revision has one form: a change of form (a conversion, a rollback) is a revision of its own.
+      const { table, copies } = this.#freeze();
+      shared = { table, copies, readers: 0 };
+      this.#sharedCopies.set(revn, shared);
+    }
+    const copy = shared;
+    copy.readers++;
+    const reader = Symbol("download");
+    this.#downloads.set(reader, now);
+    // Should a reader let go without finishing, the alarm drops the copy in time.
+    void this.#scheduleAlarm();
+    return snapshotStream(
+      { fileId, revn, at: now, copies: copy.copies },
+      tablePages(this.#sql, copy.table, PAGE_ROWS, DOWNLOAD_PAGE_CHARS),
+      () => {
+        this.#downloads.delete(reader);
+        copy.readers--;
+        if (copy.readers > 0) return;
+        if (this.#sharedCopies.get(revn) === copy) this.#sharedCopies.delete(revn);
+        dropTable(this.#sql, copy.table);
+      },
+    );
+  }
+
+  /**
    * A branch's nodes as `exportSnapshot` streams them, and the key of the
    * base they're a change from, read together: an update from main moves
    * both at once (see `updateFromMain`).
@@ -2329,11 +2446,103 @@ export class FileRoom extends DurableObject<Env> {
     revn: number | null,
     reads: readonly CopiesFormat[],
     protocol: number,
+    download: boolean,
   ): Promise<void> {
     const current = await this.#checkAccess(ws, me, true);
+    if (!current) return;
+    // Only a client that reads the file's form downloads it; a tab from before compact copies
+    // never says it can. The form is checked again in #hello, as it's sent.
+    const tickets = download && protocol !== 1 ? await this.#documentTickets(current) : null;
     await this.pause?.("hello");
-    // The file's form is checked here, after the await, as it's sent (it may have converted).
-    if (current) this.#hello(ws, current, clientId, revn, reads, protocol);
+    if (!tickets) {
+      // The file's form is checked in #hello, after the await, as it's sent (it may have converted).
+      this.#hello(ws, current, clientId, revn, reads, protocol, null);
+      return;
+    }
+    // While they were signed the file may have moved on (#hello reads it as it is now), and their
+    // access may have changed: a role changed is in the attachment, a removal closed the socket.
+    // Never the attachment from before the wait, which would put back a role taken away.
+    const latest = ws.deserializeAttachment() as Attachment | null;
+    if (!latest || ws.readyState !== WebSocket.OPEN) return;
+    this.#hello(ws, latest, clientId, revn, reads, protocol, tickets);
+  }
+
+  /**
+   * Download tickets, signed ahead (signing waits): one for the file as it is
+   * when downloaded, and one for the latest saved version (not for guests,
+   * who see only the file as it is). #hello picks.
+   */
+  async #documentTickets(me: Attachment): Promise<DocumentTickets | null> {
+    const fid = this.#meta("file_id");
+    if (fid === null) return null;
+    const exp = Date.now() + DOCUMENT_TICKET_TTL_MS;
+    const sign = (revn: number | null) =>
+      signPayload(this.env.SESSION_SECRET, {
+        purpose: "document",
+        fid,
+        uid: me.userId,
+        revn,
+        exp,
+      } satisfies DocumentTicket);
+    const saved = me.guest ? null : this.#meta("snapshot_revn");
+    const [live, fromSaved] = await Promise.all([
+      sign(null),
+      saved === null ? null : sign(Number(saved)),
+    ]);
+    return {
+      live,
+      saved:
+        saved === null || fromSaved === null ? null : { revn: Number(saved), ticket: fromSaved },
+    };
+  }
+
+  /**
+   * Whether the file is too large to send through the socket: more than
+   * INLINE_SNAPSHOT_NODES nodes, or more than INLINE_SNAPSHOT_CHARS of their
+   * properties, reading no more than that many nodes and one (in SQL).
+   */
+  #tooLargeToSend(): boolean {
+    const { n, chars } = this.#sql
+      .exec<{ n: number; chars: number }>(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(props)), 0) AS chars FROM (SELECT props FROM nodes LIMIT ?)",
+        INLINE_SNAPSHOT_NODES + 1,
+      )
+      .one();
+    return n > INLINE_SNAPSHOT_NODES || chars > INLINE_SNAPSHOT_CHARS;
+  }
+
+  /**
+   * Whether a client can load the saved version at `revn` and then catch up
+   * on what came after it: every transaction since is in the log, none before
+   * the last import, and not too many bytes of them.
+   */
+  #canReplayFrom(revn: number): boolean {
+    if (!Number.isInteger(revn) || revn > this.#revn || revn < this.#catchupFrom()) return false;
+    if (revn === this.#revn) return true;
+    const after = this.#sql
+      .exec<{ n: number; bytes: number }>(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(ops)), 0) AS bytes FROM log WHERE revn > ?",
+        revn,
+      )
+      .one();
+    return after.n === this.#revn - revn && after.bytes <= MAX_REPLAY_BYTES;
+  }
+
+  /** Sends the logged transactions after `revn`, in order. */
+  #sendLog(ws: WebSocket, me: Attachment, revn: number): void {
+    for (const row of this.#sql.exec<{
+      revn: number;
+      ops: string;
+      user_id: string;
+      session_id: string;
+    }>("SELECT revn, ops, user_id, session_id FROM log WHERE revn > ? ORDER BY revn", revn)) {
+      this.#send(ws, {
+        t: "txn",
+        revn: row.revn,
+        ops: JSON.parse(row.ops) as Op[],
+        author: me.guest ? ANONYMOUS : { userId: row.user_id, sessionId: row.session_id },
+      });
+    }
   }
 
   /**
@@ -2393,6 +2602,7 @@ export class FileRoom extends DurableObject<Env> {
     revn: number | null,
     reads: readonly CopiesFormat[],
     protocol: number,
+    tickets: DocumentTickets | null,
   ): void {
     if (!reads.includes(this.#copies)) {
       // A tab from before compact copies: the file to view, every copy built, as it reads it.
@@ -2437,6 +2647,17 @@ export class FileRoom extends DurableObject<Env> {
             )
             .one().bytes <= MAX_CATCHUP_BYTES));
 
+    // A file larger than a snapshot chunk is downloaded, by a client that can: a socket has no
+    // backpressure, so sending it here would hold all of it, and a room has 128 MB. From the
+    // latest saved version and the log after it when they meet (nothing to copy, and R2 serves
+    // it); else the file as it is, copied aside when it's downloaded (exportSnapshot).
+    const download =
+      !canCatchUp && tickets !== null && this.#tooLargeToSend()
+        ? tickets.saved && this.#canReplayFrom(tickets.saved.revn)
+          ? { ticket: tickets.saved.ticket, after: tickets.saved.revn }
+          : { ticket: tickets.live, after: null }
+        : null;
+
     const peers = me.guest ? [] : this.#peers().filter((p) => p.sessionId !== me.sessionId);
     this.#send(ws, {
       t: "welcome",
@@ -2444,25 +2665,15 @@ export class FileRoom extends DurableObject<Env> {
       revn: this.#revn,
       role: me.role,
       peers,
-      mode: canCatchUp ? "catchup" : "snapshot",
+      mode: canCatchUp ? "catchup" : download ? "download" : "snapshot",
       lastSeq,
       copies: this.#copies,
+      ...(download ? { ticket: download.ticket } : {}),
     });
     if (canCatchUp) {
-      const rows = this.#sql
-        .exec<{ revn: number; ops: string; user_id: string; session_id: string }>(
-          "SELECT revn, ops, user_id, session_id FROM log WHERE revn > ? ORDER BY revn",
-          revn,
-        )
-        .toArray();
-      for (const row of rows) {
-        this.#send(ws, {
-          t: "txn",
-          revn: row.revn,
-          ops: JSON.parse(row.ops) as Op[],
-          author: me.guest ? ANONYMOUS : { userId: row.user_id, sessionId: row.session_id },
-        });
-      }
+      this.#sendLog(ws, me, revn ?? 0);
+    } else if (download) {
+      if (download.after !== null) this.#sendLog(ws, me, download.after);
     } else {
       for (const nodes of this.#store.pages(SNAPSHOT_CHUNK_SIZE)) {
         this.#send(ws, { t: "snapshot", nodes, done: false });

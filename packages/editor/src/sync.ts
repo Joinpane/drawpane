@@ -77,6 +77,25 @@ export interface SyncOptions {
 
 type Send = (message: ClientMessage) => void;
 
+/**
+ * Downloads the file with a welcome's ticket (mode `download`): its nodes,
+ * the revision they are at and how they store copies (the snapshot's header). `signal` aborts when
+ * the download is no longer wanted (a disconnect, another welcome), so it
+ * stops rather than reading the rest of a large file for nothing.
+ */
+export type Download = (
+  ticket: string,
+  signal: AbortSignal,
+) => Promise<{
+  readonly revn: number;
+  readonly nodes: readonly NodeRecord[];
+  /** How they store copies (the snapshot's header, decision 0029); materialized when not said. */
+  readonly copies?: CopiesFormat;
+}>;
+
+/** The longest wait before asking for the file again after a download failed. */
+const MAX_DOWNLOAD_RETRY_MS = 30_000;
+
 export class SyncEngine {
   readonly #doc: Doc;
   readonly #clientId: string;
@@ -98,6 +117,35 @@ export class SyncEngine {
   #flushScheduled = false;
   #lastFlush = 0;
   #snapshot: NodeRecord[] | null = null;
+  /**
+   * The revision the snapshot coming in is at. It becomes `#revn` only once
+   * the snapshot is in: a connection lost partway leaves the document as it
+   * was, at the revision it was at.
+   */
+  #snapshotRevn: number | null = null;
+  /** How this connection downloads a file too large for the socket; null when it can't. */
+  #download: Download | null = null;
+  /** Downloads that failed in a row, for the wait before the next. */
+  #downloadFailures = 0;
+  /**
+   * Counts welcomes, disconnects and resyncs: a download finishing after
+   * one of them belongs to a connection or a welcome that's gone.
+   */
+  #generation = 0;
+  /** Aborts the download under way, if any. */
+  #downloading: AbortController | null = null;
+  /**
+   * A hello is out and its welcome hasn't come. Another isn't sent meanwhile:
+   * two welcomes would each reset what's unconfirmed, the second from before
+   * edits sent after the first, which would then go again as new ones.
+   */
+  #awaitingWelcome = false;
+  /**
+   * This client fell out of step while a hello was out: the welcome coming
+   * may be a catch-up from the revision it no longer trusts, so it asks again
+   * for the whole file.
+   */
+  #wantsFile = false;
   /** Remote transactions that arrive while a snapshot is still loading. */
   #buffered: Array<{ revn: number; ops: readonly Op[] }> = [];
   #sessionId: string | null = null;
@@ -244,23 +292,39 @@ export class SyncEngine {
   // -------------------------------------------------------------------------
   // Connection
 
-  /** Call when a socket opens. */
-  connected(send: Send): void {
+  /**
+   * Call when a socket opens. With `download`, a large file is downloaded
+   * (welcome mode `download`) instead of sent through the socket.
+   */
+  connected(send: Send, options: { readonly download?: Download } = {}): void {
     this.#send = send;
+    this.#download = options.download ?? null;
     this.#setStatus("syncing");
-    send({
+    this.#hello(this.#revn);
+  }
+
+  #hello(revn: number | null): void {
+    if (!this.#send) return;
+    this.#awaitingWelcome = true;
+    this.#send({
       t: "hello",
       protocol: PROTOCOL_VERSION,
       clientId: this.#clientId,
-      revn: this.#revn,
+      revn,
       copies: READS,
+      ...(this.#download ? { download: true as const } : {}),
     });
   }
 
   /** Call when the socket closes. Pending edits are kept and resent on reconnect. */
   disconnected(): void {
+    this.#nextGeneration();
     this.#send = null;
+    this.#awaitingWelcome = false;
+    this.#wantsFile = false;
+    this.#download = null;
     this.#snapshot = null;
+    this.#snapshotRevn = null;
     this.#buffered = [];
     this.#peers.clear();
     this.#emit("peers", this.#peers);
@@ -341,17 +405,20 @@ export class SyncEngine {
   }
 
   #welcome(message: Extract<ServerMessage, { t: "welcome" }>): void {
+    this.#nextGeneration();
+    this.#awaitingWelcome = false;
     // A room from before compact copies doesn't say: it stores them materialized.
     const copies = message.copies ?? "materialized";
-    if (message.mode === "catchup" && copies !== this.#doc.copies) {
-      // Changes in another form than the document's can't be caught up on: load it whole.
-      this.#copies = copies;
-      this.#resync(null);
-      return;
-    }
+    // Changes in another form than the document's can't be caught up on: it asks for the file,
+    // as when it fell out of step while this welcome was on its way.
+    const stale = message.mode === "catchup" && (this.#wantsFile || copies !== this.#doc.copies);
+    this.#wantsFile = false;
     const changed = this.#copies !== copies;
     this.#copies = copies;
     if (changed) this.#emit("copies", copies);
+    // Whatever came before this welcome comes again after it (in the log it replays, or in the
+    // file it sends), so what an earlier one buffered is let go.
+    this.#buffered = [];
     this.#sessionId = message.sessionId;
     this.#role = message.role;
     this.#emit("role", message.role);
@@ -368,36 +435,107 @@ export class SyncEngine {
       // Resent under new numbers: their old send times no longer apply.
       this.#sentAt.clear();
       this.#seq = Math.max(this.#seq, message.lastSeq);
-      if (message.mode === "catchup") {
+      if (message.mode === "catchup" && !stale) {
         this.#redoPending();
       }
     });
 
-    if (message.mode === "snapshot") {
+    if (stale) {
+      // Transactions buffer until the file asked for comes.
       this.#snapshot = [];
-      this.#revn = message.revn;
+      this.#snapshotRevn = null;
+      this.#hello(null);
+    } else if (message.mode === "snapshot") {
+      this.#snapshot = [];
+      this.#snapshotRevn = message.revn;
+    } else if (message.mode === "download") {
+      // Transactions buffer meanwhile, as for a snapshot.
+      this.#snapshot = [];
+      this.#snapshotRevn = null;
+      this.#startDownload(message.ticket ?? "");
     } else {
       this.#goLive();
     }
   }
 
   #snapshotChunk(nodes: readonly NodeRecord[], done: boolean): void {
-    if (!this.#snapshot) return;
+    if (!this.#snapshot || this.#snapshotRevn === null) return;
     for (const node of nodes) this.#snapshot.push(node);
-    if (!done) return;
-    const snapshot = this.#snapshot;
+    if (done) this.#loaded(this.#snapshot, this.#snapshotRevn, this.#copies ?? "materialized");
+  }
+
+  /** What was under way for the last welcome, connection or resync no longer is: a download stops. */
+  #nextGeneration(): void {
+    this.#generation++;
+    this.#downloading?.abort();
+    this.#downloading = null;
+  }
+
+  #startDownload(ticket: string): void {
+    const generation = this.#generation;
+    const download = this.#download;
+    const failed = (error: unknown) => {
+      if (generation !== this.#generation) return;
+      const wait = Math.min(MAX_DOWNLOAD_RETRY_MS, 1000 * 2 ** this.#downloadFailures++);
+      console.warn(`couldn't download the file, asking again in ${wait} ms`, error);
+      this.#setTimer(() => {
+        if (generation === this.#generation && this.#send) this.#hello(this.#revn);
+      }, wait);
+    };
+    if (!download) {
+      failed(new Error("the room sent a download this connection can't make"));
+      return;
+    }
+    const controller = new AbortController();
+    this.#downloading = controller;
+    download(ticket, controller.signal).then((file) => {
+      if (this.#downloading === controller) this.#downloading = null;
+      if (generation !== this.#generation || !this.#snapshot) return;
+      try {
+        // A snapshot that doesn't say stores copies materialized, as one from before them. One in
+        // another form than the welcome said is asked for again, as a failed download is: the
+        // file changed form since (the room sends a resync for that too), and the room takes
+        // changes only in the form this client was welcomed in.
+        const copies = file.copies ?? "materialized";
+        const form = this.#copies ?? "materialized";
+        if (copies !== form)
+          throw new Error(`the file came with its copies ${copies}, not ${form}`);
+        this.#loaded(file.nodes, file.revn, copies);
+        this.#downloadFailures = 0;
+      } catch (error) {
+        // A file that won't load is asked for again in a while, as a failed download is.
+        this.#snapshot = [];
+        this.#snapshotRevn = null;
+        failed(error);
+      }
+    }, failed);
+  }
+
+  /**
+   * The room's state is in: `nodes` at `revn`. Pending edits go on top, then
+   * the transactions that came meanwhile, those after `revn`.
+   */
+  #loaded(nodes: readonly NodeRecord[], revn: number, copies: CopiesFormat): void {
     this.#snapshot = null;
+    this.#snapshotRevn = null;
     const buffered = this.#buffered;
     this.#buffered = [];
+    // What came meanwhile must carry on from the snapshot without a gap.
+    const after = buffered.filter((txn) => txn.revn > revn);
+    if (after.some((txn, i) => txn.revn !== revn + 1 + i)) {
+      this.#resync(`the file at revision ${revn} and the changes after it don't meet`);
+      return;
+    }
     let dropped = 0;
     this.#doc.batch(() => {
       const before = this.#doc.copies;
       // As the room stores it: the document takes the file's form.
-      this.#doc.resetStored(snapshot, this.#copies ?? "materialized");
+      this.#doc.resetStored(nodes, copies);
       // Edits made before the file changed form that don't apply now (a copy layer's old
       // id) are dropped: the room couldn't take them in the old form.
       dropped = this.#redoPending(before !== this.#doc.copies);
     });
+    this.#revn = revn;
     if (dropped > 0)
       this.#emit(
         "rejected",
@@ -406,8 +544,10 @@ export class SyncEngine {
           ? "This file was updated while you edited, and your last change couldn't be kept."
           : "This file was updated while you edited, and your last changes couldn't be kept.",
       );
-    for (const txn of buffered) this.#remote(txn.revn, txn.ops);
+    for (const txn of after) this.#remote(txn.revn, txn.ops);
     this.#goLive();
+    // A download finishes outside `receive`, which reports progress otherwise.
+    this.#progress();
   }
 
   #goLive(): void {
@@ -448,7 +588,10 @@ export class SyncEngine {
     }
     while (this.#pending[0] && (this.#pending[0].seq ?? Number.POSITIVE_INFINITY) <= seq)
       this.#pending.shift();
-    this.#revn = Math.max(this.#revn ?? 0, revn);
+    // Only a document that's in follows the room's revision: while the file is loading again (a
+    // resync asked for it, or a snapshot or download is on its way) the edit comes back in it,
+    // and taking its revision would say this client is caught up to a file it doesn't have.
+    if (this.#revn !== null && !this.#snapshot) this.#revn = Math.max(this.#revn, revn);
     this.#timeAck(seq);
   }
 
@@ -524,16 +667,20 @@ export class SyncEngine {
   /** Loads the room's state afresh. `reason` is set when we fell out of step (not when the room asked). */
   #resync(reason: string | null): void {
     if (reason !== null) this.#emit("desync", reason);
+    this.#nextGeneration();
     this.#revn = null;
+    // Loading again from now: what arrives buffers, and nothing here moves the revision, until
+    // the file is in (a change applied to the document as it was would take its revision).
+    this.#snapshot = [];
+    this.#snapshotRevn = null;
+    this.#buffered = [];
     if (this.#send) {
       this.#setStatus("syncing");
-      this.#send({
-        t: "hello",
-        protocol: PROTOCOL_VERSION,
-        clientId: this.#clientId,
-        revn: null,
-        copies: READS,
-      });
+      // A welcome on its way answers this too when the room asked (whatever made it ask came
+      // before it); when this client fell out of step, that welcome may be a catch-up, so it
+      // asks for the file then.
+      if (!this.#awaitingWelcome) this.#hello(null);
+      else if (reason !== null) this.#wantsFile = true;
     }
   }
 }

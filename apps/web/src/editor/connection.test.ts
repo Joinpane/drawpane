@@ -85,3 +85,50 @@ describe("connectFile when a reconnect can't get in", () => {
     stop();
   });
 });
+
+describe("connectFile when leaving", () => {
+  it("stops the download of a file still loading", async () => {
+    class OpenSocket extends EventTarget {
+      static readonly OPEN = 1;
+      readyState = 1;
+      constructor(readonly url: string) {
+        super();
+        open.push(this);
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+        this.dispatchEvent(Object.assign(new Event("close"), { code: 1000, reason: "leaving" }));
+      }
+    }
+    const open: OpenSocket[] = [];
+    vi.stubGlobal("WebSocket", OpenSocket);
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", (_url: string, init: RequestInit) => {
+      signal = init.signal ?? undefined;
+      return new Promise(() => {});
+    });
+    const { Doc, SyncEngine } = await import("@drawpane/editor");
+    const sync = new SyncEngine(new Doc(), { clientId: "c1", setTimer: () => 0 });
+    const stop = connectFile({ sync } as unknown as Editor, "file1", () => {});
+    const socket = open[0] as OpenSocket;
+    socket.dispatchEvent(new Event("open"));
+    socket.dispatchEvent(
+      Object.assign(new Event("message"), {
+        data: JSON.stringify({
+          t: "welcome",
+          sessionId: "s",
+          revn: 7,
+          role: "editor",
+          peers: [],
+          mode: "download",
+          lastSeq: 0,
+          ticket: "ticket",
+        }),
+      }),
+    );
+    expect(signal?.aborted).toBe(false);
+    stop();
+    expect(signal?.aborted).toBe(true);
+  });
+});
