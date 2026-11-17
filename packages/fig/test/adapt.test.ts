@@ -383,6 +383,13 @@ describe("layers", () => {
       gridArea: { column: 3, row: 2, columnSpan: 1, rowSpan: 1 },
       justifySelf: "center",
     });
+
+    // A grid that reflows places its items in order, whatever anchors they kept.
+    const reflowing = new Map(raw);
+    reflowing.set("5:1", { ...(raw.get("5:1") as RawRecord), gridReflowEnabled: true });
+    const badge = adapt(grid, reflowing).children?.[1];
+    expect(badge?.gridRowAnchorIndex).toBeUndefined();
+    expect(badge?.gridChildHorizontalAlign).toBe("CENTER");
   });
 
   it("places layers by their transform, rotation and flips included", () => {

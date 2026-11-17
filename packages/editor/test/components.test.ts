@@ -365,7 +365,19 @@ describe("pinInstances (files made elsewhere)", () => {
       node("h1", "rect", "grid", "a0", { width: 32, height: 40 }),
       node("h2", "rect", "grid", "a1", { x: 32, width: 168, height: 40, sizingH: "fill" }),
       node("b1", "frame", "grid", "a2", { ...cellRow, ...pad, y: 40, width: 32, height: 36 }),
-      node("button", "rect", "b1", "a0", { x: 8, y: 4, width: 16, height: 28 }),
+      // A hugging chip as saved: Drawpane would hug it 32 wide, but the grid doesn't size it.
+      node("chip", "frame", "b1", "a0", {
+        layoutMode: "row",
+        sizingH: "hug",
+        sizingV: "hug",
+        paddingLeft: 10,
+        paddingRight: 10,
+        x: 8,
+        y: 4,
+        width: 16,
+        height: 28,
+      }),
+      node("icon", "rect", "chip", "a0", { x: 2, width: 12, height: 28 }),
       node("b2", "frame", "grid", "a3", {
         ...cellRow,
         ...pad,
@@ -387,16 +399,18 @@ describe("pinInstances (files made elsewhere)", () => {
     };
     expect(box("b1")).toEqual([0, 40, 32, 44]);
     expect(box("b2")).toEqual([32, 40, 168, 44]);
-    expect(box("button")).toEqual([8, 8, 16, 28]);
+    expect(box("chip")).toEqual([8, 8, 16, 28]);
+    expect(box("icon")).toEqual([2, 0, 12, 28]);
     expect(box("label")).toEqual([8, 12, 40, 20]);
     expect(box("grid")).toEqual([0, 20, 200, 84]);
     expect(box("footer")).toEqual([0, 104, 200, 10]);
     expect(box("table")).toEqual([0, 0, 200, 114]);
     expect(box("dot")).toEqual([50, 0, 10, 10]);
     expect(box("item")).toEqual([30, 0, 10, 10]);
-    // As an edit lays it out again (the toolbar's own layout aside).
+    // As an edit lays it out again (what the grid doesn't size aside).
     const again = layoutOps(opened(out).doc, ["grid"]);
-    expect(again.filter((op) => op.op === "set" && op.id !== "dot")).toEqual([]);
+    const sized = (id: string) => !["dot", "chip", "icon"].includes(id);
+    expect(again.filter((op) => op.op === "set" && sized(op.id))).toEqual([]);
   });
 
   it("keeps a copy as the file has it: what syncing would change is overridden", () => {

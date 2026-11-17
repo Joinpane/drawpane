@@ -338,6 +338,7 @@ describe("auto layout and components", () => {
           layoutSizingHorizontal: "FIXED",
           layoutSizingVertical: "FIXED",
         }),
+        cell("4:4", { layoutMode: "HORIZONTAL", counterAxisSizingMode: "AUTO" }),
       ],
     });
     const { nodes } = convertFile(file(grid));
@@ -356,10 +357,12 @@ describe("auto layout and components", () => {
       ],
       gridRows: [{ unit: "auto" }, { unit: "fr", value: 2.5 }],
     });
-    // Without an anchor an item flows into the next free cell.
+    // Without an anchor an item flows into the next free cell. Filling its cells with a fixed
+    // height of its own, its row is never shorter than that; hugging, its content decides.
     const flowing = byName(nodes, "Cell 4:2").props;
-    expect(flowing).toMatchObject({ sizingH: "fill", sizingV: "fill" });
+    expect(flowing).toMatchObject({ sizingH: "fill", sizingV: "fill", minHeight: 20 });
     expect(getProp(flowing, "gridArea")).toBeNull();
+    expect(getProp(byName(nodes, "Cell 4:4").props, "minHeight")).toBeNull();
     expect(byName(nodes, "Cell 4:3").props).toMatchObject({
       gridArea: { column: 3, row: 2, columnSpan: 2, rowSpan: 1 },
       justifySelf: "center",

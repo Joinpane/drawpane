@@ -80,6 +80,8 @@ export interface RawRecord {
   readonly gridColumnsSizing?: RawTrackSizes;
   readonly gridRowGap?: number;
   readonly gridColumnGap?: number;
+  /** Items flow in order, as added rows take them. */
+  readonly gridReflowEnabled?: boolean;
   /** A grid item's first row and column (track ids), and how many it spans. */
   readonly gridRowAnchor?: RawGuid;
   readonly gridColumnAnchor?: RawGuid;

@@ -148,6 +148,13 @@ export function childLayout(node: Figma.Node, parent: Figma.Node | undefined): P
     const value = node[key];
     if (typeof value === "number" && value >= 0) props[key] = round2(value);
   }
+  if (parentMode === "GRID" && v === "fill" && node.type !== "TEXT" && !hugsDown(node)) {
+    // A frame whose own height is fixed, filling its grid cells: Figma's row is never shorter
+    // than that height (a hugging one is sized by its content alone).
+    const height = round2(Math.max(0, node.size?.y ?? 0));
+    const min = props.minHeight;
+    if (typeof min !== "number" || min < height) props.minHeight = height;
+  }
   if (parentMode && node.layoutPositioning === "ABSOLUTE") props.positioning = "absolute";
   if (parentMode === "GRID") Object.assign(props, gridItem(node));
   const ch = pick(CONSTRAINT, node.constraints?.horizontal);
@@ -156,6 +163,14 @@ export function childLayout(node: Figma.Node, parent: Figma.Node | undefined): P
   if (cv && cv !== "start") props.constraintV = cv;
   if (node.preserveRatio) props.lockAspect = true;
   return props;
+}
+
+/** Whether a frame's own auto layout hugs its content down (whatever its parent makes of it). */
+function hugsDown(node: Figma.Node): boolean {
+  if (node.layoutMode === "VERTICAL") return node.primaryAxisSizingMode === "AUTO";
+  if (node.layoutMode === "HORIZONTAL" || node.layoutMode === "GRID")
+    return node.counterAxisSizingMode === "AUTO";
+  return false;
 }
 
 const CELL_ALIGN = { MIN: "start", CENTER: "center", MAX: "end" } as const;

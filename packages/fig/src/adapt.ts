@@ -214,10 +214,14 @@ const isGrid = (n: SceneNode, raw: RawRecord | undefined) =>
 
 const CELL_ALIGN = new Set(["AUTO", "MIN", "CENTER", "MAX"]);
 
-/** Where a grid's item sits: the row and column it's anchored at (by its parent's track ids), its spans and alignment. */
+/**
+ * Where a grid's item sits: the row and column it's anchored at (by its parent's track ids), its
+ * spans and alignment. A grid that reflows places its items in order, whatever anchors they
+ * kept from before (Figma shows them so), so their anchors are left out.
+ */
 function gridItemFields(raw: RawRecord | undefined, parentRaw: RawRecord | undefined) {
   const out: Partial<RestNode> = {};
-  if (raw?.gridRowAnchor && raw.gridColumnAnchor) {
+  if (raw?.gridRowAnchor && raw.gridColumnAnchor && parentRaw?.gridReflowEnabled !== true) {
     const row = gridTracks(parentRaw?.gridRows, undefined).ids.indexOf(
       guidString(raw.gridRowAnchor),
     );

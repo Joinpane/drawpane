@@ -1123,15 +1123,32 @@ export function layoutOps(doc: Doc, ids: Iterable<string>): Op[] {
   return engine.diff();
 }
 
+/** Whether a layer's parent's layout sets its size on an axis: it fills, or stretches across. */
+function sizedByParent(doc: Doc, node: NodeRecord): boolean {
+  const parent = doc.get(node.parent);
+  if (!isLayoutFrame(parent) || !inFlow(node)) return false;
+  if (isGrid(parent))
+    return (["h", "v"] as const).some((axis) =>
+      stretches(node, axis, cellAlign(parent, node, axis)),
+    );
+  const main: Axis = getProp(parent.props, "layoutMode") === "row" ? "h" : "v";
+  return (
+    sizing(node, main) === "fill" ||
+    stretches(node, main === "h" ? "v" : "h", crossAlign(parent, node))
+  );
+}
+
 /**
  * Lays out the grids in a file made elsewhere (an import), and what hugs
  * them. Such a file's layout is otherwise kept as it was saved, but a grid's
  * saved items can lag what the grid lays out where it was made (Figma lays
  * its grids out as they're shown, from their tracks and their items'
- * content). So each grid is laid out, with everything inside it; then, where
- * that changed its size, the layout frames above it that hug it, up to the
- * first that doesn't (whose layers it places again). Their other layers keep
- * their insides as they were.
+ * content). So each grid is laid out, and inside it what takes its size
+ * from it (Fill and stretched layout frames, all the way down; a layer that
+ * hugs or has a size of its own is only moved). Then, where that changed the
+ * grid's size, the layout frames above it that hug it, up to the first that
+ * doesn't (whose layers it places again). Their other layers keep their
+ * insides as they were.
  */
 export function gridImportOps(doc: Doc): Op[] {
   const grids: NodeRecord[] = [];
@@ -1149,7 +1166,8 @@ export function gridImportOps(doc: Doc): Op[] {
   };
   const above = new Set<string>();
   const engine = new LayoutEngine(doc, {
-    enters: (frame) => above.has(frame.id) || insideGrid(frame),
+    enters: (frame) =>
+      above.has(frame.id) || isGrid(frame) || (insideGrid(frame) && sizedByParent(doc, frame)),
   });
   for (const grid of grids) engine.run(grid.id);
   const roots = new Set<string>();
