@@ -6,6 +6,8 @@
  * them out. Anything not listed is read loosely, where it's read at all.
  */
 
+import type { SavedGlyph } from "@drawpane/model";
+
 export interface RGBA {
   readonly r: number;
   readonly g: number;
@@ -142,6 +144,11 @@ export interface Node {
   readonly strokeJoin?: "MITER" | "BEVEL" | "ROUND";
   readonly strokeCap?: string;
   readonly strokeDashes?: readonly number[];
+  /**
+   * Not REST: a .fig's saved glyphs for a text layer, as Figma laid it out
+   * (decision 0037). The .fig reader adds them; REST files have none.
+   */
+  drawpaneGlyphs?: readonly SavedGlyph[];
   readonly fillGeometry?: readonly { path: string; windingRule: "NONZERO" | "EVENODD" }[];
   readonly strokeGeometry?: readonly { path: string; windingRule: string }[];
   readonly cornerRadius?: number;
