@@ -19,14 +19,40 @@
  */
 import type { CopiesFormat, Op } from "@drawpane/model";
 
-/** The interface's version, sent with every request and note. */
-export const AGENT_RUNNER_V = 1;
+/**
+ * The interface's version, sent with every request and note. 2 added
+ * `reset`, `strike` and a run's `late` answer: a runner of version 1
+ * refuses a request of version 2 (and the main Worker ignores its `held`),
+ * so a main Worker deployed before its runner fails cleanly.
+ */
+export const AGENT_RUNNER_V = 2;
 /**
  * The versions the runner answers. A release that changes the interface
  * keeps the one before in this list, because the runner is deployed first
  * and must still understand the main Worker of one release back.
  */
-export const AGENT_RUNNER_ACCEPTS: readonly number[] = [1];
+export const AGENT_RUNNER_ACCEPTS: readonly number[] = [1, 2];
+
+/**
+ * The most a run may take in the runner, timed by the runner from when it
+ * starts the run (decision 0033, item 4.6), not from when it was asked:
+ * calls on a file run one at a time, and waiting for the one before isn't
+ * the run's time. The runner's own CPU limit is 60 s, so a run still going
+ * past this is waiting on something: the runner answers `late`, and is
+ * reset to cut the run off.
+ */
+export const AGENT_RUN_LIMIT_MS = 90_000;
+/**
+ * How long the main Worker waits for a run beyond its limit, for the calls
+ * ahead of it on the file: with AGENT_RUN_LIMIT_MS, the most it waits.
+ * Waiting that long is the runner being busy, not the call's fault: it's
+ * answered RUNNER_BUSY, with no reset and no strike.
+ */
+export const AGENT_QUEUE_WAIT_MS = 90_000;
+export const TOOK_TOO_LONG =
+  "That call took too long, and nothing was changed. Try a smaller part.";
+/** Why a runner was reset by the main Worker (`reset`): calls cut off with it are run again. */
+export const RUNNER_CUT_OFF = "The agent runner was reset to cut off a call past its time limit.";
 
 /** An agent session writing to a file (decision 0021), checked by the Worker. */
 export interface AgentSessionRef {
@@ -171,13 +197,34 @@ export type AgentRunAnswer =
       readonly result: unknown;
       readonly image?: { readonly mimeType: string; readonly base64: string };
     }
-  | { readonly ok: false; readonly message: string }
+  | {
+      readonly ok: false;
+      readonly message: string;
+      /**
+       * The run went past its limit (AGENT_RUN_LIMIT_MS) and may still be
+       * running: reset the runner (`reset`) to cut it off.
+       */
+      readonly late?: true;
+    }
   /**
    * The runner couldn't use the source (its editor moved on meanwhile, the
    * saved version didn't match, or it loaded fonts and has to build again):
    * ask the room again, cold (`from: null`), with `live` when said.
    */
   | { readonly ok: false; readonly again: true; readonly live?: boolean };
+
+/**
+ * A call that ran the runner out of memory, as the main Worker saw it fail
+ * (`overloaded`, "exceeded its memory limit"), and when (`at`, ms since the
+ * epoch): a strike against the call's tool and input.
+ */
+export interface AgentStrike {
+  readonly v: number;
+  readonly fileId: string;
+  readonly tool: string;
+  readonly input: unknown;
+  readonly at: number;
+}
 
 /** What the runner's editor shows for a file: the revision, or null when it's cold. */
 export interface AgentHeld {
@@ -214,11 +261,15 @@ export interface AgentRunnerApi {
   /** Lets go of everything held for the file: the next call starts cold. */
   drop(fileId: string): Promise<void>;
   /**
-   * Resets the runner, cutting off a call still under way: the caller gave
-   * up waiting (AGENT_RUN_LIMIT_MS). That call counts as a strike against
-   * it. The caller ignores a failure here.
+   * Resets the runner, cutting off a run still going past its limit (the
+   * run answered `late`). Not a strike. The caller ignores a failure here.
    */
   reset(fileId: string): Promise<void>;
+  /**
+   * Records a strike against a call that ran the runner out of memory: only
+   * the caller sees that error. The caller ignores a failure here.
+   */
+  strike(note: AgentStrike): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

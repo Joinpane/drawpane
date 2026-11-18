@@ -4,8 +4,10 @@
  * Cloudflare makes it fail, through its test hooks (agent-runner/src/hooks.ts):
  * it resets itself mid-call (`ctx.abort()`, as when it runs out of memory),
  * resets after the room committed, or never answers. People in the file stay
- * connected, nothing commits twice, and a call that keeps killing the runner
- * stops being run (strikes).
+ * connected, nothing commits twice, and a call that keeps running the
+ * runner out of memory stops being run (strikes). A strike is recorded only
+ * when the main Worker saw that error: a routine restart isn't one, and the
+ * time limit is the run's own, not the time it waited for the calls ahead.
  */
 import { env } from "cloudflare:test";
 import type { NodeRecord, Op } from "@drawpane/model";
@@ -21,10 +23,13 @@ import {
 import {
   type AgentDeps,
   agentDeps,
+  callReadTool,
   callWriteTool,
   RUNNER_ABORTED,
+  RUNNER_RESET,
   TOOK_TOO_LONG,
 } from "../src/agent/call";
+import { AGENT_RUNNER_V } from "../src/agent/runner-api";
 import { openSocket, signedInUser } from "./helpers";
 import { call, makeToken } from "./mcp-helpers";
 
@@ -124,8 +129,8 @@ describe("a runner that resets before the commit", () => {
     expect(await roomOf(fileId).agentCall(session.id, "abort-before-1")).toMatchObject({
       revn: before + 2,
     });
-    // The reset left a strike against that call (one isn't enough to refuse it).
-    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 1, inflight: 0, builds: 1 });
+    // The main Worker saw it run out of memory: a strike (one isn't enough to refuse it).
+    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 1, builds: 1 });
   });
 });
 
@@ -211,7 +216,7 @@ describe("crash strikes", () => {
     expect(errorOf(await call(token, "set_props", { ...heavy, callId: "heavy-call-2" }))).toBe(
       CALL_REFUSED,
     );
-    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 2, inflight: 0 });
+    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 2 });
     expect((await node(fileId, box))?.props.width).toBe(10);
 
     // Another call dies too: the third strike in ten minutes pauses the file, any call.
@@ -226,6 +231,66 @@ describe("crash strikes", () => {
     );
     expect(paused).toBe(filePaused(10));
     expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 3 });
+  });
+
+  it("aren't made by routine restarts, however many", async () => {
+    // #200's review: three resets during healthy calls (deploys) paused the file.
+    const { fileId, token, box, sessionId } = await setup();
+    await runnerOf(fileId).arm("restart-mid-run", 3);
+    const answers: Array<string | null> = [];
+    for (let n = 0; n < 3; n++)
+      answers.push(
+        errorOf(
+          await call(token, "set_props", {
+            sessionId,
+            callId: `restart-${n}`,
+            changes: [{ id: box, props: { w: 30 + n } }],
+          }),
+        ),
+      );
+    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 0 });
+    // Run once more on a fresh runner, or answered as a restart: never as running out of memory.
+    for (const answer of answers) expect([null, RUNNER_RESET]).toContain(answer);
+    const ordinary = await call(token, "set_props", {
+      sessionId,
+      callId: "after-restarts",
+      changes: [{ id: box, props: { h: 44 } }],
+    });
+    expect(errorOf(ordinary)).toBeNull();
+    expect((await node(fileId, box))?.props.height).toBe(44);
+  });
+
+  it("are dated when they happened, and old ones count for nothing", async () => {
+    const { fileId } = await setup();
+    const strike = (minutesAgo: number) =>
+      runnerOf(fileId).strike({
+        v: AGENT_RUNNER_V,
+        fileId,
+        tool: "set_props",
+        input: { changes: [] },
+        at: Date.now() - minutesAgo * 60_000,
+      });
+    // A week old (#200's review promoted such a leftover to a new strike): not kept.
+    await strike(7 * 24 * 60);
+    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 0 });
+    // Over an hour old (the strikes kept): not kept either. One from now is.
+    await strike(CALL_REFUSED_MS / 60_000 + 1);
+    await strike(0);
+    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 1 });
+    // Dated when it happened, not when it was recorded: 59 minutes ago still counts.
+    await strike(59);
+    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 2 });
+    const now = Date.now();
+    expect(
+      strikeRefusal(
+        [
+          { fingerprint: "a", at: now - CALL_REFUSED_MS - 60_000 },
+          { fingerprint: "a", at: now },
+        ],
+        "a",
+        now,
+      ),
+    ).toBeNull();
   });
 
   it("refuse a call after its second strike for an hour, and a file after three in ten minutes", () => {
@@ -255,13 +320,14 @@ describe("crash strikes", () => {
 });
 
 describe("a runner that never answers", () => {
-  it("is given up on at the limit, changes nothing, and is reset so the next call runs", async () => {
+  it("answers at its own limit, changes nothing, and is reset so the next call runs", async () => {
     const { fileId, person, box, by, session } = await setup();
     const before = (await roomOf(fileId).stats()).revn;
+    // The limit is 90 s (AGENT_RUN_LIMIT_MS); the test's runner has 300 ms.
+    await runnerOf(fileId).arm("run-limit", 1, 300);
     await runnerOf(fileId).arm("hang");
     const real = agentDeps(env, fileId);
-    // The limit is 90 s (AGENT_RUN_LIMIT_MS); the test waits a fraction of a second.
-    const deps: AgentDeps = { ...real, runLimitMs: 300 };
+    const deps: AgentDeps = { ...real, runLimitMs: 300, queueWaitMs: 5_000 };
     const out = await callWriteTool(deps, {
       by,
       session,
@@ -274,7 +340,9 @@ describe("a runner that never answers", () => {
     expect(await person.edit([{ op: "set", id: box, prop: "name", value: "Fine" }])).toBe(
       before + 1,
     );
-    // The hung call was cut off by the reset: a strike, and the file's next call runs.
+    // The hung call was cut off by the reset, and the file's next call runs. Not a strike:
+    // only running out of memory is.
+    await runnerOf(fileId).arm("run-limit", 0);
     const next = await callWriteTool(real, {
       by,
       session,
@@ -284,6 +352,41 @@ describe("a runner that never answers", () => {
     });
     expect(next).toMatchObject({ ok: true });
     expect((await node(fileId, box))?.props).toMatchObject({ name: "Fine", width: 16 });
-    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 1, inflight: 0 });
+    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 0 });
+  });
+});
+
+describe("the time limit", () => {
+  it("is the run's own: calls waiting their turn aren't timed out or struck", async () => {
+    // #200's review (QUEUE_DEADLINE): two calls of 250 ms under a 400 ms limit, one queued
+    // behind the other. Timed from when they were asked, the second was cut off.
+    const { fileId, box } = await setup();
+    await runnerOf(fileId).arm("run-limit", 1, 400);
+    await runnerOf(fileId).arm("slow", 2, 250);
+    const deps: AgentDeps = { ...agentDeps(env, fileId), runLimitMs: 400, queueWaitMs: 5_000 };
+    const read = (id: string) => callReadTool(deps, { fileId, tool: "get_jsx", input: { id } });
+    const [a, b] = await Promise.all([read(box), read(box)]);
+    expect(a).toMatchObject({ ok: true });
+    expect(b).toMatchObject({ ok: true });
+    expect(await runnerOf(fileId).stats()).toMatchObject({ strikes: 0 });
+    await runnerOf(fileId).arm("run-limit", 0);
+  });
+});
+
+describe("the runner's interface version", () => {
+  it("is 2, and a request of the version before still runs", async () => {
+    // `reset` and `strike` came with version 2: a runner of version 1 refuses a version 2 call.
+    expect(AGENT_RUNNER_V).toBe(2);
+    const { fileId, box } = await setup();
+    expect((await runnerOf(fileId).held(fileId)).v).toBe(2);
+    const answer = await runnerOf(fileId).run({
+      v: 1,
+      fileId,
+      tool: "get_jsx",
+      input: { id: box },
+      source: { kind: "log", from: 0, revn: 0, count: 0, copies: "materialized", txns: [] },
+    });
+    // Accepted (the source doesn't line up, so it asks for the file again): not refused as out of step.
+    expect(answer).toEqual({ ok: false, again: true });
   });
 });

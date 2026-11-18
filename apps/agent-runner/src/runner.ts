@@ -64,8 +64,8 @@ async function release(source: AgentFileSource): Promise<void> {
   if (source.kind === "snapshot") await source.body?.cancel().catch(() => {});
 }
 
-/** The file's runner: `AgentRunnerApi` but `reset`, which the Durable Object answers itself. */
-export class FileRunner implements Omit<AgentRunnerApi, "reset"> {
+/** The file's runner: `AgentRunnerApi` but `reset` and `strike`, which the Durable Object answers itself. */
+export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
   readonly #env: Env;
   readonly #fileId: string;
   readonly #measurer: () => HeadlessMeasurer;
