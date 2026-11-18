@@ -700,9 +700,14 @@ export class Editor {
    */
   #recordSyncOps(ops: readonly Op[]): Op[] {
     if (this.doc.compactCopies) return [];
-    return recordsWritten(ops).flatMap((id) =>
-      this.doc.has(id) ? syncInstanceOps(this.doc, id, { properties: true }) : [],
-    );
+    // A nested instance in a copy (an undone detach writes one's record back to nothing) is
+    // synced by the instance it's in, whose record keeps its values.
+    return recordsWritten(ops).flatMap((id) => {
+      const node = this.doc.get(id);
+      return node && getProp(node.props, "mirrors") === null
+        ? syncInstanceOps(this.doc, id, { properties: true })
+        : [];
+    });
   }
 
   /**

@@ -265,6 +265,23 @@ describe("review 4, P1 #3: detach keeps a nested instance's inherited values", (
     });
 });
 
+for (const form of FORMS)
+  it(`review 4, P1 #3: undoing a detach gives the nested instance back as it was (${form})`, () => {
+    // Found by the property test: the undo's record sync rebuilt the nested copy from its own
+    // component, its layers given new ids.
+    const { editor } = open(form, nested());
+    editor.setInstanceProperty("na", "label", "Inherited");
+    const inner = editor.doc.childIds("i")[0] as string;
+    editor.setInstanceProperty(inner, "label", "Own");
+    const before = structuredClone(editor.doc.stored());
+    editor.select(["i"]);
+    editor.detachInstances();
+    editor.undo();
+    const byId = (a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : 1);
+    expect(editor.doc.stored().sort(byId)).toEqual(before.sort(byId));
+    expect(texts(editor.doc, "i")).toEqual(["Own"]);
+  });
+
 // ---------------------------------------------------------------------------
 // P1 #4: a stale materialized layer never outlives its record
 
