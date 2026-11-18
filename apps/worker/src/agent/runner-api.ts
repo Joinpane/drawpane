@@ -213,6 +213,12 @@ export interface AgentRunnerApi {
   committed(note: AgentCommittedNote): Promise<void>;
   /** Lets go of everything held for the file: the next call starts cold. */
   drop(fileId: string): Promise<void>;
+  /**
+   * Resets the runner, cutting off a call still under way: the caller gave
+   * up waiting (AGENT_RUN_LIMIT_MS). That call counts as a strike against
+   * it. The caller ignores a failure here.
+   */
+  reset(fileId: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

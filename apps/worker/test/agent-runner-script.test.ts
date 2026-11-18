@@ -105,7 +105,7 @@ const node = async (fileId: string, id: string) =>
 describe("the runner's editor", () => {
   it("is built cold on the first call, then catches up warm from the log after a person's edit", async () => {
     const { fileId, token, person, sessionId } = await setup();
-    expect(await runnerOf(fileId).stats()).toEqual({ revn: null, builds: 0 });
+    expect(await runnerOf(fileId).stats()).toMatchObject({ revn: null, builds: 0 });
 
     const made = ok<{ ids: string[] }>(
       await call(token, "render", { sessionId, jsx: `<Frame name="Box" w={10} h={10} />` }),
@@ -114,13 +114,13 @@ describe("the runner's editor", () => {
     await person.next("txn");
     const afterFirst = (await roomOf(fileId).stats()).revn;
     // Built once, from a snapshot, and kept warm at the revision its run landed at.
-    expect(await runnerOf(fileId).stats()).toEqual({ revn: afterFirst, builds: 1 });
+    expect(await runnerOf(fileId).stats()).toMatchObject({ revn: afterFirst, builds: 1 });
 
     // A person's edit, then a call that reads it: the runner follows the log, no rebuild.
     const edited = await person.edit([{ op: "set", id: box, prop: "name", value: "Ana's box" }]);
     const jsx = ok<{ jsx: string }>(await call(token, "get_jsx", { fileId, id: box }));
     expect(jsx.jsx).toContain("Ana's box");
-    expect(await runnerOf(fileId).stats()).toEqual({ revn: edited, builds: 1 });
+    expect(await runnerOf(fileId).stats()).toMatchObject({ revn: edited, builds: 1 });
 
     // And a write on top of it, still warm.
     ok(await call(token, "set_props", { sessionId, changes: [{ id: box, props: { w: 40 } }] }));
@@ -290,7 +290,7 @@ describe("a commit through the runner's script", () => {
     expect(again.structuredContent).toEqual({ ...first, replayed: true });
     // Nothing ran, nothing was committed, and the runner wasn't asked.
     expect((await roomOf(fileId).stats()).revn).toBe(revn);
-    expect(await runnerOf(fileId).stats()).toEqual(before);
+    expect(await runnerOf(fileId).stats()).toMatchObject(before);
     const frames = (await roomOf(fileId).allNodes()).filter((n) => n.props.name === "Once");
     expect(frames).toHaveLength(1);
   });

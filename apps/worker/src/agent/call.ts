@@ -52,6 +52,15 @@ const OUT_OF_STEP =
   "The agent runner couldn't get in step with the file, and nothing was changed. Try again.";
 /** How often a run asks for the file again (a runner that moved on, loaded fonts, or was reset). */
 const RUN_TRIES = 4;
+/**
+ * How long the main Worker waits for a run before answering that it took
+ * too long (decision 0033, item 4.6). The runner's own CPU limit is 60 s,
+ * so a run still going past this is waiting on something; the runner is
+ * reset, which cuts it off and counts a strike against it.
+ */
+export const AGENT_RUN_LIMIT_MS = 90_000;
+export const TOOK_TOO_LONG =
+  "That call took too long, and nothing was changed. Try a smaller part.";
 
 /**
  * Who the call talks to. Each is a factory, called again for every request:
@@ -60,6 +69,8 @@ const RUN_TRIES = 4;
 export interface AgentDeps {
   room(): AgentRoomApi;
   runner(): AgentRunnerApi;
+  /** How long to wait for a run: AGENT_RUN_LIMIT_MS unless said (tests say less). */
+  readonly runLimitMs?: number;
 }
 
 /** The deps for a file: its room, and its runner in the runner's script. */
@@ -94,6 +105,7 @@ export function agentDeps(env: Env, fileId: string): AgentDeps {
         run: async (request) => (await stub.run(request)) as AgentRunAnswer,
         committed: (note) => stub.committed(note),
         drop: (id) => stub.drop(id),
+        reset: () => stub.reset(),
       };
     },
   };
@@ -298,21 +310,42 @@ async function runOnFile(
     }
     const request: AgentRunRequest = { v: AGENT_RUNNER_V, ...call, source };
     source = undefined;
-    let run: AgentRunAnswer;
+    let run: AgentRunAnswer | "late";
     try {
-      run = await deps.runner().run(request);
+      run = await withinLimit(deps.runner().run(request), deps.runLimitMs ?? AGENT_RUN_LIMIT_MS);
     } catch (error) {
       if (!reset && retryable(error)) {
         reset = true;
         continue;
       }
+      if (outOfCpu(error)) return { ok: false, message: TOOK_TOO_LONG };
       if (aborted(error)) return { ok: false, message: RUNNER_ABORTED };
       throw error;
+    }
+    if (run === "late") {
+      // Cut it off: it can't commit (it never does), but it would hold up the file's next calls.
+      await quietly(() => deps.runner().reset(fileId));
+      return { ok: false, message: TOOK_TOO_LONG };
     }
     if (run.ok || !("again" in run)) return run;
     live = run.live === true;
   }
   return { ok: false, message: OUT_OF_STEP };
+}
+
+/** The run's answer, or "late" when it hasn't come within `ms`. */
+async function withinLimit<T>(run: Promise<T>, ms: number): Promise<T | "late"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<"late">((resolve) => {
+    timer = setTimeout(() => resolve("late"), ms);
+  });
+  try {
+    return await Promise.race([run, late]);
+  } finally {
+    clearTimeout(timer);
+    // A run answered after the limit, or failing then, is nobody's answer.
+    run.catch(() => {});
+  }
 }
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -346,6 +379,11 @@ export function aborted(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const e = error as RemoteError;
   return e.overloaded === true || e.durableObjectReset === true;
+}
+
+/** A runner that went over its CPU limit: the call took too long, rather than too much memory. */
+function outOfCpu(error: unknown): boolean {
+  return error instanceof Error && /\bCPU\b/i.test(error.message) && aborted(error);
 }
 
 /** A reset Cloudflare says to retry (a code update), not an overrun. */
