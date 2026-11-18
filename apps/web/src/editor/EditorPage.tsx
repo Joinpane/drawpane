@@ -81,6 +81,7 @@ import { BrowseLibrariesDialog } from "./libraries/LibrarySections";
 import { PublishDialog } from "./libraries/PublishDialog";
 import { Minimap } from "./Minimap";
 import { MissingFontsDialog } from "./MissingFonts";
+import { MissingFontsButton, MissingFontsNotice } from "./MissingFontsNotice";
 import {
   chooseImageFiles,
   filesFrom,
@@ -1027,7 +1028,11 @@ function FileEditor({ fileId }: { fileId: string }) {
         ) : (
           <SyncStatus />
         )}
-        <Notice />
+        <Notice
+          editor={editor}
+          fileId={fileId}
+          teamId={meta.data ? (meta.data.file.teamId ?? null) : undefined}
+        />
         {viewing ? null : <ImageDrop fileId={fileId} />}
         <UploadTray />
         {commandOpen ? <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} /> : null}
@@ -1238,11 +1243,13 @@ function TopRight({
   onPresent: () => void;
   onOpenThread: (threadId: string) => void;
 }) {
+  const editor = useEditor();
   const hasPeers = useEditorState((s) => s.peers.size > 0);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const [sharing, setSharing] = useState(false);
   return (
     <div className="top-right pane">
+      <MissingFontsButton editor={editor} />
       <People />
       {hasPeers ? <span className="top-right__divider" aria-hidden="true" /> : null}
       <InboxMenu fileId={fileId} teamId={teamId} onOpenThread={onOpenThread} />
@@ -1350,7 +1357,16 @@ function SyncStatus() {
  * The editor's toast: one message at a time, with at most one action. It
  * stays while the pointer or focus is on it, and longer when it has an action.
  */
-function Notice() {
+function Notice({
+  editor,
+  fileId,
+  teamId,
+}: {
+  editor: Editor;
+  fileId: string;
+  /** Undefined until the file's details have loaded. */
+  teamId: string | null | undefined;
+}) {
   const notice = useEditorState((s) => s.notice);
   const [visible, setVisible] = useState<number | null>(null);
   const [held, setHeld] = useState(false);
@@ -1363,31 +1379,38 @@ function Notice() {
     const t = setTimeout(() => setVisible(null), notice.action ? 8000 : 4000);
     return () => clearTimeout(t);
   }, [notice, visible, held]);
-  if (!notice || visible !== notice.id) return null;
+  const showing = notice !== null && visible === notice.id;
+  // One toast at a time: the missing fonts notice waits while another message shows. It keeps
+  // its place in the tree either way, so it comes back after.
   return (
-    <div
-      className="notice"
-      role="alert"
-      onPointerEnter={() => setHeld(true)}
-      onPointerLeave={() => setHeld(false)}
-      onFocus={() => setHeld(true)}
-      onBlur={() => setHeld(false)}
-    >
-      <span>{notice.text}</span>
-      {notice.action ? (
-        <button
-          type="button"
-          className="notice__action"
-          onClick={() => {
-            setVisible(null);
-            setHeld(false);
-            notice.action?.run();
-          }}
+    <>
+      <MissingFontsNotice editor={editor} fileId={fileId} teamId={teamId} hidden={showing} />
+      {notice && showing ? (
+        <div
+          className="notice"
+          role="alert"
+          onPointerEnter={() => setHeld(true)}
+          onPointerLeave={() => setHeld(false)}
+          onFocus={() => setHeld(true)}
+          onBlur={() => setHeld(false)}
         >
-          {notice.action.label}
-        </button>
+          <span>{notice.text}</span>
+          {notice.action ? (
+            <button
+              type="button"
+              className="notice__action"
+              onClick={() => {
+                setVisible(null);
+                setHeld(false);
+                notice.action?.run();
+              }}
+            >
+              {notice.action.label}
+            </button>
+          ) : null}
+        </div>
       ) : null}
-    </div>
+    </>
   );
 }
 
