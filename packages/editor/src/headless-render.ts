@@ -135,6 +135,10 @@ export interface HeadlessPng {
 export const MAX_HEADLESS_SIDE = 4096;
 export const MAX_HEADLESS_PIXELS = 2048 * 2048;
 
+/** A picture the rasteriser ran out of memory drawing. */
+export const PICTURE_OUT_OF_MEMORY =
+  "That picture needs more memory than rendering here has. Export a smaller layer or a lower scale.";
+
 const DEFAULT_FALLBACK = "Instrument Sans";
 
 /** Every face the text in these layers (and their children) is set in, runs included. */
@@ -321,13 +325,21 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
         ...svgOptions,
         images: (ref) => images.sources.get(ref) ?? (skipped.has(ref) ? IMAGE_PLACEHOLDER : null),
       });
-      const raster = await deps.rasteriser.rasterise(svg, {
-        scale,
-        fonts: fonts.fonts,
-        fallbackFamily: fallback,
-        background: options.background ?? null,
-        images: images.files,
-      });
+      let raster: Awaited<ReturnType<Rasteriser["rasterise"]>>;
+      try {
+        raster = await deps.rasteriser.rasterise(svg, {
+          scale,
+          fonts: fonts.fonts,
+          fallbackFamily: fallback,
+          background: options.background ?? null,
+          images: images.files,
+        });
+      } catch (error) {
+        // resvg ran out of its capped memory (decision 0033): a smaller picture may fit.
+        if (error instanceof Error && error.name === "RasterOutOfMemory")
+          throw new ExportError(PICTURE_OUT_OF_MEMORY);
+        throw error;
+      }
       return {
         ...raster,
         bounds,
