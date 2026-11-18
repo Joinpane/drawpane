@@ -215,5 +215,26 @@
     "path-join-miter": 0.34,
     "star": 0.54,
     "rotated-gradient": 0.55
+  },
+  "linear-blends": {
+    "dodge-paint-probe": 0.93,
+    "burn-paint-probe": 1.37,
+    "dodge-layer-probe": 0.92,
+    "burn-layer-probe": 1.36,
+    "dodge-circles": 0.43,
+    "burn-circles": 0.73,
+    "dodge-paints": 0.62,
+    "burn-paints": 0.95,
+    "vibrant-fills": 0.7,
+    "dodge-gradient": 0.81,
+    "burn-stroke": 1.13,
+    "dodge-layer-frame": 0.75,
+    "inner-dodge": 0.44,
+    "inner-burn": 0.91,
+    "inner-stack": 1.19,
+    "drop-burn": 0.97,
+    "drop-dodge": 0.61,
+    "drop-burn-stripes": 0.57,
+    "drop-mixed": 0.77
   }
 }
