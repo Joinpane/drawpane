@@ -114,6 +114,13 @@ export const Color = z
   .regex(/^#[0-9a-f]{6}([0-9a-f]{2})?$/, "must be a lowercase hex color like #ff5a1f");
 export type Color = z.infer<typeof Color>;
 
+/**
+ * How a layer, paint or shadow combines with what's under it. The linear
+ * pair are Figma's "Plus darker" and "Plus lighter" (Apple's plus-darker and
+ * plus-lighter), on premultiplied colour with the alpha of normal blending:
+ * linear dodge adds the two colours, linear burn adds them and takes away
+ * the two alphas' product (decision 0038).
+ */
 export const BLEND_MODES = [
   "normal",
   "multiply",
@@ -123,6 +130,8 @@ export const BLEND_MODES = [
   "lighten",
   "color-dodge",
   "color-burn",
+  "linear-dodge",
+  "linear-burn",
   "hard-light",
   "soft-light",
   "difference",
@@ -236,6 +245,11 @@ export const Shadow = z.object({
       visible: VariableRef.optional(),
     })
     .optional(),
+  /**
+   * How the shadow combines with what's under it (Apple's glass recipe adds
+   * its inner shadows with linear dodge and burn). Missing means normal.
+   */
+  blendMode: BlendMode.optional(),
 });
 export const Blur = z.object({
   type: z.enum(["layer-blur", "background-blur"]),
@@ -770,8 +784,18 @@ const CORNERS = ["frame", "rect"] as const;
 /** Shapes with open ends: line caps and end markers apply. */
 const OPEN_ENDS = ["line", "path"] as const;
 
-/** Layers that can be a mask: anything with a filled outline. */
-const MASKABLE = ["frame", "rect", "ellipse", "polygon", "star", "path"] as const;
+/** Layers that can be a mask: any layer, as in Figma (a shape, a frame, a group, a text, a line). */
+const MASKABLE = [
+  "frame",
+  "group",
+  "rect",
+  "ellipse",
+  "polygon",
+  "star",
+  "line",
+  "path",
+  "text",
+] as const;
 
 /** What an open stroke's end looks like (Figma's arrow and marker ends). */
 export const STROKE_MARKERS = ["none", "arrow", "triangle", "circle", "diamond", "bar"] as const;
@@ -821,14 +845,16 @@ export const PROPS = {
   ),
   effects: prop(z.array(Effect).max(32), [], [...LAYERS, "effectStyle"]),
   /**
-   * A mask: its outline clips the layers above it in the same parent (up to
-   * the next mask), and it isn't drawn itself, like Figma's "Use as mask".
+   * A mask: it masks the layers above it in the same parent, up to the next
+   * mask or a frame that clips its content, and it isn't drawn itself, like
+   * Figma's "Use as mask" (see the editor's masks.ts).
    */
   isMask: prop(z.boolean(), false, MASKABLE),
   /**
-   * How a mask masks, as in Figma: by its outline (a hard clip), by its
-   * alpha (fills, gradients, opacity and blur fade what's above), or by its
-   * luminance (light shows, dark hides).
+   * How a mask masks, as in Figma: by its outline (a hard clip: whatever it
+   * draws, at full opacity), by its alpha (fills, strokes, gradients,
+   * opacity and effects fade what's above), or by its luminance (light
+   * shows, dark hides).
    */
   maskType: prop(z.enum(["outline", "alpha", "luminance"]), "outline", MASKABLE),
 

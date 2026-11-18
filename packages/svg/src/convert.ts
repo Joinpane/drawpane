@@ -267,7 +267,9 @@ class Converter {
     const opacity = opacityOf(style.get("opacity"));
     if (opacity < 0.999) decoration.opacity = Math.round(opacity * 10_000) / 10_000;
     const blend = style.get("mix-blend-mode");
-    if (blend && blend !== "normal" && BLENDS.has(blend)) decoration.blendMode = blend;
+    // CSS's plus-lighter and plus-darker are Drawpane's linear dodge and burn.
+    const mode = blend ? BLENDS.get(blend) : undefined;
+    if (mode) decoration.blendMode = mode;
     const filter = style.get("filter");
     if (filter && filter !== "none") {
       const target = this.#ref(filter);
@@ -762,22 +764,26 @@ class Converter {
   }
 }
 
-const BLENDS = new Set([
-  "multiply",
-  "screen",
-  "overlay",
-  "darken",
-  "lighten",
-  "color-dodge",
-  "color-burn",
-  "hard-light",
-  "soft-light",
-  "difference",
-  "exclusion",
-  "hue",
-  "saturation",
-  "color",
-  "luminosity",
+const BLENDS = new Map<string, string>([
+  ["plus-lighter", "linear-dodge"],
+  ["plus-darker", "linear-burn"],
+  ...[
+    "multiply",
+    "screen",
+    "overlay",
+    "darken",
+    "lighten",
+    "color-dodge",
+    "color-burn",
+    "hard-light",
+    "soft-light",
+    "difference",
+    "exclusion",
+    "hue",
+    "saturation",
+    "color",
+    "luminosity",
+  ].map((m) => [m, m] as const),
 ]);
 
 const DEFAULT_NAMES: Readonly<Record<LayerType, string>> = {

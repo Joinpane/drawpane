@@ -22,12 +22,11 @@ export function hexColor(c: Figma.RGBA, alpha = c.a): string {
 const BLENDS: Readonly<Record<string, BlendMode>> = {
   DARKEN: "darken",
   MULTIPLY: "multiply",
-  // Drawpane has no linear burn or dodge: the nearest it has.
-  LINEAR_BURN: "color-burn",
+  LINEAR_BURN: "linear-burn",
   COLOR_BURN: "color-burn",
   LIGHTEN: "lighten",
   SCREEN: "screen",
-  LINEAR_DODGE: "color-dodge",
+  LINEAR_DODGE: "linear-dodge",
   COLOR_DODGE: "color-dodge",
   OVERLAY: "overlay",
   SOFT_LIGHT: "soft-light",

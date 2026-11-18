@@ -29,7 +29,7 @@ import {
   rectCorners,
   unionRects,
 } from "./geometry";
-import { isActiveMask, maskScopes } from "./masks";
+import { endsMask, isActiveMask, maskScopes } from "./masks";
 import { postEffects, postReach } from "./post-effects";
 import { paintMargin } from "./reach";
 import { cellSizeFor, GridIndex } from "./spatial";
@@ -173,6 +173,12 @@ export class Scene {
       else this.#readers?.delete(id);
       // A layer becoming a mask (or no longer one) shows or hides the layers above it, anywhere.
       if (isActiveMask(e?.node) !== isActiveMask(node)) full = true;
+      // So does a frame starting or stopping to clip above a mask: it ends the mask's scope there.
+      else if (endsMask(e?.node) !== endsMask(node)) {
+        const parent = node?.parent ?? e?.node.parent;
+        if (parent !== undefined && doc.childIds(parent).some((c) => isActiveMask(doc.get(c))))
+          full = true;
+      }
       if (e) {
         const old = e.node;
         const covered = this.#noteOld(e, rects);

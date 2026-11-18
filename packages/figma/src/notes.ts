@@ -46,10 +46,6 @@ export const NOTE_TEXT = {
     "copy of a component on a page left out was detached",
     "copies of components on pages left out were detached",
   ],
-  "mask-kind": [
-    "group, text or line used as a mask no longer masks (only frames and shapes can)",
-    "groups, texts or lines used as masks no longer mask (only frames and shapes can)",
-  ],
   "modes-dropped": [
     "collection's modes past the 64th were dropped",
     "collections' modes past the 64th were dropped",

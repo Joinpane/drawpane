@@ -13,7 +13,7 @@
  * next frames, until it's exact.
  */
 
-import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import { type BlendMode, getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
 import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
 import { exportBounds } from "./export";
@@ -27,9 +27,10 @@ import {
 } from "./gradients";
 import { ImageCache, imagePlacement } from "./images";
 import { Inradii } from "./inradius";
-import { LuminanceMask } from "./luminance";
+import { BlendApart, type DeviceBox, deviceBox } from "./linear-blend";
+import { LuminanceMask, opaqueAlpha } from "./luminance";
 import { markersOf, trimmedStroke } from "./markers";
-import { maskScopes } from "./masks";
+import { clipsByShape, maskScopes } from "./masks";
 import { NoiseTiles, paintNoise } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { effectReach } from "./reach";
@@ -136,6 +137,32 @@ function fadesAsOne(node: NodeRecord, children: number): boolean {
   return shadows || fills + strokes > 1;
 }
 
+/**
+ * Whether a layer blending by linear dodge or burn must be drawn as one
+ * picture and blended as a whole, as Figma blends it: always for burn (the
+ * canvas has no burn to give each part), and for dodge when its parts
+ * overlap (they'd be added to each other too) or the canvas may be
+ * see-through (where the canvas's dodge adds alphas: linear-blend.ts).
+ */
+
+/** A CSS colour that's certainly opaque: `#rrggbb`, or `#rrggbbff`. */
+const opaqueColor = (css: string) => /^#[0-9a-f]{6}(ff)?$/i.test(css.trim());
+function blendsAsOne(
+  node: NodeRecord,
+  mode: BlendMode,
+  children: number,
+  /** Drawn onto a canvas known to be opaque, where the canvas's dodge is exact. */
+  opaque: boolean,
+): boolean {
+  if (mode === "linear-burn") return true;
+  if (mode !== "linear-dodge") return false;
+  if (children > 0 || !opaque) return true;
+  const effects = getProp(node.props, "effects").filter((e) => e.visible !== false).length;
+  const fills = getProp(node.props, "fills").filter((p) => p.visible !== false).length;
+  const strokes = getProp(node.props, "strokes").filter((p) => p.visible !== false).length;
+  return effects + fills + strokes > 1;
+}
+
 export interface CanvasRendererOptions {
   /** Shared decoded images. Pass the same cache to every renderer of one file. */
   readonly images?: ImageCache;
@@ -240,6 +267,9 @@ const BLEND: Record<string, GlobalCompositeOperation> = {
   lighten: "lighten",
   "color-dodge": "color-dodge",
   "color-burn": "color-burn",
+  // Exact where the backdrop is opaque or empty (decision 0038). Linear burn has no
+  // canvas mode: it's drawn by `LinearBurn`, and missing here.
+  "linear-dodge": "lighter",
   "hard-light": "hard-light",
   "soft-light": "soft-light",
   difference: "difference",
@@ -476,6 +506,10 @@ export class CanvasRenderer {
   readonly #inradii = new Inradii();
   /** What's behind a background blur, read for it (see #backgroundBlur). */
   #blurBackdrop: AnyCanvas | null = null;
+  /** Scratch canvases for drawings blended apart: linear burn, and dodge over see-through (linear-blend.ts). */
+  readonly #burn = new BlendApart();
+  /** Canvases filled with an opaque background before anything is drawn: linear dodge's quick path. */
+  readonly #opaque = new WeakSet<object>();
   /** Noise tiles, made once per look. */
   readonly #noiseTiles = new NoiseTiles();
   /** Draws texture effects, with its own WebGL context (made on first use). */
@@ -535,6 +569,9 @@ export class CanvasRenderer {
     const ty = Math.round(camera.y * dpr);
     const snapped = new Camera(tx / dpr, ty / dpr, camera.zoom);
     const background = getProp(page.props, "backgroundColor") ?? this.canvasColor;
+    // The screen is filled with the page's background first: opaque when it is.
+    if (opaqueColor(background)) this.#opaque.add(ctx.canvas);
+    else this.#opaque.delete(ctx.canvas);
     const frame: LastFrame = {
       ctx,
       pageId,
@@ -1283,6 +1320,8 @@ export class CanvasRenderer {
       ctx.fillStyle = background;
       ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     }
+    if (background && opaqueColor(background)) this.#opaque.add(ctx.canvas);
+    else this.#opaque.delete(ctx.canvas);
     const camera = new Camera(-rect.x * scale, -rect.y * scale, scale);
     const hidden = this.hidden;
     this.hidden = new Set();
@@ -1355,16 +1394,34 @@ export class CanvasRenderer {
     const isolated = this.#isolated.has(id);
     const opacity = alpha * (isolated ? 1 : getProp(node.props, "opacity"));
     if (opacity <= 0) return;
-    const own = isolated
-      ? "source-over"
-      : (BLEND[getProp(node.props, "blendMode")] ?? "source-over");
+    const mode = getProp(node.props, "blendMode");
+    const own = isolated ? "source-over" : (BLEND[mode] ?? "source-over");
     // A group's blending carries to its layers unless they blend their own way.
     const blend = own === "source-over" ? inheritedBlend : own;
 
     const post = isolated ? null : postEffects(getProp(node.props, "effects"));
-    if (post && (post.length > 0 || fadesAsOne(node, this.#scene.doc.childIds(id).length))) {
-      this.#drawProcessed(ctx, node, camera, dpr, opacity, blend, post);
-      return;
+    if (post) {
+      const children = this.#scene.doc.childIds(id).length;
+      const linear = blendsAsOne(node, mode, children, this.#opaque.has(ctx.canvas));
+      const fades = fadesAsOne(node, children);
+      if (post.length > 0 || fades || linear) {
+        // Faded, it's drawn over a copy of what's under it, so what blends inside it blends
+        // with that, as in Figma, where a frame's opacity doesn't cut its layers off.
+        const through =
+          fades &&
+          !linear &&
+          post.length === 0 &&
+          own === "source-over" &&
+          blend === "source-over" &&
+          this.#blendsWithin(id);
+        this.#drawProcessed(ctx, node, camera, dpr, opacity, blend, post, {
+          ...(linear && (mode === "linear-burn" || mode === "linear-dodge")
+            ? { linear: mode }
+            : {}),
+          through,
+        });
+        return;
+      }
     }
 
     if (node.type === "group") {
@@ -1442,7 +1499,14 @@ export class CanvasRenderer {
     opacity: number,
     blend: GlobalCompositeOperation,
     post: readonly PostEffect[],
+    how: {
+      /** Composited by linear dodge or burn, apart (linear-blend.ts). */
+      readonly linear?: "linear-dodge" | "linear-burn";
+      /** Drawn over a copy of what's under it rather than alone: see `#draw`. */
+      readonly through?: boolean;
+    } = {},
   ): void {
+    const { linear, through = false } = how;
     const id = node.id;
     const z = camera.zoom * dpr;
     const m = this.#scene.worldMatrix(id);
@@ -1502,6 +1566,7 @@ export class CanvasRenderer {
     resetState(lctx);
     // All of it, not just w×h: a child's background blur or glass reads past its corner.
     lctx.clearRect(0, 0, layer.width, layer.height);
+    if (through) lctx.drawImage(ctx.canvas, x0, y0, x1 - x0, y1 - y0, 0, 0, w, h);
     // The same camera, moved so the region's corner is the canvas's, at the reduced resolution.
     const shifted = new Camera(camera.x - x0 / dpr, camera.y - y0 / dpr, camera.zoom);
     // All of the layer that its canvas holds, even when only part of the screen is being
@@ -1567,8 +1632,43 @@ export class CanvasRenderer {
     ctx.globalAlpha = opacity;
     ctx.globalCompositeOperation = blend;
     if (finalBlur > 0) ctx.filter = `blur(${finalBlur}px)`;
-    ctx.drawImage(layer, 0, 0, w, h, x0, y0, w / scale, h / scale);
+    const picture = layer;
+    if (linear) {
+      const spread = finalBlur * 3;
+      this.#burn.blend(
+        ctx,
+        {
+          x0: x0 - spread,
+          y0: y0 - spread,
+          x1: x0 + w / scale + spread,
+          y1: y0 + h / scale + spread,
+        },
+        linear,
+        (c) => c.drawImage(picture, 0, 0, w, h, x0, y0, w / scale, h / scale),
+        this.#opaque.has(ctx.canvas),
+      );
+    } else ctx.drawImage(layer, 0, 0, w, h, x0, y0, w / scale, h / scale);
     resetState(ctx);
+  }
+
+  /** Whether this layer's paints or shadows, or any layer inside it, blend their own way. */
+  #blendsWithin(id: string): boolean {
+    const node = this.#scene.doc.get(id);
+    if (!node) return false;
+    const blended = (p: { blendMode?: string | undefined }) =>
+      p.blendMode !== undefined && p.blendMode !== "normal";
+    if (
+      getProp(node.props, "fills").some(blended) ||
+      getProp(node.props, "strokes").some(blended) ||
+      getProp(node.props, "effects").some((e) => "blendMode" in e && blended(e))
+    )
+      return true;
+    for (const child of this.#scene.doc.childIds(id)) {
+      const inner = this.#scene.doc.get(child);
+      if (!inner || inner.props.visible === false) continue;
+      if (getProp(inner.props, "blendMode") !== "normal" || this.#blendsWithin(child)) return true;
+    }
+    return false;
   }
 
   /** A canvas for post effects, by slot (two per nesting depth): kept while it fits (see `fitted`). */
@@ -1580,8 +1680,10 @@ export class CanvasRenderer {
 
   /**
    * Draws a parent's children bottom first. A mask isn't drawn itself: it
-   * masks the children above it, up to the next mask, by its outline (a
-   * clip) or by its alpha or luminance (see #drawMasked).
+   * masks the children above it, up to the next mask or a frame that clips
+   * its content (masks.ts), by its outline (a clip) or by its picture: its
+   * alpha or luminance, or for a group, text or line masking by its outline,
+   * what it draws made opaque (see #drawMasked).
    */
   #drawChildren(
     ctx: Ctx,
@@ -1613,17 +1715,22 @@ export class CanvasRenderer {
       if (scope) this.#drawMasked(ctx, scope.mask, scope.ids, camera, dpr, visible, alpha, blend);
       scope = null;
     };
-    for (const { id, isMask } of maskScopes(doc, parentId)) {
-      if (!isMask) {
+    for (const { id, isMask, mask: masking } of maskScopes(doc, parentId)) {
+      if (!isMask && masking) {
         if (scope) (scope as { ids: string[] }).ids.push(id);
         else this.#draw(ctx, id, camera, dpr, visible, alpha, blend);
         continue;
       }
+      // A mask, or a layer past the last one's scope: what was masked ends here.
       flush();
       if (clipping) ctx.restore();
       clipping = false;
+      if (!isMask) {
+        this.#draw(ctx, id, camera, dpr, visible, alpha, blend);
+        continue;
+      }
       const mask = doc.get(id) as NodeRecord;
-      if (getProp(mask.props, "maskType") !== "outline") {
+      if (!clipsByShape(mask)) {
         scope = { mask, ids: [] };
         continue;
       }
@@ -1723,7 +1830,9 @@ export class CanvasRenderer {
       this.#parts = parts;
       this.#fresh = fresh;
     }
-    if (getProp(mask.props, "maskType") === "luminance") this.#luminance.apply(picture, w, h);
+    const kind = getProp(mask.props, "maskType");
+    if (kind === "luminance") this.#luminance.apply(picture, w, h);
+    else if (kind === "outline") opaqueAlpha(picture, w, h);
     resetState(cctx);
     cctx.globalCompositeOperation = "destination-in";
     cctx.drawImage(picture, 0, 0, w, h, 0, 0, w, h);
@@ -1957,9 +2066,38 @@ export class CanvasRenderer {
       ctx.fill(shape, rule);
       return;
     }
+    this.#blended(ctx, paint.blendMode, deviceBox(ctx, 0, 0, w, h, 1), (c) => c.fill(shape, rule));
+  }
+
+  /**
+   * Draws `draw` blended by `mode` (a paint's or a shadow's) into `ctx`, in
+   * place of the layer's own blending; `box` (device pixels) bounds what it
+   * paints, for linear burn, which is drawn apart (see linear-blend.ts).
+   */
+  #blended(
+    ctx: Ctx,
+    mode: BlendMode | undefined,
+    box: DeviceBox,
+    draw: (c: Ctx) => void,
+    /** Drawn apart and then blended in, whatever the mode: shadows (see BlendApart). */
+    apart = false,
+  ): void {
+    if (!mode || mode === "normal") {
+      draw(ctx);
+      return;
+    }
+    const opaque = this.#opaque.has(ctx.canvas);
+    if (mode === "linear-burn" || (mode === "linear-dodge" && (apart || !opaque))) {
+      this.#burn.blend(ctx, box, mode, draw, opaque);
+      return;
+    }
+    if (apart) {
+      this.#burn.blend(ctx, box, BLEND[mode] ?? "source-over", draw, opaque);
+      return;
+    }
     const before = ctx.globalCompositeOperation;
-    ctx.globalCompositeOperation = BLEND[paint.blendMode] ?? "source-over";
-    ctx.fill(shape, rule);
+    ctx.globalCompositeOperation = BLEND[mode] ?? "source-over";
+    draw(ctx);
     ctx.globalCompositeOperation = before;
   }
 
@@ -1978,8 +2116,14 @@ export class CanvasRenderer {
   ): void {
     const m = gradientMatrix(paint, w, h);
     if (!m) return;
+    if (paint.blendMode && paint.blendMode !== "normal") {
+      const { blendMode, ...plain } = paint;
+      this.#blended(ctx, blendMode, deviceBox(ctx, 0, 0, w, h, 1), (c) =>
+        this.#gradientFill(c, shape, plain, w, h, rule),
+      );
+      return;
+    }
     ctx.save();
-    if (paint.blendMode) ctx.globalCompositeOperation = BLEND[paint.blendMode] ?? "source-over";
     ctx.clip(shape, rule);
     ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
     const gradient =
@@ -2008,8 +2152,14 @@ export class CanvasRenderer {
     node: NodeRecord,
   ): void {
     if (w <= 0 || h <= 0) return;
+    if (paint.blendMode && paint.blendMode !== "normal") {
+      const { blendMode, ...plain } = paint;
+      this.#blended(ctx, blendMode, deviceBox(ctx, 0, 0, w, h, 1), (c) =>
+        this.#imageFill(c, shape, plain, w, h, node),
+      );
+      return;
+    }
     ctx.save();
-    if (paint.blendMode) ctx.globalCompositeOperation = BLEND[paint.blendMode] ?? "source-over";
     ctx.globalAlpha *= paint.opacity ?? 1;
     ctx.clip(shape, node.type === "path" ? getProp(node.props, "windingRule") : "nonzero");
     const natural = this.images.natural(paint.ref);
@@ -2106,29 +2256,32 @@ export class CanvasRenderer {
     const line = trimmed ? new Path2D(serializePath(trimmed)) : shape;
     // Dashed boxes and ellipses: the pattern fitted to each side and corner, as Figma does.
     const pieces = dashes.length > 0 && !markers ? dashedOutline(node, w, h) : null;
+    // A miter can reach five weights past the edge (the canvas's limit of 10, halved).
+    const reach = weight * 5 + 1;
     for (const paint of strokes) {
-      // A miter can reach five weights past the edge (the canvas's limit of 10, halved).
-      const style = this.#paintStyle(ctx, paint, w, h, weight * 5 + 1);
+      const style = this.#paintStyle(ctx, paint, w, h, reach);
       if (!style) continue;
       ctx.strokeStyle = style;
-      if (pieces) {
-        for (const piece of pieces) {
-          ctx.setLineDash(piece.dashes);
-          ctx.lineDashOffset = piece.offset;
-          ctx.stroke(piece.path);
+      this.#blended(ctx, paint.blendMode, deviceBox(ctx, 0, 0, w, h, reach), (c) => {
+        if (pieces) {
+          for (const piece of pieces) {
+            c.setLineDash(piece.dashes);
+            c.lineDashOffset = piece.offset;
+            c.stroke(piece.path);
+          }
+        } else c.stroke(line);
+        if (!markers) return;
+        c.save();
+        c.setLineDash([]);
+        c.lineJoin = "round";
+        c.lineCap = "round";
+        c.fillStyle = style;
+        for (const marker of [markers.start, markers.end]) {
+          if (marker.fill) c.fill(new Path2D(serializePath(marker.fill)));
+          if (marker.stroke) c.stroke(new Path2D(serializePath(marker.stroke)));
         }
-      } else ctx.stroke(line);
-      if (!markers) continue;
-      ctx.save();
-      ctx.setLineDash([]);
-      ctx.lineJoin = "round";
-      ctx.lineCap = "round";
-      ctx.fillStyle = style;
-      for (const marker of [markers.start, markers.end]) {
-        if (marker.fill) ctx.fill(new Path2D(serializePath(marker.fill)));
-        if (marker.stroke) ctx.stroke(new Path2D(serializePath(marker.stroke)));
-      }
-      ctx.restore();
+        c.restore();
+      });
     }
     ctx.restore();
   }
@@ -2150,11 +2303,14 @@ export class CanvasRenderer {
     ctx.save();
     ctx.filter = "none";
     const reach = Math.max(...strokeWidths(node)) + 1;
+    const region = path;
     for (const paint of strokes) {
       const style = this.#paintStyle(ctx, paint, w, h, reach);
       if (!style) continue;
       ctx.fillStyle = style;
-      ctx.fill(path, "evenodd");
+      this.#blended(ctx, paint.blendMode, deviceBox(ctx, 0, 0, w, h, reach), (c) =>
+        c.fill(region, "evenodd"),
+      );
     }
     ctx.restore();
   }
@@ -2176,49 +2332,63 @@ export class CanvasRenderer {
     const height = getProp(node.props, "height");
     for (const s of shadows) {
       if (s.type !== "drop-shadow" && s.type !== "inner-shadow") continue;
-      ctx.save();
-      ctx.filter = "none";
-      ctx.shadowColor = hexToRgba(s.color);
-      ctx.shadowBlur = s.blur * scale;
-      ctx.shadowOffsetX = s.x * scale;
-      ctx.shadowOffsetY = s.y * scale;
-      if (kind === "drop-shadow") {
-        // Cast as Figma casts it (decision 0031): cut out under the shape where it mustn't show there.
-        const cast = dropShadowCast(node, s);
-        if (cast.cutOut) {
-          const outside = new Path2D();
-          outside.rect(-1e5, -1e5, 2e5, 2e5);
-          outside.addPath(shape);
-          ctx.clip(outside, "evenodd");
-        }
-        // Paint only the shadow: draw the shape far off-canvas and offset its
-        // shadow back into place, so translucent fills don't show a dark copy.
-        const t = ctx.getTransform();
-        const far = 1e5 / Math.max(1e-9, Math.hypot(t.a, t.b));
-        ctx.shadowOffsetX = s.x * scale - t.a * far;
-        ctx.shadowOffsetY = s.y * scale - t.b * far;
-        ctx.translate(far, 0);
-        if (node.type === "text") this.#text(ctx, node, width, "#000", scale);
-        else {
-          ctx.fillStyle = "#000";
-          ctx.fill(this.#spreadShape(node, shape, width, height, cast.spread));
-        }
-      } else {
-        ctx.clip(shape);
-        // As above: paint only the ring's shadow. The ring itself overlaps the
-        // inside of the shape when there's spread, and would show as a solid band.
-        const t = ctx.getTransform();
-        const far = 1e5 / Math.max(1e-9, Math.hypot(t.a, t.b));
-        ctx.shadowOffsetX = s.x * scale - t.a * far;
-        ctx.shadowOffsetY = s.y * scale - t.b * far;
-        ctx.translate(far, 0);
-        const ring = new Path2D();
-        ring.rect(-1e4, -1e4, 2e4, 2e4);
-        ring.addPath(this.#spreadShape(node, shape, width, height, -s.spread));
-        ctx.fillStyle = "#000";
-        ctx.fill(ring, "evenodd");
-      }
-      ctx.restore();
+      // What it can paint: an inner shadow stays in the box, a drop shadow reaches past it.
+      const pad =
+        kind === "inner-shadow"
+          ? 1
+          : Math.abs(s.x) + Math.abs(s.y) + s.blur * 1.5 + Math.abs(s.spread) + 1;
+      // Its own blending (Apple adds its glass's shadows by linear dodge and burn), else the layer's.
+      this.#blended(
+        ctx,
+        s.blendMode,
+        deviceBox(ctx, 0, 0, width, height, pad),
+        (ctx) => {
+          ctx.save();
+          ctx.filter = "none";
+          ctx.shadowColor = hexToRgba(s.color);
+          ctx.shadowBlur = s.blur * scale;
+          ctx.shadowOffsetX = s.x * scale;
+          ctx.shadowOffsetY = s.y * scale;
+          if (kind === "drop-shadow") {
+            // Cast as Figma casts it (decision 0031): cut out under the shape where it mustn't show there.
+            const cast = dropShadowCast(node, s);
+            if (cast.cutOut) {
+              const outside = new Path2D();
+              outside.rect(-1e5, -1e5, 2e5, 2e5);
+              outside.addPath(shape);
+              ctx.clip(outside, "evenodd");
+            }
+            // Paint only the shadow: draw the shape far off-canvas and offset its
+            // shadow back into place, so translucent fills don't show a dark copy.
+            const t = ctx.getTransform();
+            const far = 1e5 / Math.max(1e-9, Math.hypot(t.a, t.b));
+            ctx.shadowOffsetX = s.x * scale - t.a * far;
+            ctx.shadowOffsetY = s.y * scale - t.b * far;
+            ctx.translate(far, 0);
+            if (node.type === "text") this.#text(ctx, node, width, "#000", scale);
+            else {
+              ctx.fillStyle = "#000";
+              ctx.fill(this.#spreadShape(node, shape, width, height, cast.spread));
+            }
+          } else {
+            ctx.clip(shape);
+            // As above: paint only the ring's shadow. The ring itself overlaps the
+            // inside of the shape when there's spread, and would show as a solid band.
+            const t = ctx.getTransform();
+            const far = 1e5 / Math.max(1e-9, Math.hypot(t.a, t.b));
+            ctx.shadowOffsetX = s.x * scale - t.a * far;
+            ctx.shadowOffsetY = s.y * scale - t.b * far;
+            ctx.translate(far, 0);
+            const ring = new Path2D();
+            ring.rect(-1e4, -1e4, 2e4, 2e4);
+            ring.addPath(this.#spreadShape(node, shape, width, height, -s.spread));
+            ctx.fillStyle = "#000";
+            ctx.fill(ring, "evenodd");
+          }
+          ctx.restore();
+        },
+        true,
+      );
     }
   }
 
@@ -2675,60 +2845,105 @@ export class CanvasRenderer {
       if (!styles.has(paint)) styles.set(paint, this.#paintStyle(ctx, paint, width, height));
       return styles.get(paint) ?? null;
     };
-    for (const line of layout.lines) {
-      const x0 = lineOffset(line, width, node.props);
-      const baseline = drawnBaseline(line, dy);
-      // A list item's bullet or number, in its first character's style.
-      const marker = line.marker;
-      if (marker && !(this.#detail && marker.fontSize * scale < GREEK_BELOW)) {
-        typeset(ctx, marker.font);
-        if (spaced) (ctx as Ctx & { letterSpacing: string }).letterSpacing = "0px";
-        const paints = override
-          ? black
-          : (marker.fills ?? (layerFills.length > 0 ? layerFills : black));
-        for (const paint of paints) {
-          if (paint.visible === false) continue;
+    const paintsOf = (fills: readonly Paint[] | null | undefined) =>
+      override ? black : (fills ?? (layerFills.length > 0 ? layerFills : black));
+    // Draws the text, or with `only`, just each run's paint at that place in its list
+    // (one paint at a time, so a linear burn is drawn apart in one pass: linear-blend.ts).
+    // Linear blends drawn apart: burn, and dodge where the canvas may be see-through.
+    const opaque = this.#opaque.has(ctx.canvas);
+    const apartMode = (mode: BlendMode | undefined) =>
+      mode === "linear-burn" || (mode === "linear-dodge" && !opaque) ? mode : null;
+    const pass = (c: Ctx, only?: { index: number; apart: BlendMode | null }) => {
+      const each = (paints: readonly Paint[], fill: () => void) => {
+        paints.forEach((paint, i) => {
+          if (paint.visible === false || (only && i !== only.index)) return;
+          const mode = override ? undefined : paint.blendMode;
+          if (only && apartMode(mode) !== only.apart) return;
           const style = override ?? styleOf(paint);
-          if (!style) continue;
-          ctx.fillStyle = style;
-          ctx.fillText(marker.text, x0 + marker.x, baseline);
+          if (!style) return;
+          c.fillStyle = style;
+          if (!mode || mode === "normal" || apartMode(mode)) fill();
+          else {
+            const before = c.globalCompositeOperation;
+            c.globalCompositeOperation = BLEND[mode] ?? "source-over";
+            fill();
+            c.globalCompositeOperation = before;
+          }
+        });
+      };
+      for (const line of layout.lines) {
+        const x0 = lineOffset(line, width, node.props);
+        const baseline = drawnBaseline(line, dy);
+        // A list item's bullet or number, in its first character's style.
+        const marker = line.marker;
+        if (marker && !(this.#detail && marker.fontSize * scale < GREEK_BELOW)) {
+          typeset(c, marker.font);
+          if (spaced) (c as Ctx & { letterSpacing: string }).letterSpacing = "0px";
+          each(paintsOf(marker.fills), () => c.fillText(marker.text, x0 + marker.x, baseline));
         }
-      }
-      for (const frag of line.fragments) {
-        typeset(ctx, frag.font);
-        if (spaced)
-          (ctx as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
-        const paints = override
-          ? black
-          : (frag.fills ?? (layerFills.length > 0 ? layerFills : black));
-        for (const paint of paints) {
-          if (paint.visible === false) continue;
-          const style = override ?? styleOf(paint);
-          if (!style) continue;
-          ctx.fillStyle = style;
+        for (const frag of line.fragments) {
+          typeset(c, frag.font);
+          if (spaced)
+            (c as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
           const x = x0 + frag.x;
-          if (this.#detail && frag.fontSize * scale < GREEK_BELOW) {
-            // A small run in readable text.
-            // Unreadable at this zoom: a bar where the glyphs are, far cheaper to draw.
-            const alpha = ctx.globalAlpha;
-            ctx.globalAlpha = alpha * 0.55;
-            ctx.fillRect(x, baseline - frag.fontSize * 0.62, frag.width, frag.fontSize * 0.5);
-            ctx.globalAlpha = alpha;
-            continue;
-          }
-          // OpenType features: the shaped glyphs, when the shaper has them (else as the canvas sets it).
-          const shaped = frag.run ? (this.#measurer.shape?.(frag.text, frag.run) ?? null) : null;
-          if (shaped)
-            ctx.fill(
-              this.#placed(this.#shapedOutline(shaped, frag.text, frag.letterSpacing), x, baseline),
-            );
-          else ctx.fillText(frag.text, x, baseline);
-          if (frag.decoration !== "none") {
-            const bar = decorationBar(frag.decoration, baseline, frag.fontSize);
-            ctx.fillRect(x, bar.y, frag.width, bar.height);
-          }
+          each(paintsOf(frag.fills), () => {
+            if (this.#detail && frag.fontSize * scale < GREEK_BELOW) {
+              // A small run in readable text.
+              // Unreadable at this zoom: a bar where the glyphs are, far cheaper to draw.
+              const alpha = c.globalAlpha;
+              c.globalAlpha = alpha * 0.55;
+              c.fillRect(x, baseline - frag.fontSize * 0.62, frag.width, frag.fontSize * 0.5);
+              c.globalAlpha = alpha;
+              return;
+            }
+            // OpenType features: the shaped glyphs, when the shaper has them (else as the canvas sets it).
+            const shaped = frag.run ? (this.#measurer.shape?.(frag.text, frag.run) ?? null) : null;
+            if (shaped)
+              c.fill(
+                this.#placed(
+                  this.#shapedOutline(shaped, frag.text, frag.letterSpacing),
+                  x,
+                  baseline,
+                ),
+              );
+            else c.fillText(frag.text, x, baseline);
+            if (frag.decoration !== "none") {
+              const bar = decorationBar(frag.decoration, baseline, frag.fontSize);
+              c.fillRect(x, bar.y, frag.width, bar.height);
+            }
+          });
         }
       }
+    };
+    // Paints blended apart (Apple's vibrant labels): each paint in turn, those apart in a pass each.
+    let depth = 0;
+    const modes = new Set<BlendMode>();
+    if (!override)
+      for (const line of layout.lines)
+        for (const fills of [line.marker?.fills, ...line.fragments.map((f) => f.fills)]) {
+          const paints = paintsOf(fills);
+          depth = Math.max(depth, paints.length);
+          for (const p of paints) {
+            const mode = p.visible === false ? null : apartMode(p.blendMode);
+            if (mode) modes.add(mode);
+          }
+        }
+    if (modes.size === 0) {
+      pass(ctx);
+      return;
+    }
+    // Glyphs reach past the box: as far as the largest font around it.
+    const box = deviceBox(ctx, 0, 0, width, height, largestFontSize(node));
+    for (let index = 0; index < depth; index++) {
+      pass(ctx, { index, apart: null });
+      for (const mode of modes)
+        this.#burn.blend(
+          ctx,
+          box,
+          mode as "linear-dodge" | "linear-burn",
+          (c) => pass(c, { index, apart: mode }),
+          opaque,
+        );
     }
   }
 }

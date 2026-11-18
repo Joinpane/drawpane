@@ -49,14 +49,41 @@ export async function withFigma(link, work) {
       await page.goto(link, { waitUntil: "domcontentloaded" });
     }
     await page.waitForTimeout(12000);
-    // Any plugin will do: run one from quick actions so the page gets `figma`.
-    await page.keyboard.press("Escape");
-    await page.mouse.click(720, 500);
-    await page.keyboard.press("Control+/");
-    await page.waitForTimeout(1200);
+    // Any plugin will do: run one from quick actions so the page gets `figma`. Quick actions
+    // (Ctrl+K; Ctrl+/ no longer opens it) focuses its search box; only then do keys go there
+    // and not to the canvas, which keeps an input of its own focused.
+    const focused = () =>
+      page
+        .waitForFunction(
+          () => document.activeElement?.getAttribute("placeholder") === "Search",
+          null,
+          {
+            timeout: 10_000,
+          },
+        )
+        .then(() => true)
+        .catch(() => false);
+    let open = false;
+    for (let attempt = 0; attempt < 3 && !open; attempt++) {
+      await page.keyboard.press("Escape");
+      await page.mouse.click(720, 120);
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Control+k");
+      open = await focused();
+      if (!open) await page.waitForTimeout(5000);
+    }
+    if (!open) {
+      await page.screenshot({ path: `${profile}-quick-actions.png` });
+      throw new Error(`Quick actions didn't open; see ${profile}-quick-actions.png.`);
+    }
     await page.keyboard.type("Scripter", { delay: 50 });
-    await page.waitForTimeout(1500);
-    await page.getByText("Search plugins & widgets for").click();
+    await page
+      .getByText("Search plugins & widgets for")
+      .click({ timeout: 30_000 })
+      .catch(async (e) => {
+        await page.screenshot({ path: `${profile}-quick-actions.png` });
+        throw e;
+      });
     await page.waitForTimeout(3000);
     await page.keyboard.press("Enter");
     await page.waitForFunction(() => typeof window.figma === "object", null, { timeout: 30000 });
