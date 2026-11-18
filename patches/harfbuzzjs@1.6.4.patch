@@ -1,8 +1,8 @@
 diff --git a/dist/index.d.mts b/dist/index.d.mts
-index e9b0c5c0070638f844f7edc932b165444e2d3d27..cf8bee3d243f0b2aec9014190f49ea0adfcfb833 100644
+index e9b0c5c0070638f844f7edc932b165444e2d3d27..8badb85288b106981cb1c0c15e706c8d44296ef2 100644
 --- a/dist/index.d.mts
 +++ b/dist/index.d.mts
-@@ -306,6 +306,10 @@ type GlyphFlag = ValueOf<typeof GlyphFlag>;
+@@ -306,13 +306,24 @@ type GlyphFlag = ValueOf<typeof GlyphFlag>;
   * An object representing a {@link https://harfbuzz.github.io/harfbuzz-hb-blob.html | HarfBuzz blob}.
   * A blob wraps a chunk of binary data, typically the contents of a font file.
   */
@@ -13,22 +13,85 @@ index e9b0c5c0070638f844f7edc932b165444e2d3d27..cf8bee3d243f0b2aec9014190f49ea0a
  declare class Blob {
    readonly ptr: number;
    /**
-@@ -1694,4 +1698,4 @@ declare function otTagsToScriptAndLanguage(scriptTag: string, languageTag: strin
+    * @param data Binary font data.
+    */
+   constructor(data: Uint8Array | ArrayBuffer);
++  /**
++   * Drawpane: frees the blob, and its data. Without a free callback (a Worker) the data is freed
++   * here, so destroy every face made from the blob (and the fonts made from those) first.
++   */
++  destroy(): void;
+ }
++/** Drawpane: whether HarfBuzz's memory has room for `size` bytes in one piece right now. */
++declare function canAllocate(size: number): boolean;
+ //#endregion
+ //#region src/face.d.ts
+ declare const GlyphClass: {
+@@ -330,6 +341,8 @@ type GlyphClass = ValueOf<typeof GlyphClass>;
+  */
+ declare class Face {
+   readonly ptr: number;
++  /** Drawpane: lets go of the face now (fonts made from it keep it until they're destroyed). */
++  destroy(): void;
+   readonly upem: number;
+   /**
+    * @param blob A Blob containing font data.
+@@ -520,6 +533,8 @@ type BufferSerializeFormat = ValueOf<typeof BufferSerializeFormat>;
+  */
+ declare class Buffer {
+   readonly ptr: number;
++  /** Drawpane: frees the buffer now. */
++  destroy(): void;
+   /**
+    * @param existingPtr @internal Wrap an existing buffer pointer.
+    */
+@@ -1262,6 +1277,8 @@ type MetricsTag = ValueOf<typeof MetricsTag>;
+  */
+ declare class Font {
+   readonly ptr: number;
++  /** Drawpane: frees the font now. */
++  destroy(): void;
+   private _face?;
+   /**
+    * @param face A Face to create the font from.
+@@ -1694,4 +1711,4 @@ declare function otTagsToScriptAndLanguage(scriptTag: string, languageTag: strin
    language: string | undefined;
  };
  //#endregion
 -export { AxisFlags, AxisInfo, Blob, Buffer, BufferContentType, BufferFlag, BufferSerializeFlag, BufferSerializeFormat, ClusterLevel, Color, ColorLayer, ColorLine, ColorPalette, ColorPaletteFlags, ColorStop, Direction, DrawClosePathFunc, DrawCubicToFunc, DrawFuncs, DrawLineToFunc, DrawMoveToFunc, DrawQuadraticToFunc, Face, Feature, FeatureNameIds, Font, FontExtents, FontFuncs, GlyphClass, GlyphExtents, GlyphFlag, GlyphInfo, GlyphPosition, HarfBuzzModule, MetricsTag, NameEntry, PaintColorFunc, PaintColorGlyphFunc, PaintCompositeMode, PaintCustomPaletteColorFunc, PaintExtend, PaintFuncs, PaintImageFunc, PaintLinearGradientFunc, PaintPopClipFunc, PaintPopGroupFunc, PaintPopTransformFunc, PaintPushClipGlyphFunc, PaintPushClipRectangleFunc, PaintPushGroupFunc, PaintPushTransformFunc, PaintRadialGradientFunc, PaintSweepGradientFunc, PaletteColor, SvgPathCommand, TraceEntry, TracePhase, Variation, otTagToLanguage, otTagToScript, otTagsFromScriptAndLanguage, otTagsToScriptAndLanguage, shape, shapeWithTrace, version, versionString };
 \ No newline at end of file
-+export { AxisFlags, AxisInfo, Blob, Buffer, HarfBuzzOutOfMemory, BufferContentType, BufferFlag, BufferSerializeFlag, BufferSerializeFormat, ClusterLevel, Color, ColorLayer, ColorLine, ColorPalette, ColorPaletteFlags, ColorStop, Direction, DrawClosePathFunc, DrawCubicToFunc, DrawFuncs, DrawLineToFunc, DrawMoveToFunc, DrawQuadraticToFunc, Face, Feature, FeatureNameIds, Font, FontExtents, FontFuncs, GlyphClass, GlyphExtents, GlyphFlag, GlyphInfo, GlyphPosition, HarfBuzzModule, MetricsTag, NameEntry, PaintColorFunc, PaintColorGlyphFunc, PaintCompositeMode, PaintCustomPaletteColorFunc, PaintExtend, PaintFuncs, PaintImageFunc, PaintLinearGradientFunc, PaintPopClipFunc, PaintPopGroupFunc, PaintPopTransformFunc, PaintPushClipGlyphFunc, PaintPushClipRectangleFunc, PaintPushGroupFunc, PaintPushTransformFunc, PaintRadialGradientFunc, PaintSweepGradientFunc, PaletteColor, SvgPathCommand, TraceEntry, TracePhase, Variation, otTagToLanguage, otTagToScript, otTagsFromScriptAndLanguage, otTagsToScriptAndLanguage, shape, shapeWithTrace, version, versionString };
++export { AxisFlags, AxisInfo, Blob, Buffer, HarfBuzzOutOfMemory, canAllocate, BufferContentType, BufferFlag, BufferSerializeFlag, BufferSerializeFormat, ClusterLevel, Color, ColorLayer, ColorLine, ColorPalette, ColorPaletteFlags, ColorStop, Direction, DrawClosePathFunc, DrawCubicToFunc, DrawFuncs, DrawLineToFunc, DrawMoveToFunc, DrawQuadraticToFunc, Face, Feature, FeatureNameIds, Font, FontExtents, FontFuncs, GlyphClass, GlyphExtents, GlyphFlag, GlyphInfo, GlyphPosition, HarfBuzzModule, MetricsTag, NameEntry, PaintColorFunc, PaintColorGlyphFunc, PaintCompositeMode, PaintCustomPaletteColorFunc, PaintExtend, PaintFuncs, PaintImageFunc, PaintLinearGradientFunc, PaintPopClipFunc, PaintPopGroupFunc, PaintPopTransformFunc, PaintPushClipGlyphFunc, PaintPushClipRectangleFunc, PaintPushGroupFunc, PaintPushTransformFunc, PaintRadialGradientFunc, PaintSweepGradientFunc, PaletteColor, SvgPathCommand, TraceEntry, TracePhase, Variation, otTagToLanguage, otTagToScript, otTagsFromScriptAndLanguage, otTagsToScriptAndLanguage, shape, shapeWithTrace, version, versionString };
 \ No newline at end of file
 diff --git a/dist/index.mjs b/dist/index.mjs
-index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79ce2246ae2 100644
+index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb7183b4e7 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -12,6 +12,21 @@ function track(obj, destroy) {
+@@ -10,7 +10,41 @@ const registry = new FinalizationRegistry((cleanup) => {
+ });
+ function track(obj, destroy) {
  	const ptr = obj.ptr;
- 	registry.register(obj, () => destroy(ptr));
- }
+-	registry.register(obj, () => destroy(ptr));
++	registry.register(obj, () => destroy(ptr), obj);
++}
++// Drawpane: HarfBuzz's memory is capped (decision 0033), and the registry frees an object only
++// once JavaScript's collector gets to it, which knows nothing of that cap. `destroy()` frees
++// it now. Use nothing of it afterwards.
++function untrack(obj, destroy) {
++	if (obj.ptr === 0) return;
++	registry.unregister(obj);
++	destroy(obj.ptr);
++	obj.ptr = 0;
++}
++/**
++* Drawpane: whether HarfBuzz's memory has room for `size` bytes in one piece right now (growing
++* it, within its maximum, if it must).
++*/
++function canAllocate(size) {
++	const ptr = exports.malloc(size);
++	if (ptr === 0) return false;
++	exports.free(ptr);
++	return true;
++}
 +// Drawpane: HarfBuzz's memory has a cap (decision 0033). Past it `malloc` answers 0, and writing
 +// there (a font file, say) would overwrite the start of memory, which other fonts' data live
 +// beside: their text then measures 0 wide, with no error. So a failed allocation throws, here and
@@ -43,11 +106,10 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
 +	const ptr = exports.malloc(size);
 +	if (ptr === 0 && size > 0) throw new HarfBuzzOutOfMemory(`${size} bytes`);
 +	return ptr;
-+}
+ }
  /**
  * Initialize the HarfBuzz module.
- * @param module The Emscripten module instance created with {@link
-@@ -20,9 +35,16 @@ function track(obj, destroy) {
+@@ -20,9 +54,16 @@ function track(obj, destroy) {
  function init(module) {
  	Module = module;
  	exports = Module.wasmExports;
@@ -67,7 +129,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  }
  function hb_tag(s) {
  	return (s.charCodeAt(0) & 255) << 24 | (s.charCodeAt(1) & 255) << 16 | (s.charCodeAt(2) & 255) << 8 | (s.charCodeAt(3) & 255) << 0;
-@@ -45,7 +67,7 @@ function utf16_ptr_to_string(ptr, length) {
+@@ -45,7 +86,7 @@ function utf16_ptr_to_string(ptr, length) {
  * Faster than encoding to UTF-8
  */
  function string_to_ascii_ptr(text) {
@@ -76,7 +138,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  	for (let i = 0; i < text.length; ++i) {
  		const char = text.charCodeAt(i);
  		if (char > 127) throw new Error("Expected ASCII text");
-@@ -61,7 +83,7 @@ function string_to_ascii_ptr(text) {
+@@ -61,7 +102,7 @@ function string_to_ascii_ptr(text) {
  	};
  }
  function string_to_utf8_ptr(text) {
@@ -85,7 +147,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  	utf8Encoder.encodeInto(text, Module.HEAPU8.subarray(ptr, ptr + text.length));
  	return {
  		ptr,
-@@ -72,7 +94,7 @@ function string_to_utf8_ptr(text) {
+@@ -72,7 +113,7 @@ function string_to_utf8_ptr(text) {
  	};
  }
  function string_to_utf16_ptr(text) {
@@ -94,7 +156,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  	const words = Module.HEAPU16.subarray(ptr / 2, ptr / 2 + text.length);
  	for (let i = 0; i < words.length; ++i) words[i] = text.charCodeAt(i);
  	return {
-@@ -99,7 +121,7 @@ function language_from_string(str) {
+@@ -99,10 +140,14 @@ function language_from_string(str) {
  */
  function typed_array_from_set(setPtr) {
  	const setCount = exports.hb_set_get_population(setPtr);
@@ -102,8 +164,16 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
 +	const arrayPtr = checkedMalloc(setCount << 2);
  	const arrayOffset = arrayPtr >> 2;
  	exports.hb_set_next_many(setPtr, -1, arrayPtr, setCount);
- 	return Module.HEAPU32.subarray(arrayOffset, arrayOffset + setCount);
-@@ -210,9 +232,14 @@ var Blob = class {
+-	return Module.HEAPU32.subarray(arrayOffset, arrayOffset + setCount);
++	// Drawpane: a copy, and the array freed. A view of it was never freed, and stayed in
++	// HarfBuzz's memory after the face, splitting what it freed into pieces.
++	const result = Module.HEAPU32.slice(arrayOffset, arrayOffset + setCount);
++	exports.free(arrayPtr);
++	return result;
+ }
+ const callbackData = [void 0];
+ const freeCallbackData = [];
+@@ -210,11 +255,27 @@ var Blob = class {
  	*/
  	constructor(data) {
  		const array = data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -116,10 +186,51 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
 +			if (!freeFuncPtr) exports.free(blobPtr);
 +			throw new HarfBuzzOutOfMemory("a font file");
 +		}
++		this.dataPtr = blobPtr;
  		track(this, exports.hb_blob_destroy);
  	}
++	/**
++	* Drawpane: frees the blob, and its data. Without a free callback (a Worker) the data is freed
++	* here, so destroy every face made from the blob (and the fonts made from those) first.
++	*/
++	destroy() {
++		const data = this.dataPtr;
++		untrack(this, exports.hb_blob_destroy);
++		if (!freeFuncPtr && data) exports.free(data);
++		this.dataPtr = 0;
++	}
  };
-@@ -452,7 +479,7 @@ var Face = class {
+ //#endregion
+ //#region src/face.ts
+@@ -238,17 +299,24 @@ var Face = class {
+ 		this.upem = exports.hb_face_get_upem(this.ptr);
+ 		track(this, exports.hb_face_destroy);
+ 	}
++	/** Drawpane: lets go of the face now (fonts made from it keep it until they're destroyed). */
++	destroy() {
++		untrack(this, exports.hb_face_destroy);
++	}
+ 	/**
+ 	* Return the binary contents of an OpenType table.
+ 	* @param table Table name
+ 	* @returns A Uint8Array of the table data, or undefined if the table is not found.
+ 	*/
+ 	referenceTable(table) {
++		// Drawpane: a copy, and the table's blob let go of. It referenced the font file's blob, so
++		// keeping it kept the whole file in HarfBuzz's memory after the face was destroyed.
+ 		const blob = exports.hb_face_reference_table(this.ptr, hb_tag(table));
+ 		const length = exports.hb_blob_get_length(blob);
+-		if (!length) return;
+-		const blobptr = exports.hb_blob_get_data(blob, 0);
+-		return Module.HEAPU8.subarray(blobptr, blobptr + length);
++		const blobptr = length ? exports.hb_blob_get_data(blob, 0) : 0;
++		const data = length ? Module.HEAPU8.slice(blobptr, blobptr + length) : void 0;
++		exports.hb_blob_destroy(blob);
++		return data;
+ 	}
+ 	/**
+ 	* Return variation axis infos.
+@@ -452,7 +520,7 @@ var Face = class {
  		const languagePtr = language_from_string(language);
  		const nameLen = exports.hb_ot_name_get_utf16(this.ptr, nameId, languagePtr, 0, 0) + 1;
  		const textSizePtr = Module.stackAlloc(4);
@@ -128,7 +239,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  		Module.HEAPU32[textSizePtr / 4] = nameLen;
  		exports.hb_ot_name_get_utf16(this.ptr, nameId, languagePtr, textSizePtr, textPtr);
  		const name = utf16_ptr_to_string(textPtr, nameLen - 1);
-@@ -811,6 +838,7 @@ var Font = class Font {
+@@ -811,10 +879,15 @@ var Font = class Font {
  		if (typeof arg === "number") this.ptr = exports.hb_font_reference(arg);
  		else {
  			this.ptr = exports.hb_font_create(arg.ptr);
@@ -136,7 +247,26 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  			this._face = arg;
  		}
  		track(this, exports.hb_font_destroy);
-@@ -1822,8 +1850,10 @@ var Buffer = class Buffer {
+ 	}
++	/** Drawpane: frees the font now. */
++	destroy() {
++		untrack(this, exports.hb_font_destroy);
++	}
+ 	/** The {@link Face} associated with this font. */
+ 	get face() {
+ 		if (!this._face) this._face = new Face(exports.hb_font_get_face(this.ptr));
+@@ -1799,6 +1872,10 @@ var Buffer = class Buffer {
+ 		else this.ptr = exports.hb_buffer_create();
+ 		track(this, exports.hb_buffer_destroy);
+ 	}
++	/** Drawpane: frees the buffer now. */
++	destroy() {
++		untrack(this, exports.hb_buffer_destroy);
++	}
+ 	/**
+ 	* Appends a character with the Unicode value of `codePoint` to the buffer,
+ 	* and gives it the initial cluster value of `cluster`. Clusters can be any
+@@ -1822,8 +1899,10 @@ var Buffer = class Buffer {
  	*/
  	addText(text, itemOffset = 0, itemLength) {
  		const str = string_to_utf16_ptr(text);
@@ -147,7 +277,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  	}
  	/**
  	* Add code points to the buffer.
-@@ -1832,7 +1862,7 @@ var Buffer = class Buffer {
+@@ -1832,7 +1911,7 @@ var Buffer = class Buffer {
  	* @param itemLength The number of code points to add to the buffer, or omit for the end of the array.
  	*/
  	addCodePoints(codePoints, itemOffset = 0, itemLength) {
@@ -156,7 +286,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  		Module.HEAPU32.subarray(codePointsPtr / 4, codePointsPtr / 4 + codePoints.length).set(codePoints);
  		exports.hb_buffer_add_codepoints(this.ptr, codePointsPtr, codePoints.length, itemOffset, itemLength ?? codePoints.length);
  		exports.free(codePointsPtr);
-@@ -2022,7 +2052,7 @@ var Buffer = class Buffer {
+@@ -2022,7 +2101,7 @@ var Buffer = class Buffer {
  		const sp = Module.stackSave();
  		const endPos = end ?? this.getLength();
  		const bufLen = 32 * 1024;
@@ -165,7 +295,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  		const bufConsumedPtr = Module.stackAlloc(4);
  		let result = "";
  		while (start < endPos) {
-@@ -2228,8 +2258,10 @@ function shape(font, buffer, features) {
+@@ -2228,8 +2307,10 @@ function shape(font, buffer, features) {
  			feature.writeTo(featuresPtr + i * 16);
  		});
  	}
@@ -176,7 +306,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
  }
  /**
  * Shape a buffer with a given font, returning a JSON trace of the shaping process.
-@@ -2362,6 +2394,8 @@ function otTagsToScriptAndLanguage(scriptTag, languageTag) {
+@@ -2362,6 +2443,8 @@ function otTagsToScriptAndLanguage(scriptTag, languageTag) {
  }
  //#endregion
  //#region src/index.ts
@@ -186,4 +316,4 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..af36872c57d6afd2c07958e5fa8ee79c
 +init(await createHarfBuzz(globalThis.__drawpaneHarfBuzz ?? {}));
  //#endregion
 -export { AxisFlags, Blob, Buffer, BufferContentType, BufferFlag, BufferSerializeFlag, BufferSerializeFormat, ClusterLevel, ColorPaletteFlags, Direction, DrawFuncs, Face, Feature, Font, FontFuncs, GlyphClass, GlyphFlag, MetricsTag, PaintCompositeMode, PaintExtend, PaintFuncs, TracePhase, Variation, otTagToLanguage, otTagToScript, otTagsFromScriptAndLanguage, otTagsToScriptAndLanguage, shape, shapeWithTrace, version, versionString };
-+export { AxisFlags, Blob, Buffer, HarfBuzzOutOfMemory, BufferContentType, BufferFlag, BufferSerializeFlag, BufferSerializeFormat, ClusterLevel, ColorPaletteFlags, Direction, DrawFuncs, Face, Feature, Font, FontFuncs, GlyphClass, GlyphFlag, MetricsTag, PaintCompositeMode, PaintExtend, PaintFuncs, TracePhase, Variation, otTagToLanguage, otTagToScript, otTagsFromScriptAndLanguage, otTagsToScriptAndLanguage, shape, shapeWithTrace, version, versionString };
++export { AxisFlags, Blob, Buffer, HarfBuzzOutOfMemory, canAllocate, BufferContentType, BufferFlag, BufferSerializeFlag, BufferSerializeFormat, ClusterLevel, ColorPaletteFlags, Direction, DrawFuncs, Face, Feature, Font, FontFuncs, GlyphClass, GlyphFlag, MetricsTag, PaintCompositeMode, PaintExtend, PaintFuncs, TracePhase, Variation, otTagToLanguage, otTagToScript, otTagsFromScriptAndLanguage, otTagsToScriptAndLanguage, shape, shapeWithTrace, version, versionString };
