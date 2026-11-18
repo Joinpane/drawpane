@@ -20,6 +20,7 @@
  */
 import type { FontFeatures } from "@drawpane/model";
 import { type Face, type FontBytesLoader, faceKey } from "@drawpane/raster";
+import { sharedFace } from "./harfbuzz-faces";
 import type { FontMetrics, ShapedGlyph, ShapedText, ShapingRun, TextMeasurer } from "./text";
 
 type HarfBuzz = typeof import("harfbuzzjs");
@@ -295,7 +296,7 @@ export class Shaper {
     });
     const [hb, bytes] = await Promise.all([this.#harfBuzz, this.#loadBytes(face)]);
     if (!bytes) return null;
-    const hbFace = new hb.Face(new hb.Blob(bytes));
+    const hbFace = sharedFace(hb, bytes).face;
     const axes: Record<string, { min: number; default: number; max: number }> = {};
     for (const [tag, axis] of Object.entries(hbFace.getAxisInfos()))
       axes[tag] = { min: axis.min, default: axis.default, max: axis.max };

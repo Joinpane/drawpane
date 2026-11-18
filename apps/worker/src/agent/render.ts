@@ -10,7 +10,8 @@
  *   they were uploaded.
  *
  * resvg is WebAssembly, bundled as a module (a Worker can't compile it at
- * run time) and set up once per isolate.
+ * run time) with its memory capped (`scripts/cap-wasm.ts`), and each
+ * picture is drawn in an instance of its own (`@drawpane/raster`).
  */
 import {
   createHeadlessRenderer,
@@ -21,7 +22,8 @@ import {
   type TextMeasurer,
 } from "@drawpane/editor";
 import { cachedFontLoader, type FontBytesLoader, resvgRasteriser } from "@drawpane/raster";
-import resvgWasm from "@resvg/resvg-wasm/index_bg.wasm";
+// resvg's module with its memory capped, written by scripts/cap-wasm.ts.
+import resvgWasm from "../../wasm/resvg.wasm";
 import { mediaKey } from "../api/media";
 import type { Env } from "../env";
 

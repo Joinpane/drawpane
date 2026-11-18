@@ -10,10 +10,18 @@
  *
  * The WebAssembly module comes from the host, the way each loads it: a
  * Worker imports the `.wasm` file as a compiled `WebAssembly.Module` (Workers
- * can't compile WebAssembly at run time); Node and tests read its bytes
- * (`./node.ts`). It is set up once per isolate.
+ * can't compile WebAssembly at run time), its memory capped at build time;
+ * Node and tests read its bytes (`./node.ts`), capped here as they're
+ * compiled (`wasm-limits.ts`).
+ *
+ * Each picture is drawn in an instance of its own, made from the compiled
+ * module (0.4 ms) and dropped afterwards (decision 0033, item 4.2). A render
+ * past the cap traps, and a trap leaves an instance unusable and what it
+ * held unfreed; linear memory never shrinks, either. A fresh instance gives
+ * all of that back, so the next render is as if the failed one never ran.
  */
-import { initWasm, Resvg } from "@resvg/resvg-wasm";
+import { createResvg } from "@resvg/resvg-wasm";
+import { RESVG_MAX_BYTES, withMemoryMaximum } from "./wasm-limits";
 
 /** What a render needs besides the SVG. */
 export interface RasterOptions {
@@ -55,6 +63,12 @@ export interface Pixels {
  */
 export interface Rasteriser {
   rasterise(svg: string, options: RasterOptions): Raster | Promise<Raster>;
+  /**
+   * The most memory a render may use, in bytes, when it's capped: a render
+   * past it fails with `RasterOutOfMemory`. The renderer draws a picture
+   * smaller to fit in it. Absent when it isn't known.
+   */
+  readonly memory?: number;
 }
 
 /** resvg, in this isolate: at once, and as pixels too. */
@@ -67,29 +81,54 @@ export interface ResvgRasteriser extends Rasteriser {
 /** The module, compiled (a Worker's `.wasm` import) or as bytes (Node). */
 export type ResvgWasm = WebAssembly.Module | ArrayBuffer | Uint8Array;
 
-let setup: Promise<void> | null = null;
+/**
+ * A render that ran out of the memory resvg may grow to (a trap), worded
+ * for whoever asked. Nothing of it is kept: the next render starts afresh.
+ */
+export class RasterOutOfMemory extends Error {
+  constructor() {
+    super("That picture needs more memory than rendering has.");
+    this.name = "RasterOutOfMemory";
+  }
+}
+
+let compiled: Promise<WebAssembly.Module> | null = null;
+
+/** The module as given (a Worker's, capped when it was built), or compiled from bytes with the cap. */
+async function compile(wasm: ResvgWasm): Promise<WebAssembly.Module> {
+  if (wasm instanceof WebAssembly.Module) return wasm;
+  const bytes = wasm instanceof Uint8Array ? wasm : new Uint8Array(wasm);
+  // Only Node and tests come here (a Worker can't compile at run time): compiled at once.
+  // (Typed as Workers type it, where it can't be constructed.)
+  const { Module } = WebAssembly as unknown as {
+    Module: new (bytes: Uint8Array) => WebAssembly.Module;
+  };
+  return new Module(withMemoryMaximum(bytes, RESVG_MAX_BYTES));
+}
 
 /**
- * A rasteriser backed by resvg. The first call sets the module up; later
- * ones reuse it, whatever they pass.
+ * A rasteriser backed by resvg. The first call compiles the module; later
+ * ones reuse it, whatever they pass. Every render instantiates it afresh.
  */
 export async function resvgRasteriser(
   wasm: ResvgWasm | Promise<ResvgWasm>,
 ): Promise<ResvgRasteriser> {
-  setup ??= (async () => initWasm(await wasm))().catch((error: unknown) => {
-    setup = null;
+  compiled ??= (async () => compile(await wasm))().catch((error: unknown) => {
+    compiled = null;
     throw error;
   });
-  await setup;
+  const module = await compiled;
   return {
+    // A Worker's module was capped at the same number when it was built (apps/worker/scripts/cap-wasm.ts).
+    memory: RESVG_MAX_BYTES,
     rasterise: (svg, options) =>
-      draw(svg, options, (image) => ({
+      draw(module, svg, options, (image) => ({
         png: image.asPng(),
         width: image.width,
         height: image.height,
       })),
     pixels: (svg, options) =>
-      draw(svg, options, (image) => ({
+      draw(module, svg, options, (image) => ({
         data: unpremultiply(image.pixels),
         width: image.width,
         height: image.height,
@@ -97,11 +136,39 @@ export async function resvgRasteriser(
   };
 }
 
-type Rendered = ReturnType<InstanceType<typeof Resvg>["render"]>;
+type Glue = ReturnType<typeof createResvg>;
+type Rendered = ReturnType<InstanceType<Glue["Resvg"]>["render"]>;
 
-function draw<T>(svg: string, options: RasterOptions, read: (image: Rendered) => T): T {
+/**
+ * Draws in a new instance, which goes with this call: nothing is freed by
+ * hand (after a trap, wasm-bindgen's `free()` throws and would hide the
+ * trap), and what the instance held goes with it.
+ */
+function draw<T>(
+  module: WebAssembly.Module,
+  svg: string,
+  options: RasterOptions,
+  read: (image: Rendered) => T,
+): T {
+  const glue = createResvg();
+  glue.initSync(module);
+  try {
+    return drawIn(glue, svg, options, read);
+  } catch (error) {
+    // A trap: an allocation past the cap (Rust aborts with `unreachable`), or the like.
+    if (error instanceof WebAssembly.RuntimeError) throw new RasterOutOfMemory();
+    throw error;
+  }
+}
+
+function drawIn<T>(
+  glue: Glue,
+  svg: string,
+  options: RasterOptions,
+  read: (image: Rendered) => T,
+): T {
   const family = options.fallbackFamily;
-  const resvg = new Resvg(svg, {
+  const resvg = new glue.Resvg(svg, {
     fitTo: { mode: "zoom", value: options.scale },
     font: {
       fontBuffers: [...options.fonts],
@@ -113,26 +180,18 @@ function draw<T>(svg: string, options: RasterOptions, read: (image: Rendered) =>
     textRendering: 2,
     imageRendering: 0,
   });
-  try {
-    if (options.images)
-      for (const href of resvg.imagesToResolve() as string[]) {
-        const bytes = options.images.get(href);
-        if (!bytes) continue;
-        try {
-          resvg.resolveImage(href, bytes);
-        } catch {
-          // A file it can't decode is left out, as a broken data: URL is.
-        }
+  if (options.images)
+    for (const href of resvg.imagesToResolve() as string[]) {
+      const bytes = options.images.get(href);
+      if (!bytes) continue;
+      try {
+        resvg.resolveImage(href, bytes);
+      } catch (error) {
+        if (error instanceof WebAssembly.RuntimeError) throw error;
+        // A file it can't decode is left out, as a broken data: URL is.
       }
-    const image = resvg.render();
-    try {
-      return read(image);
-    } finally {
-      image.free();
     }
-  } finally {
-    resvg.free();
-  }
+  return read(resvg.render());
 }
 
 /** resvg's pixels have their colour multiplied by alpha; undone in place. */
