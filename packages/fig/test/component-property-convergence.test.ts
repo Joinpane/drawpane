@@ -225,6 +225,48 @@ describe("component property values converge", () => {
   // before hearing of it, C undoes its swap, then A edits. C's delayed swap and undo rebuild the
   // icon's layers copying the old main's copy layers, which the detach had pointed through to
   // the icon's own; conversion then unlinked the nested icon.
+  it("the seed 1875001 schedule, after the fix: a detach that saw the swap, then its undo (materialized)", () => {
+    // The same seed's next schedule once the first was fixed: B hears C's swap, then detaches;
+    // C undoes its swap after.
+    check(
+      "materialized",
+      [
+        [2, 2, 3],
+        [2, 8, 0],
+        [1, 9, 0],
+        [1, 12, 10],
+        [2, 7, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+      ],
+      false,
+    );
+  });
+
+  it("the seed 1875001 schedule, its third: the swap's undo in before the detach (materialized)", () => {
+    // C sends its undo before B, who detached having seen the swap, sends the detach: the rect
+    // C's undo made copies the old main's copy layer, valid then, and B's detach never saw it.
+    check(
+      "materialized",
+      [
+        [2, 2, 3],
+        [2, 8, 0],
+        [1, 9, 0],
+        [1, 12, 10],
+        [2, 7, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [2, 8, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+      ],
+      false,
+    );
+  });
+
   it("the seed 1875001 schedule: a delayed swap and undo after a detach (materialized)", () => {
     check(
       "materialized",

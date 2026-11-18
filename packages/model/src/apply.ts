@@ -149,7 +149,6 @@ function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
     if (value !== null && value !== undefined) props[prop] = value;
   }
   store.insert({ id: op.id, type: op.type, parent: op.parent, key: op.key, props });
-  if (typeof props.mirrors === "string") resolveMirrors(store, op.id);
   return [{ op: "delete", id: op.id }];
 }
 
@@ -161,11 +160,28 @@ function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
  * belongs to (an edit made before a teammate's detach pointed its siblings
  * through to their own component, applied after it) is followed down its own
  * copies to the first layer that is inside it, the one it means there. Left
- * as it is when there's none, or nothing above it is an instance. Only a
- * layer made (a delayed rebuild makes its layers again): a reference set by
- * itself is part of a change that moves references together (an undone
- * detach puts back a layer's before its instance's), and is left as it is.
+ * as it is when there's none, or nothing above it is an instance. Checked
+ * once a transaction is applied, against what it leaves (an undone swap
+ * makes its layers again before it puts its instance's component back; an
+ * undone detach puts back a layer's reference before its instance's), for
+ * the layers it made and those under a node whose link it changed (a
+ * detach applied after a teammate's rebuild it didn't see).
  */
+/** `resolveMirrors` for each of `ids` and everything under them. */
+function resolveUnder(store: NodeStore, ids: ReadonlySet<string>): void {
+  const seen = new Set<string>();
+  const stack = [...ids];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const node = store.get(id);
+    if (!node) continue;
+    if (typeof node.props.mirrors === "string") resolveMirrors(store, id);
+    for (const child of store.childIds(id)) stack.push(child);
+  }
+}
+
 function resolveMirrors(store: NodeStore, id: string): void {
   const node = store.get(id);
   const mirrors = node?.props.mirrors;
@@ -626,8 +642,13 @@ export function applyTransaction(
   const check = cycles === true ? new Map<string, { deep: boolean; index: number }>() : null;
   const sink = typeof cycles === "object" ? cycles : null;
   const keyed = new Map<string, number>();
+  // Layers it makes, and nodes whose link it changes: the copy references there are checked
+  // once it's applied (`resolveMirrors`).
+  const relinked = new Set<string>();
   for (let i = 0; i < ops.length; i++) {
     const op = ops[i] as Op;
+    if (op.op === "create" && typeof op.props.mirrors === "string") relinked.add(op.id);
+    if (op.op === "set" && (op.prop === "mirrors" || op.prop === "instanceOf")) relinked.add(op.id);
     try {
       const back = apply(store, op, false, keep, held);
       if (keep) undo.push(back);
@@ -649,6 +670,7 @@ export function applyTransaction(
       check.set(candidate.id, { deep, index: i });
     }
   }
+  if (relinked.size > 0) resolveUnder(store, relinked);
   if (keyed.size > 0)
     try {
       checkKeyedMaps(store, keyed);
