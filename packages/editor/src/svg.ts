@@ -36,7 +36,7 @@ import { exportBounds } from "./export";
 import { type Matrix, type Rect, round2 } from "./geometry";
 import { FULL_CROP, imagePlacement } from "./images";
 import { markersOf, trimmedStroke } from "./markers";
-import { hasMask, maskScopes } from "./masks";
+import { clipsByShape, hasMask, maskScopes } from "./masks";
 import { noiseThresholdZ } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { textSpans } from "./rich-text";
@@ -787,8 +787,10 @@ export function exportSvg(
   };
 
   /**
-   * A parent's children; layers above a mask go in a group clipped to the
-   * mask's outline, or masked by its own picture (its alpha, or luminance).
+   * A parent's children; layers above a mask (up to the next mask or a frame
+   * that clips its content, masks.ts) go in a group clipped to the mask's
+   * outline, or masked by its own picture: its alpha or luminance, or for a
+   * group, text or line masking by its outline, what it draws made opaque.
    */
   const visitChildren = (parentId: string, into: string[]) => {
     if (!hasMask(scene.doc, parentId)) {
@@ -796,28 +798,50 @@ export function exportSvg(
       return;
     }
     let masked: string[] | null = null;
-    let wrapper = "";
+    // How the masked layers are wrapped; null when the mask shows none of them (it draws nothing).
+    let wrapper: string | null = "";
     const flush = () => {
-      if (masked && masked.length > 0) into.push(`<g ${wrapper}>${masked.join("")}</g>`);
+      if (masked && masked.length > 0 && wrapper !== null)
+        into.push(`<g ${wrapper}>${masked.join("")}</g>`);
       masked = null;
     };
-    for (const { id, isMask } of maskScopes(scene.doc, parentId)) {
-      if (!isMask) {
+    for (const { id, isMask, mask: masking } of maskScopes(scene.doc, parentId)) {
+      if (!isMask && masking) {
         visit(id, masked ?? into);
         continue;
       }
+      // A mask, or a layer past the last one's scope: what was masked ends here.
       flush();
+      if (!isMask) {
+        visit(id, into);
+        continue;
+      }
       const mask = scene.doc.get(id) as NodeRecord;
       const type = getProp(mask.props, "maskType");
-      if (type !== "outline") {
+      if (!clipsByShape(mask)) {
         // The mask layer drawn as itself inside a <mask>, over its whole reach.
         const region = exportBounds(scene, [id]);
-        if (!region) continue;
+        if (!region) {
+          // It draws nothing, so nothing it masks shows (the canvas draws none of it either).
+          wrapper = null;
+          masked = [];
+          continue;
+        }
         const picture: string[] = [];
         visit(id, picture);
+        const box = `${attr("x", region.x)}${attr("y", region.y)}${attr("width", region.width)}${attr("height", region.height)}`;
+        let drawn = picture.join("");
+        if (type === "outline") {
+          // Wherever it draws anything, fully: alpha times 255 (the canvas's opaqueAlpha).
+          const opaque = out.id("opaque");
+          out.defs.push(
+            `<filter id="${opaque}" filterUnits="userSpaceOnUse"${box}><feComponentTransfer><feFuncA type="linear" slope="255"/></feComponentTransfer></filter>`,
+          );
+          drawn = `<g filter="url(#${opaque})">${drawn}</g>`;
+        }
         const ref = out.id("mask");
         out.defs.push(
-          `<mask id="${ref}" maskUnits="userSpaceOnUse"${attr("x", region.x)}${attr("y", region.y)}${attr("width", region.width)}${attr("height", region.height)}${attr("mask-type", type)}>${picture.join("")}</mask>`,
+          `<mask id="${ref}" maskUnits="userSpaceOnUse"${box}${attr("mask-type", type === "luminance" ? "luminance" : "alpha")}>${drawn}</mask>`,
         );
         wrapper = `mask="url(#${ref})"`;
         masked = [];

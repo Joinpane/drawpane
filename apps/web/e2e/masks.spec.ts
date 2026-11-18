@@ -3,6 +3,9 @@
  * canvas only shows the photo inside the circle, clicks outside it miss, the
  * layers panel says which is which, the inspector makes it mask by alpha
  * (a fading circle fades the photo), and the menu removes the mask again.
+ * Then masks as Figma scopes and draws them, at the points the headless
+ * renderer's tests check (packages/editor/test/masks-drawn.test.ts): a
+ * clipping frame ends a mask's scope, and a group masks by its luminance.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { canvasColor, freshInstance, type Instance } from "./fresh-instance";
@@ -16,10 +19,12 @@ type Debug = {
     props?: Record<string, unknown>,
   ): string | null;
   select(ids: string[]): void;
+  commit(ops: unknown[], label?: string): boolean;
   setProp(ids: string[], prop: string, value: unknown, label: string): void;
   reorder(d: string): void;
   zoomTo(z: number): void;
   setCamera(c: unknown): void;
+  centerOn(p: { x: number; y: number }): void;
   doc: {
     get(id: string): { parent: string; type: string; props: Record<string, unknown> } | undefined;
   };
@@ -174,5 +179,109 @@ test.describe
       const corner = await screenOf(page, { x: 20, y: 20 });
       await expect.poll(() => canvasColor(page, corner)).toBe(BLUE);
       await expect.poll(() => canvasColor(page, centre)).toBe(BLUE);
+    });
+
+    test("ends a mask at a clipping frame, and masks by a group's luminance", async () => {
+      const page0 = await page.evaluate(() => {
+        const e = (window as unknown as { drawpane: Debug }).drawpane;
+        const p = e.s.pageId;
+        const solid = (color: string) => [{ type: "solid", color }];
+        const create = (id: string, type: string, parent: string, key: string, props: object) => ({
+          op: "create",
+          id,
+          type,
+          parent,
+          key,
+          props,
+        });
+        const ok = e.commit(
+          [
+            // A popover: the arrow masks the material over it, not the clipping card above that.
+            create("pop", "frame", p, "b00", {
+              x: 1000,
+              y: 0,
+              width: 200,
+              height: 200,
+              clipContent: false,
+              fills: [],
+            }),
+            create("arrow", "rect", "pop", "a0", {
+              x: 72,
+              y: 200,
+              width: 56,
+              height: 13,
+              flipX: true,
+              isMask: true,
+              maskType: "alpha",
+              fills: solid("#ff0000"),
+            }),
+            create("material", "group", "pop", "a1", {}),
+            create("fill", "rect", "material", "a0", {
+              x: 40,
+              y: 200,
+              width: 120,
+              height: 13,
+              fills: solid("#0000ff"),
+            }),
+            create("card", "frame", "pop", "a2", {
+              x: 0,
+              y: 0,
+              width: 200,
+              height: 200,
+              fills: solid("#00ff00"),
+            }),
+            // An icon masked by a group's luminance: white shows, black hides.
+            create("icon", "frame", p, "b01", {
+              x: 1300,
+              y: 0,
+              width: 140,
+              height: 140,
+              clipContent: false,
+              fills: [],
+            }),
+            create("shape", "group", "icon", "a0", { isMask: true, maskType: "luminance" }),
+            create("white", "rect", "shape", "a0", {
+              x: 20,
+              y: 20,
+              width: 100,
+              height: 100,
+              fills: solid("#ffffff"),
+            }),
+            create("black", "rect", "shape", "a1", {
+              x: 50,
+              y: 50,
+              width: 40,
+              height: 40,
+              fills: solid("#000000"),
+            }),
+            create("ink", "rect", "icon", "a1", {
+              x: 0,
+              y: 0,
+              width: 140,
+              height: 140,
+              fills: solid("#0000ff"),
+            }),
+          ],
+          "Masks",
+        );
+        e.zoomTo(1);
+        e.centerOn({ x: 1220, y: 100 });
+        return ok;
+      });
+      expect(page0).toBe(true);
+      const at = async (x: number, y: number) => canvasColor(page, await screenOf(page, { x, y }));
+      await expect.poll(() => at(1100, 100)).toBe("#00ff00");
+      await expect.poll(() => at(1010, 10)).toBe("#00ff00");
+      await expect.poll(() => at(1100, 206)).toBe("#0000ff");
+      await expect.poll(() => at(1050, 206)).not.toBe("#0000ff");
+      await expect.poll(() => at(1330, 30)).toBe("#0000ff");
+      await expect.poll(() => at(1370, 70)).not.toBe("#0000ff");
+      await expect.poll(() => at(1435, 135)).not.toBe("#0000ff");
+      // A click on the card away from the arrow picks something: the arrow doesn't mask the card.
+      const card = await screenOf(page, { x: 1100, y: 100 });
+      await page.mouse.click(card.x, card.y);
+      expect(
+        await page.evaluate(() => (window as unknown as { drawpane: Debug }).drawpane.s.selection),
+      ).toHaveLength(1);
     });
   });

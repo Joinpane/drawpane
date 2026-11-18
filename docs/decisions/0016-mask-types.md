@@ -21,3 +21,11 @@ A Drawpane mask clipped the layers above it to its outline. Figma's masks mask b
 
 - Layers masked by alpha or luminance are drawn apart from what's below them, so a blend mode among them blends with the other masked layers, not with what's under the mask, and glass or background blur among them sees only those layers.
 - Hit testing and group bounds still use the mask's outline: a click on a fully faded part of a masked photo still picks it.
+
+## Amendment (2026-11-18): where a mask ends, and what can be one
+
+Measured on a large iOS UI kit, whose worst frame was a popover drawn white: its arrow, a mask at the bottom, masked the card's background two layers up.
+
+- **Scope:** a mask masks the siblings above it up to the next mask, the end of its parent, or a visible frame that clips its content (a component's copy too), which shows unmasked with everything above it up to the next mask. Figma's help says so ("The mask applies to all siblings above it until it reaches … a frame or component with clip content on"), and Figma's renders of both kits agree for every mask in their samples: a clipping sibling above a mask is never masked, a non-clipping one always is. A hidden frame, like a hidden mask, changes nothing. One rule in the editor's `masks.ts`, read by the canvas, SVG export (so headless renders), hit testing, group bounds and the layers panel.
+- **Any layer can be a mask,** as in Figma: groups (icon sets mask by a group's luminance), texts (symbol glyphs masking a tint) and lines join frames and shapes. Masks by alpha or luminance draw the mask's picture whatever it is. An outline mask that's one filled shape still clips to it; a group, text or line masking by its outline masks by its picture made opaque (alpha times 255), on the canvas and in SVG (`feFuncA slope="255"`). Hit testing on a group mask looks at the layers in it. The import's "mask-kind" note is gone.
+- **Import:** a `.fig` names an outline mask `OUTLINE` where the REST API says `VECTOR`; they came in as alpha masks and now come in as outline masks.

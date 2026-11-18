@@ -27,9 +27,9 @@ import {
 } from "./gradients";
 import { ImageCache, imagePlacement } from "./images";
 import { Inradii } from "./inradius";
-import { LuminanceMask } from "./luminance";
+import { LuminanceMask, opaqueAlpha } from "./luminance";
 import { markersOf, trimmedStroke } from "./markers";
-import { maskScopes } from "./masks";
+import { clipsByShape, maskScopes } from "./masks";
 import { NoiseTiles, paintNoise } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { effectReach } from "./reach";
@@ -1571,8 +1571,10 @@ export class CanvasRenderer {
 
   /**
    * Draws a parent's children bottom first. A mask isn't drawn itself: it
-   * masks the children above it, up to the next mask, by its outline (a
-   * clip) or by its alpha or luminance (see #drawMasked).
+   * masks the children above it, up to the next mask or a frame that clips
+   * its content (masks.ts), by its outline (a clip) or by its picture: its
+   * alpha or luminance, or for a group, text or line masking by its outline,
+   * what it draws made opaque (see #drawMasked).
    */
   #drawChildren(
     ctx: Ctx,
@@ -1604,17 +1606,22 @@ export class CanvasRenderer {
       if (scope) this.#drawMasked(ctx, scope.mask, scope.ids, camera, dpr, visible, alpha, blend);
       scope = null;
     };
-    for (const { id, isMask } of maskScopes(doc, parentId)) {
-      if (!isMask) {
+    for (const { id, isMask, mask: masking } of maskScopes(doc, parentId)) {
+      if (!isMask && masking) {
         if (scope) (scope as { ids: string[] }).ids.push(id);
         else this.#draw(ctx, id, camera, dpr, visible, alpha, blend);
         continue;
       }
+      // A mask, or a layer past the last one's scope: what was masked ends here.
       flush();
       if (clipping) ctx.restore();
       clipping = false;
+      if (!isMask) {
+        this.#draw(ctx, id, camera, dpr, visible, alpha, blend);
+        continue;
+      }
       const mask = doc.get(id) as NodeRecord;
-      if (getProp(mask.props, "maskType") !== "outline") {
+      if (!clipsByShape(mask)) {
         scope = { mask, ids: [] };
         continue;
       }
@@ -1714,7 +1721,9 @@ export class CanvasRenderer {
       this.#parts = parts;
       this.#fresh = fresh;
     }
-    if (getProp(mask.props, "maskType") === "luminance") this.#luminance.apply(picture, w, h);
+    const kind = getProp(mask.props, "maskType");
+    if (kind === "luminance") this.#luminance.apply(picture, w, h);
+    else if (kind === "outline") opaqueAlpha(picture, w, h);
     resetState(cctx);
     cctx.globalCompositeOperation = "destination-in";
     cctx.drawImage(picture, 0, 0, w, h, 0, 0, w, h);
