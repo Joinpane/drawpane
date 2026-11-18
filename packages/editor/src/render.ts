@@ -134,12 +134,22 @@ function fadesAsOne(node: NodeRecord, children: number): boolean {
  * Whether a layer blending by linear dodge or burn must be drawn as one
  * picture and blended as a whole, as Figma blends it: always for burn (the
  * canvas has no burn to give each part), and for dodge when its parts
- * overlap (they'd be added to each other too).
+ * overlap (they'd be added to each other too) or the canvas may be
+ * see-through (where the canvas's dodge adds alphas: linear-blend.ts).
  */
-function blendsAsOne(node: NodeRecord, mode: BlendMode, children: number): boolean {
+
+/** A CSS colour that's certainly opaque: `#rrggbb`, or `#rrggbbff`. */
+const opaqueColor = (css: string) => /^#[0-9a-f]{6}(ff)?$/i.test(css.trim());
+function blendsAsOne(
+  node: NodeRecord,
+  mode: BlendMode,
+  children: number,
+  /** Drawn onto a canvas known to be opaque, where the canvas's dodge is exact. */
+  opaque: boolean,
+): boolean {
   if (mode === "linear-burn") return true;
   if (mode !== "linear-dodge") return false;
-  if (children > 0) return true;
+  if (children > 0 || !opaque) return true;
   const effects = getProp(node.props, "effects").filter((e) => e.visible !== false).length;
   const fills = getProp(node.props, "fills").filter((p) => p.visible !== false).length;
   const strokes = getProp(node.props, "strokes").filter((p) => p.visible !== false).length;
@@ -421,8 +431,10 @@ export class CanvasRenderer {
   readonly #inradii = new Inradii();
   /** What's behind a background blur, read for it (see #backgroundBlur). */
   #blurBackdrop: AnyCanvas | null = null;
-  /** Linear burn's scratch canvases (see linear-blend.ts). */
+  /** Scratch canvases for drawings blended apart: linear burn, and dodge over see-through (linear-blend.ts). */
   readonly #burn = new BlendApart();
+  /** Canvases filled with an opaque background before anything is drawn: linear dodge's quick path. */
+  readonly #opaque = new WeakSet<object>();
   /** Noise tiles, made once per look. */
   readonly #noiseTiles = new NoiseTiles();
   /** Draws texture effects, with its own WebGL context (made on first use). */
@@ -480,6 +492,9 @@ export class CanvasRenderer {
     const ty = Math.round(camera.y * dpr);
     const snapped = new Camera(tx / dpr, ty / dpr, camera.zoom);
     const background = getProp(page.props, "backgroundColor") ?? this.canvasColor;
+    // The screen is filled with the page's background first: opaque when it is.
+    if (opaqueColor(background)) this.#opaque.add(ctx.canvas);
+    else this.#opaque.delete(ctx.canvas);
     const frame: LastFrame = {
       ctx,
       pageId,
@@ -1045,6 +1060,8 @@ export class CanvasRenderer {
       ctx.fillStyle = background;
       ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     }
+    if (background && opaqueColor(background)) this.#opaque.add(ctx.canvas);
+    else this.#opaque.delete(ctx.canvas);
     const camera = new Camera(-rect.x * scale, -rect.y * scale, scale);
     const hidden = this.hidden;
     this.hidden = new Set();
@@ -1125,7 +1142,7 @@ export class CanvasRenderer {
     const post = isolated ? null : postEffects(getProp(node.props, "effects"));
     if (post) {
       const children = this.#scene.doc.childIds(id).length;
-      const linear = blendsAsOne(node, mode, children);
+      const linear = blendsAsOne(node, mode, children, this.#opaque.has(ctx.canvas));
       const fades = fadesAsOne(node, children);
       if (post.length > 0 || fades || linear) {
         // Faded, it's drawn over a copy of what's under it, so what blends inside it blends
@@ -1138,7 +1155,9 @@ export class CanvasRenderer {
           blend === "source-over" &&
           this.#blendsWithin(id);
         this.#drawProcessed(ctx, node, camera, dpr, opacity, blend, post, {
-          burn: mode === "linear-burn",
+          ...(linear && (mode === "linear-burn" || mode === "linear-dodge")
+            ? { linear: mode }
+            : {}),
           through,
         });
         return;
@@ -1221,13 +1240,13 @@ export class CanvasRenderer {
     blend: GlobalCompositeOperation,
     post: readonly PostEffect[],
     how: {
-      /** Composited by linear burn, which `blend` can't say. */
-      readonly burn?: boolean;
+      /** Composited by linear dodge or burn, apart (linear-blend.ts). */
+      readonly linear?: "linear-dodge" | "linear-burn";
       /** Drawn over a copy of what's under it rather than alone: see `#draw`. */
       readonly through?: boolean;
     } = {},
   ): void {
-    const { burn = false, through = false } = how;
+    const { linear, through = false } = how;
     const id = node.id;
     const z = camera.zoom * dpr;
     const m = this.#scene.worldMatrix(id);
@@ -1354,9 +1373,9 @@ export class CanvasRenderer {
     ctx.globalCompositeOperation = blend;
     if (finalBlur > 0) ctx.filter = `blur(${finalBlur}px)`;
     const picture = layer;
-    if (burn) {
+    if (linear) {
       const spread = finalBlur * 3;
-      this.#burn.burn(
+      this.#burn.blend(
         ctx,
         {
           x0: x0 - spread,
@@ -1364,7 +1383,9 @@ export class CanvasRenderer {
           x1: x0 + w / scale + spread,
           y1: y0 + h / scale + spread,
         },
+        linear,
         (c) => c.drawImage(picture, 0, 0, w, h, x0, y0, w / scale, h / scale),
+        this.#opaque.has(ctx.canvas),
       );
     } else ctx.drawImage(layer, 0, 0, w, h, x0, y0, w / scale, h / scale);
     resetState(ctx);
@@ -1756,12 +1777,13 @@ export class CanvasRenderer {
       draw(ctx);
       return;
     }
-    if (mode === "linear-burn") {
-      this.#burn.burn(ctx, box, draw);
+    const opaque = this.#opaque.has(ctx.canvas);
+    if (mode === "linear-burn" || (mode === "linear-dodge" && (apart || !opaque))) {
+      this.#burn.blend(ctx, box, mode, draw, opaque);
       return;
     }
     if (apart) {
-      this.#burn.blend(ctx, box, BLEND[mode] ?? "source-over", draw);
+      this.#burn.blend(ctx, box, BLEND[mode] ?? "source-over", draw, opaque);
       return;
     }
     const before = ctx.globalCompositeOperation;
@@ -2454,16 +2476,20 @@ export class CanvasRenderer {
       override ? black : (fills ?? (layerFills.length > 0 ? layerFills : black));
     // Draws the text, or with `only`, just each run's paint at that place in its list
     // (one paint at a time, so a linear burn is drawn apart in one pass: linear-blend.ts).
-    const pass = (c: Ctx, only?: { index: number; burn: boolean }) => {
+    // Linear blends drawn apart: burn, and dodge where the canvas may be see-through.
+    const opaque = this.#opaque.has(ctx.canvas);
+    const apartMode = (mode: BlendMode | undefined) =>
+      mode === "linear-burn" || (mode === "linear-dodge" && !opaque) ? mode : null;
+    const pass = (c: Ctx, only?: { index: number; apart: BlendMode | null }) => {
       const each = (paints: readonly Paint[], fill: () => void) => {
         paints.forEach((paint, i) => {
           if (paint.visible === false || (only && i !== only.index)) return;
           const mode = override ? undefined : paint.blendMode;
-          if (only && (mode === "linear-burn") !== only.burn) return;
+          if (only && apartMode(mode) !== only.apart) return;
           const style = override ?? styleOf(paint);
           if (!style) return;
           c.fillStyle = style;
-          if (!mode || mode === "normal" || mode === "linear-burn") fill();
+          if (!mode || mode === "normal" || apartMode(mode)) fill();
           else {
             const before = c.globalCompositeOperation;
             c.globalCompositeOperation = BLEND[mode] ?? "source-over";
@@ -2516,26 +2542,35 @@ export class CanvasRenderer {
         }
       }
     };
-    // Paints burnt in (Apple's vibrant labels): each paint in turn, the burnt ones apart.
+    // Paints blended apart (Apple's vibrant labels): each paint in turn, those apart in a pass each.
     let depth = 0;
-    let burns = false;
+    const modes = new Set<BlendMode>();
     if (!override)
       for (const line of layout.lines)
         for (const fills of [line.marker?.fills, ...line.fragments.map((f) => f.fills)]) {
           const paints = paintsOf(fills);
           depth = Math.max(depth, paints.length);
-          if (paints.some((p) => p.visible !== false && p.blendMode === "linear-burn"))
-            burns = true;
+          for (const p of paints) {
+            const mode = p.visible === false ? null : apartMode(p.blendMode);
+            if (mode) modes.add(mode);
+          }
         }
-    if (!burns) {
+    if (modes.size === 0) {
       pass(ctx);
       return;
     }
     // Glyphs reach past the box: as far as the largest font around it.
     const box = deviceBox(ctx, 0, 0, width, height, largestFontSize(node));
     for (let index = 0; index < depth; index++) {
-      pass(ctx, { index, burn: false });
-      this.#burn.burn(ctx, box, (c) => pass(c, { index, burn: true }));
+      pass(ctx, { index, apart: null });
+      for (const mode of modes)
+        this.#burn.blend(
+          ctx,
+          box,
+          mode as "linear-dodge" | "linear-burn",
+          (c) => pass(c, { index, apart: mode }),
+          opaque,
+        );
     }
   }
 }

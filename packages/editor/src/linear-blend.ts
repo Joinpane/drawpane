@@ -12,9 +12,12 @@
  * faint highlight, where normal blending would darken.
  *
  * A canvas's "lighter" is linear dodge exactly where the backdrop is opaque
- * or empty (where both are partly see-through it adds the alphas too). It
+ * or empty; where both are partly see-through it adds the alphas too (a
+ * component's translucent fills over nothing come out opaque and dark). It
  * has no linear burn, but burn is dodge between the two pictures' inverses,
- * inverted back: `BlendApart` does that through two scratch canvases.
+ * inverted back (an inverse that keeps alpha: `filter: invert(1)`).
+ * `BlendApart` draws both: in a step or three on a canvas known to be
+ * opaque, exactly on any other through a few scratch canvases.
  */
 import type { AnyCanvas, Ctx } from "./webgl";
 
@@ -112,36 +115,49 @@ function canvas(existing: AnyCanvas | null, w: number, h: number): AnyCanvas | n
   return c;
 }
 
+type Apart = GlobalCompositeOperation | LinearMode;
+
 /**
- * Drawing apart, then blending in. Linear burn: what's under the box is
- * copied, inverted, into a scratch canvas; the drawing, made on a second one
- * as `ctx` would make it, is added to that inverted ("lighter"); the sum
- * goes back inverted, through `ctx`'s clip. Any other mode: the drawing made
- * apart is laid on `ctx` in that mode, for drawings a canvas blends wrongly
- * in place (a shadow cast from a shape drawn off the canvas comes out empty
- * in Chrome when blended). Bounded by the box and the canvas; the scratch
- * canvases are kept and only grow.
+ * Drawing apart, then blending in, bounded by a box and the canvas; the
+ * scratch canvases are kept and only grow.
+ *
+ * - Any canvas mode: the drawing, made on a scratch canvas as `ctx` would
+ *   make it, is laid on `ctx` in that mode (for drawings a canvas blends
+ *   wrongly in place: a shadow cast from a shape drawn off the canvas comes
+ *   out empty in Chrome when blended).
+ * - Linear dodge or burn over an opaque canvas: what's under the box is
+ *   copied (inverted, for burn) to a scratch canvas, the drawing (inverted,
+ *   for burn) is added ("lighter"), and the sum goes back (inverted back),
+ *   through `ctx`'s clip.
+ * - Linear dodge or burn over a canvas that may be see-through, exactly:
+ *   the sum laid on black (an opaque picture of the premultiplied colour),
+ *   clamped by normal blending's alpha as a grey (darken), divided by it
+ *   (colour-dodge by its inverse) and multiplied back (destination-in with
+ *   the drawing over what's there), then put back.
  */
 export class BlendApart {
-  #source: AnyCanvas | null = null;
-  #backdrop: AnyCanvas | null = null;
+  readonly #canvases: (AnyCanvas | null)[] = [null, null, null, null];
 
-  /** Draws `draw` (given a context with `ctx`'s state, transform included) burnt into `ctx` within `box`. */
-  burn(ctx: Ctx, box: DeviceBox, draw: (c: Ctx) => void): void {
-    this.#apart(ctx, box, draw, "linear-burn");
+  #scratch(i: number, w: number, h: number): Ctx | null {
+    const c = canvas(this.#canvases[i] ?? null, w, h);
+    this.#canvases[i] = c;
+    const ctx = c?.getContext("2d") as Ctx | null | undefined;
+    if (!ctx) return null;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.filter = "none";
+    ctx.shadowColor = "transparent";
+    ctx.clearRect(0, 0, w, h);
+    return ctx;
   }
 
-  /** Draws `draw` apart, as `burn` does, then lays it on `ctx` in `mode`. */
-  blend(ctx: Ctx, box: DeviceBox, mode: GlobalCompositeOperation, draw: (c: Ctx) => void): void {
-    this.#apart(ctx, box, draw, mode);
-  }
-
-  #apart(
-    ctx: Ctx,
-    box: DeviceBox,
-    draw: (c: Ctx) => void,
-    mode: GlobalCompositeOperation | "linear-burn",
-  ): void {
+  /**
+   * Draws `draw` (given a context with `ctx`'s state, transform included) into
+   * `ctx` within `box`, blended by `mode`. `opaque`: everything under the box
+   * is opaque (a canvas filled with an opaque background first).
+   */
+  blend(ctx: Ctx, box: DeviceBox, mode: Apart, draw: (c: Ctx) => void, opaque: boolean): void {
     const x0 = Math.max(0, Math.floor(box.x0));
     const y0 = Math.max(0, Math.floor(box.y0));
     const x1 = Math.min(ctx.canvas.width, Math.ceil(box.x1));
@@ -149,50 +165,70 @@ export class BlendApart {
     if (x1 <= x0 || y1 <= y0) return;
     const w = x1 - x0;
     const h = y1 - y0;
-    this.#source = canvas(this.#source, w, h);
-    const src = this.#source?.getContext("2d") as Ctx | null | undefined;
-    if (!this.#source || !src) {
+    const src = this.#scratch(0, w, h);
+    if (!src) {
       draw(ctx);
       return;
     }
     // The drawing alone, as `ctx` would draw it, moved to the scratch canvas's corner.
     src.save();
-    src.setTransform(1, 0, 0, 1, 0, 0);
-    src.globalCompositeOperation = "source-over";
-    src.globalAlpha = 1;
-    src.filter = "none";
-    src.clearRect(0, 0, w, h);
     copyState(ctx, src);
     const t = ctx.getTransform();
     src.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0);
     draw(src);
     src.restore();
-    if (mode !== "linear-burn") {
+    const drawing = src.canvas;
+    const linear = mode === "linear-dodge" || mode === "linear-burn";
+    if (!linear || (opaque && mode === "linear-dodge")) {
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalAlpha = 1;
       ctx.shadowColor = "transparent";
       ctx.filter = "none";
-      ctx.globalCompositeOperation = mode;
-      ctx.drawImage(this.#source, 0, 0, w, h, x0, y0, w, h);
+      ctx.globalCompositeOperation = linear ? "lighter" : mode;
+      ctx.drawImage(drawing, 0, 0, w, h, x0, y0, w, h);
       ctx.restore();
       return;
     }
-    this.#backdrop = canvas(this.#backdrop, w, h);
-    const back = this.#backdrop?.getContext("2d") as Ctx | null | undefined;
-    if (!this.#backdrop || !back) return;
-    // What's there, inverted, plus the drawing, inverted.
-    back.save();
-    back.setTransform(1, 0, 0, 1, 0, 0);
-    back.globalAlpha = 1;
-    back.globalCompositeOperation = "source-over";
-    back.clearRect(0, 0, w, h);
-    back.filter = "invert(1)";
-    back.drawImage(ctx.canvas, x0, y0, w, h, 0, 0, w, h);
-    back.globalCompositeOperation = "lighter";
-    back.drawImage(this.#source, 0, 0, w, h, 0, 0, w, h);
-    back.restore();
-    // In its place, inverted back, within whatever clips `ctx`.
+    const invert = mode === "linear-burn" ? "invert(1)" : "none";
+    const sum = this.#scratch(1, w, h);
+    if (!sum) return;
+    // What's there plus the drawing (their inverses, for burn).
+    sum.filter = invert;
+    sum.drawImage(ctx.canvas, x0, y0, w, h, 0, 0, w, h);
+    sum.globalCompositeOperation = "lighter";
+    sum.drawImage(drawing, 0, 0, w, h, 0, 0, w, h);
+    sum.filter = "none";
+    if (!opaque) {
+      const over = this.#scratch(2, w, h);
+      const alpha = this.#scratch(3, w, h);
+      if (!over || !alpha) return;
+      // The alpha normal blending gives: the drawing over what's there.
+      over.drawImage(ctx.canvas, x0, y0, w, h, 0, 0, w, h);
+      over.drawImage(drawing, 0, 0, w, h, 0, 0, w, h);
+      // That alpha as an opaque grey.
+      alpha.drawImage(over.canvas, 0, 0, w, h, 0, 0, w, h);
+      alpha.globalCompositeOperation = "source-in";
+      alpha.fillStyle = "#fff";
+      alpha.fillRect(0, 0, w, h);
+      alpha.globalCompositeOperation = "destination-over";
+      alpha.fillStyle = "#000";
+      alpha.fillRect(0, 0, w, h);
+      // The sum on black, clamped at the alpha, divided by it and multiplied back.
+      sum.globalCompositeOperation = "destination-over";
+      sum.fillStyle = "#000";
+      sum.fillRect(0, 0, w, h);
+      sum.globalCompositeOperation = "darken";
+      sum.drawImage(alpha.canvas, 0, 0, w, h, 0, 0, w, h);
+      alpha.globalCompositeOperation = "difference";
+      alpha.fillStyle = "#fff";
+      alpha.fillRect(0, 0, w, h);
+      sum.globalCompositeOperation = "color-dodge";
+      sum.drawImage(alpha.canvas, 0, 0, w, h, 0, 0, w, h);
+      sum.globalCompositeOperation = "destination-in";
+      sum.drawImage(over.canvas, 0, 0, w, h, 0, 0, w, h);
+    }
+    // In its place (inverted back, for burn), within whatever clips `ctx`.
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
@@ -202,8 +238,8 @@ export class BlendApart {
     ctx.fillStyle = "#000";
     ctx.fillRect(x0, y0, w, h);
     ctx.globalCompositeOperation = "source-over";
-    ctx.filter = "invert(1)";
-    ctx.drawImage(this.#backdrop, 0, 0, w, h, x0, y0, w, h);
+    ctx.filter = invert;
+    ctx.drawImage(sum.canvas, 0, 0, w, h, x0, y0, w, h);
     ctx.restore();
   }
 }
