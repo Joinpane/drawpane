@@ -855,6 +855,61 @@
           ]
         }
       ]
+    },
+    {
+      "id": "blur-text",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 50,
+          "width": 200,
+          "height": 20,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "name": "probe",
+          "x": 10,
+          "y": 10,
+          "width": 180,
+          "height": 100,
+          "fills": [],
+          "clipContent": false,
+          "children": [
+            {
+              "type": "text",
+              "x": 10,
+              "y": 30,
+              "width": 160,
+              "height": 40,
+              "characters": "Glass 12",
+              "fontFamily": "Inter",
+              "fontWeight": 600,
+              "fontSize": 32,
+              "textAlign": "center",
+              "textAutoResize": "none",
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#ffffff"
+                }
+              ],
+              "effects": [
+                {
+                  "type": "background-blur",
+                  "radius": 40
+                }
+              ]
+            }
+          ]
+        }
+      ]
     }
   ]
 }

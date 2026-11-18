@@ -522,6 +522,8 @@ export class CanvasRenderer {
   readonly #inradii = new Inradii();
   /** What's behind a background blur, read for it (see #backgroundBlur). */
   #blurBackdrop: AnyCanvas | null = null;
+  /** A background blur under text, cut to its glyphs (see #backgroundBlur). */
+  #blurGlyphs: AnyCanvas | null = null;
   /**
    * An export that sees what's under it (`renderNodes`'s `context`): while the page is drawn
    * up to the exported layers ("record"), what each of their glass and background blur
@@ -2587,6 +2589,27 @@ export class CanvasRenderer {
         within && shiftBounds(within, from.x, from.y),
       );
     else copyExtended(ctx.canvas, behind, x0, y0, x1 - x0, y1 - y0, within);
+    if (node.type === "text") {
+      // As in Figma, it shows where the layer paints: under text, its glyphs, not its box.
+      this.#blurGlyphs = scratch(this.#blurGlyphs, x1 - x0, y1 - y0);
+      const glyphs = this.#blurGlyphs?.getContext("2d") as Ctx | null | undefined;
+      if (!this.#blurGlyphs || !glyphs) return;
+      resetState(glyphs);
+      glyphs.clearRect(0, 0, x1 - x0, y1 - y0);
+      glyphs.filter = `blur(${sigma}px)`;
+      glyphs.drawImage(this.#blurBackdrop, 0, 0);
+      glyphs.filter = "none";
+      glyphs.globalCompositeOperation = "destination-in";
+      glyphs.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0);
+      this.#text(glyphs, node, w, "#ffffff", scale);
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = "source-over";
+      ctx.drawImage(this.#blurGlyphs, x0, y0);
+      ctx.restore();
+      return;
+    }
     ctx.save();
     ctx.clip(shape);
     ctx.setTransform(1, 0, 0, 1, 0, 0);

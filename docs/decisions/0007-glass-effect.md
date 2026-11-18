@@ -106,3 +106,7 @@ The probe suite went from 1.78 to 0.63, its bend fields from 4.61 to 2.65 px off
 
 - **Ellipses bend as Figma's do.** A probe suite (`glass-ellipses`: circles 80, 160 and 240 units across and a 300 × 140 ellipse, at depths 10 to 70, over position-encoding ramps) found Figma bends an ellipse less than a box at the same depth, by a share that grows with the depth and not with the size: 0.38 of depth × refraction at 10, 0.59 at 20, 0.78 at 40, 0.87 at 70, fitting 1 − 12.1 / (depth + 9.5). Ellipses keep the slope's profile, which already followed Figma's shape, at that strength. The suite went from 0.42 to 0.35 (its bend field from 1.90 to 1.59 px), the glass suite's ellipse cell from 1.28 to 0.83 and its overlapping lenses from 2.05 to 1.38.
 - **The rim's height no longer reads what an earlier glass left.** Its textures only grow, and each glass writes only its own corner of them; the blur read past that corner, into what a larger glass drawn before had left there. So a glass's rim depended on what had been drawn before it (found when one suite run before another moved a text cell from 4.25 to 5.18). Past what's been written is now outside the shape.
+
+## Revision: what's behind it, as Figma exports it (2026-11-18)
+
+Glass keeps its backdrop's alpha (over nothing it shows nothing, light included) and, in an export, sees what's under the exported layers on the page. Measured and decided in decision 0039.
