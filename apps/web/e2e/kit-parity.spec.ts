@@ -11,7 +11,9 @@
  *   in the editor, and each sampled frame's fonts are loaded and checked, its
  *   layout read and its picture drawn at the comparison's scale over the
  *   page rect Figma exported. Missing fonts fail the stage: they'd swamp
- *   every other difference.
+ *   every other difference. With E2E_KIT_PARITY_ALLOW_MISSING_FONTS=1 they
+ *   are only listed (run.json, the scoreboard and the log), for a file whose
+ *   fonts can't be had yet: its frames still score, the text in a fallback.
  * - Stage "compare": each frame's pixels against Figma's (mean and p99 as
  *   e2e/parity/pixels.ts measures them, both over white) and its layout,
  *   matched by Figma id; then scoreboard.json and report.html in the run's
@@ -35,6 +37,8 @@ import { addPasskey } from "./fresh-instance";
 
 const OUT = process.env.E2E_KIT_PARITY;
 const STAGE = process.env.E2E_KIT_PARITY_STAGE ?? "render";
+/** Missing fonts listed, not failed: the run still scores, its text drawn in a fallback face. */
+const ALLOW_MISSING_FONTS = process.env.E2E_KIT_PARITY_ALLOW_MISSING_FONTS === "1";
 const fileSafe = (id: string) => id.replace(/:/g, "-").replace(/;/g, "_");
 
 interface SampleFrame {
@@ -369,10 +373,15 @@ test.describe
         `Drew ${n} frames in ${seconds(started)} s into ${runDir}; ${withoutFigma} sampled frames have no Figma truth yet, ${notInDrawpane.length} aren't in Drawpane.`,
       );
       await page.context().close();
-      expect(
-        [...missingFonts.keys()],
-        "Fonts missing in Drawpane would swamp every other difference: make them available first.",
-      ).toEqual([]);
+      if (ALLOW_MISSING_FONTS && missingFonts.size > 0)
+        console.log(
+          `Missing in Drawpane, allowed: ${[...missingFonts].map(([face, ids]) => `${face} (${ids.length} frames)`).join(", ")}.`,
+        );
+      else
+        expect(
+          [...missingFonts.keys()],
+          "Fonts missing in Drawpane would swamp every other difference: make them available first.",
+        ).toEqual([]);
     });
 
     test("compare: scores, scoreboard.json and report.html", async ({ browser }) => {
@@ -547,9 +556,10 @@ test.describe
       if (process.env.E2E_KIT_PARITY_SAME === "1")
         expect(changed, `Scores differ from ${against}`).toEqual([]);
       expect(idsMismatched, "Sampled ids that name another node in Figma").toBe(0);
-      expect(
-        Object.keys(run.missingFonts),
-        "Fonts missing in Drawpane would swamp every other difference.",
-      ).toEqual([]);
+      if (!ALLOW_MISSING_FONTS)
+        expect(
+          Object.keys(run.missingFonts),
+          "Fonts missing in Drawpane would swamp every other difference.",
+        ).toEqual([]);
     });
   });

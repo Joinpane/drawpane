@@ -12,6 +12,7 @@ import {
   type Paint,
   type Props,
 } from "@drawpane/model";
+import { MISSING_GLYPH_FAMILY } from "./missing-glyph-font";
 import { type TextSpan, textSpans } from "./rich-text";
 
 export interface TextMeasurer {
@@ -35,6 +36,31 @@ export interface TextMeasurer {
   metrics?(font: string): FontMetrics | null;
   /** Bumped whenever earlier widths stop being right (a web font arrived), so cached layouts go too. */
   readonly generation?: number;
+  /**
+   * The family text named `family` at `size` px is drawn in: itself, or what
+   * a font alias stands in for it (decision 0036). Missing: itself.
+   */
+  family?(family: string, size: number): string;
+}
+
+/**
+ * Which family text is drawn in, where font aliases are known (decision
+ * 0036): the browser's font registry, the Worker's team lookup. A measurer
+ * that has one answers `family` from it.
+ */
+export interface FontResolver {
+  /** The family text named `family` at `size` px is drawn in. */
+  family(family: string, size: number): string;
+  /** Families text named `family` may be drawn in besides itself (by size): what to load ahead. */
+  standIns(family: string): readonly string[];
+  /** Bumped when what families resolve to may have changed. */
+  readonly generation: number;
+}
+
+/** The family text in `props` is drawn in, through the measurer's aliases when it has any. */
+export function drawnFamily(props: Props, fonts?: Pick<TextMeasurer, "family"> | null): string {
+  const family = getProp(props, "fontFamily");
+  return fonts?.family?.(family, getProp(props, "fontSize")) ?? family;
 }
 
 /**
@@ -84,14 +110,21 @@ function settingsKey(
   return tags.map((t) => `${t}=${Number(map[t])}`).join(",");
 }
 
-/** A span's shaping run, or null when it sets no features or axes (the fast path: the canvas draws it). */
-export function shapingRun(props: Props): ShapingRun | null {
+/**
+ * A span's shaping run, or null when it sets no features or axes (the fast
+ * path: the canvas draws it). Its family is the one it's drawn in (`fonts`'s
+ * aliases).
+ */
+export function shapingRun(
+  props: Props,
+  fonts?: Pick<TextMeasurer, "family"> | null,
+): ShapingRun | null {
   const features = getProp(props, "fontFeatures");
   const variations = getProp(props, "fontVariations");
   const featureTags = Object.keys(features).sort();
   const axisTags = Object.keys(variations).sort();
   if (featureTags.length === 0 && axisTags.length === 0) return null;
-  const family = getProp(props, "fontFamily");
+  const family = drawnFamily(props, fonts);
   const weight = getProp(props, "fontWeight");
   const italic = getProp(props, "fontStyle") === "italic";
   const size = getProp(props, "fontSize");
@@ -179,12 +212,18 @@ export interface TextLayout {
   readonly letterSpacing: number;
 }
 
-const FALLBACKS = '"Instrument Sans Variable", system-ui, sans-serif';
+/**
+ * After a text's own family: the missing-glyph box for private-use
+ * characters its font lacks (SF Symbols in a font without them, decision
+ * 0036), then the editor's fallback. The box font covers nothing else, so
+ * every other character falls through to the fallback as before.
+ */
+const FALLBACKS = `"${MISSING_GLYPH_FAMILY}", "Instrument Sans Variable", system-ui, sans-serif`;
 
-export function fontString(props: Props): string {
-  const family = getProp(props, "fontFamily");
+/** A canvas font string for `props`, in the family it's drawn in (`fonts`'s aliases, when given). */
+export function fontString(props: Props, fonts?: Pick<TextMeasurer, "family"> | null): string {
   const style = getProp(props, "fontStyle") === "italic" ? "italic " : "";
-  const name = family.replace(/"/g, "");
+  const name = drawnFamily(props, fonts).replace(/"/g, "");
   // Self-hosted variable fonts register as "<Family> Variable"; list both so either resolves.
   return `${style}${getProp(props, "fontWeight")} ${getProp(props, "fontSize")}px "${name}", "${name} Variable", ${FALLBACKS}`;
 }
@@ -225,7 +264,7 @@ export function lineHeightPx(props: Props, measurer?: TextMeasurer | null): numb
   const lh = getProp(props, "lineHeight");
   if (lh.unit === "px") return lh.value;
   if (lh.unit === "percent") return (size * lh.value) / 100;
-  const m = measurer?.metrics?.(fontString(props));
+  const m = measurer?.metrics?.(fontString(props, measurer));
   // Figma rounds a font's own height to whole pixels (19.36 → 19 for 16 px Inter).
   return m
     ? Math.max(1, Math.round(m.ascent + m.descent))
@@ -287,7 +326,7 @@ interface SpanStyle {
 function spanStyles(node: NodeRecord, measurer: TextMeasurer): SpanStyle[] {
   return textSpans(node).map((span) => {
     const size = getProp(span.props, "fontSize");
-    const font = fontString(span.props);
+    const font = fontString(span.props, measurer);
     const lh = lineHeightPx(span.props, measurer);
     // The font's own height centred in the line box, its baseline an ascent below that, as in
     // Figma and CSS. Without the font's metrics, a typical ascent stands in.
@@ -298,7 +337,7 @@ function spanStyles(node: NodeRecord, measurer: TextMeasurer): SpanStyle[] {
       font,
       size,
       spacing: letterSpacingPx(span.props),
-      run: shapingRun(span.props),
+      run: shapingRun(span.props, measurer),
       ascent,
       descent: lh - ascent,
       lineHeight: lh,
@@ -669,7 +708,7 @@ function computeLayout(
   const last = trimmed.lines[trimmed.lines.length - 1];
   const width = lines.reduce((w, l) => Math.max(w, l.indent + l.width), 0);
   return {
-    font: fontString(props),
+    font: fontString(props, measurer),
     lines: trimmed.lines,
     lineHeight: lineHeightPx(props, measurer),
     width,

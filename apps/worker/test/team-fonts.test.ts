@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import type { TeamFontFace } from "@drawpane/model";
+import type { TeamFontAlias, TeamFontFace } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { teamFontKey } from "../src/api/team-fonts";
 import ttfUrl from "./fixtures/InstrumentSans-Regular.ttf?inline";
@@ -113,5 +113,58 @@ describe("team fonts", () => {
     expect((await remove(b, other.face.id)).status).toBe(200);
     expect(await env.FILES.head(teamFontKey(face.sha))).toBeNull();
     expect((await remove(a, face.id)).status).toBe(404);
+  });
+});
+
+describe("team font aliases", () => {
+  const SF_PRO = {
+    family: "SF Pro",
+    targets: [
+      { family: "SF Pro Text", maxSize: 20 },
+      { family: "SF Pro Display", minSize: 20 },
+    ],
+  };
+  const put = (browser: Browser, teamId: string, body: unknown) =>
+    browser.fetch(`/api/teams/${teamId}/font-aliases`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("sets, lists with the fonts, replaces and removes an alias", async () => {
+    const { browser, teamId } = await signedInUser();
+    const res = await put(browser, teamId, SF_PRO);
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { alias: TeamFontAlias }).alias).toMatchObject({
+      ...SF_PRO,
+      updatedBy: "Ana Lima",
+    });
+    const listed = await browser.json<{ aliases: TeamFontAlias[] }>(`/api/teams/${teamId}/fonts`);
+    expect(listed.aliases.map((a) => [a.family, a.targets])).toEqual([["SF Pro", SF_PRO.targets]]);
+
+    const again = await put(browser, teamId, { family: "SF Pro", targets: [{ family: "Inter" }] });
+    expect(again.status).toBe(200);
+    const after = await browser.json<{ aliases: TeamFontAlias[] }>(`/api/teams/${teamId}/fonts`);
+    expect(after.aliases.map((a) => a.targets)).toEqual([[{ family: "Inter" }]]);
+
+    const remove = () =>
+      browser.fetch(`/api/teams/${teamId}/font-aliases/${encodeURIComponent("SF Pro")}`, {
+        method: "DELETE",
+      });
+    expect((await remove()).status).toBe(200);
+    expect((await remove()).status).toBe(404);
+    const gone = await browser.json<{ aliases: TeamFontAlias[] }>(`/api/teams/${teamId}/fonts`);
+    expect(gone.aliases).toEqual([]);
+  });
+
+  it("refuses aliases that aren't, viewers and strangers", async () => {
+    const { browser, teamId } = await signedInUser();
+    const bad = await put(browser, teamId, { family: "SF Pro", targets: [{ family: "SF Pro" }] });
+    expect(bad.status).toBe(400);
+    expect((await put(browser, teamId, "nonsense")).status).toBe(400);
+    const viewer = await signedInUser("Vi Ewer", "viewer", teamId);
+    expect((await put(viewer.browser, teamId, SF_PRO)).status).toBe(403);
+    const stranger = await signedInUser("Bo Chen");
+    expect((await put(stranger.browser, teamId, SF_PRO)).status).toBe(404);
   });
 });

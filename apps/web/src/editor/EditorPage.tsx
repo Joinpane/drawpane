@@ -80,6 +80,7 @@ import { Lens } from "./Lens";
 import { BrowseLibrariesDialog } from "./libraries/LibrarySections";
 import { PublishDialog } from "./libraries/PublishDialog";
 import { Minimap } from "./Minimap";
+import { MissingFontsDialog } from "./MissingFonts";
 import {
   chooseImageFiles,
   filesFrom,
@@ -100,7 +101,7 @@ import { textMeasurer } from "./shaping";
 import { Toolbar } from "./Toolbar";
 import { useThumbnailPublisher } from "./thumbnail";
 import { TokensWorkspace } from "./tokens/TokensWorkspace";
-import { uiFor } from "./ui-state";
+import { uiFor, useUi } from "./ui-state";
 import { useViewPreferences } from "./view-preferences";
 import { XrayLegend } from "./XrayLegend";
 import "./editor.css";
@@ -1034,6 +1035,7 @@ function FileEditor({ fileId }: { fileId: string }) {
           <ContextMenus editor={active} ctx={ctx} fileId={fileId} commentsShown={commentsOpen} />
         ) : null}
         <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+        <MissingFonts editor={editor} />
         <BrowseLibrariesDialog
           open={librariesOpen}
           fileId={fileId}
@@ -1386,5 +1388,17 @@ function Notice() {
         </button>
       ) : null}
     </div>
+  );
+}
+
+/** The missing fonts panel, open while the editor's UI state says so. */
+function MissingFonts({ editor }: { editor: Editor }) {
+  const open = useUi(editor, (ui) => ui.missingFonts);
+  return (
+    <MissingFontsDialog
+      editor={editor}
+      open={open}
+      onClose={() => uiFor(editor).set({ missingFonts: false })}
+    />
   );
 }

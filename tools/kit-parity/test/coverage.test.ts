@@ -261,3 +261,57 @@ describe("booleans", () => {
     expect(f.has("layer/ELLIPSE")).toBe(false);
   });
 });
+
+describe("glass", () => {
+  it("compares a glass effect's settings, not only that one is there", async () => {
+    const page = { guid: { sessionID: 0, localID: 1 }, type: "CANVAS", name: "Page" };
+    // As a file saves it: 0 to 1 amounts, depth and frost in px, the light's angle in degrees.
+    const glass = {
+      type: "GLASS",
+      radius: 8,
+      refractionRadius: 40,
+      refractionIntensity: 0.8,
+      specularAngle: 315,
+      specularIntensity: 0.6,
+      chromaticAberration: 0.5,
+    };
+    const layer = (local: number) => ({
+      guid: { sessionID: 1, localID: local },
+      type: "ROUNDED_RECTANGLE",
+      name: "Glass",
+      effects: [glass],
+      parentIndex: { guid: page.guid, position: `${local}` },
+    });
+    const same = {
+      type: "glass",
+      angle: -45,
+      intensity: 60,
+      refraction: 80,
+      depth: 40,
+      dispersion: 50,
+      frost: 8,
+      splay: 0,
+    };
+    const defaults = {
+      type: "glass",
+      angle: -45,
+      intensity: 80,
+      refraction: 80,
+      depth: 20,
+      dispersion: 50,
+      frost: 4,
+      splay: 0,
+    };
+    const result = await measureCoverage(
+      [page, layer(1), layer(2)],
+      [
+        { id: "f0-1", type: "page", parent: "root", props: {} },
+        { id: "f1-1", type: "rect", parent: "f0-1", props: { effects: [same] } },
+        { id: "f1-2", type: "rect", parent: "f0-1", props: { effects: [defaults] } },
+      ],
+    );
+    const f = new Map(result.features.map((x) => [x.key, x]));
+    expect(f.get("effect/GLASS")?.faithful).toBe(1);
+    expect(f.get("effect/GLASS")?.approximate).toBe(1);
+  });
+});

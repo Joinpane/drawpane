@@ -12,6 +12,7 @@
  * jsPDF and svg2pdf load on first use, so they cost nothing until then.
  */
 import {
+  drawnFamily,
   type Editor,
   ExportError,
   exportBounds,
@@ -21,7 +22,6 @@ import {
   type SvgImageSource,
   shapingFace,
   shapingRun,
-  textFaces,
   textSpans,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
@@ -56,13 +56,21 @@ const standard = (family: "helvetica" | "times" | "courier", face: Face): PdfFon
   style: face.italic ? "italic" : "normal",
 });
 
-/** Every face the text inside some layers is set in. */
+/** Every face the text inside some layers is drawn in (through font aliases, decision 0036). */
 function facesIn(editor: Editor, ids: readonly string[]): Face[] {
   const faces = new Map<string, Face>();
   const visit = (id: string) => {
     const node = editor.doc.get(id);
     if (!node || getProp(node.props, "visible") === false) return;
-    if (node.type === "text") for (const face of textFaces(node)) faces.set(faceKey(face), face);
+    if (node.type === "text")
+      for (const span of textSpans(node)) {
+        const face = {
+          family: drawnFamily(span.props, editor.measurer),
+          weight: getProp(span.props, "fontWeight"),
+          italic: getProp(span.props, "fontStyle") === "italic",
+        };
+        faces.set(faceKey(face), face);
+      }
     for (const child of editor.doc.childIds(id)) visit(child);
   };
   for (const id of ids) visit(id);
@@ -77,7 +85,7 @@ function shapedFacesIn(editor: Editor, ids: readonly string[]): ShapingFace[] {
     if (!node || getProp(node.props, "visible") === false) return;
     if (node.type === "text")
       for (const span of textSpans(node)) {
-        const run = shapingRun(span.props);
+        const run = shapingRun(span.props, editor.measurer);
         if (!run) continue;
         const face = shapingFace(run);
         faces.set(`${faceKey(face)}\u0000${face.variable ? "v" : ""}`, face);
