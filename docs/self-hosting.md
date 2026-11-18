@@ -27,7 +27,7 @@ For scripts and CI, every question has a flag: `npm create drawpane my-design --
 
 Agent tools need Workers Paid: on Free, a Worker can't set the CPU limit they need, and 10 ms of CPU can't build an editor for a real file. The rest of Drawpane works on Free within its limits: without the main Worker's five-minute CPU limit, importing, restoring or merging a very large file (hundreds of thousands of layers) can run out of CPU.
 
-When Cloudflare refuses the first deploy because the account is on Free, the installer says so, records `"plan": "free"` in `drawpane.json`, and deploys again without the runner. You can also say so up front with `--plan free`. On Free, the main Worker is deployed without its CPU limit and without the runner's binding, with `AGENT_TOOLS` set to `off`, and agents connecting over MCP are told that agent tools need Workers Paid.
+When Cloudflare refuses the first deploy because the account is on Free (its error 100328, "CPU limits are not supported for the Free plan."), the installer says so, records `"plan": "free"` in `drawpane.json`, and deploys again without the runner. If Cloudflare refuses the CPU limit in other words, the installer asks whether the account is on Free, or, when it can't ask, keeps agent tools on and stops with a warning. You can also say so up front with `--plan free`. With `--plan paid`, it never turns agent tools off. On Free, the main Worker is deployed without its CPU limit and without the runner's binding, with `AGENT_TOOLS` set to `off`, and agents connecting over MCP are told that agent tools need Workers Paid.
 
 After moving to Workers Paid, in the instance's folder:
 

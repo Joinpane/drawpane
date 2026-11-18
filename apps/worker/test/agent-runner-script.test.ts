@@ -7,10 +7,12 @@
  * commits; the room does, and refuses a run someone overtook (`stale`).
  */
 import { env, runInDurableObject } from "cloudflare:test";
-import type { NodeRecord, Op } from "@drawpane/model";
+import { type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { type AgentDeps, agentDeps, callWriteTool } from "../src/agent/call";
 import type { AgentFileSource, AgentRunRequest } from "../src/agent/runner-api";
+import type { NodeRow } from "../src/rooms/node-tables";
+import { putStream, snapshotStream } from "../src/rooms/snapshots";
 import { openSocket, signedInUser } from "./helpers";
 import { call, makeToken } from "./mcp-helpers";
 
@@ -293,5 +295,113 @@ describe("a commit through the runner's script", () => {
     expect(await runnerOf(fileId).stats()).toEqual(before);
     const frames = (await roomOf(fileId).allNodes()).filter((n) => n.props.name === "Once");
     expect(frames).toHaveLength(1);
+  });
+});
+
+describe("a saved version too large for the runner", () => {
+  const PAGE: NodeRow = { id: "P", parent: ROOT_ID, key: "a0", type: "page", props: "{}" };
+  /** The page and `count` empty rectangles, a thousand rows at a time. */
+  function* rows(count: number): Generator<NodeRow[]> {
+    yield [PAGE];
+    for (let from = 0; from < count; from += 1_000)
+      yield Array.from({ length: Math.min(1_000, count - from) }, (_, i) => ({
+        id: `N${from + i}`,
+        parent: "P",
+        key: "a0",
+        type: "rect",
+        props: "{}",
+      }));
+  }
+  const stream = (revn: number, count: number) =>
+    snapshotStream({ fileId: "file", revn, at: Date.now() }, rows(count));
+  /** Logged transactions from revision `from` on, each of up to 10,000 operations. */
+  const logged = (ops: Op[], from: number) =>
+    Array.from({ length: Math.ceil(ops.length / 10_000) }, (_, i) => ({
+      revn: from + i + 1,
+      ops: JSON.stringify(ops.slice(i * 10_000, (i + 1) * 10_000)),
+    }));
+  const run = (fileId: string, source: AgentFileSource) =>
+    runnerOf(fileId).run({ v: 1, fileId, tool: "get_jsx", input: { id: "P" }, source });
+  const OLD = 50_001;
+
+  it("isn't refused when the file shrank since: the runner asks for the room's stream", async () => {
+    const fileId = `saved-${crypto.randomUUID()}`;
+    const key = `test/${fileId}/saved`;
+    // Saved at revision 0 with 50,002 layers; six transactions since delete every rectangle.
+    await putStream(env.FILES, key, stream(0, OLD), 0);
+    const deletes: Op[] = Array.from({ length: OLD }, (_, i) => ({ op: "delete", id: `N${i}` }));
+    const txns = logged(deletes, 0);
+    const revn = txns.length;
+    const saved: AgentFileSource = {
+      kind: "snapshot",
+      key,
+      at: 0,
+      revn,
+      count: 1,
+      copies: "materialized",
+      txns,
+    };
+    // Not refused from history: the file as it is now may fit.
+    expect(await run(fileId, saved)).toEqual({ ok: false, again: true, live: true });
+    expect(await runnerOf(fileId).stats()).toEqual({ revn: null, builds: 1 });
+    // The room's stream at the current revision, one page: it runs.
+    const live: AgentFileSource = {
+      kind: "snapshot",
+      body: stream(revn, 0),
+      at: revn,
+      revn,
+      count: 1,
+      copies: "materialized",
+      txns: [],
+    };
+    expect(await run(fileId, live)).toMatchObject({ ok: true, baseRevn: revn });
+    expect(await runnerOf(fileId).stats()).toEqual({ revn, builds: 2 });
+
+    // Cold again, sent the same saved version: straight to the room's stream, nothing built.
+    await runnerOf(fileId).drop(fileId);
+    expect(await run(fileId, saved)).toEqual({ ok: false, again: true, live: true });
+    expect(await runnerOf(fileId).stats()).toEqual({ revn: null, builds: 2 });
+  });
+
+  it("is refused only from the room's stream, and the refusal kept for that revision", async () => {
+    const fileId = `grew-${crypto.randomUUID()}`;
+    const key = `test/${fileId}/saved`;
+    // Saved small; the log since adds 50,001 rectangles, past what agents work on.
+    await putStream(env.FILES, key, stream(0, 0), 0);
+    const creates: Op[] = Array.from({ length: OLD }, (_, i) => ({
+      op: "create",
+      id: `N${i}`,
+      type: "rect",
+      parent: "P",
+      key: "a0",
+      props: {},
+    }));
+    const txns = logged(creates, 0);
+    const revn = txns.length;
+    const saved: AgentFileSource = {
+      kind: "snapshot",
+      key,
+      at: 0,
+      revn,
+      count: OLD + 1,
+      copies: "materialized",
+      txns,
+    };
+    // The catch-up took it past the limit: the room's stream decides, not the saved version.
+    expect(await run(fileId, saved)).toEqual({ ok: false, again: true, live: true });
+    const live = await run(fileId, {
+      kind: "snapshot",
+      body: stream(revn, OLD),
+      at: revn,
+      revn,
+      count: OLD + 1,
+      copies: "materialized",
+      txns: [],
+    });
+    expect(live).toMatchObject({ ok: false, message: expect.stringMatching(/50,002 layers/) });
+    const builds = (await runnerOf(fileId).stats()).builds;
+    // Measured at that revision: asked again there, refused at once, nothing built.
+    expect(await run(fileId, saved)).toEqual(live);
+    expect((await runnerOf(fileId).stats()).builds).toBe(builds);
   });
 });
