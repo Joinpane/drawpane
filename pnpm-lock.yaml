@@ -221,6 +221,40 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
+  apps/agent-runner:
+    dependencies:
+      '@drawpane/editor':
+        specifier: workspace:*
+        version: link:../../packages/editor
+      '@drawpane/model':
+        specifier: workspace:*
+        version: link:../../packages/model
+      '@drawpane/raster':
+        specifier: workspace:*
+        version: link:../../packages/raster
+      '@drawpane/worker':
+        specifier: workspace:*
+        version: link:../worker
+      '@resvg/resvg-wasm':
+        specifier: 2.6.2
+        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
+      harfbuzzjs:
+        specifier: 1.6.4
+        version: 1.6.4(patch_hash=8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a)
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: 5.20261113.1
+        version: 5.20261113.1
+      '@types/node':
+        specifier: 26.6.6
+        version: 26.6.6
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      wrangler:
+        specifier: 'catalog:'
+        version: 4.161.0(@cloudflare/workers-types@5.20261113.1)(@types/node@26.6.6)
+
   apps/web:
     dependencies:
       '@drawpane/editor':
@@ -314,15 +348,9 @@ importers:
       '@drawpane/raster':
         specifier: workspace:*
         version: link:../../packages/raster
-      '@resvg/resvg-wasm':
-        specifier: 2.6.2
-        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
       '@simplewebauthn/server':
         specifier: 14.1.0
         version: 14.1.0
-      harfbuzzjs:
-        specifier: 1.6.4
-        version: 1.6.4(patch_hash=8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a)
       hono:
         specifier: 4.13.18
         version: 4.13.18
@@ -339,12 +367,18 @@ importers:
       '@drawpane/corpus':
         specifier: workspace:*
         version: link:../../packages/corpus
+      '@resvg/resvg-wasm':
+        specifier: 2.6.2
+        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
       '@simplewebauthn/browser':
         specifier: 14.0.0
         version: 14.0.0
       fast-check:
         specifier: 'catalog:'
         version: 4.10.2
+      harfbuzzjs:
+        specifier: 1.6.4
+        version: 1.6.4(patch_hash=8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a)
       typescript:
         specifier: 'catalog:'
         version: 7.0.2

@@ -1,12 +1,13 @@
 /**
- * Writes the WebAssembly the Worker bundles with each module's memory
+ * Writes the WebAssembly the agent runner bundles with each module's memory
  * capped (decision 0033, item 4.2; the caps are in
  * `@drawpane/raster/wasm-limits`): resvg's and HarfBuzz's, from their
  * packages, into `wasm/` (not committed). A Worker can't compile
  * WebAssembly at run time, so the cap has to be in the file it bundles.
  *
- * Run before anything bundles the Worker: `build`, `dev` and `deploy` do,
- * and so does the vitest config.
+ * Run before anything bundles the runner: `build`, `dev` and `deploy` do,
+ * and so does the main Worker's vitest config, which builds the runner to
+ * test both scripts together.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";

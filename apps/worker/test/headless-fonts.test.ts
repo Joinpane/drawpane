@@ -14,7 +14,7 @@ import {
   headlessFontLoader,
   pickTeamFace,
   unicodeRanges,
-} from "../src/headless/font-files";
+} from "../../agent-runner/src/font-files";
 import ttfUrl from "./fixtures/InstrumentSans-Regular.ttf?inline";
 import woffUrl from "./fixtures/InstrumentSerif-Italic.woff?inline";
 import { type Browser, signedInUser } from "./helpers";

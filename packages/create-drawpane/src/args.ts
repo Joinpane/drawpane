@@ -10,6 +10,7 @@ export const OPTIONS = {
   account: { type: "string" },
   name: { type: "string" },
   domain: { type: "string" },
+  plan: { type: "string" },
   yes: { type: "boolean", short: "y", default: false },
   force: { type: "boolean", default: false },
   help: { type: "boolean", short: "h", default: false },
@@ -21,6 +22,7 @@ const EXAMPLES: Record<string, string> = {
   account: "--account 'My company'",
   name: "--name design",
   domain: "--domain design.example.com",
+  plan: "--plan free",
 };
 
 export function parseCli(argv: readonly string[]) {

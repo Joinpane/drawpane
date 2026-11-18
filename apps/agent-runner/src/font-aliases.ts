@@ -22,8 +22,8 @@ import {
   resolveFontFamily,
   SYSTEM_FONT_FAMILIES,
 } from "@drawpane/model";
-import { teamFontAliases } from "../api/team-fonts";
-import type { Env } from "../env";
+import { teamFontAliases } from "@drawpane/worker/src/api/team-fonts";
+import type { Env } from "./env";
 import { catalogFamily, type GoogleFamily } from "./font-files";
 
 /** How long the team's families and aliases are kept before they're looked up again. */

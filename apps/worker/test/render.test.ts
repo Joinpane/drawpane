@@ -1,10 +1,10 @@
 import { env } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import rasterPackage from "../../../packages/raster/package.json";
-import workerPackage from "../package.json";
+import runnerPackage from "../../agent-runner/package.json";
+import { renderDeps, workerRasteriser } from "../../agent-runner/src/raster";
+import { pickFace, stylesheetFaces } from "../../agent-runner/src/raster/fonts";
 import { teamFontKey } from "../src/api/team-fonts";
-import { renderDeps, workerRasteriser } from "../src/render";
-import { pickFace, stylesheetFaces } from "../src/render/fonts";
 import ttfUrl from "./fixtures/InstrumentSans-Regular.ttf?inline";
 
 const TEAM = "team_render";
@@ -104,7 +104,7 @@ describe("headless rendering in the Worker", () => {
 
 describe("the rasteriser's WebAssembly", () => {
   it("is the version @drawpane/raster's glue was written for", () => {
-    expect(workerPackage.dependencies["@resvg/resvg-wasm"]).toBe(
+    expect(runnerPackage.dependencies["@resvg/resvg-wasm"]).toBe(
       rasterPackage.dependencies["@resvg/resvg-wasm"],
     );
   });

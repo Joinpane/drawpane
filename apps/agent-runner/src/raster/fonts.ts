@@ -15,8 +15,13 @@
  * font, Google turned off): the renderer draws that text in its fallback.
  */
 import { type Face, type FontBytesLoader, isSfnt } from "@drawpane/raster";
-import { fontFileFromGoogle, googleStylesheetUrl, PLAIN_UA, variableFiles } from "../api/fonts";
-import { teamFontKey } from "../api/team-fonts";
+import {
+  fontFileFromGoogle,
+  googleStylesheetUrl,
+  PLAIN_UA,
+  variableFiles,
+} from "@drawpane/worker/src/api/fonts";
+import { teamFontKey } from "@drawpane/worker/src/api/team-fonts";
 import type { Env } from "../env";
 
 /** The weight nearest `wanted`, heavier on a tie (as the editor's font picker chooses). */

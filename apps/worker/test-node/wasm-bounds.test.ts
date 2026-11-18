@@ -37,9 +37,9 @@ import {
   withMemoryMaximum,
 } from "@drawpane/raster/wasm-limits";
 import { afterAll, describe, expect, it } from "vitest";
-import { harfBuzzMeasurerWith } from "../src/agent/harfbuzz-measurer";
-import { STANDIN } from "../src/agent/measurer";
-import { AgentEngine, TEXT_OUT_OF_MEMORY } from "../src/rooms/agent-engine";
+import { AgentEngine, TEXT_OUT_OF_MEMORY } from "../../agent-runner/src/engine";
+import { harfBuzzMeasurerWith } from "../../agent-runner/src/harfbuzz-measurer";
+import { STANDIN } from "../../agent-runner/src/measurer";
 import { insertNodes } from "../src/rooms/node-tables";
 import { NODE_SCHEMA, SqlNodeStore } from "../src/rooms/sql-store";
 import { sqlDouble } from "./doubles";

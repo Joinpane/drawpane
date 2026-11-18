@@ -129,13 +129,15 @@ export class CompactCopies {
   /**
    * `nodes` in the stored form. With a `meter`, what the store keeps and
    * every copy layer the view builds are counted in it (`MemoryStore`,
-   * `CopyView`): building past it throws `BuildTooLarge`.
+   * `CopyView`): building past it throws `BuildTooLarge`. With `store`
+   * (built already, in the same meter, as `MemoryStore.paged` builds one),
+   * that store is kept and `nodes` is ignored.
    */
   constructor(
     nodes: Iterable<NodeRecord> = [],
-    { meter = null }: { meter?: BuildBudget | null } = {},
+    { meter = null, store = null }: { meter?: BuildBudget | null; store?: MemoryStore | null } = {},
   ) {
-    this.store = new MemoryStore(nodes, { meter });
+    this.store = store ?? new MemoryStore(nodes, { meter });
     // The store counts the values; a presented copy only adds its record and an object pointing at them.
     this.view = new CopyView(this.store, { budget: meter, cost: presentedBytes });
     for (const node of this.store.nodes()) {

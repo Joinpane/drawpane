@@ -8,8 +8,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { keyBetween, keysBetween, type NodeRecord, type Op } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { provideHarfBuzzMeasurer } from "../src/agent/harfbuzz";
-import { provideMeasurer } from "../src/agent/measurer";
+import { AGENT_TOOLS_OFF } from "../src/agent/call";
 import type { Env } from "../src/env";
 import { offered } from "../src/mcp/server";
 import { type Browser, openSocket, signedInUser } from "./helpers";
@@ -151,26 +150,19 @@ describe("the agent tools on MCP", () => {
     expect(init.body.result.instructions).toContain("start_session");
   });
 
-  it("are off when no text measurer is configured", () => {
-    // The Worker registers the HarfBuzz measurer as it starts: take it away for this check.
-    provideMeasurer(null);
-    try {
-      const names = offered({ ...env, AGENT_MEASURER: undefined } as unknown as Env).map(
-        (t) => t.name,
-      );
-      expect(names).toContain("get_outline");
-      expect(names).not.toContain("render");
-      expect(names).not.toContain("start_session");
-    } finally {
-      provideHarfBuzzMeasurer();
-    }
+  it("are off on the Workers Free plan (AGENT_TOOLS=off), which agents are told needs Paid", () => {
+    const free = { ...env, AGENT_TOOLS: "off" } as unknown as Env;
+    const names = offered(free).map((t) => t.name);
+    expect(names).toContain("get_outline");
+    expect(names).not.toContain("render");
+    expect(names).not.toContain("start_session");
+    expect(AGENT_TOOLS_OFF).toMatch(/Workers Free plan.*need the Workers Paid plan/);
   });
 
-  it("are on with the HarfBuzz measurer the Worker registers", () => {
-    provideHarfBuzzMeasurer();
-    const names = offered({ ...env, AGENT_MEASURER: undefined } as unknown as Env).map(
-      (t) => t.name,
-    );
+  it("are off without the agent runner, and on with it", () => {
+    const unbound = { ...env, AGENT_RUNNER: undefined } as unknown as Env;
+    expect(offered(unbound).map((t) => t.name)).not.toContain("render");
+    const names = offered(env as unknown as Env).map((t) => t.name);
     expect(names).toContain("render");
     expect(names).toContain("start_session");
   });
