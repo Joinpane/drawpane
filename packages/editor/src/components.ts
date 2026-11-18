@@ -399,6 +399,9 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
       const resize = getProp(from.props, "textAutoResize");
       if (resize === "width") overridden.add("width");
       if (resize !== "none") overridden.add("height");
+      // Glyphs saved with a file were laid out for each copy (decision 0037); a stale set is
+      // never drawn, so the copy's own is kept rather than replaced by its main's.
+      overridden.add("glyphLayout");
     }
     const keys = new Set([...Object.keys(from.props), ...Object.keys(to.props)]);
     for (const prop of keys) {

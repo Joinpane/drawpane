@@ -41,6 +41,12 @@ export interface TextMeasurer {
    * a font alias stands in for it (decision 0036). Missing: itself.
    */
   family?(family: string, size: number): string;
+  /**
+   * Whether nothing here draws text named `family` at `size` px in this
+   * weight and style, after font aliases: it would come out in a fallback
+   * face (decision 0037). Missing: nothing is known to be missing.
+   */
+  missing?(family: string, size: number, weight: number, italic: boolean): boolean;
 }
 
 /**
@@ -51,6 +57,11 @@ export interface TextMeasurer {
 export interface FontResolver {
   /** The family text named `family` at `size` px is drawn in. */
   family(family: string, size: number): string;
+  /**
+   * Whether nothing here draws text named `family` at `size` px in this
+   * weight and style, after aliases. Missing: nothing is known to be missing.
+   */
+  missing?(family: string, size: number, weight: number, italic: boolean): boolean;
   /** Families text named `family` may be drawn in besides itself (by size): what to load ahead. */
   standIns(family: string): readonly string[];
   /** Bumped when what families resolve to may have changed. */

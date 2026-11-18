@@ -33,6 +33,13 @@ import { maskScopes } from "./masks";
 import { NoiseTiles, paintNoise } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { effectReach } from "./reach";
+import {
+  glyphTable,
+  type SavedGlyphGroup,
+  type SavedText,
+  savedGlyphGroups,
+  savedText,
+} from "./saved-glyphs";
 import type { Scene } from "./scene";
 import { dropShadowCast } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
@@ -365,6 +372,8 @@ export class CanvasRenderer {
   readonly #sidePaths = new WeakMap<object, Path2D>();
   /** Shaped text as one outline at its origin, by letter spacing (see #shapedOutline). */
   readonly #shapedRuns = new WeakMap<ShapedText, Map<number, Path2D>>();
+  /** Saved glyphs' paths (decision 0037), per group. */
+  readonly #savedPaths = new WeakMap<SavedGlyphGroup, Path2D>();
   /** Each outline where it was last placed: text that holds still costs nothing per frame. */
   readonly #placedRuns = new WeakMap<Path2D, { x: number; y: number; path: Path2D }>();
   /** What the last screen frame showed, to move it on a pan instead of redrawing. */
@@ -2418,8 +2427,26 @@ export class CanvasRenderer {
     const join = getProp(node.props, "strokeJoin");
     const spaced = "letterSpacing" in ctx;
 
-    /** Each glyph run, where #text draws it: `paint` strokes or fills it. */
-    const eachRun = (c: Ctx, paint: (frag: TextFragment, x: number, y: number) => void) => {
+    const saved = this.#saved(node);
+    const outline = (frag: TextFragment, x: number, y: number) => {
+      const shaped = frag.run ? (this.#measurer.shape?.(frag.text, frag.run) ?? null) : null;
+      return shaped
+        ? this.#placed(this.#shapedOutline(shaped, frag.text, frag.letterSpacing), x, y)
+        : null;
+    };
+    /**
+     * Each glyph run, where #text draws it: `paint` strokes or fills its outline, or its
+     * text where it has none. Saved glyphs (decision 0037) are outlines, a path per group.
+     */
+    const eachRun = (
+      c: Ctx,
+      paint: (path: Path2D | null, frag: TextFragment | null, x: number, y: number) => void,
+    ) => {
+      if (saved) {
+        for (const group of savedGlyphGroups(saved, node))
+          paint(this.#savedPath(group), null, 0, 0);
+        return;
+      }
       for (const line of layout.lines) {
         const x0 = lineOffset(line, width, node.props);
         for (const frag of line.fragments) {
@@ -2427,15 +2454,11 @@ export class CanvasRenderer {
           typeset(c, frag.font);
           if (spaced)
             (c as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
-          paint(frag, x0 + frag.x, drawnBaseline(line, dy));
+          const x = x0 + frag.x;
+          const y = drawnBaseline(line, dy);
+          paint(outline(frag, x, y), frag, x, y);
         }
       }
-    };
-    const outline = (frag: TextFragment, x: number, y: number) => {
-      const shaped = frag.run ? (this.#measurer.shape?.(frag.text, frag.run) ?? null) : null;
-      return shaped
-        ? this.#placed(this.#shapedOutline(shaped, frag.text, frag.letterSpacing), x, y)
-        : null;
     };
     const strokeGlyphs = (c: Ctx, lineWidth: number) => {
       c.save();
@@ -2448,10 +2471,9 @@ export class CanvasRenderer {
         const style = this.#paintStyle(c, paint, width, height);
         if (!style) continue;
         c.strokeStyle = style;
-        eachRun(c, (frag, x, y) => {
-          const path = outline(frag, x, y);
+        eachRun(c, (path, frag, x, y) => {
           if (path) c.stroke(path);
-          else c.strokeText(frag.text, x, y);
+          else if (frag) c.strokeText(frag.text, x, y);
         });
       }
       c.restore();
@@ -2509,10 +2531,9 @@ export class CanvasRenderer {
     // Keep the half inside the glyphs, or the half outside them.
     s.globalCompositeOperation = align === "inside" ? "destination-in" : "destination-out";
     s.fillStyle = "#000";
-    eachRun(s, (frag, x, y) => {
-      const path = outline(frag, x, y);
+    eachRun(s, (path, frag, x, y) => {
       if (path) s.fill(path);
-      else s.fillText(frag.text, x, y);
+      else if (frag) s.fillText(frag.text, x, y);
     });
     s.globalCompositeOperation = "source-over";
     ctx.save();
@@ -2520,6 +2541,52 @@ export class CanvasRenderer {
     ctx.filter = "none";
     ctx.drawImage(scratch, 0, 0, w, h, x0, y0, w, h);
     ctx.restore();
+  }
+
+  /** The saved glyphs a text layer is drawn from (decision 0037), or null. */
+  #saved(node: NodeRecord): SavedText | null {
+    // The text being edited shows every line as it's laid out now.
+    if (node.id === this.whole) return null;
+    return savedText(node, this.#measurer, glyphTable(this.#scene.doc));
+  }
+
+  /** A group of saved glyphs as a path, made once. */
+  #savedPath(group: SavedGlyphGroup): Path2D {
+    let path = this.#savedPaths.get(group);
+    if (!path) {
+      path = new Path2D(group.d);
+      this.#savedPaths.set(group, path);
+    }
+    return path;
+  }
+
+  /** Saved glyphs filled as #text fills laid-out text: each group in its paints, with its bars. */
+  #savedFill(
+    ctx: Ctx,
+    node: NodeRecord,
+    saved: SavedText,
+    width: number,
+    override: string | undefined,
+  ): void {
+    const height = getProp(node.props, "height");
+    const layerFills = getProp(node.props, "fills");
+    const black: Paint[] = [{ type: "solid", color: "#000000" }];
+    const styles = new Map<Paint, string | CanvasGradient | CanvasPattern | null>();
+    for (const group of savedGlyphGroups(saved, node)) {
+      const paints = override
+        ? black
+        : (group.fills ?? (layerFills.length > 0 ? layerFills : black));
+      const path = this.#savedPath(group);
+      for (const paint of paints) {
+        if (paint.visible === false) continue;
+        if (!styles.has(paint)) styles.set(paint, this.#paintStyle(ctx, paint, width, height));
+        const style = override ?? styles.get(paint) ?? null;
+        if (!style) continue;
+        ctx.fillStyle = style;
+        ctx.fill(path);
+        for (const bar of group.bars) ctx.fillRect(bar.x, bar.y, bar.w, bar.h);
+      }
+    }
   }
 
   /**
@@ -2584,6 +2651,12 @@ export class CanvasRenderer {
     // laying the text out (which is most of what drawing a small text costs).
     if (this.#detail && largestFontSize(node) * scale < GREEK_BELOW) {
       this.#greek(ctx, node, width, override);
+      return;
+    }
+    // Its font isn't here and it's as its file laid it out: the glyphs the file saved.
+    const saved = this.#saved(node);
+    if (saved) {
+      this.#savedFill(ctx, node, saved, width, override);
       return;
     }
     const mode = getProp(node.props, "textAutoResize");
