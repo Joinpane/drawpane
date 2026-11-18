@@ -18,10 +18,10 @@ import {
   type BranchChange,
   changedFields,
   changeKey,
+  changeOp,
   editedSince,
   type NodeRecord,
   POSITION,
-  type PropName,
   type Resolution,
   ROOT_ID,
 } from "@drawpane/model";
@@ -319,13 +319,7 @@ export function applyThreeWay(
           // A parent that only came in with this merge was created above.
           if (live(to.parent))
             out.push({ op: "move", id: change.id, parent: to.parent, key: to.key });
-        } else
-          out.push({
-            op: "set",
-            id: change.id,
-            prop: change.field as PropName,
-            value: change.branch === undefined ? null : change.branch,
-          });
+        } else out.push(changeOp(change));
       }
     }
 

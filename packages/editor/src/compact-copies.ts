@@ -32,6 +32,8 @@ import {
   collectSubtree,
   isMainNode,
   isPropName,
+  KEYED_PROPS,
+  keyedResult,
   MemoryStore,
   ModelError,
   type NodeRecord,
@@ -280,7 +282,7 @@ export class CompactCopies {
   #op(tx: Tx, op: Op): void {
     const id = this.#resolve(tx, op.id);
     if (id === null) return; // Inside a layer that was dropped: nothing to do.
-    if (op.op === "set") this.#set(tx, id, op.prop, op.value);
+    if (op.op === "set") this.#set(tx, id, op.prop, op.value, op.key);
     else if (op.op === "delete") this.#delete(tx, id);
     else {
       const parent = this.#resolve(tx, op.parent);
@@ -490,9 +492,13 @@ export class CompactCopies {
   // -------------------------------------------------------------------------
   // Presented operations
 
-  #set(tx: Tx, id: string, prop: string, value: unknown): void {
+  #set(tx: Tx, id: string, prop: string, value: unknown, key?: string): void {
     const kind = this.#kind(id);
     if (kind === "missing") throw new ModelError("not_found", `Node ${id} doesn't exist.`);
+    if (key !== undefined) {
+      this.#setEntry(tx, id, kind, prop, key, value);
+      return;
+    }
     if (kind === "stored" || kind === "record") {
       const node = this.store.get(id) as NodeRecord;
       // A main that stops being one: its instances keep their layers, as stored layers.
@@ -528,8 +534,36 @@ export class CompactCopies {
   }
 
   /**
+   * A keyed set (one entry of a map, `KEYED_PROPS`): as stored on a stored
+   * node or record; on a copy layer or root, through its record like any
+   * value, written there as that one entry's set when the record has the
+   * map already (`#writeOwn`). Its inverse sets the entry back.
+   */
+  #setEntry(tx: Tx, id: string, kind: Kind, prop: string, key: string, value: unknown): void {
+    if (!isPropName(prop)) throw new ModelError("invalid_prop", `Unknown property "${prop}".`);
+    if (kind === "stored" || kind === "record") {
+      tx.inverse.push(this.#put(tx, { op: "set", id, prop, key, value }));
+      return;
+    }
+    const presented = this.view.get(id) as NodeRecord;
+    if (!propAllowed(presented.type, prop))
+      throw new ModelError("invalid_prop", `A ${presented.type} has no "${prop}" property.`);
+    const next = keyedResult(presented, { op: "set", id, prop, key, value });
+    const old = ((presented.props as Record<string, unknown>)[prop] as Record<string, unknown>)?.[
+      key
+    ];
+    const props: Record<string, unknown> = { ...presented.props };
+    if (next === null) delete props[prop];
+    else props[prop] = next;
+    this.#writeOwn(tx, id, props);
+    tx.inverse.push([{ op: "set", id, prop, key, value: old ?? null }]);
+  }
+
+  /**
    * Makes a copy layer's record (or an instance root) hold exactly what
    * `presented` differs in from its main: the stored operations that takes.
+   * A map whose entries are set on their own (`KEYED_PROPS`) that's there
+   * already is written an entry at a time.
    */
   #writeOwn(tx: Tx, id: string, presented: Readonly<Record<string, unknown>>): void {
     const base = this.view.base(id);
@@ -540,10 +574,8 @@ export class CompactCopies {
       const root = this.store.get(id) as NodeRecord;
       const want = own ?? {};
       for (const prop of Object.keys(root.props))
-        if (!(prop in want)) this.#put(tx, { op: "set", id, prop: prop as never, value: null });
-      for (const [prop, value] of Object.entries(want))
-        if (!sameValue((root.props as Record<string, unknown>)[prop], value))
-          this.#put(tx, { op: "set", id, prop: prop as never, value });
+        if (!(prop in want)) this.#putValue(tx, root, prop, null);
+      for (const [prop, value] of Object.entries(want)) this.#putValue(tx, root, prop, value);
       return;
     }
     const record = this.view.record(slot);
@@ -563,11 +595,34 @@ export class CompactCopies {
       return;
     }
     for (const prop of Object.keys(record.props))
-      if (prop !== "path" && !(prop in own))
-        this.#put(tx, { op: "set", id, prop: prop as never, value: null });
-    for (const [prop, value] of Object.entries(own))
-      if (!sameValue((record.props as Record<string, unknown>)[prop], value))
-        this.#put(tx, { op: "set", id, prop: prop as never, value });
+      if (prop !== "path" && !(prop in own)) this.#putValue(tx, record, prop, null);
+    for (const [prop, value] of Object.entries(own)) this.#putValue(tx, record, prop, value);
+  }
+
+  /**
+   * Stores `value` for `prop` on a stored node (a root or a record) when it
+   * differs: a keyed map the node holds already, as its entries' sets.
+   */
+  #putValue(tx: Tx, node: NodeRecord, prop: string, value: unknown): void {
+    const before = (node.props as Record<string, unknown>)[prop];
+    if (sameValue(before ?? null, value)) return;
+    // A record's first value, and its last, go a value at a time too: two people's first
+    // values are two values, not two records (decision 0035, item 15).
+    if (KEYED_PROPS.has(prop as never) && (before || value)) {
+      const was = (before ?? {}) as Record<string, unknown>;
+      const now = (value ?? {}) as Record<string, unknown>;
+      for (const key of new Set([...Object.keys(was), ...Object.keys(now)]))
+        if (!sameValue(was[key], now[key]))
+          this.#put(tx, {
+            op: "set",
+            id: node.id,
+            prop: prop as never,
+            key,
+            value: now[key] ?? null,
+          });
+      return;
+    }
+    this.#put(tx, { op: "set", id: node.id, prop: prop as never, value });
   }
 
   /** Sets that bring copy layers back to how they were presented (overrides last). */

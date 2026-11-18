@@ -494,7 +494,9 @@ const NOT_OVERRIDES = new Set([
 
 /**
  * A copy's links to component properties are its main layer's: Figma lists
- * them on a component's layers, and may leave them off the copies.
+ * them on a component's layers, and may leave them off the copies. A copy
+ * that lists its own (an empty list included: unlinked) keeps them, and
+ * `markOverrides` marks the difference as the copy's own.
  */
 function inheritPropertyLinks(nodes: readonly NodeRecord[], byId: ReadonlyMap<string, NodeRecord>) {
   const done = new Set<string>();

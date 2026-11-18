@@ -558,6 +558,34 @@ export type PropertyValue = z.infer<typeof PropertyValue>;
 /** The most values one instance's record holds: a set's and a variant's definitions, 64 each. */
 export const MAX_PROPERTY_VALUES = 128;
 
+/**
+ * The most characters one instance's record holds in all, keys and values
+ * (decision 0035, item 3). Each value is bounded as a text layer's
+ * `characters` is (200,000), but 128 of them aren't: this keeps a record,
+ * and an operation that creates the node holding it (a paste, an undone
+ * delete, a branch merge), well inside a room's 4 MB message, which each
+ * entry's own write is too. A value that doesn't fit isn't recorded: its
+ * layers hold it, as before records.
+ */
+export const MAX_PROPERTY_VALUES_CHARS = 400_000;
+
+/** What a record (or one entry of it) counts against `MAX_PROPERTY_VALUES_CHARS`. */
+export function propertyValueChars(key: string, value: unknown): number {
+  if (typeof value === "string") return key.length + value.length;
+  if (value && typeof value === "object") {
+    const instance = (value as { instance?: unknown }).instance;
+    return key.length + (typeof instance === "string" ? instance.length : 0);
+  }
+  return key.length + 1;
+}
+
+/** The characters a whole record counts (see `propertyValueChars`). */
+export function propertyValuesChars(values: Readonly<Record<string, unknown>>): number {
+  let n = 0;
+  for (const key in values) n += propertyValueChars(key, values[key]);
+  return n;
+}
+
 /** The values of a layer a component property drives: which property drives each. */
 export const PROP_REF_FIELDS = ["visible", "characters", "instanceOf", "slot"] as const;
 export type PropRefField = (typeof PROP_REF_FIELDS)[number];
@@ -720,7 +748,11 @@ export const PROPS = {
   propValues: prop(
     z
       .record(PropertyId, PropertyValue)
-      .refine((values) => Object.keys(values).length <= MAX_PROPERTY_VALUES, "too many values"),
+      .refine((values) => Object.keys(values).length <= MAX_PROPERTY_VALUES, "too many values")
+      .refine(
+        (values) => propertyValuesChars(values) <= MAX_PROPERTY_VALUES_CHARS,
+        "holds too many characters",
+      ),
     {},
     CONTAINERS,
   ),
@@ -874,6 +906,15 @@ const allowedProps: Record<NodeType, ReadonlySet<PropName>> = Object.fromEntries
     ),
   ]),
 ) as unknown as Record<NodeType, ReadonlySet<PropName>>;
+
+/**
+ * Properties whose value is a map an operation can set one entry of (a
+ * `set` with a `key`), each entry's value checked by the schema given:
+ * an instance's component property values (decision 0035, item 15).
+ */
+export const KEYED_PROPS: ReadonlyMap<PropName, { key: z.ZodType; value: z.ZodType }> = new Map([
+  ["propValues", { key: PropertyId, value: PropertyValue }],
+]);
 
 export function isPropName(name: string): name is PropName {
   return Object.hasOwn(PROPS, name);

@@ -27,11 +27,18 @@ export type CreateOp = {
 };
 /** Deletes a node and everything inside it. */
 export type DeleteOp = { readonly op: "delete"; readonly id: string };
-/** Sets one property. `null` resets it to its default. */
+/**
+ * Sets one property. `null` resets it to its default. With `key`, on a
+ * property whose value is a map (`KEYED_PROPS`: an instance's `propValues`),
+ * it sets that one entry, and `null` removes the entry: entries are written,
+ * undone and merged on their own, so two people setting different entries
+ * never undo each other's (decision 0035, item 15).
+ */
 export type SetOp = {
   readonly op: "set";
   readonly id: string;
   readonly prop: PropName;
+  readonly key?: string;
   readonly value: unknown;
 };
 export type MoveOp = {
@@ -63,7 +70,13 @@ export const OpSchema = z.discriminatedUnion("op", [
     props: z.record(PropKey, z.unknown()),
   }),
   z.object({ op: z.literal("delete"), id: Id }),
-  z.object({ op: z.literal("set"), id: Id, prop: PropKey, value: z.unknown() }),
+  z.object({
+    op: z.literal("set"),
+    id: Id,
+    prop: PropKey,
+    key: PropKey.optional(),
+    value: z.unknown(),
+  }),
   z.object({ op: z.literal("move"), id: Id, parent: Id, key: Key }),
 ]);
 
@@ -84,4 +97,22 @@ export const NodeRecordSchema = z.object({
 /** Parses untrusted input into operations, or throws a `z.ZodError`. */
 export function parseOps(input: unknown): Op[] {
   return OpsSchema.parse(input) as Op[];
+}
+
+/**
+ * What a `set` writes, as properties: `{ [prop]: value }`, or for a keyed
+ * set `{ [prop]: { [key]: value } }`, so what reads ids held in values
+ * (`heldNodeIds`) reads an entry as it reads the map.
+ */
+export function setOpProps(op: SetOp): Props {
+  return (
+    op.key === undefined ? { [op.prop]: op.value } : { [op.prop]: { [op.key]: op.value } }
+  ) as Props;
+}
+
+/** `op` with the value `setOpProps` gave, after a change to `props` (renamed ids). */
+export function withSetProps(op: SetOp, props: Readonly<Props>): SetOp {
+  const value = (props as Record<string, unknown>)[op.prop];
+  if (op.key === undefined) return { ...op, value };
+  return { ...op, value: (value as Record<string, unknown> | undefined)?.[op.key] ?? null };
 }

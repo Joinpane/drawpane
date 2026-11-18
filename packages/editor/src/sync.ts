@@ -64,6 +64,13 @@ export interface SyncEvents {
   restored(by: { readonly userId: string; readonly name: string }, version: RestoredVersion): void;
   /** The room's revision or the count of our edits it hasn't confirmed changed ("Saved · revision N"). */
   progress(revn: number | null, pending: number): void;
+  /**
+   * A teammate's transaction was applied (`ops`, as the room stored them),
+   * our pending edits redone over it: for what must follow from both, which
+   * neither author could see (decision 0035: a layer one added takes the
+   * property value the other set).
+   */
+  remote(ops: readonly Op[]): void;
 }
 
 export interface SyncOptions {
@@ -572,6 +579,7 @@ export class SyncEngine {
       return;
     }
     if (this.#revn !== null && revn <= this.#revn) return; // Already seen.
+    let applied = false;
     this.#doc.batch(() => {
       this.#undoPending();
       try {
@@ -584,7 +592,9 @@ export class SyncEngine {
       }
       this.#revn = revn;
       this.#redoPending();
+      applied = true;
     });
+    if (applied) this.#emit("remote", ops);
   }
 
   #ack(seq: number, revn: number): void {
@@ -721,7 +731,9 @@ export class SyncEngine {
 
 /**
  * Drops `set` operations that a later `set` of the same property overrides,
- * unless a create, delete or move of that node sits between them.
+ * unless a create, delete or move of that node sits between them. A whole
+ * map's set and its entries' (keyed) sets are kept in order: neither is
+ * dropped for the other.
  */
 export function compactOps(ops: readonly Op[]): Op[] {
   const keep = new Array<boolean>(ops.length).fill(true);
@@ -729,7 +741,8 @@ export function compactOps(ops: readonly Op[]): Op[] {
   for (let i = ops.length - 1; i >= 0; i--) {
     const op = ops[i] as Op;
     if (op.op === "set") {
-      const key = `${op.id}\u0000${op.prop}`;
+      // A keyed set (one entry of a map) only overrides a later set of the same entry.
+      const key = `${op.id}\u0000${op.prop}${op.key === undefined ? "" : `\u0000${op.key}`}`;
       if (seen.has(key)) keep[i] = false;
       else seen.add(key);
     } else {

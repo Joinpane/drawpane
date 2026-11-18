@@ -10,7 +10,16 @@
  *   resetting that typography restores the main layer's style, once no other
  *   typography on the layer stays changed.
  */
-import { type BindingKey, getProp, type NodeRecord, type Op, sameValue } from "@drawpane/model";
+import {
+  type BindingKey,
+  boundaryDrivenProps,
+  getProp,
+  isMainNode,
+  type NodeRecord,
+  type Op,
+  ROOT_LOCAL_PROPS,
+  sameValue,
+} from "@drawpane/model";
 import type { Doc } from "./doc";
 import { STYLE_PROPS } from "./text-styles";
 import { KEYS_BY_PROP } from "./variables";
@@ -30,15 +39,27 @@ export function resetDependentOps(
   const sourceId = getProp(node.props, "mirrors");
   const source = sourceId ? doc.get(sourceId) : undefined;
   if (!source) return { ops, overrides };
+  const baseline = baselineOf(doc, node, source);
 
-  // Bindings: the reset keys back as the main layer has them, the others as they are.
+  // Bindings: the reset keys back as the layer it follows has them, the others as they are.
   const keys = props.flatMap((p) => KEYS_BY_PROP.get(p) ?? []) as BindingKey[];
   if (keys.length > 0) {
     const current = getProp(node.props, "bindings");
-    const wanted = getProp(source.props, "bindings");
+    // What the layer follows for each binding's field, and what it follows for all of them.
+    const wantedFor = (key: BindingKey) =>
+      getProp(baseline(BINDING_PROP.get(key) ?? "").props, "bindings")[key];
+    const wanted: Partial<Record<BindingKey, string>> = {};
+    for (const key of new Set([
+      ...Object.keys(getProp(source.props, "bindings")),
+      ...Object.keys(getProp(baseline("").props, "bindings")),
+    ]) as Set<BindingKey>) {
+      const variable = wantedFor(key);
+      if (variable) wanted[key] = variable;
+    }
     const next: Partial<Record<BindingKey, string>> = { ...current };
     for (const key of keys) {
-      if (wanted[key]) next[key] = wanted[key];
+      const variable = wantedFor(key);
+      if (variable) next[key] = variable;
       else delete next[key];
     }
     if (!sameValue(next, current))
@@ -57,7 +78,7 @@ export function resetDependentOps(
 
   // A text style detached by editing typography by hand comes back with the last of it.
   if (node.type === "text" && props.some((p) => STYLE_PROPS.has(p))) {
-    const style = getProp(source.props, "textStyle");
+    const style = getProp(baseline("textStyle").props, "textStyle");
     if (
       style &&
       getProp(node.props, "textStyle") !== style &&
@@ -68,4 +89,28 @@ export function resetDependentOps(
     }
   }
   return { ops, overrides };
+}
+
+/** Each binding key's field (the inverse of `KEYS_BY_PROP`). */
+const BINDING_PROP = new Map<BindingKey, string>();
+for (const [prop, keys] of KEYS_BY_PROP) for (const key of keys) BINDING_PROP.set(key, prop);
+
+/**
+ * What a copy layer follows for a field, as sync does (decision 0035,
+ * item 3): its main layer; but a nested instance swapped for another
+ * component follows that component for everything except where it sits
+ * (its root-local fields) and the fields the outer component's
+ * properties drive, which stay its main layer's.
+ */
+function baselineOf(doc: Doc, node: NodeRecord, source: NodeRecord): (prop: string) => NodeRecord {
+  const own = getProp(node.props, "instanceOf");
+  const swapped =
+    own &&
+    own !== getProp(source.props, "instanceOf") &&
+    getProp(node.props, "overrides").includes("instanceOf")
+      ? doc.get(own)
+      : undefined;
+  if (!swapped || !isMainNode(swapped)) return () => source;
+  const boundary = new Set([...ROOT_LOCAL_PROPS, ...boundaryDrivenProps(source)]);
+  return (prop) => (boundary.has(prop) ? source : swapped);
 }

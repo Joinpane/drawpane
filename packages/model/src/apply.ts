@@ -5,6 +5,7 @@ import { isValidOrderKey } from "./order-key";
 import {
   CHILD_TYPES,
   isPropName,
+  KEYED_PROPS,
   NODE_TYPES,
   type NodeType,
   PROPS,
@@ -204,8 +205,35 @@ function checkRecord(store: NodeStore, op: CreateOp): void {
   }
 }
 
+/**
+ * The map a keyed set (`op.key`) leaves on `node`, checked: the entry set,
+ * or removed when `op.value` is null; null when the map is left empty.
+ */
+export function keyedResult(node: NodeRecord, op: SetOp): Record<string, unknown> | null {
+  const spec = KEYED_PROPS.get(op.prop);
+  if (!spec) throw new ModelError("invalid_prop", `"${op.prop}" has no entries to set one of.`);
+  const key = op.key as string;
+  if (!spec.key.safeParse(key).success)
+    throw new ModelError("invalid_value", `"${op.prop}" can't have an entry "${key}".`);
+  if (op.value !== null && !spec.value.safeParse(op.value).success)
+    throw new ModelError("invalid_value", `"${op.prop}.${key}" is invalid.`);
+  const before = node.props[op.prop] as Record<string, unknown> | undefined;
+  const next: Record<string, unknown> = { ...(before ?? {}) };
+  if (op.value === null) delete next[key];
+  else next[key] = op.value;
+  return Object.keys(next).length > 0 ? next : null;
+}
+
 function applySet(store: NodeStore, op: SetOp): Op[] {
   const node = requireNode(store, op.id);
+  if (op.key !== undefined) {
+    // One entry of a map: checked, and undone, on its own (decision 0035, item 15).
+    const next = keyedResult(node, op);
+    checkValue(node.type, op.prop, next);
+    const previous = (node.props[op.prop] as Record<string, unknown> | undefined)?.[op.key];
+    store.setProp(op.id, op.prop, next === null ? undefined : next);
+    return [{ op: "set", id: op.id, prop: op.prop, key: op.key, value: previous ?? null }];
+  }
   checkValue(node.type, op.prop, op.value);
   if (op.prop === "path") {
     throw new ModelError("invalid_prop", "An override record's path doesn't change.");

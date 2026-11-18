@@ -24,6 +24,23 @@ export interface DocChange {
 
 type Listener = (change: DocChange) => void;
 
+/**
+ * Properties whose change can change which layers are in which instance's
+ * copy, or which component property a layer references: what bumps
+ * `Doc.structure`.
+ */
+const STRUCTURE_PROPS: ReadonlySet<string> = new Set([
+  "propRefs",
+  "instanceOf",
+  "mirrors",
+  "isComponent",
+  "isComponentSet",
+  "exposeProps",
+]);
+
+const changesStructure = (ops: readonly Op[]) =>
+  ops.some((op) => op.op !== "set" || STRUCTURE_PROPS.has(op.prop));
+
 /** How many recent changes `changesSince` can replay, and how many ids they may hold in all. */
 const LOG_CHANGES = 256;
 const LOG_IDS = 2_000_000;
@@ -70,6 +87,7 @@ export class Doc {
   #compact: CompactCopies | null;
   readonly #listeners = new Set<Listener>();
   #version = 0;
+  #structure = 0;
   /** Changes collected while a batch is open; flushed as one notification. */
   #pending: { ids: Set<string>; parents: Set<string>; reset: boolean } | null = null;
   #batchDepth = 0;
@@ -106,6 +124,17 @@ export class Doc {
 
   get version(): number {
     return this.#version;
+  }
+
+  /**
+   * Moves (at once, inside a batch too) whenever layers are made, deleted
+   * or moved, or a value that decides which instance's copy a layer is in
+   * or which component property it references changes: a cache of what
+   * depends only on those (the layers each property drives) is good while
+   * it stays the same. Typing, recolouring and the like leave it.
+   */
+  get structure(): number {
+    return this.#structure;
   }
 
   get size(): number {
@@ -227,6 +256,7 @@ export class Doc {
    * already accepted), so nothing is refused for depth.
    */
   apply(ops: readonly Op[], options: ApplyOptions = {}): Op[] {
+    if (changesStructure(ops)) this.#structure++;
     if (this.#compact) {
       const applied = this.#compact.apply(ops, options);
       this.#lastStored = applied.stored;
@@ -245,6 +275,7 @@ export class Doc {
   /** Applies operations on the stored form as they are (compact copies; the same as `apply` otherwise). */
   applyStored(ops: readonly Op[], options: ApplyOptions = {}): Op[] {
     if (!this.#compact) return this.apply(ops, options);
+    if (changesStructure(ops)) this.#structure++;
     const applied = this.#compact.applyStored(ops, options);
     this.#lastStored = applied.stored;
     this.#lastStoredInverse = applied.storedInverse;
@@ -254,6 +285,7 @@ export class Doc {
 
   /** Replaces the whole document, e.g. from a snapshot (in the materialized form). */
   reset(nodes: Iterable<NodeRecord>): void {
+    this.#structure++;
     this.#meter = null;
     if (this.#compactCopies) {
       // The room's converter (decision 0029), so a document converted here is what the room stores.
@@ -285,6 +317,7 @@ export class Doc {
     copies?: CopiesFormat,
     { meter = null }: { readonly meter?: BuildBudget | null } = {},
   ): void {
+    this.#structure++;
     if (copies !== undefined) this.#compactCopies = copies === "compact";
     if (meter) {
       // The meter counts from what's kept now: the log so far is let go of (a reset replays nothing).

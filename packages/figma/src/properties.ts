@@ -95,7 +95,13 @@ export function convertDefinitions(
   return out;
 }
 
-/** A layer's references to properties, by the field each drives. */
+/**
+ * A layer's references to properties, by the field each drives; null when
+ * it has none to say (it takes its main layer's, if it's a copy). An
+ * explicitly empty set of references (`{}`) is kept, as `{}`: a copy's
+ * layer unlinked from its main layer's properties, whose differences are
+ * its own and which setting a property leaves alone (decision 0035).
+ */
 export function convertReferences(
   references: Figma.Node["componentPropertyReferences"],
 ): Record<string, string> | null {
@@ -104,5 +110,5 @@ export function convertReferences(
   if (references.visible) out.visible = propertyId(references.visible);
   if (references.characters) out.characters = propertyId(references.characters);
   if (references.mainComponent) out.instanceOf = propertyId(references.mainComponent);
-  return Object.keys(out).length > 0 ? out : null;
+  return out;
 }

@@ -13,7 +13,7 @@ import { ROOT_ID } from "./ids";
 import type { DocReader } from "./libraries";
 import { stableJson } from "./libraries";
 import type { NodeRecord, Op } from "./ops";
-import type { PropName } from "./schema";
+import { KEYED_PROPS, type PropName } from "./schema";
 
 /** Where a node sits: its parent and its order key there. */
 export const POSITION = "position" as const;
@@ -36,6 +36,12 @@ export type BranchChange =
       readonly id: string;
       /** A property, or `position` for a move. */
       readonly field: PropName | typeof POSITION;
+      /**
+       * For a map a change sets entries of (`KEYED_PROPS`: an instance's
+       * component property values), the entry: each is its own change, so
+       * changes to different entries never conflict (decision 0035).
+       */
+      readonly key?: string;
       readonly base: unknown;
       readonly branch: unknown;
       /** What main has now; `undefined` when main deleted the node. */
@@ -85,6 +91,10 @@ export function changedFields(
     const a = after.get(field);
     if (same(a, b)) continue;
     const m = onMain ? onMain.get(field) : undefined;
+    if (KEYED_PROPS.has(field as PropName)) {
+      changes.push(...changedEntries(node.id, field as PropName, b, a, m, onMain === null));
+      continue;
+    }
     const conflict = onMain === null || (!same(m, b) && !same(m, a));
     changes.push({
       kind: "changed",
@@ -97,6 +107,40 @@ export function changedFields(
     });
   }
   return changes;
+}
+
+/** A map's entries, as `changedFields` compares them (none: an empty map). */
+const entries = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+
+/** The changes to a keyed map's entries: one per entry that differs, as `changedFields` makes them. */
+function changedEntries(
+  id: string,
+  field: PropName,
+  base: unknown,
+  branch: unknown,
+  main: unknown,
+  mainDeleted: boolean,
+): BranchChange[] {
+  const b = entries(base);
+  const a = entries(branch);
+  const m = entries(main);
+  const out: BranchChange[] = [];
+  for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
+    if (same(a[key], b[key])) continue;
+    const conflict = mainDeleted || (!same(m[key], b[key]) && !same(m[key], a[key]));
+    out.push({
+      kind: "changed",
+      id,
+      field,
+      key,
+      base: b[key],
+      branch: a[key],
+      main: mainDeleted ? undefined : m[key],
+      conflict,
+    });
+  }
+  return out;
 }
 
 /**
@@ -164,8 +208,7 @@ export function mergeOps(
   resolutions: ReadonlyMap<string, Resolution> = new Map(),
 ): Op[] {
   const ops: Op[] = [];
-  const keyOf = (c: BranchChange) => (c.kind === "changed" ? `${c.id}:${c.field}` : c.id);
-  const take = (c: BranchChange) => !c.conflict || resolutions.get(keyOf(c)) === "branch";
+  const take = (c: BranchChange) => !c.conflict || resolutions.get(changeKey(c)) === "branch";
 
   // Added: parents before children, each only if its parent is (or will be) there.
   const added = new Set(changes.filter((c) => c.kind === "added" && take(c)).map((c) => c.id));
@@ -197,13 +240,7 @@ export function mergeOps(
       const to = c.branch as { parent: string; key: string };
       if (to.parent === ROOT_ID || main.get(to.parent) || placed.has(to.parent))
         ops.push({ op: "move", id: c.id, parent: to.parent, key: to.key });
-    } else
-      ops.push({
-        op: "set",
-        id: c.id,
-        prop: c.field,
-        value: c.branch === undefined ? null : c.branch,
-      });
+    } else ops.push(changeOp(c));
   }
 
   for (const c of changes)
@@ -211,9 +248,21 @@ export function mergeOps(
   return ops;
 }
 
-/** A change's key in `resolutions`. */
+/** A change's key in `resolutions`: `id`, `id:field`, or `id:field:entry` for a map's entry. */
 export function changeKey(change: BranchChange): string {
-  return change.kind === "changed" ? `${change.id}:${change.field}` : change.id;
+  if (change.kind !== "changed") return change.id;
+  return change.key === undefined
+    ? `${change.id}:${change.field}`
+    : `${change.id}:${change.field}:${change.key}`;
+}
+
+/** The operation that takes a changed property (or one entry of a map) to the branch's value. */
+export function changeOp(change: Extract<BranchChange, { kind: "changed" }>): Op {
+  const value = change.branch === undefined ? null : change.branch;
+  const prop = change.field as PropName;
+  return change.key === undefined
+    ? { op: "set", id: change.id, prop, value }
+    : { op: "set", id: change.id, prop, key: change.key, value };
 }
 
 /** Someone named in a branch's record; null once they've left the instance. */

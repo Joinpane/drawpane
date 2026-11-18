@@ -925,20 +925,26 @@ export function resetAllOverridesOps(doc: Doc, instanceId: string): Op[] {
     if (!node) continue;
     if (getProp(node.props, "overrides").length > 0)
       ops.push({ op: "set", id, prop: "overrides", value: null });
-    // Its property values, and its nested instances', go too (decision 0035).
-    if (Object.keys(getProp(node.props, "propValues")).length > 0)
-      ops.push({ op: "set", id, prop: "propValues", value: null });
+    // Its property values, and its nested instances', go too (decision 0035), each on its own.
+    ops.push(...clearRecordOps(node));
     stack.push(...doc.childIds(id));
   }
   return ops;
+}
+
+/** The operations that remove every value an instance's record holds, a value at a time. */
+export function clearRecordOps(node: NodeRecord): Op[] {
+  return Object.keys(getProp(node.props, "propValues")).map(
+    (key): Op => ({ op: "set", id: node.id, prop: "propValues", key, value: null }),
+  );
 }
 
 /** Turns an instance into a plain frame: no link to the main component, nothing synced. */
 export function detachOps(doc: Doc, instanceId: string): Op[] {
   const ops: Op[] = [{ op: "set", id: instanceId, prop: "instanceOf", value: null }];
   // A frame has no properties to set: what they set stays on its layers.
-  if (Object.keys(getProp(doc.get(instanceId)?.props ?? {}, "propValues")).length > 0)
-    ops.push({ op: "set", id: instanceId, prop: "propValues", value: null });
+  const instance = doc.get(instanceId);
+  if (instance) ops.push(...clearRecordOps(instance));
   const stack = [...doc.childIds(instanceId)];
   while (stack.length > 0) {
     const id = stack.pop() as string;

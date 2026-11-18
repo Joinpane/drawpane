@@ -38,9 +38,11 @@ import {
   renameHeldIds,
   type ServerMessage,
   SNAPSHOT_CHUNK_SIZE,
+  setOpProps,
   snapshotCopies,
   summarizeEdits,
   type VersionReason,
+  withSetProps,
 } from "@drawpane/model";
 import { fileFontLoader } from "../agent/harfbuzz";
 import { agentMeasurer } from "../agent/measurer";
@@ -2928,10 +2930,10 @@ export class FileRoom extends DurableObject<Env> {
             out.push(op);
             continue;
           }
-          const value = { [op.prop]: op.value };
+          const value = setOpProps(op) as Record<string, unknown>;
           const checked = held(value);
           if (!checked) return refusal;
-          out.push(checked === value ? op : ({ ...op, value: checked[op.prop] } as Op));
+          out.push(checked === value ? op : withSetProps(op, checked as Props));
           continue;
         }
         if (!made.has(op.id)) {
