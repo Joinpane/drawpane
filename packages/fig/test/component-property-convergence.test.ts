@@ -196,13 +196,11 @@ function check(
   // A tab from before properties is refused nothing for what it is: its edits are ordinary ones.
   // What any client's edit is refused on main still is: one of a layer a teammate removed meanwhile
   // (a variant switch rebuilds the layers), and with compact copies one of a copy layer a teammate
-  // detached meanwhile (its override record would be made where the plain layer is now).
+  // detached meanwhile, its override record made where the plain layer is now, or under what's a
+  // plain frame now (both reproduced on main without properties: a follow-up for compact copies).
+  const onMain = new Set(["not_found", "already_exists", "invalid_parent"]);
   if (oldTab)
-    expect(
-      room.rejected.filter(
-        (r) => r.client === OLD_TAB && r.code !== "not_found" && r.code !== "already_exists",
-      ),
-    ).toEqual([]);
+    expect(room.rejected.filter((r) => r.client === OLD_TAB && !onMain.has(r.code))).toEqual([]);
   expectAgreement(room, "i");
 }
 
