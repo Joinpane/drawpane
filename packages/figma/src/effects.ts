@@ -6,7 +6,7 @@
  */
 import { DEFAULT_GLASS, DEFAULT_NOISE, DEFAULT_TEXTURE, type Effect } from "@drawpane/model";
 import type { Notes } from "./notes";
-import { hexColor } from "./paint";
+import { blendMode, hexColor } from "./paint";
 import type * as Figma from "./rest";
 
 const NOISE_TYPES = { MONOTONE: "mono", DUOTONE: "duo", MULTITONE: "multi" } as const;
@@ -29,6 +29,7 @@ export function convertEffect(e: Figma.Effect, notes: Notes): Effect | null {
         ...(e.type === "DROP_SHADOW" && e.showShadowBehindNode === false
           ? { showBehind: false }
           : {}),
+        ...(blendMode(e.blendMode) ? { blendMode: blendMode(e.blendMode) } : {}),
         ...visible,
       };
     case "LAYER_BLUR":

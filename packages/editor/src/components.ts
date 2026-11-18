@@ -468,6 +468,9 @@ export function syncInstanceOps(
         ? constrainedValues(to, from, doc.get(to.parent), doc.get(from.parent))
         : {};
     for (const prop of laidOut) if (!(prop in derived)) overridden.add(prop);
+    // Glyphs saved with a file were laid out for each copy (decision 0037); a stale set is never
+    // drawn, so the copy's own is kept rather than replaced by its main's.
+    if (from.type === "text") overridden.add("glyphLayout");
     // Driven fields are the record's, or the main layer's: never an override (decision 0035).
     const source: Record<string, unknown> = { ...from.props };
     const drives = new Set<string>();

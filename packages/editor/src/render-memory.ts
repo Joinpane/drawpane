@@ -15,7 +15,10 @@
  *   at once; one after another, one at a time. A single shape with opacity
  *   or a blend mode, and text, are drawn straight onto the picture;
  * - for a layer with a shadow, blur, glass, noise or texture, its own layer
- *   and the buffers its filter works in, the size of its paint.
+ *   and the buffers its filter works in, the size of its paint;
+ * - for a layer, paint or shadow blending by linear dodge or burn, the
+ *   three groups SVG export builds the blend from (svg-linear.ts), the
+ *   size of the layer's paint.
  *
  * Bytes per pixel, measured on resvg 2.6.2 at 512 to 2048 px (uncapped, the
  * memory it grew to): a flat picture 8; a clip, a group or a mask 4.3 to 5
@@ -78,6 +81,15 @@ export function bytesPerPixel(scene: Scene, ids: readonly string[], bounds: Rect
       if (effects.some((e) => e.type === "layer-blur")) filter += BLUR;
       // A filtered layer and its buffers are the size of its paint.
       if (filter > 0) own += (LAYER + filter) * share(node);
+      const linear = (mode: string | undefined) =>
+        mode === "linear-dodge" || mode === "linear-burn";
+      if (
+        linear(getProp(node.props, "blendMode")) ||
+        getProp(node.props, "fills").some((p) => linear(p.blendMode)) ||
+        getProp(node.props, "strokes").some((p) => linear(p.blendMode)) ||
+        effects.some((e) => "blendMode" in e && linear(e.blendMode))
+      )
+        own += 3 * LAYER * share(node);
       if (children.length > 0) {
         if (node.type === "frame" && getProp(node.props, "clipContent")) own += LAYER;
         if (getProp(node.props, "opacity") < 1 || getProp(node.props, "blendMode") !== "normal")

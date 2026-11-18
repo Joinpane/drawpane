@@ -573,6 +573,52 @@ describe("layers", () => {
     expect(copy?.props.mirrors).toBe("f4-2");
   });
 
+  it("keeps shadows' and paints' blend modes, linear dodge and burn included", () => {
+    // Open Pencil's type leaves the linear pair out; its reader keeps them as the file has them.
+    const linear = (mode: string) => mode as "NORMAL";
+    const { page, add, adapt } = scene();
+    const rect = add("RECTANGLE", page.id, "6:9", {
+      width: 10,
+      height: 10,
+      blendMode: linear("LINEAR_BURN"),
+      fills: [
+        {
+          type: "SOLID",
+          color: { r: 0.5, g: 0.5, b: 0.5, a: 1 },
+          opacity: 1,
+          visible: true,
+          blendMode: linear("LINEAR_DODGE"),
+        },
+      ],
+      effects: [
+        {
+          type: "INNER_SHADOW",
+          color: { r: 0.16, g: 0.16, b: 0.16, a: 1 },
+          offset: { x: 0, y: 1 },
+          radius: 2,
+          spread: 0,
+          visible: true,
+          blendMode: linear("LINEAR_DODGE"),
+        },
+        {
+          type: "DROP_SHADOW",
+          color: { r: 0, g: 0, b: 0, a: 0.4 },
+          offset: { x: 0, y: 4 },
+          radius: 8,
+          spread: 0,
+          visible: true,
+          blendMode: "NORMAL",
+        },
+      ],
+    });
+    const adapted = adapt(rect);
+    expect(adapted.blendMode).toBe("LINEAR_BURN");
+    expect(adapted.fills?.[0]?.blendMode).toBe("LINEAR_DODGE");
+    expect(adapted.effects?.[0]?.blendMode).toBe("LINEAR_DODGE");
+    // Normal is what a missing one means.
+    expect(adapted.effects?.[1]).not.toHaveProperty("blendMode");
+  });
+
   it("maps paints: solid, gradient handles, a cropped image", () => {
     const { page, add, adapt } = scene();
     const rect = add("RECTANGLE", page.id, "6:1", {

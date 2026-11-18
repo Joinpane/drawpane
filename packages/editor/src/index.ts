@@ -54,6 +54,7 @@ export * from "./render";
 export * from "./render-memory";
 export * from "./replace-fonts";
 export * from "./rich-text";
+export * from "./saved-glyphs";
 export * from "./scene";
 export * from "./shaping";
 export * from "./size-pill";

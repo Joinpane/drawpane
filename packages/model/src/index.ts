@@ -6,6 +6,7 @@ export * from "./convert";
 export * from "./copies";
 export * from "./font-aliases";
 export * from "./fonts";
+export * from "./glyphs";
 export * from "./history";
 export * from "./ids";
 export * from "./imports";

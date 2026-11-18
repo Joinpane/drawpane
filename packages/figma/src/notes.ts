@@ -46,6 +46,10 @@ export const NOTE_TEXT = {
     "group, text or line used as a mask no longer masks (only frames and shapes can)",
     "groups, texts or lines used as masks no longer mask (only frames and shapes can)",
   ],
+  "glyphs-dropped": [
+    "text's saved glyph outlines were left out (the file keeps a bounded number)",
+    "texts' saved glyph outlines were left out (the file keeps a bounded number)",
+  ],
   "unsupported-node": [
     "layer of an unsupported kind was skipped",
     "layers of unsupported kinds were skipped",

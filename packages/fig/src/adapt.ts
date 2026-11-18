@@ -10,9 +10,10 @@
  * each layer's bounding box, so the boxes here are worked out the same way.
  */
 import type { Figma } from "@drawpane/figma";
+import type { SavedGlyph } from "@drawpane/model";
 import type { LayoutGrid, SceneGraph, SceneNode, Stroke } from "@open-pencil/scene-graph";
 import { getNodeLocalMatrix } from "@open-pencil/scene-graph/coordinate";
-import { commandsToPath } from "./geometry";
+import { commandsToGlyph, commandsToPath } from "./geometry";
 import type { RestIds } from "./ids";
 import type { FigNotes } from "./notes";
 import { convertEffects, convertFills } from "./paint";
@@ -93,6 +94,39 @@ export interface AdaptContext {
   /** Records by guid, as saved. */
   readonly records: ReadonlyMap<string, RawRecord>;
   readonly notes: FigNotes;
+  /** Glyph outlines read so far, each string kept once however many layers use it. */
+  readonly outlines?: Map<string, string>;
+}
+
+/**
+ * The glyphs Figma laid a text layer out in, with their outlines (decision
+ * 0037), or null when there are none to keep: text on a path, glyphs turned
+ * or stretched (by a resized copy), or one whose outline can't be read.
+ */
+function savedGlyphs(n: SceneNode, outlines: Map<string, string>): SavedGlyph[] | null {
+  const glyphs = n.derivedTextGlyphs;
+  if (!glyphs || glyphs.length === 0 || n.textPathData) return null;
+  const out: SavedGlyph[] = [];
+  for (const g of glyphs) {
+    if ((g.rotation ?? 0) !== 0 || (g.scaleX ?? 1) !== 1 || (g.scaleY ?? 1) !== 1) return null;
+    if (!(g.fontSize > 0) || !Number.isFinite(g.x) || !Number.isFinite(g.y)) return null;
+    const read = commandsToGlyph(g.commandsBlob);
+    if (read === null) return null;
+    let d = outlines.get(read);
+    if (d === undefined) {
+      d = read;
+      outlines.set(d, d);
+    }
+    out.push({
+      d,
+      x: g.x,
+      y: g.y,
+      size: g.fontSize,
+      char: g.firstCharacter ?? out.length,
+      ...(g.advance !== undefined ? { advance: g.advance } : {}),
+    });
+  }
+  return out;
 }
 
 /** The node's REST kind: Open Pencil's, except where it read a kind it doesn't know as a rectangle. */
@@ -377,7 +411,11 @@ export function adaptNode(
   const grids = n.layoutGrids.map((g) => layoutGrid(g, n)).filter((g) => g !== null);
   if (grids.length > 0) node.layoutGrids = grids;
 
-  if (type === "TEXT") Object.assign(node, textFields(n, raw, notes));
+  if (type === "TEXT") {
+    Object.assign(node, textFields(n, raw, notes));
+    const glyphs = savedGlyphs(n, ctx.outlines ?? new Map());
+    if (glyphs) node.drawpaneGlyphs = glyphs;
+  }
   if (n.fillGeometry.length > 0)
     node.fillGeometry = n.fillGeometry.map((g) => ({
       path: commandsToPath(g.commandsBlob),

@@ -668,6 +668,71 @@ describe("drop shadows behind the layer", () => {
   });
 });
 
+describe("blend modes", () => {
+  it("brings every Figma blend mode in as its own, linear dodge and burn included", () => {
+    const modes: Record<string, string | undefined> = {
+      PASS_THROUGH: undefined,
+      NORMAL: undefined,
+      DARKEN: "darken",
+      MULTIPLY: "multiply",
+      LINEAR_BURN: "linear-burn",
+      COLOR_BURN: "color-burn",
+      LIGHTEN: "lighten",
+      SCREEN: "screen",
+      LINEAR_DODGE: "linear-dodge",
+      COLOR_DODGE: "color-dodge",
+      OVERLAY: "overlay",
+      SOFT_LIGHT: "soft-light",
+      HARD_LIGHT: "hard-light",
+      DIFFERENCE: "difference",
+      EXCLUSION: "exclusion",
+      HUE: "hue",
+      SATURATION: "saturation",
+      COLOR: "color",
+      LUMINOSITY: "luminosity",
+    };
+    const layers = Object.keys(modes).map((mode, i) =>
+      node({
+        id: `1:${i + 1}`,
+        type: "RECTANGLE",
+        name: mode,
+        size: { x: 10, y: 10 },
+        relativeTransform: at(0, 0),
+        absoluteBoundingBox: { x: 0, y: 0, width: 10, height: 10 },
+        blendMode: mode,
+        fills: [{ type: "SOLID", color: white, blendMode: mode }],
+        effects: [
+          {
+            type: "INNER_SHADOW",
+            color: { r: 0.16, g: 0.16, b: 0.16, a: 1 },
+            offset: { x: 0, y: 1 },
+            radius: 2,
+            spread: 0,
+            blendMode: mode,
+          },
+          {
+            type: "DROP_SHADOW",
+            color: { r: 0, g: 0, b: 0, a: 0.4 },
+            offset: { x: 0, y: 4 },
+            radius: 8,
+            spread: 0,
+            blendMode: mode,
+          },
+        ],
+      }),
+    );
+    const { nodes } = convertFile(file(...layers));
+    validate(nodes);
+    for (const [mode, ours] of Object.entries(modes)) {
+      const props = byName(nodes, mode).props;
+      expect(getProp(props, "blendMode"), mode).toBe(ours ?? "normal");
+      expect(getProp(props, "fills")[0]?.blendMode, mode).toBe(ours);
+      for (const effect of getProp(props, "effects"))
+        expect("blendMode" in effect ? effect.blendMode : undefined, mode).toBe(ours);
+    }
+  });
+});
+
 describe("image crops", () => {
   it("keeps a crop that reaches past the image: a picture inset in its layer", () => {
     const sha = "a".repeat(64);

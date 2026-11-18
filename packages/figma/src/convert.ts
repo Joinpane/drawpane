@@ -25,6 +25,7 @@ import {
 } from "@drawpane/import-kit";
 import {
   boundaryDrivenProps,
+  GlyphTableBuilder,
   keysBetween,
   laidOutProps,
   type NodeRecord,
@@ -157,6 +158,8 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
 
   /** Instances found, to work out what each one overrides once everything is converted. */
   const instances: string[] = [];
+  /** The glyphs .fig text was laid out in (decision 0037), each outline once. */
+  const glyphs = new GlyphTableBuilder();
 
   /**
    * Converts `node` and its children. `abs` is its parent's page affine,
@@ -251,7 +254,13 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
       Object.assign(props, strokeProps(node, type, images, notes));
     }
     if (type === "rect" || type === "frame") Object.assign(props, corners(node));
-    if (type === "text") Object.assign(props, textProps(node, images, notes));
+    if (type === "text") {
+      Object.assign(props, textProps(node, images, notes));
+      if (node.drawpaneGlyphs) {
+        const layout = glyphs.layout(props, node.drawpaneGlyphs);
+        if (layout) props.glyphLayout = layout;
+      }
+    }
     if (type === "path") Object.assign(props, pathProps(node, notes));
 
     if (type === "frame") {
@@ -354,6 +363,10 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
 
   inheritPropertyLinks(nodes, byId);
   markOverrides(instances, nodes, byId);
+  // The glyph sets go after the pages, at the root.
+  const lastPage = pageKeys[pageKeys.length - 1] ?? null;
+  for (const set of glyphs.sets((n) => keysBetween(lastPage, null, n))) add(set);
+  if (glyphs.skipped > 0) notes.add("glyphs-dropped", glyphs.skipped);
   return { name: file.name, nodes, notes };
 }
 
@@ -490,6 +503,8 @@ const NOT_OVERRIDES = new Set([
   "variantProps",
   "componentProps",
   "componentDescription",
+  // Each copy's text is laid out for it (decision 0037), like a hug size: not an override.
+  "glyphLayout",
 ]);
 
 /**

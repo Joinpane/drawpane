@@ -228,5 +228,26 @@
     "runs": 3.72,
     "paragraphs": 1.22,
     "instrument": 0.45
+  },
+  "linear-blends": {
+    "dodge-paint-probe": 0.3,
+    "burn-paint-probe": 0.47,
+    "dodge-layer-probe": 0.3,
+    "burn-layer-probe": 0.94,
+    "dodge-circles": 0.36,
+    "burn-circles": 0.52,
+    "dodge-paints": 0.52,
+    "burn-paints": 1.03,
+    "vibrant-fills": 0.54,
+    "dodge-gradient": 0.5,
+    "burn-stroke": 0.81,
+    "dodge-layer-frame": 0.31,
+    "inner-dodge": 0.41,
+    "inner-burn": 0.87,
+    "inner-stack": 0.84,
+    "drop-burn": 1.2,
+    "drop-dodge": 0.77,
+    "drop-burn-stripes": 0.34,
+    "drop-mixed": 0.81
   }
 }
