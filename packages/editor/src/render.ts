@@ -168,6 +168,24 @@ const PLACEHOLDER = { light: "#ececea", dark: "#dfdfdc", cell: 8 };
 const BLUR_MAX_PIXELS = 6_000_000;
 const POST_MAX_PIXELS = 16_000_000;
 
+/**
+ * A canvas kept for scratch work, at least w × h: kept as it is while it's
+ * no more than four times that, else made to fit (to a multiple of 64, so
+ * sizes close together share one). Chromium snapshots a canvas that's drawn
+ * from, and copies all of it when it's next drawn into: a canvas grown once
+ * for a whole screen would cost that copy for every strip drawn through it.
+ */
+function fitted(existing: AnyCanvas | null, w: number, h: number): AnyCanvas | null {
+  if (
+    existing &&
+    existing.width >= w &&
+    existing.height >= h &&
+    existing.width * existing.height <= Math.max(4 * w * h, 65_536)
+  )
+    return existing;
+  return scratch(existing, Math.ceil(w / 64) * 64, Math.ceil(h / 64) * 64);
+}
+
 export interface RenderStats {
   drawn: number;
   culled: number;
@@ -1544,17 +1562,10 @@ export class CanvasRenderer {
     resetState(ctx);
   }
 
-  /** A canvas for post effects, by slot (two per nesting depth): kept and grown. */
+  /** A canvas for post effects, by slot (two per nesting depth): kept while it fits (see `fitted`). */
   #postCanvas(slot: number, w: number, h: number): OffscreenCanvas | HTMLCanvasElement | null {
-    let canvas = this.#postCanvases[slot];
-    if (!canvas) {
-      if (typeof OffscreenCanvas !== "undefined") canvas = new OffscreenCanvas(w, h);
-      else if (typeof document !== "undefined") canvas = document.createElement("canvas");
-      else return null;
-      this.#postCanvases[slot] = canvas;
-    }
-    if (canvas.width < w) canvas.width = w;
-    if (canvas.height < h) canvas.height = h;
+    const canvas = fitted(this.#postCanvases[slot] ?? null, w, h);
+    if (canvas) this.#postCanvases[slot] = canvas;
     return canvas;
   }
 
@@ -1590,7 +1601,7 @@ export class CanvasRenderer {
     // Layers above a mask that masks by its picture, gathered to draw together.
     let scope: { mask: NodeRecord; ids: string[] } | null = null;
     const flush = () => {
-      if (scope) this.#drawMasked(ctx, scope.mask, scope.ids, camera, dpr, alpha, blend);
+      if (scope) this.#drawMasked(ctx, scope.mask, scope.ids, camera, dpr, visible, alpha, blend);
       scope = null;
     };
     for (const { id, isMask } of maskScopes(doc, parentId)) {
@@ -1643,23 +1654,29 @@ export class CanvasRenderer {
     ids: readonly string[],
     camera: Camera,
     dpr: number,
+    visible: Rect,
     alpha: number,
     blend: GlobalCompositeOperation,
   ): void {
     if (ids.length === 0) return;
     const region = exportBounds(this.#scene, [mask.id]);
     if (!region) return;
-    const x0 = Math.max(0, Math.floor((region.x * camera.zoom + camera.x) * dpr));
-    const y0 = Math.max(0, Math.floor((region.y * camera.zoom + camera.y) * dpr));
-    const x1 = Math.min(
-      ctx.canvas.width,
-      Math.ceil(((region.x + region.width) * camera.zoom + camera.x) * dpr),
-    );
-    const y1 = Math.min(
-      ctx.canvas.height,
-      Math.ceil(((region.y + region.height) * camera.zoom + camera.y) * dpr),
-    );
-    if (x1 <= x0 || y1 <= y0) return;
+    const whole = {
+      x0: Math.max(0, Math.floor((region.x * camera.zoom + camera.x) * dpr)),
+      y0: Math.max(0, Math.floor((region.y * camera.zoom + camera.y) * dpr)),
+      x1: Math.min(
+        ctx.canvas.width,
+        Math.ceil(((region.x + region.width) * camera.zoom + camera.x) * dpr),
+      ),
+      y1: Math.min(
+        ctx.canvas.height,
+        Math.ceil(((region.y + region.height) * camera.zoom + camera.y) * dpr),
+      ),
+    };
+    if (whole.x1 <= whole.x0 || whole.y1 <= whole.y0) return;
+    const part = this.#maskedPart(whole, camera, dpr, visible);
+    if (!part) return;
+    const { x0, y0, x1, y1 } = part;
     const w = x1 - x0;
     const h = y1 - y0;
     const depth = this.#maskDepth;
@@ -1680,11 +1697,14 @@ export class CanvasRenderer {
       width: w / dpr / camera.zoom,
       height: h / dpr / camera.zoom,
     };
-    // Drawn whole into canvases of their own: not the parts of a partial redraw.
+    // Drawn whole within that part into canvases of their own, not cut to the parts of a partial
+    // redraw. Its layers reading the backdrop see all of it when that's the mask's whole reach;
+    // in a part, only those drawn with all they read (`#fresh`) are drawn, as outside masks.
     const parts = this.#parts;
     const fresh = this.#fresh;
+    const partial = x0 !== whole.x0 || y0 !== whole.y0 || x1 !== whole.x1 || y1 !== whole.y1;
     this.#parts = null;
-    this.#fresh = null;
+    this.#fresh = partial ? fresh : null;
     this.#maskDepth++;
     try {
       for (const id of ids) this.#draw(cctx, id, shifted, dpr, holds, alpha, blend);
@@ -1708,13 +1728,51 @@ export class CanvasRenderer {
     ctx.restore();
   }
 
-  /** Canvases for masked layers and their masks: two per nesting depth, grown as needed. */
+  /**
+   * What of a mask's reach on the canvas (`whole`, device pixels) its
+   * layers are drawn over: where the canvas is being drawn (a pan's strip,
+   * a tile, a change; all of it for a whole frame). A pan along a screen of
+   * masked pictures then draws them over the strip it uncovered, not over
+   * the whole screen each frame. A layer's pixels there don't depend on how
+   * far past them the canvas reaches, but for glass and background blur,
+   * which read around them: a pass that draws one with its effect draws
+   * all it reads too (`#withReaders`). Null when none of it is being drawn.
+   */
+  #maskedPart(
+    whole: { x0: number; y0: number; x1: number; y1: number },
+    camera: Camera,
+    dpr: number,
+    visible: Rect,
+  ): { x0: number; y0: number; x1: number; y1: number } | null {
+    let part: { x0: number; y0: number; x1: number; y1: number } | null = null;
+    for (const r of this.#parts ?? [visible]) {
+      // A pixel or two more, for antialiasing.
+      const x0 = Math.max(whole.x0, Math.floor((r.x * camera.zoom + camera.x) * dpr) - 2);
+      const y0 = Math.max(whole.y0, Math.floor((r.y * camera.zoom + camera.y) * dpr) - 2);
+      const x1 = Math.min(
+        whole.x1,
+        Math.ceil(((r.x + r.width) * camera.zoom + camera.x) * dpr) + 2,
+      );
+      const y1 = Math.min(
+        whole.y1,
+        Math.ceil(((r.y + r.height) * camera.zoom + camera.y) * dpr) + 2,
+      );
+      if (x1 <= x0 || y1 <= y0) continue;
+      part = part
+        ? {
+            x0: Math.min(part.x0, x0),
+            y0: Math.min(part.y0, y0),
+            x1: Math.max(part.x1, x1),
+            y1: Math.max(part.y1, y1),
+          }
+        : { x0, y0, x1, y1 };
+    }
+    return part;
+  }
+
+  /** Canvases for masked layers and their masks: two per nesting depth, kept while they fit (see `fitted`). */
   #maskCanvas(slot: number, w: number, h: number): AnyCanvas | null {
-    const canvas = scratch(
-      this.#maskCanvases[slot] ?? null,
-      Math.max(w, this.#maskCanvases[slot]?.width ?? 0),
-      Math.max(h, this.#maskCanvases[slot]?.height ?? 0),
-    );
+    const canvas = fitted(this.#maskCanvases[slot] ?? null, w, h);
     if (canvas) this.#maskCanvases[slot] = canvas;
     return canvas;
   }

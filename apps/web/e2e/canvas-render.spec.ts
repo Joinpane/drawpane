@@ -163,6 +163,43 @@ test.describe
         e.createLayer("ellipse", { x: 40, y: 20, width: 100, height: 100 }, blurred, {
           fills: [{ type: "solid", color: "#111111" }],
         });
+        // Masked by a fading picture, across the bottom of the view: stripes, and over them a
+        // background blur and glass, which read only what the mask's layers draw.
+        const masked = e.createLayer(
+          "frame",
+          { x: 640, y: 1480, width: 600, height: 320 },
+          e.s.pageId,
+          { fills: [] },
+        );
+        e.createLayer("ellipse", { x: 0, y: 0, width: 600, height: 320 }, masked, {
+          isMask: true,
+          maskType: "alpha",
+          fills: [
+            {
+              type: "linear",
+              from: { x: 0, y: 0.5 },
+              to: { x: 1, y: 0.5 },
+              stops: [
+                { position: 0, color: "#000000" },
+                { position: 1, color: "#00000022" },
+              ],
+            },
+          ],
+        });
+        for (let i = 0; i < 15; i++)
+          e.createLayer("rect", { x: i * 40, y: 0, width: 20, height: 320 }, masked, {
+            fills: [{ type: "solid", color: i % 2 ? "#0b8a3e" : "#7a2bd6" }],
+          });
+        e.createLayer("rect", { x: 60, y: 60, width: 220, height: 120 }, masked, {
+          cornerRadius: 20,
+          fills: [{ type: "solid", color: "#ffffff44" }],
+          effects: [{ type: "background-blur", radius: 16 }],
+        });
+        e.createLayer("rect", { x: 320, y: 120, width: 220, height: 140 }, masked, {
+          cornerRadius: 30,
+          fills: [{ type: "solid", color: "#ffffff22" }],
+          effects: [GLASS],
+        });
         e.zoomTo(1);
       });
       await page.waitForTimeout(800);
