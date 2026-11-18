@@ -393,6 +393,69 @@ describe("the Workers Free plan", () => {
     expect(cloudflare.calls).toEqual([]);
   });
 
+  /** #197's review: a CPU-limit refusal in other words, with 'free' only in the Worker's name. */
+  const unsure = (name: string) =>
+    `✘ [ERROR] A request to the Cloudflare API (/accounts/acc-1/workers/scripts/${name}-agent-runner) failed.\n  Invalid CPU limit: cpu_ms exceeds the allowed value. [code: 10021]`;
+
+  it("never switches an explicit --plan paid off, whatever Cloudflare says", async () => {
+    await install({ dir: "freeform", yes: true }, await deps(new ScriptedUi(false)));
+    cloudflare.calls = [];
+    cloudflare.cpuRefusal = unsure("freeform");
+    const ui = new ScriptedUi(false);
+    await expect(
+      upgrade(
+        { dir: "freeform", yes: true, plan: "paid" },
+        await deps(new ScriptedUi(false), "0.2.0"),
+      ),
+    ).rejects.toThrow(/Invalid CPU limit/);
+    // The runner's deploy was refused: the old main Worker still serves, agent tools on.
+    expect(cloudflare.calls).toEqual(["migrate"]);
+    const saved = await readConfig(join(cwd, "freeform"));
+    expect(saved?.plan).toBe("paid");
+    expect(saved?.version).toBe("0.1.0");
+    expect((await rendered("freeform", "wrangler.jsonc")).vars.AGENT_TOOLS).toBeUndefined();
+
+    // Even Cloudflare's own Free-plan refusal doesn't override it: it warns, and fails.
+    cloudflare.cpuRefusal = null;
+    cloudflare.freePlan = true;
+    await expect(
+      upgrade({ dir: "freeform", yes: true, plan: "paid" }, await deps(ui, "0.2.0")),
+    ).rejects.toThrow(/CPU limits are not supported for the Free plan/);
+    expect(ui.said).toContainEqual(
+      expect.stringMatching(/^warn .*set to Workers Paid.*--plan free/),
+    );
+    expect((await readConfig(join(cwd, "freeform")))?.plan).toBe("paid");
+  });
+
+  it("keeps agent tools on, and says how to choose Free, when the refusal is unclear", async () => {
+    cloudflare.cpuRefusal = unsure("freeform");
+    const ui = new ScriptedUi(false);
+    await expect(install({ dir: "freeform", yes: true }, await deps(ui))).rejects.toThrow(
+      /Invalid CPU limit/,
+    );
+    expect((await readConfig(join(cwd, "freeform")))?.plan).toBeUndefined();
+    expect(ui.said).toContainEqual(
+      expect.stringMatching(/^warn .*agent tools stay on.*--plan free/),
+    );
+    expect(cloudflare.calls).not.toContain("deploy");
+  });
+
+  it("asks when it can, and goes Free only when told", async () => {
+    cloudflare.cpuRefusal = unsure("team");
+    const no = new ScriptedUi(true, ["team", "", true, false]);
+    await expect(install({ dir: "team" }, await deps(no))).rejects.toThrow(/Invalid CPU limit/);
+    expect(no.said).toContainEqual(expect.stringMatching(/^\? .*Workers Free plan\?/));
+    expect((await readConfig(join(cwd, "team")))?.plan).toBeUndefined();
+
+    // Asked again, and it is on Free: no CPU limits from then on.
+    cloudflare.cpuRefusal = null;
+    cloudflare.freePlan = true;
+    const yes = new ScriptedUi(true, [true, false]);
+    await install({ dir: "team" }, await deps(yes));
+    expect(yes.said.some((l) => l.startsWith("? ") && l.includes("Free plan?"))).toBe(false);
+    await expectFree("team");
+  });
+
   it("doesn't mistake another refused deploy for the Free plan", async () => {
     cloudflare.failDeploy = true;
     const ui = new ScriptedUi(false);

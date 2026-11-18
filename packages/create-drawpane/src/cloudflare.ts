@@ -80,13 +80,42 @@ export function isTransient(output: string): boolean {
 }
 
 /**
- * A deploy Cloudflare refused because the account is on the Workers Free
- * plan, which can't set `limits.cpu_ms`. The exact text Cloudflare sends is
- * unverified (no Free account was tried), so this matches loosely: something
- * about CPU limits, and something about the plan.
+ * Cloudflare's refusal of a Worker's CPU limit (`limits.cpu_ms`) on the
+ * Workers Free plan: API error 100328, "CPU limits are not supported for
+ * the Free plan." Seen in Wrangler's output by projects that deployed with
+ * a CPU limit on Free; no Free account was tried here.
  */
-export function isFreePlanRefusal(output: string): boolean {
-  return /cpu.?limit|cpu_ms/i.test(output) && /free/i.test(output);
+export const FREE_PLAN_CODE = 100328;
+export const FREE_PLAN_MESSAGE = "CPU limits are not supported for the Free plan.";
+
+/**
+ * What a refused deploy says about the account's plan:
+ *
+ * - `free`: Cloudflare's own refusal of the CPU limit on the Free plan, by
+ *   its error code or its exact message.
+ * - `unsure`: the refusal is about a CPU limit, but not in those terms. It
+ *   may be the Free plan, or something else (a value out of range).
+ * - null: nothing to do with the plan.
+ *
+ * Only Cloudflare's message counts: the API path Wrangler quotes before it
+ * names the Worker, and a Worker may be named anything (`freeform-agent-runner`).
+ */
+export type PlanRefusal = "free" | "unsure" | null;
+
+export function planRefusal(output: string): PlanRefusal {
+  const said = output.replace(/A request to the Cloudflare API \([^)]*\) failed\.?/g, "");
+  const codes = [...said.matchAll(/\[code: (\d+)\]/g)].map((m) => Number(m[1]));
+  if (codes.includes(FREE_PLAN_CODE)) return "free";
+  const exact = FREE_PLAN_MESSAGE.toLowerCase();
+  for (const line of said.split("\n")) {
+    const message = line
+      .replace(/^\s*(?:✘\s*)?(?:\[ERROR\]\s*)?/, "")
+      .replace(/\s*\[code: \d+\]\s*$/, "")
+      .trim()
+      .toLowerCase();
+    if (message === exact) return "free";
+  }
+  return /\bcpu[ _-]?limits?\b|\bcpu_ms\b/i.test(said) ? "unsure" : null;
 }
 
 /** Waits between tries, longer each time. */

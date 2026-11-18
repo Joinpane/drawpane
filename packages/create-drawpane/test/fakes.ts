@@ -24,6 +24,8 @@ export class FakeCloudflare implements Cloudflare {
   failDeploy: boolean | "main" = false;
   /** On the Workers Free plan: a config with CPU limits is refused, as Cloudflare does. */
   freePlan = false;
+  /** Refuses a config with CPU limits with this output instead (a refusal in other words). */
+  cpuRefusal: string | null = null;
   /** The Workers deployed, by name. */
   scripts = new Set<string>();
   /** Each deployed configuration, parsed, in order. */
@@ -91,11 +93,13 @@ export class FakeCloudflare implements Cloudflare {
       limits?: unknown;
       durable_objects?: { bindings?: { script_name?: string }[] };
     };
+    if (this.cpuRefusal !== null && config.limits)
+      throw new WranglerError("deploy", this.cpuRefusal);
     if (this.freePlan && config.limits)
-      // A guess at Cloudflare's wording (unverified), close to what isFreePlanRefusal expects.
+      // Cloudflare's refusal on Free, as Wrangler prints it (`FREE_PLAN_CODE`).
       throw new WranglerError(
         "deploy",
-        "✘ [ERROR] A request to the Cloudflare API failed.\n  CPU limits are not supported on the Workers Free plan. [code: 100328]",
+        `✘ [ERROR] A request to the Cloudflare API (/accounts/acc-1/workers/scripts/${config.name}) failed.\n  CPU limits are not supported for the Free plan. [code: 100328]`,
       );
     // Cloudflare refuses a binding to a script that doesn't exist.
     for (const binding of config.durable_objects?.bindings ?? [])

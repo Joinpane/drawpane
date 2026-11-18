@@ -124,20 +124,57 @@ export class AgentEngine {
       return warm;
     this.drop();
     const meter = agentMeter(this.#limit);
-    const editor = new Editor({
+    const editor = this.#newEditor();
+    try {
+      editor.doc.resetStored(read(), copies, { meter });
+      this.#checkLayers(editor);
+    } catch (error) {
+      throw asTooLarge(error, this.#limit) ?? error;
+    }
+    return this.#keep(editor, revn, meter);
+  }
+
+  /**
+   * The editor at the room's revision `revn`, built from `pages` as they
+   * arrive (a snapshot read from a stream): each page is counted in the
+   * meter as it's kept, so a file more than the editor may hold throws
+   * `AgentTooLarge` partway, before the pages after it are read, and is
+   * never held whole, not even parsed. Always builds; the warm editor is
+   * let go of first.
+   */
+  async editorFrom(
+    revn: number,
+    pages: AsyncIterable<Iterable<NodeRecord>>,
+    copies: CopiesFormat = "materialized",
+  ): Promise<Editor> {
+    this.drop();
+    const meter = agentMeter(this.#limit);
+    const editor = this.#newEditor();
+    try {
+      await editor.doc.resetStoredPaged(pages, copies, { meter });
+      this.#checkLayers(editor);
+    } catch (error) {
+      throw asTooLarge(error, this.#limit) ?? error;
+    }
+    return this.#keep(editor, revn, meter);
+  }
+
+  #newEditor(): Editor {
+    return new Editor({
       measurer: this.#measurer,
       clientId: "agent",
       frames: NO_FRAMES,
       reducedMotion: () => true,
     });
-    try {
-      editor.doc.resetStored(read(), copies, { meter });
-      // Every copy layer built now, counted as it's built: the editor reads them all soon enough.
-      const layers = editor.doc.size;
-      if (layers > AGENT_MAX_NODES) throw new AgentTooLarge(tooManyLayers(layers));
-    } catch (error) {
-      throw asTooLarge(error, this.#limit) ?? error;
-    }
+  }
+
+  /** Builds every copy layer now, each counted: the editor reads them all soon enough. */
+  #checkLayers(editor: Editor): void {
+    const layers = editor.doc.size;
+    if (layers > AGENT_MAX_NODES) throw new AgentTooLarge(tooManyLayers(layers));
+  }
+
+  #keep(editor: Editor, revn: number, meter: BuildBudget): Editor {
     editor.state.set({ role: "editor", status: "live" });
     this.#editor = editor;
     this.#revn = revn;

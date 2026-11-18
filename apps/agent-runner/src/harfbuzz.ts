@@ -13,6 +13,7 @@ import type { FaceFileLoader } from "@drawpane/editor";
 // HarfBuzz's module with its memory capped, written by scripts/cap-wasm.ts.
 import hbWasm from "../wasm/harfbuzz.wasm";
 import type { Env } from "./env";
+import { type HeadlessFontResolver, headlessFontResolver } from "./font-aliases";
 import { headlessFontLoader } from "./font-files";
 import { harfBuzzMeasurerWith } from "./harfbuzz-measurer";
 import { type HeadlessMeasurer, STANDIN } from "./measurer";
@@ -47,29 +48,46 @@ function loadHarfBuzz(): Promise<HarfBuzz> {
   return harfBuzz;
 }
 
-/** The engine's measurer over HarfBuzz, with font files from `loadFile`. */
-export const harfBuzzMeasurer = (loadFile: FaceFileLoader): HeadlessMeasurer =>
-  harfBuzzMeasurerWith(loadFile, loadHarfBuzz);
+/** The engine's measurer over HarfBuzz, with font files from `loadFile` and aliases from `fonts`. */
+export const harfBuzzMeasurer = (
+  loadFile: FaceFileLoader,
+  fonts: HeadlessFontResolver | null = null,
+): HeadlessMeasurer => harfBuzzMeasurerWith(loadFile, loadHarfBuzz, fonts);
+
+/** A file's team, looked up the first time it's wanted. */
+function fileTeam(env: Env, fileId: string): () => Promise<string | null> {
+  let team: Promise<string | null> | null = null;
+  return () => {
+    team ??= env.DB.prepare("SELECT team_id FROM files WHERE id = ?")
+      .bind(fileId)
+      .first<{ team_id: string }>()
+      .then((row) => row?.team_id ?? null);
+    return team;
+  };
+}
 
 /**
  * A file's font files: its team's fonts, then Google's and the app's own.
  * The team is looked up once, the first time a font is wanted.
  */
 export function fileFontLoader(env: Env, fileId: string): FaceFileLoader {
+  const teamId = fileTeam(env, fileId);
   let loader: Promise<ReturnType<typeof headlessFontLoader>> | null = null;
   const loaderFor = () => {
-    loader ??= env.DB.prepare("SELECT team_id FROM files WHERE id = ?")
-      .bind(fileId)
-      .first<{ team_id: string }>()
-      .then((row) => headlessFontLoader({ env, teamId: row?.team_id ?? null }));
+    loader ??= teamId().then((team) => headlessFontLoader({ env, teamId: team }));
     return loader;
   };
   return async (face) => (await loaderFor())(face);
 }
 
-/** A file's measurer, over its font files. */
+/** A file's font aliases: its team's, and the built-in ones (decision 0036). */
+export function fileFontResolver(env: Env, fileId: string): HeadlessFontResolver {
+  return headlessFontResolver({ env, teamId: fileTeam(env, fileId) });
+}
+
+/** A file's measurer, over its font files, resolving its team's font aliases. */
 export function headlessMeasurer(env: Env, fileId: string): HeadlessMeasurer {
-  return harfBuzzMeasurer(fileFontLoader(env, fileId));
+  return harfBuzzMeasurer(fileFontLoader(env, fileId), fileFontResolver(env, fileId));
 }
 
 /** The measurer for a file: the stand-in when `AGENT_MEASURER=standin`, else HarfBuzz. */

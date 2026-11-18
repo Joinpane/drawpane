@@ -10,7 +10,7 @@ You need Node 22 or newer and a Cloudflare account. The installer signs you in t
 
 Drawpane is two Workers: the main one (named after your instance, say `my-design`) and its agent runner (`my-design-agent-runner`), where AI agents' tools run. The runner has no address and no secrets: only the main Worker calls it. The installer deploys the runner first, then the main Worker, every time. It counts toward your account's Workers (100 on the Free plan).
 
-Agent tools need the Workers Paid plan. On the Free plan, the installer says so, leaves the runner out and turns agent tools off; everything else works. It finds out when Cloudflare refuses the first deploy, or you can say so with `--plan free`. After moving to Workers Paid, run `npm create drawpane@latest upgrade -- --plan paid` to turn them on.
+Agent tools need the Workers Paid plan. On the Free plan, the installer says so, leaves the runner out and turns agent tools off; everything else works. It finds out when Cloudflare refuses the first deploy for the Free plan (and asks, or stops with a warning, when the refusal is unclear), or you can say so with `--plan free`. With `--plan paid`, it never turns agent tools off. After moving to Workers Paid, run `npm create drawpane@latest upgrade -- --plan paid` to turn them on.
 
 The `my-design/` folder is your instance. Keep it: `drawpane.json` records what was chosen and deployed, and it holds no secrets. To upgrade, run this in that folder:
 

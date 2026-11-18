@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   appliedMigrations,
-  isFreePlanRefusal,
   isTransient,
+  planRefusal,
   WranglerError,
   withRetries,
 } from "../src/cloudflare";
@@ -362,21 +362,34 @@ describe("isTransient", () => {
   });
 });
 
-describe("isFreePlanRefusal", () => {
-  // Guesses at Cloudflare's wording: the real text is unverified, so the match is loose.
-  it("knows a deploy refused for CPU limits on the Free plan", () => {
+describe("planRefusal", () => {
+  const api = (name: string) =>
+    `✘ [ERROR] A request to the Cloudflare API (/accounts/acc-1/workers/scripts/${name}) failed.`;
+
+  it("knows Cloudflare's refusal of a CPU limit on the Free plan, by code or exact message", () => {
     expect(
-      isFreePlanRefusal("CPU limits are not supported on the Workers Free plan. [code: 100328]"),
-    ).toBe(true);
-    expect(isFreePlanRefusal("limits.cpu_ms can't be set on the free plan")).toBe(true);
-    expect(isFreePlanRefusal("Setting a CPU limit requires Workers Paid; you're on Free")).toBe(
-      true,
-    );
+      planRefusal(
+        `${api("team-agent-runner")}\n  CPU limits are not supported for the Free plan. [code: 100328]`,
+      ),
+    ).toBe("free");
+    expect(planRefusal("Something new about plans [code: 100328]")).toBe("free");
+    expect(planRefusal("  CPU limits are not supported for the Free plan.")).toBe("free");
   });
 
-  it("doesn't mistake other refusals for it", () => {
-    expect(isFreePlanRefusal("Authentication error [code: 10000]")).toBe(false);
-    expect(isFreePlanRefusal("Exceeded CPU limit [code: 10021]")).toBe(false);
-    expect(isFreePlanRefusal("Your account is on the Free plan: too many Workers")).toBe(false);
+  it("is unsure of other words about a CPU limit, even with 'free' in the Worker's name", () => {
+    // #197's review: 'free' was only in the Worker's name, in the path Wrangler quotes.
+    expect(
+      planRefusal(
+        `${api("freeform-agent-runner")}\nInvalid CPU limit: cpu_ms exceeds the allowed value.`,
+      ),
+    ).toBe("unsure");
+    expect(planRefusal("limits.cpu_ms can't be set on the free plan")).toBe("unsure");
+    expect(planRefusal("Setting a CPU limit requires Workers Paid; you're on Free")).toBe("unsure");
+  });
+
+  it("doesn't mistake other refusals for anything about the plan", () => {
+    expect(planRefusal("Authentication error [code: 10000]")).toBeNull();
+    expect(planRefusal(`${api("freeform")}\nScript too large [code: 10027]`)).toBeNull();
+    expect(planRefusal("Your account is on the Free plan: too many Workers")).toBeNull();
   });
 });

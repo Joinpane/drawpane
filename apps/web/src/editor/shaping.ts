@@ -9,10 +9,14 @@
 import {
   CanvasTextMeasurer,
   type FontBytesLoader,
+  MISSING_GLYPH_FAMILY,
+  missingGlyphFont,
+  PRIVATE_USE_UNICODE_RANGE,
   Shaper,
   ShapingMeasurer,
 } from "@drawpane/editor";
 import { faceFileUrl, variableFileUrl } from "../fonts/font-files";
+import { fonts } from "../fonts/fonts";
 
 /** A face's TrueType or OpenType file, through the font proxy (Google, built-in) or the team's fonts. */
 export const fontBytes: FontBytesLoader = async (face) => {
@@ -24,7 +28,29 @@ export const fontBytes: FontBytesLoader = async (face) => {
 
 export const shaper = new Shaper(fontBytes);
 
-/** A measurer for an editor: the canvas, and the shaper for runs with features or axes. */
+let boxAdded = false;
+/**
+ * The missing-glyph box (decision 0036), for the page and the canvas: every
+ * private-use character a text's font lacks draws as it. Its unicode-range
+ * keeps it from being anyone's first available font, so it never changes a
+ * line's height.
+ */
+export function addMissingGlyphFont(): void {
+  if (boxAdded || typeof document === "undefined" || typeof FontFace === "undefined") return;
+  boxAdded = true;
+  const face = new FontFace(MISSING_GLYPH_FAMILY, missingGlyphFont().slice(0), {
+    unicodeRange: PRIVATE_USE_UNICODE_RANGE,
+  });
+  document.fonts.add(face);
+  void face.load().catch(() => {});
+}
+
+/**
+ * A measurer for an editor: the canvas, the shaper for runs with features or
+ * axes, and the font registry for which family each run is drawn in (font
+ * aliases, decision 0036).
+ */
 export function textMeasurer(): ShapingMeasurer {
-  return new ShapingMeasurer(new CanvasTextMeasurer(), shaper);
+  addMissingGlyphFont();
+  return new ShapingMeasurer(new CanvasTextMeasurer(), shaper, fonts);
 }

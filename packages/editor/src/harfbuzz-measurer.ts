@@ -38,11 +38,14 @@
 import type { NodeRecord } from "@drawpane/model";
 import { getProp } from "@drawpane/model";
 import { isHarfBuzzOutOfMemory, sharedFace } from "./harfbuzz-faces";
+import { isPrivateUse, MISSING_GLYPH_FAMILY, missingGlyphFont } from "./missing-glyph-font";
 import { textSpans } from "./rich-text";
 import { type FontBytesLoader, Shaper, type ShapingFace, shapingFace } from "./shaping";
 import {
   capHeightEm,
+  drawnFamily,
   type FontMetrics,
+  type FontResolver,
   type ShapedText,
   type ShapingRun,
   shapingRun,
@@ -156,21 +159,25 @@ export function parseFont(font: string): ParsedFont | null {
 /**
  * The faces a document's text is measured in: each text layer's family,
  * weight and style (its runs' too), as the canvas draws them, and the
- * shaper's faces for runs that set OpenType features or variable axes.
+ * shaper's faces for runs that set OpenType features or variable axes. With
+ * `fonts`, in the families font aliases draw them in (decision 0036).
  */
-export function measuredFaces(nodes: Iterable<NodeRecord>): MeasuredFace[] {
+export function measuredFaces(
+  nodes: Iterable<NodeRecord>,
+  fonts?: Pick<FontResolver, "family"> | null,
+): MeasuredFace[] {
   const out = new Map<string, MeasuredFace>();
   const add = (face: MeasuredFace) => out.set(measuredKey(face), face);
   for (const node of nodes) {
     if (node.type !== "text") continue;
     for (const span of textSpans(node)) {
       add({
-        family: getProp(span.props, "fontFamily"),
+        family: drawnFamily(span.props, fonts),
         weight: getProp(span.props, "fontWeight"),
         italic: getProp(span.props, "fontStyle") === "italic",
         canvas: true,
       });
-      const run = shapingRun(span.props);
+      const run = shapingRun(span.props, fonts);
       if (run) add(shapingFace(run));
     }
   }
@@ -189,7 +196,7 @@ interface CanvasFace {
   readonly font: HbFont;
   /** Positions per em: the font's units per em times PRECISION. */
   readonly em: number;
-  readonly unicodes: ReadonlySet<number>;
+  readonly unicodes: { has(cp: number): boolean };
   /** The subset a character is drawn from (see `FontFile.subsets`): 0 for a whole file, -1 for none. */
   readonly subset: (cp: number) => number;
   /** Ascent, descent and cap height, in em. */
@@ -292,6 +299,8 @@ export class HarfBuzzMeasurer implements TextMeasurer {
       if (face.canvas) {
         const fallback = { ...face, family: this.fallbackFamily };
         all.set(measuredKey(fallback), fallback);
+        const box = { ...face, family: MISSING_GLYPH_FAMILY };
+        all.set(measuredKey(box), box);
       }
     }
     await Promise.all(
@@ -360,21 +369,31 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     this.#metrics.clear();
   }
 
-  /** The first of the font's families that's ready, noting when that isn't its own. */
+  /**
+   * The first of the font's families that's ready, noting when that isn't
+   * its own. The missing-glyph box never is: as CSS's first available font,
+   * it has to have a space, and the box font has only private-use characters.
+   */
   #faceFor(parsed: ParsedFont): CanvasFace | null {
     const chain = this.#chain(parsed);
-    const first = chain.find((face) => face !== null) ?? null;
+    const families = this.#families(parsed);
+    const first =
+      chain.find((face, i) => face !== null && families[i] !== MISSING_GLYPH_FAMILY) ?? null;
     if (first !== chain[0])
       this.#approximate({ ...parsed, family: parsed.families[0] ?? "" }, "face");
     return first;
   }
 
-  /** The font's families as faces, then the fallback family; null where one isn't ready. */
-  #chain(parsed: ParsedFont): Array<CanvasFace | null> {
-    const families = parsed.families.includes(this.fallbackFamily)
+  /** The font's families, then the fallback family. */
+  #families(parsed: ParsedFont): readonly string[] {
+    return parsed.families.includes(this.fallbackFamily)
       ? parsed.families
       : [...parsed.families, this.fallbackFamily];
-    return families.map((family) => {
+  }
+
+  /** The font's families as faces, then the fallback family; null where one isn't ready. */
+  #chain(parsed: ParsedFont): Array<CanvasFace | null> {
+    return this.#families(parsed).map((family) => {
       const face = { family, weight: parsed.weight, italic: parsed.italic, canvas: true };
       const entry = this.#entry(face);
       return entry.status === "ready" ? entry.face : null;
@@ -453,7 +472,12 @@ export class HarfBuzzMeasurer implements TextMeasurer {
   }
 
   async #open(face: MeasuredFace): Promise<CanvasFace | null> {
-    const [hb, file] = await Promise.all([this.#hb(), this.#loadFile(face)]);
+    // The missing-glyph box is the editor's own, here whatever the host has.
+    const box = face.family === MISSING_GLYPH_FAMILY;
+    const [hb, file] = await Promise.all([
+      this.#hb(),
+      box ? missingGlyphFont() : this.#loadFile(face),
+    ]);
     if (!file) return null;
     const { bytes, weight, subsets } = file instanceof ArrayBuffer ? { bytes: file } : file;
     const shared = sharedFace(hb, bytes);
@@ -471,7 +495,8 @@ export class HarfBuzzMeasurer implements TextMeasurer {
       hb,
       font,
       em: upem * PRECISION,
-      unicodes: shared.unicodes,
+      // Every private-use character, without listing them (over 130,000).
+      unicodes: box ? { has: isPrivateUse } : shared.unicodes,
       subset: subsets ? subsetOf(subsets) : () => 0,
       metrics: verticalMetrics(hb, hbFace, font, upem),
     };

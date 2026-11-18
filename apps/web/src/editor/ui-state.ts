@@ -46,6 +46,8 @@ export interface EditorUi {
   readonly xrayPinned: boolean;
   /** How many of the inspector's popovers are open: the Selection Lens steps aside meanwhile. */
   readonly inspectorPopovers: number;
+  /** The missing fonts panel is open (decision 0036). */
+  readonly missingFonts: boolean;
 }
 
 const stores = new WeakMap<Editor, Store<EditorUi>>();
@@ -63,6 +65,7 @@ export function uiFor(editor: Editor): Store<EditorUi> {
       minimap: "auto",
       xrayPinned: false,
       inspectorPopovers: 0,
+      missingFonts: false,
     });
     stores.set(editor, store);
   }
@@ -81,6 +84,11 @@ export function toggleXray(editor: Editor): void {
   const pinned = !ui.get().xrayPinned;
   ui.set({ xrayPinned: pinned });
   editor.state.set({ xray: pinned });
+}
+
+/** Opens the missing fonts panel; the editor page renders it. */
+export function openMissingFonts(editor: Editor): void {
+  uiFor(editor).set({ missingFonts: true });
 }
 
 export function useUi<T>(editor: Editor, select: (ui: EditorUi) => T): T {

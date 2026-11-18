@@ -58,7 +58,7 @@ describe("parseFont", () => {
       italic: true,
       weight: 600,
       size: 13.5,
-      families: ["Inter", "Instrument Sans"],
+      families: ["Inter", "Drawpane Missing Glyph", "Instrument Sans"],
     });
     expect(
       parseFont('500 11px "Instrument Sans Variable", "Instrument Sans", system-ui, sans-serif'),

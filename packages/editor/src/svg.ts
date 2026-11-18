@@ -46,6 +46,7 @@ import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./strok
 import {
   decorationBar,
   drawnBaseline,
+  drawnFamily,
   layoutText,
   lineOffset,
   type ShapedText,
@@ -975,8 +976,12 @@ export function exportSvg(
     const align = getProp(base, "textAlign");
     const anchor = align === "center" ? "middle" : align === "right" ? "end" : null;
     const lineX = align === "center" ? w / 2 : align === "right" ? w : 0;
-    const family = (props: Props) =>
-      `'${getProp(props, "fontFamily").replace(/['"]/g, "")}', sans-serif`;
+    /** The family named, after the one it's drawn in when an alias stands in for it (decision 0036). */
+    const family = (props: Props) => {
+      const named = getProp(props, "fontFamily").replace(/['"]/g, "");
+      const drawn = drawnFamily(props, measurer).replace(/['"]/g, "");
+      return drawn !== named ? `'${drawn}', '${named}', sans-serif` : `'${named}', sans-serif`;
+    };
     const decorationOf = (d: string) =>
       d === "strikethrough" ? "line-through" : d === "underline" ? "underline" : "none";
     // The layer's own type on <text>; rich text's fragments state only what differs.
@@ -1020,8 +1025,7 @@ export function exportSvg(
     const typeOf = (frag: TextFragment) => {
       const p = propsAt(frag.start);
       let own = "";
-      if (getProp(p, "fontFamily") !== getProp(base, "fontFamily"))
-        own += attr("font-family", family(p));
+      if (family(p) !== family(base)) own += attr("font-family", family(p));
       if (frag.fontSize !== getProp(base, "fontSize")) own += attr("font-size", frag.fontSize);
       if (getProp(p, "fontWeight") !== getProp(base, "fontWeight"))
         own += attr("font-weight", getProp(p, "fontWeight"));

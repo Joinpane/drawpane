@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { type Account, type Cloudflare, isFreePlanRefusal, WranglerError } from "./cloudflare.js";
+import { type Account, type Cloudflare, planRefusal, WranglerError } from "./cloudflare.js";
 import {
   EMAIL_SECRETS,
   type EmailSecret,
@@ -160,10 +160,16 @@ export async function install(options: InstallOptions, deps: Deps): Promise<void
   // A Worker that already has a session secret keeps it: a new one would sign everyone out.
   const existing = await deps.cloudflare.secretNames(dir, config.accountId);
   const setupToken = token(18);
-  config = await deployAndWait(dir, config, deps, {
-    SETUP_TOKEN: setupToken,
-    ...(existing.includes("SESSION_SECRET") ? {} : { SESSION_SECRET: token(48) }),
-  });
+  config = await deployAndWait(
+    dir,
+    config,
+    deps,
+    {
+      SETUP_TOKEN: setupToken,
+      ...(existing.includes("SESSION_SECRET") ? {} : { SESSION_SECRET: token(48) }),
+    },
+    asking,
+  );
   config = { ...config, version: release.version };
   await writeConfig(dir, config);
 
@@ -249,7 +255,7 @@ export async function upgrade(options: UpgradeOptions, deps: Deps): Promise<void
   let next = await prepare(dir, wanted, deps);
   // An instance from before a resource existed in the release gets it now.
   next = await createResources(dir, next, deps);
-  next = await deployAndWait(dir, next, deps, null);
+  next = await deployAndWait(dir, next, deps, null, ui.interactive && !options.yes);
   next = { ...next, version: release.version };
   await writeConfig(dir, next);
   ui.outro(`${next.url} runs Drawpane ${release.version}.`);
@@ -332,7 +338,7 @@ export async function configureEmail(options: EmailOptions, deps: Deps): Promise
         `Cloudflare Email Service deploys the Worker again, and this installer carries Drawpane ${release.version} while the instance runs ${config.version}. Upgrade first (\`${UPGRADE_COMMAND}\`), then run this again.`,
       );
     next = await prepare(dir, { ...config, sendEmail: true }, deps);
-    next = await deployAndWait(dir, next, deps, secrets);
+    next = await deployAndWait(dir, next, deps, secrets, asking);
   } else {
     if (chosen)
       await ui.step(
@@ -590,14 +596,20 @@ async function createResources(
  * install interrupted between the two has a runner and the old main Worker
  * (or none), which is harmless, and running again deploys both.
  *
- * A deploy Cloudflare refuses for the Free plan (no CPU limits there) saves
- * `plan: "free"` and deploys once more without the runner, with agent tools off.
+ * A deploy Cloudflare refuses for the Free plan (no CPU limits there:
+ * `planRefusal` is "free") saves `plan: "free"` and deploys once more
+ * without the runner, with agent tools off. A refusal about a CPU limit in
+ * other words may or may not be the plan: when `asking`, the person is
+ * asked; otherwise the instance stays on Paid, and the deploy fails with a
+ * warning that says how to choose Free. An instance on Paid by choice
+ * (`--plan paid`, now or before) is never switched.
  */
 async function deployAndWait(
   dir: string,
   config: InstanceConfig,
   deps: Deps,
   secrets: Record<string, string> | null,
+  asking: boolean,
 ): Promise<InstanceConfig> {
   const { ui, cloudflare } = deps;
   let current = config;
@@ -613,12 +625,31 @@ async function deployAndWait(
   try {
     workersDev = await deployScripts(dir, current, deps, secrets);
   } catch (error) {
-    if (
-      current.plan === "free" ||
-      !(error instanceof WranglerError) ||
-      !isFreePlanRefusal(error.output)
-    )
+    if (current.plan === "free" || !(error instanceof WranglerError)) throw error;
+    const refusal = planRefusal(error.output);
+    if (refusal === null) throw error;
+    if (current.plan === "paid") {
+      ui.warn(
+        `Cloudflare refused the Workers' CPU limit${refusal === "free" ? " as it does on the Workers Free plan" : ""}. This instance is set to Workers Paid (\`--plan paid\`), so nothing was switched off. If the account is on Workers Free, run this again with \`--plan free\`.`,
+      );
       throw error;
+    }
+    if (
+      refusal === "unsure" &&
+      !(
+        asking &&
+        (await ui.confirm({
+          message:
+            "Cloudflare refused the Workers' CPU limit. Is this Cloudflare account on the Workers Free plan? (Agent tools are turned off on Free.)",
+          initial: false,
+        }))
+      )
+    ) {
+      ui.warn(
+        `Cloudflare refused the Workers' CPU limit, but not in the words it uses for the Workers Free plan, so agent tools stay on and nothing was switched off. If the account is on Workers Free, run this again with \`--plan free\`.`,
+      );
+      throw error;
+    }
     ui.warn(
       `Your Cloudflare account is on the Workers Free plan, so agent tools are off: they need Workers Paid. The rest of Drawpane works within the Free plan's limits (very large imports and restores may need more CPU than it gives). After moving to Workers Paid, turn them on with \`${PLAN_PAID_COMMAND}\`.`,
     );
