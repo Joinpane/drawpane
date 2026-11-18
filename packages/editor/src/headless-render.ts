@@ -41,11 +41,12 @@ import type { Face, FontBytesLoader, Rasteriser } from "@drawpane/raster";
 import type { Doc } from "./doc";
 import { ExportError, exportBounds, fitScale, imageRefs, snapToPixels } from "./export";
 import type { Rect } from "./geometry";
+import { missingGlyphFont } from "./missing-glyph-font";
 import { bytesPerPixel, RASTER_BASE_BYTES } from "./render-memory";
 import { textSpans } from "./rich-text";
 import { Scene } from "./scene";
 import { exportSvg, IMAGE_PLACEHOLDER, type SvgImageSource } from "./svg";
-import type { TextMeasurer } from "./text";
+import { drawnFamily, type TextMeasurer } from "./text";
 
 /** An image's file, with its natural size in pixels. */
 export interface ImageFile {
@@ -180,12 +181,19 @@ const isRasterOutOfMemory = (error: unknown) =>
 
 const DEFAULT_FALLBACK = "Instrument Sans";
 
-/** Every face the text in these layers (and their children) is set in, runs included. */
-export function facesUsed(doc: Doc, ids: readonly string[]): Face[] {
+/**
+ * Every face the text in these layers (and their children) is set in, runs
+ * included: in the family it's drawn in, with `fonts`'s aliases (decision 0036).
+ */
+export function facesUsed(
+  doc: Doc,
+  ids: readonly string[],
+  fonts?: Pick<TextMeasurer, "family"> | null,
+): Face[] {
   const faces = new Map<string, Face>();
   const add = (props: NodeRecord["props"]) => {
     const face = {
-      family: getProp(props, "fontFamily"),
+      family: drawnFamily(props, fonts),
       weight: getProp(props, "fontWeight"),
       italic: getProp(props, "fontStyle") === "italic",
     };
@@ -260,8 +268,12 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
       }),
     );
     // Each file once (faces can share one), since the rasteriser copies in every file it's handed.
+    // The missing-glyph box goes along when anything is set in a font: a symbol its font lacks
+    // draws as a box, as in the editor.
     const unique = new Map<ArrayBufferLike, Uint8Array>();
-    for (const f of [...files, ...stand]) if (f && !unique.has(f.buffer)) unique.set(f.buffer, f);
+    const box = faces.length > 0 ? [new Uint8Array(missingGlyphFont())] : [];
+    for (const f of [...files, ...stand, ...box])
+      if (f && !unique.has(f.buffer)) unique.set(f.buffer, f);
     return { fonts: [...unique.values()], missing: missing.map(faceName) };
   };
 
@@ -375,7 +387,7 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
       const longest = Math.max(width, height);
       const smallest =
         longest > MIN_HEADLESS_SIDE ? roundScale((scale * MIN_HEADLESS_SIDE) / longest) : scale;
-      const fonts = await fontsFor(facesUsed(doc, ids));
+      const fonts = await fontsFor(facesUsed(doc, ids, deps.measurer));
       let fixed = RASTER_BASE_BYTES + fonts.fonts.reduce((n, f) => n + f.length, 0);
       const least = perPixel * pixels(smallest);
       if (memory !== undefined && fixed + least > memory)

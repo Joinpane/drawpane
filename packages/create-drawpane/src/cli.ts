@@ -25,6 +25,9 @@ Options
   --account <name or id>   Cloudflare account (asked when you have several)
   --name <worker>          Worker name (default: from the folder)
   --domain <hostname>      serve on your own domain (default: a workers.dev address)
+  --plan <paid|free>       your Cloudflare Workers plan: free turns agent tools off
+                           (default: found when deploying); upgrade with --plan paid
+                           after moving to Workers Paid
   --yes, -y                take the defaults and ask nothing (for scripts and CI);
                            email reads EMAIL_PROVIDER, EMAIL_FROM and the provider's
                            settings from the environment (see docs/self-hosting.md)
@@ -77,7 +80,10 @@ async function main(argv: readonly string[]): Promise<number> {
     cwd: process.cwd(),
   };
   if (command.kind === "upgrade")
-    await upgrade({ dir: command.dir, yes: values.yes, force: values.force }, deps);
+    await upgrade(
+      { dir: command.dir, yes: values.yes, force: values.force, plan: values.plan },
+      deps,
+    );
   else if (command.kind === "email")
     await configureEmail({ dir: command.dir, yes: values.yes }, deps);
   else
@@ -87,6 +93,7 @@ async function main(argv: readonly string[]): Promise<number> {
         account: values.account,
         name: values.name,
         domain: values.domain,
+        plan: values.plan,
         yes: values.yes,
       },
       deps,

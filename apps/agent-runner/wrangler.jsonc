@@ -1,0 +1,33 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  // The agent runner (docs/decisions/0033-agent-runner.md): agent tools run here, in a script of
+  // their own, so a call that runs out of memory resets this Worker's isolate and never the file's
+  // room. Only the main Worker reaches it, through its AGENT_RUNNER binding (`script_name`), so it
+  // has no route and no workers.dev address. Deploy it before the main Worker, which binds it.
+  "name": "drawpane-agent-runner",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "workers_dev": false,
+  // A minute of CPU per call: a build of 50,000 layers takes seconds and a render tens to
+  // hundreds of milliseconds, so a runaway fails within a minute (decision 0033, item 4.6).
+  "limits": { "cpu_ms": 60000 },
+  "durable_objects": {
+    "bindings": [{ "name": "AGENT_RUNNER", "class_name": "AgentRunner" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AgentRunner"] }],
+  // The main Worker's database and bucket: fonts, images and saved versions are read here,
+  // never written. The installer renders both scripts with the instance's own names.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "drawpane",
+      "database_id": "82cecbce-29d8-4a51-8b09-4ee3d72e5296"
+    }
+  ],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "drawpane-files" }]
+  // Vars it reads, unset in production: AGENT_MEASURER (`standin` measures text with the stand-in,
+  // for tests and local development) and GOOGLE_FONTS (`off`, as for the main Worker). The
+  // installer gives both scripts the instance's vars.
+}

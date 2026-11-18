@@ -47,19 +47,19 @@ import {
   type VersionReason,
   withSetProps,
 } from "@drawpane/model";
-import { InProcessAgentRunner } from "../agent/runner";
 import {
   AGENT_CLAIM_MS,
   AGENT_RUNNER_V,
   type AgentAdmission,
   type AgentAdmissionRequest,
   type AgentCallResult,
-  type AgentCommittedNote,
+  type AgentFileSource,
+  type AgentLoggedTxn,
   type AgentReads,
   type AgentRelease,
-  type AgentRunAnswer,
-  type AgentRunRequest,
   type AgentSessionRef,
+  type AgentSourceAnswer,
+  type AgentSourceRequest,
   type CommitAgentAnswer,
   type CommitAgentRun,
 } from "../agent/runner-api";
@@ -477,13 +477,6 @@ export class FileRoom extends DurableObject<Env> {
   #revn = 0;
   readonly #ledger: CallLedger;
   /**
-   * The agent runner this room hosts in-process for now (decision 0033,
-   * migration step 1): made on the first call. The room never calls it;
-   * the main Worker does (`agent/call.ts`). The room only tells it what it
-   * committed, which it does itself once it has a script of its own.
-   */
-  #runner: InProcessAgentRunner | null = null;
-  /**
    * Agent write calls under way, by session and call id: the claim each was
    * admitted with, when it was last renewed, and the revision it was
    * admitted at. Another request with the same call id meanwhile is told
@@ -785,7 +778,6 @@ export class FileRoom extends DurableObject<Env> {
     this.#store.clearCache();
     this.#copies = "materialized";
     this.#converting = false;
-    this.#runner?.forget();
     this.#broadcast({ t: "resync" });
     await this.#scheduleAlarm(1_000);
   }
@@ -904,7 +896,6 @@ export class FileRoom extends DurableObject<Env> {
     this.#viewersAfterChange();
     this.#converting = false;
     this.#store.clearCache();
-    this.#runner?.forget();
     this.#announce = true;
     const applied = result.applied;
     console.log(
@@ -1466,7 +1457,6 @@ export class FileRoom extends DurableObject<Env> {
     this.#revn = revn;
     this.#copies = "materialized";
     this.#store.clearCache();
-    this.#runner?.forget();
     const except = this.#attachments().find(({ me }) => me.sessionId === sessionId)?.ws;
     this.#broadcast(
       { t: "restored", by, version: { id: version.id, name: version.name, at: version.at } },
@@ -1783,7 +1773,6 @@ export class FileRoom extends DurableObject<Env> {
     this.#revn = revn;
     this.#copies = copies;
     this.#viewersAfterChange();
-    this.#runner?.forget();
     this.#broadcast({ t: "resync" });
     void this.#scheduleAlarm();
     return { ok: true, revn, nodes };
@@ -2157,11 +2146,84 @@ export class FileRoom extends DurableObject<Env> {
     }
     const tooLarge = this.#tooLargeForAgents();
     if (tooLarge) return { admitted: false, answer: tooLarge };
-    if (!write) return { admitted: true, revn: this.#revn };
+    let source: AgentFileSource | undefined;
+    if (request.from !== undefined) {
+      const answer = await this.#agentSource(request.fileId, request.from, false);
+      if (answer.ok) source = answer.source;
+    }
+    const admitted = { admitted: true as const, revn: this.#revn, ...(source ? { source } : {}) };
+    if (!write) return admitted;
     const claim = crypto.randomUUID();
     this.#claims.set(claimKey(sessionId, callId), { claim, at: Date.now(), revn: this.#revn });
     this.#agentWatch ??= { from: this.#revn, left: new Map() };
-    return { admitted: true, revn: this.#revn, claim };
+    return { ...admitted, claim };
+  }
+
+  /**
+   * The file for an agent run (decision 0033, "Getting the file"), from
+   * where the runner's editor is (`from`, null when it's cold): the log
+   * since, when the log has all of it and it isn't too long; else the latest
+   * saved version in R2 with the log after it; else the file as it is,
+   * streamed as downloads are and shared with them. `busy` when as many
+   * downloads are under way as the room serves at once.
+   */
+  async agentSource(request: AgentSourceRequest): Promise<AgentSourceAnswer> {
+    this.#adopt(request.fileId);
+    return this.#agentSource(request.fileId, request.from, request.live === true);
+  }
+
+  async #agentSource(
+    fileId: string,
+    from: number | null,
+    live: boolean,
+  ): Promise<AgentSourceAnswer> {
+    const at = { revn: this.#revn, count: this.#store.count(), copies: this.#copies };
+    if (from !== null) {
+      const txns = this.#loggedAfter(from);
+      if (txns) return { ok: true, source: { ...at, kind: "log", from, txns } };
+    }
+    const saved = live ? null : this.#meta("snapshot_revn");
+    if (saved !== null) {
+      const txns = this.#loggedAfter(Number(saved));
+      if (txns)
+        return {
+          ok: true,
+          source: {
+            ...at,
+            kind: "snapshot",
+            at: Number(saved),
+            key: snapshotKey(fileId, Number(saved)),
+            txns,
+          },
+        };
+    }
+    const body = await this.exportDocument();
+    if (!body) return { ok: false, busy: true };
+    return { ok: true, source: { ...at, kind: "snapshot", at: at.revn, body, txns: [] } };
+  }
+
+  /**
+   * The transactions logged after `from`, in order, when the log has every
+   * one since (none before the last import) and they come to no more than
+   * MAX_REPLAY_BYTES of JSON; else null.
+   */
+  #loggedAfter(from: number): AgentLoggedTxn[] | null {
+    if (!Number.isInteger(from) || from > this.#revn || from < this.#catchupFrom()) return null;
+    if (from === this.#revn) return [];
+    const after = this.#sql
+      .exec<{ n: number; chars: number }>(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(ops)), 0) AS chars FROM log WHERE revn > ?",
+        from,
+      )
+      .one();
+    if (after.n !== this.#revn - from || after.chars > MAX_REPLAY_BYTES) return null;
+    return this.#sql
+      .exec<{ revn: number; ops: string }>(
+        "SELECT revn, ops FROM log WHERE revn > ? ORDER BY revn",
+        from,
+      )
+      .toArray()
+      .map(({ revn, ops }) => ({ revn, ops }));
   }
 
   /** Lets go of a write's claim on its call id (`admitAgentCall`), if it still holds it. */
@@ -2271,7 +2333,6 @@ export class FileRoom extends DurableObject<Env> {
     let revn: number;
     try {
       revn = this.#commit(ops, author, {
-        fromAgentRun: true,
         also: (next, inverse) => this.#ledger.recordCall(call, next, data, ops, inverse),
       });
     } catch (error) {
@@ -2325,37 +2386,6 @@ export class FileRoom extends DurableObject<Env> {
     }
     const touched = touchedBy(sql, theirs());
     return leftScope || !touched || touches(touched, scope);
-  }
-
-  // The runner, hosted in-process (decision 0033, migration step 1). These are
-  // `AgentRunnerApi`, called by the main Worker only; migration step 3 moves them
-  // to the runner's own script.
-
-  /** Runs a tool on this room's file. */
-  async runAgent(request: AgentRunRequest): Promise<AgentRunAnswer> {
-    this.#adopt(request.fileId);
-    return this.#agentRunner(request.fileId).run(request);
-  }
-
-  /** How the commit of a run went. */
-  async agentCommitted(note: AgentCommittedNote): Promise<void> {
-    await this.#runner?.committed(note);
-  }
-
-  /** Lets go of the runner's editor. */
-  async dropAgent(fileId: string): Promise<void> {
-    await this.#runner?.drop(fileId);
-  }
-
-  /** The runner hosted here, reading the room's rows at its revision. */
-  #agentRunner(fileId: string): InProcessAgentRunner {
-    this.#runner ??= new InProcessAgentRunner(this.env, fileId, {
-      revn: () => this.#revn,
-      copies: () => this.#copies,
-      count: () => this.#store.count(),
-      records: () => this.#store.records(),
-    });
-    return this.#runner;
   }
 
   /**
@@ -3098,15 +3128,12 @@ export class FileRoom extends DurableObject<Env> {
    * returns its revision. Throws (changing nothing) when it doesn't apply.
    * `also` writes more in the same storage transaction (an agent call's
    * ledger row), given the revision and the operations that undo it.
-   * The in-process agent runner follows, unless the change is an agent run's
-   * (`fromAgentRun`), which it hears about from the main Worker.
    */
   #commit(
     ops: readonly Op[],
     author: Author,
     options: {
       readonly also?: (revn: number, inverse: Op[]) => void;
-      readonly fromAgentRun?: boolean;
     } = {},
   ): number {
     try {
@@ -3135,7 +3162,6 @@ export class FileRoom extends DurableObject<Env> {
         }),
       );
       this.#revn = revn;
-      if (!options.fromAgentRun) this.#runner?.follow(ops, revn);
       return revn;
     } finally {
       this.#store.clearCache();
@@ -3315,21 +3341,12 @@ export class FileRoom extends DurableObject<Env> {
           return { result, count: out.count };
         });
       });
-    } catch (error) {
-      this.#runner?.forget();
-      throw error;
     } finally {
       this.#store.clearCache();
     }
     this.#revn = next;
-    if (tooBig) {
-      this.#runner?.forget();
-      this.#broadcast({ t: "resync" });
-    } else
-      for (const chunk of sent) {
-        this.#runner?.follow(chunk.ops, chunk.revn);
-        this.#broadcastChange(chunk.revn, chunk.ops, author);
-      }
+    if (tooBig) this.#broadcast({ t: "resync" });
+    else for (const chunk of sent) this.#broadcastChange(chunk.revn, chunk.ops, author);
     return { revn: next, count: outcome.count, result: outcome.result };
   }
 

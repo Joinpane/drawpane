@@ -6,23 +6,21 @@
   "description": "The Drawpane Cloudflare Worker: routing, auth, REST API, static assets and the FileRoom Durable Object.",
   "type": "module",
   "scripts": {
-    "dev": "node -e \"require('fs').mkdirSync('../web/dist',{recursive:true})\" && node scripts/cap-wasm.ts && wrangler dev --local-upstream localhost:8787",
+    "dev": "node -e \"require('fs').mkdirSync('../web/dist',{recursive:true})\" && node ../agent-runner/scripts/cap-wasm.ts && wrangler dev -c wrangler.jsonc -c ../agent-runner/wrangler.jsonc --local-upstream localhost:8787",
     "types": "wrangler types --include-runtime=false src/worker-configuration.d.ts",
     "typecheck": "tsc -p .",
     "test": "vitest run",
     "memory": "vitest run -c vitest.memory.config.ts",
-    "deploy": "node scripts/cap-wasm.ts && wrangler deploy",
+    "deploy": "wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
-    "build": "node scripts/cap-wasm.ts && wrangler deploy --dry-run --outdir dist"
+    "build": "wrangler deploy --dry-run --outdir dist"
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
     "@drawpane/model": "workspace:*",
     "@drawpane/raster": "workspace:*",
-    "@resvg/resvg-wasm": "2.6.2",
     "@simplewebauthn/server": "14.1.0",
-    "harfbuzzjs": "1.6.4",
     "hono": "4.13.18",
     "zod": "catalog:"
   },
@@ -30,8 +28,10 @@
     "@cloudflare/vitest-plugin": "1.8.1",
     "@cloudflare/workers-types": "5.20261113.1",
     "@drawpane/corpus": "workspace:*",
+    "@resvg/resvg-wasm": "2.6.2",
     "@simplewebauthn/browser": "14.0.0",
     "fast-check": "catalog:",
+    "harfbuzzjs": "1.6.4",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "wrangler": "catalog:"

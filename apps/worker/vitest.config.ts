@@ -1,11 +1,45 @@
+import { execFileSync } from "node:child_process";
+import { readdirSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
-import { capWasm } from "./scripts/cap-wasm.ts";
+import { capWasm } from "../agent-runner/scripts/cap-wasm.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const runnerDir = join(here, "../agent-runner");
+
+/**
+ * The agent runner, built as it deploys (decision 0033): the tests run both
+ * scripts, the runner as an auxiliary Worker the main one binds by name.
+ */
+function buildRunner(): Array<{ type: "ESModule" | "CompiledWasm"; path: string }> {
+  // The capped WebAssembly the runner bundles (decision 0033, item 4.2).
+  capWasm();
+  const wrangler = join(
+    dirname(createRequire(import.meta.url).resolve("wrangler/package.json")),
+    "bin/wrangler.js",
+  );
+  const outdir = join(runnerDir, "dist-test");
+  rmSync(outdir, { recursive: true, force: true });
+  execFileSync(
+    process.execPath,
+    [wrangler, "deploy", "--dry-run", "--outdir", outdir, "-c", join(runnerDir, "wrangler.jsonc")],
+    { cwd: runnerDir, stdio: ["ignore", "ignore", "inherit"] },
+  );
+  // The script and the WebAssembly it imports from beside it, as modules of their own.
+  return [
+    { type: "ESModule", path: join(outdir, "index.js") },
+    ...readdirSync(outdir)
+      .filter((name) => name.endsWith(".wasm"))
+      .map((name) => ({ type: "CompiledWasm" as const, path: join(outdir, name) })),
+  ];
+}
 
 export default defineConfig(async () => {
   const migrations = await readD1Migrations("./migrations");
-  // The capped WebAssembly the Worker bundles (decision 0033, item 4.2).
-  capWasm();
+  const runner = buildRunner();
   return {
     plugins: [
       cloudflareTest({
@@ -23,9 +57,27 @@ export default defineConfig(async () => {
             // Email is printed in tests, never sent.
             EMAIL_PROVIDER: "log",
             EMAIL_FROM: "Drawpane <design@example.com>",
-            // Agent tools on, with the deterministic stand-in measurer (agent/measurer.ts).
-            AGENT_MEASURER: "standin",
           },
+          workers: [
+            {
+              // The name the main Worker's AGENT_RUNNER binding asks for (`script_name`).
+              name: "drawpane-agent-runner",
+              modules: runner,
+              modulesRoot: join(runnerDir, "dist-test"),
+              compatibilityDate: "2026-11-01",
+              compatibilityFlags: ["nodejs_compat"],
+              durableObjects: { AGENT_RUNNER: { className: "AgentRunner", useSQLite: true } },
+              // The main Worker's database and bucket, by the same ids, so both see the same rows.
+              d1Databases: { DB: "82cecbce-29d8-4a51-8b09-4ee3d72e5296" },
+              r2Buckets: { FILES: "drawpane-files" },
+              bindings: {
+                // Agent tools with the deterministic stand-in measurer (agent-runner/src/measurer.ts).
+                AGENT_MEASURER: "standin",
+                // The chaos hooks (agent-runner/src/hooks.ts), for tests only.
+                AGENT_RUNNER_TEST_HOOKS: "on",
+              },
+            },
+          ],
         },
       }),
     ],
