@@ -1421,9 +1421,10 @@ export class CanvasRenderer {
    * Where a glass or background blur reads its backdrop: null for the canvas it's drawn on.
    * In an export that sees what's under it, what the page had there (`#recordContext`):
    * kept while recording, `pad` device pixels around the layer's box (all it reads), and
-   * returned when the export itself is drawn.
+   * returned when the export itself is drawn. "done" once the last of them is kept: the page
+   * needn't be drawn further.
    */
-  #backdropFor(ctx: Ctx, node: NodeRecord, pad: number): Backdrop | null {
+  #backdropFor(ctx: Ctx, node: NodeRecord, pad: number): Backdrop | "done" | null {
     const context = this.#context;
     if (!context?.readers.has(node.id)) return null;
     if (context.phase === "replay") return context.seen.get(node.id) ?? null;
@@ -1442,7 +1443,11 @@ export class CanvasRenderer {
     if (!canvas || !copy) return null;
     copy.drawImage(ctx.canvas, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
     context.seen.set(node.id, { canvas, x: x0, y: y0 });
-    return null;
+    // Every reader's backdrop kept: nothing more of the page is needed, this one's own effect
+    // included.
+    if (context.seen.size < context.readers.size) return null;
+    this.#until?.clear();
+    return "done";
   }
 
   /**
@@ -2577,6 +2582,7 @@ export class CanvasRenderer {
     const behind = this.#blurBackdrop?.getContext("2d") as Ctx | null | undefined;
     if (!this.#blurBackdrop || !behind) return;
     const from = this.#backdropFor(ctx, node, reach + 1);
+    if (from === "done") return;
     const within = this.#clipWithin(ctx, node);
     if (from)
       copyExtended(
@@ -2720,6 +2726,7 @@ export class CanvasRenderer {
     const within = this.#clipWithin(ctx, node);
     const reach = glassParams(glass, scale);
     const from = this.#backdropFor(ctx, node, reach.margin + Math.ceil(3 * reach.sigma) + 2);
+    if (from === "done") return;
     this.#glass.paint(ctx, outline, w, h, glass, scale, {
       ...(from ? { source: from } : {}),
       key,
