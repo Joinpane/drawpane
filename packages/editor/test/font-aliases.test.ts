@@ -1,5 +1,5 @@
 /**
- * Font aliases in the editor (decision 0034): text named "SF Pro" is laid
+ * Font aliases in the editor (decision 0036): text named "SF Pro" is laid
  * out, measured and exported in the cut its size calls for, and a symbol
  * (a private-use character) its font lacks draws as the missing-glyph box.
  *

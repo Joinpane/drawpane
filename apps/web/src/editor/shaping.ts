@@ -30,7 +30,7 @@ export const shaper = new Shaper(fontBytes);
 
 let boxAdded = false;
 /**
- * The missing-glyph box (decision 0034), for the page and the canvas: every
+ * The missing-glyph box (decision 0036), for the page and the canvas: every
  * private-use character a text's font lacks draws as it. Its unicode-range
  * keeps it from being anyone's first available font, so it never changes a
  * line's height.
@@ -48,7 +48,7 @@ export function addMissingGlyphFont(): void {
 /**
  * A measurer for an editor: the canvas, the shaper for runs with features or
  * axes, and the font registry for which family each run is drawn in (font
- * aliases, decision 0034).
+ * aliases, decision 0036).
  */
 export function textMeasurer(): ShapingMeasurer {
   addMissingGlyphFont();

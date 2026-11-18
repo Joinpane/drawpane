@@ -1,5 +1,5 @@
 /**
- * Font aliases in a real browser (decision 0034), on a throwaway instance:
+ * Font aliases in a real browser (decision 0036), on a throwaway instance:
  * the team uploads stand-ins named "SF Pro Text" and "SF Pro Display" (OFL
  * fonts renamed, tools/stand-in-fonts; Apple's own files are licensed and
  * never in the repo), and text the file sets in "SF Pro" is drawn in the cut

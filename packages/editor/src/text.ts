@@ -38,14 +38,14 @@ export interface TextMeasurer {
   readonly generation?: number;
   /**
    * The family text named `family` at `size` px is drawn in: itself, or what
-   * a font alias stands in for it (decision 0034). Missing: itself.
+   * a font alias stands in for it (decision 0036). Missing: itself.
    */
   family?(family: string, size: number): string;
 }
 
 /**
  * Which family text is drawn in, where font aliases are known (decision
- * 0034): the browser's font registry, the Worker's team lookup. A measurer
+ * 0036): the browser's font registry, the Worker's team lookup. A measurer
  * that has one answers `family` from it.
  */
 export interface FontResolver {
@@ -215,7 +215,7 @@ export interface TextLayout {
 /**
  * After a text's own family: the missing-glyph box for private-use
  * characters its font lacks (SF Symbols in a font without them, decision
- * 0034), then the editor's fallback. The box font covers nothing else, so
+ * 0036), then the editor's fallback. The box font covers nothing else, so
  * every other character falls through to the fallback as before.
  */
 const FALLBACKS = `"${MISSING_GLYPH_FAMILY}", "Instrument Sans Variable", system-ui, sans-serif`;

@@ -10,7 +10,7 @@
  * Only the team's members can read its fonts: the stylesheet and files
  * check membership, like images do. Fonts never leave this server.
  *
- * A team also keeps font aliases (decision 0034): a family it doesn't have,
+ * A team also keeps font aliases (decision 0036): a family it doesn't have,
  * drawn in families it does, in every file, without rewriting them. Listed
  * with the fonts, so the editor gets both in one request.
  */

@@ -1,5 +1,5 @@
 /**
- * Font aliases in the Worker (decision 0034): which family the headless
+ * Font aliases in the Worker (decision 0036): which family the headless
  * editor's text is drawn in, answered as the browser's font registry answers
  * it, so a layout an agent makes is the one a person sees.
  *

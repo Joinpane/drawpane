@@ -1,5 +1,5 @@
 /**
- * Font aliases (decision 0034): which family text is drawn in when the family
+ * Font aliases (decision 0036): which family text is drawn in when the family
  * it names isn't here, chosen by its size where a family comes in optical
  * sizes.
  *

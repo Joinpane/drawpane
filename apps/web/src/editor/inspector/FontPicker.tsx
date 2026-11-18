@@ -49,7 +49,7 @@ export function useFonts(): number {
 
 /**
  * Whether a family resolves to something that renders: itself, through a
- * font alias (decision 0034), or not at all (once we know it's missing).
+ * font alias (decision 0036), or not at all (once we know it's missing).
  */
 export function useFontStatus(family: string | null): "ok" | "alias" | "missing" | "unknown" {
   useFonts();

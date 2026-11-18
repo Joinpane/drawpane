@@ -1,6 +1,6 @@
 /**
  * "Drawpane Missing Glyph": one box glyph for every private-use code point
- * (decision 0034). Text lists it right after its own family, so a symbol
+ * (decision 0036). Text lists it right after its own family, so a symbol
  * (SF Symbols are private-use characters in Apple's SF fonts) that the font
  * at hand lacks draws as a box, never as whatever a fallback font has there.
  * The canvas, the HarfBuzz measurer and the headless renderer all use these

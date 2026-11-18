@@ -976,7 +976,7 @@ export function exportSvg(
     const align = getProp(base, "textAlign");
     const anchor = align === "center" ? "middle" : align === "right" ? "end" : null;
     const lineX = align === "center" ? w / 2 : align === "right" ? w : 0;
-    /** The family named, after the one it's drawn in when an alias stands in for it (decision 0034). */
+    /** The family named, after the one it's drawn in when an alias stands in for it (decision 0036). */
     const family = (props: Props) => {
       const named = getProp(props, "fontFamily").replace(/['"]/g, "");
       const drawn = drawnFamily(props, measurer).replace(/['"]/g, "");

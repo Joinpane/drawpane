@@ -197,7 +197,7 @@ function PageInspector() {
 
 /**
  * The file's fonts, when some aren't here or show through an alias (decision
- * 0034): a line saying so, and the missing fonts panel a click away.
+ * 0036): a line saying so, and the missing fonts panel a click away.
  */
 function FontsSection({ editor }: { editor: Editor }) {
   const report = useFontReport(editor);

@@ -369,7 +369,7 @@ export class ShapingMeasurer implements TextMeasurer {
   constructor(
     readonly base: TextMeasurer & { invalidate(): void },
     readonly shaper: Shaper,
-    /** Font aliases (decision 0034): which family text is drawn in. */
+    /** Font aliases (decision 0036): which family text is drawn in. */
     readonly fonts: FontResolver | null = null,
   ) {}
 

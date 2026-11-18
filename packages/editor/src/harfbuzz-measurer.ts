@@ -160,7 +160,7 @@ export function parseFont(font: string): ParsedFont | null {
  * The faces a document's text is measured in: each text layer's family,
  * weight and style (its runs' too), as the canvas draws them, and the
  * shaper's faces for runs that set OpenType features or variable axes. With
- * `fonts`, in the families font aliases draw them in (decision 0034).
+ * `fonts`, in the families font aliases draw them in (decision 0036).
  */
 export function measuredFaces(
   nodes: Iterable<NodeRecord>,

@@ -1,6 +1,6 @@
 /**
  * The fonts a file uses, and swapping them across the whole file in one
- * change: what the missing fonts panel shows and does (decision 0034), as in
+ * change: what the missing fonts panel shows and does (decision 0036), as in
  * Figma's "Replace fonts".
  *
  * A face is a family, weight and style. Every text layer's own face counts,

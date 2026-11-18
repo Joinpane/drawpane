@@ -13,7 +13,7 @@
  *
  * Anything else a file names is missing: it renders in the fallback until
  * someone installs or swaps it, unless a font alias stands in for it
- * (decision 0034): "SF Pro" drawn in the team's "SF Pro Text" below 20 px
+ * (decision 0036): "SF Pro" drawn in the team's "SF Pro Text" below 20 px
  * and "SF Pro Display" from 20 px, say, or whatever the team mapped it to.
  * The registry is the editor's `FontResolver`: layout asks it which family
  * each run is drawn in.

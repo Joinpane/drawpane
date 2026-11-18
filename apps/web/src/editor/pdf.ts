@@ -56,7 +56,7 @@ const standard = (family: "helvetica" | "times" | "courier", face: Face): PdfFon
   style: face.italic ? "italic" : "normal",
 });
 
-/** Every face the text inside some layers is drawn in (through font aliases, decision 0034). */
+/** Every face the text inside some layers is drawn in (through font aliases, decision 0036). */
 function facesIn(editor: Editor, ids: readonly string[]): Face[] {
   const faces = new Map<string, Face>();
   const visit = (id: string) => {

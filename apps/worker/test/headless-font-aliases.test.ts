@@ -1,5 +1,5 @@
 /**
- * Font aliases in the Worker (decision 0034): the headless measurer draws
+ * Font aliases in the Worker (decision 0036): the headless measurer draws
  * "SF Pro" text in the team's SF Pro Text below 20 px and SF Pro Display from
  * 20 px, as the editor does, and a team's own alias wins over the built-in
  * one. The SF fonts are stand-ins (OFL fonts renamed, tools/stand-in-fonts).

@@ -80,7 +80,7 @@ export function fileFontLoader(env: Env, fileId: string): FaceFileLoader {
   return async (face) => (await loaderFor())(face);
 }
 
-/** A file's font aliases: its team's, and the built-in ones (decision 0034). */
+/** A file's font aliases: its team's, and the built-in ones (decision 0036). */
 export function fileFontResolver(env: Env, fileId: string): HeadlessFontResolver {
   return headlessFontResolver({ env, teamId: fileTeam(env, fileId) });
 }

@@ -19,7 +19,7 @@ const canvasFace = (face: TextFace): MeasuredFace => ({ ...face, canvas: true })
 
 /**
  * The engine's measurer over `harfBuzz`, with font files from `loadFile`,
- * and text drawn in the families `fonts` aliases it to (decision 0034).
+ * and text drawn in the families `fonts` aliases it to (decision 0036).
  */
 export function harfBuzzMeasurerWith(
   loadFile: FaceFileLoader,

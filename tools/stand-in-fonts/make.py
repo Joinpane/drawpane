@@ -1,5 +1,5 @@
 """
-Builds the fonts the font-alias tests use (decision 0034), from OFL fonts
+Builds the fonts the font-alias tests use (decision 0036), from OFL fonts
 already in the repo. Apple's SF fonts are licensed and never committed, so
 tests use stand-ins that carry Apple's family names:
 
@@ -194,7 +194,7 @@ def write_module(data: bytes) -> None:
     out.write_text(
         """/**
  * "Drawpane Missing Glyph": one box glyph for every private-use code point
- * (decision 0034). Text lists it right after its own family, so a symbol
+ * (decision 0036). Text lists it right after its own family, so a symbol
  * (SF Symbols are private-use characters in Apple's SF fonts) that the font
  * at hand lacks draws as a box, never as whatever a fallback font has there.
  * The canvas, the HarfBuzz measurer and the headless renderer all use these

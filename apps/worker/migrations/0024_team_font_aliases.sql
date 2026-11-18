@@ -1,4 +1,4 @@
--- A team's font aliases (decision 0034): text in a family the team doesn't
+-- A team's font aliases (decision 0036): text in a family the team doesn't
 -- have is drawn in another, for everyone on the team, in every file, without
 -- the files changing. "SF Pro" to "SF Pro Text" below 20 px and "SF Pro
 -- Display" from 20 px, say. Built-in aliases (packages/model/src/

@@ -46,7 +46,7 @@ export interface EditorUi {
   readonly xrayPinned: boolean;
   /** How many of the inspector's popovers are open: the Selection Lens steps aside meanwhile. */
   readonly inspectorPopovers: number;
-  /** The missing fonts panel is open (decision 0034). */
+  /** The missing fonts panel is open (decision 0036). */
   readonly missingFonts: boolean;
 }
 

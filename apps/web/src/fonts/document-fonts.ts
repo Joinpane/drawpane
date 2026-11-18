@@ -1,7 +1,7 @@
 /**
  * Loads the fonts a document uses, as it opens and as people edit: every
  * text layer's family, weight and style, including styled runs within it,
- * and the families font aliases draw them in (decision 0034: "SF Pro" loads
+ * and the families font aliases draw them in (decision 0036: "SF Pro" loads
  * the team's SF Pro Text and SF Pro Display). Only new faces cost anything,
  * so typing in an already-loaded font does nothing here.
  */

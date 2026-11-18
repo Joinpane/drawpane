@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Which font files have SF Symbols (decision 0034). Symbols are characters
+ * Which font files have SF Symbols (decision 0036). Symbols are characters
  * in Unicode's private-use areas, drawn by the fonts that have them. This
  * counts each file's private-use characters, so you can tell which of your
  * fonts (SF Pro, SF Pro Text, SF Pro Display…) carries the symbols before you

@@ -183,7 +183,7 @@ const DEFAULT_FALLBACK = "Instrument Sans";
 
 /**
  * Every face the text in these layers (and their children) is set in, runs
- * included: in the family it's drawn in, with `fonts`'s aliases (decision 0034).
+ * included: in the family it's drawn in, with `fonts`'s aliases (decision 0036).
  */
 export function facesUsed(
   doc: Doc,

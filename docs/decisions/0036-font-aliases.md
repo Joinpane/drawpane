@@ -1,4 +1,4 @@
-# 0034. Font aliases: drawing a family the team doesn't have in one it does
+# 0036. Font aliases: drawing a family the team doesn't have in one it does
 
 - Status: accepted
 - Date: 2026-11-17
