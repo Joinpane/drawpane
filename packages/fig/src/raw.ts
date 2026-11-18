@@ -32,6 +32,13 @@ export interface RawEffect {
   readonly color?: Figma.RGBA;
   readonly opacity?: number;
   readonly clipToShape?: boolean;
+  /** Glass: depth, refraction 0–1, light angle and 0–1, dispersion 0–1, splay 0–1. */
+  readonly refractionRadius?: number;
+  readonly refractionIntensity?: number;
+  readonly specularAngle?: number;
+  readonly specularIntensity?: number;
+  readonly chromaticAberration?: number;
+  readonly reflectionDistance?: number;
 }
 
 export interface RawNumber {

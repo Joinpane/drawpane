@@ -290,6 +290,9 @@ async function buildParity(figma, suites) {
     node.effects = (spec.effects ?? []).map(effect);
     if (spec.opacity !== undefined) node.opacity = spec.opacity;
     if (spec.blendMode) node.blendMode = BLEND(spec.blendMode);
+    // Figma's frames clip by default, Drawpane's don't: only when the scene says.
+    if (spec.type === "frame" && spec.clipContent !== undefined)
+      node.clipsContent = spec.clipContent;
     if (spec.isMask) {
       node.isMask = true;
       node.maskType = { outline: "VECTOR", alpha: "ALPHA", luminance: "LUMINANCE" }[
@@ -359,7 +362,11 @@ async function buildParity(figma, suites) {
       frame.x = (i % cell.columns) * (cell.width + cell.gap);
       frame.y = Math.floor(i / cell.columns) * (cell.height + cell.gap);
       frame.clipsContent = true;
-      frame.fills = [paint({ type: "solid", color: suite.background ?? "#ffffff" })];
+      // "none": no background, so the render's alpha shows what the cell lets through.
+      frame.fills =
+        suite.background === "none"
+          ? []
+          : [paint({ type: "solid", color: suite.background ?? "#ffffff" })];
       if (suite.backdrop) await backdrops[suite.backdrop](frame, cell);
       for (const spec2 of spec.layers) await layer(spec2, frame);
       made.push(frame.name);
