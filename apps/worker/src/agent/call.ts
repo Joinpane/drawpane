@@ -20,6 +20,8 @@ import { findTool } from "@drawpane/editor";
 import type { Env } from "../env";
 import {
   AGENT_CLAIM_RENEW_MS,
+  AGENT_QUEUE_WAIT_MS,
+  AGENT_RUN_LIMIT_MS,
   AGENT_RUNNER_V,
   type AgentAdmission,
   type AgentCallResult,
@@ -32,7 +34,11 @@ import {
   type AgentRunRequest,
   type AgentSessionRef,
   type CommitAgentAnswer,
+  RUNNER_CUT_OFF,
+  TOOK_TOO_LONG,
 } from "./runner-api";
+
+export { AGENT_QUEUE_WAIT_MS, AGENT_RUN_LIMIT_MS, TOOK_TOO_LONG };
 
 /** How often a call runs, when someone keeps changing the frame it works in meanwhile, before giving up. */
 export const AGENT_ATTEMPTS = 3;
@@ -52,6 +58,12 @@ const OUT_OF_STEP =
   "The agent runner couldn't get in step with the file, and nothing was changed. Try again.";
 /** How often a run asks for the file again (a runner that moved on, loaded fonts, or was reset). */
 const RUN_TRIES = 4;
+/** A runner reset during a call for another reason than memory (a deploy, a platform restart). */
+export const RUNNER_RESET =
+  "The agent runner restarted during that call. Nothing was changed. Try again.";
+/** The calls ahead on the file kept the runner past AGENT_QUEUE_WAIT_MS. */
+export const RUNNER_BUSY =
+  "The agent runner is busy with other calls on this file. Nothing was changed. Try again shortly.";
 
 /**
  * Who the call talks to. Each is a factory, called again for every request:
@@ -60,6 +72,10 @@ const RUN_TRIES = 4;
 export interface AgentDeps {
   room(): AgentRoomApi;
   runner(): AgentRunnerApi;
+  /** The runner's limit on a run: AGENT_RUN_LIMIT_MS unless said (tests say less). */
+  readonly runLimitMs?: number;
+  /** How long to wait for the calls ahead: AGENT_QUEUE_WAIT_MS unless said. */
+  readonly queueWaitMs?: number;
 }
 
 /** The deps for a file: its room, and its runner in the runner's script. */
@@ -94,6 +110,8 @@ export function agentDeps(env: Env, fileId: string): AgentDeps {
         run: async (request) => (await stub.run(request)) as AgentRunAnswer,
         committed: (note) => stub.committed(note),
         drop: (id) => stub.drop(id),
+        reset: () => stub.reset(),
+        strike: (note) => stub.strike(note),
       };
     },
   };
@@ -298,21 +316,54 @@ async function runOnFile(
     }
     const request: AgentRunRequest = { v: AGENT_RUNNER_V, ...call, source };
     source = undefined;
-    let run: AgentRunAnswer;
+    let run: AgentRunAnswer | "late";
+    // The runner times the run itself, from when it starts it; this waits for the calls ahead too.
+    const wait =
+      (deps.runLimitMs ?? AGENT_RUN_LIMIT_MS) + (deps.queueWaitMs ?? AGENT_QUEUE_WAIT_MS);
     try {
-      run = await deps.runner().run(request);
+      run = await withinLimit(deps.runner().run(request), wait);
     } catch (error) {
-      if (!reset && retryable(error)) {
+      // A deploy's reset (step 0), or the call cut off with another one past its limit: once more.
+      if (!reset && (retryable(error) || cutOff(error))) {
         reset = true;
         continue;
       }
-      if (aborted(error)) return { ok: false, message: RUNNER_ABORTED };
+      if (outOfMemory(error)) {
+        // Only here is it known that the call ran the runner out of memory: a strike against it.
+        const strike = { v: AGENT_RUNNER_V, fileId, tool: call.tool, input: call.input };
+        await quietly(() => deps.runner().strike({ ...strike, at: Date.now() }));
+        return { ok: false, message: RUNNER_ABORTED };
+      }
+      if (outOfCpu(error)) return { ok: false, message: TOOK_TOO_LONG };
+      if (aborted(error)) return { ok: false, message: RUNNER_RESET };
       throw error;
+    }
+    // The calls ahead kept it: not this call's fault, and nothing to cut off.
+    if (run === "late") return { ok: false, message: RUNNER_BUSY };
+    if (!run.ok && "late" in run && run.late) {
+      // Past its limit, and maybe still going: cut it off (it can't commit, it never does).
+      await quietly(() => deps.runner().reset(fileId));
+      return { ok: false, message: run.message };
     }
     if (run.ok || !("again" in run)) return run;
     live = run.live === true;
   }
   return { ok: false, message: OUT_OF_STEP };
+}
+
+/** The run's answer, or "late" when it hasn't come within `ms`. */
+async function withinLimit<T>(run: Promise<T>, ms: number): Promise<T | "late"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<"late">((resolve) => {
+    timer = setTimeout(() => resolve("late"), ms);
+  });
+  try {
+    return await Promise.race([run, late]);
+  } finally {
+    clearTimeout(timer);
+    // A run answered after the limit, or failing then, is nobody's answer.
+    run.catch(() => {});
+  }
 }
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -346,6 +397,27 @@ export function aborted(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const e = error as RemoteError;
   return e.overloaded === true || e.durableObjectReset === true;
+}
+
+/**
+ * A runner that ran out of memory, as Cloudflare says it (step 0): reset
+ * (`overloaded`, `durableObjectReset`) with "Durable Object's isolate exceeded its memory limit and
+ * was reset" (or a Worker's "exceeded memory limit"). A reset for a deploy
+ * ("reset because its code was updated", `retryable`) or a platform restart
+ * isn't one.
+ */
+export function outOfMemory(error: unknown): boolean {
+  return aborted(error) && /exceeded (?:its )?memory limit/i.test((error as Error).message);
+}
+
+/** A call failed because the main Worker reset the runner to cut off another call (`RUNNER_CUT_OFF`). */
+function cutOff(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(RUNNER_CUT_OFF);
+}
+
+/** A runner that went over its CPU limit: the call took too long, rather than too much memory. */
+function outOfCpu(error: unknown): boolean {
+  return error instanceof Error && /\bCPU\b/i.test(error.message) && aborted(error);
 }
 
 /** A reset Cloudflare says to retry (a code update), not an overrun. */

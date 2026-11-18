@@ -64,7 +64,8 @@ async function release(source: AgentFileSource): Promise<void> {
   if (source.kind === "snapshot") await source.body?.cancel().catch(() => {});
 }
 
-export class FileRunner implements AgentRunnerApi {
+/** The file's runner: `AgentRunnerApi` but `reset` and `strike`, which the Durable Object answers itself. */
+export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
   readonly #env: Env;
   readonly #fileId: string;
   readonly #measurer: () => HeadlessMeasurer;
@@ -84,6 +85,8 @@ export class FileRunner implements AgentRunnerApi {
   /** How many times an editor was built from a snapshot (for tests: warm calls build none). */
   builds = 0;
 
+  /** Runs after a tool ran and before its answer: where the chaos tests hook in (`hooks.ts`). */
+  readonly #midRun: () => Promise<void>;
   /** The most the editor may hold, as its meter counts it (`AgentEngine`): tests set less. */
   readonly #limit: number | undefined;
 
@@ -92,12 +95,18 @@ export class FileRunner implements AgentRunnerApi {
     fileId: string,
     {
       measurer = () => agentMeasurer(env, fileId),
+      midRun = async () => {},
       limit,
-    }: { measurer?: () => HeadlessMeasurer; limit?: number } = {},
+    }: {
+      measurer?: () => HeadlessMeasurer;
+      midRun?: () => Promise<void>;
+      limit?: number;
+    } = {},
   ) {
     this.#env = env;
     this.#fileId = fileId;
     this.#measurer = measurer;
+    this.#midRun = midRun;
     this.#limit = limit;
   }
 
@@ -176,6 +185,7 @@ export class FileRunner implements AgentRunnerApi {
       } finally {
         if (write) editor.doc.untrackReads();
       }
+      await this.#midRun();
       // Text in a font not loaded yet: load it, and build again so it's measured right.
       if (write) {
         const fonts = engine.facesMissingFrom(editor, run.ops);
