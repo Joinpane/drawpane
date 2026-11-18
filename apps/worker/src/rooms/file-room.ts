@@ -696,6 +696,8 @@ export class FileRoom extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     this.pruneQuiet();
+    // Claims whose callers are gone, and the watch they kept.
+    this.#sweepClaims();
     const converting = await this.#convertCopies();
     await this.#movePins();
     const viewers = this.#refreshViewers();
@@ -2167,6 +2169,11 @@ export class FileRoom extends DurableObject<Env> {
     return true;
   }
 
+  /** How many origin notes the agent watch holds, without sweeping (for tests). */
+  async agentWatchNotes(): Promise<number> {
+    return this.#agentWatch?.left.size ?? 0;
+  }
+
   /** How many claims on agent calls are held, expired ones swept first (for tests). */
   async heldAgentClaims(): Promise<number> {
     this.#sweepClaims();
@@ -3166,7 +3173,10 @@ export class FileRoom extends DurableObject<Env> {
     // found before (what's deleted) and after (what's made) it applies.
     const touched = this.#converting ? touchedIds(ops) : null;
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
-    // A write call under way: where this deletes or moves layers away from, before it does.
+    // A write call under way: where this deletes or moves layers away from, before it does. A claim
+    // whose caller stopped renewing it lapses here too, so people's edits never keep feeding a
+    // watch no run can still need (only an agent request swept them before).
+    if (this.#agentWatch) this.#sweepClaims();
     const watch = this.#agentWatch;
     watch?.left.delete(next);
     const left = watch ? leftBy(this.#sql, ops) : undefined;

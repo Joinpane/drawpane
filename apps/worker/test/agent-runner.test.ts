@@ -1166,6 +1166,38 @@ describe("claims on call ids", () => {
     expect(seen.stale).toBe(false);
   });
 
+  it("stops keeping origin notes once an abandoned claim lapses, whoever edits next", async () => {
+    // A write call admitted, then its caller died: no renewals, and no agent request afterwards.
+    const { fileId, person, session } = await setup();
+    const room = roomOf(fileId);
+    const realNow = Date.now;
+    let now = realNow();
+    await runInDurableObject(room, async (r) => {
+      Date.now = () => now;
+      const admitted = await r.admitAgentCall({
+        v: AGENT_RUNNER_V,
+        fileId,
+        sessionId: session.id,
+        callId: "caller-died",
+      });
+      expect(admitted).toMatchObject({ admitted: true });
+    });
+    try {
+      // While the claim is live, people's edits are noted, for the run that might still commit.
+      await person.edit([{ op: "set", id: person.page.id, prop: "name", value: "live" }]);
+      expect(await room.agentWatchNotes()).toBe(1);
+      // Its lease runs out; only people edit from here on.
+      now += AGENT_CLAIM_MS + 1;
+      for (let n = 0; n < 20; n++)
+        await person.edit([{ op: "set", id: person.page.id, prop: "name", value: `after ${n}` }]);
+      expect(await room.agentWatchNotes()).toBe(0);
+    } finally {
+      await runInDurableObject(room, () => {
+        Date.now = realNow;
+      });
+    }
+  });
+
   it("lets go of the claim when the call is answered, even when its run failed", async () => {
     const { fileId, by, session } = await setup();
     const out = await callWriteTool(agentDeps(env, fileId), {
