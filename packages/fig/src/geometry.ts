@@ -12,6 +12,7 @@
  * points taken back into the unit square.
  */
 import type { Figma } from "@drawpane/figma";
+import { glyphNumber } from "@drawpane/model";
 
 const ARGS = [0, 2, 2, 4, 6] as const;
 const LETTER = ["Z", "M", "L", "Q", "C"] as const;
@@ -32,6 +33,41 @@ export function commandsToPath(blob: Uint8Array): string {
     parts.push(`${LETTER[op as 0]}${args.join(" ")}`);
   }
   return parts.join("");
+}
+
+/**
+ * A glyph's outline blob (Figma's `derivedTextData.glyphs[].commandsBlob`:
+ * the same commands in ems, y up) as a saved outline (decision 0037): in
+ * thousandths of an em, to a tenth, spaced. Null when it can't be read whole.
+ */
+export function commandsToGlyph(blob: Uint8Array): string | null {
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  const parts: string[] = [];
+  let at = 0;
+  /** Whether a path is open: Figma's blobs may close before their first move, which SVG refuses. */
+  let open = false;
+  while (at < blob.length) {
+    const op = blob[at] as number;
+    const count = ARGS[op as 0];
+    if (count === undefined || at + 1 + count * 4 > blob.length) return null;
+    at++;
+    const args: string[] = [];
+    for (let i = 0; i < count; i++, at += 4) {
+      const v = view.getFloat32(at, true);
+      if (!Number.isFinite(v) || Math.abs(v) > 1000) return null;
+      args.push(glyphNumber(v));
+    }
+    if (op === 0) {
+      if (open) parts.push("Z");
+      open = false;
+      continue;
+    }
+    // A line or curve before any move starts at the origin, as SVG's would after "M0 0".
+    if (!open && op !== 1) parts.push("M0 0");
+    open = true;
+    parts.push(`${LETTER[op as 0]}${args.join(" ")}`);
+  }
+  return parts.join(" ");
 }
 
 /** Figma's 2×3 matrix: x' = m00·x + m01·y + m02, y' = m10·x + m11·y + m12. */

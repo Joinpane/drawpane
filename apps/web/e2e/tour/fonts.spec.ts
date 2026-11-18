@@ -74,5 +74,23 @@ test("font picker tour", async ({ browser }) => {
   await dialog.getByRole("radio", { name: "This file" }).click();
   await page.waitForTimeout(800);
   await shot(page, "107-font-in-file");
+  await page.keyboard.press("Escape");
+
+  // Opened again, a file whose fonts are missing says so: a notice, and a count in the top bar.
+  await page.evaluate(() => (window as unknown as W).drawpane.select([]));
+  await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.reload();
+  await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+    timeout: 15_000,
+  });
+  // The notice waits for the font catalog and the team's fonts (and isn't there before this change).
+  await page
+    .locator(".fonts-notice")
+    .waitFor({ timeout: 10_000 })
+    .catch(() => {});
+  await page.waitForTimeout(2500);
+  await shot(page, "108-fonts-missing-on-open");
   await context.close();
 });

@@ -46,6 +46,10 @@ export const NOTE_TEXT = {
     "copy of a component on a page left out was detached",
     "copies of components on pages left out were detached",
   ],
+  "glyphs-dropped": [
+    "text's saved glyph outlines were left out (the file keeps a bounded number)",
+    "texts' saved glyph outlines were left out (the file keeps a bounded number)",
+  ],
   "unsupported-node": [
     "layer of an unsupported kind was skipped",
     "layers of unsupported kinds were skipped",

@@ -121,6 +121,23 @@ export const WEIGHT_NAMES: Readonly<Record<number, string>> = {
   900: "Black",
 };
 
+/**
+ * Whether a family has a style: a variable family any weight in its range,
+ * a static one its own weights. System and local fonts don't say which
+ * weights they have, so they're taken to have them all.
+ */
+export function hasStyle(f: FontFamily, weight: number, italic: boolean): boolean {
+  if (f.source === "system" || f.source === "local") return true;
+  const weights = italic ? f.italics : f.weights;
+  if (weights.length === 0) return false;
+  if (f.variable) {
+    const lo = Math.min(...weights);
+    const hi = Math.max(...weights);
+    return weight >= lo && weight <= hi;
+  }
+  return weights.includes(weight);
+}
+
 /** The available weight nearest to `wanted` (ties go heavier, like CSS for weights above 500). */
 export function nearestWeight(available: readonly number[], wanted: number): number {
   let best = available[0] ?? wanted;
@@ -202,6 +219,8 @@ class FontRegistry implements FontResolver {
   #version = 0;
   #teamId: string | null = null;
   #team: readonly FontFamily[] | null = null;
+  /** The team whose families `team` lists, once its load has finished (or failed). */
+  #teamLoadedFor: string | null = null;
   /** Team families, checked before anything else: a team font wins over others of its name. */
   readonly #teamKnown = new Map<string, FontFamily>();
   #teamSheet: {
@@ -264,6 +283,11 @@ class FontRegistry implements FontResolver {
     return this.#team;
   }
 
+  /** Whether `teamId`'s fonts and aliases have loaded (an empty list if the request failed). */
+  teamLoaded(teamId: string): boolean {
+    return this.#teamLoadedFor === teamId;
+  }
+
   /** The team's font aliases once loaded. */
   get aliases(): readonly TeamFontAlias[] | null {
     return this.#aliases;
@@ -284,6 +308,18 @@ class FontRegistry implements FontResolver {
   /** The family text named `family` at `size` px is drawn in (the editor's `FontResolver`). */
   family(family: string, size: number): string {
     return this.resolution(family, size).family;
+  }
+
+  /**
+   * Whether nothing here draws text named `family` at `size` px in this
+   * weight and style, after aliases: what the missing fonts panel lists as
+   * missing. Text saved with glyph outlines draws from them then (decision
+   * 0037). Until the Google catalog is in, a family only it could have
+   * counts as missing: the outlines look as the font would, so nothing jumps.
+   */
+  missing(family: string, size: number, weight: number, italic: boolean): boolean {
+    const drawn = this.get(this.family(family, size));
+    return !drawn || !hasStyle(drawn, weight, italic);
   }
 
   /** Families text named `family` may be drawn in through aliases, those that are here. */
@@ -360,6 +396,7 @@ class FontRegistry implements FontResolver {
     this.#teamKnown.clear();
     for (const f of list) this.#teamKnown.set(f.family, f);
     this.#team = list;
+    this.#teamLoadedFor = teamId;
     const signature = faces
       .map((f) => f.sha)
       .sort()

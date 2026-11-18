@@ -15,48 +15,21 @@
 import {
   type Editor,
   fontFaceKey,
-  fontUsage,
+  glyphTable,
   replaceFontOps,
+  savedText,
   type TextFace,
 } from "@drawpane/editor";
 import { builtInFontAlias, type FontAlias, type TeamFontAlias } from "@drawpane/model";
-import { Badge, Button, SegmentedControl } from "@drawpane/ui";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { Badge, Button, Icon, SegmentedControl } from "@drawpane/ui";
+import { useId, useMemo, useState, useSyncExternalStore } from "react";
 import { Dialog } from "../app/Dialog";
 import { type FontFamily, fonts, nearestWeight } from "../fonts/fonts";
-import { type FamilyReport, fontReport, styleLabel } from "../fonts/missing-fonts";
-import { useFonts } from "./inspector/FontPicker";
+import { type FamilyReport, styleLabel } from "../fonts/missing-fonts";
+import { useFontReport } from "./font-report";
 import "./missing-fonts.css";
 
 type Scope = "file" | "team";
-
-/**
- * The file's font report, kept up with the document and the registry. It
- * reads every text layer, so it's worked out a beat after edits rather than
- * on each one: a large file stays quick to edit with the page inspector open.
- */
-export function useFontReport(editor: Editor): FamilyReport[] | null {
-  const version = useSyncExternalStore(
-    (cb) => editor.doc.subscribe(cb),
-    () => editor.doc.version,
-  );
-  const registry = useFonts();
-  const [report, setReport] = useState<FamilyReport[] | null>(null);
-  useEffect(() => {
-    void fonts.loadGoogle();
-  }, []);
-  const ready = report !== null;
-  useEffect(() => {
-    // Until the catalog is in, a family nobody knows yet may still be a Google one.
-    if (fonts.google === null) return;
-    const timer = setTimeout(
-      () => setReport(fontReport(fontUsage(editor.doc), fonts)),
-      ready ? 250 : 0,
-    );
-    return () => clearTimeout(timer);
-  }, [editor, version, registry]);
-  return report;
-}
 
 /** Every family a replacement can be, by where it comes from. */
 function choices(): Array<{ label: string; families: readonly FontFamily[] }> {
@@ -143,7 +116,9 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const groups = useMemo(choices, [report]);
-  const canEdit = editor.canEdit;
+  // Viewers see what's missing, but only editors can rewrite the file.
+  const canEdit = useSyncExternalStore(editor.state.subscribe, () => editor.canEdit);
+  const readOnlyId = useId();
   const teamId = fonts.teamId;
 
   if (!report)
@@ -153,9 +128,23 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
   const aliased = report.filter((r) => r.status === "aliased");
   // An alias stands in for a family that isn't here; a family here missing a style can't have one.
   const listed = scope === "team" ? missing.filter((r) => r.status === "missing") : missing;
-  const missingLayers = new Set(
+  const missingIds = new Set(
     missing.flatMap((r) => r.styles.filter((s) => s.missing).flatMap((s) => s.layers)),
-  ).size;
+  );
+  // Layers a .fig saved with their glyph outlines draw from them until edited (decision 0037).
+  const table = glyphTable(editor.doc);
+  const drawnFromOutlines = (ids: Iterable<string>) => {
+    let n = 0;
+    for (const id of ids) {
+      const node = editor.doc.get(id);
+      if (node && savedText(node, editor.measurer, table)) n++;
+    }
+    return n;
+  };
+  const outlined = drawnFromOutlines(missingIds);
+  const familyOutlined = (r: FamilyReport) =>
+    drawnFromOutlines(new Set(r.styles.filter((st) => st.missing).flatMap((st) => st.layers)));
+  const missingLayers = missingIds.size - outlined;
 
   const familyFor = (r: FamilyReport) =>
     families[r.family] ?? (r.status === "styles" ? r.family : "");
@@ -226,7 +215,9 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
       ? aliased.length > 0
         ? "Every font in this file is available, some through an alias."
         : "Every font in this file is available."
-      : `${fontCount} in this file ${isAre} available here, so ${layers(missingLayers)} ${shows} in a fallback font or a nearby style.`;
+      : outlined > 0
+        ? `${fontCount} in this file ${isAre} available here. ${layers(outlined)} ${outlined === 1 ? "draws" : "draw"} from the glyph outlines saved with the file, as laid out, until edited${missingLayers > 0 ? `; ${layers(missingLayers)} ${shows} in a fallback font or a nearby style` : ""}.`
+        : `${fontCount} in this file ${isAre} available here, so ${layers(missingLayers)} ${shows} in a fallback font or a nearby style.`;
 
   return (
     <div className="missing-fonts">
@@ -242,12 +233,25 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
             value={scope}
             onChange={setScope}
           />
-          <p className="missing-fonts__hint">
-            {scope === "file"
-              ? "Rewrites these layers in one change you can undo."
-              : "Saves a team font alias. Files keep the font they name, and everyone on the team sees your pick instead, in every file. Each style keeps its weight."}
-          </p>
+          {/* A viewer's reason for not replacing in the file follows instead. */}
+          {scope === "file" && !canEdit ? null : (
+            <p className="missing-fonts__hint">
+              {scope === "file"
+                ? "Rewrites these layers in one change you can undo."
+                : "Saves a team font alias. Files keep the font they name, and everyone on the team sees your pick instead, in every file. Each style keeps its weight."}
+            </p>
+          )}
         </div>
+      ) : null}
+
+      {listed.length > 0 && scope === "file" && !canEdit ? (
+        <p id={readOnlyId} className="missing-fonts__readonly">
+          <Icon name="eye" size={12} />
+          <span>
+            You can view this file but not edit it, so its fonts can't be replaced here. Ask someone
+            who can edit it.
+          </span>
+        </p>
       ) : null}
 
       {listed.length > 0 ? (
@@ -264,12 +268,19 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
                     {r.status === "missing" ? "Missing" : "Missing styles"}
                   </Badge>
                 </div>
+                {familyOutlined(r) > 0 ? (
+                  <p className="missing-fonts__hint">
+                    {layers(familyOutlined(r))} drawn from saved glyph outlines. Edited text shows
+                    in a fallback font.
+                  </p>
+                ) : null}
                 {r.status === "missing" ? (
                   <label className="missing-fonts__row">
                     <span className="missing-fonts__label">Replace with</span>
                     <select
                       className="inspector__select"
                       aria-label={`Replace ${r.family} with`}
+                      disabled={scope === "file" && !canEdit}
                       value={family}
                       onChange={(e) => {
                         const value = e.target.value;
@@ -313,7 +324,7 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
                           <select
                             className="inspector__select"
                             aria-label={`${r.family} ${s.label} becomes`}
-                            disabled={!target}
+                            disabled={!target || !canEdit}
                             value={target ? styleFor(r, s) : ""}
                             onChange={(e) => {
                               const value = e.target.value;
@@ -403,6 +414,7 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
               size="lg"
               variant="primary"
               disabled={!canEdit || chosen.length === 0}
+              aria-describedby={canEdit ? undefined : readOnlyId}
               onClick={replaceInFile}
             >
               Replace fonts

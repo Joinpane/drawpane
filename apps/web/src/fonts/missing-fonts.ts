@@ -5,7 +5,9 @@
  */
 import { type FontUse, fontFaceKey, type TextFace } from "@drawpane/editor";
 import type { FontResolution } from "@drawpane/model";
-import { type FontFamily, WEIGHT_NAMES } from "./fonts";
+import { type FontFamily, hasStyle, WEIGHT_NAMES } from "./fonts";
+
+export { hasStyle };
 
 /** What the panel needs of the font registry. */
 export interface FontLookup {
@@ -46,23 +48,6 @@ export function styleLabel(weight: number, italic: boolean): string {
   const name = WEIGHT_NAMES[weight] ?? String(weight);
   if (!italic) return name;
   return weight === 400 ? "Italic" : `${name} Italic`;
-}
-
-/**
- * Whether a family has a style: a variable family any weight in its range,
- * a static one its own weights. System and local fonts don't say which
- * weights they have, so they're taken to have them all.
- */
-export function hasStyle(f: FontFamily, weight: number, italic: boolean): boolean {
-  if (f.source === "system" || f.source === "local") return true;
-  const weights = italic ? f.italics : f.weights;
-  if (weights.length === 0) return false;
-  if (f.variable) {
-    const lo = Math.min(...weights);
-    const hi = Math.max(...weights);
-    return weight >= lo && weight <= hi;
-  }
-  return weights.includes(weight);
 }
 
 /** The panel's rows, from the file's font usage: missing first, then missing styles, then aliases. */

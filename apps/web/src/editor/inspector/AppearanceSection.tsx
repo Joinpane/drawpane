@@ -24,6 +24,9 @@ const BLEND_LABEL: Record<BlendMode, string> = {
   lighten: "Lighten",
   "color-dodge": "Color dodge",
   "color-burn": "Color burn",
+  // Figma's names for them.
+  "linear-dodge": "Plus lighter",
+  "linear-burn": "Plus darker",
   "hard-light": "Hard light",
   "soft-light": "Soft light",
   difference: "Difference",
