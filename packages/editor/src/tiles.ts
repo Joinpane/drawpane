@@ -71,6 +71,27 @@ export class TileWork {
     this.#tiles.clear();
   }
 
+  /**
+   * Forgets what's left in each tile that `rect` (zoomed page pixels) covers
+   * whole: drawn already, with more than its tile. Returns the area forgotten.
+   */
+  drop(rect: Rect): number {
+    let area = 0;
+    for (const [key, entry] of this.#tiles) {
+      const r = entry.rect;
+      if (
+        r.x >= rect.x &&
+        r.y >= rect.y &&
+        r.x + r.width <= rect.x + rect.width &&
+        r.y + r.height <= rect.y + rect.height
+      ) {
+        area += r.width * r.height;
+        this.#tiles.delete(key);
+      }
+    }
+    return area;
+  }
+
   /** Forgets what's outside `view` (off the canvas, so not shown: a pan back draws it as it comes in). */
   keepWithin(view: Rect): void {
     for (const [key, entry] of this.#tiles) {

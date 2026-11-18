@@ -486,6 +486,21 @@ interface Gl extends GlCanvas {
   readonly low: [WebGLTexture, WebGLTexture];
   readonly framebuffer: WebGLFramebuffer;
   lowSize: { w: number; h: number };
+  /**
+   * Textures the framebuffer was found complete with, since they were last
+   * allocated. Asking costs a round trip to the GPU, a stall every glass
+   * drawn would pay; the answer only changes when a texture is allocated.
+   */
+  readonly complete: WeakSet<WebGLTexture>;
+}
+
+/** Whether the framebuffer, drawing into `tex`, is complete: asked once per allocation of it. */
+function attachable(g: Gl, tex: WebGLTexture): boolean {
+  if (g.complete.has(tex)) return true;
+  const { gl } = g;
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return false;
+  g.complete.add(tex);
+  return true;
 }
 
 /** How much the rim's blur can be downsampled: its Gaussian stays at least 3 pixels wide there. */
@@ -638,6 +653,7 @@ export class GlassPainter {
       low: [texture(gl, gl.LINEAR), texture(gl, gl.LINEAR)],
       framebuffer,
       lowSize: { w: 0, h: 0 },
+      complete: new WeakSet(),
     };
     return this.#gl;
   }
@@ -801,6 +817,7 @@ export class GlassPainter {
       for (const tex of g.frosted) {
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fw, fh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        g.complete.delete(tex);
       }
       g.frostSize = { w: fw, h: fh };
     }
@@ -817,7 +834,7 @@ export class GlassPainter {
       [g.frosted[0], 0, [0, 1], g.frosted[1]],
     ] as const) {
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, into, 0);
-      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      if (!attachable(g, into)) {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         return null;
       }
@@ -925,6 +942,7 @@ export class GlassPainter {
       for (const tex of g.low) {
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+        g.complete.delete(tex);
       }
       g.lowSize = { w, h };
     }
@@ -963,7 +981,7 @@ export class GlassPainter {
     gl.bindFramebuffer(gl.FRAMEBUFFER, g.framebuffer);
     gl.viewport(0, 0, lw, lh);
     lowTarget(0);
-    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    if (!attachable(g, g.low[0])) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       return false;
     }
