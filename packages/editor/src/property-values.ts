@@ -18,7 +18,9 @@
 import {
   type ComponentPropDef,
   type ComponentPropType,
+  drivenShown,
   getProp,
+  hasRecord,
   MAX_PROPERTY_SCOPE,
   MAX_PROPERTY_VALUES,
   MAX_PROPERTY_VALUES_CHARS,
@@ -32,7 +34,7 @@ import {
   sameValue,
   splitPropertyKey,
 } from "@drawpane/model";
-import { componentSetOf, isInstanceRoot, isMainComponent } from "./components";
+import { componentSetOf, isInstanceRoot, isMainComponent, swapInstanceOps } from "./components";
 import type { Doc } from "./doc";
 import { layerName } from "./names";
 
@@ -284,12 +286,105 @@ export function valueOps(
   return recordWriteOps(doc, place.root, keyed);
 }
 
-/** Whether a value suits a field (a record can outlive a definition whose type changed). */
-function fits(field: PropRefField, value: PropertyValue): boolean {
-  if (field === "visible") return typeof value === "boolean";
-  if (field === "characters") return typeof value === "string";
-  if (field === "instanceOf") return typeof value === "object" && value !== null;
-  return false;
+/**
+ * What makes an instance's first record (decision 0035, item 3), before an
+ * edit gives it its first value: a record that exists decides every key, so
+ * an instance from before records (materialized, its values on its layers)
+ * has every value its layers show that differs from its main layer's folded
+ * into it, once; with none, the record is made empty. Keyed sets, committed
+ * on their own (never undone with the edit), for each instance root `ops`
+ * write a value of that has no record.
+ */
+export function firstRecordOps(doc: Doc, ops: readonly Op[]): Op[] {
+  const out: Op[] = [];
+  const seen = new Set<string>();
+  for (const op of ops) {
+    if (op.op !== "set" || op.prop !== "propValues" || op.key === undefined) continue;
+    if (seen.has(op.id)) continue;
+    seen.add(op.id);
+    const root = doc.get(op.id);
+    if (!root || !isInstanceRoot(root) || hasRecord(root.props)) continue;
+    if (getProp(root.props, "mirrors") !== null) continue;
+    const values = doc.compactCopies ? {} : legacyValues(doc, op.id);
+    const entries = Object.entries(values);
+    if (entries.length === 0)
+      out.push({ op: "set", id: op.id, prop: "propValues", key: op.key, value: null });
+    for (const [key, value] of entries)
+      out.push({ op: "set", id: op.id, prop: "propValues", key, value });
+  }
+  return out;
+}
+
+/**
+ * The values an instance from before records holds on the layers its
+ * properties drive (its nested instances' included, under their scope): each
+ * key's first layer, in layer order, that shows another value than its main
+ * layer's. Within the record's bounds.
+ */
+function legacyValues(doc: Doc, rootId: string): PropertyValues {
+  const out: PropertyValues = {};
+  const stack = [...doc.childIds(rootId)].reverse();
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    const node = doc.get(id);
+    if (!node) continue;
+    const kids = doc.childIds(id);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i] as string);
+    const source = doc.get(getProp(node.props, "mirrors") ?? "");
+    const refs = getProp(node.props, "propRefs") as Record<string, string | undefined>;
+    if (!source) continue;
+    const owner = ownerOf(doc, id);
+    const place = owner ? recordPlace(doc, owner.id) : undefined;
+    if (!owner || !place || place.root !== rootId) continue;
+    const defs = instanceDefinitions(doc, owner.id);
+    for (const field of ["visible", "characters", "instanceOf"] as const) {
+      const propertyId = refs[field];
+      const def = propertyId ? defs.find((d) => d.id === propertyId) : undefined;
+      if (!propertyId || !def || FIELD_OF[def.type] !== field) continue;
+      const key = propertyKey(place.scope, propertyId);
+      const value = fieldValue(node, field);
+      if (key in out || value === null || sameValue(value, fieldValue(source, field))) continue;
+      const next = { ...out, [key]: value };
+      if (Object.keys(next).length > MAX_PROPERTY_VALUES) continue;
+      if (propertyValuesChars(next) > MAX_PROPERTY_VALUES_CHARS) continue;
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/**
+ * What each field a property drives on a copy layer shows, where its link
+ * ends or changes form (detach, unlink), as conversion reads it
+ * (`drivenShown`, so the three agree): its instance's record's value; its
+ * main layer's for a key a record that exists doesn't keep (a reset); the
+ * layer's own when the instance keeps no record (from before records). A
+ * materialized layer showing another was written before the record's last
+ * change. `staged` is the record as operations before these leave it.
+ */
+export function shownValues(
+  doc: Doc,
+  node: NodeRecord,
+  staged?: Readonly<Record<string, unknown>>,
+): Array<{ field: "visible" | "characters" | "instanceOf"; value: PropertyValue }> {
+  const owner = ownerOf(doc, node.id);
+  const place = owner ? recordPlace(doc, owner.id) : undefined;
+  const rootNode = place ? doc.get(place.root) : undefined;
+  if (!owner || !place || !rootNode) return [];
+  const root = staged ? { ...rootNode.props, propValues: staged } : rootNode.props;
+  const refs = getProp(node.props, "propRefs") as Record<string, string | undefined>;
+  const defs = instanceDefinitions(doc, owner.id);
+  const main = doc.get(getProp(node.props, "mirrors") ?? "")?.props;
+  const out: Array<{ field: "visible" | "characters" | "instanceOf"; value: PropertyValue }> = [];
+  for (const field of ["visible", "characters", "instanceOf"] as const) {
+    const propertyId = refs[field];
+    const def = propertyId ? defs.find((d) => d.id === propertyId) : undefined;
+    if (!propertyId || !def || FIELD_OF[def.type] !== field) continue;
+    const key = propertyKey(place.scope, propertyId);
+    const value = drivenShown(field, key, root, node.props, main);
+    if (value !== null) out.push({ field, value });
+  }
+  return out;
 }
 
 /**
@@ -348,30 +443,23 @@ function unlinkedValues(
     refs.get(op.id) ?? (getProp(node.props, "propRefs") as Record<string, string | undefined>);
   const after = (op.value ?? {}) as Record<string, string | undefined>;
   const out: Op[] = [];
-  // What it shows is its record's value, as the operations before this leave it: a
-  // materialized layer written before the record's last value can lag, and the record wins.
-  const recorded = new Map<string, unknown>(
-    drivenValues(doc, node).map(({ field, value }) => [field, value]),
-  );
+  // What it shows (`shownValues`), as the operations before this leave its record: a
+  // materialized layer written before the record's last change can lag, and the record wins.
   const owner = ownerOf(doc, op.id);
   const place = owner ? recordPlace(doc, owner.id) : undefined;
   const staged = place ? planned.get(place.root) : undefined;
-  for (const field of ["visible", "characters"] as const) {
-    const propertyId = before[field];
-    if (!propertyId || after[field]) continue;
-    let value = recorded.has(field)
-      ? recorded.get(field)
-      : (node.props as Record<string, unknown>)[field];
-    if (place && staged) {
-      const now = staged[propertyKey(place.scope, propertyId)];
-      if (now !== undefined) value = now;
-      else if (recorded.has(field)) {
-        // Reset earlier in these operations: its main layer's.
-        const source = doc.get(getProp(node.props, "mirrors") as string);
-        value = source ? (source.props as Record<string, unknown>)[field] : undefined;
-      }
+  for (const { field, value } of shownValues(doc, node, staged)) {
+    if (!before[field] || after[field]) continue;
+    if (field !== "instanceOf") {
+      out.push({ op: "set", id: op.id, prop: field, value });
+      continue;
     }
-    out.push({ op: "set", id: op.id, prop: field, value: value === undefined ? null : value });
+    // A swap kept as its own: an instance of the component it shows.
+    const shown = typeof value === "object" ? value.instance : null;
+    if (!shown) continue;
+    if (doc.compactCopies) out.push({ op: "set", id: op.id, prop: "instanceOf", value: shown });
+    else if (shown !== getProp(node.props, "instanceOf"))
+      out.push(...swapInstanceOps(doc, op.id, shown));
   }
   return out;
 }
@@ -614,29 +702,4 @@ export function scopedValues(
 /** The size a record's value takes (for a refusal's message). */
 export function valueSize(key: string, value: PropertyValue): number {
   return propertyValueChars(key, value);
-}
-
-/**
- * The values driven fields of a copy layer show: for each driven field
- * whose record holds a value, the value (decision 0035, item 3). The
- * record of the instance the layer is ultimately in; nothing when it
- * isn't in one. For materialized sync, which writes them.
- */
-export function drivenValues(
-  doc: Doc,
-  node: NodeRecord,
-): Array<{ field: PropRefField; value: PropertyValue }> {
-  const refs = getProp(node.props, "propRefs");
-  const fields = (Object.keys(refs) as PropRefField[]).filter((f) => refs[f] && f !== "slot");
-  if (fields.length === 0) return [];
-  const owner = ownerOf(doc, node.id);
-  const place = owner ? recordPlace(doc, owner.id) : undefined;
-  if (!place) return [];
-  const record = recordAt(doc, place);
-  const out: Array<{ field: PropRefField; value: PropertyValue }> = [];
-  for (const field of fields) {
-    const value = record[propertyKey(place.scope, refs[field] as string)];
-    if (value !== undefined && fits(field, value)) out.push({ field, value });
-  }
-  return out;
 }

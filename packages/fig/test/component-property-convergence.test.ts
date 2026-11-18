@@ -24,126 +24,19 @@
  * then keeps every instance (none detached) and shows what the record says,
  * when no main changed in structure meanwhile.
  */
-import { Doc, Editor, instanceProperties } from "@drawpane/editor";
-import {
-  type CopiesFormat,
-  compactByInstance,
-  type NodeRecord,
-  type Op,
-  ROOT_ID,
-} from "@drawpane/model";
+import { Doc, instanceProperties } from "@drawpane/editor";
+import { type CopiesFormat, compactByInstance, keyBetween, type NodeRecord } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
+  buttonKit,
   type Client,
   expectAgreement,
   expectConverged,
   expectShowsRecord,
   FORMS,
-  measurer,
-  node,
   Room,
 } from "./property-rooms";
-
-/**
- * A Button set (variants A and B) with a text, a boolean and an icon swap
- * property, each variant holding a nested Leaf (a text property of its own,
- * exposed); and an instance of A, its copy made by the editor.
- */
-function kit(): NodeRecord[] {
-  const mains: NodeRecord[] = [
-    node("p", "page", ROOT_ID, "a0", {}),
-    node("leaf", "frame", "p", "a0", {
-      isComponent: true,
-      name: "Leaf",
-      width: 60,
-      height: 20,
-      componentProps: [{ id: "leafLabel", name: "Leaf label", type: "text", default: "Leaf" }],
-    }),
-    node("lt", "text", "leaf", "a0", {
-      name: "Text",
-      characters: "Leaf",
-      propRefs: { characters: "leafLabel" },
-    }),
-    node("iconA", "frame", "p", "a1", { isComponent: true, name: "Arrow", width: 10, height: 10 }),
-    node("iconAr", "rect", "iconA", "a0", { name: "Shape", width: 10, height: 10 }),
-    node("iconB", "frame", "p", "a2", { isComponent: true, name: "Check", width: 10, height: 10 }),
-    node("iconBr", "ellipse", "iconB", "a0", { name: "Shape", width: 10, height: 10 }),
-    node("set", "frame", "p", "a3", {
-      isComponentSet: true,
-      name: "Button",
-      componentProps: [
-        { id: "label", name: "Label", type: "text", default: "Button" },
-        { id: "show", name: "Show", type: "boolean", default: true },
-        {
-          id: "icon",
-          name: "Icon",
-          type: "instance",
-          default: "iconA",
-          preferred: ["iconA", "iconB"],
-        },
-      ],
-    }),
-  ];
-  for (const [variant, key] of [
-    ["A", "a0"],
-    ["B", "a1"],
-  ] as const) {
-    const v = `v${variant}`;
-    mains.push(
-      node(v, "frame", "set", key, {
-        isComponent: true,
-        name: `State=${variant}`,
-        variantProps: { State: variant },
-        width: 200,
-        height: 40,
-      }),
-      node(`${v}t`, "text", v, "a0", {
-        name: variant === "A" ? "Label" : "Title",
-        characters: "Button",
-        propRefs: { characters: "label" },
-      }),
-      node(`${v}i`, "frame", v, "a1", {
-        name: "Icon",
-        instanceOf: "iconA",
-        width: 10,
-        height: 10,
-        propRefs: { visible: "show", instanceOf: "icon" },
-      }),
-      node(`${v}n`, "frame", v, "a2", {
-        name: "Nested",
-        instanceOf: "leaf",
-        exposeProps: true,
-        width: 60,
-        height: 20,
-      }),
-    );
-  }
-  // The nested instances' own copies, and the instance, as the editor makes them.
-  const editor = new Editor({ clientId: "setup", measurer });
-  editor.state.set({ role: "editor" });
-  editor.doc.resetStored([], "materialized");
-  editor.doc.reset(mains);
-  editor.setPage("p");
-  for (const id of ["vAi", "vAn", "vBi", "vBn"]) {
-    const of = editor.doc.get(id)?.props.instanceOf as string;
-    const made = editor.insertInstance(of) as string;
-    const copy = editor.doc.childIds(made);
-    // Its layers become the nested instance's, as copies.
-    editor.commit(
-      copy.map((c, i): Op => ({ op: "move", id: c, parent: id, key: `a${i}` })),
-      "setup",
-      { overrides: false },
-    );
-    editor.commit([{ op: "delete", id: made }], "setup", { overrides: false });
-  }
-  const instance = editor.insertInstance("vA") as string;
-  editor.commit([{ op: "set", id: instance, prop: "name", value: "I" }]);
-  return editor.doc
-    .stored()
-    .map((n) => (n.id === instance ? { ...n, id: "i" } : n))
-    .map((n) => (n.parent === instance ? { ...n, parent: "i" } : n));
-}
 
 /** The nested Leaf instance in `i`, as `client` presents it. */
 const nestedOf = (client: Client) =>
@@ -152,9 +45,11 @@ const nestedOf = (client: Client) =>
 type Action = readonly [client: number, kind: number, arg: number];
 
 /**
- * What a tab from before records does for a property's kinds: it doesn't see
- * properties, so it edits the layers in the instance by hand (the text, the
- * icon's visibility, an ordinary override). True when it did.
+ * What a tab from before records does (protocol 2): it doesn't see properties,
+ * so it edits the layers in the instance by hand (the text, the icon's
+ * visibility), a main's, or a page's (safe: a layer added). It loaded the file
+ * before this change and edits offline until it connects; then it's a viewer,
+ * and only its safe edits apply (`protocol2Refusal`). True when it did.
  */
 function actAsOldTab(client: Client, kind: number, arg: number, text: string): boolean {
   const editor = client.editor;
@@ -165,8 +60,20 @@ function actAsOldTab(client: Client, kind: number, arg: number, text: string): b
     editor.commit([{ op: "set", id: label.id, prop: "characters", value: text }]);
   else if (kind === 1 && icon)
     editor.commit([{ op: "set", id: icon.id, prop: "visible", value: arg % 2 === 0 }]);
-  else if ((kind === 2 || kind === 3 || kind === 5) && label)
-    editor.commit([{ op: "set", id: label.id, prop: "opacity", value: (arg % 9) / 10 + 0.1 }]);
+  else if (kind === 2 || kind === 3 || kind === 5)
+    editor.commit([
+      {
+        op: "create",
+        id: `page${text}`,
+        type: "rect",
+        parent: "p",
+        key: keyBetween(
+          editor.doc.get(editor.doc.childIds("p").at(-1) as string)?.key ?? null,
+          null,
+        ),
+        props: { width: 10, height: 10 },
+      },
+    ]);
   else if (kind === 6) {
     // A plain layer in a main: its tab knows no references.
     editor.commit([
@@ -261,21 +168,27 @@ function act(room: Room, [who, kind, arg]: Action, count: { next: number }): voi
 const KINDS = 13;
 
 function run(form: CopiesFormat, actions: readonly Action[], oldTab: boolean): Room {
-  const room = new Room(kit(), form);
+  const room = new Room(buttonKit(), form);
   room.join("a");
   room.join("b");
-  room.join("c", oldTab ? 2 : 3);
+  if (oldTab) room.joinOffline("c");
+  else room.join("c");
   const count = { next: 0 };
   for (const action of actions) act(room, action, count);
   room.settle();
   return room;
 }
 
-/** The tab from before records reloads (nothing pending: its banner waited), as today's. */
+/**
+ * The tab from before records reloads (nothing pending: each of its edits
+ * applied or was refused, and its banner waited), as today's. It's never
+ * refused anything safe.
+ */
 function reloadOldTabs(room: Room): void {
   for (const client of [...room.clients])
     if (client.protocol === 2) {
       expect(client.editor.sync.pendingCount).toBe(0);
+      expect(room.rejected.filter((r) => r.client === client.name)).toEqual([]);
       room.clients.splice(room.clients.indexOf(client), 1);
       room.join(`${client.name}-reloaded`);
     }
@@ -291,9 +204,46 @@ function expectConverts(room: Room): void {
   expectShowsRecord(doc, "i");
 }
 
+/** One schedule, and everything the property says of it once it's all delivered. */
+function check(form: CopiesFormat, actions: readonly Action[], oldTab: boolean): void {
+  const room = run(form, actions, oldTab);
+  expectConverged(room);
+  reloadOldTabs(room);
+  if (form === "materialized") {
+    // Converted as the room does, stale values or not. (A layer added to a main as its instance
+    // switches variant leaves the instance's layers stale in structure until it syncs again,
+    // which conversion keeps as it draws: not a value.)
+    if (!actions.some(([, kind]) => kind === 6)) expectConverts(room);
+    (room.clients[0] as Client).editor.setInstanceProperty("i", "label", "Settled");
+    room.settle();
+  }
+  expectAgreement(room, "i");
+}
+
 describe("component property values converge", () => {
+  // Review 5 of #187, P2 #7, found at seed 1875001: C swaps the icon, A detaches the instance
+  // before hearing of it, C undoes its swap, then A edits. C's delayed swap and undo rebuild the
+  // icon's layers copying the old main's copy layers, which the detach had pointed through to
+  // the icon's own; conversion then unlinked the nested icon.
+  it("the seed 1875001 schedule: a delayed swap and undo after a detach (materialized)", () => {
+    check(
+      "materialized",
+      [
+        [2, 2, 3],
+        [0, 12, 10],
+        [2, 7, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+      ],
+      false,
+    );
+  });
+
   it("the kit is what the test means: values on every kind of property", () => {
-    const room = new Room(kit(), "compact");
+    const room = new Room(buttonKit(), "compact");
     const client = room.join("a");
     const props = instanceProperties(client.editor.doc, "i");
     expect(props?.rows.map((r) => r.id)).toEqual(["State", "label", "show", "icon"]);
@@ -313,20 +263,7 @@ describe("component property values converge", () => {
               ),
               { minLength: 5, maxLength: 45 },
             ),
-            (actions) => {
-              const room = run(form, actions, oldTab);
-              expectConverged(room);
-              reloadOldTabs(room);
-              if (form === "materialized") {
-                // Converted as the room does, stale values or not. (A layer added to a main as
-                // its instance switches variant leaves the instance's layers stale in structure
-                // until it syncs again, which conversion keeps as it draws: not a value.)
-                if (!actions.some(([, kind]) => kind === 6)) expectConverts(room);
-                (room.clients[0] as Client).editor.setInstanceProperty("i", "label", "Settled");
-                room.settle();
-              }
-              expectAgreement(room, "i");
-            },
+            (actions) => check(form, actions, oldTab),
           ),
           {
             seed: Number(process.env.FUZZ_SEED ?? 350035),

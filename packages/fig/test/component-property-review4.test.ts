@@ -23,16 +23,7 @@ import {
 } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { runTool } from "../../editor/src/agent/tools";
-import {
-  expectAgreement,
-  expectConverged,
-  FORMS,
-  nested,
-  node,
-  open,
-  Room,
-  simple,
-} from "./property-rooms";
+import { expectConverged, FORMS, nested, node, open, Room, simple } from "./property-rooms";
 
 /** The texts under `id`, in order. */
 const texts = (doc: Doc, id: string): string[] => {
@@ -182,56 +173,10 @@ describe("review 4, P1 #1: two first changes to one copy layer both stay", () =>
 });
 
 // ---------------------------------------------------------------------------
-// P1 #2: a tab from before records keeps its unsent edits
-
-describe("review 4, P1 #2: a protocol 2 tab's queued edits all apply", () => {
-  for (const form of FORMS)
-    it(`reconnects with edits made offline, and every one is in (${form})`, () => {
-      const room = new Room(simple(), form);
-      const newer = room.join("newer");
-      const older = room.join("older", 2);
-      const text = room.id("it");
-      // It's sent nothing its model refuses.
-      for (const n of older.editor.doc.stored())
-        for (const prop of ["propRefs", "propValues", "componentProps"])
-          expect(prop in n.props).toBe(false);
-      room.disconnect(older);
-      // Offline: a page renamed, the label typed in, an ordinary override, in three edits.
-      older.editor.commit([{ op: "set", id: "p", prop: "name", value: "Renamed offline" }]);
-      older.editor.commit([{ op: "set", id: text, prop: "characters", value: "Typed offline" }]);
-      older.editor.commit([{ op: "set", id: text, prop: "opacity", value: 0.5 }]);
-      expect(older.editor.sync.pendingCount).toBeGreaterThan(0);
-      // Meanwhile a newer client sets the other property.
-      newer.editor.setInstanceProperty("i", "show", false);
-      room.settle();
-      expect(room.rejected).toEqual([]);
-      expectConverged(room);
-      const stored = new Doc({ compactCopies: form === "compact" });
-      stored.resetStored(structuredClone([...room.store.nodes()]), form);
-      expect(stored.get("p")?.props.name).toBe("Renamed offline");
-      expect(instanceValues(stored, "i")).toEqual({ label: "Typed offline", show: false });
-      expect(stored.get(text)?.props.opacity).toBe(0.5);
-      // Its update banner reloads it once nothing is pending: then it sees what everyone does.
-      room.clients.splice(room.clients.indexOf(older), 1);
-      room.join("reloaded");
-      room.settle();
-      expectAgreement(room, "i");
-    });
-
-  it("leaves out its materialized instance sync putting a driven field back to its main's", () => {
-    const room = new Room(simple(), "materialized");
-    const newer = room.join("newer");
-    const older = room.join("older", 2);
-    newer.editor.setInstanceProperty("i", "label", "Kept");
-    room.settle();
-    // Its tab edits the main; its sync writes the text it thinks the instance shows.
-    older.editor.commit([{ op: "set", id: "ta", prop: "fontSize", value: 20 }]);
-    room.settle();
-    expect(room.rejected).toEqual([]);
-    expect(instanceValues(newer.editor.doc, "i").label).toBe("Kept");
-    expect(newer.editor.doc.get("it")?.props.characters).toBe("Kept");
-  });
-});
+// P1 #2: a tab from before records keeps its unsent edits. The fourth round kept such a tab an
+// editor, its edits translated; the fifth review showed that can't hold over what it does to an
+// instance, so it views the file now and only its safe queued edits apply: see
+// component-property-review5.test.ts and the worker's component-properties.test.ts.
 
 // ---------------------------------------------------------------------------
 // P1 #3: detach keeps the values a nested instance takes from its main
@@ -359,8 +304,8 @@ describe("review 4, P1 #4: the record wins over a stale materialized layer", () 
     expect(texts(doc, "i")).toEqual(["Before", "Other"]);
   });
 
-  // Follow-up 9 (non-blocking): the import fold, run again on a record-bearing stale file.
-  it.fails("the import fold keeps an existing record over a stale layer", () => {
+  // Follow-up 9, fixed with review 5's P1 #1: an instance that keeps a record isn't folded again.
+  it("the import fold keeps an existing record over a stale layer", () => {
     const { room } = staleRoom();
     const pinned = pinInstances([...room.store.nodes()]);
     expect(pinned.nodes.find((n) => n.id === "i")?.props.propValues?.label).toBe("Latest value");

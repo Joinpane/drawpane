@@ -10,28 +10,28 @@
  * what each client has seen when it edits.
  *
  * A client may be a tab from before component property records (protocol
- * 2): the room sends it nothing it can't read and takes its edits as they
- * mean, with the model's own translation (`fromProtocol2`), as `FileRoom`
- * does. Its editor is today's, fed only what such a tab is: it sees no
- * references, records or definitions, so it edits the layers a property
- * drives as plain layers, as the old code did.
+ * 2): as `FileRoom` does, the room welcomes it as a viewer, sends it nothing
+ * it can't read, and of the edits it held unsent applies only transactions
+ * whose every operation is safe (`protocol2Refusal`), refusing the rest
+ * whole. Its editor is today's, fed only what such a tab is: it sees no
+ * references, records or definitions.
  */
 import { Doc, Editor, instanceProperties, instanceValues } from "@drawpane/editor";
 import {
   applyTransaction,
   type ClientMessage,
   type CopiesFormat,
-  CopyView,
+  collectSubtree,
   compactByInstance,
-  copyDriven,
   forProtocol2Nodes,
   forProtocol2Ops,
-  fromProtocol2,
   getProp,
+  linkedNode,
   MemoryStore,
   ModelError,
   type NodeRecord,
   type Op,
+  protocol2Refusal,
   ROOT_ID,
   type ServerMessage,
 } from "@drawpane/model";
@@ -242,6 +242,106 @@ export function nestedWithShow(): NodeRecord[] {
   return nodes;
 }
 
+/**
+ * A Button set (variants A and B) with a text, a boolean and an icon swap
+ * property, each variant holding a nested Leaf (a text property of its own,
+ * exposed); and an instance of A, its copy made by the editor.
+ */
+export function buttonKit(): NodeRecord[] {
+  const mains: NodeRecord[] = [
+    node("p", "page", ROOT_ID, "a0", {}),
+    node("leaf", "frame", "p", "a0", {
+      isComponent: true,
+      name: "Leaf",
+      width: 60,
+      height: 20,
+      componentProps: [{ id: "leafLabel", name: "Leaf label", type: "text", default: "Leaf" }],
+    }),
+    node("lt", "text", "leaf", "a0", {
+      name: "Text",
+      characters: "Leaf",
+      propRefs: { characters: "leafLabel" },
+    }),
+    node("iconA", "frame", "p", "a1", { isComponent: true, name: "Arrow", width: 10, height: 10 }),
+    node("iconAr", "rect", "iconA", "a0", { name: "Shape", width: 10, height: 10 }),
+    node("iconB", "frame", "p", "a2", { isComponent: true, name: "Check", width: 10, height: 10 }),
+    node("iconBr", "ellipse", "iconB", "a0", { name: "Shape", width: 10, height: 10 }),
+    node("set", "frame", "p", "a3", {
+      isComponentSet: true,
+      name: "Button",
+      componentProps: [
+        { id: "label", name: "Label", type: "text", default: "Button" },
+        { id: "show", name: "Show", type: "boolean", default: true },
+        {
+          id: "icon",
+          name: "Icon",
+          type: "instance",
+          default: "iconA",
+          preferred: ["iconA", "iconB"],
+        },
+      ],
+    }),
+  ];
+  for (const [variant, key] of [
+    ["A", "a0"],
+    ["B", "a1"],
+  ] as const) {
+    const v = `v${variant}`;
+    mains.push(
+      node(v, "frame", "set", key, {
+        isComponent: true,
+        name: `State=${variant}`,
+        variantProps: { State: variant },
+        width: 200,
+        height: 40,
+      }),
+      node(`${v}t`, "text", v, "a0", {
+        name: variant === "A" ? "Label" : "Title",
+        characters: "Button",
+        propRefs: { characters: "label" },
+      }),
+      node(`${v}i`, "frame", v, "a1", {
+        name: "Icon",
+        instanceOf: "iconA",
+        width: 10,
+        height: 10,
+        propRefs: { visible: "show", instanceOf: "icon" },
+      }),
+      node(`${v}n`, "frame", v, "a2", {
+        name: "Nested",
+        instanceOf: "leaf",
+        exposeProps: true,
+        width: 60,
+        height: 20,
+      }),
+    );
+  }
+  // The nested instances' own copies, and the instance, as the editor makes them.
+  const editor = new Editor({ clientId: "setup", measurer });
+  editor.state.set({ role: "editor" });
+  editor.doc.resetStored([], "materialized");
+  editor.doc.reset(mains);
+  editor.setPage("p");
+  for (const id of ["vAi", "vAn", "vBi", "vBn"]) {
+    const of = editor.doc.get(id)?.props.instanceOf as string;
+    const made = editor.insertInstance(of) as string;
+    const copy = editor.doc.childIds(made);
+    // Its layers become the nested instance's, as copies.
+    editor.commit(
+      copy.map((c, i): Op => ({ op: "move", id: c, parent: id, key: `a${i}` })),
+      "setup",
+      { overrides: false },
+    );
+    editor.commit([{ op: "delete", id: made }], "setup", { overrides: false });
+  }
+  const instance = editor.insertInstance("vA") as string;
+  editor.commit([{ op: "set", id: instance, prop: "name", value: "I" }]);
+  return editor.doc
+    .stored()
+    .map((n) => (n.id === instance ? { ...n, id: "i" } : n))
+    .map((n) => (n.parent === instance ? { ...n, parent: "i" } : n));
+}
+
 // ---------------------------------------------------------------------------
 // A room and its clients
 
@@ -253,6 +353,8 @@ export class Room {
   /** Old ids to the stored form's (compact copies rename copy layers). */
   readonly ids: ReadonlyMap<string, string>;
   readonly lastSeq = new Map<string, number>();
+  /** A protocol 2 tab's transactions the room refused whole (`protocol2Refusal`). */
+  readonly refused: Array<{ client: string; message: string }> = [];
   /** Every transaction the room refused, with what it said. */
   readonly rejected: Array<{ client: string; code: string; message: string }> = [];
 
@@ -278,6 +380,23 @@ export class Room {
 
   id(old: string): string {
     return this.ids.get(old) ?? old;
+  }
+
+  /**
+   * A tab from before records (protocol 2) that loaded the file before this
+   * change and is offline now: it edits as an editor, its edits held unsent,
+   * until it connects (`connect`, or `settle`) and is welcomed as a viewer.
+   */
+  joinOffline(name: string): Client {
+    const client = new Client(this, name, 2);
+    this.clients.push(client);
+    client.editor.state.set({ role: "editor" });
+    client.editor.doc.resetStored(
+      client.read(structuredClone([...this.store.nodes()])),
+      this.copies,
+    );
+    client.editor.setPage("p");
+    return client;
   }
 
   join(name: string, protocol: 2 | 3 = 3): Client {
@@ -310,7 +429,8 @@ export class Room {
           t: "welcome",
           sessionId: from.name,
           revn: this.revn,
-          role: from.role,
+          // A tab from before records views the file: it makes no edit (`protocol2Refusal`).
+          role: from.protocol === 2 ? "viewer" : from.role,
           peers: [],
           mode: "snapshot",
           lastSeq: this.lastSeq.get(from.name) ?? 0,
@@ -327,9 +447,20 @@ export class Room {
       from.inbox.push({ t: "ack", seq: message.seq, revn: this.revn });
       return;
     }
-    // A tab from before records: its edits as they mean (`FileRoom` does the same).
-    const ops =
-      from.protocol === 2 ? this.fromProtocol2(message.ops as Op[]) : (message.ops as Op[]);
+    const ops = message.ops as Op[];
+    // A tab from before records: only what it held unsent that's safe, whole (as `FileRoom`).
+    const refusal = from.protocol === 2 ? this.protocol2Refusal(ops) : null;
+    if (refusal) {
+      this.refused.push({ client: from.name, message: refusal });
+      from.inbox.push({
+        t: "reject",
+        seq: message.seq,
+        code: "outdated",
+        message: refusal,
+        fix: {},
+      });
+      return;
+    }
     try {
       applyTransaction(this.store, ops);
     } catch (error) {
@@ -355,26 +486,34 @@ export class Room {
     }
     this.revn++;
     this.lastSeq.set(from.name, message.seq);
+    this.#named(ops);
     from.inbox.push({ t: "ack", seq: message.seq, revn: this.revn });
     this.broadcast(ops, from);
   }
 
-  /** A protocol 2 tab's operations as they apply now, read before any applies. */
-  fromProtocol2(ops: readonly Op[]): Op[] {
-    const view = new CopyView(this.store);
-    return fromProtocol2(
+  /** Why a protocol 2 tab's transaction can't be applied, as `FileRoom` decides it. */
+  protocol2Refusal(ops: readonly Op[]): string | null {
+    return protocol2Refusal(
       {
         get: (id) => this.store.get(id),
-        driven: (id, root) => copyDriven(view, root, id),
+        holdsLinked: (id) => collectSubtree(this.store, id).some(linkedNode),
+        hadOnce: (ids) => new Set(ids.filter((id) => this.#hadOnce.has(id))),
       },
-      this.copies,
       ops,
     );
+  }
+
+  /** Ids the file has had: those it started with and every one an operation named since. */
+  readonly #hadOnce = new Set<string>();
+
+  #named(ops: readonly Op[]): void {
+    for (const op of ops) this.#hadOnce.add(op.id);
   }
 
   /** A transaction the room makes itself (a branch merge), passed to every client. */
   commit(ops: readonly Op[]): void {
     applyTransaction(this.store, [...ops]);
+    this.#named(ops);
     this.revn++;
     this.broadcast(ops, null);
   }

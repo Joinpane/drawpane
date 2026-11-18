@@ -11,13 +11,11 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   applyTransaction,
-  BuildTooLarge,
   ClientMessage,
   type CommentEvent,
   type CopiesFormat,
   forProtocol2Nodes,
   forProtocol2Ops,
-  fromProtocol2,
   heldNodeIds,
   IMPORT_TTL_MS,
   INLINE_SNAPSHOT_NODES,
@@ -34,6 +32,7 @@ import {
   type Peer,
   type Presence,
   type Props,
+  protocol2Refusal,
   RELOAD_CLOSE_CODE,
   type Resolution,
   type RestoredVersion,
@@ -2751,11 +2750,12 @@ export class FileRoom extends DurableObject<Env> {
     protocol: number,
     tickets: DocumentTickets | null,
   ): void {
-    // A tab from before component property records (protocol 2, decision 0035) stays an editor:
-    // closed to reload, it would lose the edits it holds unsent. It's sent nothing it can't read,
-    // its edits are taken as they mean (protocol2.ts), and it reloads by itself once they're in
-    // (its update banner waits for that). A tab from before compact copies reloads, unless the
-    // file is compact: then it views it as a whole file sent again, never operations (below).
+    // A tab from before component property records (protocol 2, decision 0035) views the file:
+    // welcomed as a viewer, it makes no edit, and its update banner reloads it once nothing is
+    // waiting to be saved. Closed to reload now, it would lose the edits it holds unsent: of
+    // those, what's safe applies and the rest is refused whole, saying so (`protocol2Refusal`).
+    // A tab from before compact copies reloads, unless the file is compact: then it views it as
+    // a whole file sent again, never operations (below).
     if (protocol === 1 && this.#copies !== "compact") {
       this.#tellToReload(ws);
       return;
@@ -2828,7 +2828,8 @@ export class FileRoom extends DurableObject<Env> {
       t: "welcome",
       sessionId: me.sessionId,
       revn: this.#revn,
-      role: me.role,
+      // A tab from before records: a viewer (above), whatever its role.
+      role: me.protocol === 2 ? "viewer" : me.role,
       peers,
       mode: canCatchUp ? "catchup" : download ? "download" : "snapshot",
       lastSeq,
@@ -3082,8 +3083,15 @@ export class FileRoom extends DurableObject<Env> {
       }
       ops = fitted.ops;
     }
-    // A tab from before component property records: its edits as they mean now (protocol2.ts).
-    if (me.protocol === 2) ops = this.#fromProtocol2(ops);
+    // A tab from before component property records: what it held unsent applies only when it's
+    // safe, whole; otherwise it's refused, and the tab shows that it wasn't saved (protocol2.ts).
+    if (me.protocol === 2) {
+      const refusal = this.#protocol2Refusal(ops);
+      if (refusal) {
+        this.#reject(ws, seq, ops, "outdated", refusal);
+        return;
+      }
+    }
     // Override records (decision 0029) only in a file that stores compact copies.
     if (
       this.#copies !== "compact" &&
@@ -3383,23 +3391,51 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * A protocol 2 tab's operations as they apply now (`fromProtocol2`), read
-   * before any applies. An instance too large to build to read them by is
-   * left as its tab wrote it: the edit is kept, not refused.
+   * Why a protocol 2 tab's transaction can't be applied (`protocol2Refusal`),
+   * read before any of it applies: a subtree holding a linked node found in
+   * SQL, and a node the file had once by its id in the log (`LOG_RETENTION`
+   * revisions, which an undo reaches back within).
    */
-  #fromProtocol2(ops: readonly Op[]): Op[] {
+  #protocol2Refusal(ops: readonly Op[]): string | null {
     try {
-      if (this.#copies !== "compact") return fromProtocol2(this.#store, "materialized", ops);
-      const reader = new PresentedReader(new TableReader(this.#sql, "nodes"), this.#sql, "nodes");
-      return fromProtocol2(
-        { get: (id) => this.#store.get(id), driven: (id, root) => reader.driven(id, root) },
-        "compact",
+      return protocol2Refusal(
+        {
+          get: (id) => this.#store.get(id),
+          holdsLinked: (id) =>
+            this.#sql
+              .exec(
+                `WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
+                 SELECT 1 FROM nodes n JOIN sub ON sub.id = n.id
+                  WHERE n.type = 'override'
+                     OR json_extract(n.props, '$.instanceOf') IS NOT NULL
+                     OR json_extract(n.props, '$.mirrors') IS NOT NULL
+                     OR json_extract(n.props, '$.isComponent') = 1
+                     OR json_extract(n.props, '$.isComponentSet') = 1
+                     OR json_extract(n.props, '$.variantProps') IS NOT NULL
+                     OR json_array_length(n.props, '$.overrides') > 0
+                     OR json_array_length(n.props, '$.unset') > 0
+                     OR json_extract(n.props, '$.propValues') IS NOT NULL
+                     OR json_extract(n.props, '$.propRefs') IS NOT NULL
+                     OR json_extract(n.props, '$.componentProps') IS NOT NULL
+                     OR json_extract(n.props, '$.exposeProps') = 1
+                  LIMIT 1`,
+                id,
+              )
+              .toArray().length > 0,
+          hadOnce: (ids) => {
+            const wanted = new Set(ids);
+            const found = new Set<string>();
+            // One pass over the log, its operations' ids read as written (`"id":"…"`).
+            for (const row of this.#sql.exec<{ ops: string }>("SELECT ops FROM log"))
+              for (const match of row.ops.matchAll(/"id":"([0-9A-Za-z_-]{1,64})"/g)) {
+                const id = match[1] as string;
+                if (wanted.has(id)) found.add(id);
+              }
+            return found;
+          },
+        },
         ops,
       );
-    } catch (error) {
-      if (!(error instanceof BuildTooLarge)) throw error;
-      console.error("couldn't read a protocol 2 edit's instance", error.message);
-      return [...ops];
     } finally {
       this.#store.clearCache();
     }

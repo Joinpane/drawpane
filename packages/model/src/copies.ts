@@ -44,6 +44,7 @@ import {
   isPropName,
   PROP_REF_FIELDS,
   PROPS,
+  type PropertyValue,
   type PropRefField,
   type Props,
   propAllowed,
@@ -902,6 +903,56 @@ export function drivenRefs(
     if (id && field !== "slot") out.push([field, propertyKey(scope, id)]);
   }
   return out;
+}
+
+/**
+ * Whether an instance root keeps a record (decision 0035, item 3). One that
+ * exists decides every key, a key it doesn't keep being its main's: an empty
+ * record (`{}`) is one. A root without one is from before records, and its
+ * layers hold its values.
+ */
+export function hasRecord(props: Readonly<Record<string, unknown>>): boolean {
+  return props.propValues !== undefined && props.propValues !== null;
+}
+
+/** A driven field's value in a layer's properties, as a record holds it (null: none fits). */
+export function fieldAsValue(
+  props: Readonly<Record<string, unknown>>,
+  field: string,
+): PropertyValue | null {
+  if (field === "visible") return props.visible !== false;
+  if (field === "characters") return typeof props.characters === "string" ? props.characters : "";
+  if (field === "instanceOf")
+    return typeof props.instanceOf === "string" ? { instance: props.instanceOf } : null;
+  return null;
+}
+
+/**
+ * What a copy layer's field a property drives shows (decision 0035, item 3),
+ * wherever its link ends or changes form (conversion, detach, unlink), so
+ * they agree: its instance's record's value for the key; when the instance
+ * keeps a record without the key, its main layer's (`main`, a reset, or a
+ * value never set); when it keeps none (from before records), the layer's
+ * own. A materialized layer showing another was written before the record's
+ * last change. Null when nothing fits the field.
+ */
+export function drivenShown(
+  field: string,
+  key: string,
+  root: Readonly<Record<string, unknown>>,
+  layer: Readonly<Record<string, unknown>>,
+  main: Readonly<Record<string, unknown>> | undefined,
+): PropertyValue | null {
+  if (!hasRecord(root)) return fieldAsValue(layer, field);
+  const value = (root.propValues as Record<string, unknown>)[key];
+  const fits =
+    field === "visible"
+      ? typeof value === "boolean"
+      : field === "characters"
+        ? typeof value === "string"
+        : typeof value === "object" && value !== null && "instance" in value;
+  if (value !== undefined && fits) return value as PropertyValue;
+  return main ? fieldAsValue(main, field) : fieldAsValue(layer, field);
 }
 
 /**

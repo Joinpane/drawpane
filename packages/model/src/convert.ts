@@ -31,6 +31,8 @@ import { type BuildBudget, BuildTooLarge, nodeBytes } from "./budget";
 import {
   CopyView,
   type DrivenField,
+  drivenShown,
+  hasRecord,
   isMainNode,
   OVERRIDE_KEY,
   ownValues,
@@ -607,16 +609,19 @@ export class InstanceConverter {
     const base = view.base(root.id);
     if (!base) return "its main isn't a component";
     const putRoot = (props: Readonly<Props>) => {
-      overlay.put({ ...root, props: (ownValues(base.props, props, true) ?? {}) as Props });
+      const own = (ownValues(base.props, props, true) ?? {}) as Record<string, unknown>;
+      // A record that exists stays, empty or not: it's what says its layers' values are its.
+      if (props.propValues !== undefined) own.propValues = props.propValues;
+      overlay.put({ ...root, props: own as Props });
       view.forget([root.id], [root.id]);
     };
     // The root as it's stored compact: its record takes what layers of a file from before records
     // hold for their properties (`foldValue`).
     let stored = root;
     putRoot(root.props);
-    // The values its record held before any were folded, which its layers show (`recordWins`),
-    // and the layers that showed others, as they show them.
-    const recorded = (root.props.propValues ?? {}) as Readonly<Record<string, PropertyValue>>;
+    // The root as it was, whose record, when it has one, decides what its layers show
+    // (`drivenShown`); and the layers that showed something else, as they show it.
+    const recorded = root.props;
     const shown = new Map<string, Props>();
     // Nested instances whose stored layers are another component's than the swap their record
     // holds (materialized copies lag it too): built from the record's, and the stored layers
@@ -683,7 +688,9 @@ export class InstanceConverter {
         let slotBase = view.base(slotId);
         if (!slot || !slotBase || slotBase.type !== node.type || slot.key !== node.key)
           return `${node.id} isn't its main layer's type or place`;
-        if (staleSwap(view.drivenFields(slotId), recorded, node)) {
+        // Its main layer, as the main shows it: what a key the record doesn't keep shows.
+        const main = view.get(slot.source)?.props;
+        if (staleSwap(view.drivenFields(slotId), recorded, node, main)) {
           ids.set(node.id, slotId);
           slotOf.set(node.id, { id: slotId, path: slot.path });
           staleSwaps.add(node.id);
@@ -692,9 +699,13 @@ export class InstanceConverter {
         }
         // A layer written before its record's last value (materialized copies lag it) shows the
         // record's: the record wins, and its layer isn't another value of its own.
-        const props = recordWins(view.drivenFields(slotId), recorded, node.props);
+        const props = recordWins(view.drivenFields(slotId), recorded, node.props, main);
         if (props !== node.props) shown.set(node.id, props);
-        const folded = foldValue(view.drivenFields(slotId), slotBase.props, props, stored);
+        // Only an instance from before records has its layers' values folded: one that keeps a
+        // record (empty or not) decides them, and a key it doesn't keep is its main's.
+        const folded = hasRecord(recorded)
+          ? null
+          : foldValue(view.drivenFields(slotId), slotBase.props, props, stored);
         if (folded) {
           stored = folded;
           putRoot(stored.props);
@@ -805,54 +816,58 @@ function foldValue(
 }
 
 /**
- * A layer's properties with each field a property drives that its record
- * (`recorded`) holds a value for set to that value: with records, a driven
- * field is only ever its record's, so a layer showing another was written
- * before the record's last value (materialized copies lag it) and the record
- * wins. A swap isn't (its layers are another main's, to build again), nor a
- * field the layer itself no longer references. The same object when nothing
- * changes.
+ * A layer's properties with each field a property drives as it shows
+ * (`drivenShown`): when its instance keeps a record, the record's value, or
+ * its main layer's (`main`) for a key the record doesn't keep (a reset); a
+ * layer showing another was written before the record's last change
+ * (materialized copies lag it), and the record wins. Without a record (from
+ * before records) the layer's own, which `foldValue` takes into one. A swap
+ * isn't here (`staleSwap`), nor a field the layer itself no longer
+ * references (an import unlinks one showing another value, and it's its
+ * own). The same object when nothing changes.
  */
 function recordWins(
   fields: readonly DrivenField[],
-  recorded: Readonly<Record<string, PropertyValue>>,
+  root: Readonly<Props>,
   layer: Readonly<Props>,
+  main: Readonly<Props> | undefined,
 ): Readonly<Props> {
   let out: Record<string, unknown> | null = null;
-  // Only fields the layer itself still takes from the property: one unlinked from it (an import
-  // keeps a layer that shows another value so) is its own.
   const refs = (layer.propRefs ?? {}) as Record<string, string | undefined>;
   for (const [field, key] of fields) {
-    const value = recorded[key];
-    if (value === undefined || field === "instanceOf" || !refs[field]) continue;
-    if (field === "visible" && typeof value !== "boolean") continue;
-    if (field === "characters" && typeof value !== "string") continue;
-    if (sameValue(value, drivenValue(layer as Record<string, unknown>, field))) continue;
+    if (field === "instanceOf" || !refs[field]) continue;
+    const value = drivenShown(field, key, root, layer, main);
+    if (value === null || sameValue(value, drivenValue(layer as Record<string, unknown>, field)))
+      continue;
     out ??= { ...layer };
-    out[field] = value;
+    if (field === "visible" && value === true) delete out.visible;
+    else out[field] = value;
   }
   return (out ?? layer) as Readonly<Props>;
 }
 
 /**
  * Whether a nested instance's stored layers are another component's than the
- * swap its record (`recorded`) holds for the property that drives it: written
- * before the record's last value (materialized copies lag it), so the record
- * wins and the instance is built from its swap.
+ * one it shows (`drivenShown`, as detach and unlink read it): the swap its
+ * instance's record keeps, or its main layer's component for a key the
+ * record doesn't keep. Written before the record's last change (materialized
+ * copies lag it), so the record wins and the instance is built from that one.
  */
 function staleSwap(
   fields: readonly DrivenField[],
-  recorded: Readonly<Record<string, PropertyValue>>,
+  root: Readonly<Props>,
   layer: NodeRecord,
+  main: Readonly<Props> | undefined,
 ): boolean {
   if (layer.type !== "frame" || !layer.props.propRefs?.instanceOf) return false;
   const driven = fields.find(([field]) => field === "instanceOf");
-  const value = driven ? recorded[driven[1]] : undefined;
+  if (!driven) return false;
+  const shown = drivenShown("instanceOf", driven[1], root, layer.props, main);
   return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof value.instance === "string" &&
-    value.instance !== layer.props.instanceOf
+    typeof shown === "object" &&
+    shown !== null &&
+    typeof shown.instance === "string" &&
+    shown.instance !== layer.props.instanceOf
   );
 }
 

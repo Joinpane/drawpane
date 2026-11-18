@@ -149,7 +149,48 @@ function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
     if (value !== null && value !== undefined) props[prop] = value;
   }
   store.insert({ id: op.id, type: op.type, parent: op.parent, key: op.key, props });
+  if (typeof props.mirrors === "string") resolveMirrors(store, op.id);
   return [{ op: "delete", id: op.id }];
+}
+
+/**
+ * A copy layer's reference (`mirrors`) checked against where the layer is
+ * now: the layer it copies is inside what its instance follows (the nearest
+ * instance root above it: that root's own main layer, when the root is a
+ * copy too, else its main). A reference into a main the layer no longer
+ * belongs to (an edit made before a teammate's detach pointed its siblings
+ * through to their own component, applied after it) is followed down its own
+ * copies to the first layer that is inside it, the one it means there. Left
+ * as it is when there's none, or nothing above it is an instance. Only a
+ * layer made (a delayed rebuild makes its layers again): a reference set by
+ * itself is part of a change that moves references together (an undone
+ * detach puts back a layer's before its instance's), and is left as it is.
+ */
+function resolveMirrors(store: NodeStore, id: string): void {
+  const node = store.get(id);
+  const mirrors = node?.props.mirrors;
+  if (!node || typeof mirrors !== "string") return;
+  let owner = store.get(node.parent);
+  for (let i = 0; owner && i < MAX_DEPTH; i++) {
+    if (owner.type === "frame" && typeof owner.props.instanceOf === "string") break;
+    owner = store.get(owner.parent);
+  }
+  if (!owner || owner.type !== "frame" || typeof owner.props.instanceOf !== "string") return;
+  const container = (owner.props.mirrors ?? owner.props.instanceOf) as string;
+  const inside = (at: string) => {
+    for (let n = store.get(at), i = 0; n && i < MAX_DEPTH; n = store.get(n.parent), i++)
+      if (n.id === container) return true;
+    return false;
+  };
+  if (inside(mirrors)) return;
+  let through = store.get(mirrors)?.props.mirrors;
+  for (let i = 0; typeof through === "string" && i < 256; i++) {
+    if (inside(through)) {
+      store.setProp(id, "mirrors", through);
+      return;
+    }
+    through = store.get(through)?.props.mirrors;
+  }
 }
 
 /**
@@ -275,9 +316,12 @@ function checkRecord(store: NodeStore, op: CreateOp): void {
 
 /**
  * The map a keyed set (`op.key`) leaves on `node`, checked: the entry set,
- * or removed when `op.value` is null; null when the map is left empty.
+ * or removed when `op.value` is null. A map left empty stays, empty: an
+ * instance's record that exists decides every key, one it doesn't keep
+ * being its main's (decision 0035, item 3), so its last value removed
+ * leaves the record, not none.
  */
-export function keyedResult(node: NodeRecord, op: SetOp): Record<string, unknown> | null {
+export function keyedResult(node: NodeRecord, op: SetOp): Record<string, unknown> {
   const spec = KEYED_PROPS.get(op.prop);
   if (!spec) throw new ModelError("invalid_prop", `"${op.prop}" has no entries to set one of.`);
   const key = op.key as string;
@@ -289,7 +333,7 @@ export function keyedResult(node: NodeRecord, op: SetOp): Record<string, unknown
   const next: Record<string, unknown> = { ...(before ?? {}) };
   if (op.value === null) delete next[key];
   else next[key] = op.value;
-  return Object.keys(next).length > 0 ? next : null;
+  return next;
 }
 
 function applySet(store: NodeStore, op: SetOp): Op[] {
@@ -301,8 +345,11 @@ function applySet(store: NodeStore, op: SetOp): Op[] {
     const next = keyedResult(node, op);
     if (!isPropName(op.prop) || !propAllowed(node.type, op.prop))
       throw new ModelError("invalid_prop", `A ${node.type} has no "${op.prop}" property.`);
-    const previous = (node.props[op.prop] as Record<string, unknown> | undefined)?.[op.key];
-    store.setProp(op.id, op.prop, next === null ? undefined : next);
+    const map = node.props[op.prop] as Record<string, unknown> | undefined;
+    const previous = map?.[op.key];
+    store.setProp(op.id, op.prop, next);
+    // The first entry makes the map: undone, there's none again (an instance without a record).
+    if (map === undefined) return [{ op: "set", id: op.id, prop: op.prop, value: null }];
     return [{ op: "set", id: op.id, prop: op.prop, key: op.key, value: previous ?? null }];
   }
   checkValue(node.type, op.prop, op.value);

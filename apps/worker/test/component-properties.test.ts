@@ -1,14 +1,21 @@
 /**
  * Component property values in a real room (decision 0035): a tab from
- * before keyed sets stays an editor, its edits taken as they mean (review
- * 4 of #187), a keyed set is checked entry by
+ * before keyed sets views the file, only its safe queued edits applying
+ * (review 5 of #187), a keyed set is checked entry by
  * entry and whole on what its transaction leaves, and two people's first
  * values of a nested instance both stay (the outer instance's record holds
  * them, so no record has to be made for the nested one). Review 3 of #187.
  */
 import { env } from "cloudflare:test";
 import { Doc, Editor, instanceValues } from "@drawpane/editor";
-import { compactByInstance, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
+import {
+  compactByInstance,
+  getProp,
+  INLINE_SNAPSHOT_NODES,
+  type NodeRecord,
+  type Op,
+  ROOT_ID,
+} from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { type Browser, openSocket, signedInUser } from "./helpers";
 
@@ -107,124 +114,155 @@ async function setup(form: "compact" | "materialized" = "compact") {
   return { ...owner, fileId: file.id, room, converted };
 }
 
-/**
- * The operations a tab from before records sends for `edit`: an editor
- * holding only what such a tab is sent (no references, records or
- * definitions), so it edits a driven layer as a plain one, as its code did.
- */
-function oldTab(form: "compact" | "materialized", loaded: NodeRecord[], edit: Op[]): Op[] {
-  const editor = new Editor({ measurer: { width: (_font, text) => text.length * 7 } });
-  editor.state.set({ role: "editor" });
-  editor.doc.resetStored(structuredClone(loaded), form);
-  editor.setPage("p");
-  expect(editor.commit(edit)).toBe(true);
-  return editor.sync.takeUnsent();
-}
-
 describe("component property values in the room", () => {
   for (const form of ["compact", "materialized"] as const)
-    it(`keeps a tab from before records an editor: its queued edits all apply (${form})`, async () => {
-      // Review 4 of #187, P1 #2: a protocol 2 tab told to reload lost the edits it held unsent.
+    it(`welcomes a tab from before records as a viewer; its safe queued edits apply, the rest are refused whole (${form})`, async () => {
+      // Review 5 of #187: a protocol 2 tab can't keep what it doesn't see over what it does to an
+      // instance, so it's no longer an editor (decision 0035, item 15). The operations are those
+      // the actual protocol 2 editor sent in the review's run.
       const { browser, fileId, room, converted } = await setup(form);
-      const text = form === "compact" ? (converted.ids.get("nit") as string) : "nit";
+      const current = await join(browser, fileId, "current");
+      current.send({
+        t: "txn",
+        seq: 1,
+        ops: [{ op: "set", id: "i", prop: "propValues", key: "n/label", value: "Winning" }],
+      });
+      await current.next("ack");
       const older = await openSocket(browser, fileId);
-      const hello = { t: "hello", protocol: 2, clientId: "older", copies: [form] };
-      older.send({ ...hello, revn: null });
-      const welcome = await older.next<{ role: string; revn: number; copies: string }>("welcome");
-      expect(welcome).toMatchObject({ role: "owner", copies: form });
+      older.send({ t: "hello", protocol: 2, clientId: "older", revn: null, copies: [form] });
+      expect((await older.next<{ role: string }>("welcome")).role).toBe("viewer");
       const loaded: NodeRecord[] = [];
       for (;;) {
         const chunk = await older.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot");
         loaded.push(...chunk.nodes);
         if (chunk.done) break;
       }
-      // Sent nothing its model refuses.
       const unknown = ["propRefs", "propValues", "componentProps", "exposeProps"];
       expect(loaded.some((n) => unknown.some((p) => p in n.props))).toBe(false);
-      older.ws.close();
-
-      // While it's offline, a newer client sets a value; it queues three edits of its own.
-      const newer = await join(browser, fileId, "newer");
-      newer.send({
-        t: "txn",
-        seq: 1,
-        ops: [{ op: "set", id: "i", prop: "propValues", key: "show", value: true }],
-      });
-      await newer.next("ack");
-      const queued: Op[][] = [
-        [{ op: "set", id: "p", prop: "name", value: "Renamed offline" }],
-        // Typing in the nested instance's label, as its tab writes it.
-        oldTab(form, loaded, [{ op: "set", id: text, prop: "characters", value: "Typed offline" }]),
-        // An ordinary override.
-        oldTab(form, loaded, [{ op: "set", id: text, prop: "opacity", value: 0.5 }]),
+      const text = form === "compact" ? (converted.ids.get("nit") as string) : "nit";
+      const nested = form === "compact" ? (converted.ids.get("ni") as string) : "ni";
+      const queued: Array<{ ops: Op[]; applies: boolean }> = [
+        { ops: [{ op: "set", id: "p", prop: "name", value: "Renamed offline" }], applies: true },
+        {
+          ops: [
+            {
+              op: "create",
+              id: "offlineRect0001",
+              type: "rect",
+              parent: "p",
+              key: "a5",
+              props: { width: 10, height: 10 },
+            },
+          ],
+          applies: true,
+        },
+        // Deleting the instance, then its undo (which can't carry the record it doesn't see).
+        { ops: [{ op: "delete", id: "i" }], applies: false },
+        {
+          ops: [
+            {
+              op: "create",
+              id: "i",
+              type: "frame",
+              parent: "p",
+              key: "a2",
+              props: { instanceOf: "main" },
+            },
+          ],
+          applies: false,
+        },
+        // A detach.
+        {
+          ops: [
+            { op: "set", id: "i", prop: "instanceOf", value: null },
+            { op: "set", id: nested, prop: "mirrors", value: null },
+          ],
+          applies: false,
+        },
+        // Typing in the driven text, and an ordinary override.
+        form === "compact"
+          ? {
+              ops: [
+                {
+                  op: "create",
+                  id: text,
+                  type: "override",
+                  parent: "i",
+                  key: "a0",
+                  props: { path: ["n", "t"], characters: "Typed" } as never,
+                },
+              ],
+              applies: false,
+            }
+          : {
+              ops: [
+                { op: "set", id: text, prop: "characters", value: "Typed" },
+                { op: "set", id: text, prop: "overrides", value: ["characters"] },
+              ],
+              applies: false,
+            },
+        // A safe change and an unsafe one together: neither applies.
+        {
+          ops: [
+            { op: "set", id: "p", prop: "name", value: "Half" },
+            { op: "set", id: "i", prop: "opacity", value: 0.5 },
+          ],
+          applies: false,
+        },
       ];
-
-      // It comes back: welcomed (its update banner reloads it once these are in), caught up on
-      // what it can read, and every edit applies.
-      const back = await openSocket(browser, fileId);
-      back.send({ ...hello, revn: welcome.revn });
-      expect((await back.next<{ mode: string }>("welcome")).mode).toBe("catchup");
-      const caughtUp = await back.next<{ ops: Op[] }>("txn");
-      expect(caughtUp.ops).toEqual([]);
       for (let i = 0; i < queued.length; i++) {
-        back.send({ t: "txn", seq: i + 1, ops: queued[i] });
-        expect((await back.next<{ seq: number }>("ack")).seq).toBe(i + 1);
+        older.send({ t: "txn", seq: i + 1, ops: queued[i]?.ops });
+        if (queued[i]?.applies) expect((await older.next<{ seq: number }>("ack")).seq).toBe(i + 1);
+        else {
+          const refusal = await older.next<{ seq: number; message: string }>("reject");
+          expect(refusal.seq).toBe(i + 1);
+          // Shown by the tab as it is: not saved, to be made again after reloading.
+          expect(refusal.message).toMatch(/wasn't saved/);
+          expect(refusal.message).toMatch(/Reload/);
+        }
       }
-      expect(back.inbox.filter((m) => m.t === "reject")).toEqual([]);
       const doc = new Doc();
       doc.resetStored((await room.allNodes()) as NodeRecord[], form);
       expect(doc.get("p")?.props.name).toBe("Renamed offline");
-      const nested = form === "compact" ? (converted.ids.get("ni") as string) : "ni";
-      expect(instanceValues(doc, nested)).toEqual({ label: "Typed offline" });
-      expect(instanceValues(doc, "i")).toEqual({ show: true });
-      expect(doc.get(text)?.props.characters).toBe("Typed offline");
-      expect(doc.get(text)?.props.opacity).toBe(0.5);
-      // The newer client hears it as a value of the record.
-      const heard: Op[] = [];
-      for (let i = 0; i < queued.length; i++)
-        heard.push(...(await newer.next<{ ops: Op[] }>("txn")).ops);
-      expect(heard).toContainEqual(
-        expect.objectContaining({ id: "i", prop: "propValues", value: "Typed offline" }),
-      );
-      back.ws.close();
-      newer.ws.close();
+      expect(doc.get("offlineRect0001")?.type).toBe("rect");
+      expect(getProp(doc.get("i")?.props ?? {}, "instanceOf")).toBe("main");
+      expect(getProp(doc.get("i")?.props ?? {}, "opacity")).toBe(1);
+      expect(instanceValues(doc, nested)).toEqual({ label: "Winning" });
+      older.ws.close();
+      current.ws.close();
     });
 
-  it("leaves out a materialized tab's instance sync of a field its record decides", async () => {
-    const { browser, fileId, room } = await setup("materialized");
-    const newer = await join(browser, fileId, "newer");
-    newer.send({
-      t: "txn",
-      seq: 1,
-      ops: [
-        { op: "set", id: "i", prop: "propValues", key: "n/label", value: "Kept" },
-        { op: "set", id: "nit", prop: "characters", value: "Kept" },
-      ],
-    });
-    await newer.next("ack");
+  it("gives a tab from before records that downloads a large file no editing path", async () => {
+    // Review 5 of #187, finding 5: the download isn't filtered, and its undo of a delete couldn't
+    // restore the fields it holds without knowing them. It's a viewer, and its queued delete of an
+    // instance is refused, so there's nothing to undo.
+    const { room, browser, fileId } = await setup("materialized");
+    const nodes = [
+      ...fixture().map((n) =>
+        n.id === "i" ? { ...n, props: { ...n.props, propValues: { "n/label": "Winning" } } } : n,
+      ),
+      ...Array.from({ length: INLINE_SNAPSHOT_NODES + 1 }, (_, i) =>
+        node(`large${i}`, "rect", "p", "b0", { width: 1, height: 1 }),
+      ),
+    ];
+    await room.storeMaterialized(nodes);
     const older = await openSocket(browser, fileId);
     older.send({
       t: "hello",
       protocol: 2,
-      clientId: "older",
+      clientId: "older-download",
       revn: null,
       copies: ["materialized"],
+      download: true,
     });
-    await older.next("welcome");
-    // Its sync puts back what it thinks the main gives: no mark, so not a person's edit.
-    older.send({
-      t: "txn",
-      seq: 1,
-      ops: [{ op: "set", id: "nit", prop: "characters", value: "Base" }],
-    });
-    await older.next("ack");
-    const doc = new Doc();
-    doc.resetStored((await room.allNodes()) as NodeRecord[], "materialized");
-    expect(instanceValues(doc, "ni")).toEqual({ label: "Kept" });
-    expect(doc.get("nit")?.props.characters).toBe("Kept");
+    const welcome = await older.next<{ mode: string; role: string }>("welcome");
+    expect(welcome).toMatchObject({ mode: "download", role: "viewer" });
+    older.send({ t: "txn", seq: 1, ops: [{ op: "delete", id: "i" }] });
+    expect((await older.next<{ message: string }>("reject")).message).toMatch(/wasn't saved/);
+    const after = (await room.allNodes()) as NodeRecord[];
+    expect(after.find((n) => n.id === "i")?.props.propValues).toEqual({ "n/label": "Winning" });
     older.ws.close();
-    newer.ws.close();
-  });
+  }, 30_000);
 
   it("checks a keyed set's key, property and value, and leaves the record as it was", async () => {
     const { browser, fileId, room } = await setup();

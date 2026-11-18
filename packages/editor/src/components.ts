@@ -23,6 +23,7 @@ import {
   copyChildId,
   type DrivenField,
   getProp,
+  hasRecord,
   isMainNode,
   isPropName,
   laidOutProps,
@@ -44,7 +45,6 @@ import { gridImportOps } from "./layout";
 import { layerName } from "./names";
 import {
   clearValueOps,
-  drivenValues,
   FIELD_OF,
   fieldValue,
   instanceDefinitions,
@@ -53,6 +53,7 @@ import {
   recordAt,
   recordPlace,
   scopedValues,
+  shownValues,
 } from "./property-values";
 
 /**
@@ -1055,7 +1056,9 @@ export function foldPropertyValues(doc: Doc): Map<string, Record<string, unknown
     const source = sourceId ? doc.get(sourceId) : undefined;
     const owner = source ? ownerOf(doc, id) : undefined;
     const place = owner ? recordPlace(doc, owner.id) : undefined;
-    if (source && owner && place) {
+    // An instance that keeps a record decides its values: nothing on its layers is folded.
+    const recorded = place ? hasRecord(doc.get(place.root)?.props ?? {}) : false;
+    if (source && owner && place && !recorded) {
       const defs = instanceDefinitions(doc, owner.id);
       for (const field of ["visible", "characters", "instanceOf"] as const) {
         const propertyId = refs[field];
@@ -1258,19 +1261,21 @@ export function detachOps(doc: Doc, instanceId: string): Op[] {
     if (!node) continue;
     const unlinked = getProp(node.props, "mirrors") !== null;
     if (unlinked) ops.push({ op: "set", id, prop: "mirrors", value: null });
-    // A layer keeps what its property's value is, which with materialized copies a layer
-    // written before the record's last value can lag (compact copies present it).
-    if (unlinked && !doc.compactCopies) ops.push(...recordValueOps(doc, node));
     if (getProp(node.props, "overrides").length > 0)
       ops.push({ op: "set", id, prop: "overrides", value: null });
+    // A layer keeps what its property's value shows (`shownValues`), which with materialized
+    // copies a layer written before the record's last change can lag (compact copies present it).
+    const shown = unlinked && !doc.compactCopies ? shownOps(doc, node) : { ops: [], swap: null };
+    ops.push(...shown.ops);
     if (isInstanceRoot(node)) {
       // Nested instances stay instances of their own components, with every value they show
-      // (compact copies give them theirs as they're stored on their own).
-      const values = doc.compactCopies ? null : nestedValues(doc, record, node);
+      // (compact copies give them theirs as they're stored on their own). One a swap the record
+      // chose left stale is made an instance of that component (`shownOps`), its layers its.
+      const values = doc.compactCopies ? null : nestedValues(doc, record, node, shown.swap);
       if (values)
         for (const [key, value] of Object.entries(values))
           nested.push({ op: "set", id, prop: "propValues", key, value });
-      if (!doc.compactCopies) ops.push(...ownComponentOps(doc, id));
+      if (!doc.compactCopies && !shown.swap) ops.push(...ownComponentOps(doc, id));
       continue;
     }
     stack.push(...doc.childIds(id));
@@ -1311,11 +1316,13 @@ export function nestedValues(
   doc: Doc,
   outer: Readonly<Record<string, PropertyValue>>,
   node: NodeRecord,
+  /** The component it's made an instance of instead, when a swap is handed on. */
+  swap: string | null = null,
 ): Record<string, PropertyValue> | null {
   const own = ownLayerId(doc, node.id);
   const source = own === node.id ? undefined : doc.get(own);
   const inherited =
-    source && getProp(source.props, "instanceOf") === getProp(node.props, "instanceOf")
+    source && getProp(source.props, "instanceOf") === (swap ?? getProp(node.props, "instanceOf"))
       ? getProp(source.props, "propValues")
       : {};
   const values = { ...inherited, ...(scopedValues(outer, own) ?? {}) };
@@ -1323,18 +1330,32 @@ export function nestedValues(
 }
 
 /**
- * The sets that give a copy layer the values its instance's record holds
- * for the fields a property drives, where it holds others (materialized
- * copies written before the record's last value): the record wins.
+ * What a materialized copy layer about to be detached keeps of the fields a
+ * property drives: each as it shows (`shownValues`), set where the layer
+ * holds another (written before the record's last change: the record
+ * wins); a nested instance a stale swap left is swapped to the component
+ * shown (`swap`), its layers that component's.
  */
-function recordValueOps(doc: Doc, node: NodeRecord): Op[] {
+function shownOps(doc: Doc, node: NodeRecord): { ops: Op[]; swap: string | null } {
   const ops: Op[] = [];
-  for (const { field, value } of drivenValues(doc, node)) {
-    if (field !== "visible" && field !== "characters") continue;
+  let swap: string | null = null;
+  for (const { field, value } of shownValues(doc, node)) {
+    if (field === "instanceOf") {
+      const to = typeof value === "object" ? value.instance : null;
+      if (!to || to === getProp(node.props, "instanceOf")) continue;
+      // Its layers become that component's; it's no longer a copy, so no swap mark.
+      ops.push(
+        ...swapInstanceOps(doc, node.id, to).filter(
+          (op) => !(op.op === "set" && op.id === node.id && op.prop === "overrides"),
+        ),
+      );
+      swap = to;
+      continue;
+    }
     if (sameValue(fieldValue(node, field), value)) continue;
     ops.push({ op: "set", id: node.id, prop: field, value: value as boolean | string });
   }
-  return ops;
+  return { ops, swap };
 }
 
 /** Properties of a node that differ from its main counterpart because of an override. */

@@ -20,11 +20,14 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
  * and an instance's record keeps its nested instances' values. A client
  * before it would read a keyed set as the whole map (one value removed
  * would remove them all), and its model refuses the properties records
- * need. Told to reload, it would lose the edits it holds unsent, so the
- * room keeps it an editor: it's sent nothing it can't read, and its edits
- * are taken as they mean (`fromProtocol2`), until its update banner
- * reloads it once they're in. A version 1 tab only ever views a compact
- * file, sent whole, never operations.
+ * need, so it can't keep what it doesn't see over what it does to an
+ * instance. Told to reload at once, it would lose the edits it holds
+ * unsent, so the room welcomes it as a viewer: it's sent nothing it can't
+ * read, of its unsent edits only transactions safe in every operation
+ * apply and the rest are refused whole, saying so (`protocol2Refusal`),
+ * and its update banner reloads it once nothing is waiting to be saved. A
+ * version 1 tab only ever views a compact file, sent whole, never
+ * operations.
  */
 export const PROTOCOL_VERSION = 3;
 

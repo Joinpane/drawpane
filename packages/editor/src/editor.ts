@@ -102,6 +102,7 @@ import { FIELD_OF, findPropertyRow, instanceProperties } from "./properties";
 import {
   carryOps,
   drivenEditOps,
+  firstRecordOps,
   type NestedInstance,
   nestedTree,
   ownerOf,
@@ -610,6 +611,10 @@ export class Editor {
       // writes the record its value lives in, never the layer (decision 0035, item 3).
       if (recordOverrides) ops = drivenEditOps(this.doc, ops);
       if (ops.length === 0) return [];
+      // An instance's first record value: its record made first, values from before records
+      // folded in, on its own, so undoing the edit leaves the record (decision 0035, item 3).
+      const firstRecord = firstRecordOps(this.doc, ops);
+      if (firstRecord.length > 0) this.sync.commit(firstRecord);
       // A person's edit inside an instance records an override, and setting a
       // bound property by hand detaches its variable; both before the derived
       // writes below, so those leave the edited properties alone.

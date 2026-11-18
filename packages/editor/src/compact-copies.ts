@@ -583,9 +583,7 @@ export class CompactCopies {
     const old = ((presented.props as Record<string, unknown>)[prop] as Record<string, unknown>)?.[
       key
     ];
-    const props: Record<string, unknown> = { ...presented.props };
-    if (next === null) delete props[prop];
-    else props[prop] = next;
+    const props: Record<string, unknown> = { ...presented.props, [prop]: next };
     this.#writeOwn(tx, id, props);
     tx.inverse.push([{ op: "set", id, prop, key, value: old ?? null }]);
   }

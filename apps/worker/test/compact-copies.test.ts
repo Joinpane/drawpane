@@ -1977,8 +1977,8 @@ describe("what the seventh review found", { timeout: 120_000 }, () => {
     expect(await stored(fileId)).toHaveLength(46);
   });
 
-  it("keeps a tab from before keyed sets an editor, in a file stored either way", async () => {
-    // Told to reload, it lost the edits it held unsent (#187's fourth review, P1 #2).
+  it("welcomes a tab from before keyed sets as a viewer, its safe queued edit applied, in a file stored either way", async () => {
+    // Review 5 of #187: it's no longer an editor; what it held unsent applies when safe.
     const nodes: NodeRecord[] = [
       { id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} },
       { id: "T", parent: "P", key: "a0", type: "text", props: { characters: "Hi" } },
@@ -1991,14 +1991,13 @@ describe("what the seventh review found", { timeout: 120_000 }, () => {
       if (!off) await convert(fileId);
       const socket = await openSocket(browser, fileId);
       socket.send({ t: "hello", protocol: 2, clientId: `c-${newId()}`, revn: null, copies: BOTH });
-      expect((await socket.next<{ role: string }>("welcome")).role).not.toBe("viewer");
+      expect((await socket.next<{ role: string }>("welcome")).role).toBe("viewer");
       socket.send({
         t: "txn",
         seq: 1,
         ops: [{ op: "set", id: "P", prop: "name", value: "Edited" }],
       });
       await socket.next("ack");
-      expect(socket.inbox.some((m) => m.t === "error" && m.code === "reload")).toBe(false);
       socket.ws.close();
     }
   });
