@@ -37,7 +37,7 @@
  */
 import type { NodeRecord } from "@drawpane/model";
 import { getProp } from "@drawpane/model";
-import { isHarfBuzzOutOfMemory, sharedFace } from "./harfbuzz-faces";
+import { acquireFace, isHarfBuzzOutOfMemory, releaseFace } from "./harfbuzz-faces";
 import { isPrivateUse, MISSING_GLYPH_FAMILY, missingGlyphFont } from "./missing-glyph-font";
 import { textSpans } from "./rich-text";
 import { type FontBytesLoader, Shaper, type ShapingFace, shapingFace } from "./shaping";
@@ -184,8 +184,23 @@ export function measuredFaces(
   return [...out.values()];
 }
 
+/**
+ * A face's key. The missing-glyph box has no weights or styles: one font
+ * draws it at any, so it's keyed by its family alone.
+ */
 const measuredKey = (f: MeasuredFace) =>
-  `${f.canvas ? "canvas" : f.variable ? "variable" : "static"}\u0000${f.family}\u0000${f.weight}\u0000${f.italic}`;
+  f.canvas && f.family === MISSING_GLYPH_FAMILY
+    ? `canvas\u0000${f.family}`
+    : `${f.canvas ? "canvas" : f.variable ? "variable" : "static"}\u0000${f.family}\u0000${f.weight}\u0000${f.italic}`;
+
+/**
+ * What a face leaves free in HarfBuzz's memory, at least, once it has
+ * loaded: room to measure in. A face that would leave less fails its load as
+ * out of memory. Shaping takes about 54 bytes a character while it runs
+ * (6,000 characters of Inter took 324 KiB), so this is a paragraph of about
+ * 9,000 characters.
+ */
+export const HARFBUZZ_SHAPING_RESERVE = 512 << 10;
 
 /** Fonts are scaled to this many positions per font unit, so advances keep their fractions. */
 const PRECISION = 64;
@@ -205,6 +220,8 @@ interface CanvasFace {
     readonly descent: number;
     readonly cap: number | null;
   };
+  /** Frees its font, and lets go of its file (freed when nothing else holds it). */
+  readonly release: () => void;
 }
 
 type CanvasEntry =
@@ -288,6 +305,10 @@ export class HarfBuzzMeasurer implements TextMeasurer {
   /**
    * Loads faces (and the fallback family at their weights and styles), and
    * answers those that have no file: their text is measured approximately.
+   *
+   * When they don't fit in HarfBuzz's memory, it fails with HarfBuzz's
+   * out-of-memory error, and every face it made is let go of again, so the
+   * faces loaded before keep the room they had to measure in.
    */
   async load(
     faces: Iterable<MeasuredFace>,
@@ -303,12 +324,46 @@ export class HarfBuzzMeasurer implements TextMeasurer {
         all.set(measuredKey(box), box);
       }
     }
-    await Promise.all(
-      [...all.values()].map((face) =>
-        face.canvas ? this.#load(face) : this.shaper.load(face).then(() => undefined),
-      ),
+    // The faces this load starts, to let go of if it runs out of memory.
+    const made: MeasuredFace[] = [];
+    const settled = await Promise.allSettled(
+      [...all.values()].map((face) => {
+        if (!this.#started(face)) made.push(face);
+        return face.canvas ? this.#load(face) : this.shaper.load(face);
+      }),
     );
+    // Every face has settled first: one that loads after the rest are let go of would stay.
+    const failed = settled.find((s) => s.status === "rejected");
+    if (failed) {
+      if (isHarfBuzzOutOfMemory(failed.reason)) this.#unload(made);
+      throw failed.reason;
+    }
+    // Another load let go of a face this one waited for: it ran out of memory.
+    if (list.some((face) => this.status(face) === "loading"))
+      throw new (await this.#hb()).HarfBuzzOutOfMemory("faces loading alongside");
     return { missing: list.filter((face) => this.status(face) !== "ready") };
+  }
+
+  /** Whether a face's load has started (it may have settled since). */
+  #started(face: MeasuredFace): boolean {
+    return face.canvas ? this.#faces.has(measuredKey(face)) : this.shaper.started(face);
+  }
+
+  /** Lets go of faces a load made, freeing what they hold in HarfBuzz. */
+  #unload(faces: readonly MeasuredFace[]): void {
+    for (const face of faces) {
+      if (!face.canvas) {
+        this.shaper.unload(face);
+        continue;
+      }
+      const key = measuredKey(face);
+      const entry = this.#faces.get(key);
+      if (entry?.status !== "ready") continue;
+      this.#faces.delete(key);
+      entry.face.release();
+    }
+    // Widths taken in them are dropped, and layouts made with them are stale.
+    this.#generation++;
   }
 
   width(font: string, text: string, run?: ShapingRun | null): number {
@@ -480,39 +535,64 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     ]);
     if (!file) return null;
     const { bytes, weight, subsets } = file instanceof ArrayBuffer ? { bytes: file } : file;
-    const shared = sharedFace(hb, bytes);
-    const hbFace = shared.face;
-    const upem = hbFace.upem || 1000;
-    const font = new hb.Font(hbFace);
-    // Only the weight is set: Google serves browsers its variable files with other axes at their defaults.
-    const wght = hbFace.getAxisInfos().wght;
-    if (wght)
-      font.setVariations([
-        new hb.Variation("wght", Math.min(wght.max, Math.max(wght.min, weight ?? face.weight))),
-      ]);
-    font.setScale(upem * PRECISION, upem * PRECISION);
-    return {
-      hb,
-      font,
-      em: upem * PRECISION,
-      // Every private-use character, without listing them (over 130,000).
-      unicodes: box ? { has: isPrivateUse } : shared.unicodes,
-      subset: subsets ? subsetOf(subsets) : () => 0,
-      metrics: verticalMetrics(hb, hbFace, font, upem),
+    const shared = acquireFace(hb, bytes);
+    let font: HbFont | null = null;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      font?.destroy();
+      releaseFace(hb, bytes);
     };
+    try {
+      const hbFace = shared.face;
+      const upem = hbFace.upem || 1000;
+      const made = new hb.Font(hbFace);
+      font = made;
+      // Only the weight is set: Google serves browsers its variable files with other axes at their defaults.
+      const wght = hbFace.getAxisInfos().wght;
+      if (wght)
+        made.setVariations([
+          new hb.Variation("wght", Math.min(wght.max, Math.max(wght.min, weight ?? face.weight))),
+        ]);
+      made.setScale(upem * PRECISION, upem * PRECISION);
+      const ready: CanvasFace = {
+        hb,
+        font: made,
+        em: upem * PRECISION,
+        // Every private-use character, without listing them (over 130,000).
+        unicodes: box ? { has: isPrivateUse } : shared.unicodes,
+        subset: subsets ? subsetOf(subsets) : () => 0,
+        metrics: verticalMetrics(hb, hbFace, made, upem),
+        release,
+      };
+      // Room left to measure in. HarfBuzz quietly does without what it couldn't allocate for
+      // itself (a table's cache, say), so this also catches a face made short of memory.
+      if (!hb.canAllocate(HARFBUZZ_SHAPING_RESERVE))
+        throw new hb.HarfBuzzOutOfMemory(`${HARFBUZZ_SHAPING_RESERVE} bytes to measure in`);
+      return ready;
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 }
 
 /** The advance of `text` in one face, in its positions (`em` per em). */
 function advance(face: CanvasFace, text: string): number {
   const { hb, font } = face;
+  // Freed here, not when collected: HarfBuzz's memory is capped, and a long text takes a lot of it.
   const buffer = new hb.Buffer();
-  buffer.addText(text);
-  buffer.guessSegmentProperties();
-  hb.shape(font, buffer);
-  let pen = 0;
-  for (const p of buffer.getGlyphPositions()) pen += p.xAdvance;
-  return pen;
+  try {
+    buffer.addText(text);
+    buffer.guessSegmentProperties();
+    hb.shape(font, buffer);
+    let pen = 0;
+    for (const p of buffer.getGlyphPositions()) pen += p.xAdvance;
+    return pen;
+  } finally {
+    buffer.destroy();
+  }
 }
 
 /** Strong right-to-left characters (as shaping.ts has them). */

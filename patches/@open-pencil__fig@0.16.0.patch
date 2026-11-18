@@ -1,5 +1,5 @@
 diff --git a/dist/dependencies.js b/dist/dependencies.js
-index a29c539958f911dd244a52f3438f40420a2f5408..1a2ab25f160a4fee25ea46adad74236a340076a3 100644
+index a29c539958f911dd244a52f3438f40420a2f5408..d6db3b38317d6c2be6e4df366cee4ab63bac4459 100644
 --- a/dist/dependencies.js
 +++ b/dist/dependencies.js
 @@ -257,6 +257,8 @@ function applyDerivedEntry(target, entry) {
@@ -11,6 +11,113 @@ index a29c539958f911dd244a52f3438f40420a2f5408..1a2ab25f160a4fee25ea46adad74236a
  	}
  	if (entry.transform) props.transform = structuredClone(entry.transform);
  	const { fillGeometry, strokeGeometry, vectorData } = entry;
+@@ -271,16 +273,21 @@ function ownLayers(source, owner) {
+ 	const structural = [];
+ 	const claims = [];
+ 	for (const override of symbolOverridesOf(source)) {
+-		const { guidPath, overriddenSymbolID: swap, componentPropAssignments, ...props } = override;
++		const { guidPath, overriddenSymbolID: swap, componentPropAssignments, variantPropertiesBinding: variant, variantPropertiesOptions: _options, ...props } = override;
+ 		const path = guidPath?.guids ?? [];
+ 		if (!path.length) continue;
+ 		const assignments = componentPropAssignments ?? [];
+-		if (swap || assignments.length) structural.push({
++		// Drawpane patch: the modes an override sets and the variant binding it gives travel with the
++		// structural layers, so the instance they reach knows them before it chooses its component.
++		const modes = override.variableModeBySetMap;
++		if (swap || assignments.length || modes || variant) structural.push({
+ 			owner,
+ 			declaredPath: path,
+ 			path,
+ 			swap,
+-			assignments
++			assignments,
++			...modes ? { modes } : {},
++			...variant ? { variant } : {}
+ 		});
+ 		if (Object.keys(props).length) claims.push({
+ 			path,
+@@ -582,6 +589,12 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 	const assignedFields = /* @__PURE__ */ new WeakMap();
+ 	/** Components an occurrence expanded before an outer decision replaced them. */
+ 	const replacedComponents = /* @__PURE__ */ new WeakMap();
++	/**
++	* Drawpane patch: the records being expanded, outermost first, each with the variable modes set
++	* on it (its overrides' first, outermost owner first, then its own), so a variant property bound
++	* to a variable resolves in the modes where the instance is placed (`options.resolveVariant`).
++	*/
++	const chain = [];
+ 	const defaultInstanceName = (occurrence) => {
+ 		const source = sources.get(occurrence.sourceId);
+ 		if (source?.type === "INSTANCE") return occurrence.properties.name;
+@@ -604,6 +617,9 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 	*/
+ 	const unresolvedStructural = (layer, cause) => {
+ 		if (cause.count === 0 && isStaleLayer(layer)) return;
++		// Drawpane patch: a layer that only carries modes or a variant binding is skipped like the
++		// property claim it comes with.
++		if (!layer.swap && !layer.assignments.length) return;
+ 		const error = pathError(layer.owner.id, layer.owner.mainComponentId, layer.declaredPath, cause);
+ 		if (cause.count !== 0 || !options.onUnresolvedAssignment) throw error;
+ 		layer.owner.unresolved.push({
+@@ -645,6 +661,8 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 	*/
+ 	const resolveRoot = (raw, source, superseded, structural, rank) => {
+ 		let effective = source.symbolData?.symbolID;
++		const frame = chain[chain.length - 1];
++		const variants = source.variantPropertiesBinding ? [source.variantPropertiesBinding] : [];
+ 		const replaced = bindingHistory(raw, effective, superseded);
+ 		const keys = [...componentKeys(raw.symbolData?.symbolID), ...componentKeys(effective)];
+ 		const isKey = (guid) => keys.some((key) => sameGuid(key, guid));
+@@ -673,6 +691,21 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 				assignments: layer.assignments,
+ 				rank: layer.owner.rank
+ 			});
++			if (layer.modes) frame?.modes.unshift(layer.modes);
++			if (layer.variant) variants.push(layer.variant);
++		}
++		// Drawpane patch: a variant property bound to a variable picks the variant its value names,
++		// in the modes where the instance is (later bindings, from outer owners, win).
++		if (effective && variants.length && options.resolveVariant) {
++			const chosen = options.resolveVariant({
++				symbolId: effective,
++				bindings: variants,
++				chain: chain.map((entry) => ({
++					id: entry.id,
++					modes: entry.modes
++				}))
++			});
++			if (chosen && !sameGuid(effective, chosen)) swapRoot(chosen);
+ 		}
+ 		return {
+ 			effective,
+@@ -785,6 +818,10 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 		const record = bindRecord(raw, bindings);
+ 		const { source } = record;
+ 		expanding.add(id);
++		chain.push({
++			id,
++			modes: source.variableModeBySetMap ? [source.variableModeBySetMap] : []
++		});
+ 		try {
+ 			const owner = {
+ 				id,
+@@ -816,6 +853,7 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 			return occurrence;
+ 		} finally {
+ 			expanding.delete(id);
++			chain.pop();
+ 		}
+ 	};
+ 	/**
+@@ -1303,6 +1341,8 @@ function componentDependencies(node, resolveReference, reportExternalPreferred)
+ 	forEachOverrideRecord(node, (source, override) => {
+ 		add(symbolDataOf(source)?.symbolID);
+ 		add(override?.overriddenSymbolID);
++		// Drawpane patch: the variants a variant property bound to a variable can choose.
++		for (const variant of source.variantPropertiesOptions ?? []) add(variant);
+ 		for (const definition of source.componentPropDefs ?? []) {
+ 			if (definition.type === "INSTANCE_SWAP") assignment({
+ 				value: definition.initialValue,
 diff --git a/dist/index.js b/dist/index.js
 index ac85b19ac446dad507de42ff629970d7a3ca7cfb..0c3d31d2959c7bc0e0e9206b1f6b5ebf8def1c33 100644
 --- a/dist/index.js

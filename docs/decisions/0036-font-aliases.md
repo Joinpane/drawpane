@@ -45,6 +45,12 @@ Rewriting the file is the wrong fix. It changes the file, has to be done again a
    - It lists each family that isn't here, each style a family here lacks, and each family shown through an alias, with layer counts.
    - "This file" writes the replacements into layers, runs and text styles as one undoable change (`replaceFontOps`).
    - "Every file in the team" saves a team alias instead.
+   - Viewers see the same list, with "This file" turned off and the reason given.
+9. **Saying so.** As in Figma, a file says when its fonts are missing:
+   - When a file has loaded and a family or style it uses is really missing (an alias doesn't count), a toast names it ("SF Pro and 2 other fonts are missing on 1,240 layers.") and opens the panel. It shows once per file per browser session, takes no focus, and waits while another toast has the spot.
+   - It waits for the Google catalog and the team's fonts, so it never shows for a family that turns out to be here. Fonts set after the file opened (in a new file, say) aren't announced.
+   - While anything is missing, the top bar has a quiet button with how many fonts, which opens the panel too.
+   - All of them, the inspector's Fonts section and the panel read one report per editor (`apps/web/src/editor/font-report.ts`). It's worked out a beat after an edit that touches a text layer or text style, or removes something; other edits cost a look at the ids they changed.
 
 ## Consequences
 

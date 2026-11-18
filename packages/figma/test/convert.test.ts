@@ -293,6 +293,84 @@ describe("auto layout and components", () => {
     expect(sell.props).toMatchObject({ mirrors: drawpaneId("3:2"), overrides: ["characters"] });
   });
 
+  it("links a copy's nested instance to the variant a variable mode chose", () => {
+    // A set with Light and Dark variants; a main whose material is the Light one, its Mode
+    // property bound to a variable; a copy in a frame set to Dark. Figma's API gives the
+    // copy's material as the Dark variant (its componentId) with the Dark variant's layers.
+    const fill = (v: number) => [{ type: "SOLID" as const, color: { r: v, g: v, b: v, a: 1 } }];
+    const rect = (id: string, v: number) =>
+      node({
+        id,
+        type: "RECTANGLE",
+        name: "Fill",
+        size: { x: 40, y: 40 },
+        relativeTransform: at(0, 0),
+        fills: fill(v),
+      });
+    const variant = (id: string, mode: string, child: string, v: number, x: number) =>
+      node({
+        id,
+        type: "COMPONENT",
+        name: `Mode=${mode}`,
+        size: { x: 40, y: 40 },
+        relativeTransform: at(x, 0),
+        children: [rect(child, v)],
+      });
+    const set = node({
+      id: "2:0",
+      type: "COMPONENT_SET",
+      name: "Material",
+      size: { x: 100, y: 40 },
+      relativeTransform: at(0, 0),
+      children: [variant("2:1", "Light", "2:2", 1, 0), variant("2:3", "Dark", "2:4", 0, 50)],
+    });
+    const material = (id: string, componentId: string, child: string, v: number) =>
+      node({
+        id,
+        type: "INSTANCE",
+        name: "Material",
+        componentId,
+        size: { x: 40, y: 40 },
+        relativeTransform: at(0, 0),
+        children: [rect(child, v)],
+      });
+    const main = node({
+      id: "3:1",
+      type: "COMPONENT",
+      name: "Popover",
+      size: { x: 40, y: 40 },
+      relativeTransform: at(200, 0),
+      children: [material("3:2", "2:1", "I3:2;2:2", 1)],
+    });
+    const copy = node({
+      id: "4:1",
+      type: "INSTANCE",
+      name: "Popover",
+      componentId: "3:1",
+      size: { x: 40, y: 40 },
+      relativeTransform: at(8, 8),
+      children: [material("I4:1;3:2", "2:3", "I4:1;3:2;2:4", 0)],
+    });
+    const board = node({
+      id: "4:0",
+      type: "FRAME",
+      name: "Dark",
+      size: { x: 60, y: 60 },
+      relativeTransform: at(300, 0),
+      fills: fill(0),
+      children: [copy],
+    });
+    const { nodes } = convertFile(file(set, main, board));
+    validate(nodes);
+    const byId = (id: string) => nodes.find((n) => n.id === drawpaneId(id)) as NodeRecord;
+    expect(getProp(byId("3:2").props, "instanceOf")).toBe(drawpaneId("2:1"));
+    const dark = byId("I4:1;3:2");
+    expect(getProp(dark.props, "instanceOf")).toBe(drawpaneId("2:3"));
+    const darkFill = nodes.find((n) => n.parent === dark.id) as NodeRecord;
+    expect(getProp(darkFill.props, "mirrors")).toBe(drawpaneId("2:4"));
+    expect(getProp(darkFill.props, "overrides") ?? []).toEqual([]);
+  });
+
   it("reads variant names and nested instance ids", () => {
     expect(variantProps("Size=Large, State=Hover")).toEqual({ Size: "Large", State: "Hover" });
     expect(variantProps("Button")).toBeNull();
