@@ -74,7 +74,8 @@ export const OpSchema = z.discriminatedUnion("op", [
     op: z.literal("set"),
     id: Id,
     prop: PropKey,
-    key: PropKey.optional(),
+    // An entry of a map (`KEYED_PROPS`), checked by that map's own key schema where it applies.
+    key: z.string().min(1).max(4096).optional(),
     value: z.unknown(),
   }),
   z.object({ op: z.literal("move"), id: Id, parent: Id, key: Key }),

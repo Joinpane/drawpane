@@ -14,10 +14,16 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
 /**
  * 2: the room says how the file stores copies (decision 0029), at welcome;
  * the client says which ways it can read, at hello. A client on version 1
- * (from before compact copies) is served only a file stored materialized,
- * and told to reload otherwise.
+ * (from before compact copies) views a compact file, every copy built.
+ *
+ * 3: a `set` may write one entry of a map (`key`, decision 0035, item 15),
+ * and an instance's record keeps its nested instances' values. A client
+ * before it would read a keyed set as the whole map (one value removed
+ * would remove them all), so the room tells it to reload instead of
+ * letting it edit; a version 1 tab only ever views a compact file, sent
+ * whole, never operations.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** The close code that tells a client the room needs a newer one: reload the page. */
 export const RELOAD_CLOSE_CODE = 4426;
@@ -66,8 +72,11 @@ export function latencyBucket(ms: number): number {
 export const ClientMessage = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("hello"),
-    /** 1 from clients before compact copies, which read materialized files only. */
-    protocol: z.union([z.literal(1), z.literal(PROTOCOL_VERSION)]),
+    /**
+     * 1 from clients before compact copies, which read materialized files
+     * only; 2 from clients before keyed sets, which the room tells to reload.
+     */
+    protocol: z.union([z.literal(1), z.literal(2), z.literal(PROTOCOL_VERSION)]),
     /** Stable per browser tab; used to make resent transactions idempotent. */
     clientId: Id,
     /** Last revision this client has fully applied, or null for a fresh load. */

@@ -37,7 +37,7 @@ async function convertedFile() {
   );
   // The room learns its file id when someone opens it.
   const socket = await openSocket(owner.browser, file.id);
-  socket.send({ t: "hello", protocol: 2, clientId: `c-${file.id}`, revn: null, copies: BOTH });
+  socket.send({ t: "hello", protocol: 3, clientId: `c-${file.id}`, revn: null, copies: BOTH });
   await socket.next("welcome", 10_000);
   socket.ws.close();
   await roomOf(file.id).storeMaterialized(kit.nodes);

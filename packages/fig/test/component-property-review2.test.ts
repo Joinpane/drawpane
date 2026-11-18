@@ -1,382 +1,57 @@
 /**
  * The second review of component properties (#187), as tests. Each case
- * failed on #187's head (8b84912) and passes with decision 0035's values
- * written one property at a time (a keyed `set`), a teammate's edit
- * reconciled with the values it couldn't see, nested instances' values
- * carried across an outer switch, and the review's other fixes. The cases
- * the review ran as controls (they passed there) stay here too, so they
- * keep passing.
+ * failed on #187's head (8b84912). Since the rework that made the record
+ * the only place a value is (decision 0035, item 3), they pass because
+ * driven layers show the record as they're read: compact copies present
+ * it, and materialized sync writes it from the main and the record alone.
+ * Nothing reconciles a record with its layers any more. The cases the
+ * review ran as controls (they passed there) stay here too.
  *
- * Collaboration goes through a room stand-in (`Room`): each client's
- * edits are sent as stored, ordered by the room and replayed by the
- * others' sync engines, as `FileRoom` and `SyncEngine` do. Every case
- * runs with copies stored both ways.
+ * Collaboration goes through a room stand-in (`Room`, property-rooms.ts):
+ * each client's edits are sent as stored, ordered by the room and replayed
+ * by the others' sync engines, as `FileRoom` and `SyncEngine` do. Every
+ * case runs with copies stored both ways. Materialized copies are written
+ * by whoever syncs them, from what they see: a layer a teammate made
+ * without seeing a value shows its main layer's until that instance next
+ * syncs (any edit of its properties, or of its main), which those cases
+ * check, the record kept meanwhile (decision 0035, item 16).
  */
 import { readFileSync } from "node:fs";
-import { Doc, Editor, instanceProperties, pinInstances } from "@drawpane/editor";
+import {
+  Doc,
+  drivenEditOps,
+  Editor,
+  instanceProperties,
+  instanceValues,
+  pinInstances,
+} from "@drawpane/editor";
 import { convertFile, type Figma } from "@drawpane/figma";
 import {
-  applyTransaction,
   branchChanges,
-  type ClientMessage,
-  type CopiesFormat,
-  compactByInstance,
   getProp,
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_PROPERTY_VALUES_CHARS,
-  MemoryStore,
-  ModelError,
   mergeOps,
   type NodeRecord,
-  type Op,
   PROPS,
   ROOT_ID,
-  type ServerMessage,
 } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { effectiveValues, propertyFollowOps } from "../../editor/src/property-values";
+import {
+  expectAgreement,
+  expectConverged,
+  FORMS,
+  legacy,
+  measurer,
+  nested,
+  node,
+  open,
+  Room,
+  simple,
+} from "./property-rooms";
 
-const node = (
-  id: string,
-  type: NodeRecord["type"],
-  parent: string,
-  key: string,
-  props: Record<string, unknown>,
-): NodeRecord => ({ id, type, parent, key, props: props as NodeRecord["props"] });
-
-const FORMS: readonly CopiesFormat[] = ["materialized", "compact"];
-const measurer = { width: (_font: unknown, text: string) => text.length * 7 };
-
-/** A set with a text property (Label) and a boolean (Show), and an instance that set both. */
-function simple(): NodeRecord[] {
-  return [
-    node("p", "page", ROOT_ID, "a0", {}),
-    node("set", "frame", "p", "a0", {
-      isComponentSet: true,
-      componentProps: [
-        { id: "label", name: "Label", type: "text" },
-        { id: "show", name: "Show", type: "boolean" },
-      ],
-    }),
-    node("a", "frame", "set", "a0", {
-      isComponent: true,
-      variantProps: { State: "A" },
-      width: 100,
-      height: 30,
-    }),
-    node("ta", "text", "a", "a0", {
-      name: "Text",
-      characters: "Base",
-      propRefs: { characters: "label" },
-    }),
-    node("va", "rect", "a", "a1", {
-      name: "Icon",
-      width: 10,
-      height: 10,
-      propRefs: { visible: "show" },
-    }),
-    node("b", "frame", "set", "a1", {
-      isComponent: true,
-      variantProps: { State: "B" },
-      width: 100,
-      height: 30,
-    }),
-    node("tb", "text", "b", "a0", {
-      name: "Text",
-      characters: "Base",
-      propRefs: { characters: "label" },
-    }),
-    node("vb", "rect", "b", "a1", {
-      name: "Icon",
-      width: 10,
-      height: 10,
-      propRefs: { visible: "show" },
-    }),
-    node("i", "frame", "p", "a1", {
-      instanceOf: "a",
-      width: 100,
-      height: 30,
-      propValues: { label: "Before", show: true },
-    }),
-    node("it", "text", "i", "a0", {
-      mirrors: "ta",
-      name: "Text",
-      characters: "Before",
-      propRefs: { characters: "label" },
-      overrides: ["characters"],
-    }),
-    node("iv", "rect", "i", "a1", {
-      mirrors: "va",
-      name: "Icon",
-      width: 10,
-      height: 10,
-      propRefs: { visible: "show" },
-      overrides: ["visible"],
-    }),
-  ];
-}
-
-/** `simple`'s instance from before records: its values only on its layers. */
-const legacy = (): NodeRecord[] =>
-  simple().map((n) => {
-    if (n.id !== "i") return n;
-    const { propValues: _, ...props } = n.props;
-    return { ...n, props };
-  });
-
-/** Variants A and B, each with a nested instance of Leaf (a text property) named Nested. */
-function nested(): NodeRecord[] {
-  return [
-    node("p", "page", ROOT_ID, "a0", {}),
-    node("leaf", "frame", "p", "a0", {
-      isComponent: true,
-      width: 100,
-      height: 30,
-      componentProps: [{ id: "label", name: "Label", type: "text" }],
-    }),
-    node("t", "text", "leaf", "a0", {
-      name: "Text",
-      characters: "Base",
-      propRefs: { characters: "label" },
-    }),
-    node("set", "frame", "p", "a1", { isComponentSet: true }),
-    node("a", "frame", "set", "a0", {
-      isComponent: true,
-      variantProps: { State: "A" },
-      width: 100,
-      height: 30,
-    }),
-    node("na", "frame", "a", "a0", {
-      name: "Nested",
-      instanceOf: "leaf",
-      exposeProps: true,
-      width: 100,
-      height: 30,
-    }),
-    node("nat", "text", "na", "a0", {
-      name: "Text",
-      mirrors: "t",
-      characters: "Base",
-      propRefs: { characters: "label" },
-    }),
-    node("b", "frame", "set", "a1", {
-      isComponent: true,
-      variantProps: { State: "B" },
-      width: 100,
-      height: 30,
-    }),
-    node("nb", "frame", "b", "a0", {
-      name: "Nested",
-      instanceOf: "leaf",
-      exposeProps: true,
-      width: 100,
-      height: 30,
-    }),
-    node("nbt", "text", "nb", "a0", {
-      name: "Text",
-      mirrors: "t",
-      characters: "Base",
-      propRefs: { characters: "label" },
-    }),
-    node("i", "frame", "p", "a2", { instanceOf: "a", width: 100, height: 30 }),
-    node("ni", "frame", "i", "a0", {
-      mirrors: "na",
-      name: "Nested",
-      instanceOf: "leaf",
-      exposeProps: true,
-      width: 100,
-      height: 30,
-    }),
-    node("nit", "text", "ni", "a0", {
-      mirrors: "nat",
-      name: "Text",
-      characters: "Base",
-      propRefs: { characters: "label" },
-    }),
-  ];
-}
-
-// ---------------------------------------------------------------------------
-// A room and its clients
-
-/** A FileRoom stand-in: it orders transactions, acknowledges them, and passes them on when asked. */
-class Room {
-  readonly store: MemoryStore;
-  revn = 1;
-  readonly clients: Client[] = [];
-  /** Old ids to the stored form's (compact copies rename copy layers). */
-  readonly ids: ReadonlyMap<string, string>;
-  readonly lastSeq = new Map<string, number>();
-
-  /** A room holding `nodes` as stored already, in `copies` form. */
-  static stored(nodes: readonly NodeRecord[], copies: CopiesFormat): Room {
-    return new Room(nodes, copies, true);
-  }
-
-  constructor(
-    nodes: readonly NodeRecord[],
-    readonly copies: CopiesFormat,
-    stored = false,
-  ) {
-    if (copies === "compact" && !stored) {
-      const converted = compactByInstance(structuredClone(nodes));
-      this.store = new MemoryStore(converted.nodes);
-      this.ids = converted.ids;
-    } else {
-      this.store = new MemoryStore(structuredClone(nodes));
-      this.ids = new Map();
-    }
-  }
-
-  id(old: string): string {
-    return this.ids.get(old) ?? old;
-  }
-
-  join(name: string): Client {
-    const client = new Client(this, name);
-    this.clients.push(client);
-    client.editor.sync.connected((message) => this.handle(client, message));
-    client.deliver();
-    return client;
-  }
-
-  handle(from: Client, message: ClientMessage): void {
-    if (message.t === "hello") {
-      from.inbox.push(
-        {
-          t: "welcome",
-          sessionId: from.name,
-          revn: this.revn,
-          role: "editor",
-          peers: [],
-          mode: "snapshot",
-          lastSeq: this.lastSeq.get(from.name) ?? 0,
-          copies: this.copies,
-        },
-        { t: "snapshot", nodes: structuredClone([...this.store.nodes()]), done: false },
-        { t: "snapshot", nodes: [], done: true },
-      );
-      return;
-    }
-    if (message.t !== "txn") return;
-    try {
-      applyTransaction(this.store, message.ops as Op[]);
-    } catch (error) {
-      if (!(error instanceof ModelError)) throw error;
-      from.inbox.push({
-        t: "reject",
-        seq: message.seq,
-        code: error.code,
-        message: error.message,
-        fix: {},
-      });
-      return;
-    }
-    this.revn++;
-    this.lastSeq.set(from.name, message.seq);
-    from.inbox.push({ t: "ack", seq: message.seq, revn: this.revn });
-    this.broadcast(message.ops as Op[], from);
-  }
-
-  /** A transaction the room makes itself (a branch merge), passed to every client. */
-  commit(ops: readonly Op[]): void {
-    applyTransaction(this.store, [...ops]);
-    this.revn++;
-    this.broadcast(ops, null);
-  }
-
-  broadcast(ops: readonly Op[], from: Client | null): void {
-    for (const other of this.clients)
-      if (other !== from)
-        other.inbox.push({
-          t: "txn",
-          revn: this.revn,
-          ops: structuredClone([...ops]),
-          author: { userId: "u", sessionId: from?.name ?? "room" },
-        });
-  }
-
-  /** Sends what every client has and delivers everything, until nothing moves. */
-  settle(): void {
-    for (let round = 0; round < 20; round++) {
-      for (const client of this.clients) client.editor.sync.flush();
-      if (this.clients.every((c) => c.inbox.length === 0)) return;
-      for (const client of this.clients) client.deliver();
-    }
-    throw new Error("the room didn't settle");
-  }
-}
-
-class Client {
-  readonly editor: Editor;
-  readonly inbox: ServerMessage[] = [];
-
-  constructor(
-    readonly room: Room,
-    readonly name: string,
-  ) {
-    this.editor = new Editor({ clientId: name, measurer });
-  }
-
-  deliver(): void {
-    while (this.inbox.length > 0) this.editor.sync.receive(this.inbox.shift() as ServerMessage);
-    if (!this.editor.state.get().pageId) this.editor.setPage("p");
-  }
-
-  row(instance: string, property: string) {
-    return instanceProperties(this.editor.doc, instance)?.rows.find((r) => r.id === property);
-  }
-
-  record(instance: string) {
-    return getProp(this.editor.doc.get(instance)?.props ?? {}, "propValues");
-  }
-
-  field(id: string, field: "characters" | "visible") {
-    return getProp(this.editor.doc.get(id)?.props ?? {}, field);
-  }
-}
-
-/** Every client shows each property's recorded value on every layer it drives. */
-function expectAgreement(room: Room, instance: string): void {
-  const first = room.clients[0] as Client;
-  for (const client of room.clients) {
-    expect(client.record(instance)).toEqual(first.record(instance));
-    for (const row of instanceProperties(client.editor.doc, instance)?.rows ?? []) {
-      if (row.type !== "text" && row.type !== "boolean") continue;
-      const field = row.type === "text" ? "characters" : "visible";
-      for (const target of row.targets) expect(client.field(target, field)).toBe(row.value);
-    }
-  }
-  // And the room stores what they show.
-  const stored = new Doc({ compactCopies: room.copies === "compact" });
-  stored.resetStored(structuredClone([...room.store.nodes()]), room.copies);
-  expect(getProp(stored.get(instance)?.props ?? {}, "propValues")).toEqual(first.record(instance));
-  for (const row of instanceProperties(stored, instance)?.rows ?? []) {
-    if (row.type !== "text" && row.type !== "boolean") continue;
-    const field = row.type === "text" ? "characters" : "visible";
-    for (const target of row.targets)
-      expect(getProp(stored.get(target)?.props ?? {}, field)).toBe(row.value);
-  }
-}
-
-/** A standalone editor on `nodes`, its stored operations kept. */
-function open(form: CopiesFormat, nodes: readonly NodeRecord[]) {
-  const editor = new Editor({ clientId: "review2", measurer });
-  editor.state.set({ role: "editor" });
-  editor.doc.resetStored([], form);
-  editor.doc.reset(structuredClone(nodes));
-  editor.setPage("p");
-  const sent: Op[][] = [];
-  const commit = editor.sync.commit.bind(editor.sync);
-  editor.sync.commit = (ops: readonly Op[]) => {
-    const inverse = commit(ops);
-    if (ops.length > 0) sent.push([...editor.doc.lastStoredOps]);
-    return inverse;
-  };
-  const row = (instance: string, property: string) =>
-    instanceProperties(editor.doc, instance)?.rows.find((r) => r.id === property);
-  return { editor, sent, id: (id: string) => editor.doc.resetIds.get(id) ?? id, row };
-}
+/** A file as an import stores it: values its layers held folded into records (`pinInstances`). */
+const imported = (nodes: readonly NodeRecord[]) => pinInstances(nodes).nodes;
 
 // ---------------------------------------------------------------------------
 // Finding 1 (P1): one atomic record lost independent edits
@@ -476,6 +151,14 @@ for (const form of FORMS)
       ).toBe(true);
       a.editor.sync.flush();
       room.settle();
+      if (form === "materialized") {
+        // B wrote the new layer's copy from a file without A's value: it shows the main's until
+        // the instance syncs again. The record has A's value everywhere meanwhile.
+        expectConverged(room);
+        for (const client of [a, b]) expect(client.record("i").show).toBe(false);
+        b.editor.setInstanceProperty("i", "label", "Later");
+        room.settle();
+      }
       for (const client of [a, b]) {
         const targets = client.row("i", "show")?.targets ?? [];
         expect(targets.length).toBe(2);
@@ -501,6 +184,13 @@ for (const form of FORMS)
       ]);
       b.editor.sync.flush();
       room.settle();
+      if (form === "materialized") {
+        // As above: A synced its own copy, from a file without B's new layer.
+        expectConverged(room);
+        for (const client of [a, b]) expect(client.record("i").show).toBe(false);
+        a.editor.setInstanceProperty("i", "label", "Later");
+        room.settle();
+      }
       for (const client of [a, b])
         expect(
           (client.row("i", "show")?.targets ?? []).map((t) => client.field(t, "visible")),
@@ -603,6 +293,13 @@ for (const form of FORMS)
       const client = room.join("on-main");
       room.commit(ops);
       room.settle();
+      expect(client.row("i", "label")?.value).toBe("Branch");
+      if (form === "materialized") {
+        // The merge took main's layer: it shows the record once the instance next syncs.
+        expectConverged(room);
+        client.editor.setInstanceProperty("i", "show", false);
+        room.settle();
+      }
       const label = client.row("i", "label");
       expect(label?.value).toBe("Branch");
       for (const target of label?.targets ?? [])
@@ -625,8 +322,11 @@ for (const form of FORMS)
       const label = row(next, "label");
       expect(label?.value).toBe("Nested custom");
       expect(label?.changed).toBe(true);
-      expect(getProp(editor.doc.get(next)?.props ?? {}, "propValues")).toEqual({
-        label: "Nested custom",
+      // Kept in the outer instance's record, under the nested instance's scope: nothing of its own.
+      expect(instanceValues(editor.doc, next)).toEqual({ label: "Nested custom" });
+      expect(getProp(editor.doc.get(next)?.props ?? {}, "propValues")).toEqual({});
+      expect(getProp(editor.doc.get("i")?.props ?? {}, "propValues")).toEqual({
+        "nb/label": "Nested custom",
       });
       for (const target of label?.targets ?? [])
         expect(getProp(editor.doc.get(target)?.props ?? {}, "characters")).toBe("Nested custom");
@@ -658,7 +358,12 @@ for (const form of FORMS)
           ? { ...n, props: { ...n.props, characters: "Legacy nested", overrides: ["characters"] } }
           : n,
       );
-      const { editor, row } = open(form, nodes);
+      // Folded into the record as the file is imported, under the nested instance's scope.
+      const folded = imported(nodes);
+      expect(getProp(folded.find((n) => n.id === "i")?.props ?? {}, "propValues")).toEqual({
+        "na/label": "Legacy nested",
+      });
+      const { editor, row } = open(form, folded);
       editor.setInstanceVariant("i", "State", "B");
       const next = instanceProperties(editor.doc, "i")?.nested[0]?.instanceId as string;
       expect(row(next, "label")?.value).toBe("Legacy nested");
@@ -732,12 +437,13 @@ for (const form of FORMS)
         "Deep",
         "Deep",
       ]);
-      if (form === "compact") {
-        const stored = editor.doc.storedReader().get(deep as string) as NodeRecord;
-        expect(stored.type).toBe("override");
-        expect(stored.props.propValues).toEqual({ label: "Deep" });
-        expect((stored.props.path ?? []).length).toBeGreaterThanOrEqual(2);
-      }
+      // Kept in the outermost instance's record, under the two nested instances' scope: no
+      // record had to be made for the nested instance (review 3, P1 #3).
+      expect(getProp(editor.doc.get(shell)?.props ?? {}, "propValues")).toEqual({
+        [`${inner}/na/label`]: "Deep",
+      });
+      if (form === "compact")
+        expect(editor.doc.storedReader().get(deep as string)?.props.propValues).toBeUndefined();
       const reopened = new Doc({ compactCopies: form === "compact" });
       reopened.resetStored(structuredClone(editor.doc.stored()), form);
       const restored = instanceProperties(reopened, deep as string)?.rows.find(
@@ -765,14 +471,19 @@ for (const form of FORMS)
           overrides: ["characters"],
         }),
       );
-      const { editor, row } = open(form, nodes);
-      expect(effectiveValues(editor.doc, "i").label).toBe("Before");
+      // The import gives the record the first layer's value, in layer order; the other layer,
+      // showing something else, is unlinked and keeps it, so the file draws as it did.
+      const folded = imported(nodes);
+      const { editor, row, id } = open(form, folded);
+      expect(instanceValues(editor.doc, "i").label).toBe("Before");
       editor.setInstanceProperty("i", "show", false);
       expect(
         (row("i", "label")?.targets ?? []).map((t) =>
           getProp(editor.doc.get(t)?.props ?? {}, "characters"),
         ),
-      ).toEqual(["Before", "Before"]);
+      ).toEqual(["Before"]);
+      expect(getProp(editor.doc.get(id("it2"))?.props ?? {}, "characters")).toBe("Second override");
+      expect(getProp(editor.doc.get(id("it2"))?.props ?? {}, "propRefs")).toEqual({});
     });
   });
 
@@ -807,8 +518,10 @@ for (const form of FORMS)
       expect(getProp(editor.doc.get(ni)?.props ?? {}, "overrides")).not.toContain("opacity");
     });
 
-    it("the first direct edit records the other values the layers hold from before records", () => {
-      const { editor, id, row } = open(form, legacy());
+    it("the first direct edit keeps the other values the layers held from before records", () => {
+      // The import folds them into the record, before any edit.
+      const { editor, id, row } = open(form, imported(legacy()));
+      expect(instanceValues(editor.doc, "i")).toEqual({ label: "Before", show: true });
       editor.setProp([id("iv")], "visible", false);
       expect(getProp(editor.doc.get("i")?.props ?? {}, "propValues")).toEqual({
         label: "Before",
@@ -830,8 +543,13 @@ for (const form of FORMS)
         expect(getProp(editor.doc.get(target)?.props ?? {}, "characters")).toBe("Before");
     });
 
-    it("typing pins a follower that already holds the value before its main's default changes", () => {
-      const nodes = legacy();
+    /** `simple` with a second layer the Label drives, its instance keeping no Label. */
+    const twoLabels = (): NodeRecord[] => {
+      const nodes = simple().map((n) => {
+        if (n.id === "i") return { ...n, props: { ...n.props, propValues: { show: true } } };
+        if (n.id === "it") return { ...n, props: { ...n.props, characters: "Base" } };
+        return n;
+      });
       nodes.push(
         node("ta2", "text", "a", "a2", {
           name: "Second",
@@ -845,36 +563,29 @@ for (const form of FORMS)
           propRefs: { characters: "label" },
         }),
       );
-      const { editor, row } = open(form, nodes);
+      return nodes;
+    };
+
+    it("typing pins a follower that already holds the value before its main's default changes", () => {
+      const { editor, row } = open(form, twoLabels());
       const targets = row("i", "label")?.targets ?? [];
-      editor.setProp([targets[0] as string], "characters", "Base");
-      expect(getProp(editor.doc.get(targets[1] as string)?.props ?? {}, "overrides")).toContain(
-        "characters",
-      );
+      editor.setProp([targets[0] as string], "characters", "Typed");
+      // Typing is the property's edit: the record holds it, and no layer holds a value of its own.
+      expect(instanceValues(editor.doc, "i").label).toBe("Typed");
+      for (const target of targets)
+        expect(getProp(editor.doc.get(target)?.props ?? {}, "overrides")).not.toContain(
+          "characters",
+        );
       editor.setProp(["ta2"], "characters", "Changed on main");
       expect(targets.map((t) => getProp(editor.doc.get(t)?.props ?? {}, "characters"))).toEqual([
-        "Base",
-        "Base",
+        "Typed",
+        "Typed",
       ]);
-      expect(row("i", "label")?.value).toBe("Base");
+      expect(row("i", "label")?.value).toBe("Typed");
     });
 
     it("typing detaches a variable bound to an equal follower", () => {
-      const nodes = legacy();
-      nodes.push(
-        node("ta2", "text", "a", "a2", {
-          name: "Second",
-          characters: "Base",
-          propRefs: { characters: "label" },
-        }),
-        node("it2", "text", "i", "a2", {
-          name: "Second",
-          mirrors: "ta2",
-          characters: "Base",
-          propRefs: { characters: "label" },
-        }),
-      );
-      const { editor, row } = open(form, nodes);
+      const { editor, row } = open(form, twoLabels());
       const collection = editor.createCollection("Copy") as string;
       const variable = editor.createVariable(collection, "Label", "string", "Base") as string;
       editor.bindVariable(["ta2"], "characters", variable);
@@ -882,10 +593,19 @@ for (const form of FORMS)
       expect(
         getProp(editor.doc.get(targets[1] as string)?.props ?? {}, "bindings").characters,
       ).toBe(variable);
-      editor.setProp([targets[0] as string], "characters", "Base");
+      editor.setProp([targets[0] as string], "characters", "Typed");
+      // The follower shows the record's value, its main layer's variable not bound to it.
+      expect(getProp(editor.doc.get(targets[1] as string)?.props ?? {}, "characters")).toBe(
+        "Typed",
+      );
       expect(
         getProp(editor.doc.get(targets[1] as string)?.props ?? {}, "bindings").characters,
       ).toBeUndefined();
+      // Reset, it follows the variable again (review 1, P2 #5).
+      editor.resetInstanceProperty("i", "label");
+      expect(
+        getProp(editor.doc.get(targets[1] as string)?.props ?? {}, "bindings").characters,
+      ).toBe(variable);
     });
   });
 
@@ -990,7 +710,10 @@ describe("record bounds", () => {
 
   for (const form of FORMS)
     it(`setting one value of a large legacy instance fits a room message (${form})`, () => {
-      const { editor, sent, id } = open(form, large());
+      // The import records what fits (400,000 characters in all: one of these) and unlinks the
+      // layers whose values don't, which keep them as their own.
+      const { editor, sent, id } = open(form, imported(large()));
+      expect(Object.keys(instanceValues(editor.doc, "i"))).toEqual(["p0"]);
       editor.setInstanceProperty("i", "p0", "y");
       const values = getProp(editor.doc.get("i")?.props ?? {}, "propValues");
       expect(PROPS.propValues.schema.safeParse(values).success).toBe(true);
@@ -1002,12 +725,46 @@ describe("record bounds", () => {
       for (const ops of sent)
         for (const op of ops)
           if (op.op === "set" && op.prop === "propValues") expect(op.key).toBeTruthy();
-      // Values the record has no room for stay on their layers, and still show.
-      const rows = instanceProperties(editor.doc, "i")?.rows ?? [];
-      expect(rows.find((r) => r.id === "p21")?.value).toBe("x".repeat(200_000));
+      // The values the record had no room for are their layers' own, and still show.
       expect(getProp(editor.doc.get(id("it21"))?.props ?? {}, "characters")).toBe(
         "x".repeat(200_000),
       );
+      expect(getProp(editor.doc.get(id("it21"))?.props ?? {}, "propRefs")).toEqual({});
+    });
+
+  for (const form of FORMS)
+    it(`a value that would take the record past its bound isn't set (${form})`, () => {
+      const nodes = [
+        node("p", "page", ROOT_ID, "a0", {}),
+        node("m", "frame", "p", "a0", {
+          isComponent: true,
+          componentProps: [
+            { id: "p0", name: "First", type: "text" },
+            { id: "p1", name: "Second", type: "text" },
+          ],
+        }),
+        node("t0", "text", "m", "a0", { characters: "Default", propRefs: { characters: "p0" } }),
+        node("t1", "text", "m", "a1", { characters: "Default", propRefs: { characters: "p1" } }),
+        node("i", "frame", "p", "a1", { instanceOf: "m" }),
+        node("i0", "text", "i", "a0", {
+          mirrors: "t0",
+          characters: "Default",
+          propRefs: { characters: "p0" },
+        }),
+        node("i1", "text", "i", "a1", {
+          mirrors: "t1",
+          characters: "Default",
+          propRefs: { characters: "p1" },
+        }),
+      ];
+      const { editor } = open(form, nodes);
+      editor.setInstanceProperty("i", "p0", "y".repeat(200_000));
+      const before = getProp(editor.doc.get("i")?.props ?? {}, "propValues");
+      expect(before.p0).toHaveLength(200_000);
+      // p0 holds 200,000 characters: another 200,000 don't fit beside it.
+      editor.setInstanceProperty("i", "p1", "z".repeat(200_000));
+      expect(getProp(editor.doc.get("i")?.props ?? {}, "propValues")).toEqual(before);
+      expect(editor.state.get().notice?.text).toMatch(/too long/);
     });
 
   it("a record holding more than its bound is refused", () => {
@@ -1029,7 +786,8 @@ describe("typing cost", () => {
       );
     }
     const { editor, id } = open("materialized", nodes);
-    // The first keystroke finds the property's layers; the next ones read them.
+    // A keystroke in a driven text is a write of the record: it reads the layer and its instance,
+    // not the instance's 10,000 other layers.
     editor.setProp([id("it")], "characters", "O");
     let gets = 0;
     const get = editor.doc.get.bind(editor.doc);
@@ -1037,12 +795,12 @@ describe("typing cost", () => {
       gets++;
       return get(at);
     };
-    const ops = propertyFollowOps(editor.doc, [
+    const ops = drivenEditOps(editor.doc, [
       { op: "set", id: id("it"), prop: "characters", value: "On" },
     ]);
     expect(ops).toEqual([{ op: "set", id: "i", prop: "propValues", key: "label", value: "On" }]);
     expect(gets).toBeLessThan(100);
-    // A structural change finds them again.
+    // A layer added to the main shows it.
     editor.doc.get = get;
     const added = editor.commit([
       {
@@ -1055,13 +813,11 @@ describe("typing cost", () => {
       },
     ]);
     expect(added).toBe(true);
-    const follow = propertyFollowOps(editor.doc, [
-      { op: "set", id: id("it"), prop: "characters", value: "Once" },
-    ]);
-    // The new layer follows the typing too.
-    expect(follow.filter((o) => o.op === "set" && o.prop === "characters").length).toBe(1);
-    expect(
-      instanceProperties(editor.doc, "i")?.rows.find((r) => r.id === "label")?.targets.length,
-    ).toBe(2);
+    editor.setProp([id("it")], "characters", "Once");
+    // The new layer shows the typing too: it reads the record.
+    const label = instanceProperties(editor.doc, "i")?.rows.find((r) => r.id === "label");
+    expect(label?.targets.length).toBe(2);
+    for (const target of label?.targets ?? [])
+      expect(getProp(editor.doc.get(target)?.props ?? {}, "characters")).toBe("Once");
   });
 });

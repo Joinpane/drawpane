@@ -29,10 +29,12 @@ import {
   applyOp,
   type BuildBudget,
   CopyView,
+  checkKeyedMaps,
   collectSubtree,
   isMainNode,
   isPropName,
   KEYED_PROPS,
+  keyedMapOf,
   keyedResult,
   MemoryStore,
   ModelError,
@@ -45,6 +47,7 @@ import {
   propAllowed,
   ROOT_LOCAL_PROPS,
   sameValue,
+  splitPropertyKey,
 } from "@drawpane/model";
 
 /**
@@ -182,6 +185,7 @@ export class CompactCopies {
     try {
       for (; index < ops.length; index++) this.#op(tx, ops[index] as Op);
       for (const root of tx.absorbLater) if (this.#hasLayers(root)) this.#absorb(tx, root);
+      this.#checkKeyed(tx);
     } catch (error) {
       this.#rollback(tx);
       if (error instanceof ModelError)
@@ -219,6 +223,7 @@ export class CompactCopies {
           for (; i < end; i++) tx.inverse.push(this.#put(tx, ops[i] as Op));
         });
       }
+      this.#checkKeyed(tx);
     } catch (error) {
       this.#rollback(tx);
       throw error;
@@ -239,6 +244,16 @@ export class CompactCopies {
       absorbLater: new Set(),
       deferred: null,
     };
+  }
+
+  /** The maps keyed sets wrote, checked whole on what the transaction leaves (`checkKeyedMaps`). */
+  #checkKeyed(tx: Tx): void {
+    const keyed = new Map<string, number>();
+    tx.stored.forEach((op, i) => {
+      const map = keyedMapOf(op);
+      if (map !== null) keyed.set(map, i);
+    });
+    if (keyed.size > 0) checkKeyedMaps(this.store, keyed);
   }
 
   #rollback(tx: Tx): void {
@@ -316,8 +331,10 @@ export class CompactCopies {
         const node = this.store.get(op.id) as NodeRecord;
         changed.push(node.id);
         if (node.type === "override") {
-          this.#records++;
-          if (swaps(node.props)) structural.push(node.id);
+          // Made over one a teammate made (its values set, `applyCreate`): it was counted then.
+          if (!before) this.#records++;
+          else if (rebuilds(before.props)) structural.push(node.id);
+          if (rebuilds(node.props)) structural.push(node.id);
           this.#noteSwap(node);
           this.#refreshLayout(node.parent);
           break;
@@ -350,7 +367,7 @@ export class CompactCopies {
         for (const id of presentedRemoved) tx.ids.add(id);
         if (node.type === "override") {
           changed.push(node.id);
-          if (swaps(node.props)) structural.push(node.id);
+          if (rebuilds(node.props)) structural.push(node.id);
           this.#refreshLayout(node.parent);
         } else {
           structural.push(node.parent);
@@ -362,7 +379,10 @@ export class CompactCopies {
         const node = this.store.get(op.id) as NodeRecord;
         changed.push(op.id);
         if (node.type === "override") {
-          if (op.prop === "instanceOf" || op.prop === "unset") structural.push(op.id);
+          // Which main its layers come from, or which properties drive it (decision 0035): built
+          // again.
+          if (op.prop === "instanceOf" || op.prop === "unset" || op.prop === "propRefs")
+            structural.push(op.id);
           this.#noteSwap(node);
           this.#refreshLayout(node.parent);
           break;
@@ -371,7 +391,16 @@ export class CompactCopies {
           this.#indexRoot(op.id, before?.props.instanceOf ?? null, node.props.instanceOf ?? null);
           structural.push(op.id);
         }
+        // An instance's record: the copy layers its changed values drive show them (decision
+        // 0035); one a swap property drives is built again, from what it chose.
+        if (op.prop === "propValues") {
+          const record = this.view.recordChanged(op.id, op.key === undefined ? null : [op.key]);
+          changed.push(...record.changed);
+          structural.push(...record.structural);
+        }
         if (op.prop === "isComponent") structural.push(...this.instanceRoots(op.id));
+        // A main's layer linked to a property, or unlinked: its copies' driven fields change.
+        if (op.prop === "propRefs") structural.push(op.id);
         // A set's name is its variants' instances' name.
         if ((op.prop === "name" || op.prop === "isComponentSet") && node.type === "frame")
           for (const child of this.store.childIds(op.id))
@@ -578,8 +607,26 @@ export class CompactCopies {
       for (const [prop, value] of Object.entries(want)) this.#putValue(tx, root, prop, value);
       return;
     }
+    // What its instance's record decides isn't a copy layer's own (decision 0035, item 3): its
+    // driven fields read the record, or its main layer, whatever its record held.
+    if (own) {
+      delete own.propValues;
+      for (const [field] of this.view.drivenFields(id)) delete own[field];
+      if (Array.isArray(own.overrides)) {
+        const driven = new Set<string>(this.view.drivenFields(id).map(([field]) => field));
+        const marks = (own.overrides as string[]).filter((p) => !driven.has(p));
+        if (marks.length > 0) own.overrides = marks;
+        else delete own.overrides;
+      }
+      if (own.unset) {
+        const driven = new Set<string>(this.view.drivenFields(id).map(([field]) => field));
+        const unset = (own.unset as string[]).filter((p) => p !== "propValues" && !driven.has(p));
+        if (unset.length > 0) own.unset = unset;
+        else delete own.unset;
+      }
+    }
     const record = this.view.record(slot);
-    if (!own) {
+    if (!own || Object.keys(own).length === 0) {
       if (record) this.#put(tx, { op: "delete", id });
       return;
     }
@@ -715,6 +762,22 @@ export class CompactCopies {
     }
     const nestedOf = new Map<string, string>();
     const nested: string[] = [];
+    // Its nested instances' values are its record's (decision 0035): each takes its own, under
+    // the scope that names it there, once it's an instance stored on its own.
+    const record = (this.store.get(rootId)?.props.propValues ?? {}) as Record<string, unknown>;
+    const scoped = (top: string): Record<string, unknown> | undefined => {
+      const own = this.view.ownLayerId(top);
+      const out: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(record)) {
+        const { scope } = splitPropertyKey(key);
+        if (scope[0] === own) out[key.slice(own.length + 1)] = value;
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    };
+    const values = new Map<string, Record<string, unknown> | undefined>();
+    for (const [id, layer] of byId)
+      if (id !== rootId && layer.type === "frame" && layer.props.instanceOf)
+        values.set(id, scoped(id));
     this.#group(tx, () => {
       for (const record of [...this.store.childIds(rootId)])
         if (this.store.get(record)?.type === "override")
@@ -753,7 +816,9 @@ export class CompactCopies {
     // Nested instances stay instances, stored, keeping their look as records of their own:
     // their layers, built from their own main now, match the old ones place for place.
     for (const top of nested) {
-      this.#writeOwn(tx, top, (this.store.get(top) as NodeRecord).props);
+      const props = (this.store.get(top) as NodeRecord).props;
+      const own = values.get(top);
+      this.#writeOwn(tx, top, own ? { ...props, propValues: own } : props);
       const pair = (was: string, now: string) => {
         const before = kids.get(was) ?? [];
         const after = this.view.childIds(now);
@@ -911,4 +976,12 @@ export class CompactCopies {
 /** Whether a record's values change which main its copy's layers come from. */
 function swaps(props: Props): boolean {
   return props.instanceOf !== undefined || (props.unset ?? []).includes("instanceOf");
+}
+
+/**
+ * Whether a record's values change how its copy is built: which main its
+ * layers come from, or which component properties drive it (decision 0035).
+ */
+function rebuilds(props: Props): boolean {
+  return swaps(props) || props.propRefs !== undefined || (props.unset ?? []).includes("propRefs");
 }

@@ -37,6 +37,16 @@ export * from "./overlay";
 export * from "./post-effects";
 export * from "./presets";
 export * from "./properties";
+export {
+  carryOps,
+  drivenEditOps,
+  instanceValues,
+  matchNested,
+  nestedTree,
+  ownLayerId,
+  recordPlace,
+  valueOps,
+} from "./property-values";
 export * from "./prototype";
 export * from "./reading-order";
 export * from "./render";

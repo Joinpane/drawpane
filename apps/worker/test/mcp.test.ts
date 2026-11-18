@@ -18,7 +18,7 @@ async function seededFile(browser: Browser, projectId: string) {
   const socket = await openSocket(browser, file.id);
   socket.send({
     t: "hello",
-    protocol: 2,
+    protocol: 3,
     clientId: "seed",
     revn: null,
     copies: ["materialized", "compact"],

@@ -126,7 +126,14 @@ export function checkNode(node: NodeRecord): NodeRecord {
 
 function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
   if (!isValidId(op.id)) throw new ModelError("invalid_id", `"${op.id}" isn't a valid id.`);
-  if (store.get(op.id)) throw new ModelError("already_exists", `Node ${op.id} already exists.`);
+  const existing = store.get(op.id);
+  if (existing) {
+    // An override record made where a teammate just made one (decision 0029): its id is the
+    // copy layer's, derived alike everywhere, so it's that layer's values, set (decision 0035).
+    if (op.type === "override" && existing.type === "override" && existing.parent === op.parent)
+      return mergeRecord(store, existing, op);
+    throw new ModelError("already_exists", `Node ${op.id} already exists.`);
+  }
   if (!isValidOrderKey(op.key)) throw new ModelError("invalid_key", `Invalid order key.`);
   checkParent(store, op.parent, op.type);
   if (op.type === "override") checkRecord(store, op);
@@ -143,6 +150,28 @@ function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
   }
   store.insert({ id: op.id, type: op.type, parent: op.parent, key: op.key, props });
   return [{ op: "delete", id: op.id }];
+}
+
+/**
+ * A create of an override record that exists: its values set over the
+ * record's, each the creator's (the last writer's, as sets are), its path
+ * the same (the id says so). Two people's first values on one copy layer,
+ * each writing the record from a file without the other's, both stay.
+ * Undone value by value.
+ */
+function mergeRecord(store: NodeStore, existing: NodeRecord, op: CreateOp): Op[] {
+  const path = op.props.path;
+  if (!Array.isArray(path) || JSON.stringify(path) !== JSON.stringify(existing.props.path))
+    throw new ModelError("already_exists", `Node ${op.id} already exists.`);
+  const undo: Op[] = [];
+  for (const [prop, value] of Object.entries(op.props)) {
+    if (prop === "path") continue;
+    checkValue("override", prop, value);
+    const previous = (existing.props as Record<string, unknown>)[prop];
+    store.setProp(op.id, prop, value === null ? undefined : value);
+    undo.push({ op: "set", id: op.id, prop, value: previous === undefined ? null : previous });
+  }
+  return undo.reverse();
 }
 
 /** Every node under `id`, parents before children. */
@@ -227,9 +256,12 @@ export function keyedResult(node: NodeRecord, op: SetOp): Record<string, unknown
 function applySet(store: NodeStore, op: SetOp): Op[] {
   const node = requireNode(store, op.id);
   if (op.key !== undefined) {
-    // One entry of a map: checked, and undone, on its own (decision 0035, item 15).
+    // One entry of a map: checked, and undone, on its own (decision 0035, item 15). What
+    // bounds the map whole (how many entries, how much text in all) is checked on what the
+    // transaction leaves (`checkKeyedMaps`): one entry may grow before another shrinks.
     const next = keyedResult(node, op);
-    checkValue(node.type, op.prop, next);
+    if (!isPropName(op.prop) || !propAllowed(node.type, op.prop))
+      throw new ModelError("invalid_prop", `A ${node.type} has no "${op.prop}" property.`);
     const previous = (node.props[op.prop] as Record<string, unknown> | undefined)?.[op.key];
     store.setProp(op.id, op.prop, next === null ? undefined : next);
     return [{ op: "set", id: op.id, prop: op.prop, key: op.key, value: previous ?? null }];
@@ -378,7 +410,8 @@ const cycleError = (opIndex?: number) =>
 /**
  * Validates and applies one operation. Returns the operations that undo it,
  * in the order they must run. Throws `ModelError` and leaves the store
- * untouched when the operation is invalid.
+ * untouched when the operation is invalid. A keyed set's map is checked
+ * whole by the caller, on what its transaction leaves (`checkKeyedMaps`).
  */
 export function applyOp(
   store: NodeStore,
@@ -408,6 +441,33 @@ function apply(store: NodeStore, op: Op, force: boolean, inverse: boolean, held:
     case "move":
       return applyMove(store, op, held);
   }
+}
+
+/**
+ * Checks the maps keyed sets wrote (`touched`: their node ids and
+ * properties, the operation's index each) whole, as their schema bounds
+ * them: what a transaction's keyed sets leave. Throws `ModelError` naming
+ * the last operation that wrote the first map out of bounds.
+ */
+export function checkKeyedMaps(store: NodeStore, touched: ReadonlyMap<string, number>): void {
+  for (const [at, index] of touched) {
+    const split = at.indexOf("\u0000");
+    const id = at.slice(0, split);
+    const prop = at.slice(split + 1);
+    const node = store.get(id);
+    if (!node) continue;
+    try {
+      checkValue(node.type, prop, (node.props as Record<string, unknown>)[prop] ?? null);
+    } catch (error) {
+      if (error instanceof ModelError) throw new ModelError(error.code, error.message, index);
+      throw error;
+    }
+  }
+}
+
+/** Where `checkKeyedMaps` files a keyed set: its node and property. */
+export function keyedMapOf(op: Op): string | null {
+  return op.op === "set" && op.key !== undefined ? `${op.id}\u0000${op.prop}` : null;
 }
 
 /** Undoes applied operations, last first: always allowed, however deep, never checked for cycles. */
@@ -479,11 +539,14 @@ export function applyTransaction(
   // that touched it: checked on what the transaction leaves.
   const check = cycles === true ? new Map<string, { deep: boolean; index: number }>() : null;
   const sink = typeof cycles === "object" ? cycles : null;
+  const keyed = new Map<string, number>();
   for (let i = 0; i < ops.length; i++) {
     const op = ops[i] as Op;
     try {
       const back = apply(store, op, false, keep, held);
       if (keep) undo.push(back);
+      const map = keyedMapOf(op);
+      if (map !== null) keyed.set(map, i);
     } catch (error) {
       // Rolling back may delete the only page a failed transaction created, and puts back
       // what the transaction removed however deep it was.
@@ -500,6 +563,13 @@ export function applyTransaction(
       check.set(candidate.id, { deep, index: i });
     }
   }
+  if (keyed.size > 0)
+    try {
+      checkKeyedMaps(store, keyed);
+    } catch (error) {
+      if (rollback) takeBack(store, undo);
+      throw error;
+    }
   if (check)
     for (const [id, { deep, index }] of check)
       if (instanceCycleAt(store, id, deep)) {

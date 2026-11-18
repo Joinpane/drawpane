@@ -1,36 +1,40 @@
 /**
  * An instance's component property values (decision 0035, item 3).
  *
- * An instance holds the values it set in `propValues`, by property id. Every
- * layer in its copy that references the id (`propRefs`), down to but not
- * inside nested instances, holds the value as an override of the field it
- * drives: that's what draws, and what compact records, the room and the
- * converter read. The record is what lasts when those layers change: a
- * variant switch, a layer named differently, a layer the main adds. The
- * functions here read the record, write it, and make the layers agree.
+ * One place holds a value: the record (`propValues`) of the instance that
+ * isn't itself a copy (a top-level instance, or a nested one in a main),
+ * keyed by property id, and for the nested instances in its copy by their
+ * scope and property id (`propertyKey`). A layer a property drives shows the
+ * record's value for its key, or its main layer's when there's none, as
+ * it's read: compact copies present it so (`CopyView`), and materialized
+ * sync writes it so, from the main and the record alone. Nothing holds it
+ * as an override, so there's nothing to keep in step with anything.
  *
- * Each value is written on its own (a `set` with a `key`, item 15): two
- * people setting different properties of one instance both keep theirs,
- * undo puts back one value, and a branch merges each value by itself.
+ * Editing a driven field by hand writes the record (`drivenEditOps`), a
+ * reset removes the key, and each value is written on its own (a keyed
+ * `set`, item 15), so two people's values of different properties never
+ * undo each other's.
  */
 import {
   type ComponentPropDef,
   type ComponentPropType,
   getProp,
+  MAX_PROPERTY_SCOPE,
+  MAX_PROPERTY_VALUES,
   MAX_PROPERTY_VALUES_CHARS,
   type NodeRecord,
   type Op,
-  type PropertyValue,
+  PropertyValue,
   type PropRefField,
+  propertyKey,
   propertyValueChars,
   propertyValuesChars,
   sameValue,
+  splitPropertyKey,
 } from "@drawpane/model";
-import { componentSetOf, isInstanceRoot, isMainComponent, overrideOps } from "./components";
+import { componentSetOf, isInstanceRoot, isMainComponent } from "./components";
 import type { Doc } from "./doc";
 import { layerName } from "./names";
-import { textRunOps } from "./rich-text";
-import { KEYS_BY_PROP, unbindOps } from "./variables";
 
 /** The value of a layer each property type drives. */
 export const FIELD_OF: Readonly<Partial<Record<ComponentPropType, PropRefField>>> = {
@@ -134,6 +138,72 @@ export function ownerOf(doc: Doc, id: string): NodeRecord | undefined {
   return undefined;
 }
 
+/**
+ * The id of the layer a main holds itself that `id` copies (through copies
+ * of copies): what a record key's scope names a nested instance by, the
+ * same in either copy form. A layer that copies nothing is its own.
+ */
+export function ownLayerId(doc: Doc, id: string): string {
+  let at = id;
+  for (let i = 0; i < 256; i++) {
+    const mirrors = getProp(doc.get(at)?.props ?? {}, "mirrors");
+    if (!mirrors || !doc.has(mirrors)) return at;
+    at = mirrors;
+  }
+  return at;
+}
+
+/** Where an instance's values are kept: the instance whose record holds them, and its scope there. */
+export interface RecordPlace {
+  /** The instance that isn't a copy, whose record (`propValues`) holds them. */
+  readonly root: string;
+  /** The nested instances from it down to this one (`ownLayerId` of each); empty for itself. */
+  readonly scope: readonly string[];
+}
+
+/**
+ * Where an instance's values are kept (decision 0035, item 3): its own
+ * record when it isn't a copy; a nested instance in a copy, the record of
+ * the instance it's ultimately in, under the scope that leads to it.
+ * Undefined when it isn't an instance, or its scope is past the bound.
+ */
+export function recordPlace(doc: Doc, instanceId: string): RecordPlace | undefined {
+  let at = doc.get(instanceId);
+  if (!isInstanceRoot(at) || !at) return undefined;
+  const scope: string[] = [];
+  while (getProp(at.props, "mirrors") !== null) {
+    scope.unshift(ownLayerId(doc, at.id));
+    const above = ownerOf(doc, at.id);
+    if (!above) return undefined;
+    at = above;
+  }
+  if (scope.length > MAX_PROPERTY_SCOPE) return undefined;
+  return { root: at.id, scope };
+}
+
+/** The record a place's instance keeps its values in. */
+export function recordAt(doc: Doc, place: RecordPlace): PropertyValues {
+  return getProp(doc.get(place.root)?.props ?? {}, "propValues") as PropertyValues;
+}
+
+/** An instance's own values (its record's, under its scope), by property id. */
+export function instanceValues(doc: Doc, instanceId: string): PropertyValues {
+  const place = recordPlace(doc, instanceId);
+  if (!place) return {};
+  const record = recordAt(doc, place);
+  if (place.scope.length === 0) {
+    const out: PropertyValues = {};
+    for (const [key, value] of Object.entries(record)) if (!key.includes("/")) out[key] = value;
+    return out;
+  }
+  const prefix = `${place.scope.join("/")}/`;
+  const out: PropertyValues = {};
+  for (const [key, value] of Object.entries(record))
+    if (key.startsWith(prefix) && !key.slice(prefix.length).includes("/"))
+      out[key.slice(prefix.length)] = value;
+  return out;
+}
+
 /** A layer's value for the field a property drives, as a record holds it. */
 export function fieldValue(node: NodeRecord, field: PropRefField): PropertyValue | null {
   if (field === "visible") return getProp(node.props, "visible");
@@ -143,14 +213,6 @@ export function fieldValue(node: NodeRecord, field: PropRefField): PropertyValue
     return of ? { instance: of } : null;
   }
   return null;
-}
-
-/** Whether a value suits a field (a record can outlive a definition whose type changed). */
-function fits(field: PropRefField, value: PropertyValue): boolean {
-  if (field === "visible") return typeof value === "boolean";
-  if (field === "characters") return typeof value === "string";
-  if (field === "instanceOf") return typeof value === "object" && value !== null;
-  return false;
 }
 
 /** A row's value (a boolean, a text, a component id) as a record holds it. */
@@ -170,297 +232,220 @@ export function fromRecordValue(value: PropertyValue): boolean | string {
 }
 
 /**
- * The values an instance has set: its record, and, for a property it has
- * no value for, the value a driven layer holds as an override (files from
- * before records, and imports, keep values there; so does a value too long
- * for the record). Writing this back is how an instance's values get a
- * record (decision 0035: "existing files").
+ * The keyed sets that write `values` (by key; `null` removes one) into a
+ * record, only those that change it. Null when the record they leave would
+ * be past its bounds (`MAX_PROPERTY_VALUES`, `MAX_PROPERTY_VALUES_CHARS`) or
+ * a value isn't one: the record is the only place a value is, so one that
+ * doesn't fit isn't set.
  */
-export function effectiveValues(doc: Doc, instanceId: string): PropertyValues {
-  const instance = doc.get(instanceId);
-  if (!instance) return {};
-  return { ...getProp(instance.props, "propValues"), ...legacyValues(doc, instanceId) };
-}
-
-/**
- * The values an instance holds only on its layers (see `effectiveValues`):
- * for each property its record has no value for, the first driven layer
- * that holds it as an override, in layer order. Definitions' order.
- */
-export function legacyValues(doc: Doc, instanceId: string): PropertyValues {
-  const instance = doc.get(instanceId);
-  if (!instance) return {};
-  const record = getProp(instance.props, "propValues");
-  const out: PropertyValues = {};
-  const defs = instanceDefinitions(doc, instanceId);
-  if (defs.length === 0) return out;
-  const refs = drivenLayers(doc, instanceId);
-  for (const def of defs) {
-    if (def.id in record) continue;
-    const field = FIELD_OF[def.type];
-    if (!field) continue;
-    for (const id of refs.get(refKey(def.id, field)) ?? []) {
-      const node = doc.get(id);
-      if (!node || !getProp(node.props, "overrides").includes(field)) continue;
-      const value = fieldValue(node, field);
-      if (value !== null) out[def.id] = value;
-      break;
+export function recordWriteOps(
+  doc: Doc,
+  rootId: string,
+  values: Readonly<Record<string, PropertyValue | null>>,
+): Op[] | null {
+  const node = doc.get(rootId);
+  if (!node) return null;
+  const record = getProp(node.props, "propValues") as PropertyValues;
+  const next: Record<string, unknown> = { ...record };
+  const out: Op[] = [];
+  for (const [key, value] of Object.entries(values)) {
+    const had = record[key];
+    if (value === null) {
+      if (had === undefined) continue;
+      delete next[key];
+      out.push({ op: "set", id: rootId, prop: "propValues", key, value: null });
+      continue;
     }
+    if (!PropertyValue.safeParse(value).success) return null;
+    next[key] = value;
+    if (had !== undefined && sameValue(had, value)) continue;
+    out.push({ op: "set", id: rootId, prop: "propValues", key, value });
   }
+  if (out.length === 0) return out;
+  if (Object.keys(next).length > MAX_PROPERTY_VALUES) return null;
+  if (propertyValuesChars(next) > MAX_PROPERTY_VALUES_CHARS) return null;
   return out;
 }
 
 /**
- * The operations that write `values` into an instance's record, a value at
- * a time (`null` removes one): only those that change it, only for
- * properties its main (or set) defines, and only while the record stays
- * within `MAX_PROPERTY_VALUES_CHARS`. A value that doesn't fit isn't
- * recorded (one the record held for it goes, so the record never says
- * otherwise than the layers): its layers hold it, as before records. A
- * value whose definition is gone (dormant) is dropped as the record is
- * written (decision 0035, item 3). In `values`' order, so adopting a
- * file's values takes the first ones first.
+ * The keyed sets that set an instance's values (by property id; `null`
+ * puts one back to its main's), in the record of the instance it's in.
+ * Null when they don't fit (`recordWriteOps`), or it has no place.
  */
-export function recordOps(
+export function valueOps(
   doc: Doc,
   instanceId: string,
   values: Readonly<Record<string, PropertyValue | null>>,
-): Op[] {
-  const node = doc.get(instanceId);
-  if (!node) return [];
-  const record = getProp(node.props, "propValues");
-  const defined = new Set(instanceDefinitions(doc, instanceId).map((d) => d.id));
+): Op[] | null {
+  const place = recordPlace(doc, instanceId);
+  if (!place) return null;
+  const keyed: Record<string, PropertyValue | null> = {};
+  for (const [id, value] of Object.entries(values)) keyed[propertyKey(place.scope, id)] = value;
+  return recordWriteOps(doc, place.root, keyed);
+}
+
+/** Whether a value suits a field (a record can outlive a definition whose type changed). */
+function fits(field: PropRefField, value: PropertyValue): boolean {
+  if (field === "visible") return typeof value === "boolean";
+  if (field === "characters") return typeof value === "string";
+  if (field === "instanceOf") return typeof value === "object" && value !== null;
+  return false;
+}
+
+/**
+ * Edits of fields a property drives, inside an instance (typing in the
+ * label, hiding the icon, swapping a nested instance by hand), as what they
+ * are: edits of the property (decision 0035, item 3). Each such `set` on a
+ * copy layer becomes a keyed set of the record its value lives in, and every
+ * layer the property drives shows it; other operations are kept as they
+ * are, in order. A driven field never holds a value of its own.
+ */
+export function drivenEditOps(doc: Doc, ops: readonly Op[]): Op[] {
+  let out: Op[] | null = null;
+  const planned = new Map<string, Record<string, unknown>>();
+  ops.forEach((op, i) => {
+    const kept = unlinkedValues(doc, op);
+    if (kept.length > 0) {
+      // Unlinked from a property, a layer keeps what it showed, as its own.
+      if (!out) out = ops.slice(0, i);
+      out.push(op, ...kept);
+      return;
+    }
+    const write = drivenWrite(doc, op, planned);
+    if (write === undefined) {
+      out?.push(op);
+      return;
+    }
+    if (!out) out = ops.slice(0, i);
+    if (write) out.push(write);
+  });
+  return out ?? (ops as Op[]);
+}
+
+/**
+ * A copy layer's references set so a property no longer drives a field
+ * (unlinked): the sets that keep that field as it shows now, the layer's
+ * own value from then on. None for anything else.
+ */
+function unlinkedValues(doc: Doc, op: Op): Op[] {
+  if (op.op !== "set" || op.prop !== "propRefs" || op.key !== undefined) return [];
+  const node = doc.get(op.id);
+  if (!node || getProp(node.props, "mirrors") === null) return [];
+  const before = getProp(node.props, "propRefs") as Record<string, string | undefined>;
+  const after = (op.value ?? {}) as Record<string, string | undefined>;
   const out: Op[] = [];
-  const remove = (key: string) => {
-    out.push({ op: "set", id: instanceId, prop: "propValues", key, value: null });
-  };
-  let chars = propertyValuesChars(record);
-  for (const key of Object.keys(record))
-    if (!defined.has(key)) {
-      remove(key);
-      chars -= propertyValueChars(key, record[key]);
+  for (const field of ["visible", "characters"] as const)
+    if (before[field] && !after[field]) {
+      const value = (node.props as Record<string, unknown>)[field];
+      out.push({ op: "set", id: op.id, prop: field, value: value === undefined ? null : value });
     }
-  for (const [key, value] of Object.entries(values)) {
-    if (!defined.has(key)) continue;
-    const had = record[key];
-    if (value === null) {
-      if (had !== undefined) {
-        remove(key);
-        chars -= propertyValueChars(key, had);
-      }
-      continue;
-    }
-    if (had !== undefined && sameValue(had, value)) continue;
-    const next = chars - (had === undefined ? 0 : propertyValueChars(key, had));
-    if (next + propertyValueChars(key, value) > MAX_PROPERTY_VALUES_CHARS) {
-      if (had !== undefined) {
-        remove(key);
-        chars = next;
-      }
-      continue;
-    }
-    out.push({ op: "set", id: instanceId, prop: "propValues", key, value });
-    chars = next + propertyValueChars(key, value);
-  }
   return out;
 }
 
-/** `values` less the keys `drop` has. */
-export function withoutKeys(values: PropertyValues, drop: Readonly<object>): PropertyValues {
-  const out: PropertyValues = {};
-  for (const [key, value] of Object.entries(values)) if (!(key in drop)) out[key] = value;
-  return out;
-}
-
-export interface Application {
-  /** Values to set on driven layers (visibility, text), each marked overridden. */
-  readonly ops: Op[];
-  /** Nested instances a swap property's value swaps (structural: the editor swaps them). */
-  readonly swaps: Array<{ readonly id: string; readonly component: string }>;
-  /** Nested instances that already are the chosen component, to mark swapped. */
-  readonly swapMarks: string[];
-}
-
-/**
- * What makes an instance's driven layers hold its values: every layer that
- * references a property it has a value for, and doesn't hold it as an
- * override, takes it. Layers of properties it has no value for are left.
- */
-export function applicationOf(doc: Doc, instanceId: string, values: PropertyValues): Application {
-  const out: Application = { ops: [], swaps: [], swapMarks: [] };
-  if (Object.keys(values).length === 0) return out;
-  const defs = instanceDefinitions(doc, instanceId);
-  const refs = drivenLayers(doc, instanceId);
-  for (const def of defs) {
-    const value = values[def.id];
-    const field = FIELD_OF[def.type];
-    if (value === undefined || !field || !fits(field, value)) continue;
-    for (const id of refs.get(refKey(def.id, field)) ?? []) {
-      const node = doc.get(id);
-      if (!node) continue;
-      const marked = getProp(node.props, "overrides").includes(field);
-      if (field === "instanceOf") {
-        const want = (value as { instance: string }).instance;
-        if (getProp(node.props, "instanceOf") !== want) out.swaps.push({ id, component: want });
-        else if (!marked && getProp(node.props, "mirrors") !== null) out.swapMarks.push(id);
-        continue;
-      }
-      if (field === "slot") continue;
-      const have = fieldValue(node, field);
-      if (marked && have === value) continue;
-      // Set even when equal, so it's marked: the instance's value, not the main's, from now on.
-      out.ops.push({
-        op: "set",
-        id,
-        prop: field,
-        value: field === "visible" ? (value ? null : false) : value,
-      });
-    }
-  }
-  return out;
-}
-
-/**
- * Operations as a person's edit records them, for a batch committed without
- * the editor's own marking (derived writes): the overrides they make, the
- * variable bindings they detach, text runs kept to the new text, and the
- * swap marks given.
- */
-export function asEditOps(doc: Doc, ops: readonly Op[], swapMarks: readonly string[] = []): Op[] {
-  const all = [...ops, ...unbindOps(doc, ops), ...textRunOps(doc, ops)];
-  const marks = overrideOps(doc, all);
-  for (const id of swapMarks) {
-    const index = marks.findIndex((o) => o.op === "set" && o.id === id);
-    const current =
-      index === -1
-        ? getProp(doc.get(id)?.props ?? {}, "overrides")
-        : ((marks[index] as { value: string[] }).value ?? []);
-    if (current.includes("instanceOf")) continue;
-    const op: Op = { op: "set", id, prop: "overrides", value: [...current, "instanceOf"].sort() };
-    if (index === -1) marks.push(op);
-    else marks[index] = op;
-  }
-  return [...all, ...marks];
-}
-
-/**
- * A person's edit of a field a property drives, inside an instance (typing
- * in the label, hiding the icon), is an edit of the property (decision
- * 0035, item 3): the instance's record takes the value, and so does every
- * other layer the property drives there, each marked as the instance's
- * own (and its variable detached) even where it holds the value already:
- * equal now isn't following the main later. An instance's first record
- * takes the values its layers hold from before records too, so a later
- * change to its layers can't lose them. Returns those extra operations.
- *
- * Reads only the layers the property drives (`drivenLayers` keeps them),
- * not the instance's copy, so it's cheap per keystroke.
- */
-export function propertyFollowOps(doc: Doc, ops: readonly Op[]): Op[] {
-  const writesRecord = new Set<string>();
-  const pending = new Set<string>();
-  for (const op of ops)
-    if (op.op === "set") {
-      if (op.prop === "propValues") writesRecord.add(op.id);
-      if (op.prop === "visible" || op.prop === "characters") pending.add(refKey(op.id, op.prop));
-    }
-  // Per instance: the values edited, and those its layers held from before records.
-  const records = new Map<string, { edited: PropertyValues; adopted: PropertyValues }>();
-  const out: Op[] = [];
-  for (const op of ops) {
-    if (op.op !== "set" || (op.prop !== "visible" && op.prop !== "characters")) continue;
-    const node = doc.get(op.id);
-    if (!node || getProp(node.props, "mirrors") === null) continue;
-    const propertyId = getProp(node.props, "propRefs")[op.prop];
-    if (!propertyId) continue;
-    const owner = ownerOf(doc, op.id);
-    if (!owner || writesRecord.has(owner.id)) continue;
-    const def = instanceDefinitions(doc, owner.id).find((d) => d.id === propertyId);
-    if (!def || FIELD_OF[def.type] !== op.prop) continue;
-    const value: PropertyValue =
-      op.prop === "visible" ? op.value !== false : typeof op.value === "string" ? op.value : "";
-    let record = records.get(owner.id);
-    if (!record) {
-      // What the instance holds only on its layers is recorded with it (the first write).
-      record = { edited: {}, adopted: legacyValues(doc, owner.id) };
-      records.set(owner.id, record);
-    }
-    record.edited[propertyId] = value;
-    const keys = KEYS_BY_PROP.get(op.prop) ?? [];
-    for (const id of drivenLayers(doc, owner.id).get(refKey(propertyId, op.prop)) ?? []) {
-      if (pending.has(refKey(id, op.prop))) continue;
-      pending.add(refKey(id, op.prop));
-      const other = doc.get(id);
-      if (!other) continue;
-      const pinned =
-        getProp(other.props, "overrides").includes(op.prop) &&
-        fieldValue(other, op.prop) === value &&
-        !keys.some((k) => getProp(other.props, "bindings")[k]);
-      if (!pinned) out.push({ op: "set", id, prop: op.prop, value: op.value });
-    }
-  }
-  // The edited values first, so the record takes them before those it adopts if not all fit.
-  for (const [id, { edited, adopted }] of records)
-    out.push(...recordOps(doc, id, { ...edited, ...withoutKeys(adopted, edited) }));
-  return out;
-}
-
-/**
- * The instances whose driven layers may have changed in `ops`, and that
- * have values to give them: a layer made (by sync, a swap, or in a main
- * whose compact copies present it at once) or newly referencing a property.
- */
-export function ownersToApply(
+/** The record write a driven edit is; undefined when it isn't one, null when it changes nothing. */
+function drivenWrite(
   doc: Doc,
-  ops: readonly Op[],
-  instancesOfMains: (ids: readonly string[]) => Iterable<string>,
-): string[] {
-  const out = new Set<string>();
-  const inMains: string[] = [];
-  const consider = (id: string | undefined) => {
-    const node = id ? doc.get(id) : undefined;
-    if (node && Object.keys(getProp(node.props, "propValues")).length > 0) out.add(node.id);
-  };
-  for (const op of ops) {
-    const relevant =
-      op.op === "create" ||
-      (op.op === "set" && (op.prop === "propRefs" || op.prop === "instanceOf"));
-    if (!relevant || !doc.has(op.id)) continue;
-    if (op.op === "set" && op.prop === "instanceOf") consider(op.id);
-    const owner = ownerOf(doc, op.id);
-    if (owner) consider(owner.id);
-    // In a main: only a layer that references a property can need a value from its instances.
-    else if (op.op === "set" ? op.prop === "propRefs" : op.op === "create" && !!op.props.propRefs)
-      inMains.push(op.id);
+  op: Op,
+  planned: Map<string, Record<string, unknown>>,
+): Op | null | undefined {
+  if (op.op !== "set") return undefined;
+  const field = op.prop;
+  if (field !== "visible" && field !== "characters" && field !== "instanceOf") return undefined;
+  const node = doc.get(op.id);
+  if (!node || getProp(node.props, "mirrors") === null) return undefined;
+  const propertyId = getProp(node.props, "propRefs")[field];
+  if (!propertyId) return undefined;
+  const owner = ownerOf(doc, op.id);
+  if (!owner) return undefined;
+  const def = instanceDefinitions(doc, owner.id).find((d) => d.id === propertyId);
+  if (!def || FIELD_OF[def.type] !== field) return undefined;
+  const place = recordPlace(doc, owner.id);
+  if (!place) return undefined;
+  const key = propertyKey(place.scope, propertyId);
+  let value: PropertyValue | null;
+  if (field === "visible") value = op.value !== false;
+  else if (field === "characters") value = typeof op.value === "string" ? op.value : "";
+  else value = typeof op.value === "string" ? { instance: op.value } : null;
+  // Swapping back to the main layer's component is its main's value: no record of it.
+  if (field === "instanceOf" && typeof value === "object" && value !== null) {
+    const source = doc.get(getProp(node.props, "mirrors") as string);
+    if (source && getProp(source.props, "instanceOf") === value.instance) value = null;
   }
-  if (inMains.length > 0) for (const id of instancesOfMains(inMains)) consider(id);
+  const record = planned.get(place.root) ?? {
+    ...getProp(doc.get(place.root)?.props ?? {}, "propValues"),
+  };
+  planned.set(place.root, record);
+  const had = record[key];
+  if (value === null ? had === undefined : had !== undefined && sameValue(had, value)) return null;
+  if (value === null) delete record[key];
+  else record[key] = value;
+  return { op: "set", id: place.root, prop: "propValues", key, value };
+}
+
+/**
+ * The instances whose record `ops` write (any `propValues` set): with
+ * materialized copies, whose driven layers sync then writes the values.
+ */
+export function recordsWritten(ops: readonly Op[]): string[] {
+  const out = new Set<string>();
+  for (const op of ops) if (op.op === "set" && op.prop === "propValues") out.add(op.id);
   return [...out];
 }
 
-/** A nested instance's values, from before its outer instance switched (see `nestedValues`). */
-export interface NestedValues {
-  /** Its layer names' path from the instance it's in. */
-  readonly path: string;
-  /** The component it was an instance of. */
-  readonly component: string | null;
-  readonly values: PropertyValues;
-  /** The nested instances in it, in turn. */
-  readonly nested: readonly NestedValues[];
+/**
+ * With compact copies, the copy layers whose driven values `ops` changed
+ * (keyed sets of a record): for what follows from their new values, a
+ * text's size and the layout around it.
+ */
+export function recordTargets(doc: Doc, ops: readonly Op[]): string[] {
+  if (!doc.compactCopies) return [];
+  const out: string[] = [];
+  for (const op of ops) {
+    if (op.op !== "set" || op.prop !== "propValues") continue;
+    if (op.key !== undefined) out.push(...doc.drivenBy(op.id, op.key));
+    else out.push(...doc.drivenByAll(op.id));
+  }
+  return out;
 }
 
-/** The nested instances directly in an instance's copy (not inside other nested ones), in layer order. */
-export function nestedInstances(
-  doc: Doc,
-  instanceId: string,
-): Array<{ id: string; path: string; component: string | null }> {
-  const out: Array<{ id: string; path: string; component: string | null }> = [];
+// ---------------------------------------------------------------------------
+// Across a switch: nested instances' values go to the nested instances that match
+
+/** A nested instance in an instance's copy, as a switch matches it (see `nestedTree`). */
+export interface NestedInstance {
+  /** Its presented id. */
+  readonly id: string;
+  /** What a record key's scope names it by (`ownLayerId`). */
+  readonly own: string;
+  /** The component it's an instance of. */
+  readonly component: string | null;
+  /** Its layer names' path from the instance it's in. */
+  readonly path: string;
+  /** The nested instances in it, in turn. */
+  readonly nested: readonly NestedInstance[];
+}
+
+/**
+ * Every nested instance in an instance's copy, at every depth, in layer
+ * order: what a switch matches (decision 0035, item 3). All of them, those
+ * that set nothing too, so an unchanged one keeps its match (review 3).
+ */
+export function nestedTree(doc: Doc, instanceId: string, depth = 0): NestedInstance[] {
+  if (depth > MAX_PROPERTY_SCOPE) return [];
+  const out: NestedInstance[] = [];
   const visit = (parent: string, path: string) => {
     for (const id of doc.childIds(parent)) {
       const node = doc.get(id);
       if (!node) continue;
       const at = path ? `${path}/${layerName(node)}` : layerName(node);
       if (isInstanceRoot(node)) {
-        out.push({ id, path: at, component: getProp(node.props, "instanceOf") });
+        out.push({
+          id,
+          own: ownLayerId(doc, id),
+          component: getProp(node.props, "instanceOf"),
+          path: at,
+          nested: nestedTree(doc, id, depth + 1),
+        });
         continue;
       }
       visit(id, at);
@@ -471,49 +456,152 @@ export function nestedInstances(
 }
 
 /**
- * What the nested instances in an instance's copy set, at every depth, to
- * carry across a switch of the instance (decision 0035, item 3): the
- * switch rebuilds its copy, and with it every nested instance's record.
- * Only those that set something.
- */
-export function nestedValues(doc: Doc, instanceId: string, depth = 0): NestedValues[] {
-  if (depth > 32) return [];
-  const out: NestedValues[] = [];
-  for (const { id, path, component } of nestedInstances(doc, instanceId)) {
-    const values = effectiveValues(doc, id);
-    const nested = nestedValues(doc, id, depth + 1);
-    if (Object.keys(values).length > 0 || nested.length > 0)
-      out.push({ path, component, values, nested });
-  }
-  return out;
-}
-
-/**
  * Which nested instance after a switch takes which one's values from
  * before, as Figma matches them: the same component at the same layer
  * path; then the same component, in layer order; then the same path (a
- * component swapped meanwhile, whose values go by property id where the
- * new one defines them). Each is matched at most once.
+ * component swapped meanwhile). Each is matched at most once, every
+ * sibling taking part, so one that set nothing keeps its own match.
  */
 export function matchNested(
-  before: readonly NestedValues[],
-  after: ReadonlyArray<{ id: string; path: string; component: string | null }>,
-): Array<{ id: string; from: NestedValues }> {
-  const used = new Set<NestedValues>();
-  const taken = new Set<string>();
-  const out: Array<{ id: string; from: NestedValues }> = [];
-  const pass = (fits: (old: NestedValues, now: (typeof after)[number]) => boolean) => {
+  before: readonly NestedInstance[],
+  after: readonly NestedInstance[],
+): Array<{ readonly from: NestedInstance; readonly to: NestedInstance }> {
+  const used = new Set<NestedInstance>();
+  const taken = new Set<NestedInstance>();
+  const out: Array<{ from: NestedInstance; to: NestedInstance }> = [];
+  const pass = (fits: (old: NestedInstance, now: NestedInstance) => boolean) => {
     for (const now of after) {
-      if (taken.has(now.id)) continue;
+      if (taken.has(now)) continue;
       const old = before.find((b) => !used.has(b) && fits(b, now));
       if (!old) continue;
       used.add(old);
-      taken.add(now.id);
-      out.push({ id: now.id, from: old });
+      taken.add(now);
+      out.push({ from: old, to: now });
     }
   };
   pass((old, now) => old.component === now.component && old.path === now.path);
   pass((old, now) => old.component !== null && old.component === now.component);
   pass((old, now) => old.path === now.path);
+  return out;
+}
+
+/**
+ * The record writes that carry an instance's values across a switch of it
+ * (`before`: its nested instances then; it has switched since): its own
+ * values stay where the component it's now an instance of defines them;
+ * its nested instances' go to the ones that match (`matchNested`), through
+ * every level, and go when none does. Other keys of the record are left.
+ */
+export function carryOps(doc: Doc, instanceId: string, before: readonly NestedInstance[]): Op[] {
+  const place = recordPlace(doc, instanceId);
+  if (!place) return [];
+  const record = recordAt(doc, place);
+  const base = place.scope;
+  const after = nestedTree(doc, instanceId);
+  const defined = (instance: string) =>
+    new Set(instanceDefinitions(doc, instance).map((d) => d.id));
+  const writes: Record<string, PropertyValue | null> = {};
+  /** Where a value under `scope` (relative to the switched instance) goes; null when nowhere. */
+  const translate = (scope: readonly string[], property: string): string[] | null => {
+    let olds: readonly NestedInstance[] = before;
+    let news: readonly NestedInstance[] = after;
+    const to: string[] = [];
+    let into: string = instanceId;
+    for (let i = 0; i < scope.length; i++) {
+      const old = olds.find((n) => n.own === scope[i]);
+      if (!old) return null;
+      const match = matchNested(olds, news).find((m) => m.from === old)?.to;
+      if (!match) return null;
+      to.push(match.own);
+      into = match.id;
+      // The same component inside: the rest of the way is the same layers.
+      if (old.component === match.component) {
+        to.push(...scope.slice(i + 1));
+        return to;
+      }
+      olds = old.nested;
+      news = match.nested;
+    }
+    return defined(into).has(property) ? to : null;
+  };
+  const own = defined(instanceId);
+  for (const [key, value] of Object.entries(record)) {
+    const { scope, property } = splitPropertyKey(key);
+    if (scope.length < base.length || base.some((id, i) => scope[i] !== id)) continue;
+    const below = scope.slice(base.length);
+    if (below.length === 0) {
+      if (!own.has(property)) writes[key] = null;
+      continue;
+    }
+    const to = translate(below, property);
+    const next = to ? propertyKey([...base, ...to], property) : null;
+    if (next === key) continue;
+    writes[key] = null;
+    if (next) writes[next] = value;
+  }
+  // Removals first, so a value moving where another was isn't removed after it's set.
+  const ordered: Record<string, PropertyValue | null> = {};
+  for (const [key, value] of Object.entries(writes)) if (value === null) ordered[key] = null;
+  for (const [key, value] of Object.entries(writes)) if (value !== null) ordered[key] = value;
+  return recordWriteOps(doc, place.root, ordered) ?? [];
+}
+
+/**
+ * The keyed sets that clear an instance's values, its nested instances'
+ * included (Reset all, decision 0035): every key of its record under its
+ * scope.
+ */
+export function clearValueOps(doc: Doc, instanceId: string): Op[] {
+  const place = recordPlace(doc, instanceId);
+  if (!place) return [];
+  const prefix = place.scope.length > 0 ? `${place.scope.join("/")}/` : "";
+  return Object.keys(recordAt(doc, place))
+    .filter((key) => key.startsWith(prefix))
+    .map((key): Op => ({ op: "set", id: place.root, prop: "propValues", key, value: null }));
+}
+
+/**
+ * The record a nested instance takes when it stops being a copy (its outer
+ * instance detached, materialized copies: compact ones do this as they're
+ * stored): the outer record's values under its scope, the scope taken off.
+ */
+export function scopedValues(
+  record: Readonly<Record<string, PropertyValue>>,
+  own: string,
+): PropertyValues | null {
+  const out: PropertyValues = {};
+  const prefix = `${own}/`;
+  for (const [key, value] of Object.entries(record))
+    if (key.startsWith(prefix)) out[key.slice(prefix.length)] = value;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** The size a record's value takes (for a refusal's message). */
+export function valueSize(key: string, value: PropertyValue): number {
+  return propertyValueChars(key, value);
+}
+
+/**
+ * The values driven fields of a copy layer show: for each driven field
+ * whose record holds a value, the value (decision 0035, item 3). The
+ * record of the instance the layer is ultimately in; nothing when it
+ * isn't in one. For materialized sync, which writes them.
+ */
+export function drivenValues(
+  doc: Doc,
+  node: NodeRecord,
+): Array<{ field: PropRefField; value: PropertyValue }> {
+  const refs = getProp(node.props, "propRefs");
+  const fields = (Object.keys(refs) as PropRefField[]).filter((f) => refs[f] && f !== "slot");
+  if (fields.length === 0) return [];
+  const owner = ownerOf(doc, node.id);
+  const place = owner ? recordPlace(doc, owner.id) : undefined;
+  if (!place) return [];
+  const record = recordAt(doc, place);
+  const out: Array<{ field: PropRefField; value: PropertyValue }> = [];
+  for (const field of fields) {
+    const value = record[propertyKey(place.scope, refs[field] as string)];
+    if (value !== undefined && fits(field, value)) out.push({ field, value });
+  }
   return out;
 }

@@ -38,8 +38,30 @@ const STRUCTURE_PROPS: ReadonlySet<string> = new Set([
   "exposeProps",
 ]);
 
-const changesStructure = (ops: readonly Op[]) =>
-  ops.some((op) => op.op !== "set" || STRUCTURE_PROPS.has(op.prop));
+/**
+ * Whether operations can change what `structure` stands for. Besides those
+ * properties: a copy's record listing values it lacks (`unset`, how a stored
+ * operation unlinks a copy layer from a property), and an instance's record
+ * choosing a component for a swap property, or no longer choosing one
+ * (`current` reads a value before the operations apply): the layers inside
+ * the nested instance it swaps come from another main then. Typing in a
+ * driven text changes a text value, which leaves it.
+ */
+function changesStructure(
+  ops: readonly Op[],
+  current: (id: string) => NodeRecord | undefined,
+): boolean {
+  for (const op of ops) {
+    if (op.op !== "set" || STRUCTURE_PROPS.has(op.prop) || op.prop === "unset") return true;
+    if (op.prop !== "propValues") continue;
+    if (op.key === undefined || isSwap(op.value)) return true;
+    const had = (current(op.id)?.props.propValues as Record<string, unknown> | undefined)?.[op.key];
+    if (isSwap(had)) return true;
+  }
+  return false;
+}
+
+const isSwap = (value: unknown) => typeof value === "object" && value !== null;
 
 /** How many recent changes `changesSince` can replay, and how many ids they may hold in all. */
 const LOG_CHANGES = 256;
@@ -206,6 +228,19 @@ export class Doc {
     return this.#compact?.instanceRoots(mainId) ?? [];
   }
 
+  /**
+   * The copy layers a record key's value drives in an instance, as built so
+   * far (compact copies only; materialized sync writes them, naming them).
+   */
+  drivenBy(rootId: string, key: string): readonly string[] {
+    return this.#compact?.view.drivenBy(rootId, key) ?? [];
+  }
+
+  /** Every copy layer a value of an instance's record could drive, as built so far (compact copies). */
+  drivenByAll(rootId: string): readonly string[] {
+    return this.#compact?.view.recordChanged(rootId, null).changed ?? [];
+  }
+
   /** Whether an instance stores a value a layout reads, so its layout can differ from its main's. */
   layoutDiffers(rootId: string): boolean {
     return this.#compact?.layoutDiffers(rootId) ?? false;
@@ -256,7 +291,7 @@ export class Doc {
    * already accepted), so nothing is refused for depth.
    */
   apply(ops: readonly Op[], options: ApplyOptions = {}): Op[] {
-    if (changesStructure(ops)) this.#structure++;
+    if (changesStructure(ops, (id) => this.get(id))) this.#structure++;
     if (this.#compact) {
       const applied = this.#compact.apply(ops, options);
       this.#lastStored = applied.stored;
@@ -275,7 +310,7 @@ export class Doc {
   /** Applies operations on the stored form as they are (compact copies; the same as `apply` otherwise). */
   applyStored(ops: readonly Op[], options: ApplyOptions = {}): Op[] {
     if (!this.#compact) return this.apply(ops, options);
-    if (changesStructure(ops)) this.#structure++;
+    if (changesStructure(ops, (id) => this.#compact?.store.get(id))) this.#structure++;
     const applied = this.#compact.applyStored(ops, options);
     this.#lastStored = applied.stored;
     this.#lastStoredInverse = applied.storedInverse;

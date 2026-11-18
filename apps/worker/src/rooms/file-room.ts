@@ -2653,6 +2653,16 @@ export class FileRoom extends DurableObject<Env> {
     }
   }
 
+  /** Tells a tab from an older Drawpane to reload, for a newer client, and closes its socket. */
+  #tellToReload(ws: WebSocket): void {
+    this.#send(ws, {
+      t: "error",
+      code: "reload",
+      message: "Drawpane was updated. Reload the page to keep working on this file.",
+    });
+    this.#close(ws, RELOAD_CLOSE_CODE, "Reload");
+  }
+
   #hello(
     ws: WebSocket,
     me: Attachment,
@@ -2662,6 +2672,14 @@ export class FileRoom extends DurableObject<Env> {
     protocol: number,
     tickets: DocumentTickets | null,
   ): void {
+    // A tab from before keyed sets (protocol 2, decision 0035) would read a set of one property
+    // value as the whole record, and one removed as all of them gone: it reloads for a newer
+    // client, never edits or follows edits. So does a tab from before compact copies, unless the
+    // file is compact: then it views it as a whole file sent again, never operations (below).
+    if (protocol === 2 || (protocol === 1 && this.#copies !== "compact")) {
+      this.#tellToReload(ws);
+      return;
+    }
     if (!reads.includes(this.#copies)) {
       // A tab from before compact copies: the file to view, every copy built, as it reads it.
       if (protocol === 1 && this.#copies === "compact") {
@@ -2669,12 +2687,7 @@ export class FileRoom extends DurableObject<Env> {
         return;
       }
       // Anything else that can't read the file's form is told to reload, for a newer client.
-      this.#send(ws, {
-        t: "error",
-        code: "reload",
-        message: "Drawpane was updated. Reload the page to keep working on this file.",
-      });
-      this.#close(ws, RELOAD_CLOSE_CODE, "Reload");
+      this.#tellToReload(ws);
       return;
     }
     // A client that can't download (protocol 1, or no `download`) is never sent more than the

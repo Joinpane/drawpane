@@ -4,9 +4,10 @@
  *
  * A main (or its set) defines its properties (`componentProps`); its layers
  * say which of their values a property drives (`propRefs`). An instance's
- * values are its record (`propValues`, see `property-values.ts`), shown on
- * the layers they drive as overrides. Nested instances a main exposes
- * (`exposeProps`) show their own properties under the instance's.
+ * values are in a record (`propValues`, see `property-values.ts`): its own,
+ * or, for a nested instance in a copy, the record of the instance it's in.
+ * The layers they drive show them as they're read. Nested instances a main
+ * exposes (`exposeProps`) show their own properties under the instance's.
  */
 import {
   type ComponentPropDef,
@@ -24,6 +25,7 @@ import {
   FIELD_OF,
   fieldValue,
   fromRecordValue,
+  instanceValues,
   refKey,
 } from "./property-values";
 
@@ -92,9 +94,7 @@ export function instanceProperties(
   const set = componentSetOf(doc, main.id);
   const defs = definitionsOf(doc, main.id);
   const refs = drivenLayers(doc, instanceId);
-  const record = getProp(instance.props, "propValues");
-  const overridden = (id: string, field: string) =>
-    getProp(doc.get(id)?.props ?? {}, "overrides").includes(field);
+  const record = instanceValues(doc, instanceId);
 
   const rows: PropertyRow[] = [];
   // Variants: those the definitions place, where they place them; any others first.
@@ -135,11 +135,9 @@ export function instanceProperties(
     const targets = refs.get(refKey(def.id, field)) ?? [];
     // A property no layer here takes can't be set on this instance (its value, if it has one, waits).
     if (targets.length === 0) continue;
-    const changedTargets = targets.filter((id) => overridden(id, field));
     const recorded = record[def.id];
-    // Its value: the instance's record; or, before it has one, what a changed layer holds; or what
-    // its layers have from the main.
-    const shownBy = doc.get((changedTargets[0] ?? targets[0]) as string);
+    // Its value: the record's; or, when it keeps none, what its layers show from the main.
+    const shownBy = doc.get(targets[0] as string);
     const shown = shownBy ? fieldValue(shownBy, field) : null;
     const value =
       recorded !== undefined
@@ -155,7 +153,7 @@ export function instanceProperties(
       value,
       ...(def.preferred ? { preferred: def.preferred } : {}),
       targets,
-      changed: recorded !== undefined || changedTargets.length > 0,
+      changed: recorded !== undefined,
     });
   }
   // Deep chains of exposed instances stop somewhere; Figma's kits go three or four deep.

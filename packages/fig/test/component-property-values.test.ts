@@ -447,10 +447,13 @@ for (const compact of [false, true])
       expect(row(editor, "f6-1", "10:2")?.changed).toBe(false);
     });
 
-    it("records what a file from before records holds on its layers at the first switch", () => {
+    it("keeps an imported value, folded into the record at import, across the first switch", () => {
       const { editor } = open(compact);
-      // The imported outline Button's text is an override on its label, with no record.
-      expect(getProp(editor.doc.get("f6-1")?.props ?? {}, "propValues")).toEqual({});
+      // The imported outline Button's text is in its record, put there as the file was imported
+      // (`foldPropertyValues`), not an override on its label.
+      expect(getProp(editor.doc.get("f6-1")?.props ?? {}, "propValues")).toEqual({
+        "10:2": "Outline",
+      });
       expect(row(editor, "f6-1", "10:2")).toMatchObject({ value: "Outline", changed: true });
       const variant = instanceProperties(editor.doc, "f6-1")?.rows[0];
       const other = variant?.options?.find((o) => o !== variant.value) as string;

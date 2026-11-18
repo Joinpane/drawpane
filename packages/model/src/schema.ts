@@ -555,17 +555,51 @@ export const PropertyValue = z.union([
 ]);
 export type PropertyValue = z.infer<typeof PropertyValue>;
 
-/** The most values one instance's record holds: a set's and a variant's definitions, 64 each. */
-export const MAX_PROPERTY_VALUES = 128;
+/**
+ * The most values one instance's record holds: its own properties' (a set's
+ * and a variant's definitions, 64 each) and those of the nested instances
+ * in its copy, which it holds too (decision 0035, item 3).
+ */
+export const MAX_PROPERTY_VALUES = 512;
+
+/** The most nested instances a record key passes through (`PropertyKey`). */
+export const MAX_PROPERTY_SCOPE = 32;
+
+/**
+ * Where a record keeps a value (decision 0035, item 3): a property id for
+ * the instance's own property; for a property of a nested instance in its
+ * copy, the nested instance's scope first, `scope/propertyId`. A scope is
+ * the ids of the main layers each nested instance on the way down copies,
+ * from the instance down (`ownLayerId` of each): ids of layers a main holds
+ * itself, never copies', so the same in either copy form and kept by a
+ * conversion. Neither node ids nor property ids hold "/".
+ */
+export const PropertyKey = z
+  .string()
+  .max(65 * MAX_PROPERTY_SCOPE + 64)
+  .regex(new RegExp(`^(?:[0-9A-Za-z_-]{1,64}/){0,${MAX_PROPERTY_SCOPE}}[\\w:.-]{1,64}$`));
+
+/** A record's key for `propertyId` of the nested instance at `scope` (none: the instance's own). */
+export function propertyKey(scope: readonly string[], propertyId: string): string {
+  return scope.length === 0 ? propertyId : `${scope.join("/")}/${propertyId}`;
+}
+
+/** A record key's scope and property id (`propertyKey` taken apart). */
+export function splitPropertyKey(key: string): { scope: string[]; property: string } {
+  const parts = key.split("/");
+  const property = parts.pop() as string;
+  return { scope: parts, property };
+}
 
 /**
  * The most characters one instance's record holds in all, keys and values
  * (decision 0035, item 3). Each value is bounded as a text layer's
- * `characters` is (200,000), but 128 of them aren't: this keeps a record,
+ * `characters` is (200,000), but 512 of them aren't: this keeps a record,
  * and an operation that creates the node holding it (a paste, an undone
  * delete, a branch merge), well inside a room's 4 MB message, which each
- * entry's own write is too. A value that doesn't fit isn't recorded: its
- * layers hold it, as before records.
+ * entry's own write is too. Checked on what a transaction leaves, so the
+ * edits in one may pass through a larger record on the way (one value
+ * grows before another shrinks). A value that doesn't fit isn't set.
  */
 export const MAX_PROPERTY_VALUES_CHARS = 400_000;
 
@@ -741,13 +775,15 @@ export const PROPS = {
   propRefs: prop(z.partialRecord(z.enum(PROP_REF_FIELDS), PropertyId), {}, LAYERS),
   /**
    * The component property values this instance set (decision 0035, item 3),
-   * by property id. Applied to every layer in its copy that references the
-   * id, as overrides; the record is what outlives a variant switch or a
-   * layer the main renames, removes or adds. Not copied from a main's layer.
+   * by `PropertyKey`: its own, and its nested instances'. The only place a
+   * value is kept: a layer a property drives shows the value here, or its
+   * main layer's, wherever it's read (`CopyView`, materialized sync), and
+   * never holds it as an override. Only on an instance that isn't a copy
+   * (a top-level one, or a nested one in a main); not copied from a main.
    */
   propValues: prop(
     z
-      .record(PropertyId, PropertyValue)
+      .record(PropertyKey, PropertyValue)
       .refine((values) => Object.keys(values).length <= MAX_PROPERTY_VALUES, "too many values")
       .refine(
         (values) => propertyValuesChars(values) <= MAX_PROPERTY_VALUES_CHARS,
@@ -885,7 +921,9 @@ export const PROPS = {
 export type PropName = keyof typeof PROPS;
 
 /** Never held by an override record: they're the copy's link to its main, or not a layer's. */
-const OVERRIDE_REFUSED: ReadonlySet<string> = new Set(["mirrors", "isComponent"]);
+// A record of a copy layer holds no property values: its instance's root holds them, nested
+// instances' included (decision 0035, item 3).
+const OVERRIDE_REFUSED: ReadonlySet<string> = new Set(["mirrors", "isComponent", "propValues"]);
 export type PropValues = { -readonly [K in PropName]: z.infer<(typeof PROPS)[K]["schema"]> };
 /** What a node stores: only the properties that differ from their defaults. */
 export type Props = Partial<PropValues>;
@@ -913,7 +951,7 @@ const allowedProps: Record<NodeType, ReadonlySet<PropName>> = Object.fromEntries
  * an instance's component property values (decision 0035, item 15).
  */
 export const KEYED_PROPS: ReadonlyMap<PropName, { key: z.ZodType; value: z.ZodType }> = new Map([
-  ["propValues", { key: PropertyId, value: PropertyValue }],
+  ["propValues", { key: PropertyKey, value: PropertyValue }],
 ]);
 
 export function isPropName(name: string): name is PropName {

@@ -64,15 +64,24 @@ describe("importing component properties", () => {
       // Nested instances in mains, named for what they are there.
       "f1-3": ["name"],
       "f1-6": ["name"],
-      // The outline button: its text. Not its hug width, nor its label's auto width.
-      "fI6-1_1-7": ["characters"],
-      // The field: its label, and its nested button's hidden icon and label.
-      "fI6-2_5-2": ["characters"],
-      "fI6-2_5-3_1-3": ["visible"],
-      "fI6-2_5-3_1-4": ["characters"],
-      // A button whose icon is swapped: the swap, not the swapped-in icon's own fill.
-      "fI6-3_1-3": ["instanceOf"],
     });
+    // What instances set for their properties is in their records, nested instances' with their
+    // scope (decision 0035, item 3), and never marked on the layers that show it.
+    const records = nodes
+      .filter((n) => n.props.propValues)
+      .map((n) => [n.id, getProp(n.props, "propValues")]);
+    expect(Object.fromEntries(records)).toEqual({
+      // The outline button: its text. Not its hug width, nor its label's auto width.
+      "f6-1": { "10:2": "Outline" },
+      // The field: its label, and its nested button's hidden icon and label.
+      "f6-2": { "20:1": "Bio", "f5-3/10:1": false, "f5-3/10:2": "Save" },
+      // A button whose icon is swapped: the swap, not the swapped-in icon's own fill.
+      "f6-3": { "10:3": { instance: "f4-1" } },
+    });
+    // The layers show them, as Figma's do.
+    expect(getProp(props("fI6-1_1-7"), "characters")).toBe("Outline");
+    expect(getProp(props("fI6-2_5-3_1-3"), "visible")).toBe(false);
+    expect(getProp(props("fI6-3_1-3"), "instanceOf")).toBe("f4-1");
     // An instance of a variant holds no variant values of its own.
     expect(props("f6-1").variantProps).toBeUndefined();
   });
@@ -139,11 +148,13 @@ for (const compact of [false, true]) {
       ]);
     });
 
-    it("toggles a boolean and edits a text, as overrides on the layers they drive", () => {
+    it("toggles a boolean and edits a text, in its record, shown on the layers they drive", () => {
       const { editor, get } = open();
       editor.setInstanceProperty("f6-1", "10:1", false);
       expect(getProp(get("fI6-1_1-6"), "visible")).toBe(false);
-      expect(getProp(get("fI6-1_1-6"), "overrides")).toContain("visible");
+      // The record is where the value is: the layer shows it, and isn't changed itself.
+      expect(getProp(get("f6-1"), "propValues")).toEqual({ "10:1": false, "10:2": "Outline" });
+      expect(getProp(get("fI6-1_1-6"), "overrides")).toEqual([]);
       editor.setInstanceProperty("f6-1", "10:2", "Delete");
       expect(getProp(get("fI6-1_1-7"), "characters")).toBe("Delete");
       const p = instanceProperties(editor.doc, "f6-1");

@@ -19,6 +19,7 @@ import {
   type NodeType,
   newId,
   type Op,
+  type PropertyValue,
   type PropName,
   type Props,
   propAllowed,
@@ -30,7 +31,6 @@ import { MIN_TAP_TARGET } from "./accessibility";
 import { Camera, type Insets, MAX_ZOOM, NO_INSETS } from "./camera";
 import { type CameraPath, cameraPath, easeOut, motionDuration } from "./camera-motion";
 import {
-  affectedComponents,
   componentSetOf,
   copyConstraintOps,
   detachOps,
@@ -100,21 +100,15 @@ import {
 } from "./libraries";
 import { FIELD_OF, findPropertyRow, instanceProperties } from "./properties";
 import {
-  applicationOf,
-  asEditOps,
-  effectiveValues,
-  legacyValues,
-  matchNested,
-  type NestedValues,
-  nestedInstances,
-  nestedValues,
+  carryOps,
+  drivenEditOps,
+  type NestedInstance,
+  nestedTree,
   ownerOf,
-  ownersToApply,
-  type PropertyValues,
-  propertyFollowOps,
-  recordOps,
+  recordsWritten,
+  recordTargets,
   toRecordValue,
-  withoutKeys,
+  valueOps,
 } from "./property-values";
 import { readingOrderOf } from "./reading-order";
 import { resetDependentOps } from "./resets";
@@ -489,7 +483,6 @@ export class Editor {
       this.notify(`Couldn't apply that change: ${message}`),
     );
     this.sync.on("desync", () => this.notify("Reloading the latest version of this file."));
-    this.sync.on("remote", (ops) => this.#reconcileValues(ops));
     this.history.subscribe(() =>
       this.state.set({ canUndo: this.history.canUndo, canRedo: this.history.canRedo }),
     );
@@ -613,13 +606,13 @@ export class Editor {
   #commitWithFixups(input: readonly Op[], recordOverrides = true, constrain = true): Op[] {
     let ops = input;
     return this.doc.batch(() => {
+      // Editing a field a component property drives by hand is an edit of the property: it
+      // writes the record its value lives in, never the layer (decision 0035, item 3).
+      if (recordOverrides) ops = drivenEditOps(this.doc, ops);
+      if (ops.length === 0) return [];
       // A person's edit inside an instance records an override, and setting a
       // bound property by hand detaches its variable; both before the derived
       // writes below, so those leave the edited properties alone.
-      // Editing a field a component property drives sets the property: the instance's record,
-      // and the other layers it drives there (decision 0035).
-      const follow = recordOverrides ? propertyFollowOps(this.doc, ops) : [];
-      if (follow.length > 0) ops = [...ops, ...follow];
       const marks = recordOverrides
         ? [
             ...overrideOps(this.doc, ops),
@@ -639,6 +632,8 @@ export class Editor {
       const emptied = this.#emptiedGroupOps(inverse);
       if (emptied.length > 0) inverse = [...this.sync.commit(emptied), ...inverse];
       let touched = this.#touchedBy([...ops, ...emptied], inverse);
+      // Compact copies show a record's new values at once: their texts size, layout places them.
+      for (const id of recordTargets(this.doc, first)) touched.add(id);
       let lastOps: readonly Op[] = first;
       // Derived writes until nothing changes: instances follow their main
       // component, bound properties follow their variables, text sizes to its
@@ -655,11 +650,11 @@ export class Editor {
           roundInverse = [...this.sync.commit(placed), ...roundInverse];
           synced = [...synced, ...placed];
         }
-        // Layers that came to reference a property take the value their instance set.
-        const valued = this.#propertyValueFixups([...lastOps, ...synced]);
-        if (valued.ops.length > 0) {
-          roundInverse = [...valued.inverse, ...roundInverse];
-          synced = [...synced, ...valued.ops];
+        // Materialized copies: an instance whose record changed shows it, as sync writes it.
+        const valued = this.#recordSyncOps(lastOps);
+        if (valued.length > 0) {
+          roundInverse = [...this.sync.commit(valued), ...roundInverse];
+          synced = [...synced, ...valued];
         }
         const resolved = variableFixupOps(this.doc, [...lastOps, ...synced]);
         if (resolved.length > 0) roundInverse = [...this.sync.commit(resolved), ...roundInverse];
@@ -688,117 +683,17 @@ export class Editor {
   }
 
   /**
-   * Derived writes for instances whose driven layers `ops` may have made or
-   * relinked (a layer added to a main, a sync's new copies, a swap's
-   * rebuilt layers): each layer that references a property its instance has
-   * a value for takes it, as an override (decision 0035, item 3). A nested
-   * instance a swap value names is swapped, and its instance synced.
+   * With materialized copies, the writes that make the copies of instances
+   * whose record `ops` changed show its values: sync of what the record
+   * decides alone (`syncInstanceOps` with `properties`), a pure function of
+   * the main and the record, in the same transaction (decision 0035). Compact
+   * copies present them as they're read: nothing to write.
    */
-  #propertyValueFixups(ops: readonly Op[]): { ops: Op[]; inverse: Op[] } {
-    const owners = ownersToApply(this.doc, ops, (ids) => this.#compactOwners(ids));
-    const out: Op[] = [];
-    let inverse: Op[] = [];
-    for (const owner of owners) {
-      const node = this.doc.get(owner);
-      if (!node) continue;
-      const application = applicationOf(this.doc, owner, getProp(node.props, "propValues"));
-      const edit =
-        application.ops.length > 0 || application.swapMarks.length > 0
-          ? asEditOps(this.doc, application.ops, application.swapMarks)
-          : [];
-      if (edit.length > 0) {
-        inverse = [...this.sync.commit(edit), ...inverse];
-        out.push(...edit);
-      }
-      for (const { id, component } of application.swaps) {
-        const swap = swapInstanceOps(this.doc, id, component);
-        if (swap.length === 0) continue;
-        inverse = [...this.sync.commit(swap), ...inverse];
-        out.push(...swap);
-        const sync = syncInstanceOps(this.doc, outermostInstanceOf(this.doc, id)?.id ?? id);
-        if (sync.length > 0) {
-          inverse = [...this.sync.commit(sync), ...inverse];
-          out.push(...sync);
-        }
-      }
-    }
-    return { ops: out, inverse };
-  }
-
-  /**
-   * After a teammate's edit: the instances whose driven layers it may have
-   * made, relinked or given values, and whose layers then don't hold their
-   * recorded values, are given them, as a derived edit (no undo step).
-   * Neither author could do it: one added a layer to a main while the other
-   * set the value, each from a file without the other's edit; or a branch
-   * merge took a value's record and its layers from different sides. Every
-   * client that sees it writes the same values, so they agree whoever's
-   * lands first, and the record never stays different from what's drawn.
-   */
-  #reconcileValues(ops: readonly Op[]): void {
-    if (!this.canEdit) return;
-    const owners = new Set(ownersToApply(this.doc, ops, (ids) => this.#compactOwners(ids)));
-    for (const op of ops)
-      if (op.op === "set" && op.prop === "propValues" && this.doc.has(op.id)) owners.add(op.id);
-    if (owners.size === 0) return;
-    const edits: Op[] = [];
-    const swaps: Array<{ id: string; component: string }> = [];
-    for (const owner of owners) {
-      const node = this.doc.get(owner);
-      const values = node ? getProp(node.props, "propValues") : {};
-      if (Object.keys(values).length === 0) continue;
-      const application = applicationOf(this.doc, owner, values);
-      if (application.ops.length > 0 || application.swapMarks.length > 0)
-        edits.push(...asEditOps(this.doc, application.ops, application.swapMarks));
-      swaps.push(...application.swaps);
-    }
-    if (edits.length === 0 && swaps.length === 0) return;
-    try {
-      this.doc.batch(() => {
-        if (edits.length > 0) this.#commitWithFixups(edits, false);
-        for (const { id, component } of swaps) {
-          const swap = swapInstanceOps(this.doc, id, component);
-          if (swap.length === 0) continue;
-          this.#commitWithFixups(swap, false);
-          const sync = syncInstanceOps(this.doc, outermostInstanceOf(this.doc, id)?.id ?? id);
-          if (sync.length > 0) this.#commitWithFixups(sync, false);
-        }
-      });
-    } catch (error) {
-      // Whatever no longer applies is the room's to settle; the next edit there tries again.
-      if (!(error instanceof Error && error.name === "ModelError")) throw error;
-    }
-  }
-
-  /**
-   * With compact copies, the instances that may hold values for layers a
-   * main gained (its copies present them without a write): the stored
-   * instance roots of that main and of every main holding its instances,
-   * and the nested instances in them with a record of their own. Without,
-   * sync writes the new layers into each copy, and those name their owners.
-   */
-  #compactOwners(ids: readonly string[]): string[] {
-    if (!this.doc.compactCopies) return [];
-    const mains = new Set(affectedComponents(this.doc, ids));
-    const queue = [...mains];
-    for (let i = 0; i < queue.length; i++)
-      for (const root of this.doc.instanceRoots(queue[i] as string))
-        for (const outer of affectedComponents(this.doc, [root]))
-          if (!mains.has(outer)) {
-            mains.add(outer);
-            queue.push(outer);
-          }
-    const stored = this.doc.storedReader();
-    const out: string[] = [];
-    for (const main of mains)
-      for (const root of this.doc.instanceRoots(main)) {
-        out.push(root);
-        for (const id of stored.childIds(root)) {
-          const record = stored.get(id);
-          if (record?.type === "override" && record.props.propValues) out.push(id);
-        }
-      }
-    return out;
+  #recordSyncOps(ops: readonly Op[]): Op[] {
+    if (this.doc.compactCopies) return [];
+    return recordsWritten(ops).flatMap((id) =>
+      this.doc.has(id) ? syncInstanceOps(this.doc, id, { properties: true }) : [],
+    );
   }
 
   /**
@@ -2543,45 +2438,25 @@ export class Editor {
   }
 
   /**
-   * Swaps an instance to another component and keeps its property values
-   * by id: what it set, those still on its layers from before records
-   * included, is recorded first; after, the record keeps what the new
-   * component defines and its layers take it.
+   * Swaps an instance to another component (one undo step). Its values,
+   * kept in its record (decision 0035), go across: its own where the new
+   * component defines them, its nested instances' to the nested instances
+   * that match (`carryOps`).
    */
   #switchInstance(instanceId: string, componentId: string, label: string): void {
     if (swapInstanceOps(this.doc, instanceId, componentId).length === 0) return;
     this.beginGesture(label);
-    const values = effectiveValues(this.doc, instanceId);
-    const adopt = recordOps(this.doc, instanceId, legacyValues(this.doc, instanceId));
-    if (adopt.length > 0) this.commit(adopt, label, { overrides: false });
-    // The swap rebuilds the copy, nested instances and their records with it: theirs go across.
-    const nested = nestedValues(this.doc, instanceId);
+    const before = nestedTree(this.doc, instanceId);
     this.#swap(instanceId, componentId, label);
-    // What the new component doesn't define goes (`recordOps` drops it).
-    const kept = recordOps(this.doc, instanceId, {});
-    if (kept.length > 0) this.commit(kept, label, { overrides: false });
-    // Values too long for the record are on its layers only: they go across too.
-    this.#applyValues(instanceId, label, values);
-    this.#carryNested(instanceId, nested, label);
+    this.#carry(instanceId, before, label);
     this.endGesture();
   }
 
-  /**
-   * Gives the nested instances in an instance's copy, just rebuilt, the
-   * values the ones before had (`matchNested` pairs them): recorded on
-   * each, and applied to its layers; then the nested instances in them.
-   */
-  #carryNested(instanceId: string, before: readonly NestedValues[], label: string): void {
-    if (before.length === 0) return;
-    for (const { id, from } of matchNested(before, nestedInstances(this.doc, instanceId))) {
-      if (!this.doc.has(id)) continue;
-      if (Object.keys(from.values).length > 0) {
-        const write = recordOps(this.doc, id, from.values);
-        if (write.length > 0) this.commit(write, label, { overrides: false });
-        this.#applyValues(id, label, from.values);
-      }
-      if (this.doc.has(id)) this.#carryNested(id, from.nested, label);
-    }
+  /** The record writes that carry an instance's values across a switch (see `carryOps`). */
+  #carry(instanceId: string, before: readonly NestedInstance[], label: string): void {
+    if (!this.doc.has(instanceId)) return;
+    const carried = carryOps(this.doc, instanceId, before);
+    if (carried.length > 0) this.commit(carried, label, { overrides: false });
   }
 
   /** The structural swap: the instance's layers rebuilt from `componentId`, then synced. */
@@ -2596,27 +2471,6 @@ export class Editor {
       outermostInstanceOf(this.doc, instanceId)?.id ?? instanceId,
     );
     if (sync.length > 0) this.commit(sync, label, { overrides: false });
-  }
-
-  /**
-   * Makes an instance's driven layers hold its values (marked as a
-   * person's edit): its record's, or `values` when given (with values too
-   * long for the record, which only its layers hold).
-   */
-  #applyValues(instanceId: string, label: string, values?: PropertyValues): void {
-    const node = this.doc.get(instanceId);
-    if (!node) return;
-    const application = applicationOf(
-      this.doc,
-      instanceId,
-      values ?? getProp(node.props, "propValues"),
-    );
-    if (application.ops.length > 0 || application.swapMarks.length > 0)
-      this.commit(asEditOps(this.doc, application.ops, application.swapMarks), label, {
-        overrides: false,
-      });
-    for (const { id, component } of application.swaps)
-      if (this.doc.has(id)) this.#switchInstance(id, component, label);
   }
 
   /** Clears one property override on one layer inside an instance, so it follows its main again. */
@@ -2685,10 +2539,11 @@ export class Editor {
   }
 
   /**
-   * Sets a component property on an instance (decision 0035): its record
-   * takes the value, and every layer the property drives in its copy holds
-   * it, recorded as overrides. A variant swaps the instance to the matching
-   * variant; an instance swap swaps the nested instances it drives.
+   * Sets a component property on an instance (decision 0035): the record
+   * its values are kept in takes the value, and every layer the property
+   * drives shows it. A variant swaps the instance to the matching variant;
+   * an instance swap swaps the nested instances it drives, and the values
+   * set inside them go to what matches in the new component.
    */
   setInstanceProperty(instanceId: string, propertyId: string, value: boolean | string): void {
     const properties = instanceProperties(this.doc, instanceId);
@@ -2701,22 +2556,15 @@ export class Editor {
     const recordValue = toRecordValue(row.type, value);
     if (recordValue === null) return;
     const label = row.type === "instance" ? `Swap ${row.name}` : `Change ${row.name}`;
-    const set = { [propertyId]: recordValue };
-    // Only this value is written; what the instance held only on its layers is recorded with it.
-    const legacy = withoutKeys(legacyValues(this.doc, instanceId), set);
-    const values = { ...effectiveValues(this.doc, instanceId), ...set };
-    const write = recordOps(this.doc, instanceId, { ...set, ...legacy });
-    this.beginGesture(label);
-    if (write.length > 0) this.commit(write, label, { overrides: false });
-    this.#applyValues(instanceId, label, values);
-    this.endGesture();
+    this.#writeValue(instanceId, propertyId, recordValue, row.type === "instance", label);
   }
 
   /**
-   * Puts a component property on an instance back to its main's value: its
-   * record forgets it, and the layers it drives take back their main's
-   * value with what it depends on. A variant axis goes back alone: the
-   * instance switches to the variant with the other axes as they are.
+   * Puts a component property on an instance back to its main's value: the
+   * record forgets it, and the layers it drives show their main layer's
+   * value again, with what it depends on (a variable bound to it). A
+   * variant axis goes back alone: the instance switches to the variant with
+   * the other axes as they are.
    */
   resetInstanceProperty(instanceId: string, propertyId: string): void {
     const properties = instanceProperties(this.doc, instanceId);
@@ -2726,13 +2574,36 @@ export class Editor {
       this.#resetVariantAxis(instanceId, row.name);
       return;
     }
-    const field = FIELD_OF[row.type];
-    if (!field) return;
-    const label = `Reset ${row.name}`;
+    if (!FIELD_OF[row.type]) return;
+    this.#writeValue(instanceId, propertyId, null, row.type === "instance", `Reset ${row.name}`);
+  }
+
+  /**
+   * Writes one value of an instance's (`null`: its main's again), one undo
+   * step. A swap's carries what's set inside the nested instances it swaps
+   * to what matches in what they're swapped to.
+   */
+  #writeValue(
+    instanceId: string,
+    propertyId: string,
+    value: PropertyValue | null,
+    swaps: boolean,
+    label: string,
+  ): void {
+    const write = valueOps(this.doc, instanceId, { [propertyId]: value });
+    if (write === null) {
+      this.notify("That value is too long to keep on this instance.");
+      return;
+    }
+    if (write.length === 0) return;
+    const swapped = swaps
+      ? (instanceProperties(this.doc, instanceId)?.rows.find((r) => r.id === propertyId)?.targets ??
+        [])
+      : [];
+    const before = new Map(swapped.map((id) => [id, nestedTree(this.doc, id)] as const));
     this.beginGesture(label);
-    const forget = recordOps(this.doc, instanceId, { [propertyId]: null });
-    if (forget.length > 0) this.commit(forget, label, { overrides: false });
-    this.resetOverrides(row.targets.map((id) => ({ id, props: [field] })));
+    this.commit(write, label, { overrides: false });
+    for (const [id, nested] of before) this.#carry(id, nested, label);
     this.endGesture();
   }
 
@@ -2762,9 +2633,11 @@ export class Editor {
     const target = exact ?? findVariant(this.doc, set.id, wanted);
     if (!target || target.id === mainId) return;
     if (target.id === originalId) {
-      this.beginGesture(`Reset ${axis}`);
+      const label = `Reset ${axis}`;
+      this.beginGesture(label);
+      const before = nestedTree(this.doc, instanceId);
       this.resetOverrides([{ id: instanceId, props: ["instanceOf"] }]);
-      this.#applyValues(instanceId, `Reset ${axis}`);
+      this.#carry(instanceId, before, label);
       this.endGesture();
     } else this.#switchInstance(instanceId, target.id, `Reset ${axis}`);
   }

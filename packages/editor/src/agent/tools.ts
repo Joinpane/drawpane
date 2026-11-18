@@ -15,6 +15,7 @@ import {
   keysBetween,
   type LayerType,
   type Op,
+  type PropertyValue,
   type PropName,
   type Props,
 } from "@drawpane/model";
@@ -22,6 +23,7 @@ import { z } from "zod";
 import type { Editor } from "../editor";
 import { ExportError } from "../export";
 import { base64, type HeadlessPng, type PngOptions } from "../headless-render";
+import { instanceValues, valueOps } from "../property-values";
 import {
   expandOne,
   JSX_TAGS,
@@ -107,6 +109,25 @@ function checkedProps(editor: Editor, nodeId: string, raw: Record<string, unknow
   const props: Record<string, unknown> = {};
   for (const [name, value] of Object.entries(tree.props)) if (asked.has(name)) props[name] = value;
   return props as Props;
+}
+
+/**
+ * An instance's property values as `set_props` writes them (`propValues`,
+ * by property id): written as the property panel writes them, a value at a
+ * time into the record they're kept in (decision 0035), the instance's own
+ * or, for a nested instance in a copy, the record of the instance it's in.
+ * A value it no longer lists goes back to its main's.
+ */
+function propertyValueOps(editor: Editor, nodeId: string, value: unknown): Op[] {
+  const wanted = (value ?? {}) as Record<string, PropertyValue>;
+  const writes: Record<string, PropertyValue | null> = {};
+  for (const key of Object.keys(instanceValues(editor.doc, nodeId)))
+    if (!(key in wanted)) writes[key] = null;
+  Object.assign(writes, wanted);
+  const ops = valueOps(editor.doc, nodeId, writes);
+  if (ops === null)
+    throw new ToolFailure(`${nodeId}: those property values don't fit (they're too long)`);
+  return ops;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,8 +312,10 @@ const setProps = defineTool({
       props: checkedProps(editor, nodeId, props),
     }));
     const ops = planned.flatMap(({ id: nodeId, props }) =>
-      Object.entries(props).map(
-        ([prop, value]): Op => ({ op: "set", id: nodeId, prop: prop as PropName, value }),
+      Object.entries(props).flatMap(([prop, value]): Op[] =>
+        prop === "propValues"
+          ? propertyValueOps(editor, nodeId, value)
+          : [{ op: "set", id: nodeId, prop: prop as PropName, value }],
       ),
     );
     if (ops.length > 0) editor.commit(ops, "Change properties");

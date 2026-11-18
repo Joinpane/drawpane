@@ -28,11 +28,27 @@
  */
 import { ModelError } from "./apply";
 import { type BuildBudget, BuildTooLarge, nodeBytes } from "./budget";
-import { CopyView, isMainNode, OVERRIDE_KEY, ownValues, samePropValue } from "./copies";
+import {
+  CopyView,
+  type DrivenField,
+  isMainNode,
+  OVERRIDE_KEY,
+  ownValues,
+  samePropValue,
+} from "./copies";
+import { sameValue } from "./history";
 import { ROOT_ID } from "./ids";
 import type { NodeRecord } from "./ops";
 import { compareSiblings } from "./order-key";
-import { getProp, type Props } from "./schema";
+import {
+  getProp,
+  MAX_PROPERTY_VALUES,
+  MAX_PROPERTY_VALUES_CHARS,
+  type PropertyValue,
+  type Props,
+  propertyValuesChars,
+  splitPropertyKey,
+} from "./schema";
 import { MemoryStore } from "./store";
 
 /** How copies are stored in a file: every copy layer, or the compact form (decision 0029). */
@@ -137,11 +153,14 @@ export function heldNodeIds(props: Readonly<Props>): { layers: string[]; others:
       str(def.default, others);
       if (Array.isArray(def.preferred)) for (const id of def.preferred) str(id, others);
     }
-  // The component an instance chose for a swap property (decision 0035, item 3).
+  // The component an instance chose for a swap property, and the layers of mains a key's scope
+  // names its nested instances by (decision 0035, item 3): layers a main holds itself.
   if (p.propValues && typeof p.propValues === "object")
-    for (const value of Object.values(p.propValues as Record<string, unknown>))
+    for (const [key, value] of Object.entries(p.propValues as Record<string, unknown>)) {
+      for (const id of splitPropertyKey(key).scope) str(id, others);
       if (value && typeof value === "object")
         str((value as { instance?: unknown }).instance, others);
+    }
   return { layers, others };
 }
 
@@ -591,14 +610,24 @@ export class InstanceConverter {
       overlay.put({ ...root, props: (ownValues(base.props, props, true) ?? {}) as Props });
       view.forget([root.id], [root.id]);
     };
+    // The root as it's stored compact: its record takes what layers of a file from before records
+    // hold for their properties (`foldValue`).
+    let stored = root;
     putRoot(root.props);
 
     const write = (
       slotId: string,
       path: readonly string[],
-      own: Record<string, unknown> | null,
+      values: Record<string, unknown> | null,
       structural: boolean,
     ) => {
+      // A copy layer's record never holds property values: its instance's root holds them all
+      // (decision 0035). A copy that holds some isn't its instance's, and the check says so.
+      let own = values;
+      if (own?.propValues !== undefined) {
+        const { propValues: _, ...rest } = own;
+        own = Object.keys(rest).length > 0 ? rest : null;
+      }
       if (own)
         overlay.put({
           id: slotId,
@@ -632,9 +661,15 @@ export class InstanceConverter {
         if (!slotId) return `no copy of ${mirrors} under ${presented}`;
         bySource.delete(source);
         const slot = view.slot(slotId);
-        const slotBase = view.base(slotId);
+        let slotBase = view.base(slotId);
         if (!slot || !slotBase || slotBase.type !== node.type || slot.key !== node.key)
           return `${node.id} isn't its main layer's type or place`;
+        const folded = foldValue(view.drivenFields(slotId), slotBase.props, node.props, stored);
+        if (folded) {
+          stored = folded;
+          putRoot(stored.props);
+          slotBase = view.base(slotId) ?? slotBase;
+        }
         ids.set(node.id, slotId);
         slotOf.set(node.id, { id: slotId, path: slot.path });
         const own = ownValues(slotBase.props, node.props);
@@ -665,7 +700,7 @@ export class InstanceConverter {
 
     // Ids the layers hold, renamed now that every copy's id is known.
     const held = (node: NodeRecord) => renameHeldIds(node.props, rename) ?? node.props;
-    if (holdsIds(root.props)) putRoot(held(root));
+    if (holdsIds(stored.props)) putRoot(held(stored));
     for (const node of layers) {
       if (!holdsIds(node.props)) continue;
       const slot = slotOf.get(node.id) as { id: string; path: readonly string[] };
@@ -678,7 +713,7 @@ export class InstanceConverter {
     view.forget([root.id], [root.id]);
     const presentedRoot = view.get(root.id);
     if (!presentedRoot) return "it can't be built";
-    const differs = differences(held(root), presentedRoot.props);
+    const differs = differences(held(stored), presentedRoot.props);
     if (differs) return `the instance's ${differs}`;
     let count = 0;
     const stack = [...view.childIds(root.id)];
@@ -701,6 +736,53 @@ export class InstanceConverter {
     }
     return null;
   }
+}
+
+/**
+ * A file from before records (decision 0035, item 3) holds what an instance
+ * set for a property on the layers it drives. A copy layer that holds, on
+ * a field a property drives, another value than its instance's record and
+ * main give it (`base`) has it folded into the record: the root as stored
+ * with it (null when there's nothing to fold). A key the record has
+ * already isn't changed (a layer disagreeing with it fails the check, and
+ * its instance is left detached, as it draws), nor is a value past the
+ * record's bounds.
+ */
+function foldValue(
+  fields: readonly DrivenField[],
+  base: Readonly<Record<string, unknown>>,
+  layer: Readonly<Props>,
+  root: NodeRecord,
+): NodeRecord | null {
+  if (fields.length === 0) return null;
+  const record = { ...((root.props.propValues ?? {}) as Record<string, PropertyValue>) };
+  let changed = false;
+  for (const [field, key] of fields) {
+    if (record[key] !== undefined) continue;
+    const value = drivenValue(layer as Record<string, unknown>, field);
+    if (value === null || sameValue(value, drivenValue(base, field))) continue;
+    record[key] = value;
+    changed = true;
+  }
+  if (!changed) return null;
+  if (
+    Object.keys(record).length > MAX_PROPERTY_VALUES ||
+    propertyValuesChars(record) > MAX_PROPERTY_VALUES_CHARS
+  )
+    return null;
+  return { ...root, props: { ...root.props, propValues: record } };
+}
+
+/** A driven field's value in properties, as a record holds it. */
+function drivenValue(
+  props: Readonly<Record<string, unknown>>,
+  field: string,
+): PropertyValue | null {
+  if (field === "visible") return props.visible !== false;
+  if (field === "characters") return typeof props.characters === "string" ? props.characters : "";
+  if (field === "instanceOf")
+    return typeof props.instanceOf === "string" ? { instance: props.instanceOf } : null;
+  return null;
 }
 
 /** The first property two nodes' values differ in (a missing value equals its default), or null. */
