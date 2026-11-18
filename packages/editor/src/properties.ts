@@ -4,29 +4,30 @@
  *
  * A main (or its set) defines its properties (`componentProps`); its layers
  * say which of their values a property drives (`propRefs`). An instance's
- * value for a property is that value on the layers it drives, in the
- * instance's copy: setting a property sets them, which is an override like
- * any other. Nested instances a main exposes (`exposeProps`) show their own
- * properties under the instance's.
+ * values are its record (`propValues`, see `property-values.ts`), shown on
+ * the layers they drive as overrides. Nested instances a main exposes
+ * (`exposeProps`) show their own properties under the instance's.
  */
 import {
   type ComponentPropDef,
   type ComponentPropType,
   getProp,
   type NodeRecord,
-  type PropRefField,
   ROOT_LOCAL_PROPS,
 } from "@drawpane/model";
 import { componentSetOf, isInstanceRoot, isMainComponent, variantProperties } from "./components";
 import type { Doc } from "./doc";
 import { layerName } from "./names";
+import {
+  definitionsOf,
+  drivenLayers,
+  FIELD_OF,
+  fieldValue,
+  fromRecordValue,
+  refKey,
+} from "./property-values";
 
-/** The value of a layer each property type drives. */
-export const FIELD_OF: Readonly<Partial<Record<ComponentPropType, PropRefField>>> = {
-  boolean: "visible",
-  text: "characters",
-  instance: "instanceOf",
-};
+export { definitionsOf, FIELD_OF };
 
 export interface PropertyRow {
   /** The property's id (a variant's entry may have none: then its name). */
@@ -53,43 +54,6 @@ export interface InstanceProperties {
   readonly rows: readonly PropertyRow[];
   /** Exposed nested instances, in layer order. */
   readonly nested: readonly InstanceProperties[];
-}
-
-/** Every property a main shows: its set's, then its own (ids once). */
-export function definitionsOf(doc: Doc, mainId: string): ComponentPropDef[] {
-  const main = doc.get(mainId);
-  if (!isMainComponent(main) || !main) return [];
-  const set = componentSetOf(doc, mainId);
-  const out: ComponentPropDef[] = [];
-  const seen = new Set<string>();
-  for (const owner of set ? [set, main] : [main])
-    for (const def of getProp(owner.props, "componentProps"))
-      if (!seen.has(def.id)) {
-        seen.add(def.id);
-        out.push(def);
-      }
-  return out;
-}
-
-/** The layers under `rootId` (at any depth) that reference each property, by field. */
-function referencesUnder(doc: Doc, rootId: string): Map<string, string[]> {
-  const out = new Map<string, string[]>();
-  const stack = [...doc.childIds(rootId)].reverse();
-  while (stack.length > 0) {
-    const id = stack.pop() as string;
-    const node = doc.get(id);
-    if (!node) continue;
-    for (const [field, propertyId] of Object.entries(getProp(node.props, "propRefs"))) {
-      if (!propertyId) continue;
-      const key = `${propertyId}\u0000${field}`;
-      const list = out.get(key);
-      if (list) list.push(id);
-      else out.set(key, [id]);
-    }
-    const kids = doc.childIds(id);
-    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i] as string);
-  }
-  return out;
 }
 
 /** Nested instances under `rootId` whose main exposes them, in layer order (not inside other instances). */
@@ -127,7 +91,8 @@ export function instanceProperties(
   if (!main || !isMainComponent(main)) return null;
   const set = componentSetOf(doc, main.id);
   const defs = definitionsOf(doc, main.id);
-  const refs = referencesUnder(doc, instanceId);
+  const refs = drivenLayers(doc, instanceId);
+  const record = getProp(instance.props, "propValues");
   const overridden = (id: string, field: string) =>
     getProp(doc.get(id)?.props ?? {}, "overrides").includes(field);
 
@@ -167,17 +132,21 @@ export function instanceProperties(
     }
     const field = FIELD_OF[def.type];
     if (!field) continue;
-    const targets = refs.get(`${def.id}\u0000${field}`) ?? [];
-    // A property no layer here takes can't be set on this instance.
+    const targets = refs.get(refKey(def.id, field)) ?? [];
+    // A property no layer here takes can't be set on this instance (its value, if it has one, waits).
     if (targets.length === 0) continue;
-    const first = doc.get(targets[0] as string);
-    const props = first?.props ?? {};
+    const changedTargets = targets.filter((id) => overridden(id, field));
+    const recorded = record[def.id];
+    // Its value: the instance's record; or, before it has one, what a changed layer holds; or what
+    // its layers have from the main.
+    const shownBy = doc.get((changedTargets[0] ?? targets[0]) as string);
+    const shown = shownBy ? fieldValue(shownBy, field) : null;
     const value =
-      field === "visible"
-        ? getProp(props, "visible")
-        : field === "characters"
-          ? getProp(props, "characters")
-          : getProp(props, "instanceOf");
+      recorded !== undefined
+        ? fromRecordValue(recorded)
+        : shown === null
+          ? null
+          : fromRecordValue(shown);
     rows.push({
       id: def.id,
       name: def.name,
@@ -186,7 +155,7 @@ export function instanceProperties(
       value,
       ...(def.preferred ? { preferred: def.preferred } : {}),
       targets,
-      changed: targets.some((id) => overridden(id, field)),
+      changed: recorded !== undefined || changedTargets.length > 0,
     });
   }
   // Deep chains of exposed instances stop somewhere; Figma's kits go three or four deep.
@@ -293,7 +262,12 @@ const LABELS: Readonly<Record<string, string>> = {
 };
 
 /** Bookkeeping an instance holds that no person changed: never listed. */
-const UNLISTED: ReadonlySet<string> = new Set(["propRefs", "exposeProps", "bindings"]);
+const UNLISTED: ReadonlySet<string> = new Set([
+  "propRefs",
+  "exposeProps",
+  "propValues",
+  "bindings",
+]);
 
 function labelFor(doc: Doc, node: NodeRecord, prop: string): string {
   if (prop === "visible") return getProp(node.props, "visible") ? "Shown" : "Hidden";

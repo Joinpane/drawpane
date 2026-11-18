@@ -92,3 +92,89 @@ export function laidOutProps(
   }
   return out;
 }
+
+/** How a layer follows its frame on one axis (Figma's and Penpot's constraints). */
+export type Constraint = "start" | "end" | "center" | "stretch" | "scale";
+
+/** The new start and size of a span pinned by `c` when its frame grows from `from` to `to`. */
+export function constrainSpan(
+  c: Constraint,
+  pos: number,
+  size: number,
+  from: number,
+  to: number,
+): { pos: number; size: number } {
+  const delta = to - from;
+  switch (c) {
+    case "start":
+      return { pos, size };
+    case "end":
+      return { pos: pos + delta, size };
+    case "center":
+      return { pos: pos + delta / 2, size };
+    case "stretch":
+      // Keep both margins; a frame smaller than the margins leaves the layer at zero size.
+      return { pos, size: Math.max(0, size + delta) };
+    case "scale": {
+      if (from <= 0) return { pos, size };
+      const k = to / from;
+      return { pos: pos * k, size: size * k };
+    }
+  }
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * The place and size a copy layer's constraints give it, derived from the
+ * main layer it copies (decision 0035, item 7): where a copy frame without
+ * auto layout differs in size from its main's, a child pinned to the end or
+ * centre, stretched or scaled sits where its main layer does, moved by the
+ * difference. Only the values that differ from the main layer's are given;
+ * an axis pinned to the start (or a frame of the same size) gives none.
+ */
+export function constrainedValues(
+  copy: NodeRecord,
+  source: NodeRecord,
+  parent: NodeRecord | undefined,
+  parentSource: NodeRecord | undefined,
+): Partial<Record<"x" | "y" | "width" | "height", number>> {
+  const out: Partial<Record<"x" | "y" | "width" | "height", number>> = {};
+  if (!parent || !parentSource || parent.type !== "frame" || copy.type === "group") return out;
+  // Auto layout places its children itself.
+  if (
+    getProp(parent.props, "layoutMode") !== "none" &&
+    getProp(copy.props, "positioning") !== "absolute"
+  )
+    return out;
+  for (const axis of AXES) {
+    const from = getProp(parentSource.props, axis.size);
+    const to = getProp(parent.props, axis.size);
+    if (Math.abs(to - from) <= EPSILON) continue;
+    const c = getProp(copy.props, axis.constraint) as Constraint;
+    if (c === "start") continue;
+    const span = constrainSpan(
+      c,
+      getProp(source.props, axis.pos),
+      getProp(source.props, axis.size),
+      from,
+      to,
+    );
+    out[axis.pos] = round2(span.pos);
+    if (c === "stretch" || c === "scale") out[axis.size] = round2(span.size);
+  }
+  return out;
+}
+
+/**
+ * What a nested instance swapped for another component keeps from the main
+ * layer it copies, rather than taking the swapped-in component's (decision
+ * 0035, item 3): the fields the outer component's properties drive (its
+ * visibility, say), but not which component it is, which is the swap.
+ */
+export function boundaryDrivenProps(source: NodeRecord): string[] {
+  const out: string[] = [];
+  for (const [field, id] of Object.entries(getProp(source.props, "propRefs")))
+    if (id && field !== "instanceOf" && field !== "slot") out.push(field);
+  return out;
+}

@@ -36,6 +36,7 @@
 import { type BuildBudget, ENTRY_BYTES, idsBytes, nodeBytes, slotBytes } from "./budget";
 import { sameValue } from "./history";
 import { ROOT_ID } from "./ids";
+import { boundaryDrivenProps } from "./laid-out";
 import type { NodeRecord } from "./ops";
 import { keyBetween } from "./order-key";
 import { getProp, isPropName, PROPS, type Props, propAllowed } from "./schema";
@@ -51,6 +52,8 @@ export const COPY_LINK_PROPS: ReadonlySet<string> = new Set([
   "componentDescription",
   "variantProps",
   "componentProps",
+  // What one instance set (decision 0035): each copy holds its own.
+  "propValues",
   "mirrors",
   "overrides",
   "unset",
@@ -624,8 +627,9 @@ export class CopyView {
   /**
    * A copy layer before its own values: its source's, as copied. A nested
    * instance swapped for another main is that main's instance, placed where
-   * its source is: its root-local values from the source, the rest the
-   * main's, as an instance root has them.
+   * its source is: its root-local values, and the fields the outer
+   * component's properties drive, from the source; the rest the main's, as
+   * an instance root has them.
    */
   #slotBase(slot: CopySlot, source: NodeRecord): Record<string, unknown> {
     const props: Record<string, unknown> = {};
@@ -636,6 +640,12 @@ export class CopyView {
         if (value !== undefined && prop !== "instanceOf") props[prop] = value;
       }
       Object.assign(props, this.#rootBase(swapped));
+      // What the outer component's properties drive stays the outer main's (decision 0035).
+      for (const prop of boundaryDrivenProps(source)) {
+        const value = (source.props as Record<string, unknown>)[prop];
+        if (value === undefined) delete props[prop];
+        else props[prop] = value;
+      }
     } else
       for (const [prop, value] of Object.entries(source.props))
         if (!COPY_LINK_PROPS.has(prop)) props[prop] = value;

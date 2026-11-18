@@ -19,7 +19,7 @@ import {
   SegmentedControl,
   Switch,
 } from "@drawpane/ui";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEditor } from "./hooks";
 
 /**
@@ -178,6 +178,9 @@ function TextValue({
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
+  // Escape cancels: the blur it causes runs before React has the restored draft, so it's told
+  // not to commit rather than left to read the state.
+  const cancelled = useRef(false);
   const lines = Math.min(4, Math.max(1, draft.split("\n").length, Math.ceil(draft.length / 22)));
   return (
     <textarea
@@ -187,8 +190,15 @@ function TextValue({
       value={draft}
       disabled={disabled}
       onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => {
-        if (draft !== value) onCommit(draft);
+      onFocus={() => {
+        cancelled.current = false;
+      }}
+      onBlur={(e) => {
+        if (cancelled.current) {
+          cancelled.current = false;
+          return;
+        }
+        if (e.currentTarget.value !== value) onCommit(e.currentTarget.value);
       }}
       onKeyDown={(e) => {
         e.stopPropagation();
@@ -197,6 +207,8 @@ function TextValue({
           e.currentTarget.blur();
         }
         if (e.key === "Escape") {
+          e.preventDefault();
+          cancelled.current = true;
           setDraft(value);
           e.currentTarget.blur();
         }

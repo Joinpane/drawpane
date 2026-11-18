@@ -34,7 +34,7 @@ export const TEXT_STYLE_PROPS = [
 ] as const satisfies readonly PropName[];
 export type TextStyleProp = (typeof TEXT_STYLE_PROPS)[number];
 
-const STYLE_PROPS: ReadonlySet<string> = new Set(TEXT_STYLE_PROPS);
+export const STYLE_PROPS: ReadonlySet<string> = new Set(TEXT_STYLE_PROPS);
 
 /** The file's text styles, by name. */
 export function textStyles(doc: Doc): NodeRecord[] {

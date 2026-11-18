@@ -72,6 +72,7 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   variantProps: "component",
   componentDescription: "component",
   componentProps: "component",
+  propValues: "component",
   propRefs: "component",
   exposeProps: "component",
   instanceOf: "component",

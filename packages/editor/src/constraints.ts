@@ -8,7 +8,7 @@
  * commit, so resizing by handle, inspector, command bar or a preset all
  * follow it, and undo restores children with their frame in one step.
  */
-import { getProp, type NodeRecord, type Op } from "@drawpane/model";
+import { constrainSpan, getProp, type NodeRecord, type Op } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { round2 } from "./geometry";
 
@@ -34,32 +34,7 @@ function placedByLayout(frame: NodeRecord, child: NodeRecord): boolean {
   );
 }
 
-/** The new start and size of a span pinned by `c` when its frame grows from `from` to `to`. */
-export function constrainSpan(
-  c: Constraint,
-  pos: number,
-  size: number,
-  from: number,
-  to: number,
-): { pos: number; size: number } {
-  const delta = to - from;
-  switch (c) {
-    case "start":
-      return { pos, size };
-    case "end":
-      return { pos: pos + delta, size };
-    case "center":
-      return { pos: pos + delta / 2, size };
-    case "stretch":
-      // Keep both margins; a frame smaller than the margins leaves the layer at zero size.
-      return { pos, size: Math.max(0, size + delta) };
-    case "scale": {
-      if (from <= 0) return { pos, size };
-      const k = to / from;
-      return { pos: pos * k, size: size * k };
-    }
-  }
-}
+export { constrainSpan };
 
 /**
  * Fix-up operations that move and size the children of every frame `ops`

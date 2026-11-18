@@ -137,6 +137,11 @@ export function heldNodeIds(props: Readonly<Props>): { layers: string[]; others:
       str(def.default, others);
       if (Array.isArray(def.preferred)) for (const id of def.preferred) str(id, others);
     }
+  // The component an instance chose for a swap property (decision 0035, item 3).
+  if (p.propValues && typeof p.propValues === "object")
+    for (const value of Object.values(p.propValues as Record<string, unknown>))
+      if (value && typeof value === "object")
+        str((value as { instance?: unknown }).instance, others);
   return { layers, others };
 }
 
@@ -153,6 +158,7 @@ export const NODE_ID_PROPS: readonly string[] = [
   "variableModes",
   "values",
   "componentProps",
+  "propValues",
 ];
 
 /** Whether a node's properties hold ids of other layers (see `renameHeldIds`). */

@@ -106,6 +106,18 @@ test.describe
       await expect(panel.getByRole("button", { name: "Reset 1 change" })).toBeVisible();
     });
 
+    test("Escape cancels a text property draft", async () => {
+      await page.evaluate(() => (window as unknown as W).drawpane.select(["f6-1"]));
+      const label = inspector(page).getByRole("textbox", { name: "Label", exact: true });
+      await expect(label).toHaveValue("Outline");
+      await label.fill("Do not commit");
+      await label.press("Escape");
+      await expect
+        .poll(() => copyOf(page, "f6-1", "f1-7").then((p) => p?.characters))
+        .toBe("Outline");
+      await expect(label).toHaveValue("Outline");
+    });
+
     test("toggles a boolean and edits a text property", async () => {
       const panel = inspector(page);
       await panel.getByRole("switch", { name: "Show Icon" }).click();

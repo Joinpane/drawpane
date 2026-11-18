@@ -1,6 +1,15 @@
 /** Which of a copy's values layout decides (decision 0035, item 7): each case on its own. */
 import { describe, expect, it } from "vitest";
-import { laidOutProps, type NodeRecord, type Props } from "../src/index";
+import {
+  boundaryDrivenProps,
+  constrainedValues,
+  heldNodeIds,
+  laidOutProps,
+  MAX_PROPERTY_VALUES,
+  type NodeRecord,
+  PROPS,
+  type Props,
+} from "../src/index";
 
 const layer = (type: NodeRecord["type"], props: Record<string, unknown> = {}): NodeRecord => ({
   id: "x",
@@ -71,5 +80,61 @@ describe("laidOutProps", () => {
     expect(at(pinned("scale"), wider)).toEqual(["width", "x"]);
     // Same size as its main's frame: a moved child moved on purpose.
     expect(at(pinned("scale"), main)).toEqual([]);
+  });
+});
+
+describe("constrainedValues", () => {
+  const parent = (width: number, props: Record<string, unknown> = {}) =>
+    layer("frame", { width, height: 40, ...props });
+  const child = (constraintH: string, x = 70, width = 20) =>
+    layer("rect", { x, width, height: 20, constraintH });
+
+  it("moves an end-pinned or centred child by its frame's growth from its main layer's place", () => {
+    // The copy's own (stale) place doesn't matter: it's derived from the main layer's.
+    expect(constrainedValues(child("end", 150), child("end"), parent(200), parent(100))).toEqual({
+      x: 170,
+    });
+    expect(
+      constrainedValues(child("center", 0), child("center", 40), parent(200), parent(100)),
+    ).toEqual({ x: 90 });
+  });
+
+  it("stretches and scales sizes too, and leaves a start-pinned child alone", () => {
+    expect(
+      constrainedValues(child("stretch"), child("stretch", 10, 80), parent(200), parent(100)),
+    ).toEqual({ x: 10, width: 180 });
+    expect(
+      constrainedValues(child("scale"), child("scale", 10, 20), parent(200), parent(100)),
+    ).toEqual({ x: 20, width: 40 });
+    expect(constrainedValues(child("start"), child("start"), parent(200), parent(100))).toEqual({});
+  });
+
+  it("gives nothing for a frame of the same size, or one auto layout places children in", () => {
+    expect(constrainedValues(child("end"), child("end"), parent(100), parent(100))).toEqual({});
+    const flow = { layoutMode: "row" };
+    expect(
+      constrainedValues(child("end"), child("end"), parent(200, flow), parent(100, flow)),
+    ).toEqual({});
+  });
+});
+
+describe("component property values (decision 0035, item 3)", () => {
+  it("keeps the fields an outer property drives at a swap, but not the swap itself", () => {
+    expect(
+      boundaryDrivenProps(layer("frame", { propRefs: { visible: "a", instanceOf: "b" } })),
+    ).toEqual(["visible"]);
+  });
+
+  it("bounds a record and lists the components it names", () => {
+    const schema = PROPS.propValues.schema;
+    expect(schema.safeParse({ a: true, b: "text", c: { instance: "main1" } }).success).toBe(true);
+    const many = Object.fromEntries(
+      Array.from({ length: MAX_PROPERTY_VALUES + 1 }, (_, i) => [`p${i}`, true]),
+    );
+    expect(schema.safeParse(many).success).toBe(false);
+    expect(schema.safeParse({ a: { instance: "main1", extra: 1 } }).success).toBe(false);
+    expect(
+      heldNodeIds({ propValues: { a: true, c: { instance: "main1" } } } as Props).others,
+    ).toEqual(["main1"]);
   });
 });

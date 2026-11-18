@@ -1,0 +1,71 @@
+/**
+ * What resetting an override restores besides the value (decision 0035,
+ * item 3): a value is stored with what it depends on, and a reset puts all
+ * of it back as its main has it.
+ *
+ * - A variable bound to the property (`bindings`): setting a value by hand
+ *   detached it, so resetting the value binds it again, as the main layer
+ *   is bound. The layer's other bindings stay as they are.
+ * - A text style (`textStyle`): editing typography by hand detached it, so
+ *   resetting that typography restores the main layer's style, once no other
+ *   typography on the layer stays changed.
+ */
+import { type BindingKey, getProp, type NodeRecord, type Op, sameValue } from "@drawpane/model";
+import type { Doc } from "./doc";
+import { STYLE_PROPS } from "./text-styles";
+import { KEYS_BY_PROP } from "./variables";
+
+/**
+ * The operations that restore what `props` of a copy layer depend on, and
+ * the layer's overrides after the reset (`props` and what's restored with
+ * them taken out). The values themselves are restored by sync.
+ */
+export function resetDependentOps(
+  doc: Doc,
+  node: NodeRecord,
+  props: readonly string[],
+): { ops: Op[]; overrides: string[] } {
+  const ops: Op[] = [];
+  let overrides = getProp(node.props, "overrides").filter((p) => !props.includes(p));
+  const sourceId = getProp(node.props, "mirrors");
+  const source = sourceId ? doc.get(sourceId) : undefined;
+  if (!source) return { ops, overrides };
+
+  // Bindings: the reset keys back as the main layer has them, the others as they are.
+  const keys = props.flatMap((p) => KEYS_BY_PROP.get(p) ?? []) as BindingKey[];
+  if (keys.length > 0) {
+    const current = getProp(node.props, "bindings");
+    const wanted = getProp(source.props, "bindings");
+    const next: Partial<Record<BindingKey, string>> = { ...current };
+    for (const key of keys) {
+      if (wanted[key]) next[key] = wanted[key];
+      else delete next[key];
+    }
+    if (!sameValue(next, current))
+      ops.push({
+        op: "set",
+        id: node.id,
+        prop: "bindings",
+        value: Object.keys(next).length > 0 ? next : null,
+      });
+    // Once its bindings are the main layer's again, they follow it; until then they're its own.
+    const same = sameValue(next, wanted);
+    if (same) overrides = overrides.filter((p) => p !== "bindings");
+    else if (!sameValue(current, next) && !overrides.includes("bindings"))
+      overrides = [...overrides, "bindings"].sort();
+  }
+
+  // A text style detached by editing typography by hand comes back with the last of it.
+  if (node.type === "text" && props.some((p) => STYLE_PROPS.has(p))) {
+    const style = getProp(source.props, "textStyle");
+    if (
+      style &&
+      getProp(node.props, "textStyle") !== style &&
+      !overrides.some((p) => STYLE_PROPS.has(p))
+    ) {
+      ops.push({ op: "set", id: node.id, prop: "textStyle", value: style });
+      overrides = overrides.filter((p) => p !== "textStyle");
+    }
+  }
+  return { ops, overrides };
+}

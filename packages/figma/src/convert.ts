@@ -24,6 +24,7 @@ import {
   serializePath,
 } from "@drawpane/import-kit";
 import {
+  boundaryDrivenProps,
   keysBetween,
   laidOutProps,
   type NodeRecord,
@@ -545,6 +546,8 @@ function markOverrides(
         ? byId.get(of)
         : undefined;
     const laidOutSwapped = swappedTo ? laidOutProps(layer, swappedTo, { root: true }) : null;
+    // What the outer component's properties drive stays its main layer's (decision 0035).
+    const boundary = new Set(swappedTo ? boundaryDrivenProps(main) : []);
     const keys = new Set([
       ...Object.keys(layer.props),
       ...Object.keys(main.props),
@@ -555,7 +558,7 @@ function markOverrides(
       // Where an instance sits, and how it's used in the main around it, are its own.
       if (root && ROOT_LOCAL_PROPS.has(k)) continue;
       let against = main;
-      if (swappedTo && !ROOT_LOCAL_PROPS.has(k)) {
+      if (swappedTo && !ROOT_LOCAL_PROPS.has(k) && !boundary.has(k)) {
         if (laidOutSwapped?.has(k)) continue;
         against = swappedTo;
       }

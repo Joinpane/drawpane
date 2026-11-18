@@ -544,6 +544,20 @@ export const ComponentPropDef = z.object({
 });
 export type ComponentPropDef = z.infer<typeof ComponentPropDef>;
 
+/**
+ * An instance's value for one component property (decision 0035, item 3): a
+ * boolean's, a text's, or the component an instance swap chose.
+ */
+export const PropertyValue = z.union([
+  z.boolean(),
+  z.string().max(200_000),
+  z.object({ instance: z.string().regex(ID_PATTERN) }).strict(),
+]);
+export type PropertyValue = z.infer<typeof PropertyValue>;
+
+/** The most values one instance's record holds: a set's and a variant's definitions, 64 each. */
+export const MAX_PROPERTY_VALUES = 128;
+
 /** The values of a layer a component property drives: which property drives each. */
 export const PROP_REF_FIELDS = ["visible", "characters", "instanceOf", "slot"] as const;
 export type PropRefField = (typeof PROP_REF_FIELDS)[number];
@@ -697,6 +711,19 @@ export const PROPS = {
    * An instance's value for the property is that value in its copy.
    */
   propRefs: prop(z.partialRecord(z.enum(PROP_REF_FIELDS), PropertyId), {}, LAYERS),
+  /**
+   * The component property values this instance set (decision 0035, item 3),
+   * by property id. Applied to every layer in its copy that references the
+   * id, as overrides; the record is what outlives a variant switch or a
+   * layer the main renames, removes or adds. Not copied from a main's layer.
+   */
+  propValues: prop(
+    z
+      .record(PropertyId, PropertyValue)
+      .refine((values) => Object.keys(values).length <= MAX_PROPERTY_VALUES, "too many values"),
+    {},
+    CONTAINERS,
+  ),
   /** A nested instance in a main whose properties show on that main's instances (Figma's "exposed"). */
   exposeProps: prop(z.boolean(), false, CONTAINERS),
   instanceOf: prop(z.string().regex(ID_PATTERN).nullable(), null, CONTAINERS),
