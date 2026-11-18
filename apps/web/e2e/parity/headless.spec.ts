@@ -49,6 +49,7 @@ const FROM_FIGMA = [
   "vertical-trim",
   "glass",
   "grain",
+  "linear-blends",
 ];
 
 interface Layer {
