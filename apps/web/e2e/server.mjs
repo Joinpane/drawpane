@@ -1,12 +1,13 @@
 // Starts the Worker for end-to-end tests on its own port with a throwaway
 // database, so every run begins with a fresh, un-set-up instance.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const port = process.env.E2E_PORT ?? "8788";
 const worker = resolve(import.meta.dirname, "../../worker");
+const runner = resolve(import.meta.dirname, "../../agent-runner");
 // Each run's database is removed when the Worker exits. A run that was killed
 // outright leaves its own behind: those over a day old are cleared here, so
 // many runs never fill the disk (hundreds once took 34 GB).
@@ -54,13 +55,38 @@ const vars = {
   EMAIL_FROM: "Drawpane <design@example.com>",
   // The kit store reads a fixture registry a spec serves locally, or none: tests never reach GitHub or Penpot.
   KIT_REGISTRY: process.env.E2E_KIT_REGISTRY ?? "off",
-  // Agent tools on, with the stand-in text measurer (decision 0021; worker agent/measurer.ts).
-  AGENT_MEASURER: "standin",
 };
+// The agent runner runs beside the Worker (decision 0033), from a copy of its config with the
+// stand-in text measurer: `--var` reaches only the first config. Its comments are whole lines.
+const runnerConfig = JSON.parse(
+  readFileSync(join(runner, "wrangler.jsonc"), "utf8")
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n"),
+);
+delete runnerConfig.$schema;
+runnerConfig.main = join(runner, runnerConfig.main);
+// Agent tools on, with the stand-in text measurer (agent-runner/src/measurer.ts).
+runnerConfig.vars = { ...runnerConfig.vars, AGENT_MEASURER: "standin" };
+const runnerConfigPath = join(persist, "agent-runner.wrangler.json");
+writeFileSync(runnerConfigPath, JSON.stringify(runnerConfig));
+// The capped WebAssembly the runner bundles (normally written by its build).
+const capped = spawnSync(process.execPath, [join(runner, "scripts/cap-wasm.ts")], {
+  cwd: runner,
+  stdio: "inherit",
+});
+if (capped.status !== 0) {
+  removePersist();
+  process.exit(capped.status ?? 1);
+}
 const child = spawn(
   wrangler,
   [
     "dev",
+    "-c",
+    join(worker, "wrangler.jsonc"),
+    "-c",
+    runnerConfigPath,
     "--port",
     port,
     "--local-upstream",

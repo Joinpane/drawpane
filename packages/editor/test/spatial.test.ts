@@ -106,6 +106,23 @@ describe("TileWork", () => {
     );
   });
 
+  it("forgets the parts a drawn rect covers whole, and only those", () => {
+    fc.assert(
+      fc.property(fc.array(rect, { maxLength: 12 }), rect, (added, drawn) => {
+        const work = new TileWork(256);
+        for (const r of added) work.add(r);
+        const before = work.areas();
+        const dropped = work.drop(drawn);
+        const after = work.areas();
+        // What's left is what was there, less the parts inside `drawn`.
+        const kept = before.filter((r) => !contains(drawn, r));
+        expect(after).toEqual(kept);
+        const area = (rs: Rect[]) => rs.reduce((sum, r) => sum + r.width * r.height, 0);
+        expect(dropped).toBe(area(before) - area(after));
+      }),
+    );
+  });
+
   it("starts at the centre and forgets what's left the view", () => {
     const work = new TileWork(100);
     work.add({ x: 0, y: 0, width: 300, height: 100 });

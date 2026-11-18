@@ -50,3 +50,32 @@ The canvas benchmark at 10,000 layers didn't regress: whole-page pan p95 15.8 �
 - **Main edits are still slow**, now nearly all of it in applying the edit and laying out its copies, not drawing: phase 4's job.
 - **Tile edges and software rasterising.** A shape crossing a tile's edge is antialiased a shade differently there by Chromium's software rasteriser, as it always was along a pan's strips: after a first frame drawn in tiles, 40 of 1.3 million pixels differ from a whole redraw, by at most 6 levels of 255 (small icons on an edge by up to about 50). After 30 pans, about 2,400 pixels differ, before this change as after. A GPU-backed canvas clips to whole pixels exactly, so laptops should show none; not measured here.
 - Not done: levels of detail beyond what the renderer already did (unreadable text as bars, specks skipped): the stand-ins carry zoomed-out views instead. Hit testing and the minimap read only what's near the pointer or the page's top level; the layers panel reads no bounds. Phase 4 changes how copies are stored but presents them through `Doc` with its change log, which is all the scene reads.
+
+## Revision: glass and background blur in tiles too (2026-11-18)
+
+Item 6 drew a page with any glass or background blur whole, every time a frame couldn't be moved or scaled: its first frame, every zoom past what the last frame could stand in for, and every change too large for a frame. A large iOS UI kit, imported, is full of both (one page has 921 of them, 4,644 shadows and 17,922 layers), and there each of those frames redrew every glass on the screen at once. Pans paid as well: each strip a pan uncovered was grown by every reader it touched and all they read, and a glass cut by the screen's edge, which can't be kept for pans, was drawn afresh every frame. A profile put 84 to 91% of those frames in glass, most of it copying pictures between the canvas and the shader's.
+
+- **Readers in tiles.** A page with readers is drawn in tiles like any other. A tile, a pan's strip or a change that readers paint in is drawn with them and all they read in one pass (`#withReaders`, as strips were), when that fits what's left of the budget by how long each reader took last time (for one not drawn yet: what readers have taken on average, and the page's cost for that much canvas). Otherwise it's drawn without them, and they wait (`#pendingReaders`); once the tiles are done each is drawn, with all it reads, nearest the centre first, as the budget allows. Such a pass redraws everything it reads, so it doesn't matter what was drawn there before; the canvas is exact when none is left.
+- **Settling frames.** A frame that only carries on (nothing moved or changed) may take as long as the browser's own share of the last frame, up to 64 ms. On a machine that composites a 2880 × 1800 canvas without a GPU, that share is about 100 ms, and 8 ms of drawing a frame would take hundreds of frames to finish; at 60 Hz with a GPU it's under the budget, which stays as it was.
+- Reader areas are kept per zoom and document version, so a pan doesn't measure every reader every frame, and glass asks the GPU whether its framebuffer is complete once per texture allocation, not every draw (a round trip to the GPU process each time).
+
+- **Masked layers over the part being redrawn.** A strip, tile or change that touched a mask drew every layer it masks over the mask's whole reach on screen, into canvases that only grew. Chromium snapshots a canvas that's drawn from and copies all of it when it's next drawn into, so a page of masked device screens paid two whole-screen copies per mask per strip (over a second a pan step). They're now drawn over the part being redrawn, and the scratch canvases for masks and post effects shrink when far larger than needed. On main alone this gains little on that page, where strips are grown to every reader they touch; with readers deferred, strips stay thin.
+
+`e2e/canvas-scale.spec.ts` gains a page of glass and background blur, drawn in tiles, panned while it's drawn, zoomed out and in, each compared with a whole redraw (with the readers' second pass left out, it fails). `e2e/canvas-render.spec.ts` waits for the canvas to say it's exact, and gains masked stripes under a background blur and glass, across the pans.
+
+Measured with `bench/file.spec.ts` (the kit converted by `tools/kit-parity`, `BENCH_FILE`), at 1440 × 900 and 2× on this VM without a GPU, main and this change one after the other; "content" is the renderer's time per frame:
+
+| A large iOS UI kit | Before | After |
+| --- | --- | --- |
+| Page of 17,922 layers, 921 glass and background blurs: first frame / exact | 6,249 / 6,250 ms | 466 / 28,465 ms |
+| that page, zoom: content p95 / worst | 1,871 / 4,286 ms | 18.9 / 232 ms |
+| that page, pan whole: content p95 / worst | 8.4 / 89.5 ms | 3.6 / 10.0 ms |
+| Page of 1,714 layers, 168 readers, zoom: worst | 5,051 ms | 30.6 ms |
+| that page, pan at 100%: content p50 / p95 / worst | 6.5 / 1,446 / 5,125 ms | 13.1 / 21.2 / 33.8 ms |
+| Page of masked device screens, 163 readers, pan at 100%: content p50 / p95 | 1,057 / 2,651 ms | 79.7 / 212 ms |
+| that page, zoom: worst | 2,565 ms | 123 ms |
+
+The generated kit's scale bench (100,000 layers, no readers) didn't change beyond this VM's noise: three runs each, interleaved, pan at 25% p95 33.7 / 73.3 / 51.5 ms before and 84.7 / 31.7 / 26.2 ms after (the 84.7 in a run whose document commit, which this doesn't touch, also took twice as long), zoom's worst 52 / 22 / 25 ms and 46 / 19 / 13 ms. The parity suites for glass, blurs, shadows, grain and masks score the same cell for cell (115 of 119), one shadow cell and two glass probe cells a little better, and one glass probe cell 0.01 apart, which main itself scores at 0.00 and 0.01 on different runs.
+
+- **Exact takes longer here.** Most of a large page's glass is drawn after its tiles, in passes the budget allows, and each frame on this VM costs the browser about 60 to 100 ms whatever is drawn: the page above is exact after about 30 s instead of 6. Throughout, it's on screen, a stand-in where it isn't exact yet, and it pans and zooms. With a GPU, glass costs a small part of what it does here, and a frame far less.
+- **Glass a pan uncovers shows without its effect** until its pass, when the pass doesn't fit that frame: a frame or two with a GPU, longer here.

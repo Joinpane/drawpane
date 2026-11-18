@@ -12,7 +12,8 @@
  *   drawn once more at half the scale;
  * - harfbuzzjs (patched) throws when `malloc` answers 0, instead of copying
  *   a font file to address 0, after which text already loaded measured 0
- *   wide with no error.
+ *   wide with no error. A load that fails so frees what it made, leaving
+ *   the room text loaded before measures in.
  *
  * Run with the memory check (`pnpm --filter @drawpane/worker memory`).
  */
@@ -37,9 +38,9 @@ import {
   withMemoryMaximum,
 } from "@drawpane/raster/wasm-limits";
 import { afterAll, describe, expect, it } from "vitest";
-import { harfBuzzMeasurerWith } from "../src/agent/harfbuzz-measurer";
-import { STANDIN } from "../src/agent/measurer";
-import { AgentEngine, TEXT_OUT_OF_MEMORY } from "../src/rooms/agent-engine";
+import { AgentEngine, TEXT_OUT_OF_MEMORY } from "../../agent-runner/src/engine";
+import { harfBuzzMeasurerWith } from "../../agent-runner/src/harfbuzz-measurer";
+import { STANDIN } from "../../agent-runner/src/measurer";
 import { insertNodes } from "../src/rooms/node-tables";
 import { NODE_SCHEMA, SqlNodeStore } from "../src/rooms/sql-store";
 import { sqlDouble } from "./doubles";
@@ -257,9 +258,13 @@ describe("a shadow on a 2048 px frame: 107 MiB to draw at full size", () => {
 });
 
 describe("font-faces: 800 texts in Inter at weights 100 to 899", () => {
-  /** HarfBuzz from its module with the cap, as the Worker instantiates it; its memory, to watch. */
+  /**
+   * HarfBuzz from its module with the cap, as the Worker instantiates it; its memory, to watch,
+   * and how much of it is free.
+   */
   async function cappedHarfBuzz() {
     let memory: WebAssembly.Memory | null = null;
+    let exports: { malloc(size: number): number; free(ptr: number): void } | null = null;
     const bytes = withMemoryMaximum(
       new Uint8Array(readFileSync(require.resolve("harfbuzzjs/dist/harfbuzz.wasm"))),
       HARFBUZZ_MAX_BYTES,
@@ -271,13 +276,22 @@ describe("font-faces: 800 texts in Inter at weights 100 to 899", () => {
       ) {
         void WebAssembly.instantiate(bytes, imports).then(({ instance, module }) => {
           memory = instance.exports.memory as WebAssembly.Memory;
+          exports = instance.exports as unknown as typeof exports;
           done(instance, module);
         });
         return {};
       },
     };
     const hb = await import("harfbuzzjs");
-    return { hb, used: () => memory?.buffer.byteLength ?? 0 };
+    /** Bytes free up to the cap, in KiB pieces: each taken until none is left, then given back. */
+    const free = () => {
+      const { malloc, free } = exports as NonNullable<typeof exports>;
+      const taken: number[] = [];
+      for (let ptr = malloc(1024); ptr !== 0; ptr = malloc(1024)) taken.push(ptr);
+      for (const ptr of taken) free(ptr);
+      return taken.length * 1024;
+    };
+    return { hb, used: () => memory?.buffer.byteLength ?? 0, free };
   }
 
   const texts = (): NodeRecord[] =>
@@ -334,6 +348,39 @@ describe("font-faces: 800 texts in Inter at weights 100 to 899", () => {
     // And the load failed as the tool's failure, saying why.
     expect(failed).toBeInstanceOf(ToolFailure);
     expect((failed as Error).message).toBe(TEXT_OUT_OF_MEMORY);
+    r.close();
+  });
+
+  it("frees what a failed load made: HarfBuzz has as much free after it as before", async () => {
+    // As the case before: a copy of the file per weight, so the 800 weights don't fit.
+    const { hb, free } = await harfBuzz;
+    const loader: FaceFileLoader = async (face) =>
+      face.family === "Inter" ? { bytes: inter.slice(0), weight: face.weight } : null;
+    const measurer = harfBuzzMeasurerWith(loader, async () => hb);
+    await measurer.load([{ family: "Inter", weight: 400, italic: false }]);
+    const word = measurer.width("400 16px Inter", "Hamburgefonstiv ");
+    const before = free();
+
+    const r = room("font-faces-freed", texts());
+    const engine = new AgentEngine(measurer);
+    const failed = await engine.load(engine.missingFaces(editorOf(engine, r))).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect((failed as Error).message).toBe(TEXT_OUT_OF_MEMORY);
+    const after = free();
+    console.log(
+      `HarfBuzz free before the failed load ${(before / 1024).toFixed(0)} KiB, after ${(after / 1024).toFixed(0)} KiB`,
+    );
+    // All of it, or more if earlier cases' fonts were collected meanwhile. A failed load that
+    // kept what it made left almost none, and text loaded before couldn't measure.
+    expect(after).toBeGreaterThanOrEqual(before);
+    // Only the face loaded before is ready; the failed load's are tried again next time.
+    expect(measurer.has({ family: "Inter", weight: 400, italic: false })).toBe(true);
+    expect(measurer.has({ family: "Inter", weight: 401, italic: false })).toBe(false);
+    // A long paragraph (8,000 characters) still measures, in the room the load left.
+    const paragraph = "Hamburgefonstiv ".repeat(500);
+    expect(Math.abs(measurer.width("400 16px Inter", paragraph) - 500 * word)).toBeLessThan(1);
     r.close();
   });
 });

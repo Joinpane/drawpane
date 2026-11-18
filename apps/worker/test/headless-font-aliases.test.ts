@@ -8,12 +8,12 @@ import { env } from "cloudflare:test";
 import { fontString, layoutText } from "@drawpane/editor";
 import type { NodeRecord, Props } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import { headlessFontResolver } from "../../agent-runner/src/font-aliases";
+import { headlessFontLoader } from "../../agent-runner/src/font-files";
+import { harfBuzzMeasurer } from "../../agent-runner/src/harfbuzz";
 import displayUrl from "../../web/e2e/fixtures/SFProDisplay-StandIn-Regular.ttf?inline";
 import textBoldUrl from "../../web/e2e/fixtures/SFProText-StandIn-Bold.ttf?inline";
 import textUrl from "../../web/e2e/fixtures/SFProText-StandIn-Regular.ttf?inline";
-import { harfBuzzMeasurer } from "../src/agent/harfbuzz";
-import { headlessFontResolver } from "../src/headless/font-aliases";
-import { headlessFontLoader } from "../src/headless/font-files";
 import { type Browser, signedInUser } from "./helpers";
 
 const bytesOf = (url: string) =>

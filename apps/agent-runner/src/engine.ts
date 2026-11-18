@@ -1,20 +1,21 @@
 /**
- * The headless engine (decision 0021): an `Editor` inside the FileRoom that
- * runs agent tools when no open editor does. It is the same editor the
+ * The headless engine (decision 0021): an `Editor` in the agent runner
+ * (decision 0033) that runs agent tools when no open editor does. It is the same editor the
  * browser runs, with the Worker's text measurer, so a tool's edit gets the
  * same fix-ups (text sizing, auto layout, instances, variables) as a
  * person's.
  *
- * One editor stays warm per room: it follows every transaction the room
- * commits, and is rebuilt from the room's nodes when it falls out of step.
+ * One editor stays warm per file: it follows the transactions the room
+ * logged since (the runner gets them with each call), and is rebuilt from a
+ * snapshot of the file when it falls out of step.
  * Everything it keeps is counted in a meter as it's kept
  * (`agent-admission.ts`): built from pages of the room's rows, it's refused
  * partway (`AgentTooLarge`) when the file is more than it may hold, and a
  * warm one that grows past that is let go of, so the next call builds it
  * again and is refused.
  * A run collects the operations the editor's sync engine queued (it never
- * connects, so everything it commits waits there) and hands them to the
- * room, which commits them as one transaction.
+ * connects, so everything it commits waits there) and hands them back; the
+ * main Worker has the room commit them as one transaction.
  */
 import {
   Editor,
@@ -37,7 +38,6 @@ import {
   ROOT_ID,
   slotBytes,
 } from "@drawpane/model";
-import type { HeadlessMeasurer } from "../agent/measurer";
 import {
   AGENT_MAX_HELD,
   AGENT_MAX_NODES,
@@ -45,7 +45,8 @@ import {
   agentMeter,
   asTooLarge,
   tooManyLayers,
-} from "./agent-admission";
+} from "@drawpane/worker/src/rooms/agent-admission";
+import type { HeadlessMeasurer } from "./measurer";
 
 /**
  * Text whose fonts don't fit in HarfBuzz's capped memory (decision 0033).
@@ -93,6 +94,11 @@ export class AgentEngine {
     return this.#editor !== null;
   }
 
+  /** The room revision the warm editor shows; -1 when there's none. */
+  get revn(): number {
+    return this.#editor ? this.#revn : -1;
+  }
+
   /** What the editor warm at `revn` holds, as its meter counts it; null when there's none. */
   heldAt(revn: number): number | null {
     return this.#editor && this.#revn === revn ? (this.#meter?.held ?? 0) : null;
@@ -118,20 +124,57 @@ export class AgentEngine {
       return warm;
     this.drop();
     const meter = agentMeter(this.#limit);
-    const editor = new Editor({
+    const editor = this.#newEditor();
+    try {
+      editor.doc.resetStored(read(), copies, { meter });
+      this.#checkLayers(editor);
+    } catch (error) {
+      throw asTooLarge(error, this.#limit) ?? error;
+    }
+    return this.#keep(editor, revn, meter);
+  }
+
+  /**
+   * The editor at the room's revision `revn`, built from `pages` as they
+   * arrive (a snapshot read from a stream): each page is counted in the
+   * meter as it's kept, so a file more than the editor may hold throws
+   * `AgentTooLarge` partway, before the pages after it are read, and is
+   * never held whole, not even parsed. Always builds; the warm editor is
+   * let go of first.
+   */
+  async editorFrom(
+    revn: number,
+    pages: AsyncIterable<Iterable<NodeRecord>>,
+    copies: CopiesFormat = "materialized",
+  ): Promise<Editor> {
+    this.drop();
+    const meter = agentMeter(this.#limit);
+    const editor = this.#newEditor();
+    try {
+      await editor.doc.resetStoredPaged(pages, copies, { meter });
+      this.#checkLayers(editor);
+    } catch (error) {
+      throw asTooLarge(error, this.#limit) ?? error;
+    }
+    return this.#keep(editor, revn, meter);
+  }
+
+  #newEditor(): Editor {
+    return new Editor({
       measurer: this.#measurer,
       clientId: "agent",
       frames: NO_FRAMES,
       reducedMotion: () => true,
     });
-    try {
-      editor.doc.resetStored(read(), copies, { meter });
-      // Every copy layer built now, counted as it's built: the editor reads them all soon enough.
-      const layers = editor.doc.size;
-      if (layers > AGENT_MAX_NODES) throw new AgentTooLarge(tooManyLayers(layers));
-    } catch (error) {
-      throw asTooLarge(error, this.#limit) ?? error;
-    }
+  }
+
+  /** Builds every copy layer now, each counted: the editor reads them all soon enough. */
+  #checkLayers(editor: Editor): void {
+    const layers = editor.doc.size;
+    if (layers > AGENT_MAX_NODES) throw new AgentTooLarge(tooManyLayers(layers));
+  }
+
+  #keep(editor: Editor, revn: number, meter: BuildBudget): Editor {
     editor.state.set({ role: "editor", status: "live" });
     this.#editor = editor;
     this.#revn = revn;

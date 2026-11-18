@@ -1,22 +1,22 @@
 /**
  * The real text measurer for the headless engine (decision 0021): the
  * editor's `HarfBuzzMeasurer`, reading the same font files the browser
- * draws with (`headless/font-files.ts`), held to the canvas measurer by the
- * text parity suite. Registered with `provideMeasurer` when the Worker
- * starts, which turns the agent tools on.
+ * draws with (`font-files.ts`), held to the canvas measurer by the text
+ * parity suite.
  *
  * HarfBuzz is WebAssembly. Its package loads the module from beside its
- * script, which a Worker can't do, so the module is bundled here and handed
- * to it (`patches/harfbuzzjs@1.6.4.patch` lets the package take it).
+ * script, which a Worker can't do, so the module is bundled here, capped
+ * (`scripts/cap-wasm.ts`), and handed to it (`patches/harfbuzzjs@1.6.4.patch`
+ * lets the package take it).
  */
 import type { FaceFileLoader } from "@drawpane/editor";
 // HarfBuzz's module with its memory capped, written by scripts/cap-wasm.ts.
-import hbWasm from "../../wasm/harfbuzz.wasm";
-import type { Env } from "../env";
-import { type HeadlessFontResolver, headlessFontResolver } from "../headless/font-aliases";
-import { headlessFontLoader } from "../headless/font-files";
+import hbWasm from "../wasm/harfbuzz.wasm";
+import type { Env } from "./env";
+import { type HeadlessFontResolver, headlessFontResolver } from "./font-aliases";
+import { headlessFontLoader } from "./font-files";
 import { harfBuzzMeasurerWith } from "./harfbuzz-measurer";
-import { type HeadlessMeasurer, type MeasurerFactory, provideMeasurer } from "./measurer";
+import { type HeadlessMeasurer, STANDIN } from "./measurer";
 
 type HarfBuzz = typeof import("harfbuzzjs");
 
@@ -90,9 +90,7 @@ export function headlessMeasurer(env: Env, fileId: string): HeadlessMeasurer {
   return harfBuzzMeasurer(fileFontLoader(env, fileId), fileFontResolver(env, fileId));
 }
 
-export const harfBuzzMeasurers: MeasurerFactory = headlessMeasurer;
-
-/** Turns the agent tools on, with the real measurer. Called when the Worker starts. */
-export function provideHarfBuzzMeasurer(): void {
-  provideMeasurer(harfBuzzMeasurers);
+/** The measurer for a file: the stand-in when `AGENT_MEASURER=standin`, else HarfBuzz. */
+export function agentMeasurer(env: Env, fileId: string): HeadlessMeasurer {
+  return env.AGENT_MEASURER === "standin" ? STANDIN : headlessMeasurer(env, fileId);
 }

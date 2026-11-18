@@ -199,10 +199,10 @@ catalogs:
       version: 4.6.7
 
 patchedDependencies:
-  '@open-pencil/fig@0.16.0': 392a1d4f9f0db736b314fce3f94da73f9d793ebec52f479cba029e474d95af06
+  '@open-pencil/fig@0.16.0': 36c22d33ce8a8250241fcfd7732e065792f4bcc94f94f64ed54a814adee2ccec
   '@open-pencil/scene-graph@0.16.0': 637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad
   '@resvg/resvg-wasm@2.6.2': 561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23
-  harfbuzzjs@1.6.4: 8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a
+  harfbuzzjs@1.6.4: 7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e
 
 importers:
 
@@ -220,6 +220,40 @@ importers:
       typescript:
         specifier: 7.0.2
         version: 7.0.2
+
+  apps/agent-runner:
+    dependencies:
+      '@drawpane/editor':
+        specifier: workspace:*
+        version: link:../../packages/editor
+      '@drawpane/model':
+        specifier: workspace:*
+        version: link:../../packages/model
+      '@drawpane/raster':
+        specifier: workspace:*
+        version: link:../../packages/raster
+      '@drawpane/worker':
+        specifier: workspace:*
+        version: link:../worker
+      '@resvg/resvg-wasm':
+        specifier: 2.6.2
+        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
+      harfbuzzjs:
+        specifier: 1.6.4
+        version: 1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e)
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: 5.20261113.1
+        version: 5.20261113.1
+      '@types/node':
+        specifier: 26.6.6
+        version: 26.6.6
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      wrangler:
+        specifier: 'catalog:'
+        version: 4.161.0(@cloudflare/workers-types@5.20261113.1)(@types/node@26.6.6)
 
   apps/web:
     dependencies:
@@ -314,15 +348,9 @@ importers:
       '@drawpane/raster':
         specifier: workspace:*
         version: link:../../packages/raster
-      '@resvg/resvg-wasm':
-        specifier: 2.6.2
-        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
       '@simplewebauthn/server':
         specifier: 14.1.0
         version: 14.1.0
-      harfbuzzjs:
-        specifier: 1.6.4
-        version: 1.6.4(patch_hash=8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a)
       hono:
         specifier: 4.13.18
         version: 4.13.18
@@ -339,12 +367,18 @@ importers:
       '@drawpane/corpus':
         specifier: workspace:*
         version: link:../../packages/corpus
+      '@resvg/resvg-wasm':
+        specifier: 2.6.2
+        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
       '@simplewebauthn/browser':
         specifier: 14.0.0
         version: 14.0.0
       fast-check:
         specifier: 'catalog:'
         version: 4.10.2
+      harfbuzzjs:
+        specifier: 1.6.4
+        version: 1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e)
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
@@ -418,7 +452,7 @@ importers:
         version: link:../raster
       harfbuzzjs:
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a)
+        version: 1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e)
       pathkit-wasm:
         specifier: 1.0.0
         version: 1.0.0
@@ -452,7 +486,7 @@ importers:
         version: link:../model
       '@open-pencil/fig':
         specifier: 0.16.0
-        version: 0.16.0(patch_hash=392a1d4f9f0db736b314fce3f94da73f9d793ebec52f479cba029e474d95af06)(@open-pencil/kiwi@0.16.0)(@open-pencil/scene-graph@0.16.0(patch_hash=637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad)(typescript@7.0.2))(typescript@7.0.2)
+        version: 0.16.0(patch_hash=36c22d33ce8a8250241fcfd7732e065792f4bcc94f94f64ed54a814adee2ccec)(@open-pencil/kiwi@0.16.0)(@open-pencil/scene-graph@0.16.0(patch_hash=637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad)(typescript@7.0.2))(typescript@7.0.2)
       '@open-pencil/kiwi':
         specifier: 0.16.0
         version: 0.16.0
@@ -651,7 +685,7 @@ importers:
         version: link:../../packages/model
       '@open-pencil/fig':
         specifier: 0.16.0
-        version: 0.16.0(patch_hash=392a1d4f9f0db736b314fce3f94da73f9d793ebec52f479cba029e474d95af06)(@open-pencil/kiwi@0.16.0)(@open-pencil/scene-graph@0.16.0(patch_hash=637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad)(typescript@7.0.2))(typescript@7.0.2)
+        version: 0.16.0(patch_hash=36c22d33ce8a8250241fcfd7732e065792f4bcc94f94f64ed54a814adee2ccec)(@open-pencil/kiwi@0.16.0)(@open-pencil/scene-graph@0.16.0(patch_hash=637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad)(typescript@7.0.2))(typescript@7.0.2)
       '@open-pencil/kiwi':
         specifier: 0.16.0
         version: 0.16.0
@@ -2736,7 +2770,7 @@ snapshots:
 
   '@noble/hashes@2.4.0': {}
 
-  '@open-pencil/fig@0.16.0(patch_hash=392a1d4f9f0db736b314fce3f94da73f9d793ebec52f479cba029e474d95af06)(@open-pencil/kiwi@0.16.0)(@open-pencil/scene-graph@0.16.0(patch_hash=637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad)(typescript@7.0.2))(typescript@7.0.2)':
+  '@open-pencil/fig@0.16.0(patch_hash=36c22d33ce8a8250241fcfd7732e065792f4bcc94f94f64ed54a814adee2ccec)(@open-pencil/kiwi@0.16.0)(@open-pencil/scene-graph@0.16.0(patch_hash=637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad)(typescript@7.0.2))(typescript@7.0.2)':
     dependencies:
       '@open-pencil/kiwi': 0.16.0
       '@open-pencil/scene-graph': 0.16.0(patch_hash=637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad)(typescript@7.0.2)
@@ -3323,7 +3357,7 @@ snapshots:
 
   fzstd@0.1.1: {}
 
-  harfbuzzjs@1.6.4(patch_hash=8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a): {}
+  harfbuzzjs@1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e): {}
 
   hono@4.13.18: {}
 

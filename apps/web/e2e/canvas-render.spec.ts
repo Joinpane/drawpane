@@ -21,8 +21,20 @@ type W = {
     zoomTo(z: number): void;
     centerOn(p: { x: number; y: number }): void;
   };
-  drawpaneFrames: { redraw(): void };
+  drawpaneFrames: { redraw(): void; exact: boolean };
 };
+
+/**
+ * Waits until the canvas says it's exact: a frame too costly for the
+ * budget is drawn a tile at a time, and glass and background blur after
+ * the tiles (decision 0028), over the frames that follow.
+ */
+async function exact(page: Page): Promise<void> {
+  await page.waitForFunction(() => (window as unknown as W).drawpaneFrames.exact, undefined, {
+    timeout: 60_000,
+    polling: 50,
+  });
+}
 
 /** The content canvas's pixels, as a compact fingerprint per 4×4 block. */
 async function pixels(page: Page): Promise<number[]> {
@@ -151,6 +163,43 @@ test.describe
         e.createLayer("ellipse", { x: 40, y: 20, width: 100, height: 100 }, blurred, {
           fills: [{ type: "solid", color: "#111111" }],
         });
+        // Masked by a fading picture, across the bottom of the view: stripes, and over them a
+        // background blur and glass, which read only what the mask's layers draw.
+        const masked = e.createLayer(
+          "frame",
+          { x: 640, y: 1480, width: 600, height: 320 },
+          e.s.pageId,
+          { fills: [] },
+        );
+        e.createLayer("ellipse", { x: 0, y: 0, width: 600, height: 320 }, masked, {
+          isMask: true,
+          maskType: "alpha",
+          fills: [
+            {
+              type: "linear",
+              from: { x: 0, y: 0.5 },
+              to: { x: 1, y: 0.5 },
+              stops: [
+                { position: 0, color: "#000000" },
+                { position: 1, color: "#00000022" },
+              ],
+            },
+          ],
+        });
+        for (let i = 0; i < 15; i++)
+          e.createLayer("rect", { x: i * 40, y: 0, width: 20, height: 320 }, masked, {
+            fills: [{ type: "solid", color: i % 2 ? "#0b8a3e" : "#7a2bd6" }],
+          });
+        e.createLayer("rect", { x: 60, y: 60, width: 220, height: 120 }, masked, {
+          cornerRadius: 20,
+          fills: [{ type: "solid", color: "#ffffff44" }],
+          effects: [{ type: "background-blur", radius: 16 }],
+        });
+        e.createLayer("rect", { x: 320, y: 120, width: 220, height: 140 }, masked, {
+          cornerRadius: 30,
+          fills: [{ type: "solid", color: "#ffffff22" }],
+          effects: [GLASS],
+        });
         e.zoomTo(1);
       });
       await page.waitForTimeout(800);
@@ -170,6 +219,7 @@ test.describe
           await frame();
         }
       });
+      await exact(page);
       const panned = await pixels(page);
       const full = await redrawn(page);
       expect(difference(panned, full)).toBeLessThan(0.002);
@@ -194,6 +244,7 @@ test.describe
           await frame();
         }
       });
+      await exact(page);
       const panned = await pixels(page);
       const full = await redrawn(page);
       // Strict: a seam, or a rim along the screen's edge carried in by the pan, is faint.
@@ -212,6 +263,7 @@ test.describe
       });
       // After the pause, the stand-in frames give way to an exact one.
       await page.waitForTimeout(400);
+      await exact(page);
       const settled = await pixels(page);
       const full = await redrawn(page);
       expect(difference(settled, full)).toBeLessThan(0.002);

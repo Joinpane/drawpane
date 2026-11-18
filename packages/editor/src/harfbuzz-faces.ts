@@ -8,9 +8,16 @@
  *
  * Files are told apart by identity: the host's font loaders keep one
  * `ArrayBuffer` per file and hand out the same one each time.
+ *
+ * A face is counted: each `acquireFace` is a hold on it, and when the last
+ * hold is released the face and its copy of the file are freed at once, not
+ * whenever JavaScript's collector gets to them (it knows nothing of
+ * HarfBuzz's cap). The measurer releases what a load that ran out of memory
+ * made, so faces loaded before keep the room they had to measure in.
  */
 type HarfBuzz = typeof import("harfbuzzjs");
 type HbFace = InstanceType<HarfBuzz["Face"]>;
+type HbBlob = InstanceType<HarfBuzz["Blob"]>;
 
 export interface SharedFace {
   readonly face: HbFace;
@@ -18,10 +25,18 @@ export interface SharedFace {
   readonly unicodes: ReadonlySet<number>;
 }
 
-const shared = new WeakMap<object, WeakMap<ArrayBuffer, SharedFace>>();
+interface Held extends SharedFace {
+  readonly blob: HbBlob;
+  holds: number;
+}
 
-/** The face for a font file in this HarfBuzz, made the first time it's asked for. */
-export function sharedFace(hb: HarfBuzz, bytes: ArrayBuffer): SharedFace {
+const shared = new WeakMap<object, WeakMap<ArrayBuffer, Held>>();
+
+/**
+ * The face for a font file in this HarfBuzz, made the first time it's asked
+ * for, and held until a `releaseFace` for each `acquireFace`.
+ */
+export function acquireFace(hb: HarfBuzz, bytes: ArrayBuffer): SharedFace {
   let faces = shared.get(hb);
   if (!faces) {
     faces = new WeakMap();
@@ -29,10 +44,19 @@ export function sharedFace(hb: HarfBuzz, bytes: ArrayBuffer): SharedFace {
   }
   let entry = faces.get(bytes);
   if (!entry) {
-    const face = new hb.Face(new hb.Blob(bytes));
+    const blob = new hb.Blob(bytes);
+    let face: HbFace;
+    try {
+      face = new hb.Face(blob);
+    } catch (error) {
+      blob.destroy();
+      throw error;
+    }
     let unicodes: ReadonlySet<number> | null = null;
     entry = {
       face,
+      blob,
+      holds: 0,
       get unicodes() {
         unicodes ??= new Set(face.collectUnicodes());
         return unicodes;
@@ -40,7 +64,22 @@ export function sharedFace(hb: HarfBuzz, bytes: ArrayBuffer): SharedFace {
     };
     faces.set(bytes, entry);
   }
+  entry.holds++;
   return entry;
+}
+
+/**
+ * Lets go of a hold from `acquireFace`. The last one frees the face and its
+ * file: destroy the fonts made from it first.
+ */
+export function releaseFace(hb: HarfBuzz, bytes: ArrayBuffer): void {
+  const faces = shared.get(hb);
+  const entry = faces?.get(bytes);
+  if (!faces || !entry || --entry.holds > 0) return;
+  faces.delete(bytes);
+  // The face first: the blob's data is freed with the blob, and the face reads from it.
+  entry.face.destroy();
+  entry.blob.destroy();
 }
 
 /** What HarfBuzz throws when its capped memory has no room (`patches/harfbuzzjs`). */

@@ -208,7 +208,7 @@ describe("setting up email", () => {
     await installed();
     const ui = new ScriptedUi(true, ["Cloudflare Email Service", "design@example.com", true]);
     await configureEmail({ dir: "team" }, await deps(ui));
-    expect(cloudflare.calls).toEqual(["migrate", "deploy"]);
+    expect(cloudflare.calls).toEqual(["migrate", "deploy runner", "deploy"]);
     expect(cloudflare.deployedSecrets.at(-1)).toEqual({
       EMAIL_PROVIDER: "cloudflare",
       EMAIL_FROM: "design@example.com",
