@@ -37,9 +37,9 @@ import {
   googleStylesheet,
   googleStylesheetUrl,
   googleVariableFiles,
-} from "../api/fonts";
-import { teamFontKey } from "../api/team-fonts";
-import type { Env } from "../env";
+} from "@drawpane/worker/src/api/fonts";
+import { teamFontKey } from "@drawpane/worker/src/api/team-fonts";
+import type { Env } from "./env";
 
 /** A face, as `MeasuredFace` in @drawpane/editor. */
 export interface HeadlessFace {
@@ -241,7 +241,7 @@ function sniffable(bytes: Uint8Array): boolean {
 /** The editor's Google catalog, loaded on first use. */
 let catalog: Promise<Map<string, GoogleFamily>> | null = null;
 async function catalogFamily(family: string): Promise<GoogleFamily | null> {
-  catalog ??= import("../../../web/src/fonts/google-fonts.json").then(({ default: data }) => {
+  catalog ??= import("../../web/src/fonts/google-fonts.json").then(({ default: data }) => {
     const fromMask = (mask: number) => ALL_WEIGHTS.filter((_, i) => mask & (1 << i));
     const out = new Map<string, GoogleFamily>();
     for (const [name, , upright, italic, variable] of data.families as Array<

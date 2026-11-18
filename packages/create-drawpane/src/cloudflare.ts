@@ -23,6 +23,7 @@ export interface Cloudflare {
   createDatabase(accountId: string, name: string): Promise<void>;
   /** Creates the R2 bucket, or does nothing when the account already has it. */
   ensureBucket(accountId: string, name: string): Promise<void>;
+  // Secrets are the main Worker's only (wrangler.jsonc): the agent runner has none.
   /** The names of the secrets the instance's Worker has; none when it doesn't exist yet. */
   secretNames(dir: string, accountId: string): Promise<string[]>;
   /** Sets the Worker's secrets from a JSON file of names and values, without deploying its code. */
@@ -32,10 +33,17 @@ export interface Cloudflare {
   /** Applies the instance's pending D1 migrations; returns the ones it applied ("0011_invite_notes"). */
   migrate(dir: string, accountId: string, database: string): Promise<string[]>;
   /**
-   * Deploys the instance's Worker, with secrets from a JSON file when given.
-   * Resolves to the workers.dev address when it has one.
+   * Deploys one of the instance's Workers: the one `configFile` in the folder
+   * describes (`wrangler deploy -c`), or the main one (wrangler.jsonc) when
+   * not given. Secrets come from a JSON file when given. Resolves to the
+   * workers.dev address when it has one.
    */
-  deploy(dir: string, accountId: string, secretsFile: string | null): Promise<string | null>;
+  deploy(
+    dir: string,
+    accountId: string,
+    secretsFile: string | null,
+    configFile?: string,
+  ): Promise<string | null>;
 }
 
 /** A Wrangler run that failed: its output, for the person to read. */
@@ -69,6 +77,16 @@ export function isTransient(output: string): boolean {
   return /code: 10001|code: 10013|code: 971|internal error|please try again|rate limit|429 Too Many|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up/i.test(
     output,
   );
+}
+
+/**
+ * A deploy Cloudflare refused because the account is on the Workers Free
+ * plan, which can't set `limits.cpu_ms`. The exact text Cloudflare sends is
+ * unverified (no Free account was tried), so this matches loosely: something
+ * about CPU limits, and something about the plan.
+ */
+export function isFreePlanRefusal(output: string): boolean {
+  return /cpu.?limit|cpu_ms/i.test(output) && /free/i.test(output);
 }
 
 /** Waits between tries, longer each time. */
@@ -217,11 +235,15 @@ export const wrangler: Cloudflare = {
     return [...new Set([...applied, ...appliedMigrations(output)])];
   },
 
-  async deploy(dir, accountId, secretsFile) {
-    const output = await run(["deploy", ...(secretsFile ? ["--secrets-file", secretsFile] : [])], {
-      cwd: dir,
-      accountId,
-    });
+  async deploy(dir, accountId, secretsFile, configFile) {
+    const output = await run(
+      [
+        "deploy",
+        ...(configFile ? ["-c", configFile] : []),
+        ...(secretsFile ? ["--secrets-file", secretsFile] : []),
+      ],
+      { cwd: dir, accountId },
+    );
     return output.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i)?.[0] ?? null;
   },
 };

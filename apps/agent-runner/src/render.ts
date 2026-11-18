@@ -22,10 +22,10 @@ import {
   type TextMeasurer,
 } from "@drawpane/editor";
 import { cachedFontLoader, type FontBytesLoader, resvgRasteriser } from "@drawpane/raster";
+import { mediaKey } from "@drawpane/worker/src/api/media";
 // resvg's module with its memory capped, written by scripts/cap-wasm.ts.
-import resvgWasm from "../../wasm/resvg.wasm";
-import { mediaKey } from "../api/media";
-import type { Env } from "../env";
+import resvgWasm from "../wasm/resvg.wasm";
+import type { Env } from "./env";
 
 /** Font files for the renderer, from the measurer's loader: the shaper's faces, not the canvas's. */
 export function renderFonts(loadFile: FaceFileLoader): FontBytesLoader {

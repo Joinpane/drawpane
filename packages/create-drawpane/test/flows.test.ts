@@ -1,9 +1,9 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { type Deps, install, upgrade } from "../src/flows";
-import { readConfig } from "../src/instance";
+import { readConfig, writeConfig } from "../src/instance";
 import { Problem } from "../src/problem";
 import type { Ui } from "../src/ui";
 import { FakeCloudflare, fakeRelease, ScriptedUi } from "./fakes";
@@ -40,6 +40,7 @@ describe("install", () => {
       "create database studio",
       "create bucket studio-files",
       "migrate",
+      "deploy runner",
       "deploy",
     ]);
     const config = await readConfig(join(cwd, "studio"));
@@ -75,7 +76,7 @@ describe("install", () => {
     cloudflare.databases.set("team", "existing-uuid");
     cloudflare.buckets.add("team-files");
     await install({ dir: "team", yes: true }, await deps(new ScriptedUi(false)));
-    expect(cloudflare.calls).toEqual(["migrate", "deploy"]);
+    expect(cloudflare.calls).toEqual(["migrate", "deploy runner", "deploy"]);
     expect((await readConfig(join(cwd, "team")))?.database.id).toBe("existing-uuid");
   });
 
@@ -123,7 +124,7 @@ describe("install", () => {
           ),
       },
     );
-    expect(cloudflare.calls).toEqual(["migrate", "deploy"]);
+    expect(cloudflare.calls).toEqual(["migrate", "deploy runner", "deploy"]);
     expect(cloudflare.deployedSecrets.map((s) => Object.keys(s))).toEqual([["SETUP_TOKEN"]]);
     const said = (d.ui as ScriptedUi).said;
     expect(said.some((l) => l.includes("already set up: sign in"))).toBe(true);
@@ -199,6 +200,210 @@ describe("install", () => {
   });
 });
 
+/** A generated config in the instance's folder, parsed (it starts with comment lines). */
+async function rendered(dir: string, file: string) {
+  const text = await readFile(join(cwd, dir, file), "utf8");
+  return JSON.parse(
+    text
+      .split("\n")
+      .filter((l) => !l.startsWith("//"))
+      .join("\n"),
+  );
+}
+
+const exists = (path: string) =>
+  access(path).then(
+    () => true,
+    () => false,
+  );
+
+describe("the agent runner", () => {
+  it("is deployed first, named after the instance, and bound by the main Worker", async () => {
+    const ui = new ScriptedUi(false);
+    await install({ dir: "team", yes: true }, await deps(ui));
+    expect(cloudflare.calls).toEqual([
+      "create database team",
+      "create bucket team-files",
+      "migrate",
+      "deploy runner",
+      "deploy",
+    ]);
+    expect((await readConfig(join(cwd, "team")))?.runner).toBe("team-agent-runner");
+    const runner = await rendered("team", "agent-runner.wrangler.jsonc");
+    expect(runner).toMatchObject({
+      name: "team-agent-runner",
+      main: "server/agent-runner/index.js",
+      workers_dev: false,
+      d1_databases: [{ binding: "DB", database_name: "team", database_id: "uuid-team" }],
+      r2_buckets: [{ binding: "FILES", bucket_name: "team-files" }],
+    });
+    const main = await rendered("team", "wrangler.jsonc");
+    expect(main.durable_objects.bindings).toContainEqual({
+      name: "AGENT_RUNNER",
+      class_name: "AgentRunner",
+      script_name: "team-agent-runner",
+    });
+    expect(main.limits).toEqual({ cpu_ms: 300000 });
+    expect(main.vars.AGENT_TOOLS).toBeUndefined();
+    // The runner gets no secrets: they all went with the main Worker.
+    expect(cloudflare.deployedSecrets).toHaveLength(1);
+    // Nothing about the Free plan.
+    expect(ui.said.some((l) => l.startsWith("warn"))).toBe(false);
+  });
+
+  it("is named in the note before anything is set up", async () => {
+    const ui = new ScriptedUi(true, ["studio", "studio", "", true, false]);
+    await install({}, await deps(ui));
+    const note = ui.said.find((l) => l.startsWith("note About to set up"));
+    expect(note).toContain("studio-agent-runner");
+  });
+
+  it("finishes an install that stopped between the runner and the main Worker", async () => {
+    cloudflare.failDeploy = "main";
+    await expect(
+      install({ dir: "team", yes: true }, await deps(new ScriptedUi(false))),
+    ).rejects.toThrow("deploy failed");
+    // The runner is up, the main Worker isn't: harmless.
+    expect([...cloudflare.scripts]).toEqual(["team-agent-runner"]);
+    expect((await readConfig(join(cwd, "team")))?.version).toBeNull();
+
+    cloudflare.failDeploy = false;
+    cloudflare.calls = [];
+    const ui = new ScriptedUi(false);
+    await install({ dir: "team", yes: true }, await deps(ui));
+    expect(ui.said).toContain("info Picking up where the last install stopped.");
+    // Nothing made twice: the runner deploys again (harmless), then the main Worker.
+    expect(cloudflare.calls).toEqual(["migrate", "deploy runner", "deploy"]);
+    expect([...cloudflare.scripts].sort()).toEqual(["team", "team-agent-runner"]);
+    // The session secret went up once, with the deploy that worked.
+    expect(cloudflare.deployedSecrets.map((s) => "SESSION_SECRET" in s)).toEqual([true]);
+    expect((await readConfig(join(cwd, "team")))?.version).toBe("0.1.0");
+  });
+
+  it("is added to an instance from before it, on upgrade, ahead of the main Worker", async () => {
+    await install({ dir: "team", yes: true }, await deps(new ScriptedUi(false)));
+    // As an older installer left it: one script, nothing about a runner.
+    const { runner: _, ...old } = (await readConfig(join(cwd, "team"))) as NonNullable<
+      Awaited<ReturnType<typeof readConfig>>
+    >;
+    await writeConfig(join(cwd, "team"), old);
+    cloudflare.scripts = new Set(["team"]);
+    cloudflare.calls = [];
+
+    const ui = new ScriptedUi(true, [true]);
+    await upgrade({ dir: "team" }, await deps(ui, "0.2.0"));
+    expect(cloudflare.calls).toEqual(["migrate", "deploy runner", "deploy"]);
+    expect(ui.said.find((l) => l.startsWith("note Upgrade"))).toContain("team-agent-runner");
+    const config = await readConfig(join(cwd, "team"));
+    expect(config).toMatchObject({ runner: "team-agent-runner", version: "0.2.0" });
+    expect([...cloudflare.scripts].sort()).toEqual(["team", "team-agent-runner"]);
+  });
+
+  it("keeps the order on every upgrade", async () => {
+    await install({ dir: "team", yes: true }, await deps(new ScriptedUi(false)));
+    for (const version of ["0.2.0", "0.3.0"]) {
+      cloudflare.calls = [];
+      await upgrade({ dir: "team", yes: true }, await deps(new ScriptedUi(false), version));
+      expect(cloudflare.calls).toEqual(["migrate", "deploy runner", "deploy"]);
+    }
+  });
+});
+
+describe("the Workers Free plan", () => {
+  async function expectFree(dir: string) {
+    const main = await rendered(dir, "wrangler.jsonc");
+    expect(main.limits).toBeUndefined();
+    expect(main.durable_objects.bindings).toEqual([{ name: "FILE_ROOM", class_name: "FileRoom" }]);
+    expect(main.vars.AGENT_TOOLS).toBe("off");
+    expect(await exists(join(cwd, dir, "agent-runner.wrangler.jsonc"))).toBe(false);
+    expect((await readConfig(join(cwd, dir)))?.plan).toBe("free");
+    expect([...cloudflare.scripts]).toEqual([dir]);
+  }
+
+  it("deploys without the runner when told with --plan free", async () => {
+    cloudflare.freePlan = true;
+    const ui = new ScriptedUi(true, ["team", "", true, false]);
+    await install({ dir: "team", plan: "free" }, await deps(ui));
+    expect(cloudflare.calls).toEqual([
+      "create database team",
+      "create bucket team-files",
+      "migrate",
+      "deploy",
+    ]);
+    expect(ui.said.find((l) => l.startsWith("note About to set up"))).toContain(
+      "agent tools need Workers Paid",
+    );
+    await expectFree("team");
+  });
+
+  it("finds out from a refused deploy, says so, and deploys again without the runner", async () => {
+    cloudflare.freePlan = true;
+    const ui = new ScriptedUi(false);
+    await install({ dir: "team", yes: true }, await deps(ui));
+    // The runner's deploy was refused (nothing recorded), then the main Worker went up once.
+    expect(cloudflare.calls).toEqual([
+      "create database team",
+      "create bucket team-files",
+      "migrate",
+      "deploy",
+    ]);
+    expect(ui.said).toContainEqual(
+      expect.stringMatching(
+        /^warn Your Cloudflare account is on the Workers Free plan, so agent tools are off: they need Workers Paid\. The rest of Drawpane works within the Free plan's limits/,
+      ),
+    );
+    await expectFree("team");
+    expect((await readConfig(join(cwd, "team")))?.version).toBe("0.1.0");
+    // Both secrets still went up, once.
+    expect(cloudflare.deployedSecrets.map((s) => Object.keys(s).sort())).toEqual([
+      ["SESSION_SECRET", "SETUP_TOKEN"],
+    ]);
+  });
+
+  it("stays free on upgrade, and --plan paid turns agent tools back on", async () => {
+    cloudflare.freePlan = true;
+    await install({ dir: "team", yes: true }, await deps(new ScriptedUi(false)));
+    cloudflare.calls = [];
+    const ui = new ScriptedUi(false);
+    await upgrade({ dir: "team", yes: true }, await deps(ui, "0.2.0"));
+    expect(cloudflare.calls).toEqual(["migrate", "deploy"]);
+    // Known already: no second warning.
+    expect(ui.said.some((l) => l.startsWith("warn"))).toBe(false);
+    await expectFree("team");
+
+    // The account moved to Workers Paid: the same version deploys again, with the runner.
+    cloudflare.freePlan = false;
+    cloudflare.calls = [];
+    await upgrade(
+      { dir: "team", yes: true, plan: "paid" },
+      await deps(new ScriptedUi(false), "0.2.0"),
+    );
+    expect(cloudflare.calls).toEqual(["migrate", "deploy runner", "deploy"]);
+    expect((await readConfig(join(cwd, "team")))?.plan).toBe("paid");
+    const main = await rendered("team", "wrangler.jsonc");
+    expect(main.vars.AGENT_TOOLS).toBeUndefined();
+    expect(main.limits).toEqual({ cpu_ms: 300000 });
+    expect(await exists(join(cwd, "team/agent-runner.wrangler.jsonc"))).toBe(true);
+  });
+
+  it("rejects a plan that isn't paid or free, before anything else", async () => {
+    await expect(
+      install({ dir: "team", yes: true, plan: "pro" }, await deps(new ScriptedUi(false))),
+    ).rejects.toThrow(/--plan pro: Use paid or free/);
+    expect(cloudflare.calls).toEqual([]);
+  });
+
+  it("doesn't mistake another refused deploy for the Free plan", async () => {
+    cloudflare.failDeploy = true;
+    const ui = new ScriptedUi(false);
+    await expect(install({ dir: "team", yes: true }, await deps(ui))).rejects.toThrow(
+      "deploy failed",
+    );
+    expect((await readConfig(join(cwd, "team")))?.plan).toBeUndefined();
+    expect(ui.said.some((l) => l.startsWith("warn"))).toBe(false);
+  });
+});
+
 describe("upgrade", () => {
   beforeEach(async () => {
     await install({ dir: "team", yes: true }, await deps(new ScriptedUi(false), "0.1.0"));
@@ -209,7 +414,7 @@ describe("upgrade", () => {
     const ui = new ScriptedUi(false);
     cloudflare.applied = ["0011_invite_notes", "0012_room_connections"];
     await upgrade({ dir: "team", yes: true }, await deps(ui, "0.2.0"));
-    expect(cloudflare.calls).toEqual(["migrate", "deploy"]);
+    expect(cloudflare.calls).toEqual(["migrate", "deploy runner", "deploy"]);
     // It says what it applied, not just "up to date".
     expect(ui.said).toContain(
       "done Database updated: 2 migrations (0011_invite_notes, 0012_room_connections)",
@@ -228,7 +433,7 @@ describe("upgrade", () => {
     expect(ui.said.some((l) => l.includes("Already on 0.1.0"))).toBe(true);
     expect(cloudflare.calls).toEqual([]);
     await upgrade({ dir: "team", yes: true, force: true }, await deps(new ScriptedUi(false)));
-    expect(cloudflare.calls).toEqual(["migrate", "deploy"]);
+    expect(cloudflare.calls).toEqual(["migrate", "deploy runner", "deploy"]);
   });
 
   it("explains a folder that isn't an instance", async () => {

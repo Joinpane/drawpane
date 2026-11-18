@@ -1,10 +1,10 @@
 # Self-hosting Drawpane
 
-Drawpane runs entirely in your own Cloudflare account: one Worker, one Durable Object class (a FileRoom per file), a D1 database for accounts and file lists, and an R2 bucket for snapshots and media. Nothing runs anywhere else, and an idle instance costs only its storage.
+Drawpane runs entirely in your own Cloudflare account: two Workers, a D1 database for accounts and file lists, and an R2 bucket for snapshots and media. The main Worker serves the app and holds a FileRoom (a Durable Object) per file. The agent runner (`<name>-agent-runner`) runs AI agents' tools, with an AgentRunner Durable Object per file, so an agent's heavy call can never disconnect the people editing (decision 0033). It has no route, no address and no secrets: only the main Worker calls it. Nothing runs anywhere else, and an idle instance costs only its storage.
 
 ## Install
 
-You need a Cloudflare account on the Workers Paid plan (Durable Objects with SQLite storage need it) and Node 22 or newer. Then:
+You need a Cloudflare account and Node 22 or newer. Agent tools need the Workers Paid plan (see [The Workers Free plan](#the-workers-free-plan)). The two Workers count toward your account's limit on Workers (100 on the Free plan). Then:
 
 ```sh
 npm create drawpane my-design
@@ -14,14 +14,28 @@ The installer:
 
 1. Signs you in to Cloudflare in your browser (or uses `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` when they're set).
 2. Asks which account to use, what to call the Worker, and whether to serve it on your own domain. Leave the domain empty for a free `<name>.<subdomain>.workers.dev` address; a domain has to be on a zone in the same account.
-3. Creates a D1 database and an R2 bucket, applies the migrations, and deploys, with a generated session secret and a one-time setup token.
+3. Creates a D1 database and an R2 bucket, applies the migrations, and deploys: the agent runner first, then the main Worker with a generated session secret and a one-time setup token. The main Worker binds the runner by its name, so the runner has to exist first.
 4. Opens the setup page with the token filled in. Create your account there: you own the first team and can invite everyone else.
 
 To try a version that isn't released yet, run the installer from a clone of this repository: `pnpm install && pnpm build && node packages/create-drawpane/dist/cli.js my-design`.
 
-The folder it makes (`my-design/`) is your instance: `drawpane.json` records what was chosen and what's deployed, `wrangler.jsonc` is generated from it, and `server/` holds the release. Keep it; you upgrade from it. It holds no secrets, so it's safe to commit. If an install is interrupted, run the same command again: it picks up where it stopped and never creates anything twice.
+The folder it makes (`my-design/`) is your instance: `drawpane.json` records what was chosen and what's deployed, `wrangler.jsonc` (the main Worker) and `agent-runner.wrangler.jsonc` (the runner) are generated from it, and `server/` holds the release. Keep it; you upgrade from it. It holds no secrets, so it's safe to commit. If an install is interrupted, run the same command again: it picks up where it stopped and never creates anything twice.
 
 For scripts and CI, every question has a flag: `npm create drawpane my-design -- --yes --account <name or id> --domain design.example.com`. See `--help`.
+
+### The Workers Free plan
+
+Agent tools need Workers Paid: on Free, a Worker can't set the CPU limit they need, and 10 ms of CPU can't build an editor for a real file. The rest of Drawpane works on Free within its limits: without the main Worker's five-minute CPU limit, importing, restoring or merging a very large file (hundreds of thousands of layers) can run out of CPU.
+
+When Cloudflare refuses the first deploy because the account is on Free, the installer says so, records `"plan": "free"` in `drawpane.json`, and deploys again without the runner. You can also say so up front with `--plan free`. On Free, the main Worker is deployed without its CPU limit and without the runner's binding, with `AGENT_TOOLS` set to `off`, and agents connecting over MCP are told that agent tools need Workers Paid.
+
+After moving to Workers Paid, in the instance's folder:
+
+```sh
+npm create drawpane@latest upgrade -- --plan paid
+```
+
+It deploys the runner, then the main Worker with agent tools on.
 
 ## Upgrading
 
@@ -31,7 +45,7 @@ In the instance's folder:
 npm create drawpane@latest upgrade
 ```
 
-It swaps in the new release, applies new database migrations (additive, so the running version keeps working), and deploys. Secrets and data are left as they are. It won't move an instance to an older version.
+It swaps in the new release, applies new database migrations (additive, so the running version keeps working), and deploys the agent runner, then the main Worker. Secrets and data are left as they are. It won't move an instance to an older version. An instance from before the agent runner gets it on its next upgrade: `drawpane.json` gains `"runner": "<name>-agent-runner"`, and the runner is deployed before the main Worker.
 
 The instance's **Health and cost** page (the bolt beside your name in the dashboard, for whoever set the instance up) shows the version it runs, and says when a newer one is out, with its release notes and this command. To know that, the Worker asks the npm registry for `create-drawpane`'s latest version when the page is opened, at most once every six hours. To turn that off, add `"vars": { "UPDATE_CHECK": "off" }` to `drawpane.json` and run `npm create drawpane@latest upgrade -- --force`.
 
@@ -45,6 +59,7 @@ The installer runs these steps; they're here as a reference, or for setups it do
 
 - Node 26 and pnpm 12. With [mise](https://mise.jdx.dev), `mise install` in the repo sets both up.
 - An API token with **Workers Scripts**, **Workers Routes**, **D1**, **Workers R2 Storage** and **Zone DNS** edit permissions, exported as `CLOUDFLARE_API_TOKEN`, plus `CLOUDFLARE_ACCOUNT_ID`.
+- Workers Paid, for agent tools. On Free, see step 5.
 
 Then:
 
@@ -62,7 +77,7 @@ Then:
    npx wrangler r2 bucket create drawpane-files
    ```
 
-   Put the printed `database_id` into `apps/worker/wrangler.jsonc`.
+   Put the printed `database_id` into `apps/worker/wrangler.jsonc` and `apps/agent-runner/wrangler.jsonc`. Both Workers use the same database and bucket.
 
 3. **Choose your domain.** You pass it when you deploy (step 5), so it stays out of the repository. Wrangler creates the DNS record and certificate the first time.
 
@@ -75,16 +90,18 @@ Then:
 
    Keep the setup token: you need it once, to create the first account.
 
-5. **Apply migrations and deploy**
+5. **Apply migrations and deploy**, the agent runner first: the main Worker binds it by name (`script_name` in its `AGENT_RUNNER` binding), so it has to exist.
 
    ```sh
    pnpm --filter @drawpane/worker run db:migrate:remote
    pnpm run deploy --domain design.example.com
    ```
 
+   `pnpm run deploy` builds both Workers, deploys the runner (`pnpm --filter @drawpane/agent-runner run deploy`), then the main Worker (`pnpm --filter @drawpane/worker run deploy`, with your domain). To deploy them one at a time, run those two in that order. The runner is `drawpane-agent-runner` here. To name it otherwise, change `name` in `apps/agent-runner/wrangler.jsonc` and `script_name` in `apps/worker/wrangler.jsonc` to match. On the Workers Free plan, skip the runner, and in `apps/worker/wrangler.jsonc` remove `limits` and the `AGENT_RUNNER` binding and add `"AGENT_TOOLS": "off"` to `vars`.
+
 6. **Create your account.** Open your domain. A fresh instance sends you to **Set up this instance**: enter your name, email and the setup token, then create a passkey. You now own the first team and can invite everyone else from the dashboard.
 
-To upgrade an instance installed by hand, pull the new version and run step 5 again. Migrations are additive and run before the new Worker takes traffic.
+To upgrade an instance installed by hand, pull the new version and run step 5 again, runner first. Migrations are additive and run before the new Worker takes traffic.
 
 ## Fonts
 

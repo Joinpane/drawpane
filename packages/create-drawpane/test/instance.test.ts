@@ -2,18 +2,26 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appliedMigrations, isTransient, WranglerError, withRetries } from "../src/cloudflare";
+import {
+  appliedMigrations,
+  isFreePlanRefusal,
+  isTransient,
+  WranglerError,
+  withRetries,
+} from "../src/cloudflare";
 import {
   compareVersions,
   domainProblem,
+  instanceRunner,
   nameProblem,
   newConfig,
   readConfig,
+  runnerName,
   suggestName,
   writeConfig,
 } from "../src/instance";
 import { Problem } from "../src/problem";
-import { renderWranglerConfig } from "../src/release";
+import { renderRunnerConfig, renderWranglerConfig } from "../src/release";
 
 describe("names", () => {
   it("suggests a Worker name from the folder", () => {
@@ -92,6 +100,32 @@ describe("drawpane.json", () => {
     await mkdir(file);
     await expect(readConfig(dir)).rejects.toThrow(`Couldn't read ${file}: EISDIR.`);
   });
+
+  it("records the agent runner's name, and reads an older config without one", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "drawpane-config-"));
+    const config = newConfig({ accountId: "acc", name: "design", domain: null });
+    expect(config.runner).toBe("design-agent-runner");
+    expect(config.plan).toBeUndefined();
+    const { runner: _, ...old } = config;
+    await writeFile(join(dir, "drawpane.json"), JSON.stringify(old));
+    const read = await readConfig(dir);
+    expect(read?.runner).toBeUndefined();
+    expect(instanceRunner(read as NonNullable<typeof read>)).toBe("design-agent-runner");
+    await writeFile(join(dir, "drawpane.json"), JSON.stringify({ ...config, runner: "Runner!" }));
+    await expect(readConfig(dir)).rejects.toThrow(/runner: lowercase/);
+    await writeFile(join(dir, "drawpane.json"), JSON.stringify({ ...config, plan: "free" }));
+    expect((await readConfig(dir))?.plan).toBe("free");
+    await writeFile(join(dir, "drawpane.json"), JSON.stringify({ ...config, plan: "pro" }));
+    await expect(readConfig(dir)).rejects.toThrow(/plan: /);
+  });
+
+  it("keeps the runner's name a Worker name, even after a long instance name", () => {
+    expect(runnerName("design")).toBe("design-agent-runner");
+    const long = runnerName("a".repeat(50));
+    expect(long).toHaveLength(63);
+    expect(nameProblem(long)).toBeNull();
+    expect(runnerName(`${"a".repeat(49)}-b`)).toBe(`${"a".repeat(49)}-agent-runner`);
+  });
 });
 
 describe("wrangler.jsonc", () => {
@@ -152,6 +186,88 @@ describe("wrangler.jsonc", () => {
       RP_NAME: "Drawpane",
       GOOGLE_FONTS: "off",
       DRAWPANE_VERSION: "0.1.0",
+    });
+  });
+
+  const withRunner = {
+    ...template,
+    limits: { cpu_ms: 300000 },
+    durable_objects: {
+      bindings: [
+        { name: "FILE_ROOM", class_name: "FileRoom" },
+        { name: "AGENT_RUNNER", class_name: "AgentRunner", script_name: "drawpane-agent-runner" },
+      ],
+    },
+  };
+
+  it("binds the instance's own agent runner", () => {
+    const config = newConfig({ accountId: "acc", name: "design", domain: null });
+    const rendered = parse(renderWranglerConfig(withRunner, config, "0.1.0"));
+    expect(rendered.durable_objects.bindings).toEqual([
+      { name: "FILE_ROOM", class_name: "FileRoom" },
+      { name: "AGENT_RUNNER", class_name: "AgentRunner", script_name: "design-agent-runner" },
+    ]);
+    expect(rendered.limits).toEqual({ cpu_ms: 300000 });
+    expect(rendered.vars.AGENT_TOOLS).toBeUndefined();
+    // An older config without a runner name gets the default.
+    const { runner: _, ...old } = config;
+    expect(
+      parse(renderWranglerConfig(withRunner, old, "0.1.0")).durable_objects.bindings[1].script_name,
+    ).toBe("design-agent-runner");
+  });
+
+  it("on the Free plan, leaves out the CPU limit and the runner, and turns agent tools off", () => {
+    const config = {
+      ...newConfig({ accountId: "acc", name: "design", domain: null }),
+      plan: "free" as const,
+      vars: { GOOGLE_FONTS: "off" },
+    };
+    const rendered = parse(renderWranglerConfig(withRunner, config, "0.1.0"));
+    expect(rendered.limits).toBeUndefined();
+    expect(rendered.durable_objects.bindings).toEqual([
+      { name: "FILE_ROOM", class_name: "FileRoom" },
+    ]);
+    expect(rendered.migrations).toEqual(template.migrations);
+    expect(rendered.vars).toEqual({
+      GOOGLE_FONTS: "off",
+      AGENT_TOOLS: "off",
+      DRAWPANE_VERSION: "0.1.0",
+    });
+  });
+
+  it("renders the runner with the instance's name, storage and settings, and no address", () => {
+    const runnerTemplate = {
+      compatibility_date: "2026-11-01",
+      compatibility_flags: ["nodejs_compat"],
+      limits: { cpu_ms: 60000 },
+      workers_dev: false,
+      durable_objects: { bindings: [{ name: "AGENT_RUNNER", class_name: "AgentRunner" }] },
+      migrations: [{ tag: "v1", new_sqlite_classes: ["AgentRunner"] }],
+    };
+    const config = {
+      ...newConfig({ accountId: "acc", name: "design", domain: "design.example.com" }),
+      database: { name: "design", id: "db-1" },
+      vars: { GOOGLE_FONTS: "off" },
+    };
+    const text = renderRunnerConfig(runnerTemplate, config, "0.1.0");
+    expect(text.startsWith("// Generated by create-drawpane")).toBe(true);
+    const rendered = parse(text);
+    expect(rendered).toEqual({
+      ...runnerTemplate,
+      name: "design-agent-runner",
+      main: "server/agent-runner/index.js",
+      no_bundle: true,
+      upload_source_maps: true,
+      workers_dev: false,
+      d1_databases: [
+        {
+          binding: "DB",
+          database_name: "design",
+          database_id: "db-1",
+        },
+      ],
+      r2_buckets: [{ binding: "FILES", bucket_name: "design-files" }],
+      vars: { GOOGLE_FONTS: "off", DRAWPANE_VERSION: "0.1.0" },
     });
   });
 
@@ -243,5 +359,24 @@ describe("isTransient", () => {
   it("doesn't on a refusal that won't change", () => {
     expect(isTransient("Authentication error [code: 10000]")).toBe(false);
     expect(isTransient("A bucket with this name already exists [code: 10004]")).toBe(false);
+  });
+});
+
+describe("isFreePlanRefusal", () => {
+  // Guesses at Cloudflare's wording: the real text is unverified, so the match is loose.
+  it("knows a deploy refused for CPU limits on the Free plan", () => {
+    expect(
+      isFreePlanRefusal("CPU limits are not supported on the Workers Free plan. [code: 100328]"),
+    ).toBe(true);
+    expect(isFreePlanRefusal("limits.cpu_ms can't be set on the free plan")).toBe(true);
+    expect(isFreePlanRefusal("Setting a CPU limit requires Workers Paid; you're on Free")).toBe(
+      true,
+    );
+  });
+
+  it("doesn't mistake other refusals for it", () => {
+    expect(isFreePlanRefusal("Authentication error [code: 10000]")).toBe(false);
+    expect(isFreePlanRefusal("Exceeded CPU limit [code: 10021]")).toBe(false);
+    expect(isFreePlanRefusal("Your account is on the Free plan: too many Workers")).toBe(false);
   });
 });

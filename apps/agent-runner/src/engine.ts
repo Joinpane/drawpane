@@ -1,20 +1,21 @@
 /**
- * The headless engine (decision 0021): an `Editor` inside the FileRoom that
- * runs agent tools when no open editor does. It is the same editor the
+ * The headless engine (decision 0021): an `Editor` in the agent runner
+ * (decision 0033) that runs agent tools when no open editor does. It is the same editor the
  * browser runs, with the Worker's text measurer, so a tool's edit gets the
  * same fix-ups (text sizing, auto layout, instances, variables) as a
  * person's.
  *
- * One editor stays warm per room: it follows every transaction the room
- * commits, and is rebuilt from the room's nodes when it falls out of step.
+ * One editor stays warm per file: it follows the transactions the room
+ * logged since (the runner gets them with each call), and is rebuilt from a
+ * snapshot of the file when it falls out of step.
  * Everything it keeps is counted in a meter as it's kept
  * (`agent-admission.ts`): built from pages of the room's rows, it's refused
  * partway (`AgentTooLarge`) when the file is more than it may hold, and a
  * warm one that grows past that is let go of, so the next call builds it
  * again and is refused.
  * A run collects the operations the editor's sync engine queued (it never
- * connects, so everything it commits waits there) and hands them to the
- * room, which commits them as one transaction.
+ * connects, so everything it commits waits there) and hands them back; the
+ * main Worker has the room commit them as one transaction.
  */
 import {
   Editor,
@@ -37,7 +38,6 @@ import {
   ROOT_ID,
   slotBytes,
 } from "@drawpane/model";
-import type { HeadlessMeasurer } from "../agent/measurer";
 import {
   AGENT_MAX_HELD,
   AGENT_MAX_NODES,
@@ -45,7 +45,8 @@ import {
   agentMeter,
   asTooLarge,
   tooManyLayers,
-} from "./agent-admission";
+} from "@drawpane/worker/src/rooms/agent-admission";
+import type { HeadlessMeasurer } from "./measurer";
 
 /**
  * Text whose fonts don't fit in HarfBuzz's capped memory (decision 0033).
@@ -91,6 +92,11 @@ export class AgentEngine {
 
   get warm(): boolean {
     return this.#editor !== null;
+  }
+
+  /** The room revision the warm editor shows; -1 when there's none. */
+  get revn(): number {
+    return this.#editor ? this.#revn : -1;
   }
 
   /** What the editor warm at `revn` holds, as its meter counts it; null when there's none. */

@@ -28,10 +28,10 @@ import {
 } from "@drawpane/editor";
 import { applyTransaction, checkNode, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
 import { afterAll, describe, expect, it } from "vitest";
-import { STANDIN } from "../src/agent/measurer";
+import { AgentEngine } from "../../agent-runner/src/engine";
+import { STANDIN } from "../../agent-runner/src/measurer";
 import { answerDocument, SqlFileDoc } from "../src/mcp/document";
 import { AGENT_MAX_HELD, AgentTooLarge, agentPrecheck } from "../src/rooms/agent-admission";
-import { AgentEngine } from "../src/rooms/agent-engine";
 import { presentedCount } from "../src/rooms/convert";
 import { insertNodes, TableReader } from "../src/rooms/node-tables";
 import { NODE_SCHEMA, SqlNodeStore } from "../src/rooms/sql-store";

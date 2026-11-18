@@ -7,8 +7,8 @@ import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect } from "vitest";
-import type { Account, Cloudflare } from "../src/cloudflare";
-import type { Release } from "../src/release";
+import { type Account, type Cloudflare, WranglerError } from "../src/cloudflare";
+import { MAIN_CONFIG, type Release, RUNNER_CONFIG } from "../src/release";
 import type { Choice, Ui } from "../src/ui";
 
 /** A Cloudflare account in memory, recording what was asked of it. */
@@ -20,7 +20,14 @@ export class FakeCloudflare implements Cloudflare {
   calls: string[] = [];
   secrets = new Set<string>();
   deployedSecrets: Record<string, string>[] = [];
-  failDeploy = false;
+  /** Fails every deploy, or only the main Worker's (an install stopped between the two). */
+  failDeploy: boolean | "main" = false;
+  /** On the Workers Free plan: a config with CPU limits is refused, as Cloudflare does. */
+  freePlan = false;
+  /** The Workers deployed, by name. */
+  scripts = new Set<string>();
+  /** Each deployed configuration, parsed, in order. */
+  deployedConfigs: Record<string, unknown>[] = [];
 
   async accounts() {
     return this.signedIn ? this.accountList : null;
@@ -67,9 +74,33 @@ export class FakeCloudflare implements Cloudflare {
     this.calls.push("migrate");
     return this.applied;
   }
-  async deploy(dir: string, _: string, secretsFile: string | null) {
-    await stat(join(dir, "server/worker/index.js"));
-    if (this.failDeploy) throw new Error("deploy failed");
+  async deploy(dir: string, _: string, secretsFile: string | null, configFile?: string) {
+    const isRunner = configFile === RUNNER_CONFIG;
+    expect([undefined, RUNNER_CONFIG]).toContain(configFile);
+    await stat(join(dir, isRunner ? "server/agent-runner/index.js" : "server/worker/index.js"));
+    if (this.failDeploy === true || (this.failDeploy === "main" && !isRunner))
+      throw new Error("deploy failed");
+    const text = await readFile(join(dir, configFile ?? MAIN_CONFIG), "utf8");
+    const config = JSON.parse(
+      text
+        .split("\n")
+        .filter((l) => !l.startsWith("//"))
+        .join("\n"),
+    ) as {
+      name: string;
+      limits?: unknown;
+      durable_objects?: { bindings?: { script_name?: string }[] };
+    };
+    if (this.freePlan && config.limits)
+      // A guess at Cloudflare's wording (unverified), close to what isFreePlanRefusal expects.
+      throw new WranglerError(
+        "deploy",
+        "✘ [ERROR] A request to the Cloudflare API failed.\n  CPU limits are not supported on the Workers Free plan. [code: 100328]",
+      );
+    // Cloudflare refuses a binding to a script that doesn't exist.
+    for (const binding of config.durable_objects?.bindings ?? [])
+      if (binding.script_name && !this.scripts.has(binding.script_name))
+        throw new WranglerError("deploy", `Script ${binding.script_name} not found [code: 10061]`);
     if (secretsFile) {
       const secrets = JSON.parse(await readFile(secretsFile, "utf8")) as Record<string, string>;
       this.deployedSecrets.push(secrets);
@@ -80,8 +111,10 @@ export class FakeCloudflare implements Cloudflare {
       // Private to its owner.
       expect((await stat(secretsFile)).mode & 0o077).toBe(0);
     }
-    this.calls.push("deploy");
-    return "https://design.ana.workers.dev";
+    this.scripts.add(config.name);
+    this.deployedConfigs.push(config);
+    this.calls.push(isRunner ? "deploy runner" : "deploy");
+    return isRunner ? null : "https://design.ana.workers.dev";
   }
 }
 
@@ -145,14 +178,41 @@ export class ScriptedUi implements Ui {
 export async function fakeRelease(version: string): Promise<Release> {
   const root = await mkdtemp(join(tmpdir(), "drawpane-release-"));
   await mkdir(join(root, "worker"));
+  await mkdir(join(root, "agent-runner"));
   await mkdir(join(root, "assets"));
   await mkdir(join(root, "migrations"));
   await writeFile(join(root, "worker/index.js"), `export default {}; // ${version}`);
+  await writeFile(join(root, "agent-runner/index.js"), `export class AgentRunner {} // ${version}`);
   await writeFile(join(root, "assets/index.html"), "<!doctype html>");
   await writeFile(join(root, "migrations/0001_init.sql"), "SELECT 1;");
   await writeFile(
     join(root, "wrangler.template.json"),
-    JSON.stringify({ compatibility_date: "2026-11-01", assets: { binding: "ASSETS" } }),
+    JSON.stringify({
+      compatibility_date: "2026-11-01",
+      limits: { cpu_ms: 300000 },
+      assets: { binding: "ASSETS" },
+      durable_objects: {
+        bindings: [
+          { name: "FILE_ROOM", class_name: "FileRoom" },
+          {
+            name: "AGENT_RUNNER",
+            class_name: "AgentRunner",
+            script_name: "drawpane-agent-runner",
+          },
+        ],
+      },
+      migrations: [{ tag: "v1", new_sqlite_classes: ["FileRoom"] }],
+    }),
+  );
+  await writeFile(
+    join(root, "agent-runner.template.json"),
+    JSON.stringify({
+      compatibility_date: "2026-11-01",
+      limits: { cpu_ms: 60000 },
+      workers_dev: false,
+      durable_objects: { bindings: [{ name: "AGENT_RUNNER", class_name: "AgentRunner" }] },
+      migrations: [{ tag: "v1", new_sqlite_classes: ["AgentRunner"] }],
+    }),
   );
   return { version, root };
 }

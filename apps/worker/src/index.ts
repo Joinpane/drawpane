@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import { ZodError } from "zod";
-import { provideHarfBuzzMeasurer } from "./agent/harfbuzz";
 import { requireFileRole } from "./api/access";
 import { admin } from "./api/admin";
 import { email } from "./api/email";
@@ -189,9 +188,6 @@ app.onError((error, c) => {
     500,
   );
 });
-
-// Agents design here: their text is measured as the browser measures it (decision 0021).
-provideHarfBuzzMeasurer();
 
 export default {
   fetch: app.fetch,

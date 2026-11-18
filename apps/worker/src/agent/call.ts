@@ -4,9 +4,17 @@
  * and the runner hears how that went. The room never calls the runner and
  * the runner never calls the room; everything goes through here.
  *
- * Today the runner is in-process, hosted by the file's room
- * (`agentDeps`); migration step 3 gives it a script of its own, and only
- * `agentDeps` changes.
+ * The runner is a Durable Object in a script of its own (`apps/agent-runner`),
+ * one per file, bound as AGENT_RUNNER. Step 0's rules
+ * (`0033-agent-runner-step0.md`) hold here: a new runner stub for every
+ * call; a failed `committed` only means the runner dropped its editor; the
+ * room never awaits the runner, since only this code calls it; and a runner
+ * that ran out of memory is the agent's failure, never retried.
+ *
+ * Each run gets the file from the room (`AgentFileSource`): first the
+ * runner says which revision its editor shows (`held`), then the room
+ * answers with the log since (warm) or a snapshot (cold), along with
+ * admission for the first run.
  */
 import { findTool } from "@drawpane/editor";
 import type { Env } from "../env";
@@ -16,6 +24,7 @@ import {
   type AgentAdmission,
   type AgentCallResult,
   type AgentCommittedNote,
+  type AgentFileSource,
   type AgentRequester,
   type AgentRoomApi,
   type AgentRunAnswer,
@@ -37,6 +46,12 @@ export const RUNNER_ABORTED =
 export const KEPT_CHANGING =
   "Someone kept changing the frame that call works in while it ran, so nothing was changed. Try again.";
 const KEPT_BUSY = "That call is still running from an earlier request. Try again shortly.";
+const DOWNLOADS_BUSY =
+  "Many people are opening this file right now, so the agent runner couldn't load it. Nothing was changed. Try again shortly.";
+const OUT_OF_STEP =
+  "The agent runner couldn't get in step with the file, and nothing was changed. Try again.";
+/** How often a run asks for the file again (a runner that moved on, loaded fonts, or was reset). */
+const RUN_TRIES = 4;
 
 /**
  * Who the call talks to. Each is a factory, called again for every request:
@@ -47,11 +62,12 @@ export interface AgentDeps {
   runner(): AgentRunnerApi;
 }
 
-/** The deps for a file: the room, and the runner it hosts in-process for now. */
+/** The deps for a file: its room, and its runner in the runner's script. */
 export function agentDeps(env: Env, fileId: string): AgentDeps {
   const room = () => env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
+  const runner = env.AGENT_RUNNER;
   return {
-    // The RPC stub's types lose the unions' narrowing; the answers are as the room returns them.
+    // The RPC stubs' types lose the unions' narrowing; the answers are as each side returns them.
     room: () => {
       const stub = room();
       return {
@@ -59,6 +75,8 @@ export function agentDeps(env: Env, fileId: string): AgentDeps {
           (await stub.admitAgentCall(request)) as Awaited<
             ReturnType<AgentRoomApi["admitAgentCall"]>
           >,
+        agentSource: async (request) =>
+          (await stub.agentSource(request)) as Awaited<ReturnType<AgentRoomApi["agentSource"]>>,
         commitAgentRun: async (request) =>
           (await stub.commitAgentRun(request)) as CommitAgentAnswer,
         releaseAgentCall: (request) => stub.releaseAgentCall(request),
@@ -68,15 +86,30 @@ export function agentDeps(env: Env, fileId: string): AgentDeps {
       };
     },
     runner: () => {
-      const stub = room();
+      if (!runner) throw new Error("This Worker has no AGENT_RUNNER binding.");
+      // A new stub every time: one whose runner was reset fails every later call.
+      const stub = runner.get(runner.idFromName(fileId));
       return {
-        run: async (request) => (await stub.runAgent(request)) as AgentRunAnswer,
-        committed: (note) => stub.agentCommitted(note),
-        drop: (id) => stub.dropAgent(id),
+        held: (id) => stub.held(id),
+        run: async (request) => (await stub.run(request)) as AgentRunAnswer,
+        committed: (note) => stub.committed(note),
+        drop: (id) => stub.drop(id),
       };
     },
   };
 }
+
+/**
+ * Whether agents can design here: the runner is bound and the tools aren't
+ * turned off (the Workers Free plan, `AGENT_TOOLS=off`).
+ */
+export function agentToolsEnabled(env: Env): boolean {
+  return env.AGENT_TOOLS !== "off" && env.AGENT_RUNNER !== undefined;
+}
+
+/** What agents are told when the tools that design are off. */
+export const AGENT_TOOLS_OFF =
+  "This instance runs on Cloudflare's Workers Free plan, so the tools that design (start_session, render and the rest) are off: they need the Workers Paid plan. Reading files works.";
 
 /** The pauses before asking again about a call id another request holds, growing to the last. */
 const BUSY_PAUSES_MS = [25, 50, 100, 200, 400, 800, 1000];
@@ -106,7 +139,7 @@ export async function callWriteTool(
   if (tool?.level !== "write") return { ok: false, message: `There's no write tool ${call.tool}.` };
   const { fileId } = call.session;
   const ids = { v: AGENT_RUNNER_V, fileId, sessionId: call.session.id, callId: call.callId };
-  const admission = await admitWrite(deps, ids);
+  const admission = await admitWrite(deps, ids, await heldRevn(deps, fileId));
   if (!admission.admitted) return admission.answer;
   const claim = admission.claim;
   const renewing =
@@ -121,7 +154,7 @@ export async function callWriteTool(
           AGENT_CLAIM_RENEW_MS,
         );
   try {
-    const answer = await runAndCommit(deps, call, tool.title);
+    const answer = await runAndCommit(deps, call, tool.title, admission.source);
     if (answer.ok) return answer;
     // A request with this call id that ran despite the claim (the room restarted meanwhile)
     // may have committed: its recorded answer is the call's.
@@ -137,10 +170,11 @@ export async function callWriteTool(
 async function admitWrite(
   deps: AgentDeps,
   ids: { v: number; fileId: string; sessionId: string; callId: string },
+  from: number | null,
 ): Promise<Exclude<AgentAdmission, { busy: true }>> {
   const until = Date.now() + BUSY_WAIT_MS;
   for (let attempt = 0; ; attempt++) {
-    const admission = await deps.room().admitAgentCall(ids);
+    const admission = await deps.room().admitAgentCall({ ...ids, from });
     if (!("busy" in admission)) return admission;
     // A claim its caller stopped renewing goes after AGENT_CLAIM_MS: a live one is waited for.
     if (Date.now() > until) return { admitted: false, answer: { ok: false, message: KEPT_BUSY } };
@@ -158,16 +192,16 @@ async function runAndCommit(
     readonly input: unknown;
   },
   label: string,
+  first: AgentFileSource | undefined,
 ): Promise<AgentCallResult> {
   const { fileId } = call.session;
   for (let attempt = 0; attempt < AGENT_ATTEMPTS; attempt++) {
     if (attempt > 0) await pause(STALE_PAUSES_MS[attempt - 1] ?? 1_000);
-    const run = await runOnce(deps, {
-      v: AGENT_RUNNER_V,
-      fileId,
-      tool: call.tool,
-      input: call.input,
-    });
+    const run = await runOnFile(
+      deps,
+      { fileId, tool: call.tool, input: call.input },
+      attempt === 0 ? first : undefined,
+    );
     if (!run.ok) return run;
     let answer: CommitAgentAnswer;
     try {
@@ -205,16 +239,15 @@ export async function callReadTool(
   const tool = findTool(call.tool);
   if (!tool || tool.level === "write")
     return { ok: false, message: `There's no read tool ${call.tool}.` };
-  const admission = await deps.room().admitAgentCall({ v: AGENT_RUNNER_V, fileId: call.fileId });
+  const admission = await deps.room().admitAgentCall({
+    v: AGENT_RUNNER_V,
+    fileId: call.fileId,
+    from: await heldRevn(deps, call.fileId),
+  });
   // A read has no call id, so nothing is ever busy for it.
   if (!admission.admitted)
     return "busy" in admission ? { ok: false, message: KEPT_BUSY } : admission.answer;
-  const run = await runOnce(deps, {
-    v: AGENT_RUNNER_V,
-    fileId: call.fileId,
-    tool: call.tool,
-    input: call.input,
-  });
+  const run = await runOnFile(deps, call, admission.source);
   if (!run.ok) return run;
   return {
     ok: true,
@@ -225,21 +258,61 @@ export async function callReadTool(
   };
 }
 
+/** The revision the runner's editor shows for the file; null when it's cold or doesn't answer. */
+async function heldRevn(deps: AgentDeps, fileId: string): Promise<number | null> {
+  try {
+    const held = await deps.runner().held(fileId);
+    return held.v === AGENT_RUNNER_V ? held.revn : null;
+  } catch (error) {
+    console.warn("the agent runner didn't say where it is", error);
+    return null;
+  }
+}
+
+/** A run's answer once it had a file it could use: a result, or a failure for the agent. */
+type RunDone = Exclude<AgentRunAnswer, { again: true }>;
+
 /**
- * One run on a fresh runner stub. A runner that ran out of memory (or CPU)
- * fails its call, and nothing was committed: that's the agent's answer,
- * and it isn't retried. A reset for an update is retried once.
+ * Runs a tool on the file, each time on a fresh runner stub, with the file
+ * as the room gives it (`first`, when admission brought it). A runner that
+ * couldn't use what it got asks for it again, cold. A runner that ran out
+ * of memory (or CPU) fails its call, and nothing was committed: that's the
+ * agent's answer, and it isn't retried. A reset for an update is retried
+ * once, with the file asked for again, since a stream is read only once.
  */
-async function runOnce(deps: AgentDeps, request: AgentRunRequest): Promise<AgentRunAnswer> {
-  for (let attempt = 0; ; attempt++) {
+async function runOnFile(
+  deps: AgentDeps,
+  call: { readonly fileId: string; readonly tool: string; readonly input: unknown },
+  first: AgentFileSource | undefined,
+): Promise<RunDone> {
+  const { fileId } = call;
+  let source = first;
+  let live = false;
+  let reset = false;
+  for (let tries = 0; tries < RUN_TRIES; tries++) {
+    if (!source) {
+      const from = tries === 0 ? await heldRevn(deps, fileId) : null;
+      const got = await deps.room().agentSource({ v: AGENT_RUNNER_V, fileId, from, live });
+      if (!got.ok) return { ok: false, message: DOWNLOADS_BUSY };
+      source = got.source;
+    }
+    const request: AgentRunRequest = { v: AGENT_RUNNER_V, ...call, source };
+    source = undefined;
+    let run: AgentRunAnswer;
     try {
-      return await deps.runner().run(request);
+      run = await deps.runner().run(request);
     } catch (error) {
-      if (attempt === 0 && retryable(error)) continue;
+      if (!reset && retryable(error)) {
+        reset = true;
+        continue;
+      }
       if (aborted(error)) return { ok: false, message: RUNNER_ABORTED };
       throw error;
     }
+    if (run.ok || !("again" in run)) return run;
+    live = run.live === true;
   }
+  return { ok: false, message: OUT_OF_STEP };
 }
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

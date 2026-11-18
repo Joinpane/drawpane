@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import type { Account, Cloudflare } from "./cloudflare.js";
+import { type Account, type Cloudflare, isFreePlanRefusal, WranglerError } from "./cloudflare.js";
 import {
   EMAIL_SECRETS,
   type EmailSecret,
@@ -25,14 +25,25 @@ import {
   compareVersions,
   domainProblem,
   type InstanceConfig,
+  instanceRunner,
   nameProblem,
   newConfig,
+  type Plan,
   readConfig,
   suggestName,
   writeConfig,
 } from "./instance.js";
 import { Problem } from "./problem.js";
-import { copyRelease, type Release, readTemplate, renderWranglerConfig } from "./release.js";
+import {
+  copyRelease,
+  MAIN_CONFIG,
+  type Release,
+  RUNNER_CONFIG,
+  RUNNER_TEMPLATE,
+  readTemplate,
+  renderRunnerConfig,
+  renderWranglerConfig,
+} from "./release.js";
 import type { Ui } from "./ui.js";
 
 export interface Deps {
@@ -56,6 +67,8 @@ export interface InstallOptions {
   readonly domain?: string | undefined;
   /** Take every default and ask nothing. */
   readonly yes?: boolean;
+  /** The account's Workers plan, "paid" or "free"; undefined finds out on deploy. */
+  readonly plan?: string | undefined;
 }
 
 export interface UpgradeOptions {
@@ -63,6 +76,8 @@ export interface UpgradeOptions {
   readonly yes?: boolean;
   /** Deploy again even when the instance already runs this version. */
   readonly force?: boolean;
+  /** Switches the instance's Workers plan ("paid" after moving to Workers Paid). */
+  readonly plan?: string | undefined;
 }
 
 export interface EmailOptions {
@@ -72,6 +87,7 @@ export interface EmailOptions {
 }
 
 const UPGRADE_COMMAND = "npm create drawpane@latest upgrade";
+const PLAN_PAID_COMMAND = `${UPGRADE_COMMAND} -- --plan paid`;
 const EMAIL_COMMAND = "npm create drawpane@latest email";
 
 export async function install(options: InstallOptions, deps: Deps): Promise<void> {
@@ -112,12 +128,15 @@ export async function install(options: InstallOptions, deps: Deps): Promise<void
     const account = await chooseAccount(accounts, options, deps, asking);
     const name = await chooseName(dir, options, ui, asking);
     const domain = await chooseDomain(options, ui, asking);
-    config = newConfig({ accountId: account.id, name, domain });
+    config = newConfig({ accountId: account.id, name, domain, plan: planOption(options) });
     ui.note(
       [
         `Account   ${account.name}`,
         `Worker    ${config.name}`,
         `Address   ${config.domain ?? `${config.name}.<your subdomain>.workers.dev`}`,
+        config.plan === "free"
+          ? "Agents    off (agent tools need Workers Paid)"
+          : `Agents    ${instanceRunner(config)} (a second Worker, for agent tools)`,
         `Database  ${config.database.name} (D1)`,
         `Files     ${config.bucket} (R2)`,
       ].join("\n"),
@@ -131,6 +150,9 @@ export async function install(options: InstallOptions, deps: Deps): Promise<void
     throw new Problem(
       `You're signed in to Cloudflare without access to account ${config.accountId}, which this instance uses. Sign in as someone with access and run this again.`,
     );
+  } else {
+    const plan = planOption(options);
+    if (plan) config = { ...config, plan };
   }
 
   config = await prepare(dir, config, deps);
@@ -178,6 +200,7 @@ It's already set up: sign in there.`,
 
 export async function upgrade(options: UpgradeOptions, deps: Deps): Promise<void> {
   const { ui, release } = deps;
+  const plan = planOption(options);
   const dir = resolve(deps.cwd, options.dir ?? ".");
   const config = await readConfig(dir);
   if (!config)
@@ -194,14 +217,22 @@ export async function upgrade(options: UpgradeOptions, deps: Deps): Promise<void
     throw new Problem(
       `This installer carries Drawpane ${release.version}, older than the ${config.version} the instance runs. Use \`${UPGRADE_COMMAND}\`.`,
     );
-  if (order === 0 && !options.force) {
+  // A change of plan is worth a deploy on its own: it turns agent tools on or off.
+  const planChanges = plan !== undefined && plan !== (config.plan ?? "paid");
+  if (order === 0 && !options.force && !planChanges) {
     ui.outro(`Already on ${release.version}. (Pass --force to deploy it again.)`);
     return;
   }
+  const wanted: InstanceConfig = plan ? { ...config, plan } : config;
   if (ui.interactive && !options.yes) {
     ui.note(
       [
         `Instance  ${config.url}`,
+        ...(wanted.plan === "free"
+          ? ["Agents    off (agent tools need Workers Paid)"]
+          : !config.runner || config.plan === "free"
+            ? [`Adds      ${instanceRunner(wanted)} (a second Worker, for agent tools)`]
+            : []),
         "New database migrations apply first; the running version keeps",
         "working until the new one takes over.",
       ].join("\n"),
@@ -215,7 +246,7 @@ export async function upgrade(options: UpgradeOptions, deps: Deps): Promise<void
       `You're signed in to Cloudflare without access to account ${config.accountId}, which this instance uses.`,
     );
 
-  let next = await prepare(dir, config, deps);
+  let next = await prepare(dir, wanted, deps);
   // An instance from before a resource existed in the release gets it now.
   next = await createResources(dir, next, deps);
   next = await deployAndWait(dir, next, deps, null);
@@ -437,8 +468,17 @@ async function chooseAccount(
   });
 }
 
-/** Rejects a `--name` or `--domain` that won't do. */
+/** The `--plan` given, or undefined; anything but paid or free is a Problem. */
+function planOption(options: { readonly plan?: string | undefined }): Plan | undefined {
+  if (options.plan === undefined) return undefined;
+  const plan = options.plan.toLowerCase();
+  if (plan === "paid" || plan === "free") return plan;
+  throw new Problem(`--plan ${options.plan}: Use paid or free (your Cloudflare Workers plan).`);
+}
+
+/** Rejects a `--name`, `--domain` or `--plan` that won't do. */
 function checkFlags(options: InstallOptions): void {
+  planOption(options);
   if (options.name !== undefined) {
     const problem = nameProblem(options.name);
     if (problem) throw new Problem(`--name ${options.name}: ${problem}`);
@@ -482,20 +522,32 @@ async function chooseDomain(
   return domain.toLowerCase() || null;
 }
 
-/** Puts the bundled release and a fresh wrangler.jsonc in the folder. */
+/**
+ * Puts the bundled release and fresh configurations in the folder. An
+ * instance from before the agent runner gets its name recorded now.
+ */
 async function prepare(dir: string, config: InstanceConfig, deps: Deps): Promise<InstanceConfig> {
+  const next: InstanceConfig = { ...config, runner: instanceRunner(config) };
+  await writeConfig(dir, next);
   await deps.ui.step(`Unpacking Drawpane ${deps.release.version}`, async () => {
     await copyRelease(deps.release, dir);
-    await renderConfig(dir, config, deps.release);
+    await renderConfig(dir, next, deps.release);
   });
-  return config;
+  return next;
 }
 
+/** Both Workers' configurations; on the Free plan only the main one, since the runner isn't deployed. */
 async function renderConfig(dir: string, config: InstanceConfig, release: Release) {
   await writeFile(
-    join(dir, "wrangler.jsonc"),
+    join(dir, MAIN_CONFIG),
     renderWranglerConfig(await readTemplate(release), config, release.version),
   );
+  if (config.plan === "free") await rm(join(dir, RUNNER_CONFIG), { force: true });
+  else
+    await writeFile(
+      join(dir, RUNNER_CONFIG),
+      renderRunnerConfig(await readTemplate(release, RUNNER_TEMPLATE), config, release.version),
+    );
 }
 
 /** The database and bucket, found by name before being created, so running again is safe. */
@@ -531,7 +583,16 @@ async function createResources(
   return next;
 }
 
-/** Applies migrations, deploys (with secrets when given), and waits until it answers. */
+/**
+ * Applies migrations, deploys both Workers (the main one with secrets when
+ * given), and waits until it answers. The agent runner goes first, every
+ * time: the main Worker binds it by script name, so it has to exist. An
+ * install interrupted between the two has a runner and the old main Worker
+ * (or none), which is harmless, and running again deploys both.
+ *
+ * A deploy Cloudflare refuses for the Free plan (no CPU limits there) saves
+ * `plan: "free"` and deploys once more without the runner, with agent tools off.
+ */
 async function deployAndWait(
   dir: string,
   config: InstanceConfig,
@@ -539,6 +600,7 @@ async function deployAndWait(
   secrets: Record<string, string> | null,
 ): Promise<InstanceConfig> {
   const { ui, cloudflare } = deps;
+  let current = config;
   await ui.step(
     "Updating the database",
     () => cloudflare.migrate(dir, config.accountId, config.database.name),
@@ -547,17 +609,30 @@ async function deployAndWait(
         ? "Database up to date"
         : `Database updated: ${applied.length === 1 ? "1 migration" : `${applied.length} migrations`} (${applied.join(", ")})`,
   );
-  const workersDev = await ui.step(
-    "Deploying",
-    () => withSecretsFile(secrets, (file) => cloudflare.deploy(dir, config.accountId, file)),
-    () => "Deployed",
-  );
-  const url = config.domain ? `https://${config.domain}` : workersDev;
+  let workersDev: string | null;
+  try {
+    workersDev = await deployScripts(dir, current, deps, secrets);
+  } catch (error) {
+    if (
+      current.plan === "free" ||
+      !(error instanceof WranglerError) ||
+      !isFreePlanRefusal(error.output)
+    )
+      throw error;
+    ui.warn(
+      `Your Cloudflare account is on the Workers Free plan, so agent tools are off: they need Workers Paid. The rest of Drawpane works within the Free plan's limits (very large imports and restores may need more CPU than it gives). After moving to Workers Paid, turn them on with \`${PLAN_PAID_COMMAND}\`.`,
+    );
+    current = { ...current, plan: "free" };
+    await writeConfig(dir, current);
+    await renderConfig(dir, current, deps.release);
+    workersDev = await deployScripts(dir, current, deps, secrets);
+  }
+  const url = current.domain ? `https://${current.domain}` : workersDev;
   if (!url)
     throw new Problem(
       "Deployed, but Cloudflare didn't say where. Your account may need a workers.dev subdomain: choose one under Workers & Pages in the dashboard, then run this again.",
     );
-  const next = { ...config, url };
+  const next = { ...current, url };
   await writeConfig(dir, next);
   await ui.step(
     `Waiting for ${url} to answer`,
@@ -565,6 +640,30 @@ async function deployAndWait(
     () => `${url} is up`,
   );
   return next;
+}
+
+/** The agent runner (unless on the Free plan), then the main Worker; resolves to its workers.dev address. */
+async function deployScripts(
+  dir: string,
+  config: InstanceConfig,
+  deps: Deps,
+  secrets: Record<string, string> | null,
+): Promise<string | null> {
+  const { ui, cloudflare } = deps;
+  if (config.plan !== "free") {
+    const runner = instanceRunner(config);
+    // No secrets: the runner has none.
+    await ui.step(
+      `Deploying the agent runner (${runner})`,
+      () => cloudflare.deploy(dir, config.accountId, null, RUNNER_CONFIG),
+      () => `Agent runner deployed (${runner})`,
+    );
+  }
+  return ui.step(
+    `Deploying ${config.name}`,
+    () => withSecretsFile(secrets, (file) => cloudflare.deploy(dir, config.accountId, file)),
+    () => "Deployed",
+  );
 }
 
 /** Secrets travel in a private temporary file that's gone as soon as the deploy is. */

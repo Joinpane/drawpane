@@ -4,7 +4,7 @@
  * uploaded. Only images the file's team may read, as the media API checks.
  */
 
-import { mediaKey } from "../api/media";
+import { mediaKey } from "@drawpane/worker/src/api/media";
 import type { Env } from "../env";
 
 /** What the headless renderer's image loader returns (`ImageFile` in @drawpane/editor). */

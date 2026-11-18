@@ -1,7 +1,7 @@
 /**
  * An agent call split between the runner and the room (decision 0033,
  * migration step 1): the main Worker's side (`agent/call.ts`) with the
- * runner the room hosts in-process, wrapped so a person can edit between
+ * runner in its own script (step 3), wrapped so a person can edit between
  * the run and its commit. A commit is refused as stale when someone changed
  * a layer in the run's scope (the top-level layers it worked in, and what
  * they use), and the call then runs again; edits elsewhere don't hold it up.
@@ -571,8 +571,8 @@ describe("the main Worker's side of a call", () => {
       input: { changes: [{ id: box, props: { w: 30 } }] },
     });
     expect(out).toMatchObject({ ok: true });
-    // One for the run, one to say the commit landed.
-    expect(runners).toBe(2);
+    // One to ask where its editor is, one for the run, one to say the commit landed.
+    expect(runners).toBe(3);
     expect((await node(fileId, box))?.props.width).toBe(30);
   });
 
