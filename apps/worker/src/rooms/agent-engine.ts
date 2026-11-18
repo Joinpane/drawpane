@@ -20,6 +20,7 @@ import {
   Editor,
   type FrameClock,
   findTool,
+  isHarfBuzzOutOfMemory,
   runTool,
   type TextFace,
   ToolFailure,
@@ -45,6 +46,13 @@ import {
   asTooLarge,
   tooManyLayers,
 } from "./agent-admission";
+
+/**
+ * Text whose fonts don't fit in HarfBuzz's capped memory (decision 0033).
+ * The fonts loaded before still measure right; nothing was changed.
+ */
+export const TEXT_OUT_OF_MEMORY =
+  "That text needs more memory for its fonts than agent tools have, and nothing was changed. Use fewer font families or weights, or work on a smaller part.";
 
 /** Nothing animates in a Worker. */
 const NO_FRAMES: FrameClock = { request: () => 0, cancel: () => {} };
@@ -198,9 +206,14 @@ export class AgentEngine {
     return [...missing.values()];
   }
 
-  /** Loads fonts ahead of a run. */
-  load(faces: readonly TextFace[]): Promise<void> {
-    return this.#measurer.load(faces);
+  /** Loads fonts ahead of a run. Fonts that don't fit in HarfBuzz's memory fail it (`ToolFailure`). */
+  async load(faces: readonly TextFace[]): Promise<void> {
+    try {
+      await this.#measurer.load(faces);
+    } catch (error) {
+      if (isHarfBuzzOutOfMemory(error)) throw new ToolFailure(TEXT_OUT_OF_MEMORY);
+      throw error;
+    }
   }
 
   /**
@@ -223,6 +236,11 @@ export class AgentEngine {
       const tooLarge = asTooLarge(error, this.#limit);
       // The meter stopped it: what the editor holds is past what it may, so it's let go of.
       if (editor.sync.takeUnsent().length > 0 || tooLarge) this.drop();
+      // Text measured partway when HarfBuzz ran out: the editor's layout can't be trusted.
+      if (isHarfBuzzOutOfMemory(error)) {
+        this.drop();
+        throw new ToolFailure(TEXT_OUT_OF_MEMORY);
+      }
       throw tooLarge ?? error;
     } finally {
       editor.history.clear();

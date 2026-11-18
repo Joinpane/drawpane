@@ -9,15 +9,12 @@
  * script, which a Worker can't do, so the module is bundled here and handed
  * to it (`patches/harfbuzzjs@1.6.4.patch` lets the package take it).
  */
-import {
-  type FaceFileLoader,
-  HarfBuzzMeasurer,
-  type MeasuredFace,
-  type TextFace,
-} from "@drawpane/editor";
-import hbWasm from "harfbuzzjs/dist/harfbuzz.wasm";
+import type { FaceFileLoader } from "@drawpane/editor";
+// HarfBuzz's module with its memory capped, written by scripts/cap-wasm.ts.
+import hbWasm from "../../wasm/harfbuzz.wasm";
 import type { Env } from "../env";
 import { headlessFontLoader } from "../headless/font-files";
+import { harfBuzzMeasurerWith } from "./harfbuzz-measurer";
 import { type HeadlessMeasurer, type MeasurerFactory, provideMeasurer } from "./measurer";
 
 type HarfBuzz = typeof import("harfbuzzjs");
@@ -50,27 +47,9 @@ function loadHarfBuzz(): Promise<HarfBuzz> {
   return harfBuzz;
 }
 
-/** The face the canvas draws plain text in: what the editor measures with. */
-const canvasFace = (face: TextFace): MeasuredFace => ({ ...face, canvas: true });
-
 /** The engine's measurer over HarfBuzz, with font files from `loadFile`. */
-export function harfBuzzMeasurer(loadFile: FaceFileLoader): HeadlessMeasurer {
-  const measurer = new HarfBuzzMeasurer(loadFile, { harfBuzz: loadHarfBuzz });
-  return {
-    width: (font, text, run) => measurer.width(font, text, run),
-    // Runs with OpenType features or axes, as glyphs: what the headless renderer outlines.
-    shape: (text, run) => measurer.shape(text, run),
-    metrics: (font) => measurer.metrics(font),
-    get generation() {
-      return measurer.generation;
-    },
-    // Ready, or known to have no file (then it's measured in the fallback, as the browser draws it).
-    has: (face) => measurer.status(canvasFace(face)) !== "loading",
-    load: async (faces) => {
-      await measurer.load(faces.map(canvasFace));
-    },
-  };
-}
+export const harfBuzzMeasurer = (loadFile: FaceFileLoader): HeadlessMeasurer =>
+  harfBuzzMeasurerWith(loadFile, loadHarfBuzz);
 
 /**
  * A file's font files: its team's fonts, then Google's and the app's own.

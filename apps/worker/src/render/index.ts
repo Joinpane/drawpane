@@ -5,7 +5,7 @@
  * `createHeadlessRenderer`; the Worker itself doesn't import the editor.
  *
  * resvg's WebAssembly comes in as a compiled module, as Workers require,
- * and is set up on the first render, not when the Worker starts.
+ * with its memory capped. Each render draws in a fresh instance of it.
  */
 import {
   cachedFontLoader,
@@ -13,8 +13,9 @@ import {
   type Rasteriser,
   resvgRasteriser,
 } from "@drawpane/raster";
-// The same file @drawpane/raster's glue expects: both pin one version (test/render.test.ts checks).
-import resvgWasm from "@resvg/resvg-wasm/index_bg.wasm";
+// The same file @drawpane/raster's glue expects (both pin one version: test/render.test.ts checks),
+// with its memory capped by scripts/cap-wasm.ts.
+import resvgWasm from "../../wasm/resvg.wasm";
 import type { Env } from "../env";
 import { workerFontLoader } from "./fonts";
 import { type WorkerImage, workerImageLoader } from "./media";

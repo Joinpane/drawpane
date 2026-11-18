@@ -6,15 +6,15 @@
   "description": "The Drawpane Cloudflare Worker: routing, auth, REST API, static assets and the FileRoom Durable Object.",
   "type": "module",
   "scripts": {
-    "dev": "node -e \"require('fs').mkdirSync('../web/dist',{recursive:true})\" && wrangler dev --local-upstream localhost:8787",
+    "dev": "node -e \"require('fs').mkdirSync('../web/dist',{recursive:true})\" && node scripts/cap-wasm.ts && wrangler dev --local-upstream localhost:8787",
     "types": "wrangler types --include-runtime=false src/worker-configuration.d.ts",
     "typecheck": "tsc -p .",
     "test": "vitest run",
     "memory": "vitest run -c vitest.memory.config.ts",
-    "deploy": "wrangler deploy",
+    "deploy": "node scripts/cap-wasm.ts && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
-    "build": "wrangler deploy --dry-run --outdir dist"
+    "build": "node scripts/cap-wasm.ts && wrangler deploy --dry-run --outdir dist"
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",

@@ -1,0 +1,55 @@
+diff --git a/index.d.ts b/index.d.ts
+index 4153e038f1f075af4c612f71fa256a968490138b..8bf8b7bf62f3e5f5cb8b1f51a61fa14f0f1d69ae 100644
+--- a/index.d.ts
++++ b/index.d.ts
+@@ -105,5 +105,15 @@ export declare const Resvg: {
+ 		readonly width: number;
+ 	};
+ };
++/**
++ * Drawpane: the glue for an instance of its own. `initSync` instantiates it
++ * from a compiled module at once; `memory` is its linear memory once set up.
++ */
++export declare function createResvg(): {
++	Resvg: typeof Resvg;
++	initWasm: typeof initWasm;
++	initSync(module: WebAssembly.Module): void;
++	memory(): WebAssembly.Memory;
++};
+ 
+ export {};
+diff --git a/index.mjs b/index.mjs
+index 60f7b616e8f4c7afcedb8e242c02e1f8cec13ab3..7b78b171a304069da7064a29108848f7d25f2d26 100644
+--- a/index.mjs
++++ b/index.mjs
+@@ -1,4 +1,8 @@
+ // wasm/dist/index.js
++// Drawpane: everything below is one instance's glue, made by `createResvg`, so a caller can draw
++// each picture in an instance of its own. A trap (out of memory, under a capped memory) leaves an
++// instance unusable and what it held unfreed, and `initWasm` refuses to run twice.
++function createResvg() {
+ var wasm;
+ var heap = new Array(128).fill(void 0);
+ heap.push(void 0, null, true, false);
+@@ -578,7 +582,20 @@ var Resvg2 = class extends Resvg {
+ function isCustomFontsOptions(value) {
+   return Object.prototype.hasOwnProperty.call(value, "fontBuffers");
+ }
++// Drawpane: an instance made at once from a compiled module.
++var initSync = (module) => {
++  if (initialized) throw new Error("Already initialized.");
++  const instance = new WebAssembly.Instance(module, __wbg_get_imports());
++  __wbg_finalize_init(instance, module);
++  initialized = true;
++};
++return { Resvg: Resvg2, initWasm, initSync, memory: () => wasm.memory };
++}
++var shared = createResvg();
++var Resvg = shared.Resvg;
++var initWasm = shared.initWasm;
+ export {
+-  Resvg2 as Resvg,
++  Resvg,
++  createResvg,
+   initWasm
+ };

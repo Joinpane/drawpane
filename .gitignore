@@ -14,3 +14,5 @@ storybook-static/
 .env
 .env.*
 !.env.example
+# The Worker's capped WebAssembly, written by apps/worker/scripts/cap-wasm.ts.
+apps/worker/wasm/

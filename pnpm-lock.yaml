@@ -201,7 +201,8 @@ catalogs:
 patchedDependencies:
   '@open-pencil/fig@0.16.0': 392a1d4f9f0db736b314fce3f94da73f9d793ebec52f479cba029e474d95af06
   '@open-pencil/scene-graph@0.16.0': 637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad
-  harfbuzzjs@1.6.4: 720762f2eee41eef232c7e4ef0f4970d68f7d5a08cd5bfd50a70fa2ce759b136
+  '@resvg/resvg-wasm@2.6.2': 561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23
+  harfbuzzjs@1.6.4: 8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a
 
 importers:
 
@@ -315,13 +316,13 @@ importers:
         version: link:../../packages/raster
       '@resvg/resvg-wasm':
         specifier: 2.6.2
-        version: 2.6.2
+        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
       '@simplewebauthn/server':
         specifier: 14.1.0
         version: 14.1.0
       harfbuzzjs:
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=720762f2eee41eef232c7e4ef0f4970d68f7d5a08cd5bfd50a70fa2ce759b136)
+        version: 1.6.4(patch_hash=8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a)
       hono:
         specifier: 4.13.18
         version: 4.13.18
@@ -417,7 +418,7 @@ importers:
         version: link:../raster
       harfbuzzjs:
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=720762f2eee41eef232c7e4ef0f4970d68f7d5a08cd5bfd50a70fa2ce759b136)
+        version: 1.6.4(patch_hash=8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a)
       pathkit-wasm:
         specifier: 1.0.0
         version: 1.0.0
@@ -545,7 +546,7 @@ importers:
     dependencies:
       '@resvg/resvg-wasm':
         specifier: 2.6.2
-        version: 2.6.2
+        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
     devDependencies:
       '@types/node':
         specifier: 26.6.6
@@ -2897,7 +2898,7 @@ snapshots:
 
   '@poppinss/exception@1.2.3': {}
 
-  '@resvg/resvg-wasm@2.6.2': {}
+  '@resvg/resvg-wasm@2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.19':
     optional: true
@@ -3322,7 +3323,7 @@ snapshots:
 
   fzstd@0.1.1: {}
 
-  harfbuzzjs@1.6.4(patch_hash=720762f2eee41eef232c7e4ef0f4970d68f7d5a08cd5bfd50a70fa2ce759b136): {}
+  harfbuzzjs@1.6.4(patch_hash=8eebc3bd884d13144bdf64fe1a9f6c0818465bedd9fa71a98971961a25db9a9a): {}
 
   hono@4.13.18: {}
 

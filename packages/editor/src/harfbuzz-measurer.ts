@@ -37,6 +37,7 @@
  */
 import type { NodeRecord } from "@drawpane/model";
 import { getProp } from "@drawpane/model";
+import { isHarfBuzzOutOfMemory, sharedFace } from "./harfbuzz-faces";
 import { textSpans } from "./rich-text";
 import { type FontBytesLoader, Shaper, type ShapingFace, shapingFace } from "./shaping";
 import {
@@ -423,8 +424,18 @@ export class HarfBuzzMeasurer implements TextMeasurer {
       const done = this.#open(face).then(
         (ready) =>
           this.#settle(key, ready ? { status: "ready", face: ready } : { status: "unavailable" }),
-        () => this.#settle(key, { status: "unavailable" }),
+        (error: unknown) => {
+          // HarfBuzz's memory is full: not a face without a file, which would quietly measure
+          // in the fallback. `load` fails with it, and the face is tried again next time.
+          if (isHarfBuzzOutOfMemory(error)) {
+            this.#faces.delete(key);
+            throw error;
+          }
+          this.#settle(key, { status: "unavailable" });
+        },
       );
+      // Started by a measure that doesn't wait for it: only `load` hears the failure.
+      done.catch(() => {});
       entry = { status: "loading", done };
       this.#faces.set(key, entry);
     }
@@ -445,7 +456,8 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     const [hb, file] = await Promise.all([this.#hb(), this.#loadFile(face)]);
     if (!file) return null;
     const { bytes, weight, subsets } = file instanceof ArrayBuffer ? { bytes: file } : file;
-    const hbFace = new hb.Face(new hb.Blob(bytes));
+    const shared = sharedFace(hb, bytes);
+    const hbFace = shared.face;
     const upem = hbFace.upem || 1000;
     const font = new hb.Font(hbFace);
     // Only the weight is set: Google serves browsers its variable files with other axes at their defaults.
@@ -459,7 +471,7 @@ export class HarfBuzzMeasurer implements TextMeasurer {
       hb,
       font,
       em: upem * PRECISION,
-      unicodes: new Set(hbFace.collectUnicodes()),
+      unicodes: shared.unicodes,
       subset: subsets ? subsetOf(subsets) : () => 0,
       metrics: verticalMetrics(hb, hbFace, font, upem),
     };
