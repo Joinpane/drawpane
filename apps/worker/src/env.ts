@@ -1,3 +1,5 @@
+// Types only: the runner is another script, reached through its binding (no code comes along).
+import type { AgentRunner } from "../../agent-runner/src/index";
 import type { FileRoom } from "./rooms/file-room";
 
 /** Bindings and secrets, as configured in wrangler.jsonc and `wrangler secret put`. */
@@ -6,6 +8,12 @@ export interface Env {
   /** Snapshots, media and fonts. */
   readonly FILES: R2Bucket;
   readonly FILE_ROOM: DurableObjectNamespace<FileRoom>;
+  /**
+   * The agent runner (decision 0033): a Durable Object per file in the
+   * runner's own script (`script_name`, apps/agent-runner). Absent when
+   * agent tools are off (`AGENT_TOOLS`).
+   */
+  readonly AGENT_RUNNER?: DurableObjectNamespace<AgentRunner>;
   readonly ASSETS: Fetcher;
   /** Signs WebAuthn challenges and FileRoom claims. At least 32 random bytes. */
   readonly SESSION_SECRET: string;
@@ -37,10 +45,11 @@ export interface Env {
   /** `off` stops the Worker from fetching Google Fonts (see api/fonts.ts). */
   readonly GOOGLE_FONTS?: string;
   /**
-   * `standin` turns on the agent tools with a stand-in text measurer, for
-   * tests and local development (see agent/measurer.ts). Unset in production.
+   * `off` turns the agent tools off (the read tools stay): the installer
+   * sets it on the Workers Free plan, whose 10 ms of CPU can't build an
+   * editor for a real file (decision 0033, answer 4).
    */
-  readonly AGENT_MEASURER?: string;
+  readonly AGENT_TOOLS?: string;
   /** Sign in with GitHub: an OAuth app's client id and secret (docs/self-hosting.md). */
   readonly GITHUB_CLIENT_ID?: string;
   readonly GITHUB_CLIENT_SECRET?: string;

@@ -15,8 +15,17 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*", "/ws/*"]
   },
+  // The agent runner is a script of its own (apps/agent-runner, decision 0033): an agent call that
+  // runs out of memory resets its isolate, never a file's room. Deploy it first: this binds it.
   "durable_objects": {
-    "bindings": [{ "name": "FILE_ROOM", "class_name": "FileRoom" }]
+    "bindings": [
+      { "name": "FILE_ROOM", "class_name": "FileRoom" },
+      {
+        "name": "AGENT_RUNNER",
+        "class_name": "AgentRunner",
+        "script_name": "drawpane-agent-runner"
+      }
+    ]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FileRoom"] }],
   "d1_databases": [

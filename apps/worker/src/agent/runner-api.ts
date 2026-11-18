@@ -4,9 +4,11 @@
  * room does for an agent call, as two separate APIs the main Worker calls
  * in turn (`call.ts`).
  *
- * Everything here is plain data, so it can cross RPC. Today the runner is
- * implemented in-process, hosted by the room (`runner.ts`); migration step 3
- * moves it into a script of its own behind the same interface. Three rules
+ * Everything here is plain data (and, for a cold runner, a stream), so it
+ * crosses RPC: the runner is a Durable Object in a script of its own
+ * (`apps/agent-runner`), bound here as AGENT_RUNNER. The two scripts are
+ * deployed one after the other, the runner first, so each side checks `v`
+ * and the runner accepts every version in AGENT_RUNNER_ACCEPTS. Three rules
  * from step 0 (`0033-agent-runner-step0.md`) shape it:
  *
  * - A failed `committed` means the runner dropped its editor, never that the
@@ -15,10 +17,16 @@
  *   every call (`AgentDeps.runner` is a factory).
  * - The room never awaits the runner. The main Worker makes every call.
  */
-import type { Op } from "@drawpane/model";
+import type { CopiesFormat, Op } from "@drawpane/model";
 
-/** The runner's RPC version: the main Worker of one release back must still be understood. */
+/** The interface's version, sent with every request and note. */
 export const AGENT_RUNNER_V = 1;
+/**
+ * The versions the runner answers. A release that changes the interface
+ * keeps the one before in this list, because the runner is deployed first
+ * and must still understand the main Worker of one release back.
+ */
+export const AGENT_RUNNER_ACCEPTS: readonly number[] = [1];
 
 /** An agent session writing to a file (decision 0021), checked by the Worker. */
 export interface AgentSessionRef {
@@ -84,11 +92,66 @@ export type AgentReads = {
   readonly absent: readonly string[];
 } | null;
 
+/** A logged transaction, as the room keeps it: its revision and its operations' JSON. */
+export interface AgentLoggedTxn {
+  readonly revn: number;
+  readonly ops: string;
+}
+
+/**
+ * The file as the runner gets it for a run, at the room's revision `revn`
+ * (decision 0033, "Getting the file"). The main Worker asks the room for it
+ * (`AgentRoomApi.agentSource`, or with admission) and hands it over; the
+ * runner never reads the room.
+ *
+ * - `log`: warm. What was logged after `from`, the revision the runner said
+ *   its editor shows (`AgentRunnerApi.held`); none when it's `revn`.
+ * - `snapshot`: cold. A version 2 snapshot at revision `at`: the latest saved
+ *   version in R2 (`key`), or the file as it is streamed from the room
+ *   (`body`, shared with downloads of that revision), then what was logged
+ *   after `at`.
+ *
+ * `count` (the stored nodes at `revn`) and `copies` let the runner check
+ * that what it built is the room's file.
+ */
+export type AgentFileSource = {
+  readonly revn: number;
+  readonly count: number;
+  readonly copies: CopiesFormat;
+} & (
+  | { readonly kind: "log"; readonly from: number; readonly txns: readonly AgentLoggedTxn[] }
+  | {
+      readonly kind: "snapshot";
+      readonly at: number;
+      readonly key?: string;
+      readonly body?: ReadableStream<Uint8Array>;
+      readonly txns: readonly AgentLoggedTxn[];
+    }
+);
+
+/**
+ * What the main Worker asks for the file with: the revision the runner's
+ * editor shows (null: cold), and `live` to skip the saved version (the
+ * runner couldn't use it).
+ */
+export interface AgentSourceRequest {
+  readonly v: number;
+  readonly fileId: string;
+  readonly from: number | null;
+  readonly live?: boolean;
+}
+
+/** The source, or `busy` when as many people are downloading the file as the room serves at once. */
+export type AgentSourceAnswer =
+  | { readonly ok: true; readonly source: AgentFileSource }
+  | { readonly ok: false; readonly busy: true };
+
 export interface AgentRunRequest {
   readonly v: number;
   readonly fileId: string;
   readonly tool: string;
   readonly input: unknown;
+  readonly source: AgentFileSource;
 }
 
 export type AgentRunAnswer =
@@ -108,7 +171,19 @@ export type AgentRunAnswer =
       readonly result: unknown;
       readonly image?: { readonly mimeType: string; readonly base64: string };
     }
-  | { readonly ok: false; readonly message: string };
+  | { readonly ok: false; readonly message: string }
+  /**
+   * The runner couldn't use the source (its editor moved on meanwhile, the
+   * saved version didn't match, or it loaded fonts and has to build again):
+   * ask the room again, cold (`from: null`), with `live` when said.
+   */
+  | { readonly ok: false; readonly again: true; readonly live?: boolean };
+
+/** What the runner's editor shows for a file: the revision, or null when it's cold. */
+export interface AgentHeld {
+  readonly v: number;
+  readonly revn: number | null;
+}
 
 /** How the commit of a run went: `revn` is where it landed, or null when it didn't. */
 export interface AgentCommittedNote {
@@ -126,7 +201,9 @@ export interface AgentCommittedNote {
  * room (`AgentRoomApi.commitAgentRun`) and says how that went.
  */
 export interface AgentRunnerApi {
-  /** Runs a tool on the file as the runner gets it. A tool's failure is an answer, not a throw. */
+  /** The revision its editor shows for the file, to ask the room for the log since. */
+  held(fileId: string): Promise<AgentHeld>;
+  /** Runs a tool on the file as `request.source` gives it. A tool's failure is an answer, not a throw. */
   run(request: AgentRunRequest): Promise<AgentRunAnswer>;
   /**
    * The commit of `runId` landed at `revn`, or didn't (null). Landed right
@@ -147,6 +224,8 @@ export interface AgentAdmissionRequest {
   /** For a write: the session and call id, to answer a repeated id as recorded. */
   readonly sessionId?: string;
   readonly callId?: string;
+  /** The revision the runner's editor shows (null: cold), so admission brings the source too. */
+  readonly from?: number | null;
 }
 
 /**
@@ -158,7 +237,13 @@ export interface AgentAdmissionRequest {
  * Nothing else holds it up.
  */
 export type AgentAdmission =
-  | { readonly admitted: true; readonly revn: number; readonly claim?: string }
+  | {
+      readonly admitted: true;
+      readonly revn: number;
+      readonly claim?: string;
+      /** The file for the first run, when `from` was given and the room could send it. */
+      readonly source?: AgentFileSource;
+    }
   | { readonly admitted: false; readonly busy: true }
   | { readonly admitted: false; readonly answer: AgentCallResult };
 
@@ -210,6 +295,8 @@ export type CommitAgentAnswer =
 /** The room's part in an agent call: two short steps, neither of which waits on the runner. */
 export interface AgentRoomApi {
   admitAgentCall(request: AgentAdmissionRequest): Promise<AgentAdmission>;
+  /** The file for a run, from where the runner is (`AgentFileSource`). */
+  agentSource(request: AgentSourceRequest): Promise<AgentSourceAnswer>;
   commitAgentRun(request: CommitAgentRun): Promise<CommitAgentAnswer>;
   /** Lets go of an admitted write's claim on its call id; a claim already gone is fine. */
   releaseAgentCall(request: AgentRelease): Promise<void>;

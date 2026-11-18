@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024"],
+    "types": ["@cloudflare/workers-types", "node"],
+    "allowImportingTsExtensions": true
+  },
+  // The main Worker's modules this one shares (the runner interface, snapshots, the meter, font
+  // and media keys) are type-checked here too, with the ambient types they're written against.
+  "include": [
+    "src",
+    "scripts",
+    "../worker/src/editor-globals.d.ts",
+    "../worker/src/node-zlib.d.ts",
+    "../worker/src/wasm.d.ts"
+  ]
+}

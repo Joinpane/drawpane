@@ -36,6 +36,10 @@ describe("the command line", () => {
     expect((error(["--yes=1"]) as Error).message).toBe(
       "--yes doesn't take a value: it's on when given. See --help.",
     );
+    expect((error(["upgrade", "--plan"]) as Error).message).toBe(
+      "--plan needs a value, like --plan free.",
+    );
+    expect(parseCli(["upgrade", "--plan", "paid"]).values.plan).toBe("paid");
   });
 
   it("reads install, upgrade and email, with their folders", () => {

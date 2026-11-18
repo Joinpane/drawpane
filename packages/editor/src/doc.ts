@@ -351,6 +351,25 @@ export class Doc {
     copies?: CopiesFormat,
     { meter = null }: { readonly meter?: BuildBudget | null } = {},
   ): void {
+    this.#keepStored(new MemoryStore(nodes, { meter }), copies, meter);
+  }
+
+  /**
+   * `resetStored` from pages that arrive one at a time (a snapshot read from
+   * a stream): each page is kept and counted in `meter` as it arrives, so a
+   * file too large is refused (`BuildTooLarge`) partway, before the rest is
+   * read. The document is unchanged until every page is kept.
+   */
+  async resetStoredPaged(
+    pages: AsyncIterable<Iterable<NodeRecord>>,
+    copies?: CopiesFormat,
+    { meter = null }: { readonly meter?: BuildBudget | null } = {},
+  ): Promise<void> {
+    this.#keepStored(await MemoryStore.paged(pages, { meter }), copies, meter);
+  }
+
+  /** Replaces the whole document with `store`, as a room stores it (`resetStored`). */
+  #keepStored(store: MemoryStore, copies: CopiesFormat | undefined, meter: BuildBudget | null) {
     if (copies !== undefined) this.#compactCopies = copies === "compact";
     if (meter) {
       // The meter counts from what's kept now: the log so far is let go of (a reset replays nothing).
@@ -359,11 +378,11 @@ export class Doc {
     }
     this.#meter = meter;
     if (this.#compactCopies) {
-      this.#compact = new CompactCopies(nodes, { meter });
+      this.#compact = new CompactCopies([], { meter, store });
       this.#store = new MemoryStore();
     } else {
       this.#compact = null;
-      this.#store = new MemoryStore(nodes, { meter });
+      this.#store = store;
     }
     this.#resetIds = new Map();
     this.#record(new Set(), new Set(), true);

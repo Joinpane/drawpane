@@ -33,7 +33,7 @@ Rewriting the file is the wrong fix. It changes the file, has to be done again a
    - Until the catalog has loaded, it aliases nothing, so text never jumps to a stand-in and back.
    - `watchDocumentFonts` loads every stand-in a family may use, since which one depends on size.
    - Layouts are invalidated through the measurer's generation when the registry changes.
-6. **The Worker.** `headless/font-aliases.ts` answers the same question from D1 (the team's families and aliases), the bundled and system lists (shared constants in the model), and the Google catalog.
+6. **The Worker.** `apps/agent-runner/src/font-aliases.ts` (the agent runner, decision 0033) answers the same question from D1 (the team's families and aliases), the bundled and system lists (shared constants in the model), and the Google catalog.
    - It is prepared before measuring, like font files.
    - The team's part is looked up again after a minute, so a long-lived room picks up a new alias.
    - Only fonts installed on someone's own computer are beyond it.

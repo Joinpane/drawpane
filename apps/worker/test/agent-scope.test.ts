@@ -8,7 +8,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { Doc } from "@drawpane/editor";
 import { copyId, type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
-import { agentReads } from "../src/agent/runner";
+import { agentReads } from "../../agent-runner/src/runner";
 import { AGENT_SCOPE_CAP, AGENT_SCOPE_SCAN } from "../src/agent/runner-api";
 import {
   leftBy,
