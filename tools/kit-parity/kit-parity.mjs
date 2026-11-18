@@ -9,9 +9,10 @@
 //   convert   --fig <file.fig>                 convert as the dashboard does (cached)
 //   figma     --key <figma file key> [--only id,id] [--limit n]
 //                                              Figma's renders and trees (resumable)
-//   drawpane  --fig <file.fig> [--port 8951] [--run <dir>]
-//                                              Drawpane's renders and layout (a new run)
-//   compare   [--run <dir>] [--against <scoreboard.json>] [--same]
+//   drawpane  --fig <file.fig> [--port 8951] [--run <dir>] [--allow-missing-fonts]
+//                                              Drawpane's renders and layout (a new run);
+//                                              missing fonts fail it unless allowed
+//   compare   [--run <dir>] [--against <scoreboard.json>] [--same] [--allow-missing-fonts]
 //                                              scores, scoreboard.json and report.html;
 //                                              with --against, what got better and worse
 //                                              (--same: fail unless nothing changed)
@@ -51,6 +52,7 @@ const { positionals, values } = parseArgs({
     run: { type: "string" },
     against: { type: "string" },
     same: { type: "boolean" },
+    "allow-missing-fonts": { type: "boolean" },
     nodes: { type: "string" },
     name: { type: "string" },
   },
@@ -124,6 +126,7 @@ function spec(stage, extra = {}) {
     E2E_KIT_PARITY: out,
     E2E_KIT_PARITY_STAGE: stage,
     E2E_PORT: port,
+    ...(values["allow-missing-fonts"] ? { E2E_KIT_PARITY_ALLOW_MISSING_FONTS: "1" } : {}),
     ...extra,
   };
   const run = spawnSync(

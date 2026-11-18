@@ -317,6 +317,34 @@ const bound =
     return "approximate";
   };
 
+/**
+ * A glass effect's settings, as the file saves them, against the output's.
+ * The record names them after what they do (the plugin API's names in
+ * brackets): specularAngle (lightAngle), specularIntensity (lightIntensity),
+ * refractionIntensity (refraction), refractionRadius (depth),
+ * chromaticAberration (dispersion), radius (frost); checked against the
+ * plugin API on a real file. The 0 to 1 ones are 0 to 100 in Drawpane, and
+ * angles are compared on the circle. A setting the record doesn't have
+ * (older glass has no refractionIntensity, and the plugin API reports none)
+ * isn't compared.
+ */
+function sameGlass(got: Obj, raw: Obj): boolean {
+  const has = (k: string) => num(raw[k]) !== undefined;
+  const pct = (v: unknown) => (num(v) ?? 0) * 100;
+  const turn = (a: unknown, b: unknown) => {
+    const d = Math.abs((((num(a) ?? 0) - (num(b) ?? 0)) % 360) + 360) % 360;
+    return Math.min(d, 360 - d) <= 1;
+  };
+  return (
+    (!has("radius") || near(got.frost, raw.radius)) &&
+    (!has("specularIntensity") || near(got.intensity, pct(raw.specularIntensity))) &&
+    (!has("refractionIntensity") || near(got.refraction, pct(raw.refractionIntensity))) &&
+    (!has("refractionRadius") || near(got.depth, raw.refractionRadius)) &&
+    (!has("chromaticAberration") || near(got.dispersion, pct(raw.chromaticAberration))) &&
+    (!has("specularAngle") || turn(got.angle, raw.specularAngle))
+  );
+}
+
 /** Effects of one kind: the same number of them, with the same values. */
 const effectCheck =
   (figmaType: string): Check =>
@@ -339,6 +367,7 @@ const effectCheck =
         );
       }
       if (figmaType.endsWith("BLUR")) return near(g.radius, w.radius);
+      if (figmaType === "GLASS") return sameGlass(g, w);
       return true;
     });
     return same ? "faithful" : "approximate";
@@ -874,7 +903,10 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
           label: `${t.toLowerCase().replace(/_/g, " ")} effects`,
           importance: "visual",
           code: CODE.effects,
-          how: "the same number of effects of that kind on the layer, with the same radius, spread and offset",
+          how:
+            t === "GLASS"
+              ? "the same number of glass effects on the layer, with the same light angle and intensity, refraction, depth, dispersion and frost"
+              : "the same number of effects of that kind on the layer, with the same radius, spread and offset",
           check: effectCheck(t),
         },
         list,
