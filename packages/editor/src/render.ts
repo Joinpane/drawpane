@@ -144,6 +144,26 @@ export interface CanvasRendererOptions {
 /** No layer reading the backdrop is drawn afresh (see `#redraw`). */
 const NO_READERS: ReadonlySet<string> = new Set();
 
+/**
+ * Where a layer that reads around it paints (its box and its effects'
+ * reach) and what it reads (that and the farthest its backdrop is read),
+ * in zoomed page pixels (device pixels less the camera's translation), not
+ * yet kept to the canvas.
+ */
+interface ReaderArea {
+  readonly paints: Rect;
+  readonly reads: Rect;
+}
+
+/** A rect in zoomed page pixels on the device, kept to the canvas; null when it's off it. */
+function onCanvas(r: Rect, frame: { tx: number; ty: number; width: number; height: number }) {
+  const x0 = Math.max(0, r.x + frame.tx);
+  const y0 = Math.max(0, r.y + frame.ty);
+  const x1 = Math.min(frame.width, r.x + r.width + frame.tx);
+  const y1 = Math.min(frame.height, r.y + r.height + frame.ty);
+  return x1 > x0 && y1 > y0 ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
+}
+
 /** Two neutral greys in device pixels, the same in both themes: an image that is still loading. */
 const PLACEHOLDER = { light: "#ececea", dark: "#dfdfdc", cell: 8 };
 
@@ -154,6 +174,24 @@ const PLACEHOLDER = { light: "#ececea", dark: "#dfdfdc", cell: 8 };
  */
 const BLUR_MAX_PIXELS = 6_000_000;
 const POST_MAX_PIXELS = 16_000_000;
+
+/**
+ * A canvas kept for scratch work, at least w × h: kept as it is while it's
+ * no more than four times that, else made to fit (to a multiple of 64, so
+ * sizes close together share one). Chromium snapshots a canvas that's drawn
+ * from, and copies all of it when it's next drawn into: a canvas grown once
+ * for a whole screen would cost that copy for every strip drawn through it.
+ */
+function fitted(existing: AnyCanvas | null, w: number, h: number): AnyCanvas | null {
+  if (
+    existing &&
+    existing.width >= w &&
+    existing.height >= h &&
+    existing.width * existing.height <= Math.max(4 * w * h, 65_536)
+  )
+    return existing;
+  return scratch(existing, Math.ceil(w / 64) * 64, Math.ceil(h / 64) * 64);
+}
 
 export interface RenderStats {
   drawn: number;
@@ -303,6 +341,13 @@ export interface RenderOptions {
   readonly budget?: number;
 }
 
+/**
+ * The most a frame that only carries on drawing (nothing moved or changed)
+ * may take, when the browser's own share of a frame is longer than the
+ * budget anyway (see `#settling`).
+ */
+const SETTLING_MAX = 64;
+
 /** How far a zoom may stray from the snapshot it scales before it's drawn exactly. */
 const PREVIEW_MAX_SCALE = 4;
 const PREVIEW_MIN_SCALE = 0.6;
@@ -343,12 +388,33 @@ export class CanvasRenderer {
   /** Device pixels drawn in the work so far. */
   #workArea = 0;
   /**
+   * Layers reading the backdrop (glass, background blur) whose effect isn't
+   * on the canvas: a pan's strip, a tile or a change, too costly to draw
+   * with them at once, drew them without it. Each is drawn again with what it reads
+   * once the tiles are done and there's time (see `#drawReaders`).
+   */
+  readonly #pendingReaders = new Set<string>();
+  /** How long each reader's last pass took (it and what it reads), to tell whether one fits in what's left of a frame. */
+  readonly #readerMs = new Map<string, number>();
+  /** Their sum: one not drawn yet is expected to cost what readers have on average. */
+  #readerMsSum = 0;
+  /** Where the page's readers paint and read, in zoomed page pixels, at one zoom and document version. */
+  #readerAreas: {
+    pageId: string;
+    version: number;
+    zoom: number;
+    dpr: number;
+    areas: Map<string, ReaderArea>;
+  } | null = null;
+  /**
    * How long each page last took to draw, in milliseconds per device pixel,
    * at each zoom (by powers of two: zoomed out, a pixel holds far more):
    * whether a frame or a change is drawn at once or a tile at a time, and
    * how big the tiles are.
    */
   readonly #density = new Map<string, Map<number, number>>();
+  /** When the last call started, and how long it took: what the browser took between (see `#settling`). */
+  #lastCall: { start: number; ms: number } | null = null;
   /** Frames kept as stand-ins (see `#standIn`), most recent last. */
   #rasters: Raster[] = [];
   /**
@@ -451,6 +517,7 @@ export class CanvasRenderer {
     { exact = false, budget = Number.POSITIVE_INFINITY }: RenderOptions = {},
   ): boolean {
     const start = performance.now();
+    const settling = this.#settling(start, budget);
     this.stats = { drawn: 0, culled: 0, ms: 0 };
     this.images.frame();
     const page = this.#scene.doc.get(pageId);
@@ -458,6 +525,7 @@ export class CanvasRenderer {
     if (!page) {
       this.#last = null;
       this.#work.clear();
+      this.#pendingReaders.clear();
       this.pending = false;
       ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
       return true;
@@ -486,6 +554,7 @@ export class CanvasRenderer {
     if (!this.#last || !sameContent(this.#last, frame)) this.#generation++;
     if (!exact && this.#preview(ctx, frame)) {
       this.#work.clear();
+      this.#pendingReaders.clear();
       this.pending = false;
       this.stats.ms = performance.now() - start;
       return false;
@@ -493,13 +562,30 @@ export class CanvasRenderer {
     this.#screen = ctx;
     let done: boolean;
     try {
-      done = this.#paint(ctx, frame, snapped, viewport, dpr, start, budget);
+      done = this.#paint(ctx, frame, snapped, viewport, dpr, start, budget, settling);
     } finally {
       this.#screen = null;
     }
     this.pending = !done;
     this.stats.ms = performance.now() - start;
+    this.#lastCall = { start, ms: this.stats.ms };
     return done;
+  }
+
+  /**
+   * The budget for a frame that only carries on drawing what's left (the
+   * last call left work, and nothing has moved or changed since): when the
+   * browser's own share of the last frame (the time between calls, less
+   * what the last call took) was longer than the budget, as on a machine
+   * that draws without a GPU, up to that much, at most `SETTLING_MAX`. The
+   * frame rate drops by at most half while nothing moves, and the exact
+   * picture arrives in far fewer frames. Elsewhere, the budget as it is.
+   */
+  #settling(start: number, budget: number): number {
+    const last = this.#lastCall;
+    if (!this.pending || !last || !Number.isFinite(budget)) return budget;
+    const browser = start - last.start - last.ms;
+    return Math.max(budget, Math.min(SETTLING_MAX, browser));
   }
 
   /**
@@ -516,6 +602,7 @@ export class CanvasRenderer {
     dpr: number,
     start: number,
     budget: number,
+    settling: number,
   ): boolean {
     const last = this.#last;
     const lastExact = this.#lastExact;
@@ -525,9 +612,10 @@ export class CanvasRenderer {
       last.zoom === frame.zoom &&
       sameCanvas(last, frame) &&
       sameLook(last, frame);
-    // Layers that read the backdrop (glass, background blur) read what's drawn around them, so
-    // a page with any is drawn whole at once: in tiles, they'd read tiles not drawn yet.
-    const tiles = Number.isFinite(budget) && this.#scene.backdropReaders(frame.pageId).length === 0;
+    // Drawn a tile at a time when it costs more than the budget. Layers that read the backdrop
+    // (glass, background blur) read what's drawn around them, so a tile they paint in is drawn
+    // with all they read, in one pass, as a pan's strips are, or without them, to draw later.
+    const tiles = Number.isFinite(budget);
     // What to draw now (device pixels); null for all of it.
     let fresh: Rect[] | null = kept ? this.#moved(ctx, last, frame) : null;
     if (fresh && last && last.version !== frame.version) {
@@ -563,6 +651,7 @@ export class CanvasRenderer {
     if (fresh && !this.#work.empty && !tiles) fresh = null;
     if (!fresh) {
       this.#work.clear();
+      this.#pendingReaders.clear();
       const area = frame.width * frame.height;
       if (!tiles || !this.#costly(frame.pageId, frame.zoom, area, budget)) {
         this.#workWhole = false;
@@ -579,13 +668,16 @@ export class CanvasRenderer {
       this.#workWhole = true;
       this.#workMs = 0;
       this.#workArea = 0;
-    } else if (fresh.length > 0) this.#drawFresh(ctx, frame, camera, dpr, fresh);
-    if (this.#work.empty) return true;
+    } else if (fresh.length > 0)
+      this.#drawFresh(ctx, frame, camera, dpr, fresh, budget - (performance.now() - start));
+    if (this.#work.empty && this.#pendingReaders.size === 0) return true;
     // A tile at a time, centre first, while the budget lasts: at least one when nothing else was
     // drawn, so it always gets on, but none past the budget while a pan's strips fill it.
     const centre = { x: view.x + view.width / 2, y: view.y + view.height / 2 };
-    const idle = !fresh || fresh.length === 0;
-    for (let first = idle; first || performance.now() - start < budget; first = false) {
+    let first = !fresh || fresh.length === 0;
+    // Nothing moved or changed: only carrying on with what's left.
+    if (fresh && fresh.length === 0) budget = settling;
+    for (; first || performance.now() - start < budget; first = false) {
       const area = this.#work.take(view, centre);
       if (!area) break;
       const t = performance.now();
@@ -595,15 +687,32 @@ export class CanvasRenderer {
         width: area.width,
         height: area.height,
       };
-      this.#redraw(ctx, frame, camera, dpr, [rect], NO_READERS);
-      this.#workMs += performance.now() - t;
+      // With the readers painting in it, and all they read, when that fits what's left of the
+      // budget (what it drew past the tile is exact then: tiles it covers are done); else
+      // without them, to draw once the tiles are (`#drawReaders`).
+      const grown = this.#drawFresh(ctx, frame, camera, dpr, [rect], budget - (t - start));
       this.#workArea += area.width * area.height;
+      if (grown)
+        for (const r of grown)
+          this.#workArea += this.#work.drop({
+            x: r.x - frame.tx,
+            y: r.y - frame.ty,
+            width: r.width,
+            height: r.height,
+          });
+      this.#workMs += performance.now() - t;
     }
     if (!this.#work.empty) return false;
-    if (this.#workWhole) {
-      this.#measured(frame.pageId, frame.zoom, this.#workMs / Math.max(1, this.#workArea));
-      this.#keep(ctx, frame);
+    if (this.#workWhole && this.#workArea > 0) {
+      // The tiles are done: what the page costs to draw here is known, readers left aside.
+      this.#measured(frame.pageId, frame.zoom, this.#workMs / this.#workArea);
+      this.#workArea = 0;
     }
+    // Then the readers left waiting, each with all it reads, nearest the centre first, while the
+    // budget lasts.
+    this.#drawReaders(ctx, frame, camera, dpr, start, budget, first);
+    if (this.#pendingReaders.size > 0) return false;
+    if (this.#workWhole) this.#keep(ctx, frame);
     this.#workWhole = false;
     return true;
   }
@@ -875,17 +984,142 @@ export class CanvasRenderer {
     return strips.map(([x, y, w, h]) => ({ x, y, width: w, height: h }));
   }
 
-  /** Draws these parts of the canvas (device pixels) exactly: what a pan uncovered, what changed. */
-  #drawFresh(ctx: Ctx, frame: LastFrame, camera: Camera, dpr: number, rects: Rect[]): void {
-    const grown = this.#withReaders(rects, frame.pageId, camera, dpr, frame.width, frame.height);
-    if (grown.readers.size > 0) {
+  /**
+   * Draws these parts of the canvas (device pixels) exactly: what a pan
+   * uncovered, what changed. Layers reading the backdrop that paint there
+   * are drawn with all they read, at once when that fits in what's `left`
+   * of the budget, else later (see `#drawReaders`). Returns what it drew
+   * past `rects` for them, if anything.
+   */
+  #drawFresh(
+    ctx: Ctx,
+    frame: LastFrame,
+    camera: Camera,
+    dpr: number,
+    rects: Rect[],
+    left: number,
+  ): Rect[] | null {
+    const grown = this.#withReaders(rects, frame, camera, dpr);
+    if (grown.readers.size === 0) {
+      for (const rect of rects) this.#redraw(ctx, frame, camera, dpr, [rect], grown.readers);
+      return null;
+    }
+    if (!this.#readersCostly(grown, frame, left)) {
       // Layers that read the backdrop around them (glass, background blur) and touch a part
       // are redrawn whole, with all they read, in one pass: drawn in a part alone, they'd
       // read the last frame's finished pixels past its edge, and leave a seam there.
+      const t = performance.now();
       this.#redraw(ctx, frame, camera, dpr, grown.rects, grown.readers);
-      return;
+      this.#drewReaders(grown.readers, performance.now() - t);
+      return grown.rects;
     }
-    for (const rect of rects) this.#redraw(ctx, frame, camera, dpr, [rect], grown.readers);
+    // Too costly for this frame: the parts now, the readers in them once there's time.
+    for (const rect of rects) this.#redraw(ctx, frame, camera, dpr, [rect], NO_READERS);
+    this.#defer(frame, camera, dpr, rects);
+    return null;
+  }
+
+  /**
+   * Whether drawing these readers with all they read would take longer than
+   * `budget`: by how long each took last time; for one not drawn yet, by
+   * what readers have taken on average (many are a few pixels across, or
+   * cut away, and cost next to nothing) and, as all it reads is drawn with
+   * it, by the page's drawing cost for that much of it (unknown before
+   * anything on the page is measured: costly then).
+   */
+  #readersCostly(
+    grown: { rects: readonly Rect[]; readers: ReadonlySet<string> },
+    frame: LastFrame,
+    budget: number,
+  ): boolean {
+    if (!Number.isFinite(budget)) return false;
+    if (budget <= 0) return true;
+    const average = this.#readerMs.size > 0 ? this.#readerMsSum / this.#readerMs.size : 0;
+    let ms = 0;
+    let unknown = false;
+    for (const id of grown.readers) {
+      const known = this.#readerMs.get(id);
+      if (known === undefined) unknown = true;
+      ms += known ?? average;
+    }
+    if (ms > budget) return true;
+    if (!unknown) return false;
+    // Nothing measured on this page yet: no telling, so not now.
+    const density = this.#densityAt(frame.pageId, frame.zoom);
+    if (density === undefined) return true;
+    const area = grown.rects.reduce((sum, r) => sum + r.width * r.height, 0);
+    return density * area > budget;
+  }
+
+  /** These readers were drawn with all they read, in `ms`: each costs its share. */
+  #drewReaders(readers: ReadonlySet<string>, ms: number): void {
+    for (const id of readers) {
+      this.#pendingReaders.delete(id);
+      const share = ms / readers.size;
+      this.#readerMsSum += share - (this.#readerMs.get(id) ?? 0);
+      this.#readerMs.set(id, share);
+    }
+  }
+
+  /** The readers that paint in `rects` (device pixels), drawn there without their effect: to draw again. */
+  #defer(frame: LastFrame, camera: Camera, dpr: number, rects: readonly Rect[]): void {
+    const areas = this.#areas(frame, camera, dpr);
+    if (areas.size === 0) return;
+    for (const [id, area] of areas) {
+      if (this.#pendingReaders.has(id)) continue;
+      const paints = onCanvas(area.paints, frame);
+      if (paints && rects.some((r) => rectsIntersect(r, paints))) this.#pendingReaders.add(id);
+    }
+  }
+
+  /**
+   * Draws the readers waiting (see `#pendingReaders`), nearest the centre
+   * first, each with all it reads and the readers painting there, in one
+   * pass, while the budget lasts: one likely to cost more than what's left
+   * waits, unless nothing was drawn yet (`first`), so work always gets on. Readers
+   * off the canvas are dropped: a pan back draws them as they come in.
+   */
+  #drawReaders(
+    ctx: Ctx,
+    frame: LastFrame,
+    camera: Camera,
+    dpr: number,
+    start: number,
+    budget: number,
+    first: boolean,
+  ): void {
+    if (this.#pendingReaders.size === 0) return;
+    const areas = this.#areas(frame, camera, dpr);
+    const cx = frame.width / 2;
+    const cy = frame.height / 2;
+    const waiting: Array<{ id: string; paints: Rect; distance: number }> = [];
+    for (const id of this.#pendingReaders) {
+      const area = areas.get(id);
+      const paints = area && onCanvas(area.paints, frame);
+      if (!paints) {
+        this.#pendingReaders.delete(id);
+        continue;
+      }
+      const dx = paints.x + paints.width / 2 - cx;
+      const dy = paints.y + paints.height / 2 - cy;
+      waiting.push({ id, paints, distance: dx * dx + dy * dy });
+    }
+    waiting.sort((a, b) => a.distance - b.distance);
+    for (const { id, paints } of waiting) {
+      if (!this.#pendingReaders.has(id)) continue;
+      const now = performance.now();
+      const left = budget - (now - start);
+      if (!first && left <= 0) break;
+      // Its own cost alone too much: skip it without working out what it reads.
+      if (!first && this.#readersCostly({ rects: [paints], readers: new Set([id]) }, frame, left))
+        continue;
+      const grown = this.#withReaders([paints], frame, camera, dpr);
+      if (!first && this.#readersCostly(grown, frame, left)) continue;
+      first = false;
+      this.#redraw(ctx, frame, camera, dpr, grown.rects, grown.readers);
+      this.#drewReaders(grown.readers, performance.now() - now);
+      this.#pendingReaders.delete(id);
+    }
   }
 
   /**
@@ -938,26 +1172,25 @@ export class CanvasRenderer {
   /**
    * The strips grown by what's read by the layers that read around them and
    * paint in them, and so on (what one reads may be where another paints),
-   * within the canvas; null when no such layer paints in them, so they're
-   * drawn as they are.
+   * within the canvas, and those layers. No layers when none paints in them,
+   * so they're drawn as they are.
    */
   #withReaders(
     strips: readonly Rect[],
-    pageId: string,
+    frame: LastFrame,
     camera: Camera,
     dpr: number,
-    width: number,
-    height: number,
   ): { rects: Rect[]; readers: Set<string> } {
     // Glass and background blur. (Layer blur and texture spread only the layer, which is drawn
     // whole into a canvas of its own.)
-    const readers = this.#scene.backdropReaders(pageId);
     const taken = new Set<string>();
-    if (readers.length === 0) return { rects: [...strips], readers: taken };
+    const all = this.#areas(frame, camera, dpr);
+    if (all.size === 0) return { rects: [...strips], readers: taken };
     const areas: Array<{ id: string; paints: Rect; reads: Rect }> = [];
-    for (const id of readers) {
-      const area = this.#readerArea(id, camera, dpr, width, height);
-      if (area) areas.push({ id, ...area });
+    for (const [id, area] of all) {
+      const paints = onCanvas(area.paints, frame);
+      const reads = onCanvas(area.reads, frame);
+      if (paints && reads) areas.push({ id, paints, reads });
     }
     const dirty = [...strips];
     for (let grew = true; grew; ) {
@@ -973,21 +1206,41 @@ export class CanvasRenderer {
   }
 
   /**
-   * Where a layer that reads around it paints (its box and its effects'
-   * reach), and what it reads (that and the farthest its backdrop is read),
-   * in device pixels, within the canvas.
+   * Where each of the page's layers that read around them paints and reads
+   * (see `ReaderArea`), kept while the zoom and the document stay as they
+   * are: a pan only moves them.
    */
-  #readerArea(
-    id: string,
-    camera: Camera,
-    dpr: number,
-    width: number,
-    height: number,
-  ): { paints: Rect; reads: Rect } | null {
+  #areas(frame: LastFrame, camera: Camera, dpr: number): ReadonlyMap<string, ReaderArea> {
+    const cached = this.#readerAreas;
+    if (
+      cached &&
+      cached.pageId === frame.pageId &&
+      cached.version === frame.version &&
+      cached.zoom === camera.zoom &&
+      cached.dpr === dpr
+    )
+      return cached.areas;
+    const areas = new Map<string, ReaderArea>();
+    for (const id of this.#scene.backdropReaders(frame.pageId)) {
+      const area = this.#readerArea(id, camera.zoom, dpr);
+      if (area) areas.set(id, area);
+    }
+    this.#readerAreas = {
+      pageId: frame.pageId,
+      version: frame.version,
+      zoom: camera.zoom,
+      dpr,
+      areas,
+    };
+    return areas;
+  }
+
+  /** Where a layer that reads around it paints and reads, in zoomed page pixels. */
+  #readerArea(id: string, zoom: number, dpr: number): ReaderArea | null {
     const node = this.#scene.doc.get(id);
     const b = this.#scene.bounds(id);
     if (!node || !b) return null;
-    const z = camera.zoom * dpr;
+    const z = zoom * dpr;
     const paints = effectReach(node) * z;
     let reads = paints;
     for (const e of getProp(node.props, "effects")) {
@@ -995,17 +1248,15 @@ export class CanvasRenderer {
       if (e.type === "glass") reads = Math.max(reads, glassParams(e, z).margin);
       if (e.type === "background-blur") reads = Math.max(reads, blurSigma(e.radius) * z * 3);
     }
-    const rect = (reach: number): Rect | null => {
+    const rect = (reach: number): Rect => {
       const r = Math.ceil(reach) + 2;
-      const x0 = Math.max(0, Math.floor((b.x * camera.zoom + camera.x) * dpr) - r);
-      const y0 = Math.max(0, Math.floor((b.y * camera.zoom + camera.y) * dpr) - r);
-      const x1 = Math.min(width, Math.ceil(((b.x + b.width) * camera.zoom + camera.x) * dpr) + r);
-      const y1 = Math.min(height, Math.ceil(((b.y + b.height) * camera.zoom + camera.y) * dpr) + r);
-      return x1 > x0 && y1 > y0 ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
+      const x0 = Math.floor(b.x * z) - r;
+      const y0 = Math.floor(b.y * z) - r;
+      const x1 = Math.ceil((b.x + b.width) * z) + r;
+      const y1 = Math.ceil((b.y + b.height) * z) + r;
+      return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
     };
-    const p = rect(paints);
-    const r = rect(reads);
-    return p && r ? { paints: p, reads: r } : null;
+    return { paints: rect(paints), reads: rect(reads) };
   }
 
   /**
@@ -1320,17 +1571,10 @@ export class CanvasRenderer {
     resetState(ctx);
   }
 
-  /** A canvas for post effects, by slot (two per nesting depth): kept and grown. */
+  /** A canvas for post effects, by slot (two per nesting depth): kept while it fits (see `fitted`). */
   #postCanvas(slot: number, w: number, h: number): OffscreenCanvas | HTMLCanvasElement | null {
-    let canvas = this.#postCanvases[slot];
-    if (!canvas) {
-      if (typeof OffscreenCanvas !== "undefined") canvas = new OffscreenCanvas(w, h);
-      else if (typeof document !== "undefined") canvas = document.createElement("canvas");
-      else return null;
-      this.#postCanvases[slot] = canvas;
-    }
-    if (canvas.width < w) canvas.width = w;
-    if (canvas.height < h) canvas.height = h;
+    const canvas = fitted(this.#postCanvases[slot] ?? null, w, h);
+    if (canvas) this.#postCanvases[slot] = canvas;
     return canvas;
   }
 
@@ -1366,7 +1610,7 @@ export class CanvasRenderer {
     // Layers above a mask that masks by its picture, gathered to draw together.
     let scope: { mask: NodeRecord; ids: string[] } | null = null;
     const flush = () => {
-      if (scope) this.#drawMasked(ctx, scope.mask, scope.ids, camera, dpr, alpha, blend);
+      if (scope) this.#drawMasked(ctx, scope.mask, scope.ids, camera, dpr, visible, alpha, blend);
       scope = null;
     };
     for (const { id, isMask } of maskScopes(doc, parentId)) {
@@ -1419,23 +1663,29 @@ export class CanvasRenderer {
     ids: readonly string[],
     camera: Camera,
     dpr: number,
+    visible: Rect,
     alpha: number,
     blend: GlobalCompositeOperation,
   ): void {
     if (ids.length === 0) return;
     const region = exportBounds(this.#scene, [mask.id]);
     if (!region) return;
-    const x0 = Math.max(0, Math.floor((region.x * camera.zoom + camera.x) * dpr));
-    const y0 = Math.max(0, Math.floor((region.y * camera.zoom + camera.y) * dpr));
-    const x1 = Math.min(
-      ctx.canvas.width,
-      Math.ceil(((region.x + region.width) * camera.zoom + camera.x) * dpr),
-    );
-    const y1 = Math.min(
-      ctx.canvas.height,
-      Math.ceil(((region.y + region.height) * camera.zoom + camera.y) * dpr),
-    );
-    if (x1 <= x0 || y1 <= y0) return;
+    const whole = {
+      x0: Math.max(0, Math.floor((region.x * camera.zoom + camera.x) * dpr)),
+      y0: Math.max(0, Math.floor((region.y * camera.zoom + camera.y) * dpr)),
+      x1: Math.min(
+        ctx.canvas.width,
+        Math.ceil(((region.x + region.width) * camera.zoom + camera.x) * dpr),
+      ),
+      y1: Math.min(
+        ctx.canvas.height,
+        Math.ceil(((region.y + region.height) * camera.zoom + camera.y) * dpr),
+      ),
+    };
+    if (whole.x1 <= whole.x0 || whole.y1 <= whole.y0) return;
+    const part = this.#maskedPart(whole, camera, dpr, visible);
+    if (!part) return;
+    const { x0, y0, x1, y1 } = part;
     const w = x1 - x0;
     const h = y1 - y0;
     const depth = this.#maskDepth;
@@ -1456,11 +1706,14 @@ export class CanvasRenderer {
       width: w / dpr / camera.zoom,
       height: h / dpr / camera.zoom,
     };
-    // Drawn whole into canvases of their own: not the parts of a partial redraw.
+    // Drawn whole within that part into canvases of their own, not cut to the parts of a partial
+    // redraw. Its layers reading the backdrop see all of it when that's the mask's whole reach;
+    // in a part, only those drawn with all they read (`#fresh`) are drawn, as outside masks.
     const parts = this.#parts;
     const fresh = this.#fresh;
+    const partial = x0 !== whole.x0 || y0 !== whole.y0 || x1 !== whole.x1 || y1 !== whole.y1;
     this.#parts = null;
-    this.#fresh = null;
+    this.#fresh = partial ? fresh : null;
     this.#maskDepth++;
     try {
       for (const id of ids) this.#draw(cctx, id, shifted, dpr, holds, alpha, blend);
@@ -1484,13 +1737,51 @@ export class CanvasRenderer {
     ctx.restore();
   }
 
-  /** Canvases for masked layers and their masks: two per nesting depth, grown as needed. */
+  /**
+   * What of a mask's reach on the canvas (`whole`, device pixels) its
+   * layers are drawn over: where the canvas is being drawn (a pan's strip,
+   * a tile, a change; all of it for a whole frame). A pan along a screen of
+   * masked pictures then draws them over the strip it uncovered, not over
+   * the whole screen each frame. A layer's pixels there don't depend on how
+   * far past them the canvas reaches, but for glass and background blur,
+   * which read around them: a pass that draws one with its effect draws
+   * all it reads too (`#withReaders`). Null when none of it is being drawn.
+   */
+  #maskedPart(
+    whole: { x0: number; y0: number; x1: number; y1: number },
+    camera: Camera,
+    dpr: number,
+    visible: Rect,
+  ): { x0: number; y0: number; x1: number; y1: number } | null {
+    let part: { x0: number; y0: number; x1: number; y1: number } | null = null;
+    for (const r of this.#parts ?? [visible]) {
+      // A pixel or two more, for antialiasing.
+      const x0 = Math.max(whole.x0, Math.floor((r.x * camera.zoom + camera.x) * dpr) - 2);
+      const y0 = Math.max(whole.y0, Math.floor((r.y * camera.zoom + camera.y) * dpr) - 2);
+      const x1 = Math.min(
+        whole.x1,
+        Math.ceil(((r.x + r.width) * camera.zoom + camera.x) * dpr) + 2,
+      );
+      const y1 = Math.min(
+        whole.y1,
+        Math.ceil(((r.y + r.height) * camera.zoom + camera.y) * dpr) + 2,
+      );
+      if (x1 <= x0 || y1 <= y0) continue;
+      part = part
+        ? {
+            x0: Math.min(part.x0, x0),
+            y0: Math.min(part.y0, y0),
+            x1: Math.max(part.x1, x1),
+            y1: Math.max(part.y1, y1),
+          }
+        : { x0, y0, x1, y1 };
+    }
+    return part;
+  }
+
+  /** Canvases for masked layers and their masks: two per nesting depth, kept while they fit (see `fitted`). */
   #maskCanvas(slot: number, w: number, h: number): AnyCanvas | null {
-    const canvas = scratch(
-      this.#maskCanvases[slot] ?? null,
-      Math.max(w, this.#maskCanvases[slot]?.width ?? 0),
-      Math.max(h, this.#maskCanvases[slot]?.height ?? 0),
-    );
+    const canvas = fitted(this.#maskCanvases[slot] ?? null, w, h);
     if (canvas) this.#maskCanvases[slot] = canvas;
     return canvas;
   }

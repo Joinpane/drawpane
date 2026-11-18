@@ -12,8 +12,13 @@ import { AGENT_TOOLS, type AgentTool, type ToolLevel } from "@drawpane/editor";
 import { ID_PATTERN, newId } from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
-import { agentDeps, callReadTool, callWriteTool } from "../agent/call";
-import { agentToolsEnabled } from "../agent/measurer";
+import {
+  AGENT_TOOLS_OFF,
+  agentDeps,
+  agentToolsEnabled,
+  callReadTool,
+  callWriteTool,
+} from "../agent/call";
 import type { AgentCallResult } from "../agent/runner-api";
 import {
   type AgentSession,
@@ -554,7 +559,7 @@ export const TOOLS: readonly Tool[] = [
 
 const BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
-/** The tools this instance offers: the agent tools only once a text measurer is configured. */
+/** The tools this instance offers: the agent tools only with the agent runner (`agentToolsEnabled`). */
 export const offered = (env: Env) => TOOLS.filter((t) => !t.agent || agentToolsEnabled(env));
 
 /** A tool as `tools/list` describes it. */
@@ -593,7 +598,7 @@ async function handle(ctx: ToolContext, request: Request) {
         serverInfo: SERVER_INFO,
         instructions: agentToolsEnabled(ctx.env)
           ? READ_INSTRUCTIONS + WRITE_INSTRUCTIONS
-          : READ_INSTRUCTIONS,
+          : `${READ_INSTRUCTIONS}\n\n${AGENT_TOOLS_OFF}`,
       };
     }
     case "ping":
@@ -602,7 +607,9 @@ async function handle(ctx: ToolContext, request: Request) {
       return { tools: offered(ctx.env).map(describe) };
     case "tools/call": {
       const t = typeof params.name === "string" ? BY_NAME.get(params.name) : undefined;
-      if (!t || (t.agent && !agentToolsEnabled(ctx.env)))
+      if (t?.agent && !agentToolsEnabled(ctx.env))
+        return toolResult({ error: AGENT_TOOLS_OFF }, true);
+      if (!t)
         throw Object.assign(new Error(`No tool ${String(params.name)}.`), { rpc: INVALID_PARAMS });
       if (t.level === "write" && ctx.scope !== "write")
         return toolResult({ error: WRITE_TOKEN_NEEDED }, true);

@@ -20,7 +20,7 @@
  */
 import type { FontFeatures } from "@drawpane/model";
 import { type Face, type FontBytesLoader, faceKey } from "@drawpane/raster";
-import { sharedFace } from "./harfbuzz-faces";
+import { acquireFace, releaseFace } from "./harfbuzz-faces";
 import type {
   FontMetrics,
   FontResolver,
@@ -69,6 +69,8 @@ interface Instance {
 
 interface ReadyFace {
   readonly hb: HarfBuzz;
+  /** The file, held in `harfbuzz-faces` until `unload`. */
+  readonly bytes: ArrayBuffer;
   readonly face: HbFace;
   readonly upem: number;
   /** Its axes by tag (none for a static font). */
@@ -157,6 +159,11 @@ export class Shaper {
     return () => this.#listeners.delete(listener);
   }
 
+  /** Whether a face has started loading (it may be ready or unavailable since). */
+  started(face: ShapingFace): boolean {
+    return this.#faces.has(faceKey(face));
+  }
+
   status(face: ShapingFace): FaceStatus {
     return this.#faces.get(faceKey(face))?.status ?? "loading";
   }
@@ -167,6 +174,23 @@ export class Shaper {
    */
   retry(face: ShapingFace): void {
     if (this.#faces.get(faceKey(face))?.status === "unavailable") this.#faces.delete(faceKey(face));
+  }
+
+  /**
+   * Lets go of a ready face, freeing its fonts (and its file, when nothing
+   * else holds it): the measurer's load that made it ran out of memory. The
+   * next shape or load starts over.
+   */
+  unload(face: ShapingFace): void {
+    const key = faceKey(face);
+    const entry = this.#faces.get(key);
+    if (entry?.status !== "ready") return;
+    this.#faces.delete(key);
+    for (const { font } of entry.instances.values()) font.destroy();
+    entry.instances.clear();
+    releaseFace(entry.hb, entry.bytes);
+    this.#runs.clear();
+    this.#generation++;
   }
 
   /** Waits for a face: ready, or unavailable. */
@@ -267,10 +291,11 @@ export class Shaper {
     if (variations.length > 0) font.setVariations(variations);
     const instance: Instance = { font, paths: new Map() };
     entry.instances.set(key, instance);
-    // Dropped fonts are freed by harfbuzzjs once collected.
-    for (const old of entry.instances.keys()) {
+    // Dropped fonts are freed now, not once collected: HarfBuzz's memory is capped.
+    for (const [old, dropped] of entry.instances) {
       if (entry.instances.size <= MAX_INSTANCES) break;
       entry.instances.delete(old);
+      dropped.font.destroy();
     }
     return instance;
   }
@@ -303,11 +328,12 @@ export class Shaper {
     });
     const [hb, bytes] = await Promise.all([this.#harfBuzz, this.#loadBytes(face)]);
     if (!bytes) return null;
-    const hbFace = sharedFace(hb, bytes).face;
+    // Held for as long as the shaper lives: its fonts are made from it as runs need them.
+    const hbFace = acquireFace(hb, bytes).face;
     const axes: Record<string, { min: number; default: number; max: number }> = {};
     for (const [tag, axis] of Object.entries(hbFace.getAxisInfos()))
       axes[tag] = { min: axis.min, default: axis.default, max: axis.max };
-    return { hb, face: hbFace, upem: hbFace.upem || 1000, axes, instances: new Map() };
+    return { hb, bytes, face: hbFace, upem: hbFace.upem || 1000, axes, instances: new Map() };
   }
 
   #shape(
@@ -319,16 +345,23 @@ export class Shaper {
   ): ShapedText | null {
     const { hb, upem } = entry;
     const { font, paths } = instance;
+    // Freed here, not when collected: HarfBuzz's memory is capped, and a long text takes a lot of it.
     const buffer = new hb.Buffer();
-    buffer.addText(text);
-    buffer.guessSegmentProperties();
-    hb.shape(
-      font,
-      buffer,
-      Object.entries(features).map(([tag, on]) => new hb.Feature(tag, on ? 1 : 0)),
-    );
-    const infos = buffer.getGlyphInfos();
-    const positions = buffer.getGlyphPositions();
+    let infos: ReturnType<typeof buffer.getGlyphInfos>;
+    let positions: ReturnType<typeof buffer.getGlyphPositions>;
+    try {
+      buffer.addText(text);
+      buffer.guessSegmentProperties();
+      hb.shape(
+        font,
+        buffer,
+        Object.entries(features).map(([tag, on]) => new hb.Feature(tag, on ? 1 : 0)),
+      );
+      infos = buffer.getGlyphInfos();
+      positions = buffer.getGlyphPositions();
+    } finally {
+      buffer.destroy();
+    }
     const scale = size / upem;
     const glyphs: ShapedGlyph[] = [];
     let pen = 0;

@@ -219,6 +219,8 @@ class FontRegistry implements FontResolver {
   #version = 0;
   #teamId: string | null = null;
   #team: readonly FontFamily[] | null = null;
+  /** The team whose families `team` lists, once its load has finished (or failed). */
+  #teamLoadedFor: string | null = null;
   /** Team families, checked before anything else: a team font wins over others of its name. */
   readonly #teamKnown = new Map<string, FontFamily>();
   #teamSheet: {
@@ -279,6 +281,11 @@ class FontRegistry implements FontResolver {
   /** The team's families once loaded, by name. */
   get team(): readonly FontFamily[] | null {
     return this.#team;
+  }
+
+  /** Whether `teamId`'s fonts and aliases have loaded (an empty list if the request failed). */
+  teamLoaded(teamId: string): boolean {
+    return this.#teamLoadedFor === teamId;
   }
 
   /** The team's font aliases once loaded. */
@@ -389,6 +396,7 @@ class FontRegistry implements FontResolver {
     this.#teamKnown.clear();
     for (const f of list) this.#teamKnown.set(f.family, f);
     this.#team = list;
+    this.#teamLoadedFor = teamId;
     const signature = faces
       .map((f) => f.sha)
       .sort()

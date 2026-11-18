@@ -81,12 +81,41 @@ export class MemoryStore implements NodeStore {
 
   constructor(nodes: Iterable<NodeRecord> = [], { meter = null }: MemoryStoreOptions = {}) {
     this.#meter = meter;
+    this.#keep(nodes);
+    this.#index();
+  }
+
+  /**
+   * A store built from pages that arrive one at a time (a snapshot read
+   * from a stream), each page kept and counted as it arrives. A meter
+   * refuses (`BuildTooLarge`) partway, before the page that passes its
+   * limit is kept and before the pages after it are read, so a file too
+   * large is never held whole, parsed or kept.
+   */
+  static async paged(
+    pages: AsyncIterable<Iterable<NodeRecord>>,
+    options: MemoryStoreOptions = {},
+  ): Promise<MemoryStore> {
+    const store = new MemoryStore([], options);
+    for await (const page of pages) store.#keep(page);
+    store.#index();
+    return store;
+  }
+
+  /** Keeps nodes, each counted before it's kept; the child index is made after (`#index`). */
+  #keep(nodes: Iterable<NodeRecord>): void {
+    const meter = this.#meter;
     if (meter)
       for (const node of nodes) {
         meter.charge(storedBytes(node));
         this.#nodes.set(node.id, node);
       }
     else for (const node of nodes) this.#nodes.set(node.id, node);
+  }
+
+  /** Makes the ordered child index from the nodes kept. */
+  #index(): void {
+    this.#children.clear();
     for (const node of this.#nodes.values()) this.#list(node.parent).push(node.id);
     for (const ids of this.#children.values()) ids.sort(this.#compareIds);
   }

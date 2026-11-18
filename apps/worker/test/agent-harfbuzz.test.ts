@@ -4,8 +4,8 @@
  * with a font file as the browser's canvas would.
  */
 import { describe, expect, it } from "vitest";
-import { harfBuzzMeasurer } from "../src/agent/harfbuzz";
-import { STANDIN } from "../src/agent/measurer";
+import { harfBuzzMeasurer } from "../../agent-runner/src/harfbuzz";
+import { STANDIN } from "../../agent-runner/src/measurer";
 import ttfUrl from "./fixtures/InstrumentSans-Regular.ttf?inline";
 
 const bytes = async () => (await fetch(ttfUrl)).arrayBuffer();

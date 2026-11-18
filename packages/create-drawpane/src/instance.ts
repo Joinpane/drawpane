@@ -31,18 +31,48 @@ const InstanceConfig = z.object({
   sendEmail: z.boolean().optional(),
   /** Settings for the Worker, over the release's (e.g. `GOOGLE_FONTS: "off"`). */
   vars: z.record(z.string(), z.string()).optional(),
+  /**
+   * The agent runner's Worker, the second script (docs/decisions/0033-agent-runner.md).
+   * Missing in instances from before it; an upgrade fills it in.
+   */
+  runner: workerName.optional(),
+  /**
+   * The account's Workers plan. "free" turns agent tools off and leaves the
+   * runner undeployed: Free can't set the CPU limits they need. Missing means
+   * paid, or not known yet (a deploy that finds Free saves it).
+   */
+  plan: z.enum(["paid", "free"]).optional(),
 });
 export type InstanceConfig = z.infer<typeof InstanceConfig>;
+export type Plan = NonNullable<InstanceConfig["plan"]>;
+
+const RUNNER_SUFFIX = "-agent-runner";
+
+/**
+ * The agent runner's Worker name for an instance: "design" → "design-agent-runner".
+ * A long name is cut to keep within Cloudflare's 63 characters.
+ */
+export function runnerName(name: string): string {
+  const base = name.slice(0, 63 - RUNNER_SUFFIX.length).replace(/-+$/, "");
+  return `${base}${RUNNER_SUFFIX}`;
+}
+
+/** The runner's name this instance uses: the recorded one, or the default for older configs. */
+export function instanceRunner(config: InstanceConfig): string {
+  return config.runner ?? runnerName(config.name);
+}
 
 /** A new instance's config, before anything exists on Cloudflare. */
 export function newConfig({
   accountId,
   name,
   domain,
+  plan,
 }: {
   accountId: string;
   name: string;
   domain: string | null;
+  plan?: Plan | undefined;
 }): InstanceConfig {
   return {
     version: null,
@@ -52,6 +82,8 @@ export function newConfig({
     bucket: `${name}-files`,
     domain,
     url: null,
+    runner: runnerName(name),
+    ...(plan ? { plan } : {}),
   };
 }
 

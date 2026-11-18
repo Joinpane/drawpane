@@ -9,7 +9,7 @@ import {
   type MeasuredFace,
   type TextFace,
 } from "@drawpane/editor";
-import type { HeadlessFontResolver } from "../headless/font-aliases";
+import type { HeadlessFontResolver } from "./font-aliases";
 import type { HeadlessMeasurer } from "./measurer";
 
 type HarfBuzz = typeof import("harfbuzzjs");
