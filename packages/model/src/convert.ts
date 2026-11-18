@@ -809,8 +809,9 @@ function foldValue(
  * (`recorded`) holds a value for set to that value: with records, a driven
  * field is only ever its record's, so a layer showing another was written
  * before the record's last value (materialized copies lag it) and the record
- * wins. A swap isn't (its layers are another main's, to build again). The
- * same object when nothing changes.
+ * wins. A swap isn't (its layers are another main's, to build again), nor a
+ * field the layer itself no longer references. The same object when nothing
+ * changes.
  */
 function recordWins(
   fields: readonly DrivenField[],
@@ -818,9 +819,12 @@ function recordWins(
   layer: Readonly<Props>,
 ): Readonly<Props> {
   let out: Record<string, unknown> | null = null;
+  // Only fields the layer itself still takes from the property: one unlinked from it (an import
+  // keeps a layer that shows another value so) is its own.
+  const refs = (layer.propRefs ?? {}) as Record<string, string | undefined>;
   for (const [field, key] of fields) {
     const value = recorded[key];
-    if (value === undefined || field === "instanceOf") continue;
+    if (value === undefined || field === "instanceOf" || !refs[field]) continue;
     if (field === "visible" && typeof value !== "boolean") continue;
     if (field === "characters" && typeof value !== "string") continue;
     if (sameValue(value, drivenValue(layer as Record<string, unknown>, field))) continue;
@@ -841,7 +845,7 @@ function staleSwap(
   recorded: Readonly<Record<string, PropertyValue>>,
   layer: NodeRecord,
 ): boolean {
-  if (layer.type !== "frame") return false;
+  if (layer.type !== "frame" || !layer.props.propRefs?.instanceOf) return false;
   const driven = fields.find(([field]) => field === "instanceOf");
   const value = driven ? recorded[driven[1]] : undefined;
   return (
