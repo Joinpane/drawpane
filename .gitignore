@@ -16,5 +16,7 @@ storybook-static/
 !.env.example
 # The agent runner's capped WebAssembly, written by apps/agent-runner/scripts/cap-wasm.ts.
 apps/agent-runner/wasm/
+# Where older builds wrote it, before the agent runner had its own app.
+apps/worker/wasm/
 # The runner as the main Worker's tests build it (apps/worker/vitest.config.ts).
 apps/agent-runner/dist-test/
