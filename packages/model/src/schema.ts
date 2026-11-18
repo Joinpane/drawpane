@@ -637,8 +637,18 @@ const CORNERS = ["frame", "rect"] as const;
 /** Shapes with open ends: line caps and end markers apply. */
 const OPEN_ENDS = ["line", "path"] as const;
 
-/** Layers that can be a mask: anything with a filled outline. */
-const MASKABLE = ["frame", "rect", "ellipse", "polygon", "star", "path"] as const;
+/** Layers that can be a mask: any layer, as in Figma (a shape, a frame, a group, a text, a line). */
+const MASKABLE = [
+  "frame",
+  "group",
+  "rect",
+  "ellipse",
+  "polygon",
+  "star",
+  "line",
+  "path",
+  "text",
+] as const;
 
 /** What an open stroke's end looks like (Figma's arrow and marker ends). */
 export const STROKE_MARKERS = ["none", "arrow", "triangle", "circle", "diamond", "bar"] as const;
@@ -688,14 +698,16 @@ export const PROPS = {
   ),
   effects: prop(z.array(Effect).max(32), [], LAYERS),
   /**
-   * A mask: its outline clips the layers above it in the same parent (up to
-   * the next mask), and it isn't drawn itself, like Figma's "Use as mask".
+   * A mask: it masks the layers above it in the same parent, up to the next
+   * mask or a frame that clips its content, and it isn't drawn itself, like
+   * Figma's "Use as mask" (see the editor's masks.ts).
    */
   isMask: prop(z.boolean(), false, MASKABLE),
   /**
-   * How a mask masks, as in Figma: by its outline (a hard clip), by its
-   * alpha (fills, gradients, opacity and blur fade what's above), or by its
-   * luminance (light shows, dark hides).
+   * How a mask masks, as in Figma: by its outline (a hard clip: whatever it
+   * draws, at full opacity), by its alpha (fills, strokes, gradients,
+   * opacity and effects fade what's above), or by its luminance (light
+   * shows, dark hides).
    */
   maskType: prop(z.enum(["outline", "alpha", "luminance"]), "outline", MASKABLE),
 

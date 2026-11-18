@@ -389,8 +389,12 @@ export function adaptNode(
     node.blendMode = n.blendMode;
   if (n.isMask) {
     node.isMask = true;
-    // Open Pencil reads a mask with only the older outline flag as an alpha mask.
-    node.maskType = n.maskIsOutline && !raw?.maskType ? "VECTOR" : n.maskType;
+    // Open Pencil reads a mask with only the older outline flag as an alpha mask, and passes the
+    // .fig's own name for an outline mask ("OUTLINE"), which the REST API calls "VECTOR".
+    node.maskType =
+      (n.maskIsOutline && !raw?.maskType) || (n.maskType as string) === "OUTLINE"
+        ? "VECTOR"
+        : n.maskType;
   }
   const effects = convertEffects(n.effects, raw?.effects, notes);
   if (effects.length > 0) node.effects = effects;

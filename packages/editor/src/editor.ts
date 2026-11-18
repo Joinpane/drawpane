@@ -1747,10 +1747,8 @@ export class Editor {
       return;
     }
     const bottom = nodes[0] as NodeRecord;
-    if (!propAllowed(bottom.type, "isMask")) {
-      this.notify("A mask needs an outline: use a shape, frame or vector as the bottom layer.");
-      return;
-    }
+    // Any layer can be a mask, as in Figma; this only guards against kinds that aren't layers.
+    if (!propAllowed(bottom.type, "isMask")) return;
     if (nodes.length === 1) {
       // On the page it would clip everything above it: ask for the layers it should clip.
       if (this.doc.get(bottom.parent)?.type === "page") {

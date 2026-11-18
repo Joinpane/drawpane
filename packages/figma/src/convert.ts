@@ -202,15 +202,13 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
       return;
     }
 
-    if (node.isMask) {
-      // Figma lets any layer mask what's above it; Drawpane masks with frames and shapes.
-      if (propAllowed(type, "isMask")) {
-        props.isMask = true;
-        // Figma's masks mask by their alpha unless set otherwise (older files say so with
-        // isMaskOutline); Drawpane's default is the outline.
-        const mask = node.maskType ?? (node.isMaskOutline ? "VECTOR" : "ALPHA");
-        if (mask !== "VECTOR") props.maskType = mask === "LUMINANCE" ? "luminance" : "alpha";
-      } else notes.add("mask-kind");
+    if (node.isMask && propAllowed(type, "isMask")) {
+      // Any layer can mask what's above it, in Figma and in Drawpane.
+      props.isMask = true;
+      // Figma's masks mask by their alpha unless set otherwise (older files say so with
+      // isMaskOutline); Drawpane's default is the outline.
+      const mask = node.maskType ?? (node.isMaskOutline ? "VECTOR" : "ALPHA");
+      if (mask !== "VECTOR") props.maskType = mask === "LUMINANCE" ? "luminance" : "alpha";
     }
 
     if (type !== "group") {

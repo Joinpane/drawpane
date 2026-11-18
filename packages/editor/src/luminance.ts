@@ -91,3 +91,18 @@ export class LuminanceMask {
     ctx.putImageData(image, 0, 0);
   }
 }
+
+/**
+ * An outline mask's picture, for a mask that isn't one shape (a group, a
+ * text, a line): wherever it draws anything, it masks fully, as Figma's
+ * vector masks ignore translucency. Alpha times 255, kept to 255, as the
+ * SVG export's `feFuncA slope="255"` does. Rare, so a loop over the pixels.
+ */
+export function opaqueAlpha(canvas: AnyCanvas, w: number, h: number): void {
+  const ctx = canvas.getContext("2d") as Ctx | null;
+  if (!ctx || w <= 0 || h <= 0) return;
+  const image = ctx.getImageData(0, 0, w, h);
+  const d = image.data;
+  for (let i = 3; i < d.length; i += 4) if ((d[i] as number) > 0) d[i] = 255;
+  ctx.putImageData(image, 0, 0);
+}
