@@ -111,3 +111,4 @@ What's left after that is real in Drawpane's model: a resized instance, a change
 - Until decision 0034, copies in a frame of another variable mode list their mode's fills and strokes as overrides.
 - Instances of variants hold no `variantProps`, nor an override or an `unset` for it (the kit's 18,890 marks). The number of override records doesn't change: those instances have other differences too.
 - Measured with phase 1 on the kit: override marks fall from 294,708 to 160,968, instances with any from 17,825 to 9,282, and what's drawn doesn't change.
+- Measured again with item 3's records and the review's fixes, against main at 2db8ab2: override marks 295,576 to 161,797, instances with any 17,825 to 9,282, no instance holds a record after import, and what's drawn doesn't change (761 frames, none changed). Every mark that differs from phase 1's own count came with main's changes since.
