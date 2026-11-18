@@ -4,6 +4,7 @@ export * from "./budget";
 export * from "./comments";
 export * from "./convert";
 export * from "./copies";
+export * from "./font-aliases";
 export * from "./fonts";
 export * from "./history";
 export * from "./ids";

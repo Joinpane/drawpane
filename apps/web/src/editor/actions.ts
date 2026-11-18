@@ -20,7 +20,7 @@ import { isMac } from "../app/format";
 import { copySelectionAs, exportPageAsPdf, exportSelection } from "./exporting";
 import { openTextStyles } from "./inspector/TextStyles";
 import { getOverrides } from "./shortcuts-store";
-import { toggleMinimap, toggleXray, uiFor } from "./ui-state";
+import { openMissingFonts, toggleMinimap, toggleXray, uiFor } from "./ui-state";
 
 export interface Shortcut {
   /** `KeyboardEvent.key`, lowercased. */
@@ -1026,6 +1026,14 @@ export const ACTIONS: readonly Action[] = [
     keywords: "version name milestone checkpoint history",
     enabled: canEdit,
     run: ({ saveVersion }) => saveVersion(),
+  },
+  {
+    id: "file.missingFonts",
+    label: "Missing fonts…",
+    group: "File",
+    icon: "warning",
+    keywords: "replace fonts swap font alias sf pro fallback substitute typeface",
+    run: ({ editor }) => openMissingFonts(editor),
   },
   {
     id: "file.browseLibraries",
