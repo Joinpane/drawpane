@@ -12,7 +12,7 @@ Figma has the same problem and solves it in the file: every text layer in a `.fi
 
 ## Decision
 
-1. **Keep them on import.** The `.fig` reader turns each text layer's glyphs (as Open Pencil resolves them, copies included) into outlines: SVG path data in thousandths of an em, y up, to a tenth (`commandsToGlyph`). Glyphs turned or stretched (text on a path, a copy resized out of proportion), and layers with one that can't be read, keep none. REST files have no glyphs, so nothing changes for them.
+1. **Keep them on import.** The `.fig` reader turns each text layer's glyphs (as Open Pencil resolves them, copies included) into outlines: SVG path data in thousandths of an em, y up, to a tenth (`commandsToGlyph`), always starting with a move. Glyphs turned or stretched (text on a path, a copy resized out of proportion), and layers with one that can't be read, keep none. REST files have no glyphs, so nothing changes for them.
 
 2. **Store each outline once, in the file.**
    - A new root-level node, `glyphSet`, beside pages, text styles and collections, holds `glyphOutlines`: outline by id, the id 16 hex digits of the outline's hash (`glyphId`), so identical outlines are one entry however many layers, sizes or fonts use them.
@@ -40,11 +40,25 @@ Figma has the same problem and solves it in the file: every text layer in a `.fi
 
 On the large iOS UI kit (kit parity, 400 frames at 2×, both runs on the same base, `--allow-missing-fonts`), and the shadcn/ui kit, which has every font:
 
-MEASURED_TABLE
+Both runs on main at 34dbafd and this change, same sample, at 2×. Score is the mean RGB difference from Figma's render, 0 to 255.
+
+| | Large iOS UI kit, before | after | shadcn/ui kit, before | after |
+| --- | --- | --- | --- | --- |
+| Frames | 400 | 400 | 761 | 761 |
+| Median | 2.49 | 0.87 | 0.78 | 0.78 |
+| p90 | 17.05 | 14.81 | 3.27 | 3.27 |
+| Total | 2,970.4 | 2,351.1 | 1,188.3 | 1,189.1 |
+| Over 1 / 2 / 5 / 10 / 20 | 273 / 218 / 140 / 87 / 26 | 190 / 147 / 99 / 64 / 22 | 347 / 169 / 46 / 10 / 1 | 347 / 170 / 46 / 10 / 1 |
+| Frames better / worse | | 232 / 0 | | 0 / 1 |
+
+- **Where the iOS kit's difference went** (the triage's per-pixel attribution, `attribute.mjs`, run on both): text in a fallback face (cause 1) 853.7 to 472.7, SF Symbols drawn as boxes (cause 4) 346.5 to 118.4. Together 1,200 to 591: half of what missing fonts cost is gone. Every other cause is within 1 of where it was. What's left of the two is mostly text with no outlines (below) and text on dark boards that cause 2 colours wrong.
+- **shadcn/ui kit**, every font present: 760 frames draw exactly as before. The one that changed is on the "Welcome" page, which scores differently between runs of the same code (fonts arriving late); its labels were drawn in a fallback face that run, not from outlines, whose layout is monospaced.
+- **Size.** The iOS kit's converted nodes grew from 19.7 MB to 22.1 MB (2 glyph sets, 947 distinct glyphs, 9,079 of 11,436 text layers with a layout). The shadcn/ui kit's, materialized, from 278.4 MB to 298.0 MB (2 glyph sets, 44,219 of 45,592 text layers); stored as compact copies, a copy keeps a layout only where it differs from its main's.
+- **Figma's blobs often close before their first move**, which SVG path data can't: a browser's `Path2D` then draws nothing. The import drops such a close, and drawing skips one in outlines saved before that.
 
 ## Consequences
 
 - Text in fonts nobody can upload looks as it does in Figma until it's edited, SF Symbols included. Fonts a team uploads still win.
-- Files grow by their outlines and layouts. The iOS kit's converted nodes grew FILE_GROWTH.
+- Files grow by their outlines and layouts. The iOS kit's converted nodes grew 12% (19.7 to 22.1 MB), the shadcn/ui kit's 7%.
 - A layer whose font size or other shaping value the import resolves differently from what Figma laid out (a variable bound in another mode) keeps no outlines: its fingerprint can't match the glyphs Figma saved. In the iOS kit those are about 2,300 text layers whose Dynamic Type sizes the import resolves in another mode (Open Pencil drops their glyphs for the same reason). Resolving variables in each layer's own mode would bring their outlines back.
 - Copying a text layer into another file, or a library's text into a file using it, takes its layout but not the glyph sets, so it's laid out as usual there.
