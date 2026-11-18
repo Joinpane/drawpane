@@ -9,7 +9,6 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { findTool, type HeadlessRenderer, ToolFailure, type ToolServices } from "@drawpane/editor";
 import {
   applyTransaction,
   ClientMessage,
@@ -44,16 +43,36 @@ import {
   type VersionReason,
   withSetProps,
 } from "@drawpane/model";
-import { fileFontLoader } from "../agent/harfbuzz";
-import { agentMeasurer } from "../agent/measurer";
-import { headlessRenderer } from "../agent/render";
+import { InProcessAgentRunner } from "../agent/runner";
+import {
+  AGENT_CLAIM_MS,
+  AGENT_RUNNER_V,
+  type AgentAdmission,
+  type AgentAdmissionRequest,
+  type AgentCallResult,
+  type AgentCommittedNote,
+  type AgentReads,
+  type AgentRelease,
+  type AgentRunAnswer,
+  type AgentRunRequest,
+  type AgentSessionRef,
+  type CommitAgentAnswer,
+  type CommitAgentRun,
+} from "../agent/runner-api";
 import { FILE_ACCESS, FILE_ROLE } from "../api/access";
 import type { Env, Role } from "../env";
 import { signPayload, verifyPayload } from "../lib/crypto";
 import { answerDocument, type DocumentRequest, SqlFileDoc } from "../mcp/document";
-import { AgentTooLarge, agentPrecheck } from "./agent-admission";
-import { AgentEngine, type EngineRun } from "./agent-engine";
-import { CALL_SCHEMA, CallLedger, changedIds, firstOverlap, type StepCall } from "./call-ledger";
+import { agentPrecheck } from "./agent-admission";
+import { leftBy, runScope, type Scope, touchedBy, touches } from "./agent-scope";
+import {
+  CALL_SCHEMA,
+  CallLedger,
+  changedIds,
+  firstOverlap,
+  loggedSince,
+  type StepCall,
+} from "./call-ledger";
 import {
   applyConversion,
   CONVERT_STEP_WORK,
@@ -390,35 +409,13 @@ export interface Requester {
   readonly name: string;
 }
 
-/** An agent session writing to this file (decision 0021), checked by the Worker. */
-export interface AgentSessionRef {
-  readonly id: string;
-  /** "Claude, for Ana". */
-  readonly name: string;
-  /** This room's file: the session's target. */
-  readonly fileId: string;
-}
-
-/** What an agent call answers. A failure is worded for the model and committed nothing. */
-export type AgentCallResult =
-  | {
-      readonly ok: true;
-      /** The revision it committed; null when it changed nothing. */
-      readonly revn: number | null;
-      readonly result: unknown;
-      /** A picture the tool answered with (export_image), for the model to see. */
-      readonly image?: { readonly mimeType: string; readonly base64: string };
-      /** True when the call id was seen before: this is the recorded answer, and nothing ran. */
-      readonly replayed: boolean;
-    }
-  | { readonly ok: false; readonly message: string };
+export type { AgentCallResult, AgentSessionRef } from "../agent/runner-api";
 
 /** The largest change one agent call may make, in JSON bytes (one log row, well under SQLite's cap). */
 const MAX_AGENT_CHANGE_BYTES = 1 << 20;
-/** How often a call runs again because the file changed under it, before giving up. */
-const AGENT_ATTEMPTS = 3;
-const NO_ENGINE =
-  "Agents can't design on this instance yet: it has no text measurer configured. Reading still works.";
+const AGENT_OUT_OF_STEP =
+  "Drawpane was updated during that call, and nothing was changed. Try again.";
+const STALE_RUN = "Someone changed the frame that call works in while it ran.";
 
 export interface SavedVersion {
   readonly id: string;
@@ -468,9 +465,29 @@ export class FileRoom extends DurableObject<Env> {
   readonly #presence = new Map<string, Presence>();
   #revn = 0;
   readonly #ledger: CallLedger;
-  /** The warm headless editor agents' calls run on (decision 0021); made on the first call. */
-  #engine: AgentEngine | null = null;
-  #rendering: Promise<HeadlessRenderer> | null = null;
+  /**
+   * The agent runner this room hosts in-process for now (decision 0033,
+   * migration step 1): made on the first call. The room never calls it;
+   * the main Worker does (`agent/call.ts`). The room only tells it what it
+   * committed, which it does itself once it has a script of its own.
+   */
+  #runner: InProcessAgentRunner | null = null;
+  /**
+   * Agent write calls under way, by session and call id: the claim each was
+   * admitted with, when it was last renewed, and the revision it was
+   * admitted at. Another request with the same call id meanwhile is told
+   * it's busy (`admitAgentCall`). One not renewed for AGENT_CLAIM_MS is
+   * gone: swept on every admission and renewal. Held in memory: a room
+   * that restarts forgets them, and the ledger's replay is the backstop.
+   */
+  readonly #claims = new Map<string, { claim: string; at: number; revn: number }>();
+  /**
+   * While any write call holds a claim: where each transaction since
+   * revision `from` deleted or moved layers away from (`leftBy`), by
+   * revision, before it applied; null for one that touched everything. A
+   * run's commit is checked against it (`#staleSince`).
+   */
+  #agentWatch: { from: number; readonly left: Map<number, Scope | null> } | null = null;
   /** Copies of the file set aside for downloads, by revision (see exportDocument). */
   readonly #sharedCopies = new Map<
     number,
@@ -681,6 +698,8 @@ export class FileRoom extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     this.pruneQuiet();
+    // Claims whose callers are gone, and the watch they kept.
+    this.#sweepClaims();
     const converting = await this.#convertCopies();
     await this.#movePins();
     const viewers = this.#refreshViewers();
@@ -755,7 +774,7 @@ export class FileRoom extends DurableObject<Env> {
     this.#store.clearCache();
     this.#copies = "materialized";
     this.#converting = false;
-    this.#engine?.drop();
+    this.#runner?.forget();
     this.#broadcast({ t: "resync" });
     await this.#scheduleAlarm(1_000);
   }
@@ -874,7 +893,7 @@ export class FileRoom extends DurableObject<Env> {
     this.#viewersAfterChange();
     this.#converting = false;
     this.#store.clearCache();
-    this.#engine?.drop();
+    this.#runner?.forget();
     this.#announce = true;
     const applied = result.applied;
     console.log(
@@ -1436,7 +1455,7 @@ export class FileRoom extends DurableObject<Env> {
     this.#revn = revn;
     this.#copies = "materialized";
     this.#store.clearCache();
-    this.#engine?.drop();
+    this.#runner?.forget();
     const except = this.#attachments().find(({ me }) => me.sessionId === sessionId)?.ws;
     this.#broadcast(
       { t: "restored", by, version: { id: version.id, name: version.name, at: version.at } },
@@ -1753,7 +1772,7 @@ export class FileRoom extends DurableObject<Env> {
     this.#revn = revn;
     this.#copies = copies;
     this.#viewersAfterChange();
-    this.#engine?.drop();
+    this.#runner?.forget();
     this.#broadcast({ t: "resync" });
     void this.#scheduleAlarm();
     return { ok: true, revn, nodes };
@@ -2107,129 +2126,225 @@ export class FileRoom extends DurableObject<Env> {
   // Agents (decision 0021)
 
   /**
-   * Runs an agent's write tool on the headless editor and commits what it
-   * did as one transaction, attributed to the person and the session and
-   * seen arriving by everyone here. The Worker has checked the session and
-   * the person's access.
-   *
-   * Everything async comes first (the fonts the document needs); from
-   * taking the editor to the commit, nothing waits on anything outside the
-   * room, so the tool runs on the file as it is when it commits. A call id
-   * seen before answers as recorded, without running again. A tool that
-   * fails commits nothing.
+   * The room's first step in an agent call (decision 0033): whether it may
+   * run. A call id this session made before answers as recorded; a file
+   * more than the headless editor may hold is refused. Admitted, it answers
+   * the revision the file is at. The Worker has checked the session and the
+   * person's access.
    */
-  async runAgentTool(
-    by: Requester,
-    session: AgentSessionRef,
-    callId: string,
-    name: string,
-    input: unknown,
-  ): Promise<AgentCallResult> {
-    return refusedAsFailure(() => this.#runAgentTool(by, session, callId, name, input));
+  async admitAgentCall(request: AgentAdmissionRequest): Promise<AgentAdmission> {
+    this.#adopt(request.fileId);
+    if (request.v !== AGENT_RUNNER_V)
+      return { admitted: false, answer: { ok: false, message: AGENT_OUT_OF_STEP } };
+    const { sessionId, callId } = request;
+    const write = sessionId !== undefined && callId !== undefined;
+    if (write) {
+      const replay = this.#replay(sessionId, callId);
+      if (replay) return { admitted: false, answer: replay };
+      this.#sweepClaims();
+      if (this.#claims.has(claimKey(sessionId, callId))) return { admitted: false, busy: true };
+    }
+    const tooLarge = this.#tooLargeForAgents();
+    if (tooLarge) return { admitted: false, answer: tooLarge };
+    if (!write) return { admitted: true, revn: this.#revn };
+    const claim = crypto.randomUUID();
+    this.#claims.set(claimKey(sessionId, callId), { claim, at: Date.now(), revn: this.#revn });
+    this.#agentWatch ??= { from: this.#revn, left: new Map() };
+    return { admitted: true, revn: this.#revn, claim };
   }
 
-  async #runAgentTool(
-    by: Requester,
-    session: AgentSessionRef,
-    callId: string,
-    name: string,
-    input: unknown,
-  ): Promise<AgentCallResult> {
-    this.#adopt(session.fileId);
-    const tool = findTool(name);
-    if (tool?.level !== "write") return { ok: false, message: `There's no write tool ${name}.` };
-    const replay = this.#replay(session.id, callId);
-    if (replay) return replay;
-    const tooLarge = this.#tooLargeForAgents();
-    if (tooLarge) return tooLarge;
-    const engine = this.#agentEngine(session.fileId);
-    if (!engine) return { ok: false, message: NO_ENGINE };
+  /** Lets go of a write's claim on its call id (`admitAgentCall`), if it still holds it. */
+  async releaseAgentCall(request: AgentRelease): Promise<void> {
+    if (request.v !== AGENT_RUNNER_V) return;
+    const key = claimKey(request.sessionId, request.callId);
+    if (this.#claims.get(key)?.claim === request.claim) this.#claims.delete(key);
+    this.#sweepClaims();
+  }
 
-    // The fonts the file is set in, loaded before anything is measured.
-    const missing = engine.missingFaces(this.#warmEditor(engine));
-    if (missing.length > 0) await engine.load(missing);
+  /** Keeps a write's claim for another AGENT_CLAIM_MS while its request runs; false when it's gone. */
+  async renewAgentCall(request: AgentRelease): Promise<boolean> {
+    if (request.v !== AGENT_RUNNER_V) return false;
+    this.#sweepClaims();
+    const held = this.#claims.get(claimKey(request.sessionId, request.callId));
+    if (held?.claim !== request.claim) return false;
+    held.at = Date.now();
+    return true;
+  }
 
-    for (let attempt = 0; attempt < AGENT_ATTEMPTS; attempt++) {
-      // A retry of this call may have finished while the fonts loaded.
-      const again = this.#replay(session.id, callId);
-      if (again) return again;
-      const revn = this.#revn;
-      let run: EngineRun;
-      try {
-        run = await engine.run(this.#warmEditor(engine), name, input);
-      } catch (error) {
-        return failedRun(engine, name, error);
-      }
-      // Tools don't wait on anything, so nothing can have landed meanwhile; if it did, run again.
-      if (this.#revn !== revn) {
-        engine.drop();
-        continue;
-      }
-      // Text in a font not loaded yet: load it, and run again so it's measured right.
-      const fonts = engine.facesMissingFrom(this.#warmEditor(engine), run.ops);
-      if (fonts.length > 0 && attempt < AGENT_ATTEMPTS - 1) {
-        engine.drop();
-        await engine.load(fonts);
-        continue;
-      }
-      return this.#commitAgentCall(by, session, callId, tool.title, name, run);
-    }
-    return { ok: false, message: "The file kept changing while that ran. Try again." };
+  /** How many origin notes the agent watch holds, without sweeping (for tests). */
+  async agentWatchNotes(): Promise<number> {
+    return this.#agentWatch?.left.size ?? 0;
+  }
+
+  /** How many claims on agent calls are held, expired ones swept first (for tests). */
+  async heldAgentClaims(): Promise<number> {
+    this.#sweepClaims();
+    return this.#claims.size;
   }
 
   /**
-   * Runs an agent's read tool (get_jsx, export_image) on the headless
-   * editor: nothing is committed or recorded.
+   * Drops claims not renewed for AGENT_CLAIM_MS (their callers are gone),
+   * and what the watch kept that no claim's run can still need: all of it
+   * once no claim is left.
    */
-  async readAgentTool(fileId: string, name: string, input: unknown): Promise<AgentCallResult> {
-    return refusedAsFailure(() => this.#readAgentTool(fileId, name, input));
+  #sweepClaims(): void {
+    const now = Date.now();
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const [key, held] of this.#claims) {
+      if (now - held.at >= AGENT_CLAIM_MS) this.#claims.delete(key);
+      else oldest = Math.min(oldest, held.revn);
+    }
+    const watch = this.#agentWatch;
+    if (!watch) return;
+    if (this.#claims.size === 0) {
+      this.#agentWatch = null;
+      return;
+    }
+    // A run's base revision is at least the revision its call was admitted at.
+    for (const revn of watch.left.keys()) if (revn <= oldest) watch.left.delete(revn);
   }
 
-  async #readAgentTool(fileId: string, name: string, input: unknown): Promise<AgentCallResult> {
-    this.#adopt(fileId);
-    const tool = findTool(name);
-    if (!tool || tool.level === "write")
-      return { ok: false, message: `There's no read tool ${name}.` };
-    const tooLarge = this.#tooLargeForAgents();
-    if (tooLarge) return tooLarge;
-    const engine = this.#agentEngine(fileId);
-    if (!engine) return { ok: false, message: NO_ENGINE };
-    if (name === "export_image") {
-      // Text is laid out again to be drawn: in its own fonts, as the browser lays it out.
-      const missing = engine.missingFaces(this.#warmEditor(engine));
-      if (missing.length > 0) await engine.load(missing);
-    }
-    const editor = this.#warmEditor(engine);
-    const services: ToolServices = {
-      renderPng: async (id, options) =>
-        (await this.#renderer(fileId, engine)).renderPng(editor.doc, id, options),
+  /** What the ledger recorded for a session's call, as its replay; null when nothing is. */
+  async recordedAgentCall(request: {
+    v: number;
+    fileId: string;
+    sessionId: string;
+    callId: string;
+  }): Promise<AgentCallResult | null> {
+    this.#adopt(request.fileId);
+    if (request.v !== AGENT_RUNNER_V) return null;
+    return this.#replay(request.sessionId, request.callId);
+  }
+
+  /**
+   * The room's second step: commits what a run made as one transaction,
+   * attributed to the person and the session and seen arriving by everyone
+   * here, with its ledger row in the same storage transaction. A call id
+   * seen before answers as recorded (a retry finished first).
+   *
+   * The run was made on `baseRevn`. When the file has moved on since, it's
+   * still committed unless someone's logged operations since then touched
+   * its scope (`agent-scope.ts`): the top-level layers it worked in, the
+   * page's list when it put a top-level layer in or took one out, and the
+   * mains, styles and variables used inside them. Then it's `stale`,
+   * nothing is committed, and the caller runs it again on the file as it
+   * is. Edits in other top-level layers don't hold it up.
+   */
+  async commitAgentRun(request: CommitAgentRun): Promise<CommitAgentAnswer> {
+    const { by, session, callId, ops } = request;
+    this.#adopt(session.fileId);
+    if (request.v !== AGENT_RUNNER_V) return { ok: false, message: AGENT_OUT_OF_STEP };
+    const replay = this.#replay(session.id, callId);
+    if (replay) return replay;
+    const data = request.result ?? null;
+    const call = {
+      sessionId: session.id,
+      callId,
+      userId: by.userId,
+      tool: request.tool,
+      label: request.label,
     };
-    try {
-      const { result } = await engine.run(editor, name, input, services);
-      return {
-        ok: true,
-        revn: null,
-        result: result.data,
-        ...(result.image ? { image: result.image } : {}),
-        replayed: false,
-      };
-    } catch (error) {
-      return failedRun(engine, name, error);
+    if (ops.length === 0) {
+      this.ctx.storage.transactionSync(() => this.#ledger.recordCall(call, null, data, null, null));
+      return { ok: true, revn: null, result: data, replayed: false };
     }
+    if (JSON.stringify(ops).length > MAX_AGENT_CHANGE_BYTES)
+      return {
+        ok: false,
+        message: "That's too much to change in one call. Build it in parts: one section per call.",
+      };
+    const moved = request.baseRevn !== this.#revn;
+    if (moved && this.#staleSince(request.baseRevn, ops, request.reads))
+      return { ok: false, stale: true, message: STALE_RUN };
+    const author = { clientId: "agent", seq: 0, userId: by.userId, sessionId: session.id };
+    let revn: number;
+    try {
+      revn = this.#commit(ops, author, {
+        fromAgentRun: true,
+        also: (next, inverse) => this.#ledger.recordCall(call, next, data, ops, inverse),
+      });
+    } catch (error) {
+      if (error instanceof ModelError) {
+        // Made on a revision since overtaken, by changes the overlap doesn't see (a parent
+        // deleted, a cycle): run again on the file as it is.
+        if (moved) return { ok: false, stale: true, message: STALE_RUN };
+        return { ok: false, message: `That change doesn't apply: ${error.message}` };
+      }
+      throw error;
+    }
+    this.#broadcastChange(revn, ops, author);
+    void this.#scheduleAlarm();
+    return { ok: true, revn, result: data, replayed: false };
   }
 
-  /** The room's renderer, made the first time something is drawn. */
-  #renderer(fileId: string, engine: AgentEngine): Promise<HeadlessRenderer> {
-    this.#rendering ??= headlessRenderer(
-      this.env,
-      fileId,
-      engine.measurer,
-      fileFontLoader(this.env, fileId),
-    ).catch((error: unknown) => {
-      this.#rendering = null;
-      throw error;
+  /**
+   * Whether anyone's logged operations after `since`, the agent's own
+   * sessions included, touched the scope of a run of `ops` that read where
+   * `reads` says (`agent-scope.ts`). True as well when the log no longer
+   * reaches back that far, when the scope is the whole file, and when where
+   * a layer was deleted or moved away from since then wasn't noted.
+   */
+  #staleSince(since: number, ops: readonly Op[], reads: AgentReads | undefined): boolean {
+    if (since >= this.#revn) return false;
+    // An import since then replaced the file without logging it.
+    if (since < this.#catchupFrom()) return true;
+    const oldest = this.#sql
+      .exec<{ revn: number | null }>("SELECT MIN(revn) AS revn FROM log")
+      .one().revn;
+    if (oldest === null || oldest > since + 1) return true;
+    const scope = runScope(this.#sql, ops, reads ?? null);
+    if (!scope) return true;
+    const watch = this.#agentWatch;
+    const watched = watch !== null && watch.from <= since;
+    let leftScope = false;
+    const sql = this.#sql;
+    // What everyone did since, read a page at a time: stops at a delete or move away from
+    // the scope, or one whose source wasn't noted (as it applied, `leftBy`).
+    function* theirs(): Generator<Op> {
+      for (const row of loggedSince(sql, since, null)) {
+        if (row.ops.some((op) => op.op === "delete" || op.op === "move")) {
+          const left = watched ? watch.left.get(row.revn) : undefined;
+          if (!left || touches(left, scope as Scope)) {
+            leftScope = true;
+            return;
+          }
+        }
+        yield* row.ops;
+      }
+    }
+    const touched = touchedBy(sql, theirs());
+    return leftScope || !touched || touches(touched, scope);
+  }
+
+  // The runner, hosted in-process (decision 0033, migration step 1). These are
+  // `AgentRunnerApi`, called by the main Worker only; migration step 3 moves them
+  // to the runner's own script.
+
+  /** Runs a tool on this room's file. */
+  async runAgent(request: AgentRunRequest): Promise<AgentRunAnswer> {
+    this.#adopt(request.fileId);
+    return this.#agentRunner(request.fileId).run(request);
+  }
+
+  /** How the commit of a run went. */
+  async agentCommitted(note: AgentCommittedNote): Promise<void> {
+    await this.#runner?.committed(note);
+  }
+
+  /** Lets go of the runner's editor. */
+  async dropAgent(fileId: string): Promise<void> {
+    await this.#runner?.drop(fileId);
+  }
+
+  /** The runner hosted here, reading the room's rows at its revision. */
+  #agentRunner(fileId: string): InProcessAgentRunner {
+    this.#runner ??= new InProcessAgentRunner(this.env, fileId, {
+      revn: () => this.#revn,
+      copies: () => this.#copies,
+      count: () => this.#store.count(),
+      records: () => this.#store.records(),
     });
-    return this.#rendering;
+    return this.#runner;
   }
 
   /**
@@ -2310,14 +2425,12 @@ export class FileRoom extends DurableObject<Env> {
 
   /**
    * A refusal when the file is more than the headless editor may hold
-   * (`agent-admission.ts`). A warm editor at this revision is within it
-   * (its meter lets it go when it isn't). Otherwise the SQL pre-check, a
-   * fast filter before anything is read; a file it passes is measured as
-   * the editor is built (`#warmEditor`), and a refusal then is kept for the
-   * revision, so asking again doesn't read the file again.
+   * (`agent-admission.ts`): the SQL pre-check, a fast filter before
+   * anything is read, worked out once a revision. A file it passes is
+   * measured as the runner builds its editor, and the runner keeps a
+   * refusal then for the revision, so asking again doesn't build it again.
    */
   #tooLargeForAgents(): AgentCallResult | null {
-    if (this.#engine?.heldAt(this.#revn) != null) return null;
     if (this.#agentRefusal?.revn !== this.#revn) {
       const pre = agentPrecheck(this.#sql, this.#copies, () => this.#presentedLayers());
       this.#agentRefusal = { revn: this.#revn, message: pre.ok ? null : pre.message };
@@ -2340,82 +2453,6 @@ export class FileRoom extends DurableObject<Env> {
   #replay(sessionId: string, callId: string): AgentCallResult | null {
     const seen = this.#ledger.get(sessionId, callId);
     return seen ? { ok: true, revn: seen.revn, result: seen.result, replayed: true } : null;
-  }
-
-  /** The room's engine, made with the file's measurer; null when none is configured. */
-  #agentEngine(fileId: string): AgentEngine | null {
-    if (this.#engine) return this.#engine;
-    const measurer = agentMeasurer(this.env, fileId);
-    if (!measurer) return null;
-    this.#engine = new AgentEngine(measurer);
-    return this.#engine;
-  }
-
-  /**
-   * The headless editor at this revision, built when there's none warm:
-   * from pages of the room's rows (`SqlNodeStore.records`), metered as it's
-   * built. A file that's more than it may hold, or that grew past it while
-   * the call awaited (its fonts), is refused (`AgentTooLarge`, a
-   * `ToolFailure`, answered as the tool's failure).
-   */
-  #warmEditor(engine: AgentEngine) {
-    if (engine.heldAt(this.#revn) === null) {
-      const tooLarge = this.#tooLargeForAgents();
-      if (tooLarge && !tooLarge.ok) throw new AgentTooLarge(tooLarge.message);
-    }
-    try {
-      return engine.editorAt(
-        this.#revn,
-        this.#store.count(),
-        () => this.#store.records(),
-        this.#copies,
-      );
-    } catch (error) {
-      if (error instanceof AgentTooLarge)
-        this.#agentRefusal = { revn: this.#revn, message: error.message };
-      throw error;
-    }
-  }
-
-  /** Commits an engine run as one transaction, with its ledger row in the same storage transaction. */
-  #commitAgentCall(
-    by: Requester,
-    session: AgentSessionRef,
-    callId: string,
-    label: string,
-    tool: string,
-    run: EngineRun,
-  ): AgentCallResult {
-    const engine = this.#engine as AgentEngine;
-    const data = run.result.data ?? null;
-    const call = { sessionId: session.id, callId, userId: by.userId, tool, label };
-    if (run.ops.length === 0) {
-      this.ctx.storage.transactionSync(() => this.#ledger.recordCall(call, null, data, null, null));
-      return { ok: true, revn: null, result: data, replayed: false };
-    }
-    if (JSON.stringify(run.ops).length > MAX_AGENT_CHANGE_BYTES) {
-      engine.drop();
-      return {
-        ok: false,
-        message: "That's too much to change in one call. Build it in parts: one section per call.",
-      };
-    }
-    const author = { clientId: "agent", seq: 0, userId: by.userId, sessionId: session.id };
-    let revn: number;
-    try {
-      revn = this.#commit(run.ops, author, {
-        fromEngine: true,
-        also: (next, inverse) => this.#ledger.recordCall(call, next, data, run.ops, inverse),
-      });
-    } catch (error) {
-      engine.drop();
-      if (error instanceof ModelError)
-        return { ok: false, message: `That change doesn't apply: ${error.message}` };
-      throw error;
-    }
-    this.#broadcastChange(revn, run.ops, author);
-    void this.#scheduleAlarm();
-    return { ok: true, revn, result: data, replayed: false };
   }
 
   /**
@@ -3040,14 +3077,15 @@ export class FileRoom extends DurableObject<Env> {
    * returns its revision. Throws (changing nothing) when it doesn't apply.
    * `also` writes more in the same storage transaction (an agent call's
    * ledger row), given the revision and the operations that undo it.
-   * The warm agent editor follows, unless the change is its own (`fromEngine`).
+   * The in-process agent runner follows, unless the change is an agent run's
+   * (`fromAgentRun`), which it hears about from the main Worker.
    */
   #commit(
     ops: readonly Op[],
     author: Author,
     options: {
       readonly also?: (revn: number, inverse: Op[]) => void;
-      readonly fromEngine?: boolean;
+      readonly fromAgentRun?: boolean;
     } = {},
   ): number {
     try {
@@ -3076,8 +3114,7 @@ export class FileRoom extends DurableObject<Env> {
         }),
       );
       this.#revn = revn;
-      if (options.fromEngine) this.#engine?.committed(revn);
-      else this.#engine?.follow(ops, revn);
+      if (!options.fromAgentRun) this.#runner?.follow(ops, revn);
       return revn;
     } finally {
       this.#store.clearCache();
@@ -3151,6 +3188,13 @@ export class FileRoom extends DurableObject<Env> {
     // found before (what's deleted) and after (what's made) it applies.
     const touched = this.#converting ? touchedIds(ops) : null;
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
+    // A write call under way: where this deletes or moves layers away from, before it does. A claim
+    // whose caller stopped renewing it lapses here too, so people's edits never keep feeding a
+    // watch no run can still need (only an agent request swept them before).
+    if (this.#agentWatch) this.#sweepClaims();
+    const watch = this.#agentWatch;
+    watch?.left.delete(next);
+    const left = watch ? leftBy(this.#sql, ops) : undefined;
     // A file stored compact: what this removes and makes, checked when the transaction ends.
     if (check) this.#noteRemovedMains(ops, check);
     // Every commit is checked for instances inside their own main, held or not (the clients
@@ -3162,6 +3206,7 @@ export class FileRoom extends DurableObject<Env> {
       cycles,
     });
     this.#store.clearCache();
+    if (watch && left !== undefined) watch.left.set(next, left);
     if (check) this.#noteCandidates(ops);
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
     const now = Date.now();
@@ -3250,18 +3295,18 @@ export class FileRoom extends DurableObject<Env> {
         });
       });
     } catch (error) {
-      this.#engine?.drop();
+      this.#runner?.forget();
       throw error;
     } finally {
       this.#store.clearCache();
     }
     this.#revn = next;
     if (tooBig) {
-      this.#engine?.drop();
+      this.#runner?.forget();
       this.#broadcast({ t: "resync" });
     } else
       for (const chunk of sent) {
-        this.#engine?.follow(chunk.ops, chunk.revn);
+        this.#runner?.follow(chunk.ops, chunk.revn);
         this.#broadcastChange(chunk.revn, chunk.ops, author);
       }
     return { revn: next, count: outcome.count, result: outcome.result };
@@ -3715,30 +3760,6 @@ export class FileRoom extends DurableObject<Env> {
   }
 }
 
-/**
- * A tool that failed, as its answer: its own failure as worded, anything
- * else (a bug) logged, with the engine let go in case it was left half-done.
- */
-/** A tool call refused outside a run (the file grew past what agents work on) answered as a failure. */
-async function refusedAsFailure(call: () => Promise<AgentCallResult>): Promise<AgentCallResult> {
-  try {
-    return await call();
-  } catch (error) {
-    if (error instanceof ToolFailure) return { ok: false, message: error.message };
-    throw error;
-  }
-}
-
-function failedRun(engine: AgentEngine, name: string, error: unknown): AgentCallResult {
-  if (error instanceof ToolFailure) return { ok: false, message: error.message };
-  console.error(`agent tool ${name} failed`, error);
-  engine.drop();
-  return {
-    ok: false,
-    message: `${name} failed unexpectedly, and changed nothing. Try it another way, or in smaller steps.`,
-  };
-}
-
 export type UpdateResult =
   | {
       readonly ok: true;
@@ -3819,4 +3840,9 @@ function pinSweepFlag(to: CopiesFormat, gen: number): string {
 function parsePinSweep(flag: string, copies: CopiesFormat, gen: number): PinSweep {
   const [to, at] = flag.split(":");
   return to === "compact" || to === "materialized" ? { to, gen: Number(at) } : { to: copies, gen };
+}
+
+/** A claim's key: a session's call id. */
+function claimKey(sessionId: string, callId: string): string {
+  return `${sessionId}\u0000${callId}`;
 }

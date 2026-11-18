@@ -79,8 +79,15 @@ function followOps(node: NodeRecord, style: NodeRecord): Op[] {
 /**
  * Derived writes after `ops`: layers whose style changed (or that just got a
  * style) take its values, and layers pointing at a deleted style let go of it.
+ * `deletedStyles`, when the caller knows them (from the deletes' inverse),
+ * are the deleted layers that were text styles: deleting anything else
+ * doesn't look through every layer for followers.
  */
-export function textStyleFixupOps(doc: Doc, ops: readonly Op[]): Op[] {
+export function textStyleFixupOps(
+  doc: Doc,
+  ops: readonly Op[],
+  deletedStyles?: ReadonlySet<string>,
+): Op[] {
   const layers = new Set<string>();
   const styles = new Set<string>();
   for (const op of ops) {
@@ -93,7 +100,9 @@ export function textStyleFixupOps(doc: Doc, ops: readonly Op[]): Op[] {
       layers.add(node.id);
   }
   // A style deleted in this batch: its layers keep their look and let go.
-  const deleted = new Set(ops.filter((o) => o.op === "delete").map((o) => o.id));
+  const deleted = new Set(
+    ops.filter((o) => o.op === "delete" && (deletedStyles?.has(o.id) ?? true)).map((o) => o.id),
+  );
   if (styles.size === 0 && layers.size === 0 && deleted.size === 0) return [];
 
   const out: Op[] = [];

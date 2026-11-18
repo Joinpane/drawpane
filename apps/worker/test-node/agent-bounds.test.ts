@@ -111,7 +111,7 @@ function* sampled(nodes: Iterable<NodeRecord>): Generator<NodeRecord> {
   sample();
 }
 
-/** The headless editor built as the room builds it (`FileRoom.#warmEditor`). */
+/** The headless editor built as the agent runner builds it (`InProcessAgentRunner`). */
 function build(engine: AgentEngine, r: Room, copies: "materialized" | "compact", revn = 1) {
   const store = new SqlNodeStore(r.sql);
   return engine.editorAt(revn, store.count(), () => sampled(store.records()), copies);
@@ -132,7 +132,7 @@ function copiesOf(children: number, instances: number): NodeRecord[] {
 
 /**
  * An agent's read as the room runs it: pre-checked (`#tooLargeForAgents`),
- * then the headless editor built from pages, metered (`#warmEditor`), and
+ * then the headless editor built from pages, metered (the runner's `#editor`), and
  * the tool run. A refusal comes back as its message, and what refused it.
  */
 async function agentRead(
