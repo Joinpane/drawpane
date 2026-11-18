@@ -221,4 +221,63 @@ test.describe
       await settled(page);
       await compare(page);
     });
+
+    test("with glass and background blur on its screens: drawn in tiles, then the readers", async () => {
+      // Layers that read the backdrop read what's drawn around them: tiles draw them without it,
+      // and each is drawn again with all it reads once the tiles are done.
+      await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const ops: unknown[] = [];
+        e.doc.childIds(e.s.pageId).forEach((id, i) => {
+          if (i % 3 === 2) return;
+          const effect =
+            i % 3 === 0
+              ? {
+                  type: "glass",
+                  angle: -45,
+                  intensity: 80,
+                  refraction: 80,
+                  depth: 20,
+                  dispersion: 50,
+                  frost: 4,
+                  splay: 0,
+                }
+              : { type: "background-blur", radius: 12 };
+          ops.push({ op: "set", id, prop: "effects", value: [effect] });
+          ops.push({
+            op: "set",
+            id,
+            prop: "fills",
+            value: [{ type: "solid", color: "#ffffff", opacity: 0.4 }],
+          });
+        });
+        e.doc.apply(ops);
+        e.zoomToFit();
+      });
+      await settled(page);
+      await compare(page);
+      // Closer, panned while it's still being drawn, then far out and back in.
+      await page.evaluate(async () => {
+        const e = (window as unknown as W).drawpane;
+        const c = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
+        e.state.set({ camera: e.s.camera.zoomAt(c, e.s.camera.zoom * 3) });
+        for (let i = 0; i < 30; i++) {
+          e.state.set({ camera: e.s.camera.pan(i % 2 ? 37 : -11, 23) });
+          await new Promise((r) => requestAnimationFrame(r));
+        }
+      });
+      await settled(page);
+      await compare(page);
+      await page.evaluate(async () => {
+        const e = (window as unknown as W).drawpane;
+        const c = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
+        for (let i = 0; i < 30; i++) {
+          const factor = i < 15 ? 1 / 1.15 : 1.15;
+          e.state.set({ camera: e.s.camera.zoomAt(c, e.s.camera.zoom * factor) });
+          await new Promise((r) => requestAnimationFrame(r));
+        }
+      });
+      await settled(page);
+      await compare(page);
+    });
   });

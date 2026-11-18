@@ -21,8 +21,20 @@ type W = {
     zoomTo(z: number): void;
     centerOn(p: { x: number; y: number }): void;
   };
-  drawpaneFrames: { redraw(): void };
+  drawpaneFrames: { redraw(): void; exact: boolean };
 };
+
+/**
+ * Waits until the canvas says it's exact: a frame too costly for the
+ * budget is drawn a tile at a time, and glass and background blur after
+ * the tiles (decision 0028), over the frames that follow.
+ */
+async function exact(page: Page): Promise<void> {
+  await page.waitForFunction(() => (window as unknown as W).drawpaneFrames.exact, undefined, {
+    timeout: 60_000,
+    polling: 50,
+  });
+}
 
 /** The content canvas's pixels, as a compact fingerprint per 4×4 block. */
 async function pixels(page: Page): Promise<number[]> {
@@ -170,6 +182,7 @@ test.describe
           await frame();
         }
       });
+      await exact(page);
       const panned = await pixels(page);
       const full = await redrawn(page);
       expect(difference(panned, full)).toBeLessThan(0.002);
@@ -194,6 +207,7 @@ test.describe
           await frame();
         }
       });
+      await exact(page);
       const panned = await pixels(page);
       const full = await redrawn(page);
       // Strict: a seam, or a rim along the screen's edge carried in by the pan, is faint.
@@ -212,6 +226,7 @@ test.describe
       });
       // After the pause, the stand-in frames give way to an exact one.
       await page.waitForTimeout(400);
+      await exact(page);
       const settled = await pixels(page);
       const full = await redrawn(page);
       expect(difference(settled, full)).toBeLessThan(0.002);
