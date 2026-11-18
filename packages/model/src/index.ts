@@ -14,6 +14,7 @@ export * from "./media";
 export * from "./ops";
 export * from "./order-key";
 export * from "./protocol";
+export * from "./protocol2";
 export * from "./prototype";
 export * from "./schema";
 export * from "./search";

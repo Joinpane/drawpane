@@ -14,15 +14,31 @@
  * a teammate set at the same time shows its main layer's until that
  * instance syncs again, so in that form the check runs after one more edit
  * of the instance's properties (any client's).
+ *
+ * The third client may be a tab from before component property records
+ * (protocol 2, review 4 of #187): it edits the layers a property drives as
+ * plain layers, queues edits while offline, and is never refused or told to
+ * reload with any unsent; once everything is in, it reloads (as its update
+ * banner does) and everyone agrees. A client may also detach the instance.
+ * In materialized form, the room's automatic conversion to compact copies
+ * then keeps every instance (none detached) and shows what the record says,
+ * when no main changed in structure meanwhile.
  */
-import { Editor, instanceProperties } from "@drawpane/editor";
-import { type CopiesFormat, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
+import { Doc, Editor, instanceProperties } from "@drawpane/editor";
+import {
+  type CopiesFormat,
+  compactByInstance,
+  type NodeRecord,
+  type Op,
+  ROOT_ID,
+} from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
   type Client,
   expectAgreement,
   expectConverged,
+  expectShowsRecord,
   FORMS,
   measurer,
   node,
@@ -135,11 +151,45 @@ const nestedOf = (client: Client) =>
 
 type Action = readonly [client: number, kind: number, arg: number];
 
+/**
+ * What a tab from before records does for a property's kinds: it doesn't see
+ * properties, so it edits the layers in the instance by hand (the text, the
+ * icon's visibility, an ordinary override). True when it did.
+ */
+function actAsOldTab(client: Client, kind: number, arg: number, text: string): boolean {
+  const editor = client.editor;
+  const kids = editor.doc.childIds("i").map((id) => editor.doc.get(id) as NodeRecord);
+  const label = kids.find((n) => n.type === "text");
+  const icon = kids.find((n) => n.props.name === "Icon");
+  if (kind === 0 && label)
+    editor.commit([{ op: "set", id: label.id, prop: "characters", value: text }]);
+  else if (kind === 1 && icon)
+    editor.commit([{ op: "set", id: icon.id, prop: "visible", value: arg % 2 === 0 }]);
+  else if ((kind === 2 || kind === 3 || kind === 5) && label)
+    editor.commit([{ op: "set", id: label.id, prop: "opacity", value: (arg % 9) / 10 + 0.1 }]);
+  else if (kind === 6) {
+    // A plain layer in a main: its tab knows no references.
+    editor.commit([
+      {
+        op: "create",
+        id: `old${text}`,
+        type: "rect",
+        parent: arg % 2 === 0 ? "vA" : "vB",
+        key: `c${text}`,
+        props: { width: 10, height: 10 },
+      },
+    ]);
+  } else if (kind === 12) return true;
+  else return false;
+  return true;
+}
+
 /** Does one action; what each kind is is listed here. */
 function act(room: Room, [who, kind, arg]: Action, count: { next: number }): void {
   const client = room.clients[who] as Client;
   const editor = client.editor;
   const text = `${client.name}${count.next++}`;
+  if (client.protocol === 2 && actAsOldTab(client, kind, arg, text)) return;
   switch (kind) {
     case 0:
       editor.setInstanceProperty("i", "label", text);
@@ -198,18 +248,47 @@ function act(room: Room, [who, kind, arg]: Action, count: { next: number }): voi
       if (client.online) room.disconnect(client);
       else room.connect(client);
       return;
+    case 12:
+      // Now and then the instance is detached; otherwise a value is set.
+      if (arg >= 10) {
+        editor.select(["i"]);
+        editor.detachInstances();
+      } else editor.setInstanceProperty("i", "label", text);
+      return;
   }
 }
 
-const KINDS = 12;
+const KINDS = 13;
 
-function run(form: CopiesFormat, actions: readonly Action[]): Room {
+function run(form: CopiesFormat, actions: readonly Action[], oldTab: boolean): Room {
   const room = new Room(kit(), form);
-  for (const name of ["a", "b", "c"]) room.join(name);
+  room.join("a");
+  room.join("b");
+  room.join("c", oldTab ? 2 : 3);
   const count = { next: 0 };
   for (const action of actions) act(room, action, count);
   room.settle();
   return room;
+}
+
+/** The tab from before records reloads (nothing pending: its banner waited), as today's. */
+function reloadOldTabs(room: Room): void {
+  for (const client of [...room.clients])
+    if (client.protocol === 2) {
+      expect(client.editor.sync.pendingCount).toBe(0);
+      room.clients.splice(room.clients.indexOf(client), 1);
+      room.join(`${client.name}-reloaded`);
+    }
+  room.settle();
+}
+
+/** The room's file, converted to compact copies as its room does: every instance kept, as it shows. */
+function expectConverts(room: Room): void {
+  const converted = compactByInstance(structuredClone([...room.store.nodes()]));
+  expect([...converted.detached.entries()]).toEqual([]);
+  const doc = new Doc({ compactCopies: true });
+  doc.resetStored(converted.nodes, "compact");
+  expectShowsRecord(doc, "i");
 }
 
 describe("component property values converge", () => {
@@ -222,31 +301,37 @@ describe("component property values converge", () => {
   });
 
   for (const form of FORMS)
-    it(`three clients, random edits, resets, switches, swaps, undo and reconnects (${form})`, () => {
-      fc.assert(
-        fc.property(
-          fc.array(
-            fc.tuple(
-              fc.integer({ min: 0, max: 2 }),
-              fc.integer({ min: 0, max: KINDS - 1 }),
-              fc.integer({ min: 0, max: 11 }),
+    for (const oldTab of [false, true])
+      it(`three clients, random edits, resets, switches, swaps, detach, undo and reconnects${oldTab ? ", one a tab from before records" : ""} (${form})`, () => {
+        fc.assert(
+          fc.property(
+            fc.array(
+              fc.tuple(
+                fc.integer({ min: 0, max: 2 }),
+                fc.integer({ min: 0, max: KINDS - 1 }),
+                fc.integer({ min: 0, max: 11 }),
+              ),
+              { minLength: 5, maxLength: 45 },
             ),
-            { minLength: 5, maxLength: 45 },
+            (actions) => {
+              const room = run(form, actions, oldTab);
+              expectConverged(room);
+              reloadOldTabs(room);
+              if (form === "materialized") {
+                // Converted as the room does, stale values or not. (A layer added to a main as
+                // its instance switches variant leaves the instance's layers stale in structure
+                // until it syncs again, which conversion keeps as it draws: not a value.)
+                if (!actions.some(([, kind]) => kind === 6)) expectConverts(room);
+                (room.clients[0] as Client).editor.setInstanceProperty("i", "label", "Settled");
+                room.settle();
+              }
+              expectAgreement(room, "i");
+            },
           ),
-          (actions) => {
-            const room = run(form, actions);
-            expectConverged(room);
-            if (form === "materialized") {
-              (room.clients[0] as Client).editor.setInstanceProperty("i", "label", "Settled");
-              room.settle();
-            }
-            expectAgreement(room, "i");
+          {
+            seed: Number(process.env.FUZZ_SEED ?? 350035),
+            numRuns: Number(process.env.PROPERTY_RUNS ?? 120),
           },
-        ),
-        {
-          seed: Number(process.env.FUZZ_SEED ?? 350035),
-          numRuns: Number(process.env.PROPERTY_RUNS ?? 120),
-        },
-      );
-    }, 600_000);
+        );
+      }, 600_000);
 });

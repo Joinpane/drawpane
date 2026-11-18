@@ -12,7 +12,7 @@
 import { ROOT_ID } from "./ids";
 import type { DocReader } from "./libraries";
 import { stableJson } from "./libraries";
-import type { NodeRecord, Op } from "./ops";
+import type { CreateOp, NodeRecord, Op } from "./ops";
 import { KEYED_PROPS, type PropName } from "./schema";
 
 /** Where a node sits: its parent and its order key there. */
@@ -48,6 +48,12 @@ export type BranchChange =
       readonly main: unknown;
       /** Main changed the same field to something else, or deleted the node. */
       readonly conflict: boolean;
+      /**
+       * One field of an override record both sides made from a base without
+       * it (decision 0035): `base` is undefined, an unset field is `null`.
+       * The fields taken come in as one create, merged into main's record.
+       */
+      readonly record?: true;
     };
 
 /** All the nodes in a reader, parents before children. */
@@ -156,6 +162,99 @@ export function addedChange(
   return { kind: "added", id: node.id, conflict: parentThere ? null : "parent-gone" };
 }
 
+/**
+ * Whether `node`, which the branch added, is an override record main made
+ * too since the base: the same copy layer's (its id derives from its
+ * instance and path, so both sides name it alike).
+ */
+function bothMadeRecord(node: NodeRecord, now: NodeRecord | undefined): now is NodeRecord {
+  return (
+    node.type === "override" &&
+    now?.type === "override" &&
+    now.parent === node.parent &&
+    same(node.props.path, now.props.path)
+  );
+}
+
+/** Bookkeeping in an override record, not fields of the layer. */
+const RECORD_MARKS = new Set(["path", "unset", "overrides"]);
+
+/** An override record's fields: each value it sets, and `null` for each it unsets. */
+function recordFields(record: NodeRecord): Map<string, unknown> {
+  const out = new Map<string, unknown>();
+  for (const [field, value] of Object.entries(record.props))
+    if (!RECORD_MARKS.has(field) && value !== undefined && value !== null) out.set(field, value);
+  const unset = record.props.unset;
+  if (Array.isArray(unset))
+    for (const field of unset)
+      if (typeof field === "string" && !out.has(field)) out.set(field, null);
+  return out;
+}
+
+/**
+ * The changes a node the branch added makes. Most are one `added` change
+ * (`addedChange`). An override record main made too (`now`) is the
+ * branch's fields from an empty base, each its own change: one main gave
+ * another value (or unset) conflicts, one main left alone doesn't, and one
+ * both made alike isn't a change.
+ */
+export function addedChanges(
+  node: NodeRecord,
+  now: NodeRecord | undefined,
+  parentOnMain: boolean,
+  parentInBase: boolean,
+): BranchChange[] {
+  if (!bothMadeRecord(node, now)) return [addedChange(node, parentOnMain, parentInBase)];
+  const onMain = recordFields(now);
+  const changes: BranchChange[] = [];
+  for (const [field, value] of recordFields(node)) {
+    const m = onMain.get(field);
+    // (An unset field is null, which `same` takes for a missing one.)
+    if (m !== undefined && same(value, m)) continue;
+    changes.push({
+      kind: "changed",
+      id: node.id,
+      field: field as PropName,
+      base: undefined,
+      branch: value,
+      main: m,
+      conflict: m !== undefined,
+      record: true,
+    });
+  }
+  return changes;
+}
+
+/**
+ * The create that brings the `taken` fields of an override record both
+ * sides made into main's, which it merges into (`applyCreate`): each taken
+ * field's value or unset, and the branch's marks on them. Null when none.
+ */
+export function recordOp(node: NodeRecord, taken: ReadonlySet<string>): CreateOp | null {
+  if (taken.size === 0) return null;
+  const props: Record<string, unknown> = { path: node.props.path };
+  const unset: string[] = [];
+  const fields = recordFields(node);
+  for (const field of taken) {
+    const value = fields.get(field);
+    if (value === null) unset.push(field);
+    else if (value !== undefined) props[field] = value;
+  }
+  if (unset.length) props.unset = unset;
+  const marks = Array.isArray(node.props.overrides)
+    ? node.props.overrides.filter((field) => taken.has(field))
+    : [];
+  if (marks.length) props.overrides = marks;
+  return {
+    op: "create",
+    id: node.id,
+    type: node.type,
+    parent: node.parent,
+    key: node.key,
+    props: props as NodeRecord["props"],
+  };
+}
+
 /** Whether main changed a node since the base (`was` undefined: main added it). */
 export function editedSince(was: NodeRecord | undefined, now: NodeRecord): boolean {
   // Maps don't serialise: compare their entries.
@@ -174,7 +273,12 @@ export function branchChanges(base: DocReader, branch: DocReader, main: DocReade
     if (!was) {
       // Added on the branch: its parent must be there in main (or come with it).
       changes.push(
-        addedChange(node, main.get(node.parent) !== undefined, baseNodes.has(node.parent)),
+        ...addedChanges(
+          node,
+          main.get(node.id),
+          main.get(node.parent) !== undefined,
+          baseNodes.has(node.parent),
+        ),
       );
       continue;
     }
@@ -234,13 +338,26 @@ export function mergeOps(
   };
   for (const id of added) place(id);
 
+  // Override records both sides made: the fields taken, merged into main's by one create each.
+  const records = new Map<string, Set<string>>();
   for (const c of changes) {
     if (c.kind !== "changed" || !take(c) || !main.get(c.id)) continue;
+    if (c.record) {
+      const taken = records.get(c.id) ?? new Set<string>();
+      taken.add(c.field);
+      records.set(c.id, taken);
+      continue;
+    }
     if (c.field === POSITION) {
       const to = c.branch as { parent: string; key: string };
       if (to.parent === ROOT_ID || main.get(to.parent) || placed.has(to.parent))
         ops.push({ op: "move", id: c.id, parent: to.parent, key: to.key });
     } else ops.push(changeOp(c));
+  }
+  for (const [id, taken] of records) {
+    const node = branch.get(id);
+    const op = node && recordOp(node, taken);
+    if (op) ops.push(op);
   }
 
   for (const c of changes)

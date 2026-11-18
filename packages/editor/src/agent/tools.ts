@@ -311,8 +311,11 @@ const setProps = defineTool({
       id: nodeId,
       props: checkedProps(editor, nodeId, props),
     }));
+    // A layer's references first: one unlinked and edited in one change gets the edit as its own.
+    const refsFirst = (entries: [string, unknown][]) =>
+      entries.sort(([a], [b]) => Number(b === "propRefs") - Number(a === "propRefs"));
     const ops = planned.flatMap(({ id: nodeId, props }) =>
-      Object.entries(props).flatMap(([prop, value]): Op[] =>
+      refsFirst(Object.entries(props)).flatMap(([prop, value]): Op[] =>
         prop === "propValues"
           ? propertyValueOps(editor, nodeId, value)
           : [{ op: "set", id: nodeId, prop: prop as PropName, value }],

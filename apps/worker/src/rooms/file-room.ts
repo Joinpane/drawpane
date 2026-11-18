@@ -11,9 +11,13 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   applyTransaction,
+  BuildTooLarge,
   ClientMessage,
   type CommentEvent,
   type CopiesFormat,
+  forProtocol2Nodes,
+  forProtocol2Ops,
+  fromProtocol2,
   heldNodeIds,
   IMPORT_TTL_MS,
   INLINE_SNAPSHOT_NODES,
@@ -290,6 +294,13 @@ interface Attachment {
    * view, and its edits are refused, telling it to reload (decision 0029).
    */
   viewing?: boolean;
+  /**
+   * The protocol its hello said. 2: a tab from before component property
+   * records (decision 0035), an editor sent nothing it can't read, whose
+   * edits are taken as they mean (protocol2.ts). Missing before it was
+   * recorded, and for the current protocol.
+   */
+  protocol?: number;
   /** When a viewing client was last sent the file. */
   servedAt?: number;
   /** Whether the file changed since a viewing client was last sent it. */
@@ -2631,10 +2642,11 @@ export class FileRoom extends DurableObject<Env> {
       user_id: string;
       session_id: string;
     }>("SELECT revn, ops, user_id, session_id FROM log WHERE revn > ? ORDER BY revn", revn)) {
+      const ops = JSON.parse(row.ops) as Op[];
       this.#send(ws, {
         t: "txn",
         revn: row.revn,
-        ops: JSON.parse(row.ops) as Op[],
+        ops: me.protocol === 2 ? forProtocol2Ops(ops) : ops,
         author: me.guest ? ANONYMOUS : { userId: row.user_id, sessionId: row.session_id },
       });
     }
@@ -2709,11 +2721,12 @@ export class FileRoom extends DurableObject<Env> {
     protocol: number,
     tickets: DocumentTickets | null,
   ): void {
-    // A tab from before keyed sets (protocol 2, decision 0035) would read a set of one property
-    // value as the whole record, and one removed as all of them gone: it reloads for a newer
-    // client, never edits or follows edits. So does a tab from before compact copies, unless the
+    // A tab from before component property records (protocol 2, decision 0035) stays an editor:
+    // closed to reload, it would lose the edits it holds unsent. It's sent nothing it can't read,
+    // its edits are taken as they mean (protocol2.ts), and it reloads by itself once they're in
+    // (its update banner waits for that). A tab from before compact copies reloads, unless the
     // file is compact: then it views it as a whole file sent again, never operations (below).
-    if (protocol === 2 || (protocol === 1 && this.#copies !== "compact")) {
+    if (protocol === 1 && this.#copies !== "compact") {
       this.#tellToReload(ws);
       return;
     }
@@ -2773,6 +2786,8 @@ export class FileRoom extends DurableObject<Env> {
     me.reads = [...reads];
     me.viewing = false;
     me.stale = false;
+    if (protocol === 2) me.protocol = 2;
+    else delete me.protocol;
     ws.serializeAttachment(me);
     const lastSeq =
       this.#sql
@@ -2797,7 +2812,11 @@ export class FileRoom extends DurableObject<Env> {
     } else {
       // Nothing awaits from here to the last chunk: one revision.
       sendSocketSnapshot(this.#sql, (nodes, done) =>
-        this.#send(ws, { t: "snapshot", nodes, done }),
+        this.#send(ws, {
+          t: "snapshot",
+          nodes: me.protocol === 2 ? forProtocol2Nodes(nodes) : nodes,
+          done,
+        }),
       );
     }
     if (!me.guest) this.#broadcast({ t: "peer", peer: this.#peer(me) }, ws);
@@ -3033,6 +3052,8 @@ export class FileRoom extends DurableObject<Env> {
       }
       ops = fitted.ops;
     }
+    // A tab from before component property records: its edits as they mean now (protocol2.ts).
+    if (me.protocol === 2) ops = this.#fromProtocol2(ops);
     // Override records (decision 0029) only in a file that stores compact copies.
     if (
       this.#copies !== "compact" &&
@@ -3337,7 +3358,34 @@ export class FileRoom extends DurableObject<Env> {
       }
     }
     this.#store.clearCache();
+    const me = ws.deserializeAttachment() as Attachment | null;
+    if (me?.protocol === 2)
+      for (const [id, node] of Object.entries(fix))
+        if (node) fix[id] = forProtocol2Nodes([node])[0] as NodeRecord;
     this.#send(ws, { t: "reject", seq, code, message, fix });
+  }
+
+  /**
+   * A protocol 2 tab's operations as they apply now (`fromProtocol2`), read
+   * before any applies. An instance too large to build to read them by is
+   * left as its tab wrote it: the edit is kept, not refused.
+   */
+  #fromProtocol2(ops: readonly Op[]): Op[] {
+    try {
+      if (this.#copies !== "compact") return fromProtocol2(this.#store, "materialized", ops);
+      const reader = new PresentedReader(new TableReader(this.#sql, "nodes"), this.#sql, "nodes");
+      return fromProtocol2(
+        { get: (id) => this.#store.get(id), driven: (id, root) => reader.driven(id, root) },
+        "compact",
+        ops,
+      );
+    } catch (error) {
+      if (!(error instanceof BuildTooLarge)) throw error;
+      console.error("couldn't read a protocol 2 edit's instance", error.message);
+      return [...ops];
+    } finally {
+      this.#store.clearCache();
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -3736,6 +3784,20 @@ export class FileRoom extends DurableObject<Env> {
         : message.t === "resync"
           ? data
           : null;
+    // A tab from before component property records gets what it can apply (`forProtocol2Ops`).
+    let legacy: { data: string; guest: string | null } | undefined;
+    const forLegacy = () => {
+      if (!legacy) {
+        const ops = message.t === "txn" ? forProtocol2Ops(message.ops) : null;
+        legacy = ops
+          ? {
+              data: JSON.stringify({ ...message, ops }),
+              guest: JSON.stringify({ ...message, ops, author: ANONYMOUS }),
+            }
+          : { data, guest: guestData };
+      }
+      return legacy;
+    };
     let sent = 0;
     for (const ws of this.ctx.getWebSockets()) {
       if (ws === except) continue;
@@ -3750,7 +3812,8 @@ export class FileRoom extends DurableObject<Env> {
         continue;
       }
       try {
-        ws.send(me.guest ? (guestData as string) : data);
+        if (me.protocol === 2) ws.send((me.guest ? forLegacy().guest : forLegacy().data) as string);
+        else ws.send(me.guest ? (guestData as string) : data);
         sent++;
       } catch {
         // Ignore sockets that are closing.

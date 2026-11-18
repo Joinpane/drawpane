@@ -298,20 +298,28 @@ function fits(field: PropRefField, value: PropertyValue): boolean {
  * are: edits of the property (decision 0035, item 3). Each such `set` on a
  * copy layer becomes a keyed set of the record its value lives in, and every
  * layer the property drives shows it; other operations are kept as they
- * are, in order. A driven field never holds a value of its own.
+ * are, in order. A driven field never holds a value of its own. Each is read
+ * against the references the operations before it leave: a layer unlinked
+ * and then edited in one transaction gets the edit as its own value, and the
+ * property's other layers keep theirs.
  */
 export function drivenEditOps(doc: Doc, ops: readonly Op[]): Op[] {
   let out: Op[] | null = null;
   const planned = new Map<string, Record<string, unknown>>();
+  const refs = new Map<string, Record<string, string | undefined>>();
   ops.forEach((op, i) => {
-    const kept = unlinkedValues(doc, op);
+    const kept = unlinkedValues(doc, op, refs, planned);
+    if (op.op === "set" && op.prop === "propRefs" && op.key === undefined)
+      refs.set(op.id, (op.value ?? {}) as Record<string, string | undefined>);
+    // A layer no longer a copy (detached): no property drives it.
+    if (op.op === "set" && op.prop === "mirrors" && !op.value) refs.set(op.id, {});
     if (kept.length > 0) {
       // Unlinked from a property, a layer keeps what it showed, as its own.
       if (!out) out = ops.slice(0, i);
       out.push(op, ...kept);
       return;
     }
-    const write = drivenWrite(doc, op, planned);
+    const write = drivenWrite(doc, op, planned, refs);
     if (write === undefined) {
       out?.push(op);
       return;
@@ -327,18 +335,44 @@ export function drivenEditOps(doc: Doc, ops: readonly Op[]): Op[] {
  * (unlinked): the sets that keep that field as it shows now, the layer's
  * own value from then on. None for anything else.
  */
-function unlinkedValues(doc: Doc, op: Op): Op[] {
+function unlinkedValues(
+  doc: Doc,
+  op: Op,
+  refs: ReadonlyMap<string, Record<string, string | undefined>>,
+  planned: ReadonlyMap<string, Record<string, unknown>>,
+): Op[] {
   if (op.op !== "set" || op.prop !== "propRefs" || op.key !== undefined) return [];
   const node = doc.get(op.id);
   if (!node || getProp(node.props, "mirrors") === null) return [];
-  const before = getProp(node.props, "propRefs") as Record<string, string | undefined>;
+  const before =
+    refs.get(op.id) ?? (getProp(node.props, "propRefs") as Record<string, string | undefined>);
   const after = (op.value ?? {}) as Record<string, string | undefined>;
   const out: Op[] = [];
-  for (const field of ["visible", "characters"] as const)
-    if (before[field] && !after[field]) {
-      const value = (node.props as Record<string, unknown>)[field];
-      out.push({ op: "set", id: op.id, prop: field, value: value === undefined ? null : value });
+  // What it shows is its record's value, as the operations before this leave it: a
+  // materialized layer written before the record's last value can lag, and the record wins.
+  const recorded = new Map<string, unknown>(
+    drivenValues(doc, node).map(({ field, value }) => [field, value]),
+  );
+  const owner = ownerOf(doc, op.id);
+  const place = owner ? recordPlace(doc, owner.id) : undefined;
+  const staged = place ? planned.get(place.root) : undefined;
+  for (const field of ["visible", "characters"] as const) {
+    const propertyId = before[field];
+    if (!propertyId || after[field]) continue;
+    let value = recorded.has(field)
+      ? recorded.get(field)
+      : (node.props as Record<string, unknown>)[field];
+    if (place && staged) {
+      const now = staged[propertyKey(place.scope, propertyId)];
+      if (now !== undefined) value = now;
+      else if (recorded.has(field)) {
+        // Reset earlier in these operations: its main layer's.
+        const source = doc.get(getProp(node.props, "mirrors") as string);
+        value = source ? (source.props as Record<string, unknown>)[field] : undefined;
+      }
     }
+    out.push({ op: "set", id: op.id, prop: field, value: value === undefined ? null : value });
+  }
   return out;
 }
 
@@ -347,13 +381,14 @@ function drivenWrite(
   doc: Doc,
   op: Op,
   planned: Map<string, Record<string, unknown>>,
+  refs: ReadonlyMap<string, Record<string, string | undefined>>,
 ): Op | null | undefined {
   if (op.op !== "set") return undefined;
   const field = op.prop;
   if (field !== "visible" && field !== "characters" && field !== "instanceOf") return undefined;
   const node = doc.get(op.id);
   if (!node || getProp(node.props, "mirrors") === null) return undefined;
-  const propertyId = getProp(node.props, "propRefs")[field];
+  const propertyId = (refs.get(op.id) ?? getProp(node.props, "propRefs"))[field];
   if (!propertyId) return undefined;
   const owner = ownerOf(doc, op.id);
   if (!owner) return undefined;

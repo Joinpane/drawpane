@@ -153,22 +153,61 @@ function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
 }
 
 /**
- * A create of an override record that exists: its values set over the
- * record's, each the creator's (the last writer's, as sets are), its path
- * the same (the id says so). Two people's first values on one copy layer,
- * each writing the record from a file without the other's, both stay.
+ * A create of an override record that exists: its path the same (the id says
+ * so), merged field by field, so two people's first changes to one copy layer,
+ * each writing the record from a file without the other's, both stay:
+ * - a field the create gives a value or lists in `unset` is the creator's (the
+ *   last writer's, as sets are): its value set, or its value removed and the
+ *   field unset;
+ * - a field the create doesn't mention keeps what the record has;
+ * - `unset` is both lists, less the fields the create gives a value;
+ * - `overrides`, which marks fields, is both lists.
+ * Every client, the room, stored replay and a branch merge apply it here.
  * Undone value by value.
  */
+export function mergeRecordProps(
+  existing: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...existing };
+  const strings = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+  const given = new Set<string>();
+  for (const [prop, value] of Object.entries(incoming)) {
+    if (prop === "path" || prop === "unset" || prop === "overrides") continue;
+    if (value === null || value === undefined) continue;
+    merged[prop] = value;
+    given.add(prop);
+  }
+  const cleared = strings(incoming.unset);
+  for (const prop of cleared) if (!given.has(prop)) delete merged[prop];
+  const union = (a: string[], b: string[]) => [...new Set([...a, ...b])];
+  const unset = union(
+    strings(existing.unset).filter((prop) => !given.has(prop)),
+    cleared.filter((prop) => !given.has(prop)),
+  );
+  if (unset.length) merged.unset = unset;
+  else delete merged.unset;
+  const overrides = union(strings(existing.overrides), strings(incoming.overrides));
+  if (overrides.length) merged.overrides = overrides;
+  else delete merged.overrides;
+  return merged;
+}
+
 function mergeRecord(store: NodeStore, existing: NodeRecord, op: CreateOp): Op[] {
   const path = op.props.path;
   if (!Array.isArray(path) || JSON.stringify(path) !== JSON.stringify(existing.props.path))
     throw new ModelError("already_exists", `Node ${op.id} already exists.`);
+  const before = existing.props as Record<string, unknown>;
+  const after = mergeRecordProps(before, op.props as Record<string, unknown>);
   const undo: Op[] = [];
-  for (const [prop, value] of Object.entries(op.props)) {
+  for (const prop of new Set([...Object.keys(before), ...Object.keys(after)])) {
     if (prop === "path") continue;
-    checkValue("override", prop, value);
-    const previous = (existing.props as Record<string, unknown>)[prop];
-    store.setProp(op.id, prop, value === null ? undefined : value);
+    const previous = before[prop];
+    const next = after[prop];
+    if (JSON.stringify(previous) === JSON.stringify(next)) continue;
+    checkValue("override", prop, next ?? null);
+    store.setProp(op.id, prop, next);
     undo.push({ op: "set", id: op.id, prop, value: previous === undefined ? null : previous });
   }
   return undo.reverse();

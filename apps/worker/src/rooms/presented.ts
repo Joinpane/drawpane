@@ -16,7 +16,9 @@
 import {
   BuildBudget,
   CopyView,
+  copyDriven,
   type DocReader,
+  type DrivenField,
   type NodeRecord,
   ROOT_ID,
   type StoredReader,
@@ -80,6 +82,17 @@ export class PresentedReader implements DocReader {
       return this.#view.get(id);
     }
     return this.#search(id);
+  }
+
+  /**
+   * The fields of the copy layer `id` in the instance `root` (an override
+   * record's id is its layer's) that a component property drives, each with
+   * its key in the instance's record (decision 0035), and the layer's main
+   * layer: what a protocol 2 tab's edits mean (`fromProtocol2`).
+   */
+  driven(id: string, root: string): { fields: readonly DrivenField[]; source?: NodeRecord } {
+    this.#between();
+    return copyDriven(this.#view, root, id);
   }
 
   #search(id: string): NodeRecord | undefined {

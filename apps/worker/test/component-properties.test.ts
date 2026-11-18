@@ -1,6 +1,7 @@
 /**
- * Component property values in a real room (decision 0035): a client from
- * before keyed sets is told to reload, a keyed set is checked entry by
+ * Component property values in a real room (decision 0035): a tab from
+ * before keyed sets stays an editor, its edits taken as they mean (review
+ * 4 of #187), a keyed set is checked entry by
  * entry and whole on what its transaction leaves, and two people's first
  * values of a nested instance both stay (the outer instance's record holds
  * them, so no record has to be made for the nested one). Review 3 of #187.
@@ -82,7 +83,7 @@ async function join(browser: Browser, fileId: string, clientId: string) {
   return { ...socket, welcome, nodes };
 }
 
-async function setup() {
+async function setup(form: "compact" | "materialized" = "compact") {
   const owner = await signedInUser("Component properties");
   const { file } = await owner.browser.json<{ file: { id: string } }>(
     `/api/projects/${owner.projectId}/files`,
@@ -91,6 +92,10 @@ async function setup() {
   const seed = await join(owner.browser, file.id, "seed");
   seed.ws.close();
   const room = env.FILE_ROOM.get(env.FILE_ROOM.idFromName(file.id));
+  if (form === "materialized") {
+    await room.storeMaterialized(fixture());
+    return { ...owner, fileId: file.id, room, converted: { nodes: fixture(), ids: new Map() } };
+  }
   const converted = compactByInstance(fixture());
   const imported = await room.importNodes(
     { userId: owner.userId, name: "Properties" },
@@ -102,21 +107,122 @@ async function setup() {
   return { ...owner, fileId: file.id, room, converted };
 }
 
+/**
+ * The operations a tab from before records sends for `edit`: an editor
+ * holding only what such a tab is sent (no references, records or
+ * definitions), so it edits a driven layer as a plain one, as its code did.
+ */
+function oldTab(form: "compact" | "materialized", loaded: NodeRecord[], edit: Op[]): Op[] {
+  const editor = new Editor({ measurer: { width: (_font, text) => text.length * 7 } });
+  editor.state.set({ role: "editor" });
+  editor.doc.resetStored(structuredClone(loaded), form);
+  editor.setPage("p");
+  expect(editor.commit(edit)).toBe(true);
+  return editor.sync.takeUnsent();
+}
+
 describe("component property values in the room", () => {
-  it("tells a client from before keyed sets to reload, never letting it edit", async () => {
-    const { browser, fileId } = await setup();
-    const older = await openSocket(browser, fileId);
-    older.send({ t: "hello", protocol: 2, clientId: "older", revn: null, copies: ["compact"] });
-    expect((await older.next<{ code: string }>("error")).code).toBe("reload");
-    // Its socket is closed: nothing it would send is read, nothing is sent to it.
+  for (const form of ["compact", "materialized"] as const)
+    it(`keeps a tab from before records an editor: its queued edits all apply (${form})`, async () => {
+      // Review 4 of #187, P1 #2: a protocol 2 tab told to reload lost the edits it held unsent.
+      const { browser, fileId, room, converted } = await setup(form);
+      const text = form === "compact" ? (converted.ids.get("nit") as string) : "nit";
+      const older = await openSocket(browser, fileId);
+      const hello = { t: "hello", protocol: 2, clientId: "older", copies: [form] };
+      older.send({ ...hello, revn: null });
+      const welcome = await older.next<{ role: string; revn: number; copies: string }>("welcome");
+      expect(welcome).toMatchObject({ role: "owner", copies: form });
+      const loaded: NodeRecord[] = [];
+      for (;;) {
+        const chunk = await older.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot");
+        loaded.push(...chunk.nodes);
+        if (chunk.done) break;
+      }
+      // Sent nothing its model refuses.
+      const unknown = ["propRefs", "propValues", "componentProps", "exposeProps"];
+      expect(loaded.some((n) => unknown.some((p) => p in n.props))).toBe(false);
+      older.ws.close();
+
+      // While it's offline, a newer client sets a value; it queues three edits of its own.
+      const newer = await join(browser, fileId, "newer");
+      newer.send({
+        t: "txn",
+        seq: 1,
+        ops: [{ op: "set", id: "i", prop: "propValues", key: "show", value: true }],
+      });
+      await newer.next("ack");
+      const queued: Op[][] = [
+        [{ op: "set", id: "p", prop: "name", value: "Renamed offline" }],
+        // Typing in the nested instance's label, as its tab writes it.
+        oldTab(form, loaded, [{ op: "set", id: text, prop: "characters", value: "Typed offline" }]),
+        // An ordinary override.
+        oldTab(form, loaded, [{ op: "set", id: text, prop: "opacity", value: 0.5 }]),
+      ];
+
+      // It comes back: welcomed (its update banner reloads it once these are in), caught up on
+      // what it can read, and every edit applies.
+      const back = await openSocket(browser, fileId);
+      back.send({ ...hello, revn: welcome.revn });
+      expect((await back.next<{ mode: string }>("welcome")).mode).toBe("catchup");
+      const caughtUp = await back.next<{ ops: Op[] }>("txn");
+      expect(caughtUp.ops).toEqual([]);
+      for (let i = 0; i < queued.length; i++) {
+        back.send({ t: "txn", seq: i + 1, ops: queued[i] });
+        expect((await back.next<{ seq: number }>("ack")).seq).toBe(i + 1);
+      }
+      expect(back.inbox.filter((m) => m.t === "reject")).toEqual([]);
+      const doc = new Doc();
+      doc.resetStored((await room.allNodes()) as NodeRecord[], form);
+      expect(doc.get("p")?.props.name).toBe("Renamed offline");
+      const nested = form === "compact" ? (converted.ids.get("ni") as string) : "ni";
+      expect(instanceValues(doc, nested)).toEqual({ label: "Typed offline" });
+      expect(instanceValues(doc, "i")).toEqual({ show: true });
+      expect(doc.get(text)?.props.characters).toBe("Typed offline");
+      expect(doc.get(text)?.props.opacity).toBe(0.5);
+      // The newer client hears it as a value of the record.
+      const heard: Op[] = [];
+      for (let i = 0; i < queued.length; i++)
+        heard.push(...(await newer.next<{ ops: Op[] }>("txn")).ops);
+      expect(heard).toContainEqual(
+        expect.objectContaining({ id: "i", prop: "propValues", value: "Typed offline" }),
+      );
+      back.ws.close();
+      newer.ws.close();
+    });
+
+  it("leaves out a materialized tab's instance sync of a field its record decides", async () => {
+    const { browser, fileId, room } = await setup("materialized");
     const newer = await join(browser, fileId, "newer");
     newer.send({
       t: "txn",
       seq: 1,
-      ops: [{ op: "set", id: "i", prop: "propValues", key: "label", value: "New" }],
+      ops: [
+        { op: "set", id: "i", prop: "propValues", key: "n/label", value: "Kept" },
+        { op: "set", id: "nit", prop: "characters", value: "Kept" },
+      ],
     });
     await newer.next("ack");
-    expect(older.inbox.filter((m) => m.t === "txn")).toEqual([]);
+    const older = await openSocket(browser, fileId);
+    older.send({
+      t: "hello",
+      protocol: 2,
+      clientId: "older",
+      revn: null,
+      copies: ["materialized"],
+    });
+    await older.next("welcome");
+    // Its sync puts back what it thinks the main gives: no mark, so not a person's edit.
+    older.send({
+      t: "txn",
+      seq: 1,
+      ops: [{ op: "set", id: "nit", prop: "characters", value: "Base" }],
+    });
+    await older.next("ack");
+    const doc = new Doc();
+    doc.resetStored((await room.allNodes()) as NodeRecord[], "materialized");
+    expect(instanceValues(doc, "ni")).toEqual({ label: "Kept" });
+    expect(doc.get("nit")?.props.characters).toBe("Kept");
+    older.ws.close();
     newer.ws.close();
   });
 

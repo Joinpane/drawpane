@@ -8,13 +8,25 @@
  * which replay it through their `SyncEngine` (rebasing what they haven't
  * sent). Delivery is explicit, so a test (or a generated schedule) decides
  * what each client has seen when it edits.
+ *
+ * A client may be a tab from before component property records (protocol
+ * 2): the room sends it nothing it can't read and takes its edits as they
+ * mean, with the model's own translation (`fromProtocol2`), as `FileRoom`
+ * does. Its editor is today's, fed only what such a tab is: it sees no
+ * references, records or definitions, so it edits the layers a property
+ * drives as plain layers, as the old code did.
  */
 import { Doc, Editor, instanceProperties, instanceValues } from "@drawpane/editor";
 import {
   applyTransaction,
   type ClientMessage,
   type CopiesFormat,
+  CopyView,
   compactByInstance,
+  copyDriven,
+  forProtocol2Nodes,
+  forProtocol2Ops,
+  fromProtocol2,
   getProp,
   MemoryStore,
   ModelError,
@@ -268,8 +280,8 @@ export class Room {
     return this.ids.get(old) ?? old;
   }
 
-  join(name: string): Client {
-    const client = new Client(this, name);
+  join(name: string, protocol: 2 | 3 = 3): Client {
+    const client = new Client(this, name, protocol);
     this.clients.push(client);
     this.connect(client);
     return client;
@@ -304,7 +316,7 @@ export class Room {
           lastSeq: this.lastSeq.get(from.name) ?? 0,
           copies: this.copies,
         },
-        { t: "snapshot", nodes: structuredClone([...this.store.nodes()]), done: false },
+        { t: "snapshot", nodes: from.read(structuredClone([...this.store.nodes()])), done: false },
         { t: "snapshot", nodes: [], done: true },
       );
       return;
@@ -315,8 +327,11 @@ export class Room {
       from.inbox.push({ t: "ack", seq: message.seq, revn: this.revn });
       return;
     }
+    // A tab from before records: its edits as they mean (`FileRoom` does the same).
+    const ops =
+      from.protocol === 2 ? this.fromProtocol2(message.ops as Op[]) : (message.ops as Op[]);
     try {
-      applyTransaction(this.store, message.ops as Op[]);
+      applyTransaction(this.store, ops);
     } catch (error) {
       if (!(error instanceof ModelError)) throw error;
       this.rejected.push({ client: from.name, code: error.code, message: error.message });
@@ -327,6 +342,8 @@ export class Room {
         if ((op.op === "create" || op.op === "move") && op.parent !== ROOT_ID)
           fix[op.parent] ??= structuredClone(this.store.get(op.parent) ?? null);
       }
+      if (from.protocol === 2)
+        for (const [id, n] of Object.entries(fix)) if (n) fix[id] = from.read([n])[0] as NodeRecord;
       from.inbox.push({
         t: "reject",
         seq: message.seq,
@@ -339,7 +356,20 @@ export class Room {
     this.revn++;
     this.lastSeq.set(from.name, message.seq);
     from.inbox.push({ t: "ack", seq: message.seq, revn: this.revn });
-    this.broadcast(message.ops as Op[], from);
+    this.broadcast(ops, from);
+  }
+
+  /** A protocol 2 tab's operations as they apply now, read before any applies. */
+  fromProtocol2(ops: readonly Op[]): Op[] {
+    const view = new CopyView(this.store);
+    return fromProtocol2(
+      {
+        get: (id) => this.store.get(id),
+        driven: (id, root) => copyDriven(view, root, id),
+      },
+      this.copies,
+      ops,
+    );
   }
 
   /** A transaction the room makes itself (a branch merge), passed to every client. */
@@ -355,7 +385,7 @@ export class Room {
         other.inbox.push({
           t: "txn",
           revn: this.revn,
-          ops: structuredClone([...ops]),
+          ops: structuredClone(other.protocol === 2 ? forProtocol2Ops(ops) : [...ops]),
           author: { userId: "u", sessionId: from?.name ?? "room" },
         });
   }
@@ -381,8 +411,15 @@ export class Client {
   constructor(
     readonly room: Room,
     readonly name: string,
+    /** 2: a tab from before component property records (see the top). */
+    readonly protocol: 2 | 3 = 3,
   ) {
     this.editor = new Editor({ clientId: name, measurer });
+  }
+
+  /** Nodes as this client is sent them. */
+  read(nodes: NodeRecord[]): NodeRecord[] {
+    return this.protocol === 2 ? forProtocol2Nodes(nodes) : nodes;
   }
 
   deliver(): void {
@@ -413,10 +450,18 @@ export class Client {
 
 const byId = (a: NodeRecord, b: NodeRecord) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
-/** Every client holds exactly what the room stores (nothing pending anywhere). */
+/**
+ * Every client holds exactly what the room stores (nothing pending anywhere).
+ * A protocol 2 tab only has nothing pending: it may show a property's old
+ * value until it reloads.
+ */
 export function expectConverged(room: Room): void {
   const stored = [...room.store.nodes()].sort(byId);
   for (const client of room.clients) {
+    if (client.protocol === 2) {
+      expect(client.editor.sync.pendingCount).toBe(0);
+      continue;
+    }
     expect(client.editor.sync.pendingCount).toBe(0);
     expect(client.editor.doc.stored().sort(byId)).toEqual(stored);
   }
@@ -458,7 +503,8 @@ export function expectShowsRecord(doc: Doc, instance: string): void {
  */
 export function expectAgreement(room: Room, instance: string): void {
   expectConverged(room);
-  for (const client of room.clients) expectShowsRecord(client.editor.doc, instance);
+  for (const client of room.clients)
+    if (client.protocol !== 2) expectShowsRecord(client.editor.doc, instance);
   const opened = new Doc({ compactCopies: room.copies === "compact" });
   opened.resetStored(structuredClone([...room.store.nodes()]), room.copies);
   expectShowsRecord(opened, instance);

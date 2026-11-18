@@ -44,6 +44,7 @@ import { gridImportOps } from "./layout";
 import { layerName } from "./names";
 import {
   clearValueOps,
+  drivenValues,
   FIELD_OF,
   fieldValue,
   instanceDefinitions,
@@ -1160,8 +1161,13 @@ function withSets(nodes: readonly NodeRecord[], ops: readonly Op[]): readonly No
  */
 export function overrideOps(doc: Doc, ops: readonly Op[]): Op[] {
   const marks = new Map<string, Set<string>>();
+  // A layer the operations unlink from its main (detached) has nothing to be an override of.
+  const leaving = new Set<string>();
+  for (const op of ops)
+    if (op.op === "set" && (op.prop === "mirrors" || op.prop === "instanceOf") && !op.value)
+      leaving.add(op.id);
   for (const op of ops) {
-    if (op.op !== "set" || LINK_PROPS.has(op.prop)) continue;
+    if (op.op !== "set" || LINK_PROPS.has(op.prop) || leaving.has(op.id)) continue;
     const node = doc.get(op.id);
     if (!node) continue;
     const isRoot = isInstanceRoot(node);
@@ -1250,24 +1256,85 @@ export function detachOps(doc: Doc, instanceId: string): Op[] {
     const id = stack.pop() as string;
     const node = doc.get(id);
     if (!node) continue;
+    const unlinked = getProp(node.props, "mirrors") !== null;
+    if (unlinked) ops.push({ op: "set", id, prop: "mirrors", value: null });
+    // A layer keeps what its property's value is, which with materialized copies a layer
+    // written before the record's last value can lag (compact copies present it).
+    if (unlinked && !doc.compactCopies) ops.push(...recordValueOps(doc, node));
+    if (getProp(node.props, "overrides").length > 0)
+      ops.push({ op: "set", id, prop: "overrides", value: null });
     if (isInstanceRoot(node)) {
-      // Nested instances stay instances of their own components, with their values (compact
-      // copies give them theirs as they're stored on their own).
-      const values = doc.compactCopies ? null : scopedValues(record, ownLayerId(doc, id));
+      // Nested instances stay instances of their own components, with every value they show
+      // (compact copies give them theirs as they're stored on their own).
+      const values = doc.compactCopies ? null : nestedValues(doc, record, node);
       if (values)
         for (const [key, value] of Object.entries(values))
           nested.push({ op: "set", id, prop: "propValues", key, value });
-      if (getProp(node.props, "mirrors")) ops.push({ op: "set", id, prop: "mirrors", value: null });
-      if (getProp(node.props, "overrides").length > 0)
-        ops.push({ op: "set", id, prop: "overrides", value: null });
+      if (!doc.compactCopies) ops.push(...ownComponentOps(doc, id));
       continue;
     }
-    if (getProp(node.props, "mirrors")) ops.push({ op: "set", id, prop: "mirrors", value: null });
-    if (getProp(node.props, "overrides").length > 0)
-      ops.push({ op: "set", id, prop: "overrides", value: null });
     stack.push(...doc.childIds(id));
   }
   return [...ops, ...nested];
+}
+
+/**
+ * A nested instance in a materialized copy, about to stand on its own
+ * (detached around it): its layers copy its main's copy layers, which copy
+ * its own component's. They copy its component's then, one step down, as
+ * an instance's layers do, so it follows its component and converts.
+ */
+function ownComponentOps(doc: Doc, instanceId: string): Op[] {
+  const ops: Op[] = [];
+  const stack = [...doc.childIds(instanceId)];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    const node = doc.get(id);
+    if (!node) continue;
+    const mirrors = getProp(node.props, "mirrors");
+    const through = mirrors ? getProp(doc.get(mirrors)?.props ?? {}, "mirrors") : null;
+    if (through && doc.has(through)) ops.push({ op: "set", id, prop: "mirrors", value: through });
+    stack.push(...doc.childIds(id));
+  }
+  return ops;
+}
+
+/**
+ * The values a nested instance in a copy shows, as a record of its own for
+ * when it's no longer in one (detached): those the outer instance's record
+ * keeps under its scope, over those its main layer's own record holds (the
+ * values the main around it set, which it shows where the outer record has
+ * none), while it's an instance of the same component as that layer. Null
+ * when there are none.
+ */
+export function nestedValues(
+  doc: Doc,
+  outer: Readonly<Record<string, PropertyValue>>,
+  node: NodeRecord,
+): Record<string, PropertyValue> | null {
+  const own = ownLayerId(doc, node.id);
+  const source = own === node.id ? undefined : doc.get(own);
+  const inherited =
+    source && getProp(source.props, "instanceOf") === getProp(node.props, "instanceOf")
+      ? getProp(source.props, "propValues")
+      : {};
+  const values = { ...inherited, ...(scopedValues(outer, own) ?? {}) };
+  return Object.keys(values).length > 0 ? values : null;
+}
+
+/**
+ * The sets that give a copy layer the values its instance's record holds
+ * for the fields a property drives, where it holds others (materialized
+ * copies written before the record's last value): the record wins.
+ */
+function recordValueOps(doc: Doc, node: NodeRecord): Op[] {
+  const ops: Op[] = [];
+  for (const { field, value } of drivenValues(doc, node)) {
+    if (field !== "visible" && field !== "characters") continue;
+    if (sameValue(fieldValue(node, field), value)) continue;
+    ops.push({ op: "set", id: node.id, prop: field, value: value as boolean | string });
+  }
+  return ops;
 }
 
 /** Properties of a node that differ from its main counterpart because of an override. */

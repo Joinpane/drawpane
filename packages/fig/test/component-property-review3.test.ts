@@ -57,7 +57,7 @@ const shown = (room: Room) =>
 // P1 #1: older clients are gated
 
 describe("review 3, P1 #1: the protocol says keyed sets", () => {
-  it("is version 3, and a version 2 hello still reads, so the room can tell it to reload", () => {
+  it("is version 3, and a version 2 hello still reads, so the room can tell such a tab apart", () => {
     expect(PROTOCOL_VERSION).toBe(3);
     const hello = { t: "hello", clientId: "old", revn: null, copies: ["materialized"] };
     expect(ClientMessage.safeParse({ ...hello, protocol: 2 }).success).toBe(true);

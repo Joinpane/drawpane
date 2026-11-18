@@ -762,12 +762,19 @@ export class CompactCopies {
     }
     const nestedOf = new Map<string, string>();
     const nested: string[] = [];
-    // Its nested instances' values are its record's (decision 0035): each takes its own, under
-    // the scope that names it there, once it's an instance stored on its own.
+    // Its nested instances' values are what they show (decision 0035): each takes its own,
+    // under the scope that names it in its record, over those its main layer's record holds
+    // (the main around it set them, and it shows them where its record has none) while it's
+    // an instance of that layer's component, once it's an instance stored on its own.
     const record = (this.store.get(rootId)?.props.propValues ?? {}) as Record<string, unknown>;
     const scoped = (top: string): Record<string, unknown> | undefined => {
       const own = this.view.ownLayerId(top);
-      const out: Record<string, unknown> = {};
+      const source = own === top ? undefined : this.store.get(own);
+      const out: Record<string, unknown> =
+        source &&
+        source.props.instanceOf === (this.view.get(top) as NodeRecord | undefined)?.props.instanceOf
+          ? { ...(source.props.propValues ?? {}) }
+          : {};
       for (const [key, value] of Object.entries(record)) {
         const { scope } = splitPropertyKey(key);
         if (scope[0] === own) out[key.slice(own.length + 1)] = value;

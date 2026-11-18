@@ -19,9 +19,12 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
  * 3: a `set` may write one entry of a map (`key`, decision 0035, item 15),
  * and an instance's record keeps its nested instances' values. A client
  * before it would read a keyed set as the whole map (one value removed
- * would remove them all), so the room tells it to reload instead of
- * letting it edit; a version 1 tab only ever views a compact file, sent
- * whole, never operations.
+ * would remove them all), and its model refuses the properties records
+ * need. Told to reload, it would lose the edits it holds unsent, so the
+ * room keeps it an editor: it's sent nothing it can't read, and its edits
+ * are taken as they mean (`fromProtocol2`), until its update banner
+ * reloads it once they're in. A version 1 tab only ever views a compact
+ * file, sent whole, never operations.
  */
 export const PROTOCOL_VERSION = 3;
 
@@ -74,7 +77,7 @@ export const ClientMessage = z.discriminatedUnion("t", [
     t: z.literal("hello"),
     /**
      * 1 from clients before compact copies, which read materialized files
-     * only; 2 from clients before keyed sets, which the room tells to reload.
+     * only; 2 from clients before keyed sets (see `PROTOCOL_VERSION`).
      */
     protocol: z.union([z.literal(1), z.literal(2), z.literal(PROTOCOL_VERSION)]),
     /** Stable per browser tab; used to make resent transactions idempotent. */

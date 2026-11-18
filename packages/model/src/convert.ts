@@ -614,6 +614,25 @@ export class InstanceConverter {
     // hold for their properties (`foldValue`).
     let stored = root;
     putRoot(root.props);
+    // The values its record held before any were folded, which its layers show (`recordWins`),
+    // and the layers that showed others, as they show them.
+    const recorded = (root.props.propValues ?? {}) as Readonly<Record<string, PropertyValue>>;
+    const shown = new Map<string, Props>();
+    // Nested instances whose stored layers are another component's than the swap their record
+    // holds (materialized copies lag it too): built from the record's, and the stored layers
+    // under them, which are the other component's, go (the record wins, as for a value).
+    const staleSwaps = new Set<string>();
+    const staleBelow = new Set<string>();
+    const dropBelow = (id: string) => {
+      for (const kid of children.get(id) ?? []) {
+        staleBelow.add(kid.id);
+        dropBelow(kid.id);
+      }
+    };
+    const asShown = (node: NodeRecord): NodeRecord => {
+      const props = shown.get(node.id);
+      return props ? { ...node, props } : node;
+    };
 
     const write = (
       slotId: string,
@@ -664,7 +683,18 @@ export class InstanceConverter {
         let slotBase = view.base(slotId);
         if (!slot || !slotBase || slotBase.type !== node.type || slot.key !== node.key)
           return `${node.id} isn't its main layer's type or place`;
-        const folded = foldValue(view.drivenFields(slotId), slotBase.props, node.props, stored);
+        if (staleSwap(view.drivenFields(slotId), recorded, node)) {
+          ids.set(node.id, slotId);
+          slotOf.set(node.id, { id: slotId, path: slot.path });
+          staleSwaps.add(node.id);
+          dropBelow(node.id);
+          continue;
+        }
+        // A layer written before its record's last value (materialized copies lag it) shows the
+        // record's: the record wins, and its layer isn't another value of its own.
+        const props = recordWins(view.drivenFields(slotId), recorded, node.props);
+        if (props !== node.props) shown.set(node.id, props);
+        const folded = foldValue(view.drivenFields(slotId), slotBase.props, props, stored);
         if (folded) {
           stored = folded;
           putRoot(stored.props);
@@ -672,18 +702,13 @@ export class InstanceConverter {
         }
         ids.set(node.id, slotId);
         slotOf.set(node.id, { id: slotId, path: slot.path });
-        const own = ownValues(slotBase.props, node.props);
+        const own = ownValues(slotBase.props, props);
         if (own) {
           const swapped = node.type === "frame" && swaps(own);
           write(slotId, slot.path, own, swapped);
           // Swapped: its base is the other main's now, so what it keeps is what differs from that.
           if (swapped)
-            write(
-              slotId,
-              slot.path,
-              ownValues((view.base(slotId) ?? slotBase).props, node.props),
-              true,
-            );
+            write(slotId, slot.path, ownValues((view.base(slotId) ?? slotBase).props, props), true);
         }
         const deeper = walk(node.id, slotId);
         if (deeper) return deeper;
@@ -701,8 +726,9 @@ export class InstanceConverter {
     // Ids the layers hold, renamed now that every copy's id is known.
     const held = (node: NodeRecord) => renameHeldIds(node.props, rename) ?? node.props;
     if (holdsIds(stored.props)) putRoot(held(stored));
-    for (const node of layers) {
-      if (!holdsIds(node.props)) continue;
+    for (const layer of layers) {
+      const node = asShown(layer);
+      if (staleSwaps.has(node.id) || staleBelow.has(node.id) || !holdsIds(node.props)) continue;
       const slot = slotOf.get(node.id) as { id: string; path: readonly string[] };
       const slotBase = view.base(slot.id);
       if (!slotBase) return `${node.id} has no base`;
@@ -716,19 +742,24 @@ export class InstanceConverter {
     const differs = differences(held(stored), presentedRoot.props);
     if (differs) return `the instance's ${differs}`;
     let count = 0;
+    const builtFresh = new Set([...staleSwaps].map((id) => ids.get(id) as string));
     const stack = [...view.childIds(root.id)];
     for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
       count++;
-      for (const child of view.childIds(id)) stack.push(child);
+      if (!builtFresh.has(id)) for (const child of view.childIds(id)) stack.push(child);
     }
-    if (count !== layers.length) return `${count} layers built, ${layers.length} stored`;
-    for (const node of layers) {
+    const kept = layers.length - staleBelow.size;
+    if (count !== kept) return `${count} layers built, ${kept} stored`;
+    for (const layer of layers) {
+      if (staleBelow.has(layer.id)) continue;
+      const node = asShown(layer);
       const id = ids.get(node.id) as string;
       const built = view.get(id);
       if (!built) return `${node.id} isn't built`;
       const parent = node.parent === root.id ? root.id : ids.get(node.parent);
       if (built.parent !== parent || built.key !== node.key || built.type !== node.type)
         return `${node.id} isn't where it was`;
+      if (staleSwaps.has(node.id)) continue;
       const want: Record<string, unknown> = { ...held(node) };
       if (typeof want.mirrors === "string") want.mirrors = rename(want.mirrors) ?? want.mirrors;
       const off = differences(want as Props, built.props);
@@ -771,6 +802,54 @@ function foldValue(
   )
     return null;
   return { ...root, props: { ...root.props, propValues: record } };
+}
+
+/**
+ * A layer's properties with each field a property drives that its record
+ * (`recorded`) holds a value for set to that value: with records, a driven
+ * field is only ever its record's, so a layer showing another was written
+ * before the record's last value (materialized copies lag it) and the record
+ * wins. A swap isn't (its layers are another main's, to build again). The
+ * same object when nothing changes.
+ */
+function recordWins(
+  fields: readonly DrivenField[],
+  recorded: Readonly<Record<string, PropertyValue>>,
+  layer: Readonly<Props>,
+): Readonly<Props> {
+  let out: Record<string, unknown> | null = null;
+  for (const [field, key] of fields) {
+    const value = recorded[key];
+    if (value === undefined || field === "instanceOf") continue;
+    if (field === "visible" && typeof value !== "boolean") continue;
+    if (field === "characters" && typeof value !== "string") continue;
+    if (sameValue(value, drivenValue(layer as Record<string, unknown>, field))) continue;
+    out ??= { ...layer };
+    out[field] = value;
+  }
+  return (out ?? layer) as Readonly<Props>;
+}
+
+/**
+ * Whether a nested instance's stored layers are another component's than the
+ * swap its record (`recorded`) holds for the property that drives it: written
+ * before the record's last value (materialized copies lag it), so the record
+ * wins and the instance is built from its swap.
+ */
+function staleSwap(
+  fields: readonly DrivenField[],
+  recorded: Readonly<Record<string, PropertyValue>>,
+  layer: NodeRecord,
+): boolean {
+  if (layer.type !== "frame") return false;
+  const driven = fields.find(([field]) => field === "instanceOf");
+  const value = driven ? recorded[driven[1]] : undefined;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof value.instance === "string" &&
+    value.instance !== layer.props.instanceOf
+  );
 }
 
 /** A driven field's value in properties, as a record holds it. */
