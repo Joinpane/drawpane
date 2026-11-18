@@ -788,7 +788,6 @@ export class FileRoom extends DurableObject<Env> {
       this.#sql.exec("DELETE FROM meta WHERE k = 'tokens'");
     });
     this.#store.clearCache();
-    this.#runner?.forget();
     if (Number(this.#meta("tokens") ?? 0) < TOKENS_VERSION) this.#migrateTokens();
   }
 

@@ -45,7 +45,7 @@ async function join(browser: Parameters<typeof openSocket>[0], fileId: string) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 2,
+    protocol: 3,
     clientId: "person",
     revn: null,
     copies: ["materialized", "compact"],
