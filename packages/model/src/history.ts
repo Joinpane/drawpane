@@ -124,6 +124,8 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   maxLines: "text",
   textStyle: "text",
   textRuns: "text",
+  glyphLayout: "text",
+  glyphOutlines: "text",
   pathData: "vector",
   windingRule: "vector",
   backgroundColor: "style",

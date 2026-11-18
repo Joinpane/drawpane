@@ -40,6 +40,13 @@ import { hasMask, maskScopes } from "./masks";
 import { noiseThresholdZ } from "./noise";
 import { blurSigma, type PostEffect, postEffects, postMargin } from "./post-effects";
 import { textSpans } from "./rich-text";
+import {
+  glyphTable,
+  type SavedGlyphGroup,
+  type SavedText,
+  savedGlyphGroups,
+  savedText,
+} from "./saved-glyphs";
 import type { Scene } from "./scene";
 import { dropShadowCast } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
@@ -961,7 +968,82 @@ export function exportSvg(
     if (elements.length > 0) parts.push(wrap(elements.join("")));
   };
 
+  /**
+   * Text drawn from the glyphs its file saved (decision 0037), as the canvas
+   * draws it: each group's path in its paints, with its bars, then strokes
+   * around the glyphs.
+   */
+  const savedGlyphText = (
+    node: NodeRecord,
+    saved: SavedText,
+    w: number,
+    h: number,
+    transform: string,
+    parts: string[],
+  ) => {
+    const base = node.props;
+    const groups = savedGlyphGroups(saved, node);
+    const shapeOf = (group: SavedGlyphGroup) =>
+      `<path${attr("d", group.d)}/>${group.bars
+        .map(
+          (b) =>
+            `<rect${attr("x", svgNumber(b.x))}${attr("y", svgNumber(b.y))}${attr("width", svgNumber(b.w))}${attr("height", svgNumber(b.h))}/>`,
+        )
+        .join("")}`;
+    const fills = getProp(base, "fills");
+    const layerPaints: readonly Paint[] =
+      fills.length > 0 ? fills : [{ type: "solid", color: "#000000" }];
+    for (const group of groups) {
+      const shape = shapeOf(group);
+      for (const paint of group.fills ?? layerPaints) {
+        if (paint.visible === false) continue;
+        const fill = out.paint("fill", paint, w, h);
+        if (fill) parts.push(`<g${transform}${fill}>${shape}</g>`);
+      }
+    }
+    const strokePaints = getProp(base, "strokes").filter((p) => p.visible !== false);
+    const weight = getProp(base, "strokeWeight");
+    if (strokePaints.length === 0 || weight <= 0) return;
+    const strokeAlign = getProp(base, "strokeAlign");
+    let strokeStyle = attr("stroke-width", strokeAlign === "center" ? weight : weight * 2);
+    const join = getProp(base, "strokeJoin");
+    if (join !== "miter") strokeStyle += attr("stroke-linejoin", join);
+    const dashes = getProp(base, "strokeDashes");
+    if (dashes.length > 0) strokeStyle += attr("stroke-dasharray", dashes.map(svgNumber).join(" "));
+    const paths = groups.map((g) => g.d).join("");
+    let wrap = (svg: string) => svg;
+    if (strokeAlign === "inside") {
+      const clip = out.id("clip");
+      const inner = /transform="([^"]*)"/.exec(transform)?.[1] ?? "";
+      out.defs.push(
+        `<clipPath id="${clip}"><path${inner ? attr("transform", inner) : ""}${attr("d", paths)}/></clipPath>`,
+      );
+      wrap = (svg) => `<g clip-path="url(#${clip})">${svg}</g>`;
+    } else if (strokeAlign === "outside") {
+      const mask = out.id("mask");
+      const m = weight * 2 + getProp(base, "fontSize") * 0.5;
+      const local = `${attr("x", -m)}${attr("y", -m)}${attr("width", w + m * 2)}${attr("height", h + m * 2)}`;
+      const page = regionAttrs(scene.worldMatrix(node.id), -m, -m, w + m, h + m, 0);
+      out.defs.push(
+        `<mask id="${mask}" maskUnits="userSpaceOnUse"${page}><rect${transform}${local} fill="#fff"/><path${transform}${attr("d", paths)} fill="#000"/></mask>`,
+      );
+      wrap = (svg) => `<g mask="url(#${mask})">${svg}</g>`;
+    }
+    const stroked: string[] = [];
+    for (const paint of strokePaints) {
+      const stroke = out.paint("stroke", paint, w, h);
+      if (stroke)
+        stroked.push(`<path${transform} fill="none"${stroke}${strokeStyle}${attr("d", paths)}/>`);
+    }
+    if (stroked.length > 0) parts.push(wrap(stroked.join("")));
+  };
+
   const text = (node: NodeRecord, w: number, h: number, transform: string, parts: string[]) => {
+    const saved = savedText(node, measurer, glyphTable(scene.doc));
+    if (saved) {
+      savedGlyphText(node, saved, w, h, transform, parts);
+      return;
+    }
     const mode = getProp(node.props, "textAutoResize");
     const layout = layoutText(node, measurer, mode === "width" ? null : w);
     const dy = textBlockOffset(node, layout);

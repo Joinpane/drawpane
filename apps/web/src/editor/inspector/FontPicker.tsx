@@ -4,7 +4,7 @@
  * families this file uses one tab away. ↑ and ↓ preview a font on the
  * selected text right on the canvas; Enter keeps it, Esc goes back.
  */
-import { type Editor, textFaces } from "@drawpane/editor";
+import { type Editor, glyphTable, savedText, textFaces } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import {
   Badge,
@@ -114,6 +114,12 @@ export function FontPicker({
   const families = new Set(nodes.map((n) => getProp(n.props, "fontFamily")));
   const family = families.size === 1 ? ([...families][0] ?? null) : null;
   const status = useFontStatus(family);
+  // Text a .fig saved with its glyph outlines draws from them until it's edited (decision 0037).
+  const table = glyphTable(editor.doc);
+  const outlined =
+    status === "missing" &&
+    nodes.length > 0 &&
+    nodes.every((n) => savedText(n, editor.measurer, table) !== null);
   return (
     <>
       <button
@@ -129,7 +135,11 @@ export function FontPicker({
         {status === "missing" ? (
           <span
             className="font-trigger__missing"
-            title={`${family} isn't available here, so it shows in a fallback font.`}
+            title={
+              outlined
+                ? `${family} isn't available here. This text is drawn from the glyph outlines saved with the file, as it was laid out; edit it and it shows in a fallback font.`
+                : `${family} isn't available here, so it shows in a fallback font.`
+            }
           >
             <Icon name="warning" size={12} />
           </span>

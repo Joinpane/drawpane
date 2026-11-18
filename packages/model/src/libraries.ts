@@ -209,7 +209,8 @@ class Hash64 {
   }
 }
 
-function hash64(text: string): string {
+/** 64 bits of a string's hash, as 16 hex digits. */
+export function hash64(text: string): string {
   return new Hash64().update(text).digest();
 }
 

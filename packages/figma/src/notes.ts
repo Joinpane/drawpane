@@ -58,6 +58,10 @@ export const NOTE_TEXT = {
     "grid style isn't brought yet (layers keep their grids)",
     "grid styles aren't brought yet (layers keep their grids)",
   ],
+  "glyphs-dropped": [
+    "text's saved glyph outlines were left out (the file keeps a bounded number)",
+    "texts' saved glyph outlines were left out (the file keeps a bounded number)",
+  ],
   "unsupported-node": [
     "layer of an unsupported kind was skipped",
     "layers of unsupported kinds were skipped",

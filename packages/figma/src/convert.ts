@@ -23,7 +23,14 @@ import {
   parseSvgPath,
   serializePath,
 } from "@drawpane/import-kit";
-import { boundAlike, keysBetween, type NodeRecord, propAllowed, ROOT_ID } from "@drawpane/model";
+import {
+  boundAlike,
+  GlyphTableBuilder,
+  keysBetween,
+  type NodeRecord,
+  propAllowed,
+  ROOT_ID,
+} from "@drawpane/model";
 import { convertEffects } from "./effects";
 import { drawpaneId, mirroredId, mirroredUnder } from "./ids";
 import { childLayout, containerLayout, layoutGrids } from "./layout";
@@ -140,6 +147,8 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
 
   /** Instances found, to work out what each one overrides once everything is converted. */
   const instances: string[] = [];
+  /** The glyphs .fig text was laid out in (decision 0037), each outline once. */
+  const glyphs = new GlyphTableBuilder();
 
   // Variables and styles (decision 0034): converted first, so layers bind and link only what came.
   const pages = (file.document.children ?? []).filter((p) => p.type === "CANVAS");
@@ -249,7 +258,13 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
       Object.assign(props, strokeProps(node, type, images, notes, variables));
     }
     if (type === "rect" || type === "frame") Object.assign(props, corners(node));
-    if (type === "text") Object.assign(props, textProps(node, images, notes, variables));
+    if (type === "text") {
+      Object.assign(props, textProps(node, images, notes, variables));
+      if (node.drawpaneGlyphs) {
+        const layout = glyphs.layout(props, node.drawpaneGlyphs);
+        if (layout) props.glyphLayout = layout;
+      }
+    }
     const bindings = layerBindings(node, type, variables);
     if (Object.keys(bindings).length > 0) props.bindings = bindings;
     Object.assign(props, layerStyles(node, type, styleKinds));
@@ -357,6 +372,10 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
 
   for (const node of [...tokens.nodes, ...styles]) add(node);
   markOverrides(instances, nodes, byId);
+  // The glyph sets go after the pages, at the root.
+  const lastPage = pageKeys[pageKeys.length - 1] ?? null;
+  for (const set of glyphs.sets((n) => keysBetween(lastPage, null, n))) add(set);
+  if (glyphs.skipped > 0) notes.add("glyphs-dropped", glyphs.skipped);
   return { name: file.name, nodes, notes };
 }
 
@@ -492,6 +511,8 @@ const NOT_OVERRIDES = new Set([
   "isComponent",
   "isComponentSet",
   "variantProps",
+  // Each copy's text is laid out for it (decision 0037), like a hug size: not an override.
+  "glyphLayout",
 ]);
 
 type Bindings = Readonly<Record<string, string>> | undefined;

@@ -283,6 +283,8 @@ async function buildPages(
   /** Pages of the file left out, whose components come in as detached copies. */
   const omitted = new Set(pages.filter((p) => !chosen.has(p.id)).map((p) => p.id));
   const builder = new RestFileBuilder();
+  /** Glyph outlines, each kept once across the passes. */
+  const outlines = new Map<string, string>();
   let built = 0;
   let aliasOf: ReturnType<typeof aliasReader> | null = null;
   for (const pass of passes) {
@@ -307,6 +309,7 @@ async function buildPages(
       notes,
       aliasOf: aliasReader(state.graph, raw),
       findStyle,
+      outlines,
     };
     aliasOf = ctx.aliasOf;
     for (const page of state.graph.getPages(false)) {
