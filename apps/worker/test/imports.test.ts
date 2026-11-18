@@ -141,7 +141,13 @@ describe("importing into a new file", () => {
     const { browser, fileId } = await newFile();
     const main = { id: "M1", type: "frame", parent: "P1", key: "a0", props: { isComponent: true } };
     const inner = { id: "R1", type: "rect", parent: "M1", key: "a0", props: { width: 10 } };
-    const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
+    const copy = {
+      id: "I1",
+      type: "frame",
+      parent: "P1",
+      key: "a1",
+      props: { propValues: {}, instanceOf: "M1" },
+    };
     const wrong = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["R1"] } };
     const record = { ...wrong, id: copyId("I1", ["R1"]), props: { path: ["R1"], width: 20 } };
     // A record whose id isn't the one its path derives is refused.
@@ -169,7 +175,13 @@ describe("importing into a new file", () => {
   it("refuses override records into a file stored materialized", async () => {
     const { browser, fileId } = await newFile();
     await roomOf(fileId).storeMaterialized([page("P1", "Cover", "a0")]);
-    const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
+    const copy = {
+      id: "I1",
+      type: "frame",
+      parent: "P1",
+      key: "a1",
+      props: { propValues: {}, instanceOf: "M1" },
+    };
     const record = {
       id: copyId("I1", ["X1"]),
       type: "override",
@@ -465,7 +477,13 @@ describe("importing into a new file", () => {
 
   it("checks override records in each part and at the commit of an import in parts", async () => {
     const { browser, fileId } = await newFile();
-    const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
+    const copy = {
+      id: "I1",
+      type: "frame",
+      parent: "P1",
+      key: "a1",
+      props: { propValues: {}, instanceOf: "M1" },
+    };
     const record = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["X1"] } };
     const { importId, part, commit } = await inParts(browser, fileId);
     expect((await part([page("P1", "Cover", "a0"), copy])).status).toBe(200);

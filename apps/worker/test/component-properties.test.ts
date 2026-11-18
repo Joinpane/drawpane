@@ -6,7 +6,7 @@
  * values of a nested instance both stay (the outer instance's record holds
  * them, so no record has to be made for the nested one). Review 3 of #187.
  */
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { Doc, Editor, instanceValues } from "@drawpane/editor";
 import {
   compactByInstance,
@@ -264,6 +264,59 @@ describe("component property values in the room", () => {
     older.ws.close();
   }, 30_000);
 
+  for (const form of ["compact", "materialized"] as const)
+    it(`treats a socket attached before attachments said their protocol as a tab from before records (${form})`, async () => {
+      // Review 6 of #187, finding 5: a socket hibernated on main keeps its attachment, without a
+      // protocol, when the room adopts this code; it doesn't say hello again.
+      const { browser, fileId, room } = await setup(form);
+      const current = await join(browser, fileId, "current");
+      current.send({
+        t: "txn",
+        seq: 1,
+        ops: [{ op: "set", id: "i", prop: "propValues", key: "n/label", value: "Winning" }],
+      });
+      await current.next("ack");
+      const old = await join(browser, fileId, "main-era");
+      // Its attachment as main wrote it: every field but the protocol.
+      await runInDurableObject(room, (_instance, state) => {
+        for (const socket of state.getWebSockets()) {
+          const me = socket.deserializeAttachment() as Record<string, unknown>;
+          if (me.clientId !== "main-era") continue;
+          delete me.protocol;
+          socket.serializeAttachment(me);
+        }
+      });
+      old.send({ t: "txn", seq: 1, ops: [{ op: "delete", id: "i" }] });
+      expect((await old.next<{ message: string }>("reject")).message).toMatch(/wasn't saved/);
+      old.send({
+        t: "txn",
+        seq: 2,
+        ops: [
+          {
+            op: "create",
+            id: "i",
+            type: "frame",
+            parent: "p",
+            key: "a2",
+            props: { instanceOf: "main" },
+          },
+        ],
+      });
+      expect((await old.next<{ message: string }>("reject")).message).toMatch(/wasn't saved/);
+      const root = ((await room.allNodes()) as NodeRecord[]).find((n) => n.id === "i");
+      expect(root?.props.propValues).toEqual({ "n/label": "Winning" });
+      // What it's sent is what a tab from before records can read.
+      current.send({
+        t: "txn",
+        seq: 2,
+        ops: [{ op: "set", id: "i", prop: "propValues", key: "n/label", value: "Again" }],
+      });
+      await current.next("ack");
+      expect((await old.next<{ ops: Op[] }>("txn")).ops).toEqual([]);
+      old.ws.close();
+      current.ws.close();
+    });
+
   it("checks a keyed set's key, property and value, and leaves the record as it was", async () => {
     const { browser, fileId, room } = await setup();
     const client = await join(browser, fileId, "validation");
@@ -285,7 +338,8 @@ describe("component property values in the room", () => {
       expect(["invalid_prop", "invalid_value"]).toContain(rejection.code);
     }
     const nodes = await room.allNodes();
-    expect(nodes.find((n) => n.id === "i")?.props.propValues).toBeUndefined();
+    // Its record as the import made it (every instance keeps one, decision 0035), unchanged.
+    expect(nodes.find((n) => n.id === "i")?.props.propValues).toEqual({});
     client.ws.close();
   });
 

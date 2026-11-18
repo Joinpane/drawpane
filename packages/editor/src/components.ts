@@ -23,12 +23,10 @@ import {
   copyChildId,
   type DrivenField,
   getProp,
-  hasRecord,
   isMainNode,
   isPropName,
   laidOutProps,
-  MAX_PROPERTY_VALUES,
-  MAX_PROPERTY_VALUES_CHARS,
+  migrateRecords,
   type NodeRecord,
   newId,
   type Op,
@@ -37,7 +35,6 @@ import {
   type PropRefField,
   type Props,
   propertyKey,
-  propertyValuesChars,
 } from "@drawpane/model";
 import { LAYOUT_NEUTRAL } from "./compact-copies";
 import { type Doc, Doc as DocCtor } from "./doc";
@@ -45,10 +42,7 @@ import { gridImportOps } from "./layout";
 import { layerName } from "./names";
 import {
   clearValueOps,
-  FIELD_OF,
   fieldValue,
-  instanceDefinitions,
-  ownerOf,
   ownLayerId,
   recordAt,
   recordPlace,
@@ -341,6 +335,8 @@ export function instantiateOps(
     }
     if (isRoot) {
       props.instanceOf = componentId;
+      // Its record, empty: an instance always keeps one (decision 0035, item 3).
+      props.propValues = {};
       // An instance of a variant is named after its set ("Button"), like Figma.
       const set = componentSetOf(doc, componentId);
       if (set) props.name = getProp(set.props, "name");
@@ -934,7 +930,8 @@ export function pinInstances(input: readonly NodeRecord[]): {
   // What instances set for their properties goes in their records first, the one place a value is
   // kept (decision 0035, item 3), so a nested instance a swap property swapped is that, not a
   // structure sync would rebuild; a layer showing another value than its property's is unlinked.
-  const folded = withPatches(nodes, foldPropertyValues(doc));
+  // Every instance gets a record, empty when it set nothing (`migrateRecords`).
+  const folded = migrateRecords(nodes).nodes;
   if (folded !== nodes) {
     nodes = folded;
     doc.reset(nodes);
@@ -1017,118 +1014,8 @@ export function pinInstances(input: readonly NodeRecord[]): {
   return { nodes: out, pinned, detached };
 }
 
-/**
- * Instances' property values as a file made elsewhere has them, on the
- * layers they drive, put where Drawpane keeps them (decision 0035, item
- * 3): a layer a property drives showing another value than its main
- * layer's has it recorded, in the record of the instance it's ultimately
- * in, under its key, and isn't marked for it. One record, one value: a
- * property's first layer (in layer order) that differs gives it; another
- * of its layers showing something else, or a value past the record's
- * bounds, is unlinked from the property instead, keeping what it shows as
- * an override. So the file draws as it did, and every value is in one
- * place. Returns the properties to change, by node (undefined: removed).
- */
-export function foldPropertyValues(doc: Doc): Map<string, Record<string, unknown>> {
-  const patches = new Map<string, Record<string, unknown>>();
-  const patch = (id: string) => {
-    let p = patches.get(id);
-    if (!p) {
-      p = {};
-      patches.set(id, p);
-    }
-    return p;
-  };
-  /** Each record's values as they're folded, and the layers each key's value was taken from. */
-  const records = new Map<string, Record<string, PropertyValue>>();
-  interface Target {
-    readonly node: NodeRecord;
-    readonly field: PropRefField;
-    readonly value: PropertyValue | null;
-    readonly differs: boolean;
-  }
-  const byKey = new Map<string, { root: string; key: string; targets: Target[] }>();
-  const visit = (id: string) => {
-    const node = doc.get(id);
-    if (!node) return;
-    const refs = getProp(node.props, "propRefs");
-    const sourceId = getProp(node.props, "mirrors");
-    const source = sourceId ? doc.get(sourceId) : undefined;
-    const owner = source ? ownerOf(doc, id) : undefined;
-    const place = owner ? recordPlace(doc, owner.id) : undefined;
-    // An instance that keeps a record decides its values: nothing on its layers is folded.
-    const recorded = place ? hasRecord(doc.get(place.root)?.props ?? {}) : false;
-    if (source && owner && place && !recorded) {
-      const defs = instanceDefinitions(doc, owner.id);
-      for (const field of ["visible", "characters", "instanceOf"] as const) {
-        const propertyId = refs[field];
-        if (!propertyId) continue;
-        const def = defs.find((d) => d.id === propertyId);
-        if (!def || FIELD_OF[def.type] !== field) continue;
-        const value = fieldValue(node, field);
-        const differs =
-          !sameValue(value, fieldValue(source, field)) ||
-          getProp(node.props, "overrides").includes(field);
-        const key = propertyKey(place.scope, propertyId);
-        const at = `${place.root}\u0000${key}`;
-        const entry = byKey.get(at) ?? { root: place.root, key, targets: [] };
-        entry.targets.push({ node, field, value, differs });
-        byKey.set(at, entry);
-      }
-    }
-    for (const child of doc.childIds(id)) visit(child);
-  };
-  for (const page of doc.pageIds()) visit(page);
-  for (const { root, key, targets } of byKey.values()) {
-    const first = targets.find((t) => t.differs);
-    const record = records.get(root) ?? {
-      ...(getProp(doc.get(root)?.props ?? {}, "propValues") as Record<string, PropertyValue>),
-    };
-    let value = first?.value ?? null;
-    if (value !== null) {
-      const next = { ...record, [key]: value };
-      if (
-        Object.keys(next).length > MAX_PROPERTY_VALUES ||
-        propertyValuesChars(next) > MAX_PROPERTY_VALUES_CHARS
-      )
-        value = null;
-      else {
-        records.set(root, next);
-        patch(root).propValues = next;
-      }
-    }
-    for (const target of targets) {
-      const { node, field } = target;
-      const shows = value === null ? !target.differs : sameValue(target.value, value);
-      const patched = patches.get(node.id);
-      const marks: string[] =
-        patched && "overrides" in patched
-          ? ((patched.overrides as string[] | undefined) ?? [])
-          : getProp(node.props, "overrides");
-      if (shows) {
-        // It shows the property's value: never its own (decision 0035).
-        if (marks.includes(field)) {
-          const kept = marks.filter((m) => m !== field);
-          patch(node.id).overrides = kept.length > 0 ? kept : undefined;
-        }
-        continue;
-      }
-      // It shows something else: unlinked, so it keeps it.
-      const own = patch(node.id);
-      const refs = { ...(own.propRefs ?? getProp(node.props, "propRefs")) } as Record<
-        string,
-        string
-      >;
-      delete refs[field];
-      own.propRefs = refs;
-      own.overrides = [...new Set([...marks, field, "propRefs"])].sort();
-    }
-  }
-  return patches;
-}
-
 /** `nodes` with `patches`' properties (undefined: removed); the same array when there are none. */
-function withPatches(
+function _withPatches(
   nodes: readonly NodeRecord[],
   patches: ReadonlyMap<string, Record<string, unknown>>,
 ): readonly NodeRecord[] {

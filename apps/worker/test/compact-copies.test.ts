@@ -553,7 +553,7 @@ describe("what the review of the conversion found", { timeout: 120_000 }, () => 
           type: "frame",
           parent: page.id,
           key: keyBetween(keyBetween(null, null), null),
-          props: { name: "Badge", instanceOf: main, width: 40, height: 20, x: 100 },
+          props: { propValues: {}, name: "Badge", instanceOf: main, width: 40, height: 20, x: 100 },
         },
       ],
     });
@@ -779,7 +779,7 @@ const placeInstance = (id: string, page: string, main: string, n = 5): Op => ({
   type: "frame",
   parent: page,
   key: at(n),
-  props: { instanceOf: main, x: 300 + n * 10, y: 0 },
+  props: { propValues: {}, instanceOf: main, x: 300 + n * 10, y: 0 },
 });
 
 describe("what the second review of the conversion found", { timeout: 120_000 }, () => {
@@ -815,7 +815,7 @@ describe("what the second review of the conversion found", { timeout: 120_000 },
       type: "frame",
       parent: page,
       key: at(2),
-      props: { instanceOf: "BaseMain", isComponent: true, x: 100 },
+      props: { propValues: {}, instanceOf: "BaseMain", isComponent: true, x: 100 },
     },
   ];
 
@@ -1336,7 +1336,7 @@ describe("what the third review of the conversion found", { timeout: 120_000 }, 
       type: "frame",
       parent: "Btn",
       key: at(0),
-      props: { instanceOf: "Icon" },
+      props: { propValues: {}, instanceOf: "Icon" },
     },
     placeInstance("PlacedBtn", page, "Btn", 3),
     {
@@ -1353,7 +1353,7 @@ describe("what the third review of the conversion found", { timeout: 120_000 }, 
       type: "frame",
       parent: "CardOfBtn",
       key: at(0),
-      props: { instanceOf: "Btn" },
+      props: { propValues: {}, instanceOf: "Btn" },
     },
     placeInstance("PlacedCard", page, "CardOfBtn", 6),
   ];
@@ -1634,7 +1634,7 @@ describe("a main containing an instance of itself (the fourth review)", {
     type: "frame",
     parent,
     key,
-    props: { instanceOf: of },
+    props: { propValues: {}, instanceOf: of },
   });
 
   it("is refused by the room, whoever sends it", async () => {
@@ -1659,7 +1659,7 @@ describe("a main containing an instance of itself (the fourth review)", {
           type: "frame",
           parent: "CyA",
           key: "a5",
-          props: { instanceOf: "CyB" },
+          props: { propValues: {}, instanceOf: "CyB" },
         },
       ],
     });
@@ -1716,7 +1716,8 @@ describe("what the fifth review found", { timeout: 120_000 }, () => {
     type: "frame",
     parent,
     key,
-    props,
+    // An instance keeps a record (decision 0035).
+    props: props.instanceOf && !props.mirrors ? { propValues: {}, ...props } : props,
   });
 
   it("restores a version whose components hold each other the other way round", async () => {
@@ -1756,8 +1757,20 @@ describe("what the fifth review found", { timeout: 120_000 }, () => {
       { id: "LpPage", type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page" } },
       { id: "LpA", type: "frame", parent: "LpPage", key: "a0", props: { isComponent: true } },
       { id: "LpRect", type: "rect", parent: "LpA", key: "a0", props: {} },
-      { id: "LpSelf", type: "frame", parent: "LpA", key: "a1", props: { instanceOf: "LpA" } },
-      { id: "LpI", type: "frame", parent: "LpPage", key: "a1", props: { instanceOf: "LpA" } },
+      {
+        id: "LpSelf",
+        type: "frame",
+        parent: "LpA",
+        key: "a1",
+        props: { propValues: {}, instanceOf: "LpA" },
+      },
+      {
+        id: "LpI",
+        type: "frame",
+        parent: "LpPage",
+        key: "a1",
+        props: { propValues: {}, instanceOf: "LpA" },
+      },
     ];
     const { importId } = await browser.json<{ importId: string }>(`/api/files/${fileId}/imports`, {
       method: "POST",
@@ -1779,7 +1792,13 @@ describe("what the fifth review found", { timeout: 120_000 }, () => {
       { id: "BkPage", type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page" } },
       { id: "BkMain", type: "frame", parent: "BkPage", key: "a0", props: { isComponent: true } },
       { id: "BkRect", type: "rect", parent: "BkMain", key: "a0", props: { name: "R" } },
-      { id: "BkInst", type: "frame", parent: "BkPage", key: "a1", props: { instanceOf: "BkMain" } },
+      {
+        id: "BkInst",
+        type: "frame",
+        parent: "BkPage",
+        key: "a1",
+        props: { propValues: {}, instanceOf: "BkMain" },
+      },
       {
         id: "BkCopy",
         type: "rect",

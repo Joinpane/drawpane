@@ -16,7 +16,7 @@
  * whole. Its editor is today's, fed only what such a tab is: it sees no
  * references, records or definitions.
  */
-import { Doc, Editor, instanceProperties, instanceValues } from "@drawpane/editor";
+import { Doc, Editor, instanceProperties, instanceValues, syncInstanceOps } from "@drawpane/editor";
 import {
   applyTransaction,
   type ClientMessage,
@@ -29,6 +29,7 @@ import {
   linkedNode,
   MemoryStore,
   ModelError,
+  migrateRecords,
   type NodeRecord,
   type Op,
   protocol2Refusal,
@@ -247,7 +248,7 @@ export function nestedWithShow(): NodeRecord[] {
  * property, each variant holding a nested Leaf (a text property of its own,
  * exposed); and an instance of A, its copy made by the editor.
  */
-export function buttonKit(): NodeRecord[] {
+export function buttonKit({ deep = false }: { readonly deep?: boolean } = {}): NodeRecord[] {
   const mains: NodeRecord[] = [
     node("p", "page", ROOT_ID, "a0", {}),
     node("leaf", "frame", "p", "a0", {
@@ -316,13 +317,37 @@ export function buttonKit(): NodeRecord[] {
       }),
     );
   }
+  // Three levels deep: Leaf holds an instance of Deep (a text), and Other is there to swap the
+  // nested Leaf copy to (review 6 of #187, B).
+  if (deep)
+    mains.push(
+      node("deep", "frame", "p", "a4", { isComponent: true, name: "Deep", width: 40, height: 10 }),
+      node("dt", "text", "deep", "a0", { name: "Deep text", characters: "Deep" }),
+      node("ln", "frame", "leaf", "a1", {
+        name: "Inner",
+        instanceOf: "deep",
+        width: 40,
+        height: 10,
+      }),
+      node("other", "frame", "p", "a5", {
+        isComponent: true,
+        name: "Other",
+        width: 60,
+        height: 20,
+      }),
+      node("ot", "ellipse", "other", "a0", { name: "Shape", width: 10, height: 10 }),
+    );
   // The nested instances' own copies, and the instance, as the editor makes them.
   const editor = new Editor({ clientId: "setup", measurer });
   editor.state.set({ role: "editor" });
   editor.doc.resetStored([], "materialized");
   editor.doc.reset(mains);
   editor.setPage("p");
-  for (const id of ["vAi", "vAn", "vBi", "vBn"]) {
+  // Deep: each nested instance's copies made by syncing it, innermost first.
+  if (deep)
+    for (const id of ["ln", "vAi", "vAn", "vBi", "vBn"])
+      editor.commit(syncInstanceOps(editor.doc, id), "setup", { overrides: false });
+  for (const id of deep ? [] : ["vAi", "vAn", "vBi", "vBn"]) {
     const of = editor.doc.get(id)?.props.instanceOf as string;
     const made = editor.insertInstance(of) as string;
     const copy = editor.doc.childIds(made);
@@ -340,6 +365,32 @@ export function buttonKit(): NodeRecord[] {
     .stored()
     .map((n) => (n.id === instance ? { ...n, id: "i" } : n))
     .map((n) => (n.parent === instance ? { ...n, parent: "i" } : n));
+}
+
+/**
+ * Three levels: Deep (a text), Leaf holding an instance of Deep, and a main A
+ * holding an instance of Leaf; an instance of A, its copies materialized, and
+ * Other, a component to swap the Leaf copy to.
+ */
+export function deepKit(): NodeRecord[] {
+  return [
+    node("p", "page", ROOT_ID, "a0", {}),
+    node("deep", "frame", "p", "a0", { isComponent: true, width: 10, height: 10 }),
+    node("dt", "text", "deep", "a0", { characters: "Deep" }),
+    node("leaf", "frame", "p", "a1", { isComponent: true, width: 10, height: 10 }),
+    node("ln", "frame", "leaf", "a0", { instanceOf: "deep", width: 10, height: 10 }),
+    node("lnt", "text", "ln", "a0", { mirrors: "dt", characters: "Deep" }),
+    node("a", "frame", "p", "a2", { isComponent: true, width: 10, height: 10 }),
+    node("na", "frame", "a", "a0", { instanceOf: "leaf", width: 10, height: 10 }),
+    node("nan", "frame", "na", "a0", { instanceOf: "deep", mirrors: "ln", width: 10, height: 10 }),
+    node("nant", "text", "nan", "a0", { mirrors: "lnt", characters: "Deep" }),
+    node("other", "frame", "p", "a3", { isComponent: true, width: 10, height: 10 }),
+    node("ot", "ellipse", "other", "a0", { width: 10, height: 10 }),
+    node("i", "frame", "p", "a4", { instanceOf: "a", width: 10, height: 10 }),
+    node("ni", "frame", "i", "a0", { instanceOf: "leaf", mirrors: "na", width: 10, height: 10 }),
+    node("nni", "frame", "ni", "a0", { instanceOf: "deep", mirrors: "nan", width: 10, height: 10 }),
+    node("nnit", "text", "nni", "a0", { mirrors: "nant", characters: "Deep" }),
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -368,12 +419,14 @@ export class Room {
     readonly copies: CopiesFormat,
     stored = false,
   ) {
+    // As the room loads a file: every instance from before records migrated first (`migrateRecords`).
+    const migrated = migrateRecords(structuredClone(nodes)).nodes;
     if (copies === "compact" && !stored) {
-      const converted = compactByInstance(structuredClone(nodes));
+      const converted = compactByInstance(migrated);
       this.store = new MemoryStore(converted.nodes);
       this.ids = converted.ids;
     } else {
-      this.store = new MemoryStore(structuredClone(nodes));
+      this.store = new MemoryStore(migrated);
       this.ids = new Map();
     }
   }
@@ -654,7 +707,8 @@ export function open(form: CopiesFormat, nodes: readonly NodeRecord[]) {
   const editor = new Editor({ clientId: "review", measurer });
   editor.state.set({ role: "editor" });
   editor.doc.resetStored([], form);
-  editor.doc.reset(structuredClone(nodes));
+  // A file as a room serves it: migrated (`migrateRecords`).
+  editor.doc.reset(migrateRecords(structuredClone(nodes)).nodes);
   editor.setPage("p");
   const sent: Op[][] = [];
   const commit = editor.sync.commit.bind(editor.sync);

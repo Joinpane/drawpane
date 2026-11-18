@@ -17,6 +17,7 @@ export * from "./order-key";
 export * from "./protocol";
 export * from "./protocol2";
 export * from "./prototype";
+export * from "./record-fold";
 export * from "./schema";
 export * from "./search";
 export * from "./sha256";

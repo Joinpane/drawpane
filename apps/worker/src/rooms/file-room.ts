@@ -14,6 +14,8 @@ import {
   ClientMessage,
   type CommentEvent,
   type CopiesFormat,
+  foldOps,
+  foldRecord,
   forProtocol2Nodes,
   forProtocol2Ops,
   heldNodeIds,
@@ -27,12 +29,14 @@ import {
   MAX_LIBRARY_ASSETS,
   ModelError,
   type NodeRecord,
+  needsRecord,
   newId,
   type Op,
   type Peer,
   type Presence,
   type Props,
   protocol2Refusal,
+  RECORDS_PROTOCOL,
   RELOAD_CLOSE_CODE,
   type Resolution,
   type RestoredVersion,
@@ -135,6 +139,7 @@ import {
   savePinMap,
 } from "./pin-map";
 import { PresentedReader } from "./presented";
+import { migrateTable, needingRecords } from "./records";
 import { loadSnapshot, restoreFromTable, SnapshotError } from "./restore";
 import {
   AUTOSAVE_RETENTION_MS,
@@ -250,6 +255,12 @@ const COPY_PROPS: ReadonlySet<string> = new Set([
 const CONVERT_REFUSALS = 5;
 /** The version saved before a file's copies are converted (decision 0029): how to undo it. */
 export const BEFORE_COMPACT = "Before compact copies";
+/** The version saved before a file's instances first keep records (decision 0035). */
+export const BEFORE_RECORDS = "Before component properties";
+/** Instances from before records a step of the room's migration folds, at most (`recordsStep`). */
+const RECORDS_STEP = 200;
+/** Who a room's own migration is logged as. */
+const RECORDS_AUTHOR = { clientId: "records", seq: 0, userId: "system", sessionId: "records" };
 
 /** The author guests see on every change: nobody in particular. */
 const ANONYMOUS = { userId: "", sessionId: "" } as const;
@@ -294,10 +305,10 @@ interface Attachment {
    */
   viewing?: boolean;
   /**
-   * The protocol its hello said. 2: a tab from before component property
-   * records (decision 0035), an editor sent nothing it can't read, whose
-   * edits are taken as they mean (protocol2.ts). Missing before it was
-   * recorded, and for the current protocol.
+   * The protocol its hello said, always recorded since component property
+   * records (decision 0035). Missing on a socket said hello to before then:
+   * one that hibernated on that code and was kept when the room took this
+   * code up, which runs a tab from before records (`#fromBefore`).
    */
   protocol?: number;
   /** When a viewing client was last sent the file. */
@@ -460,6 +471,8 @@ export class FileRoom extends DurableObject<Env> {
    * compact copies does (tests set 0, one instance a step, to see it resume).
    */
   convertStepWork = CONVERT_STEP_WORK;
+  /** Tests: instances a step of the migration to records folds (`#migrateRecords`). */
+  recordsStep = RECORDS_STEP;
   /**
    * Tests: runs where a restore, a merge, an update, a hello or a sweep of
    * comment pins has awaited and is about to go on, to make something
@@ -703,7 +716,9 @@ export class FileRoom extends DurableObject<Env> {
     this.pruneQuiet();
     // Claims whose callers are gone, and the watch they kept.
     this.#sweepClaims();
-    const converting = await this.#convertCopies();
+    // Instances from before records first: conversion reads records (decision 0035).
+    const migrating = await this.#migrateRecords();
+    const converting = migrating === null ? await this.#convertCopies() : migrating;
     await this.#movePins();
     const viewers = this.#refreshViewers();
     if (this.#announce) {
@@ -749,6 +764,146 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   // -------------------------------------------------------------------------
+  // Records (decision 0035, item 3)
+
+  /**
+   * One step of the room's migration to records: every instance keeps one,
+   * those from before records folded (`foldRecord`: every value kept, or its
+   * layer unlinked), a step of them at a time, each a transaction logged and
+   * sent to everyone, so no client sees or folds one without. A version is
+   * saved first ("Before component properties"), which restoring undoes it
+   * from (a restored version is folded as it comes back). Once none is left
+   * it's marked done, and doesn't run again. Returns when to come back.
+   */
+  async #migrateRecords(): Promise<number | null> {
+    const fileId = this.#meta("file_id");
+    if (!fileId || this.#meta("records") === "done") return null;
+    const ids = needingRecords(this.#sql, "nodes", this.recordsStep);
+    if (ids.length === 0) {
+      // Nothing from before records (a new file, or every one migrated already): nothing to save.
+      this.#setMeta("records", "done");
+      return null;
+    }
+    if (this.#meta("records_backup") === null) {
+      const backup = await this.#saveVersion(fileId, {
+        reason: "named",
+        name: BEFORE_RECORDS,
+        description:
+          "Saved before this file's instances kept their component property values in records. Restore it to undo that.",
+        keepName: true,
+      });
+      this.#setMeta("records_backup", backup.id);
+      return Date.now();
+    }
+    this.#migrateRoots(ids);
+    return Date.now();
+  }
+
+  /** Folds these instances from before records into their records: one transaction everyone follows. */
+  #migrateRoots(ids: readonly string[]): void {
+    const ops: Op[] = [];
+    try {
+      for (const id of ids) {
+        const root = this.#store.get(id);
+        if (root && needsRecord(root)) ops.push(...foldOps(id, foldRecord(this.#store, id)));
+      }
+    } finally {
+      this.#store.clearCache();
+    }
+    if (ops.length === 0) return;
+    // Marked done in the same storage transaction as the last instances it folds: a step cut short
+    // leaves neither, and resumes; the marker never says done with any left.
+    const revn = this.#commit(ops, RECORDS_AUTHOR, {
+      also: () => {
+        if (needingRecords(this.#sql, "nodes", 1).length === 0) this.#setMeta("records", "done");
+      },
+    });
+    this.#broadcastChange(revn, ops, RECORDS_AUTHOR);
+  }
+
+  /**
+   * While the migration to records is under way: the instances from before
+   * records an edit reaches (an instance it changes, or a layer in one),
+   * folded first, so the edit lands on its record, never makes one of its
+   * own from what its client saw (decision 0035).
+   */
+  #migrateTouched(ops: readonly Op[]): void {
+    if (this.#meta("records") === "done") return;
+    const roots = new Set<string>();
+    try {
+      for (const op of ops) {
+        const from = op.op === "create" ? op.parent : op.id;
+        for (let at = this.#store.get(from), i = 0; at && i < 1024; i++) {
+          if (at.type === "frame" && typeof at.props.instanceOf === "string" && !at.props.mirrors) {
+            if (needsRecord(at)) roots.add(at.id);
+            break;
+          }
+          at = this.#store.get(at.parent);
+        }
+      }
+    } finally {
+      this.#store.clearCache();
+    }
+    if (roots.size > 0) this.#migrateRoots([...roots]);
+  }
+
+  /**
+   * Why an edit can't be applied: it would leave an instance without a
+   * record (made without one, a frame made an instance without one, or its
+   * record removed), or null. Every instance keeps one (decision 0035), and
+   * its client is told so, never left believing it saved.
+   */
+  #recordlessInstance(ops: readonly Op[]): string | null {
+    const refusal =
+      "Every instance keeps a record of its component property values, and this change would leave one without. Reload the page, then make it again.";
+    const given = new Set<string>();
+    for (const op of ops)
+      if (
+        op.op === "set" &&
+        op.prop === "propValues" &&
+        (op.key !== undefined || op.value !== null)
+      )
+        given.add(op.id);
+    try {
+      for (const op of ops) {
+        if (op.op === "create") {
+          const node = {
+            id: op.id,
+            type: op.type,
+            parent: op.parent,
+            key: op.key,
+            props: op.props,
+          };
+          if (needsRecord(node) && !given.has(op.id)) return refusal;
+        } else if (op.op === "set" && op.prop === "instanceOf" && typeof op.value === "string") {
+          const node = this.#store.get(op.id);
+          if (
+            node &&
+            !node.props.mirrors &&
+            node.props.propValues === undefined &&
+            !given.has(op.id)
+          )
+            return refusal;
+        } else if (
+          op.op === "set" &&
+          op.prop === "propValues" &&
+          op.key === undefined &&
+          op.value === null
+        ) {
+          const node = this.#store.get(op.id);
+          const detached = ops.some(
+            (o) => o.op === "set" && o.id === op.id && o.prop === "instanceOf" && o.value === null,
+          );
+          if (node?.props.instanceOf && !node.props.mirrors && !detached) return refusal;
+        }
+      }
+      return null;
+    } finally {
+      this.#store.clearCache();
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Compact copies (decision 0029, phase 4b)
 
   /** Whether files convert to compact copies, and new ones start so: `COMPACT_COPIES=off` stops both. */
@@ -766,7 +921,7 @@ export class FileRoom extends DurableObject<Env> {
       this.#sql.exec("DELETE FROM nodes");
       for (const node of nodes) this.#store.insert(node);
       dropConvertTables(this.#sql, LIVE_CONVERSION);
-      for (const k of ["conv_backup", "conv_failed", "conv_refused"])
+      for (const k of ["conv_backup", "conv_failed", "conv_refused", "records", "records_backup"])
         this.#sql.exec("DELETE FROM meta WHERE k = ?", k);
       const next = this.#revn + 1;
       this.#setMeta("revn", String(next));
@@ -1238,6 +1393,8 @@ export class FileRoom extends DurableObject<Env> {
       }
       if (me.role === role) continue;
       ws.serializeAttachment({ ...me, role });
+      // A tab from before records stays a viewer, whatever its role (`#fromBefore`).
+      if (this.#fromBefore(me)) continue;
       this.#send(ws, { t: "role", role, previous: me.role, by });
     }
     const fileId = this.#meta("file_id");
@@ -1317,6 +1474,8 @@ export class FileRoom extends DurableObject<Env> {
           return { ok: false, reason: "invalid", message: error.message };
         throw error;
       }
+      // A version from before records comes back with every instance keeping one (decision 0035).
+      this.#room.transact(() => migrateTable(this.#sql, table));
       // Undoing compact copies (decision 0029): with conversion turned off, a version from before
       // it puts the file back as it was stored then, materialized.
       if (this.#copies === "compact" && versionCopies === "materialized" && !this.#compactOn())
@@ -1704,6 +1863,8 @@ export class FileRoom extends DurableObject<Env> {
     sent: CopiesFormat,
   ): ImportResult {
     const seed = this.#seedPage();
+    // Every instance comes in keeping a record, those from before records folded (decision 0035).
+    migrateTable(this.#sql, IMPORT_TABLE);
     // Compact copies can't come into a file stored materialized: they'd show nothing.
     if (sent === "compact" && copies !== "compact")
       return { ok: false, reason: "invalid", message: NO_COMPACT_COPIES };
@@ -2107,6 +2268,12 @@ export class FileRoom extends DurableObject<Env> {
           return { ok: false, reason: "invalid", message: `It can't be read. ${error.message}` };
         throw error;
       }
+      // Both sides with every instance keeping a record, as this file's do (decision 0035): a
+      // base, or a branch, from before records compares records, not layers' values.
+      this.#room.transact(() => {
+        migrateTable(this.#sql, tables.base);
+        migrateTable(this.#sql, tables.other);
+      });
       // Compared in this file's form (decision 0029): a side saved before compact copies is
       // converted as it's read. Copies' ids are derived the same way on every side.
       const read = [
@@ -2675,7 +2842,7 @@ export class FileRoom extends DurableObject<Env> {
       this.#send(ws, {
         t: "txn",
         revn: row.revn,
-        ops: me.protocol === 2 ? forProtocol2Ops(ops) : ops,
+        ops: this.#fromBefore(me) ? forProtocol2Ops(ops) : ops,
         author: me.guest ? ANONYMOUS : { userId: row.user_id, sessionId: row.session_id },
       });
     }
@@ -2731,6 +2898,17 @@ export class FileRoom extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Whether a socket runs a tab from before component property records: its
+   * hello said protocol 2, or said none it recorded (one said hello to on
+   * code from before then, hibernated, and kept when the room took up this
+   * code, without saying hello again). Such a tab views the file
+   * (protocol2.ts): of what it held unsent, only safe transactions apply.
+   */
+  #fromBefore(me: Attachment): boolean {
+    return !!me.clientId && (me.protocol === undefined || me.protocol < RECORDS_PROTOCOL);
+  }
+
   /** Tells a tab from an older Drawpane to reload, for a newer client, and closes its socket. */
   #tellToReload(ws: WebSocket): void {
     this.#send(ws, {
@@ -2760,6 +2938,10 @@ export class FileRoom extends DurableObject<Env> {
       this.#tellToReload(ws);
       return;
     }
+    // Every socket says its protocol from now on: one that doesn't said hello before (`#fromBefore`).
+    me.protocol = protocol;
+    // A file whose instances don't all keep records yet migrates at once (`#migrateRecords`).
+    if (this.#meta("records") !== "done") void this.#scheduleAlarm(0);
     if (!reads.includes(this.#copies)) {
       // A tab from before compact copies: the file to view, every copy built, as it reads it.
       if (protocol === 1 && this.#copies === "compact") {
@@ -2816,8 +2998,6 @@ export class FileRoom extends DurableObject<Env> {
     me.reads = [...reads];
     me.viewing = false;
     me.stale = false;
-    if (protocol === 2) me.protocol = 2;
-    else delete me.protocol;
     ws.serializeAttachment(me);
     const lastSeq =
       this.#sql
@@ -2829,7 +3009,7 @@ export class FileRoom extends DurableObject<Env> {
       sessionId: me.sessionId,
       revn: this.#revn,
       // A tab from before records: a viewer (above), whatever its role.
-      role: me.protocol === 2 ? "viewer" : me.role,
+      role: this.#fromBefore(me) ? "viewer" : me.role,
       peers,
       mode: canCatchUp ? "catchup" : download ? "download" : "snapshot",
       lastSeq,
@@ -2845,7 +3025,7 @@ export class FileRoom extends DurableObject<Env> {
       sendSocketSnapshot(this.#sql, (nodes, done) =>
         this.#send(ws, {
           t: "snapshot",
-          nodes: me.protocol === 2 ? forProtocol2Nodes(nodes) : nodes,
+          nodes: this.#fromBefore(me) ? forProtocol2Nodes(nodes) : nodes,
           done,
         }),
       );
@@ -3085,13 +3265,21 @@ export class FileRoom extends DurableObject<Env> {
     }
     // A tab from before component property records: what it held unsent applies only when it's
     // safe, whole; otherwise it's refused, and the tab shows that it wasn't saved (protocol2.ts).
-    if (me.protocol === 2) {
+    if (this.#fromBefore(me)) {
       const refusal = this.#protocol2Refusal(ops);
       if (refusal) {
         this.#reject(ws, seq, ops, "outdated", refusal);
         return;
       }
     }
+    // Every instance keeps a record (decision 0035): refused, saying so, when this would leave one
+    // without; one from before records it reaches is folded first, while the room migrates.
+    const recordless = this.#recordlessInstance(ops);
+    if (recordless) {
+      this.#reject(ws, seq, ops, "invalid_value", recordless);
+      return;
+    }
+    this.#migrateTouched(ops);
     // Override records (decision 0029) only in a file that stores compact copies.
     if (
       this.#copies !== "compact" &&
@@ -3865,7 +4053,8 @@ export class FileRoom extends DurableObject<Env> {
         continue;
       }
       try {
-        if (me.protocol === 2) ws.send((me.guest ? forLegacy().guest : forLegacy().data) as string);
+        if (this.#fromBefore(me))
+          ws.send((me.guest ? forLegacy().guest : forLegacy().data) as string);
         else ws.send(me.guest ? (guestData as string) : data);
         sent++;
       } catch {

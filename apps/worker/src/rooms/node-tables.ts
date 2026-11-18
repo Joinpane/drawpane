@@ -49,7 +49,7 @@ export const TEMP_PREFIX = "tmp_";
 
 const NAME = /^[a-z][a-z0-9_]{0,62}$/;
 
-function checkName(name: string): string {
+export function checkName(name: string): string {
   if (!NAME.test(name)) throw new Error(`bad table name ${name}`);
   return name;
 }

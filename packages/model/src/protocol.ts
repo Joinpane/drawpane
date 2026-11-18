@@ -31,6 +31,15 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
  */
 export const PROTOCOL_VERSION = 3;
 
+/**
+ * The first protocol whose clients know component property records
+ * (decision 0035): a tab said hello on an earlier one, or on code from
+ * before the room recorded protocols (its attachment says none), only views
+ * the file, its safe queued edits applying (`protocol2Refusal`). A later
+ * bump keeps this number.
+ */
+export const RECORDS_PROTOCOL = 3;
+
 /** The close code that tells a client the room needs a newer one: reload the page. */
 export const RELOAD_CLOSE_CODE = 4426;
 

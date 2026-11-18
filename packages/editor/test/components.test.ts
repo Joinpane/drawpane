@@ -1,4 +1,4 @@
-import { compactByInstance, getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { compactByInstance, getProp, type NodeRecord, needsRecord, ROOT_ID } from "@drawpane/model";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   canMoveInto,
@@ -618,8 +618,12 @@ describe("pinInstances (files made elsewhere)", () => {
     expect(compact.nodes.some((n) => n.id === "contentDot")).toBe(false);
   });
 
-  it("leaves a file whose copies match their mains as it is", () => {
+  it("leaves a file whose copies match their mains as it is, each instance given its record", () => {
     const nodes = file({});
-    expect(pinInstances(nodes)).toEqual({ nodes, pinned: 0, detached: 0 });
+    // Every instance keeps a record, empty when it set nothing (decision 0035).
+    const recorded = nodes.map((n) =>
+      needsRecord(n) ? { ...n, props: { ...n.props, propValues: {} } } : n,
+    );
+    expect(pinInstances(nodes)).toEqual({ nodes: recorded, pinned: 0, detached: 0 });
   });
 });

@@ -473,8 +473,11 @@ export class CompactCopies {
     }
     const reads = (prop: string) => !LAYOUT_NEUTRAL.has(prop) && !RECORD_BOOKKEEPING.has(prop);
     const listsRead = (props: Props) => (props.unset ?? []).some(reads);
+    // A record with no values (every instance keeps one, decision 0035) sets nothing layout reads.
+    const empty = (p: string) =>
+      p === "propValues" && Object.keys(root.props.propValues ?? {}).length === 0;
     let differs =
-      Object.keys(root.props).some((p) => !ROOT_LOCAL_PROPS.has(p) && reads(p)) ||
+      Object.keys(root.props).some((p) => !ROOT_LOCAL_PROPS.has(p) && reads(p) && !empty(p)) ||
       listsRead(root.props);
     if (!differs)
       for (const id of this.store.childIds(rootId)) {
@@ -899,7 +902,11 @@ export class CompactCopies {
     let props = op.props;
     const main = op.type === "frame" ? op.props.instanceOf : null;
     const base = main ? this.view.rootBase(main) : undefined;
-    if (base && main !== op.id) props = (ownValues(base, op.props, true) ?? {}) as Props;
+    if (base && main !== op.id) {
+      props = (ownValues(base, op.props, true) ?? {}) as Props;
+      // Its record stays, empty or not: an instance always keeps one (decision 0035).
+      if (op.props.propValues !== undefined) props = { ...props, propValues: op.props.propValues };
+    }
     tx.inverse.push(this.#put(tx, { ...op, props }));
     const node = this.store.get(op.id) as NodeRecord;
     if (isMainNode(node)) for (const root of this.instanceRoots(op.id)) tx.absorbLater.add(root);

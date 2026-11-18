@@ -153,60 +153,73 @@ function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
 }
 
 /**
- * A copy layer's reference (`mirrors`) checked against where the layer is
- * now: the layer it copies is inside what its instance follows (the nearest
- * instance root above it: that root's own main layer, when the root is a
- * copy too, else its main). A reference into a main the layer no longer
- * belongs to (an edit made before a teammate's detach pointed its siblings
- * through to their own component, applied after it) is followed down its own
- * copies to the first layer that is inside it, the one it means there. Left
- * as it is when there's none, or nothing above it is an instance. Checked
- * once a transaction is applied, against what it leaves (an undone swap
- * makes its layers again before it puts its instance's component back; an
- * undone detach puts back a layer's reference before its instance's), for
- * the layers it made and those under a node whose link it changed (a
- * detach applied after a teammate's rebuild it didn't see).
+ * Copy references derived top-down by origin (decision 0035, item 3). Each
+ * layer under an instance copies a child of what its parent copies
+ * (`copyTarget`): the parent's main layer for a copy, the main for an
+ * instance root following one, the component it's swapped to for a swapped
+ * nested instance. A layer whose reference isn't one of those children
+ * (written before a teammate's detach, or undone after one) is pointed at
+ * the child whose copy chain ends at the same main layer (`origin`) as its
+ * reference's: through to the inner component after a detach, back to the
+ * outer copy when the detach is undone. Left as it is when no child matches
+ * (conversion then says so). Run on what a transaction leaves, parents
+ * before children, over the layers it made and those under every node whose
+ * link it changed: a pure function of the file, so the room, every client
+ * and replay agree.
  */
-/** `resolveMirrors` for each of `ids` and everything under them. */
 function resolveUnder(store: NodeStore, ids: ReadonlySet<string>): void {
+  // Walked from the topmost: one under another that's walked is reached from it, after its parent.
+  const roots = [...ids].filter((id) => {
+    for (let at = store.get(id), i = 0; at && i < MAX_DEPTH; i++) {
+      at = store.get(at.parent);
+      if (at && ids.has(at.id)) return false;
+    }
+    return true;
+  });
   const seen = new Set<string>();
-  const stack = [...ids];
-  while (stack.length > 0) {
-    const id = stack.pop() as string;
+  const queue = [...roots];
+  for (let i = 0; i < queue.length; i++) {
+    const id = queue[i] as string;
     if (seen.has(id)) continue;
     seen.add(id);
     const node = store.get(id);
     if (!node) continue;
-    if (typeof node.props.mirrors === "string") resolveMirrors(store, id);
-    for (const child of store.childIds(id)) stack.push(child);
+    if (typeof node.props.mirrors === "string") resolveMirrors(store, node);
+    for (const child of store.childIds(id)) queue.push(child);
   }
 }
 
-function resolveMirrors(store: NodeStore, id: string): void {
-  const node = store.get(id);
-  const mirrors = node?.props.mirrors;
-  if (!node || typeof mirrors !== "string") return;
-  let owner = store.get(node.parent);
-  for (let i = 0; owner && i < MAX_DEPTH; i++) {
-    if (owner.type === "frame" && typeof owner.props.instanceOf === "string") break;
-    owner = store.get(owner.parent);
+/** What a node's children copy: its main layer, its main, or the component it's swapped to. */
+function copyTarget(store: NodeStore, node: NodeRecord): string | null {
+  const mirrors = typeof node.props.mirrors === "string" ? node.props.mirrors : null;
+  const instanceOf =
+    node.type === "frame" && typeof node.props.instanceOf === "string"
+      ? node.props.instanceOf
+      : null;
+  if (instanceOf && (!mirrors || store.get(mirrors)?.props.instanceOf !== instanceOf))
+    return instanceOf;
+  return mirrors;
+}
+
+/** The main layer a copy chain ends at. */
+function origin(store: NodeStore, id: string): string {
+  let at = id;
+  for (let i = 0; i < 256; i++) {
+    const next = store.get(at)?.props.mirrors;
+    if (typeof next !== "string" || !store.get(next)) return at;
+    at = next;
   }
-  if (!owner || owner.type !== "frame" || typeof owner.props.instanceOf !== "string") return;
-  const container = (owner.props.mirrors ?? owner.props.instanceOf) as string;
-  const inside = (at: string) => {
-    for (let n = store.get(at), i = 0; n && i < MAX_DEPTH; n = store.get(n.parent), i++)
-      if (n.id === container) return true;
-    return false;
-  };
-  if (inside(mirrors)) return;
-  let through = store.get(mirrors)?.props.mirrors;
-  for (let i = 0; typeof through === "string" && i < 256; i++) {
-    if (inside(through)) {
-      store.setProp(id, "mirrors", through);
-      return;
-    }
-    through = store.get(through)?.props.mirrors;
-  }
+  return at;
+}
+
+function resolveMirrors(store: NodeStore, node: NodeRecord): void {
+  const mirrors = node.props.mirrors as string;
+  const parent = store.get(node.parent);
+  const target = parent ? copyTarget(store, parent) : null;
+  if (!target || store.get(mirrors)?.parent === target) return;
+  const from = origin(store, mirrors);
+  const match = store.childIds(target).find((child) => origin(store, child) === from);
+  if (match) store.setProp(node.id, "mirrors", match);
 }
 
 /**

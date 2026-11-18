@@ -3,7 +3,7 @@
  * a file that uses them, instanced there, and updated from a newer publish
  * with the instances following and keeping their overrides.
  */
-import { getProp, keyBetween, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { getProp, keyBetween, type NodeRecord, needsRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { instancesOf, instantiateOps, listComponents } from "../src/components";
 import { Doc } from "../src/doc";
@@ -366,5 +366,33 @@ describe("copies are read-only (review of #96)", () => {
     expect(batches[0]?.map((op) => op.op)).toEqual(["create"]);
     for (const batch of batches.slice(1))
       expect(batch[0]).toMatchObject({ op: "create", parent: libraryContainerId(LIB_FILE) });
+  });
+});
+
+describe("a library published before records (decision 0035, review 6 of #187)", () => {
+  /** `lib`'s publish as it was before records: no instance in it keeps one. */
+  const beforeRecords = (lib: Editor) => {
+    const doc = new Doc({ compactCopies: false });
+    const nodes = snapshot(lib)
+      .stored()
+      .map((n) => {
+        if (n.props.propValues === undefined) return n;
+        const { propValues: _, ...props } = n.props;
+        return { ...n, props };
+      });
+    doc.resetStored(nodes, "materialized");
+    return doc;
+  };
+
+  it("brings its components in with every instance keeping a record, on insert and on update", () => {
+    const { lib, card } = makeLibrary();
+    const source = beforeRecords(lib);
+    expect(source.stored().filter(needsRecord).length).toBeGreaterThan(0);
+    const file = editorWithPage();
+    file.insertLibraryComponent(source, ref(), card, { x: 0, y: 0 });
+    expect(file.doc.stored().filter(needsRecord)).toEqual([]);
+    lib.setProp([card], "cornerRadius", 12, "Radius");
+    file.updateLibrary(beforeRecords(lib), ref());
+    expect(file.doc.stored().filter(needsRecord)).toEqual([]);
   });
 });

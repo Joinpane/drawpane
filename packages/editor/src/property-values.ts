@@ -20,7 +20,6 @@ import {
   type ComponentPropType,
   drivenShown,
   getProp,
-  hasRecord,
   MAX_PROPERTY_SCOPE,
   MAX_PROPERTY_VALUES,
   MAX_PROPERTY_VALUES_CHARS,
@@ -284,73 +283,6 @@ export function valueOps(
   const keyed: Record<string, PropertyValue | null> = {};
   for (const [id, value] of Object.entries(values)) keyed[propertyKey(place.scope, id)] = value;
   return recordWriteOps(doc, place.root, keyed);
-}
-
-/**
- * What makes an instance's first record (decision 0035, item 3), before an
- * edit gives it its first value: a record that exists decides every key, so
- * an instance from before records (materialized, its values on its layers)
- * has every value its layers show that differs from its main layer's folded
- * into it, once; with none, the record is made empty. Keyed sets, committed
- * on their own (never undone with the edit), for each instance root `ops`
- * write a value of that has no record.
- */
-export function firstRecordOps(doc: Doc, ops: readonly Op[]): Op[] {
-  const out: Op[] = [];
-  const seen = new Set<string>();
-  for (const op of ops) {
-    if (op.op !== "set" || op.prop !== "propValues" || op.key === undefined) continue;
-    if (seen.has(op.id)) continue;
-    seen.add(op.id);
-    const root = doc.get(op.id);
-    if (!root || !isInstanceRoot(root) || hasRecord(root.props)) continue;
-    if (getProp(root.props, "mirrors") !== null) continue;
-    const values = doc.compactCopies ? {} : legacyValues(doc, op.id);
-    const entries = Object.entries(values);
-    if (entries.length === 0)
-      out.push({ op: "set", id: op.id, prop: "propValues", key: op.key, value: null });
-    for (const [key, value] of entries)
-      out.push({ op: "set", id: op.id, prop: "propValues", key, value });
-  }
-  return out;
-}
-
-/**
- * The values an instance from before records holds on the layers its
- * properties drive (its nested instances' included, under their scope): each
- * key's first layer, in layer order, that shows another value than its main
- * layer's. Within the record's bounds.
- */
-function legacyValues(doc: Doc, rootId: string): PropertyValues {
-  const out: PropertyValues = {};
-  const stack = [...doc.childIds(rootId)].reverse();
-  while (stack.length > 0) {
-    const id = stack.pop() as string;
-    const node = doc.get(id);
-    if (!node) continue;
-    const kids = doc.childIds(id);
-    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i] as string);
-    const source = doc.get(getProp(node.props, "mirrors") ?? "");
-    const refs = getProp(node.props, "propRefs") as Record<string, string | undefined>;
-    if (!source) continue;
-    const owner = ownerOf(doc, id);
-    const place = owner ? recordPlace(doc, owner.id) : undefined;
-    if (!owner || !place || place.root !== rootId) continue;
-    const defs = instanceDefinitions(doc, owner.id);
-    for (const field of ["visible", "characters", "instanceOf"] as const) {
-      const propertyId = refs[field];
-      const def = propertyId ? defs.find((d) => d.id === propertyId) : undefined;
-      if (!propertyId || !def || FIELD_OF[def.type] !== field) continue;
-      const key = propertyKey(place.scope, propertyId);
-      const value = fieldValue(node, field);
-      if (key in out || value === null || sameValue(value, fieldValue(source, field))) continue;
-      const next = { ...out, [key]: value };
-      if (Object.keys(next).length > MAX_PROPERTY_VALUES) continue;
-      if (propertyValuesChars(next) > MAX_PROPERTY_VALUES_CHARS) continue;
-      out[key] = value;
-    }
-  }
-  return out;
 }
 
 /**

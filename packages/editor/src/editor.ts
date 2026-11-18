@@ -15,6 +15,7 @@ import {
   keysBetween,
   type LayerType,
   type ListType,
+  migrateRecords,
   type NodeRecord,
   type NodeType,
   newId,
@@ -102,7 +103,6 @@ import { FIELD_OF, findPropertyRow, instanceProperties } from "./properties";
 import {
   carryOps,
   drivenEditOps,
-  firstRecordOps,
   type NestedInstance,
   nestedTree,
   ownerOf,
@@ -611,10 +611,6 @@ export class Editor {
       // writes the record its value lives in, never the layer (decision 0035, item 3).
       if (recordOverrides) ops = drivenEditOps(this.doc, ops);
       if (ops.length === 0) return [];
-      // An instance's first record value: its record made first, values from before records
-      // folded in, on its own, so undoing the edit leaves the record (decision 0035, item 3).
-      const firstRecord = firstRecordOps(this.doc, ops);
-      if (firstRecord.length > 0) this.sync.commit(firstRecord);
       // A person's edit inside an instance records an override, and setting a
       // bound property by hand detaches its variable; both before the derived
       // writes below, so those leave the edited properties alone.
@@ -2140,7 +2136,7 @@ export class Editor {
     this.beginGesture("Insert instance");
     try {
       // One transaction per copy: a teammate copying the same at once clashes on one, not all.
-      for (const batch of importBatches(this.doc, source, lib, [assetId]))
+      for (const batch of importBatches(this.doc, recorded(source), lib, [assetId]))
         if (!this.commit(batch, "Insert instance", { overrides: false, library: true }))
           return null;
       return this.insertInstance(libraryNodeId(lib.fileId, main), at);
@@ -2182,7 +2178,7 @@ export class Editor {
    * publish (`source`, its snapshot); their instances follow, overrides kept.
    */
   updateLibrary(source: Doc, lib: LibraryRef): boolean {
-    const ops = updateOps(this.doc, source, lib);
+    const ops = updateOps(this.doc, recorded(source), lib);
     if (ops.length === 0) return false;
     return this.commit(ops, `Update ${lib.name || "library"}`, {
       overrides: false,
@@ -3622,6 +3618,8 @@ export class Editor {
       return false;
     }
     if (data.format !== "drawpane/nodes" || !Array.isArray(data.nodes)) return false;
+    // Copied from a file from before records: its instances come in keeping one (decision 0035).
+    data.nodes = migrateRecords(data.nodes, (id) => this.doc.get(id)).nodes;
     const parent = options.at ? this.dropTarget(options.at) : this.insertionParent();
     if (!parent) return false;
     let target =
@@ -4053,3 +4051,17 @@ export class Editor {
 }
 
 export { ALIGN_EDGES };
+
+/**
+ * A library's publish (`source`) with every instance keeping a record, those
+ * from before records folded (`migrateRecords`, decision 0035): what comes
+ * into this file from it does. The same document when none needs one.
+ */
+function recorded(source: Doc): Doc {
+  const stored = source.stored();
+  const { nodes, migrated } = migrateRecords(stored);
+  if (migrated === 0) return source;
+  const doc = new Doc({ compactCopies: source.compactCopies });
+  doc.resetStored(nodes, source.compactCopies ? "compact" : "materialized");
+  return doc;
+}

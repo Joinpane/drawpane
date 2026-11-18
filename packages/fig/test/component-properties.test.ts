@@ -67,8 +67,11 @@ describe("importing component properties", () => {
     });
     // What instances set for their properties is in their records, nested instances' with their
     // scope (decision 0035, item 3), and never marked on the layers that show it.
+    // Every instance that isn't a copy keeps one, empty when it set nothing (decision 0035).
+    const instances = nodes.filter((n) => n.props.instanceOf && !n.props.mirrors);
+    expect(instances.filter((n) => n.props.propValues === undefined)).toEqual([]);
     const records = nodes
-      .filter((n) => n.props.propValues)
+      .filter((n) => n.props.propValues && Object.keys(n.props.propValues).length > 0)
       .map((n) => [n.id, getProp(n.props, "propValues")]);
     expect(Object.fromEntries(records)).toEqual({
       // The outline button: its text. Not its hug width, nor its label's auto width.

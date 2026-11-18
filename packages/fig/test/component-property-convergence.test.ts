@@ -20,6 +20,8 @@
  * plain layers, queues edits while offline, and is never refused or told to
  * reload with any unsent; once everything is in, it reloads (as its update
  * banner does) and everyone agrees. A client may also detach the instance.
+ * A third variant nests three levels deep (Leaf holds an instance of Deep),
+ * its nested Leaf copy swapped by hand to another component and back.
  * In materialized form, the room's automatic conversion to compact copies
  * then keeps every instance (none detached) and shows what the record says,
  * when no main changed in structure meanwhile.
@@ -155,6 +157,18 @@ function act(room: Room, [who, kind, arg]: Action, count: { next: number }): voi
       if (client.online) room.disconnect(client);
       else room.connect(client);
       return;
+    case 13: {
+      // The nested Leaf copy swapped by hand, to Other or back (the deep kit has Other).
+      const nested =
+        nestedOf(client) ??
+        editor.doc.childIds("i").find((id) => {
+          const n = editor.doc.get(id);
+          return n?.props.name === "Nested";
+        });
+      if (nested && editor.doc.has("other"))
+        editor.swapInstance(nested, arg % 2 === 0 ? "other" : "leaf");
+      return;
+    }
     case 12:
       // Now and then the instance is detached; otherwise a value is set.
       if (arg >= 10) {
@@ -165,10 +179,10 @@ function act(room: Room, [who, kind, arg]: Action, count: { next: number }): voi
   }
 }
 
-const KINDS = 13;
+const KINDS = 14;
 
-function run(form: CopiesFormat, actions: readonly Action[], oldTab: boolean): Room {
-  const room = new Room(buttonKit(), form);
+function run(form: CopiesFormat, actions: readonly Action[], oldTab: boolean, deep = false): Room {
+  const room = new Room(buttonKit({ deep }), form);
   room.join("a");
   room.join("b");
   if (oldTab) room.joinOffline("c");
@@ -205,8 +219,13 @@ function expectConverts(room: Room): void {
 }
 
 /** One schedule, and everything the property says of it once it's all delivered. */
-function check(form: CopiesFormat, actions: readonly Action[], oldTab: boolean): void {
-  const room = run(form, actions, oldTab);
+function check(
+  form: CopiesFormat,
+  actions: readonly Action[],
+  oldTab: boolean,
+  deep = false,
+): void {
+  const room = run(form, actions, oldTab, deep);
   expectConverged(room);
   reloadOldTabs(room);
   if (form === "materialized") {
@@ -221,6 +240,19 @@ function check(form: CopiesFormat, actions: readonly Action[], oldTab: boolean):
 }
 
 describe("component property values converge", () => {
+  it("the deep kit is three levels deep: the instance's Leaf copy holds a copy of Deep", () => {
+    const room = new Room(buttonKit({ deep: true }), "materialized");
+    const doc = room.join("a").editor.doc;
+    const leafCopy = doc.childIds("i").find((id) => doc.get(id)?.props.instanceOf === "leaf");
+    const deepCopy = doc
+      .childIds(leafCopy as string)
+      .find((id) => doc.get(id)?.props.instanceOf === "deep");
+    expect(deepCopy && doc.childIds(deepCopy).map((id) => doc.get(id)?.props.characters)).toEqual([
+      "Deep",
+    ]);
+    expect([...compactByInstance([...room.store.nodes()]).detached]).toEqual([]);
+  });
+
   // Review 5 of #187, P2 #7, found at seed 1875001: C swaps the icon, A detaches the instance
   // before hearing of it, C undoes its swap, then A edits. C's delayed swap and undo rebuild the
   // icon's layers copying the old main's copy layers, which the detach had pointed through to
@@ -293,8 +325,12 @@ describe("component property values converge", () => {
   });
 
   for (const form of FORMS)
-    for (const oldTab of [false, true])
-      it(`three clients, random edits, resets, switches, swaps, detach, undo and reconnects${oldTab ? ", one a tab from before records" : ""} (${form})`, () => {
+    for (const [oldTab, deep] of [
+      [false, false],
+      [true, false],
+      [false, true],
+    ] as const)
+      it(`three clients, random edits, resets, switches, swaps, detach, undo and reconnects${oldTab ? ", one a tab from before records" : ""}${deep ? ", three levels deep" : ""} (${form})`, () => {
         fc.assert(
           fc.property(
             fc.array(
@@ -305,7 +341,7 @@ describe("component property values converge", () => {
               ),
               { minLength: 5, maxLength: 45 },
             ),
-            (actions) => check(form, actions, oldTab),
+            (actions) => check(form, actions, oldTab, deep),
           ),
           {
             seed: Number(process.env.FUZZ_SEED ?? 350035),

@@ -98,6 +98,21 @@ export function changedFields(
     if (same(a, b)) continue;
     const m = onMain ? onMain.get(field) : undefined;
     if (KEYED_PROPS.has(field as PropName)) {
+      // A map that exists differs from none (an instance's record decides every key once it
+      // exists, decision 0035): one side making or removing it changes it whole, conflicting
+      // where main did otherwise. Maps on both sides are compared entry by entry.
+      if (present(b) !== present(a)) {
+        changes.push({
+          kind: "changed",
+          id: node.id,
+          field: field as PropName,
+          base: b,
+          branch: a,
+          main: m,
+          conflict: onMain === null || (!same(m, b) && !same(m, a)),
+        });
+        continue;
+      }
       changes.push(...changedEntries(node.id, field as PropName, b, a, m, onMain === null));
       continue;
     }
@@ -114,6 +129,9 @@ export function changedFields(
   }
   return changes;
 }
+
+/** Whether a map is there at all (an empty one is). */
+const present = (value: unknown) => value !== undefined && value !== null;
 
 /** A map's entries, as `changedFields` compares them (none: an empty map). */
 const entries = (value: unknown): Record<string, unknown> =>
