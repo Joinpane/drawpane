@@ -12,7 +12,9 @@ import { AGENT_TOOLS, type AgentTool, type ToolLevel } from "@drawpane/editor";
 import { ID_PATTERN, newId } from "@drawpane/model";
 import { Hono } from "hono";
 import { z } from "zod";
+import { agentDeps, callReadTool, callWriteTool } from "../agent/call";
 import { agentToolsEnabled } from "../agent/measurer";
+import type { AgentCallResult } from "../agent/runner-api";
 import {
   type AgentSession,
   endSession,
@@ -24,7 +26,6 @@ import { type FileRow, requireFileRole } from "../api/access";
 import { type TokenScope, userForBearer } from "../auth/tokens";
 import type { AppContext, Env, User } from "../env";
 import { HttpError } from "../lib/http";
-import type { AgentCallResult } from "../rooms/file-room";
 import type { DocumentRequest } from "./document";
 
 /** The revisions we speak, oldest first; the last is what we offer a client that names none we know. */
@@ -376,7 +377,10 @@ function answer(out: AgentCallResult, callId: string): Record<string, unknown> {
 const roomRef = (s: AgentSession) => ({ id: s.id, name: s.name, fileId: s.targetId });
 const requester = (ctx: ToolContext) => ({ userId: ctx.user.id, name: ctx.user.name });
 
-/** An agent tool from the editor's tool layer, run by the file's room on its headless editor. */
+/**
+ * An agent tool from the editor's tool layer, run by the agent runner and
+ * committed by the file's room: this Worker makes both calls (`agent/call.ts`).
+ */
 function agentTool(t: AgentTool): Tool {
   const base = t.input as unknown as z.ZodObject<z.ZodRawShape>;
   if (t.level !== "write") {
@@ -390,12 +394,11 @@ function agentTool(t: AgentTool): Tool {
       run: (async (ctx: ToolContext, args: { fileId: string } & Record<string, unknown>) => {
         const { fileId, ...input } = args;
         const { file } = await readFile(ctx, fileId);
-        // The RPC stub's types lose the union's narrowing; the answer is as the room returns it.
-        const out = (await fileRoom(ctx.env, file.id).readAgentTool(
-          file.id,
-          t.name,
+        const out = await callReadTool(agentDeps(ctx.env, file.id), {
+          fileId: file.id,
+          tool: t.name,
           input,
-        )) as AgentCallResult;
+        });
         if (!out.ok) throw new ToolError(out.message);
         return out.image ? new WithImage(out.result, out.image) : out.result;
       }) as Tool["run"],
@@ -415,13 +418,13 @@ function agentTool(t: AgentTool): Tool {
     ) => {
       const { sessionId, callId = ctx.callId, ...input } = args;
       const s = await session(ctx, sessionId);
-      const out = await fileRoom(ctx.env, s.targetId).runAgentTool(
-        requester(ctx),
-        roomRef(s),
+      const out = await callWriteTool(agentDeps(ctx.env, s.targetId), {
+        by: requester(ctx),
+        session: roomRef(s),
         callId,
-        t.name,
+        tool: t.name,
         input,
-      );
+      });
       return answer(out, callId);
     }) as Tool["run"],
   };

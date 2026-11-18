@@ -24,6 +24,21 @@ export interface DocChange {
 
 type Listener = (change: DocChange) => void;
 
+/**
+ * What was read while `trackReads` was on. An agent run's commit uses it
+ * only to find which top-level layers the run worked in (decision 0033):
+ * it needn't name every layer read inside one, and caches that skip a read
+ * don't matter, so long as something in each top-level layer is named.
+ */
+export interface DocReads {
+  /** Layers read (presented ids). */
+  readonly ids: Set<string>;
+  /** Parents whose child list was read. */
+  readonly lists: Set<string>;
+  /** Something read every layer (`nodes()`, `stored()`): it depends on all of them. */
+  all: boolean;
+}
+
 /** How many recent changes `changesSince` can replay, and how many ids they may hold in all. */
 const LOG_CHANGES = 256;
 const LOG_IDS = 2_000_000;
@@ -84,6 +99,9 @@ export class Doc {
   #lastStoredInverse: readonly Op[] = [];
   #resetIds: ReadonlyMap<string, string> = new Map();
 
+  /** What's being read, while `trackReads` is on. */
+  #reads: DocReads | null = null;
+
   constructor(options: DocOptions = {}) {
     this.#compactCopies = options.compactCopies ?? compactByDefault;
     this.#compact = this.#compactCopies ? new CompactCopies() : null;
@@ -118,24 +136,53 @@ export class Doc {
   }
 
   get(id: string): NodeRecord | undefined {
-    return this.#compact ? this.#compact.view.get(id) : this.#store.get(id);
+    const node = this.#compact ? this.#compact.view.get(id) : this.#store.get(id);
+    if (this.#reads) this.#read(this.#reads, id);
+    return node;
   }
 
   has(id: string): boolean {
-    return this.#compact ? this.#compact.view.get(id) !== undefined : this.#store.has(id);
+    return this.get(id) !== undefined;
   }
 
   childIds(parent: string): readonly string[] {
-    return this.#compact ? this.#compact.view.childIds(parent) : this.#store.childIds(parent);
+    const ids = this.#compact ? this.#compact.view.childIds(parent) : this.#store.childIds(parent);
+    if (this.#reads) this.#readList(this.#reads, parent);
+    return ids;
   }
 
   pageIds(): readonly string[] {
     const store = this.#compact?.store ?? this.#store;
-    return store.childIds(ROOT_ID).filter((id) => store.get(id)?.type === "page");
+    const ids = store.childIds(ROOT_ID);
+    if (this.#reads) this.#readList(this.#reads, ROOT_ID);
+    return ids.filter((id) => store.get(id)?.type === "page");
   }
 
   nodes(): IterableIterator<NodeRecord> {
+    if (this.#reads) this.#reads.all = true;
     return this.#compact ? this.#compact.view.nodes() : this.#store.nodes();
+  }
+
+  /**
+   * Starts recording what's read (`DocReads`), until `untrackReads`. Off,
+   * reading costs one check.
+   */
+  trackReads(): DocReads {
+    this.#reads = { ids: new Set(), lists: new Set(), all: false };
+    return this.#reads;
+  }
+
+  untrackReads(): void {
+    this.#reads = null;
+  }
+
+  #read(reads: DocReads, id: string): void {
+    reads.ids.add(id);
+  }
+
+  #readList(reads: DocReads, parent: string): void {
+    reads.lists.add(parent);
+    reads.ids.add(parent);
   }
 
   /** Ancestors of `id`, nearest first, excluding the root. */
@@ -154,7 +201,9 @@ export class Doc {
   /** Variable collections, in order. */
   collectionIds(): readonly string[] {
     const store = this.#compact?.store ?? this.#store;
-    return store.childIds(ROOT_ID).filter((id) => store.get(id)?.type === "collection");
+    const ids = store.childIds(ROOT_ID);
+    if (this.#reads) this.#readList(this.#reads, ROOT_ID);
+    return ids.filter((id) => store.get(id)?.type === "collection");
   }
 
   /** The page a node lives on. */
@@ -169,16 +218,24 @@ export class Doc {
 
   /** Where a copy layer sits (its instance root, path and main layer), when copies are compact. */
   copySlot(id: string): CopySlot | undefined {
-    return this.#compact?.view.slot(id);
+    const slot = this.#compact?.view.slot(id);
+    if (this.#reads) this.#read(this.#reads, id);
+    return slot;
   }
 
   /** The stored instance roots of a main (compact copies only). */
   instanceRoots(mainId: string): readonly string[] {
-    return this.#compact?.instanceRoots(mainId) ?? [];
+    const roots = this.#compact?.instanceRoots(mainId) ?? [];
+    if (this.#reads) {
+      this.#reads.ids.add(mainId);
+      for (const id of roots) this.#reads.ids.add(id);
+    }
+    return roots;
   }
 
   /** Whether an instance stores a value a layout reads, so its layout can differ from its main's. */
   layoutDiffers(rootId: string): boolean {
+    if (this.#reads) this.#read(this.#reads, rootId);
     return this.#compact?.layoutDiffers(rootId) ?? false;
   }
 
@@ -195,14 +252,23 @@ export class Doc {
   } {
     const store = () => this.#compact?.store ?? this.#store;
     return {
-      get: (id) => store().get(id),
-      childIds: (parent) => store().childIds(parent),
+      get: (id) => {
+        const node = store().get(id);
+        if (this.#reads) this.#read(this.#reads, id);
+        return node;
+      },
+      childIds: (parent) => {
+        const ids = store().childIds(parent);
+        if (this.#reads) this.#readList(this.#reads, parent);
+        return ids;
+      },
       pageIds: () => this.pageIds(),
     };
   }
 
   /** The stored form: what a room would store. Materialized when copies aren't compact. */
   stored(): NodeRecord[] {
+    if (this.#reads) this.#reads.all = true;
     return [...(this.#compact?.store ?? this.#store).nodes()];
   }
 
