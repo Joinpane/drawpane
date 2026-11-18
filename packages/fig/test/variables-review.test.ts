@@ -97,7 +97,7 @@ describe("text styles from a .fig (F13)", { timeout: 60_000 }, () => {
 });
 
 describe("swapped variants (F14)", () => {
-  function swapped(oldBinding: string | null, oldColor: number) {
+  function swapped(oldBinding: string | null, oldColor: number, ownColor = oldColor) {
     const graph = new SceneGraph();
     const page = graph.getPages(true)[0] as SceneNode;
     graph.variableCollections.set("c", {
@@ -140,7 +140,7 @@ describe("swapped variants (F14)", () => {
     } as never);
     const copy = graph.createNode("INSTANCE", page.id, {
       componentId: current.id,
-      fills: old.fills,
+      fills: solid(ownColor),
       boundVariables: oldBinding ? { "fills/0/color": oldBinding } : {},
     } as never);
     const guids = new Map([
@@ -177,14 +177,22 @@ describe("swapped variants (F14)", () => {
   });
 
   it("F14: an instance whose copy of the binding Open Pencil left out still takes the new look", () => {
-    // The kit's dropdown buttons, swapped to the ghost variant (no fill): kept the old fill.
     const { after, color } = swapped(null, 1);
     expect(after.fills[0]?.color).toEqual({ r: 0, g: 0, b: 0, a: 1 });
     expect(color).toEqual({ type: "VARIABLE_ALIAS", id: "VariableID:w" });
   });
 
-  it("F14: a binding the instance chose itself is an override, kept", () => {
-    const { color } = swapped("x", 1);
+  it("F14: a copy bound to another variable than its old component, its value the same, takes the new look", () => {
+    // The kit's dropdown buttons, swapped to the ghost variant: the main holding them binds
+    // their fill to another variable than the button component does. They kept the old fill.
+    const { after, color } = swapped("x", 1);
+    expect(after.fills[0]?.color).toEqual({ r: 0, g: 0, b: 0, a: 1 });
+    expect(color).toEqual({ type: "VARIABLE_ALIAS", id: "VariableID:w" });
+  });
+
+  it("F14: an instance whose value differs from its old component's overrides it: value and binding kept", () => {
+    const { after, color } = swapped("x", 1, 0.5);
+    expect(after.fills[0]?.color).toEqual({ r: 0.5, g: 0.5, b: 0.5, a: 1 });
     expect(color).toEqual({ type: "VARIABLE_ALIAS", id: "VariableID:x" });
   });
 });

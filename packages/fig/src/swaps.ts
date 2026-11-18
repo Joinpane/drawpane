@@ -80,16 +80,15 @@ export function applySwappedLooks(
     const was = oldMain as unknown as Record<string, unknown>;
     const next = newMain as unknown as Record<string, unknown>;
     // Provenance, not colour (decision 0034): a field the instance doesn't override (its value
-    // the old component's, and its binding the old component's or none, as Open Pencil keeps
-    // some copies' bindings) takes the new component's value and binding. A binding of its own
-    // (another variable than the old component's) is an override, kept.
+    // still the old component's) takes the new component's value and its binding, whatever
+    // the copy's binding was (a main holding the copy may bind it to another variable, and
+    // Open Pencil leaves some copies' bindings out). One whose value differs is an override:
+    // its value and binding are kept.
     const bound = { ...(node.boundVariables as Bound | undefined) };
     let rebound = false;
     for (const field of LOOK) {
+      if (!same(own[field], was[field])) continue;
       const ownBinds = bindingsOf(node.boundVariables as Bound, field);
-      const wasBinds = bindingsOf(oldMain.boundVariables as Bound, field);
-      const bindsInherited = Object.keys(ownBinds).length === 0 || same(ownBinds, wasBinds);
-      if (!same(own[field], was[field]) || !bindsInherited) continue;
       if (!same(own[field], next[field])) updates[field] = structuredClone(next[field]);
       const nextBinds = bindingsOf(newMain.boundVariables as Bound, field);
       if (same(ownBinds, nextBinds)) continue;
