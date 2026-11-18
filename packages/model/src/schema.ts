@@ -109,6 +109,13 @@ export const Color = z
   .regex(/^#[0-9a-f]{6}([0-9a-f]{2})?$/, "must be a lowercase hex color like #ff5a1f");
 export type Color = z.infer<typeof Color>;
 
+/**
+ * How a layer, paint or shadow combines with what's under it. The linear
+ * pair are Figma's "Plus darker" and "Plus lighter" (Apple's plus-darker and
+ * plus-lighter), on premultiplied colour with the alpha of normal blending:
+ * linear dodge adds the two colours, linear burn adds them and takes away
+ * the two alphas' product (decision 0038).
+ */
 export const BLEND_MODES = [
   "normal",
   "multiply",
@@ -118,6 +125,8 @@ export const BLEND_MODES = [
   "lighten",
   "color-dodge",
   "color-burn",
+  "linear-dodge",
+  "linear-burn",
   "hard-light",
   "soft-light",
   "difference",
@@ -199,6 +208,11 @@ export const Shadow = z.object({
    * have. Decision 0031 has how a layer casts its drop shadow.
    */
   showBehind: z.boolean().optional(),
+  /**
+   * How the shadow combines with what's under it (Apple's glass recipe adds
+   * its inner shadows with linear dodge and burn). Missing means normal.
+   */
+  blendMode: BlendMode.optional(),
 });
 export const Blur = z.object({
   type: z.enum(["layer-blur", "background-blur"]),

@@ -309,6 +309,14 @@ describe("paint", () => {
       only(svg('<rect width="1" height="1" style="mix-blend-mode: multiply"/>')).props.blendMode,
     ).toBe("multiply");
   });
+
+  it("reads plus-lighter and plus-darker as linear dodge and burn", () => {
+    const mode = (css: string) =>
+      only(svg(`<rect width="1" height="1" style="mix-blend-mode: ${css}"/>`)).props.blendMode;
+    expect(mode("plus-lighter")).toBe("linear-dodge");
+    expect(mode("plus-darker")).toBe("linear-burn");
+    expect(mode("normal")).toBeUndefined();
+  });
 });
 
 describe("styles", () => {

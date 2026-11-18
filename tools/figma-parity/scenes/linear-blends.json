@@ -1,0 +1,952 @@
+{
+  "suite": "linear-blends",
+  "about": "Linear dodge and burn (plus lighter and plus darker) on paints, layers, strokes and shadows: probes of their alpha rules over opaque, semi-transparent and empty backdrops, and Apple-style vibrant fills and blended shadows.",
+  "cell": { "width": 240, "height": 160, "gap": 40, "columns": 5 },
+  "background": "#f4f3ef",
+  "cells": [
+    {
+      "id": "dodge-paint-probe",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#303030" }]
+        },
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#808080" }]
+        },
+        {
+          "type": "rect",
+          "x": 120,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#b0b0b0" }]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 40,
+          "fills": [{ "type": "solid", "color": "#a0a0a0", "blendMode": "linear-dodge" }]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 240,
+          "height": 40,
+          "fills": [
+            { "type": "solid", "color": "#a0a0a0", "opacity": 0.5, "blendMode": "linear-dodge" }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 240,
+          "height": 40,
+          "fills": [
+            { "type": "solid", "color": "#a0a0a0", "opacity": 0.2, "blendMode": "linear-dodge" }
+          ]
+        },
+        {
+          "type": "frame",
+          "x": 0,
+          "y": 120,
+          "width": 240,
+          "height": 40,
+          "opacity": 0.99,
+          "fills": [],
+          "children": [
+            {
+              "type": "rect",
+              "x": 0,
+              "y": 0,
+              "width": 120,
+              "height": 40,
+              "fills": [{ "type": "solid", "color": "#80808080" }]
+            },
+            {
+              "type": "rect",
+              "x": 0,
+              "y": 0,
+              "width": 240,
+              "height": 40,
+              "fills": [
+                { "type": "solid", "color": "#a0a0a0", "opacity": 0.5, "blendMode": "linear-dodge" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "burn-paint-probe",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#303030" }]
+        },
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#808080" }]
+        },
+        {
+          "type": "rect",
+          "x": 120,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#b0b0b0" }]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 40,
+          "fills": [{ "type": "solid", "color": "#606060", "blendMode": "linear-burn" }]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 240,
+          "height": 40,
+          "fills": [
+            { "type": "solid", "color": "#606060", "opacity": 0.5, "blendMode": "linear-burn" }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 240,
+          "height": 40,
+          "fills": [
+            { "type": "solid", "color": "#606060", "opacity": 0.2, "blendMode": "linear-burn" }
+          ]
+        },
+        {
+          "type": "frame",
+          "x": 0,
+          "y": 120,
+          "width": 240,
+          "height": 40,
+          "opacity": 0.99,
+          "fills": [],
+          "children": [
+            {
+              "type": "rect",
+              "x": 0,
+              "y": 0,
+              "width": 120,
+              "height": 40,
+              "fills": [{ "type": "solid", "color": "#80808080" }]
+            },
+            {
+              "type": "rect",
+              "x": 0,
+              "y": 0,
+              "width": 240,
+              "height": 40,
+              "fills": [
+                { "type": "solid", "color": "#606060", "opacity": 0.5, "blendMode": "linear-burn" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dodge-layer-probe",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#303030" }]
+        },
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#808080" }]
+        },
+        {
+          "type": "rect",
+          "x": 120,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#b0b0b0" }]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 40,
+          "fills": [{ "type": "solid", "color": "#a0a0a0" }],
+          "blendMode": "linear-dodge"
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 240,
+          "height": 40,
+          "fills": [{ "type": "solid", "color": "#a0a0a0" }],
+          "blendMode": "linear-dodge",
+          "opacity": 0.5
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 240,
+          "height": 40,
+          "fills": [{ "type": "solid", "color": "#a0a0a0" }],
+          "blendMode": "linear-dodge",
+          "opacity": 0.2
+        },
+        {
+          "type": "frame",
+          "x": 0,
+          "y": 120,
+          "width": 240,
+          "height": 40,
+          "opacity": 0.99,
+          "fills": [],
+          "children": [
+            {
+              "type": "rect",
+              "x": 0,
+              "y": 0,
+              "width": 120,
+              "height": 40,
+              "fills": [{ "type": "solid", "color": "#80808080" }]
+            },
+            {
+              "type": "rect",
+              "x": 0,
+              "y": 0,
+              "width": 240,
+              "height": 40,
+              "fills": [{ "type": "solid", "color": "#a0a0a0" }],
+              "blendMode": "linear-dodge",
+              "opacity": 0.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "burn-layer-probe",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#303030" }]
+        },
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#808080" }]
+        },
+        {
+          "type": "rect",
+          "x": 120,
+          "y": 0,
+          "width": 60,
+          "height": 120,
+          "fills": [{ "type": "solid", "color": "#b0b0b0" }]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 40,
+          "fills": [{ "type": "solid", "color": "#606060" }],
+          "blendMode": "linear-burn"
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 240,
+          "height": 40,
+          "fills": [{ "type": "solid", "color": "#606060" }],
+          "blendMode": "linear-burn",
+          "opacity": 0.5
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 240,
+          "height": 40,
+          "fills": [{ "type": "solid", "color": "#606060" }],
+          "blendMode": "linear-burn",
+          "opacity": 0.2
+        },
+        {
+          "type": "frame",
+          "x": 0,
+          "y": 120,
+          "width": 240,
+          "height": 40,
+          "opacity": 0.99,
+          "fills": [],
+          "children": [
+            {
+              "type": "rect",
+              "x": 0,
+              "y": 0,
+              "width": 120,
+              "height": 40,
+              "fills": [{ "type": "solid", "color": "#80808080" }]
+            },
+            {
+              "type": "rect",
+              "x": 0,
+              "y": 0,
+              "width": 240,
+              "height": 40,
+              "fills": [{ "type": "solid", "color": "#606060" }],
+              "blendMode": "linear-burn",
+              "opacity": 0.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dodge-circles",
+      "layers": [
+        {
+          "type": "ellipse",
+          "x": 55,
+          "y": 30,
+          "width": 90,
+          "height": 90,
+          "fills": [{ "type": "solid", "color": "#ff7a45" }]
+        },
+        {
+          "type": "ellipse",
+          "x": 95,
+          "y": 30,
+          "width": 90,
+          "height": 90,
+          "fills": [{ "type": "solid", "color": "#3d7bf0" }],
+          "blendMode": "linear-dodge"
+        },
+        {
+          "type": "ellipse",
+          "x": 75,
+          "y": 60,
+          "width": 90,
+          "height": 90,
+          "fills": [{ "type": "solid", "color": "#30a46c" }],
+          "blendMode": "linear-dodge"
+        }
+      ]
+    },
+    {
+      "id": "burn-circles",
+      "layers": [
+        {
+          "type": "ellipse",
+          "x": 55,
+          "y": 30,
+          "width": 90,
+          "height": 90,
+          "fills": [{ "type": "solid", "color": "#ff7a45" }]
+        },
+        {
+          "type": "ellipse",
+          "x": 95,
+          "y": 30,
+          "width": 90,
+          "height": 90,
+          "fills": [{ "type": "solid", "color": "#3d7bf0" }],
+          "blendMode": "linear-burn"
+        },
+        {
+          "type": "ellipse",
+          "x": 75,
+          "y": 60,
+          "width": 90,
+          "height": 90,
+          "fills": [{ "type": "solid", "color": "#30a46c" }],
+          "blendMode": "linear-burn"
+        }
+      ]
+    },
+    {
+      "id": "dodge-paints",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "linear",
+              "from": { "x": 0, "y": 0.5 },
+              "to": { "x": 1, "y": 0.5 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 0.5, "color": "#ffd166" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 30,
+          "width": 180,
+          "height": 100,
+          "fills": [
+            { "type": "solid", "color": "#1c1b1a" },
+            { "type": "solid", "color": "#7f7f7f", "opacity": 0.6, "blendMode": "linear-dodge" }
+          ],
+          "cornerRadius": 16
+        }
+      ]
+    },
+    {
+      "id": "burn-paints",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "linear",
+              "from": { "x": 0, "y": 0.5 },
+              "to": { "x": 1, "y": 0.5 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 0.5, "color": "#ffd166" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 30,
+          "width": 180,
+          "height": 100,
+          "fills": [
+            { "type": "solid", "color": "#ffffff" },
+            { "type": "solid", "color": "#3d3d3d", "opacity": 0.5, "blendMode": "linear-burn" }
+          ],
+          "cornerRadius": 16
+        }
+      ]
+    },
+    {
+      "id": "vibrant-fills",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 80,
+          "fills": [
+            {
+              "type": "linear",
+              "from": { "x": 0, "y": 0.5 },
+              "to": { "x": 1, "y": 0.5 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 0.5, "color": "#ffd166" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 240,
+          "height": 80,
+          "fills": [{ "type": "solid", "color": "#1c1c1e" }]
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 40,
+          "fills": [
+            { "type": "solid", "color": "#7f7f7f", "opacity": 0.5, "blendMode": "linear-burn" },
+            { "type": "solid", "color": "#3d3d3d", "blendMode": "linear-dodge" }
+          ],
+          "cornerRadius": 20
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 100,
+          "width": 200,
+          "height": 40,
+          "fills": [
+            { "type": "solid", "color": "#cccccc", "opacity": 0.3, "blendMode": "linear-dodge" },
+            { "type": "solid", "color": "#404040", "opacity": 0.5, "blendMode": "linear-burn" }
+          ],
+          "cornerRadius": 20
+        }
+      ]
+    },
+    {
+      "id": "dodge-gradient",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [{ "type": "solid", "color": "#2a2a40" }]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 30,
+          "width": 180,
+          "height": 100,
+          "fills": [
+            {
+              "type": "linear",
+              "from": { "x": 0, "y": 0 },
+              "to": { "x": 1, "y": 1 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 1, "color": "#3d7bf000" }
+              ],
+              "blendMode": "linear-dodge"
+            }
+          ],
+          "cornerRadius": 16
+        }
+      ]
+    },
+    {
+      "id": "burn-stroke",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "linear",
+              "from": { "x": 0, "y": 0.5 },
+              "to": { "x": 1, "y": 0.5 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 0.5, "color": "#ffd166" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 40,
+          "width": 160,
+          "height": 80,
+          "fills": [],
+          "cornerRadius": 12,
+          "strokes": [{ "type": "solid", "color": "#404040", "blendMode": "linear-burn" }],
+          "strokeWeight": 8,
+          "strokeAlign": "center"
+        }
+      ]
+    },
+    {
+      "id": "dodge-layer-frame",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [{ "type": "solid", "color": "#203040" }]
+        },
+        {
+          "type": "frame",
+          "x": 30,
+          "y": 30,
+          "width": 180,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [{ "type": "solid", "color": "#606060" }],
+          "blendMode": "linear-dodge",
+          "children": [
+            {
+              "type": "rect",
+              "x": 20,
+              "y": 20,
+              "width": 60,
+              "height": 60,
+              "fills": [{ "type": "solid", "color": "#ff7a45" }]
+            },
+            {
+              "type": "rect",
+              "x": 100,
+              "y": 20,
+              "width": 60,
+              "height": 60,
+              "fills": [{ "type": "solid", "color": "#3d7bf0" }]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inner-dodge",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [{ "type": "solid", "color": "#1c1c1e" }]
+        },
+        {
+          "type": "rect",
+          "x": 50,
+          "y": 40,
+          "width": 140,
+          "height": 80,
+          "fills": [{ "type": "solid", "color": "#3a3a3c" }],
+          "cornerRadius": 24,
+          "effects": [
+            {
+              "type": "inner-shadow",
+              "color": "#505050",
+              "x": 0,
+              "y": 3,
+              "blur": 6,
+              "spread": 0,
+              "blendMode": "linear-dodge"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inner-burn",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "linear",
+              "from": { "x": 0, "y": 0.5 },
+              "to": { "x": 1, "y": 0.5 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 0.5, "color": "#ffd166" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 50,
+          "y": 40,
+          "width": 140,
+          "height": 80,
+          "fills": [{ "type": "solid", "color": "#f2f2f7" }],
+          "cornerRadius": 24,
+          "effects": [
+            {
+              "type": "inner-shadow",
+              "color": "#808080",
+              "x": 0,
+              "y": -4,
+              "blur": 8,
+              "spread": 0,
+              "blendMode": "linear-burn"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inner-stack",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "linear",
+              "from": { "x": 0, "y": 0.5 },
+              "to": { "x": 1, "y": 0.5 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 0.5, "color": "#ffd166" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 50,
+          "y": 40,
+          "width": 140,
+          "height": 80,
+          "fills": [{ "type": "solid", "color": "#ffffff", "opacity": 0.3 }],
+          "cornerRadius": 40,
+          "effects": [
+            {
+              "type": "inner-shadow",
+              "color": "#282828",
+              "x": 0,
+              "y": 2,
+              "blur": 4,
+              "spread": 0,
+              "blendMode": "linear-dodge"
+            },
+            {
+              "type": "inner-shadow",
+              "color": "#282828",
+              "x": 0,
+              "y": -2,
+              "blur": 4,
+              "spread": 0,
+              "blendMode": "linear-dodge"
+            },
+            {
+              "type": "inner-shadow",
+              "color": "#cccccc",
+              "x": 0,
+              "y": 0,
+              "blur": 12,
+              "spread": 0,
+              "blendMode": "linear-burn"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-burn",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "linear",
+              "from": { "x": 0, "y": 0.5 },
+              "to": { "x": 1, "y": 0.5 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 0.5, "color": "#ffd166" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 30,
+          "width": 120,
+          "height": 80,
+          "fills": [{ "type": "solid", "color": "#ffffff" }],
+          "cornerRadius": 16,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#00000066",
+              "x": 0,
+              "y": 10,
+              "blur": 20,
+              "spread": 0,
+              "blendMode": "linear-burn"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-dodge",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [{ "type": "solid", "color": "#1c1c1e" }]
+        },
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 30,
+          "width": 120,
+          "height": 80,
+          "fills": [{ "type": "solid", "color": "#3a3a3c" }],
+          "cornerRadius": 16,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#606060",
+              "x": 0,
+              "y": 8,
+              "blur": 16,
+              "spread": 2,
+              "blendMode": "linear-dodge"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-burn-stripes",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [{ "type": "solid", "color": "#808080" }]
+        },
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 60,
+          "width": 240,
+          "height": 40,
+          "fills": [{ "type": "solid", "color": "#ffd166" }]
+        },
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 30,
+          "width": 120,
+          "height": 80,
+          "fills": [{ "type": "solid", "color": "#ffffff" }],
+          "cornerRadius": 16,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#262626",
+              "x": 6,
+              "y": 6,
+              "blur": 0,
+              "spread": 0,
+              "blendMode": "linear-burn"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-mixed",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [{ "type": "solid", "color": "#ccd5e0" }]
+        },
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 30,
+          "width": 120,
+          "height": 80,
+          "fills": [{ "type": "solid", "color": "#ffffff", "opacity": 0.5 }],
+          "cornerRadius": 16,
+          "effects": [
+            {
+              "type": "drop-shadow",
+              "color": "#0000001a",
+              "x": 0,
+              "y": 4,
+              "blur": 12,
+              "spread": 0
+            },
+            {
+              "type": "drop-shadow",
+              "color": "#333333",
+              "x": 0,
+              "y": 2,
+              "blur": 6,
+              "spread": 0,
+              "blendMode": "linear-burn"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

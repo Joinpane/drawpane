@@ -5,7 +5,8 @@
  * stars, lines and paths (with their winding rule and end markers), text as `<text>` with one `<tspan>` per line,
  * frames as `<g>` (clipped with a `<clipPath>` when they clip content) and
  * groups. Each layer keeps its rotation and flips (as a transform matrix),
- * its opacity and blend mode, solid and gradient fills (one element per
+ * its opacity and blend mode (linear dodge and burn, which CSS lacks, built
+ * from blends it has over a copy of what's under them: svg-linear.ts), solid and gradient fills (one element per
  * paint, bottom first; angular gradients as a pattern of fine wedges), and solid or gradient strokes with weight, position
  * (inside and outside are emulated with a clip path or mask), dashes (fitted
  * to each side and corner of a box or ellipse, as on the canvas), joins and
@@ -24,7 +25,7 @@
  * Not covered yet:
  * - image fills without a supplied image, and image strokes (left out)
  * - background blur (SVG can't blur what's behind an element)
- * - per-paint blend modes on strokes
+ * - per-paint blend modes on text
  * - text that depends on fonts the viewer lacks: text stays live, so it
  *   renders in whatever font the viewing app has (outlining comes later)
  * - auto layout: positions are exported as they are on the canvas, not as
@@ -35,6 +36,7 @@ import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./da
 import { exportBounds } from "./export";
 import { type Matrix, type Rect, round2 } from "./geometry";
 import { FULL_CROP, imagePlacement } from "./images";
+import type { LinearMode } from "./linear-blend";
 import { markersOf, trimmedStroke } from "./markers";
 import { hasMask, maskScopes } from "./masks";
 import { noiseThresholdZ } from "./noise";
@@ -50,6 +52,7 @@ import {
 import type { Scene } from "./scene";
 import { dropShadowCast } from "./shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "./stroke-sides";
+import { linearBlendMarkup, linearRegion } from "./svg-linear";
 import {
   decorationBar,
   drawnBaseline,
@@ -470,6 +473,12 @@ function regionAttrs(
   y1: number,
   pad: number,
 ): string {
+  const r = regionRect(m, x0, y0, x1, y1, pad);
+  return `${attr("x", r.x)}${attr("y", r.y)}${attr("width", r.width)}${attr("height", r.height)}`;
+}
+
+/** A box in a layer's units, grown by `pad` page units, as the page-space box around it. */
+function regionRect(m: Matrix, x0: number, y0: number, x1: number, y1: number, pad: number): Rect {
   const xs: number[] = [];
   const ys: number[] = [];
   for (const [x, y] of [
@@ -483,8 +492,16 @@ function regionAttrs(
   }
   const left = Math.min(...xs) - pad;
   const top = Math.min(...ys) - pad;
-  return `${attr("x", left)}${attr("y", top)}${attr("width", Math.max(...xs) + pad - left)}${attr("height", Math.max(...ys) + pad - top)}`;
+  return {
+    x: left,
+    y: top,
+    width: Math.max(...xs) + pad - left,
+    height: Math.max(...ys) + pad - top,
+  };
 }
+
+const isLinear = (mode: string | undefined): mode is LinearMode =>
+  mode === "linear-dodge" || mode === "linear-burn";
 
 /**
  * Serializes layers (and their children) as a standalone SVG document whose
@@ -585,6 +602,97 @@ export function exportSvg(
     return `<g clip-path="url(#${clip})"${opacity}${blendStyle}><g${transform}>${body}</g></g>`;
   };
 
+  /**
+   * What's drawn under the layer being visited, in the group that isolates
+   * it, bottom first: the lists its markup is going into. A linear blend
+   * reads it (see `linearBlend`).
+   */
+  let under: string[][] = [];
+  const withUnder = (lists: string[][], visitIt: () => void) => {
+    const before = under;
+    under = lists;
+    try {
+      visitIt();
+    } finally {
+      under = before;
+    }
+  };
+
+  /**
+   * What `lists` draw, moved into defs and drawn from there (`<use>`), so it
+   * can be copied by reference: the references, bottom first.
+   */
+  const referenced = (lists: readonly string[][]): string[] => {
+    const refs: string[] = [];
+    for (const list of lists) {
+      if (list.length === 0) continue;
+      const only = list.length === 1 ? (list[0] as string) : "";
+      if (!only.startsWith("<use ")) {
+        const id = out.id("under");
+        out.defs.push(`<g id="${id}">${list.join("")}</g>`);
+        list.splice(0, list.length, `<use href="#${id}"/>`);
+      }
+      refs.push(list[0] as string);
+    }
+    return refs;
+  };
+
+  /** Whether a layer's paints or shadows, or any layer inside it, blend their own way. */
+  const blendsWithin = (id: string): boolean => {
+    const node = scene.doc.get(id);
+    if (!node) return false;
+    const blended = (p: { blendMode?: string | undefined }) =>
+      p.blendMode !== undefined && p.blendMode !== "normal";
+    if (
+      getProp(node.props, "fills").some(blended) ||
+      getProp(node.props, "strokes").some(blended) ||
+      getProp(node.props, "effects").some((e) => "blendMode" in e && blended(e))
+    )
+      return true;
+    return scene.doc.childIds(id).some((child) => {
+      const inner = scene.doc.get(child);
+      if (!inner || inner.props.visible === false) return false;
+      return getProp(inner.props, "blendMode") !== "normal" || blendsWithin(child);
+    });
+  };
+
+  /**
+   * `source` blended by linear dodge or burn into what `backdrop` draws, in
+   * `region` (page space): markup to draw after the backdrop (svg-linear.ts).
+   * The backdrop's markup moves into defs and is drawn from there, so the
+   * filter gets a copy by reference. Over nothing, it's the source as it is.
+   */
+  const linearBlend = (
+    mode: LinearMode,
+    backdrop: readonly string[][],
+    source: readonly string[],
+    region: Rect | null,
+  ): string[] => {
+    const refs = referenced(backdrop);
+    if (refs.length === 0 || !region || source.length === 0) return [...source];
+    const { defs, markup } = linearBlendMarkup(
+      mode,
+      linearRegion(region),
+      refs.join(""),
+      source.join(""),
+      (prefix) => out.id(prefix),
+    );
+    out.defs.push(...defs);
+    return [markup];
+  };
+
+  /** A shadow's or paint's markup in its own blending: CSS's, or a linear blend into `backdrop`. */
+  const blended = (
+    mode: Paint["blendMode"],
+    piece: string,
+    backdrop: readonly string[][],
+    region: Rect,
+  ): string[] => {
+    if (isLinear(mode)) return linearBlend(mode, backdrop, [piece], region);
+    if (mode && BLEND_CSS.has(mode)) return [`<g style="mix-blend-mode:${mode}">${piece}</g>`];
+    return [piece];
+  };
+
   /** An offset and a Gaussian blur in page space, as a canvas shadow is cast; `region` in page space. */
   const shadowFilter = (
     s: { x: number; y: number; blur: number },
@@ -619,9 +727,14 @@ export function exportSvg(
     matrix: Matrix,
     shape: { tag: string; attrs: string } | null,
     into: string[],
+    /** What's under the layer in its group, for a shadow's own blending. */
+    backdrop: readonly string[][],
   ) => {
     for (const s of getProp(node.props, "effects")) {
       if (s.type !== "drop-shadow" || s.visible === false) continue;
+      const area = regionRect(matrix, 0, 0, w, h, reach(s));
+      const put = (piece: string) =>
+        into.push(...blended(s.blendMode, piece, [...backdrop, into], area));
       const region = regionAttrs(matrix, 0, 0, w, h, reach(s));
       const { color, alpha } = splitColor(s.color);
       const ink = `${attr("fill", color)}${alpha < 1 ? attr("fill-opacity", alpha) : ""}`;
@@ -638,8 +751,8 @@ export function exportSvg(
           out.defs.push(
             `<mask id="${mask}" maskUnits="userSpaceOnUse"${region}><rect${region} fill="#fff"/><${shape.tag}${transformAttr(matrix)}${shape.attrs} fill="#000"/></mask>`,
           );
-          into.push(`<g mask="url(#${mask})">${drawn}</g>`);
-        } else into.push(drawn);
+          put(`<g mask="url(#${mask})">${drawn}</g>`);
+        } else put(drawn);
       } else {
         // Text: the glyphs' silhouette, filled with the shadow's colour.
         const glyphs: string[] = [];
@@ -649,9 +762,7 @@ export function exportSvg(
         out.defs.push(
           `<filter id="${tint}" filterUnits="userSpaceOnUse"${region} color-interpolation-filters="sRGB"><feFlood${attr("flood-color", color)}${alpha < 1 ? attr("flood-opacity", alpha) : ""}/><feComposite in2="SourceGraphic" operator="in"/></filter>`,
         );
-        into.push(
-          `<g filter="url(#${tint})"><g filter="url(#${filter})">${glyphs.join("")}</g></g>`,
-        );
+        put(`<g filter="url(#${tint})"><g filter="url(#${filter})">${glyphs.join("")}</g></g>`);
       }
     }
   };
@@ -667,6 +778,8 @@ export function exportSvg(
     matrix: Matrix,
     shape: { tag: string; attrs: string },
     into: string[],
+    /** What's under the layer's inner shadows: what's under it in its group, its drop shadows and fills. */
+    backdrop: readonly string[][],
   ) => {
     const transform = transformAttr(matrix);
     for (const s of getProp(node.props, "effects")) {
@@ -684,7 +797,12 @@ export function exportSvg(
       const filter = shadowFilter(s, region, false);
       const { color, alpha } = splitColor(s.color);
       into.push(
-        `<g clip-path="url(#${clip})"><g filter="url(#${filter})"><rect${region}${attr("fill", color)}${alpha < 1 ? attr("fill-opacity", alpha) : ""} mask="url(#${ring})"/></g></g>`,
+        ...blended(
+          s.blendMode,
+          `<g clip-path="url(#${clip})"><g filter="url(#${filter})"><rect${region}${attr("fill", color)}${alpha < 1 ? attr("fill-opacity", alpha) : ""} mask="url(#${ring})"/></g></g>`,
+          [...backdrop, into],
+          regionRect(matrix, 0, 0, w, h, 1),
+        ),
       );
     }
   };
@@ -720,11 +838,37 @@ export function exportSvg(
     }`;
     const name = node.props.name ? attr("data-name", node.props.name) : "";
     const parts: string[] = [];
+    // What's under the layer in its group; and under its own parts, which are a group of
+    // their own when it fades, blends or has post effects.
+    const outer = [...under, into];
+    const linear = isLinear(blend) ? blend : null;
+    const post = postEffects(getProp(node.props, "effects")).length > 0;
+    const own = wrapperAttrs !== "" || linear !== null || post;
+    // Faded only, with something inside that blends: as on the canvas (and in Figma), what's
+    // under it is copied into its group first, so what blends inside blends with that.
+    const through = opacity < 1 && !BLEND_CSS.has(blend) && !linear && !post && blendsWithin(id);
+    const base = own && !through ? [] : outer;
+    /** The layer's markup into its parent's: as it is, or blended by linear dodge or burn as a whole. */
+    const place = (drawn: string[], wrap: boolean) => {
+      let backdrop = "";
+      const region = through ? exportBounds(scene, [id]) : null;
+      const refs = region ? referenced(outer) : [];
+      if (region && refs.length > 0) {
+        const clip = out.id("clip");
+        out.defs.push(
+          `<clipPath id="${clip}"><rect${attr("x", region.x)}${attr("y", region.y)}${attr("width", region.width)}${attr("height", region.height)}/></clipPath>`,
+        );
+        backdrop = `<g clip-path="url(#${clip})">${refs.join("")}</g>`;
+      }
+      const whole = wrap ? [`<g${name}${wrapperAttrs}>${backdrop}${drawn.join("")}</g>`] : drawn;
+      if (linear) into.push(...linearBlend(linear, outer, whole, exportBounds(scene, [id])));
+      else into.push(...whole);
+    };
 
     if (node.type === "group") {
-      visitChildren(id, parts);
+      withUnder(base, () => visitChildren(id, parts));
       const drawn = processed(node, parts);
-      if (drawn.length > 0) into.push(`<g${name}${wrapperAttrs}>${drawn.join("")}</g>`);
+      if (drawn.length > 0) place(drawn, true);
       return;
     }
 
@@ -740,13 +884,14 @@ export function exportSvg(
     const above: string[] = [];
 
     if (node.type === "text") {
-      dropShadows(node, w, h, matrix, null, shadows);
+      dropShadows(node, w, h, matrix, null, shadows, base);
       text(node, w, h, transform, below);
     } else {
       const shape = shapeOf(node, w, h);
       if (shape) {
-        dropShadows(node, w, h, matrix, shape, shadows);
+        dropShadows(node, w, h, matrix, shape, shadows, base);
         glassRim(node, shape, transform, below);
+        const box = regionRect(matrix, 0, 0, w, h, 1);
         if (node.type !== "line")
           for (const paint of getProp(node.props, "fills")) {
             if (paint.visible === false) continue;
@@ -754,19 +899,25 @@ export function exportSvg(
               paint.blendMode && BLEND_CSS.has(paint.blendMode)
                 ? ` style="mix-blend-mode:${paint.blendMode}"`
                 : "";
-            if (paint.type === "image") {
-              const image = imageFill(paint, shape, w, h, transform, blendStyle);
-              if (image) below.push(image);
-              continue;
+            let piece: string | null;
+            if (paint.type === "image")
+              piece = imageFill(paint, shape, w, h, transform, blendStyle);
+            else {
+              const fill = out.paint("fill", paint, w, h);
+              piece = fill ? `<${shape.tag}${transform}${shape.attrs}${fill}${blendStyle}/>` : null;
             }
-            const fill = out.paint("fill", paint, w, h);
-            if (!fill) continue;
-            below.push(`<${shape.tag}${transform}${shape.attrs}${fill}${blendStyle}/>`);
+            if (!piece) continue;
+            if (isLinear(paint.blendMode))
+              below.push(...linearBlend(paint.blendMode, [...base, shadows, below], [piece], box));
+            else below.push(piece);
           }
-        if (node.type !== "line") innerShadows(node, w, h, matrix, shape, inner);
+        if (node.type !== "line")
+          innerShadows(node, w, h, matrix, shape, inner, [...base, shadows, below]);
         if (node.type === "frame") {
           const inside: string[] = [];
-          visitChildren(id, inside);
+          // Its clip doesn't cut them off from what's under it: a linear blend reads all of it,
+          // as on the canvas (CSS blends inside a clip group see only what's in it).
+          withUnder([...base, shadows, below, inner], () => visitChildren(id, inside));
           if (inside.length > 0) {
             if (getProp(node.props, "clipContent")) {
               const clip = out.id("clip");
@@ -784,13 +935,12 @@ export function exportSvg(
             }
           }
         }
-        strokes(node, shape, w, h, transform, above);
+        strokes(node, shape, w, h, transform, above, [...base, shadows, below, inner, children]);
       }
     }
     const drawn = processed(node, [...shadows, ...below, ...inner, ...children, ...above]);
     if (drawn.length === 0) return;
-    if (wrapperAttrs || name) into.push(`<g${name}${wrapperAttrs}>${drawn.join("")}</g>`);
-    else into.push(...drawn);
+    place(drawn, wrapperAttrs !== "" || name !== "");
   };
 
   /**
@@ -810,7 +960,10 @@ export function exportSvg(
     };
     for (const { id, isMask } of maskScopes(scene.doc, parentId)) {
       if (!isMask) {
-        visit(id, masked ?? into);
+        // Masked, it's in a group of its own with the others the mask masks.
+        const group = masked;
+        if (group) withUnder([], () => visit(id, group));
+        else visit(id, into);
         continue;
       }
       flush();
@@ -821,7 +974,7 @@ export function exportSvg(
         const region = exportBounds(scene, [id]);
         if (!region) continue;
         const picture: string[] = [];
-        visit(id, picture);
+        withUnder([], () => visit(id, picture));
         const ref = out.id("mask");
         out.defs.push(
           `<mask id="${ref}" maskUnits="userSpaceOnUse"${attr("x", region.x)}${attr("y", region.y)}${attr("width", region.width)}${attr("height", region.height)}${attr("mask-type", type)}>${picture.join("")}</mask>`,
@@ -882,10 +1035,14 @@ export function exportSvg(
     h: number,
     transform: string,
     parts: string[],
+    /** What's under the strokes, for a paint's own blending. */
+    backdrop: readonly string[][],
   ) => {
     const paints = getProp(node.props, "strokes").filter((p) => p.visible !== false);
     if (paints.length === 0) return;
     const sides = strokeWidths(node);
+    const matrix = scene.worldMatrix(node.id);
+    const reachOf = (weight: number) => regionRect(matrix, 0, 0, w, h, weight * 5 + 1);
     if (!isUniform(sides)) {
       // A width per side: the region between two boxes, filled (see stroke-sides.ts).
       const r = getProp(node.props, "cornerRadius");
@@ -900,7 +1057,15 @@ export function exportSvg(
       );
       for (const paint of paints) {
         const fill = out.paint("fill", paint, w, h);
-        if (fill) parts.push(`<path${transform}${attr("d", d)} fill-rule="evenodd"${fill}/>`);
+        if (fill)
+          parts.push(
+            ...blended(
+              paint.blendMode,
+              `<path${transform}${attr("d", d)} fill-rule="evenodd"${fill}/>`,
+              [...backdrop, parts],
+              reachOf(Math.max(...sides)),
+            ),
+          );
       }
       return;
     }
@@ -942,8 +1107,15 @@ export function exportSvg(
     }
     const trimmed = markers ? trimmedStroke(node, markers.start.inset, markers.end.inset) : null;
     const line = trimmed ? { tag: "path", attrs: attr("d", serializePath(trimmed)) } : shape;
-    const elements: string[] = [];
+    // Paints in their own blending go on apart, each over what's drawn before it.
+    let elements: string[] = [];
+    const flush = () => {
+      if (elements.length > 0) parts.push(wrap(elements.join("")));
+      elements = [];
+    };
     for (const paint of paints) {
+      const own = paint.blendMode !== undefined && paint.blendMode !== "normal";
+      if (own) flush();
       const stroke = out.paint("stroke", paint, w, h);
       if (stroke && pieces)
         for (const piece of pieces)
@@ -952,8 +1124,7 @@ export function exportSvg(
           );
       else if (stroke)
         elements.push(`<${line.tag}${transform}${line.attrs} fill="none"${stroke}${style}/>`);
-      if (!markers) continue;
-      for (const marker of [markers.start, markers.end]) {
+      for (const marker of markers ? [markers.start, markers.end] : []) {
         if (marker.fill) {
           const fill = out.paint("fill", paint, w, h);
           if (fill)
@@ -964,8 +1135,19 @@ export function exportSvg(
             `<path${transform}${attr("d", serializePath(marker.stroke))} fill="none"${stroke}${attr("stroke-width", weight)} stroke-linecap="round" stroke-linejoin="round"/>`,
           );
       }
+      if (own && elements.length > 0) {
+        parts.push(
+          ...blended(
+            paint.blendMode,
+            wrap(elements.join("")),
+            [...backdrop, parts],
+            reachOf(weight),
+          ),
+        );
+        elements = [];
+      }
     }
-    if (elements.length > 0) parts.push(wrap(elements.join("")));
+    flush();
   };
 
   /**
