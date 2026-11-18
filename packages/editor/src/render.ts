@@ -161,6 +161,21 @@ const shiftBounds = (b: Bounds, x: number, y: number): Bounds => ({
   y1: b.y1 - y,
 });
 
+/**
+ * A paint that comes out the same whatever is under it: opaque, and drawn normally, or white
+ * lightening (Apple's vibrant white text adds itself by linear dodge) or black darkening.
+ */
+function hidesWhatsUnder(paint: Paint): boolean {
+  if (paint.visible === false || paint.type !== "solid" || (paint.opacity ?? 1) < 1) return false;
+  if (!opaqueColor(paint.color)) return false;
+  const mode = paint.blendMode ?? "normal";
+  if (mode === "normal") return true;
+  const hex = paint.color.slice(1, 7).toLowerCase();
+  if (hex === "ffffff") return ["linear-dodge", "screen", "lighten"].includes(mode);
+  if (hex === "000000") return ["linear-burn", "multiply", "darken"].includes(mode);
+  return false;
+}
+
 /** A CSS colour that's certainly opaque: `#rrggbb`, or `#rrggbbff`. */
 const opaqueColor = (css: string) => /^#[0-9a-f]{6}(ff)?$/i.test(css.trim());
 function blendsAsOne(
@@ -2598,17 +2613,7 @@ export class CanvasRenderer {
     if (node.type === "text") {
       // As in Figma, the layer is its fills over the blur, cut to its glyphs once: under
       // opaque fills none of the blur shows, not even at the glyphs' anti-aliased edges.
-      const fills = getProp(node.props, "fills").filter((f) => f.visible !== false);
-      if (
-        fills.some(
-          (f) =>
-            f.type === "solid" &&
-            (f.opacity ?? 1) >= 1 &&
-            opaqueColor(f.color) &&
-            (f.blendMode ?? "normal") === "normal",
-        )
-      )
-        return;
+      if (getProp(node.props, "fills").some(hidesWhatsUnder)) return;
       // Otherwise it shows where the layer paints: under its glyphs, not its box.
       this.#blurGlyphs = scratch(this.#blurGlyphs, x1 - x0, y1 - y0);
       const glyphs = this.#blurGlyphs?.getContext("2d") as Ctx | null | undefined;
