@@ -105,27 +105,10 @@ function moveText(from: Position | undefined, to: Position, docs: Readers): stri
   return parent ? `Moved into ${layerName(parent)}` : "Moved";
 }
 
-/**
- * What a change's row calls its property: the component property's name
- * for an instance's value (one entry of `propValues`), else the field's.
- */
-function changeLabel(change: Extract<BranchChange, { kind: "changed" }>, docs: Readers): string {
-  if (change.key === undefined) return propLabel(change.field);
-  for (const doc of [docs.branch, docs.main]) {
-    const mainId = doc.get(change.id)?.props.instanceOf;
-    const main = mainId ? doc.get(mainId) : undefined;
-    const set = main ? doc.get(main.parent) : undefined;
-    for (const owner of [main, set])
-      for (const def of owner?.props.componentProps ?? [])
-        if (def.id === change.key) return def.name;
-  }
-  return "Property";
-}
-
 function changedText(change: Extract<BranchChange, { kind: "changed" }>, docs: Readers): string {
   if (change.field === POSITION)
     return moveText(change.base as Position | undefined, change.branch as Position, docs);
-  const label = changeLabel(change, docs);
+  const label = propLabel(change.field);
   const before = valueText(change.field, change.base);
   const after = valueText(change.field, change.branch);
   // Effects and the like say little as values: the label is enough.
@@ -142,7 +125,7 @@ function sideText(
   if (side === undefined) return "Deleted";
   if (change.field === POSITION)
     return moveText(change.base as Position | undefined, side as Position, docs);
-  return `${changeLabel(change, docs)} ${valueText(change.field, side)}`;
+  return `${propLabel(change.field)} ${valueText(change.field, side)}`;
 }
 
 const KIND_ADDED_LABEL: Readonly<Record<string, string>> = {

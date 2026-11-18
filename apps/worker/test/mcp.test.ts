@@ -18,7 +18,7 @@ async function seededFile(browser: Browser, projectId: string) {
   const socket = await openSocket(browser, file.id);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 2,
     clientId: "seed",
     revn: null,
     copies: ["materialized", "compact"],
@@ -62,15 +62,7 @@ async function seededFile(browser: Browser, projectId: string) {
       type: "frame",
       parent: "card",
       key: "a1",
-      props: {
-        propValues: {},
-        name: "Button",
-        x: 16,
-        y: 140,
-        width: 120,
-        height: 40,
-        instanceOf: "btn",
-      },
+      props: { name: "Button", x: 16, y: 140, width: 120, height: 40, instanceOf: "btn" },
     },
     {
       op: "create",
@@ -253,7 +245,7 @@ describe("the read tools", () => {
     expect(node.structuredContent).toMatchObject({
       kind: "instance",
       parent: "card",
-      props: { propValues: {}, instanceOf: "btn" },
+      props: { instanceOf: "btn" },
     });
     const found = await call(token, "find_nodes", { fileId, query: "order" });
     expect(found.structuredContent).toMatchObject({ total: 1, nodes: [{ id: "title" }] });

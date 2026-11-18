@@ -9,30 +9,22 @@
  * sent). Delivery is explicit, so a test (or a generated schedule) decides
  * what each client has seen when it edits.
  *
- * A client may be a tab from before component property records (protocol
- * 2): as `FileRoom` does, the room welcomes it as a viewer, sends it nothing
- * it can't read, and of the edits it held unsent applies only transactions
- * whose every operation is safe (`protocol2Refusal`), refusing the rest
- * whole. Its editor is today's, fed only what such a tab is: it sees no
- * references, records or definitions.
+ * A property's value is the value of the layers it drives (decision 0035),
+ * so nothing here knows of any other place a value is: a tab from before
+ * properties edits the same layers as plain overrides, and is an ordinary
+ * client.
  */
-import { Doc, Editor, instanceProperties, instanceValues, syncInstanceOps } from "@drawpane/editor";
+import { Doc, Editor, instanceProperties, syncInstanceOps } from "@drawpane/editor";
 import {
   applyTransaction,
   type ClientMessage,
   type CopiesFormat,
-  collectSubtree,
   compactByInstance,
-  forProtocol2Nodes,
-  forProtocol2Ops,
   getProp,
-  linkedNode,
   MemoryStore,
   ModelError,
-  migrateRecords,
   type NodeRecord,
   type Op,
-  protocol2Refusal,
   ROOT_ID,
   type ServerMessage,
 } from "@drawpane/model";
@@ -49,7 +41,7 @@ export const node = (
 export const FORMS: readonly CopiesFormat[] = ["materialized", "compact"];
 export const measurer = { width: (_font: unknown, text: string) => text.length * 7 };
 
-/** A set with a text property (Label) and a boolean (Show), and an instance that set both. */
+/** A set with a text property (Label) and a boolean (Show), and an instance that set the text. */
 export function simple(): NodeRecord[] {
   return [
     node("p", "page", ROOT_ID, "a0", {}),
@@ -98,13 +90,13 @@ export function simple(): NodeRecord[] {
       instanceOf: "a",
       width: 100,
       height: 30,
-      propValues: { label: "Before", show: true },
     }),
     node("it", "text", "i", "a0", {
       mirrors: "ta",
       name: "Text",
       characters: "Before",
       propRefs: { characters: "label" },
+      overrides: ["characters"],
     }),
     node("iv", "rect", "i", "a1", {
       mirrors: "va",
@@ -115,21 +107,6 @@ export function simple(): NodeRecord[] {
     }),
   ];
 }
-
-/**
- * `simple`'s instance from before records: its values only on its layers,
- * marked as overrides, as imports and phase 1 wrote them.
- */
-export const legacy = (): NodeRecord[] =>
-  simple().map((n) => {
-    if (n.id === "i") {
-      const { propValues: _, ...props } = n.props;
-      return { ...n, props };
-    }
-    if (n.id === "it") return { ...n, props: { ...n.props, overrides: ["characters"] } };
-    if (n.id === "iv") return { ...n, props: { ...n.props, overrides: ["visible"] } };
-    return n;
-  });
 
 /** Variants A and B, each with a nested instance of Leaf (a text property) named Nested. */
 export function nested(): NodeRecord[] {
@@ -404,8 +381,6 @@ export class Room {
   /** Old ids to the stored form's (compact copies rename copy layers). */
   readonly ids: ReadonlyMap<string, string>;
   readonly lastSeq = new Map<string, number>();
-  /** A protocol 2 tab's transactions the room refused whole (`protocol2Refusal`). */
-  readonly refused: Array<{ client: string; message: string }> = [];
   /** Every transaction the room refused, with what it said. */
   readonly rejected: Array<{ client: string; code: string; message: string }> = [];
 
@@ -419,14 +394,12 @@ export class Room {
     readonly copies: CopiesFormat,
     stored = false,
   ) {
-    // As the room loads a file: every instance from before records migrated first (`migrateRecords`).
-    const migrated = migrateRecords(structuredClone(nodes)).nodes;
     if (copies === "compact" && !stored) {
-      const converted = compactByInstance(migrated);
+      const converted = compactByInstance(structuredClone(nodes));
       this.store = new MemoryStore(converted.nodes);
       this.ids = converted.ids;
     } else {
-      this.store = new MemoryStore(migrated);
+      this.store = new MemoryStore(structuredClone(nodes));
       this.ids = new Map();
     }
   }
@@ -436,24 +409,20 @@ export class Room {
   }
 
   /**
-   * A tab from before records (protocol 2) that loaded the file before this
-   * change and is offline now: it edits as an editor, its edits held unsent,
-   * until it connects (`connect`, or `settle`) and is welcomed as a viewer.
+   * A client that loaded the file and is offline now: it edits, its edits
+   * held unsent, until it connects (`connect`, or `settle`).
    */
   joinOffline(name: string): Client {
-    const client = new Client(this, name, 2);
+    const client = new Client(this, name);
     this.clients.push(client);
     client.editor.state.set({ role: "editor" });
-    client.editor.doc.resetStored(
-      client.read(structuredClone([...this.store.nodes()])),
-      this.copies,
-    );
+    client.editor.doc.resetStored(structuredClone([...this.store.nodes()]), this.copies);
     client.editor.setPage("p");
     return client;
   }
 
-  join(name: string, protocol: 2 | 3 = 3): Client {
-    const client = new Client(this, name, protocol);
+  join(name: string): Client {
+    const client = new Client(this, name);
     this.clients.push(client);
     this.connect(client);
     return client;
@@ -482,14 +451,13 @@ export class Room {
           t: "welcome",
           sessionId: from.name,
           revn: this.revn,
-          // A tab from before records views the file: it makes no edit (`protocol2Refusal`).
-          role: from.protocol === 2 ? "viewer" : from.role,
+          role: from.role,
           peers: [],
           mode: "snapshot",
           lastSeq: this.lastSeq.get(from.name) ?? 0,
           copies: this.copies,
         },
-        { t: "snapshot", nodes: from.read(structuredClone([...this.store.nodes()])), done: false },
+        { t: "snapshot", nodes: structuredClone([...this.store.nodes()]), done: false },
         { t: "snapshot", nodes: [], done: true },
       );
       return;
@@ -501,19 +469,6 @@ export class Room {
       return;
     }
     const ops = message.ops as Op[];
-    // A tab from before records: only what it held unsent that's safe, whole (as `FileRoom`).
-    const refusal = from.protocol === 2 ? this.protocol2Refusal(ops) : null;
-    if (refusal) {
-      this.refused.push({ client: from.name, message: refusal });
-      from.inbox.push({
-        t: "reject",
-        seq: message.seq,
-        code: "outdated",
-        message: refusal,
-        fix: {},
-      });
-      return;
-    }
     try {
       applyTransaction(this.store, ops);
     } catch (error) {
@@ -521,13 +476,11 @@ export class Room {
       this.rejected.push({ client: from.name, code: error.code, message: error.message });
       // What the room has of the nodes the transaction named, as `FileRoom` sends it.
       const fix: Record<string, NodeRecord | null> = {};
-      for (const op of message.ops as Op[]) {
+      for (const op of ops) {
         if (fix[op.id] === undefined) fix[op.id] = structuredClone(this.store.get(op.id) ?? null);
         if ((op.op === "create" || op.op === "move") && op.parent !== ROOT_ID)
           fix[op.parent] ??= structuredClone(this.store.get(op.parent) ?? null);
       }
-      if (from.protocol === 2)
-        for (const [id, n] of Object.entries(fix)) if (n) fix[id] = from.read([n])[0] as NodeRecord;
       from.inbox.push({
         t: "reject",
         seq: message.seq,
@@ -539,34 +492,13 @@ export class Room {
     }
     this.revn++;
     this.lastSeq.set(from.name, message.seq);
-    this.#named(ops);
     from.inbox.push({ t: "ack", seq: message.seq, revn: this.revn });
     this.broadcast(ops, from);
-  }
-
-  /** Why a protocol 2 tab's transaction can't be applied, as `FileRoom` decides it. */
-  protocol2Refusal(ops: readonly Op[]): string | null {
-    return protocol2Refusal(
-      {
-        get: (id) => this.store.get(id),
-        holdsLinked: (id) => collectSubtree(this.store, id).some(linkedNode),
-        hadOnce: (ids) => new Set(ids.filter((id) => this.#hadOnce.has(id))),
-      },
-      ops,
-    );
-  }
-
-  /** Ids the file has had: those it started with and every one an operation named since. */
-  readonly #hadOnce = new Set<string>();
-
-  #named(ops: readonly Op[]): void {
-    for (const op of ops) this.#hadOnce.add(op.id);
   }
 
   /** A transaction the room makes itself (a branch merge), passed to every client. */
   commit(ops: readonly Op[]): void {
     applyTransaction(this.store, [...ops]);
-    this.#named(ops);
     this.revn++;
     this.broadcast(ops, null);
   }
@@ -577,7 +509,7 @@ export class Room {
         other.inbox.push({
           t: "txn",
           revn: this.revn,
-          ops: structuredClone(other.protocol === 2 ? forProtocol2Ops(ops) : [...ops]),
+          ops: structuredClone([...ops]),
           author: { userId: "u", sessionId: from?.name ?? "room" },
         });
   }
@@ -603,15 +535,8 @@ export class Client {
   constructor(
     readonly room: Room,
     readonly name: string,
-    /** 2: a tab from before component property records (see the top). */
-    readonly protocol: 2 | 3 = 3,
   ) {
     this.editor = new Editor({ clientId: name, measurer });
-  }
-
-  /** Nodes as this client is sent them. */
-  read(nodes: NodeRecord[]): NodeRecord[] {
-    return this.protocol === 2 ? forProtocol2Nodes(nodes) : nodes;
   }
 
   deliver(): void {
@@ -630,11 +555,6 @@ export class Client {
     return instanceProperties(this.editor.doc, instance)?.rows.find((r) => r.id === property);
   }
 
-  /** The values an instance keeps (its own, from the record they're in). */
-  record(instance: string) {
-    return instanceValues(this.editor.doc, instance);
-  }
-
   field(id: string, field: "characters" | "visible") {
     return getProp(this.editor.doc.get(id)?.props ?? {}, field);
   }
@@ -642,64 +562,96 @@ export class Client {
 
 const byId = (a: NodeRecord, b: NodeRecord) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
-/**
- * Every client holds exactly what the room stores (nothing pending anywhere).
- * A protocol 2 tab only has nothing pending: it may show a property's old
- * value until it reloads.
- */
+/** Every client holds exactly what the room stores, with nothing pending anywhere. */
 export function expectConverged(room: Room): void {
   const stored = [...room.store.nodes()].sort(byId);
   for (const client of room.clients) {
-    if (client.protocol === 2) {
-      expect(client.editor.sync.pendingCount).toBe(0);
-      continue;
-    }
     expect(client.editor.sync.pendingCount).toBe(0);
     expect(client.editor.doc.stored().sort(byId)).toEqual(stored);
   }
 }
 
+const FIELD = { text: "characters", boolean: "visible", instance: "instanceOf" } as const;
+
 /**
- * Every layer a property drives in `instance` (and in its nested
- * instances, `nestedToo`) shows the instance's value: the record's, or its
- * main layer's when the record keeps none. In `doc`.
+ * What every property row of `instance` (and of its exposed nested
+ * instances) says in `doc` agrees with the layers it drives: their value
+ * when they all hold one, "Mixed" when they don't.
  */
-export function expectShowsRecord(doc: Doc, instance: string): void {
-  const props = instanceProperties(doc, instance);
-  const walk = (p: NonNullable<typeof props>) => {
-    const values = instanceValues(doc, p.instanceId);
+export function expectRowsMatchLayers(doc: Doc, instance: string): void {
+  const walk = (p: NonNullable<ReturnType<typeof instanceProperties>>) => {
     for (const row of p.rows) {
       if (row.type !== "text" && row.type !== "boolean" && row.type !== "instance") continue;
-      const field =
-        row.type === "text" ? "characters" : row.type === "boolean" ? "visible" : "instanceOf";
-      const recorded = values[row.id];
-      for (const target of row.targets) {
-        const shown = getProp(doc.get(target)?.props ?? {}, field);
-        if (recorded !== undefined)
-          expect(shown).toEqual(typeof recorded === "object" ? recorded.instance : recorded);
-        else {
-          // Its main layer's.
-          const source = getProp(doc.get(target)?.props ?? {}, "mirrors");
-          expect(shown).toEqual(getProp(doc.get(source as string)?.props ?? {}, field));
-        }
-      }
+      const field = FIELD[row.type];
+      const values = row.targets.map((t) => getProp(doc.get(t)?.props ?? {}, field));
+      const agree = values.every((v) => v === values[0]);
+      expect({ value: row.value, mixed: row.mixed === true }).toEqual(
+        agree ? { value: values[0], mixed: false } : { value: null, mixed: true },
+      );
     }
     for (const n of p.nested) walk(n);
   };
+  const props = instanceProperties(doc, instance);
   if (props) walk(props);
 }
 
+/** Every layer each `values` property drives in `instance` holds its value, in `doc`. */
+export function expectHolds(
+  doc: Doc,
+  instance: string,
+  values: Readonly<Record<string, boolean | string>>,
+): void {
+  const props = instanceProperties(doc, instance);
+  for (const [property, value] of Object.entries(values)) {
+    const row = props?.rows.find((r) => r.id === property);
+    if (!row || (row.type !== "text" && row.type !== "boolean" && row.type !== "instance"))
+      continue;
+    const field = FIELD[row.type];
+    expect(row.targets.length).toBeGreaterThan(0);
+    for (const t of row.targets) expect(getProp(doc.get(t)?.props ?? {}, field)).toEqual(value);
+    expect(row).toMatchObject({ value, changed: true });
+  }
+}
+
+/** The room's stored file, opened as a client opens it. */
+export function opened(room: Room): Doc {
+  const doc = new Doc({ compactCopies: room.copies === "compact" });
+  doc.resetStored(structuredClone([...room.store.nodes()]), room.copies);
+  return doc;
+}
+
 /**
- * The room and every client agree, and every client shows each property's
- * value on every layer it drives, as does the room's stored file opened.
+ * The room and every client agree, every row says what its layers hold, and
+ * an edit of each property (by the first client) sets every layer it
+ * drives, on every client and in the room's file opened.
  */
 export function expectAgreement(room: Room, instance: string): void {
   expectConverged(room);
-  for (const client of room.clients)
-    if (client.protocol !== 2) expectShowsRecord(client.editor.doc, instance);
-  const opened = new Doc({ compactCopies: room.copies === "compact" });
-  opened.resetStored(structuredClone([...room.store.nodes()]), room.copies);
-  expectShowsRecord(opened, instance);
+  for (const client of room.clients) expectRowsMatchLayers(client.editor.doc, instance);
+  expectRowsMatchLayers(opened(room), instance);
+  const first = room.clients[0] as Client;
+  // Each instance in the tree (exposed nested ones too), and what each of its properties is set to.
+  const edits: Array<{ instance: string; values: Record<string, boolean | string> }> = [];
+  const collect = (p: NonNullable<ReturnType<typeof instanceProperties>>) => {
+    const values: Record<string, boolean | string> = {};
+    for (const row of p.rows) {
+      if (row.type === "text") values[row.id] = `Settled ${row.id}`;
+      if (row.type === "boolean") values[row.id] = row.value === false;
+    }
+    edits.push({ instance: p.instanceId, values });
+    for (const n of p.nested) collect(n);
+  };
+  const props = instanceProperties(first.editor.doc, instance);
+  if (props) collect(props);
+  for (const edit of edits)
+    for (const [property, value] of Object.entries(edit.values))
+      first.editor.setInstanceProperty(edit.instance, property, value);
+  room.settle();
+  expectConverged(room);
+  for (const edit of edits) {
+    for (const client of room.clients) expectHolds(client.editor.doc, edit.instance, edit.values);
+    expectHolds(opened(room), edit.instance, edit.values);
+  }
 }
 
 /** A standalone editor on `nodes`, its stored operations kept. */
@@ -707,8 +659,7 @@ export function open(form: CopiesFormat, nodes: readonly NodeRecord[]) {
   const editor = new Editor({ clientId: "review", measurer });
   editor.state.set({ role: "editor" });
   editor.doc.resetStored([], form);
-  // A file as a room serves it: migrated (`migrateRecords`).
-  editor.doc.reset(migrateRecords(structuredClone(nodes)).nodes);
+  editor.doc.reset(structuredClone(nodes));
   editor.setPage("p");
   const sent: Op[][] = [];
   const commit = editor.sync.commit.bind(editor.sync);

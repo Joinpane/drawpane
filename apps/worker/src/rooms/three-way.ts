@@ -3,7 +3,7 @@
  * at a time (decision 0026). Three files: the base (`base`), the side whose
  * changes come in (`other`: the branch when merging, main when updating),
  * and the room's own nodes (`nodes`: main when merging, the branch when
- * updating). The comparison per node is the model's (`addedChanges`,
+ * updating). The comparison per node is the model's (`addedChange`,
  * `changedFields`, `editedSince`), so this agrees with `branchChanges` and
  * `mergeOps`, which the editor's review uses.
  *
@@ -14,17 +14,16 @@
  * then deletions, less those inside another being deleted.
  */
 import {
-  addedChanges,
+  addedChange,
   type BranchChange,
   changedFields,
   changeKey,
-  changeOp,
   editedSince,
   type NodeRecord,
   POSITION,
+  type PropName,
   type Resolution,
   ROOT_ID,
-  recordOp,
 } from "@drawpane/model";
 import { boundedPages, type NodeRow, PAGE_ROWS, toRecord } from "./node-tables";
 import type { OpChunks } from "./op-chunks";
@@ -110,8 +109,7 @@ const untouched = (row: Joined) =>
 function changesOf(row: Joined): BranchChange[] {
   const node = toRecord(row);
   const was = sideOf(row, "b");
-  if (!was)
-    return addedChanges(node, sideOf(row, "n"), row.parent_live === 1, row.parent_base === 1);
+  if (!was) return [addedChange(node, row.parent_live === 1, row.parent_base === 1)];
   return changedFields(was, node, sideOf(row, "n"));
 }
 
@@ -298,18 +296,8 @@ export function applyThreeWay(
   // Added, parents first (a level at a time): each only where its parent is there or came in.
   for (const rows of byLevel(sql, t, `NOT EXISTS (SELECT 1 FROM ${t.base} x WHERE x.id = o.id)`))
     for (const row of rows) {
-      const changes = changesOf(row);
-      // An override record the room made too: the fields taken, merged into the room's.
-      if (changes.some((change) => change.kind === "changed")) {
-        const taken = new Set<string>();
-        for (const change of changes)
-          if (change.kind === "changed" && take(change)) taken.add(change.field);
-        const op = recordOp(toRecord(row), taken);
-        if (op) out.push(op);
-        continue;
-      }
-      const change = changes[0];
-      if (!change || !take(change) || !live(row.parent)) continue;
+      const change = addedChange(toRecord(row), row.parent_live === 1, row.parent_base === 1);
+      if (!take(change) || !live(row.parent)) continue;
       out.push({
         op: "create",
         id: row.id,
@@ -331,7 +319,13 @@ export function applyThreeWay(
           // A parent that only came in with this merge was created above.
           if (live(to.parent))
             out.push({ op: "move", id: change.id, parent: to.parent, key: to.key });
-        } else out.push(changeOp(change));
+        } else
+          out.push({
+            op: "set",
+            id: change.id,
+            prop: change.field as PropName,
+            value: change.branch === undefined ? null : change.branch,
+          });
       }
     }
 

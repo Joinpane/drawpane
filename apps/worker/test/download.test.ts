@@ -83,7 +83,7 @@ interface Welcome {
 async function hello(socket: Socket, clientId: string, download: boolean): Promise<Welcome> {
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 2,
     copies: ["materialized", "compact"],
     clientId,
     revn: null,
@@ -113,7 +113,7 @@ async function editor(browser: Browser, fileId: string) {
   const { revn } = await roomOf(fileId).stats();
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 2,
     copies: ["materialized", "compact"],
     clientId: "editor1",
     revn,
@@ -357,7 +357,7 @@ describe("opening a file larger than one snapshot chunk", () => {
           ws,
           JSON.stringify({
             t: "hello",
-            protocol: 3,
+            protocol: 2,
             copies: ["materialized", "compact"],
             clientId: "race",
             revn: null,

@@ -5,7 +5,6 @@ import { isValidOrderKey } from "./order-key";
 import {
   CHILD_TYPES,
   isPropName,
-  KEYED_PROPS,
   NODE_TYPES,
   type NodeType,
   PROPS,
@@ -126,14 +125,7 @@ export function checkNode(node: NodeRecord): NodeRecord {
 
 function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
   if (!isValidId(op.id)) throw new ModelError("invalid_id", `"${op.id}" isn't a valid id.`);
-  const existing = store.get(op.id);
-  if (existing) {
-    // An override record made where a teammate just made one (decision 0029): its id is the
-    // copy layer's, derived alike everywhere, so it's that layer's values, set (decision 0035).
-    if (op.type === "override" && existing.type === "override" && existing.parent === op.parent)
-      return mergeRecord(store, existing, op);
-    throw new ModelError("already_exists", `Node ${op.id} already exists.`);
-  }
+  if (store.get(op.id)) throw new ModelError("already_exists", `Node ${op.id} already exists.`);
   if (!isValidOrderKey(op.key)) throw new ModelError("invalid_key", `Invalid order key.`);
   checkParent(store, op.parent, op.type);
   if (op.type === "override") checkRecord(store, op);
@@ -150,137 +142,6 @@ function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
   }
   store.insert({ id: op.id, type: op.type, parent: op.parent, key: op.key, props });
   return [{ op: "delete", id: op.id }];
-}
-
-/**
- * Copy references derived top-down by origin (decision 0035, item 3). Each
- * layer under an instance copies a child of what its parent copies
- * (`copyTarget`): the parent's main layer for a copy, the main for an
- * instance root following one, the component it's swapped to for a swapped
- * nested instance. A layer whose reference isn't one of those children
- * (written before a teammate's detach, or undone after one) is pointed at
- * the child whose copy chain ends at the same main layer (`origin`) as its
- * reference's: through to the inner component after a detach, back to the
- * outer copy when the detach is undone. Left as it is when no child matches
- * (conversion then says so). Run on what a transaction leaves, parents
- * before children, over the layers it made and those under every node whose
- * link it changed: a pure function of the file, so the room, every client
- * and replay agree.
- */
-function resolveUnder(store: NodeStore, ids: ReadonlySet<string>): void {
-  // Walked from the topmost: one under another that's walked is reached from it, after its parent.
-  const roots = [...ids].filter((id) => {
-    for (let at = store.get(id), i = 0; at && i < MAX_DEPTH; i++) {
-      at = store.get(at.parent);
-      if (at && ids.has(at.id)) return false;
-    }
-    return true;
-  });
-  const seen = new Set<string>();
-  const queue = [...roots];
-  for (let i = 0; i < queue.length; i++) {
-    const id = queue[i] as string;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const node = store.get(id);
-    if (!node) continue;
-    if (typeof node.props.mirrors === "string") resolveMirrors(store, node);
-    for (const child of store.childIds(id)) queue.push(child);
-  }
-}
-
-/** What a node's children copy: its main layer, its main, or the component it's swapped to. */
-function copyTarget(store: NodeStore, node: NodeRecord): string | null {
-  const mirrors = typeof node.props.mirrors === "string" ? node.props.mirrors : null;
-  const instanceOf =
-    node.type === "frame" && typeof node.props.instanceOf === "string"
-      ? node.props.instanceOf
-      : null;
-  if (instanceOf && (!mirrors || store.get(mirrors)?.props.instanceOf !== instanceOf))
-    return instanceOf;
-  return mirrors;
-}
-
-/** The main layer a copy chain ends at. */
-function origin(store: NodeStore, id: string): string {
-  let at = id;
-  for (let i = 0; i < 256; i++) {
-    const next = store.get(at)?.props.mirrors;
-    if (typeof next !== "string" || !store.get(next)) return at;
-    at = next;
-  }
-  return at;
-}
-
-function resolveMirrors(store: NodeStore, node: NodeRecord): void {
-  const mirrors = node.props.mirrors as string;
-  const parent = store.get(node.parent);
-  const target = parent ? copyTarget(store, parent) : null;
-  if (!target || store.get(mirrors)?.parent === target) return;
-  const from = origin(store, mirrors);
-  const match = store.childIds(target).find((child) => origin(store, child) === from);
-  if (match) store.setProp(node.id, "mirrors", match);
-}
-
-/**
- * A create of an override record that exists: its path the same (the id says
- * so), merged field by field, so two people's first changes to one copy layer,
- * each writing the record from a file without the other's, both stay:
- * - a field the create gives a value or lists in `unset` is the creator's (the
- *   last writer's, as sets are): its value set, or its value removed and the
- *   field unset;
- * - a field the create doesn't mention keeps what the record has;
- * - `unset` is both lists, less the fields the create gives a value;
- * - `overrides`, which marks fields, is both lists.
- * Every client, the room, stored replay and a branch merge apply it here.
- * Undone value by value.
- */
-export function mergeRecordProps(
-  existing: Record<string, unknown>,
-  incoming: Record<string, unknown>,
-): Record<string, unknown> {
-  const merged: Record<string, unknown> = { ...existing };
-  const strings = (value: unknown): string[] =>
-    Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
-  const given = new Set<string>();
-  for (const [prop, value] of Object.entries(incoming)) {
-    if (prop === "path" || prop === "unset" || prop === "overrides") continue;
-    if (value === null || value === undefined) continue;
-    merged[prop] = value;
-    given.add(prop);
-  }
-  const cleared = strings(incoming.unset);
-  for (const prop of cleared) if (!given.has(prop)) delete merged[prop];
-  const union = (a: string[], b: string[]) => [...new Set([...a, ...b])];
-  const unset = union(
-    strings(existing.unset).filter((prop) => !given.has(prop)),
-    cleared.filter((prop) => !given.has(prop)),
-  );
-  if (unset.length) merged.unset = unset;
-  else delete merged.unset;
-  const overrides = union(strings(existing.overrides), strings(incoming.overrides));
-  if (overrides.length) merged.overrides = overrides;
-  else delete merged.overrides;
-  return merged;
-}
-
-function mergeRecord(store: NodeStore, existing: NodeRecord, op: CreateOp): Op[] {
-  const path = op.props.path;
-  if (!Array.isArray(path) || JSON.stringify(path) !== JSON.stringify(existing.props.path))
-    throw new ModelError("already_exists", `Node ${op.id} already exists.`);
-  const before = existing.props as Record<string, unknown>;
-  const after = mergeRecordProps(before, op.props as Record<string, unknown>);
-  const undo: Op[] = [];
-  for (const prop of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    if (prop === "path") continue;
-    const previous = before[prop];
-    const next = after[prop];
-    if (JSON.stringify(previous) === JSON.stringify(next)) continue;
-    checkValue("override", prop, next ?? null);
-    store.setProp(op.id, prop, next);
-    undo.push({ op: "set", id: op.id, prop, value: previous === undefined ? null : previous });
-  }
-  return undo.reverse();
 }
 
 /** Every node under `id`, parents before children. */
@@ -343,44 +204,8 @@ function checkRecord(store: NodeStore, op: CreateOp): void {
   }
 }
 
-/**
- * The map a keyed set (`op.key`) leaves on `node`, checked: the entry set,
- * or removed when `op.value` is null. A map left empty stays, empty: an
- * instance's record that exists decides every key, one it doesn't keep
- * being its main's (decision 0035, item 3), so its last value removed
- * leaves the record, not none.
- */
-export function keyedResult(node: NodeRecord, op: SetOp): Record<string, unknown> {
-  const spec = KEYED_PROPS.get(op.prop);
-  if (!spec) throw new ModelError("invalid_prop", `"${op.prop}" has no entries to set one of.`);
-  const key = op.key as string;
-  if (!spec.key.safeParse(key).success)
-    throw new ModelError("invalid_value", `"${op.prop}" can't have an entry "${key}".`);
-  if (op.value !== null && !spec.value.safeParse(op.value).success)
-    throw new ModelError("invalid_value", `"${op.prop}.${key}" is invalid.`);
-  const before = node.props[op.prop] as Record<string, unknown> | undefined;
-  const next: Record<string, unknown> = { ...(before ?? {}) };
-  if (op.value === null) delete next[key];
-  else next[key] = op.value;
-  return next;
-}
-
 function applySet(store: NodeStore, op: SetOp): Op[] {
   const node = requireNode(store, op.id);
-  if (op.key !== undefined) {
-    // One entry of a map: checked, and undone, on its own (decision 0035, item 15). What
-    // bounds the map whole (how many entries, how much text in all) is checked on what the
-    // transaction leaves (`checkKeyedMaps`): one entry may grow before another shrinks.
-    const next = keyedResult(node, op);
-    if (!isPropName(op.prop) || !propAllowed(node.type, op.prop))
-      throw new ModelError("invalid_prop", `A ${node.type} has no "${op.prop}" property.`);
-    const map = node.props[op.prop] as Record<string, unknown> | undefined;
-    const previous = map?.[op.key];
-    store.setProp(op.id, op.prop, next);
-    // The first entry makes the map: undone, there's none again (an instance without a record).
-    if (map === undefined) return [{ op: "set", id: op.id, prop: op.prop, value: null }];
-    return [{ op: "set", id: op.id, prop: op.prop, key: op.key, value: previous ?? null }];
-  }
   checkValue(node.type, op.prop, op.value);
   if (op.prop === "path") {
     throw new ModelError("invalid_prop", "An override record's path doesn't change.");
@@ -525,8 +350,7 @@ const cycleError = (opIndex?: number) =>
 /**
  * Validates and applies one operation. Returns the operations that undo it,
  * in the order they must run. Throws `ModelError` and leaves the store
- * untouched when the operation is invalid. A keyed set's map is checked
- * whole by the caller, on what its transaction leaves (`checkKeyedMaps`).
+ * untouched when the operation is invalid.
  */
 export function applyOp(
   store: NodeStore,
@@ -556,33 +380,6 @@ function apply(store: NodeStore, op: Op, force: boolean, inverse: boolean, held:
     case "move":
       return applyMove(store, op, held);
   }
-}
-
-/**
- * Checks the maps keyed sets wrote (`touched`: their node ids and
- * properties, the operation's index each) whole, as their schema bounds
- * them: what a transaction's keyed sets leave. Throws `ModelError` naming
- * the last operation that wrote the first map out of bounds.
- */
-export function checkKeyedMaps(store: NodeStore, touched: ReadonlyMap<string, number>): void {
-  for (const [at, index] of touched) {
-    const split = at.indexOf("\u0000");
-    const id = at.slice(0, split);
-    const prop = at.slice(split + 1);
-    const node = store.get(id);
-    if (!node) continue;
-    try {
-      checkValue(node.type, prop, (node.props as Record<string, unknown>)[prop] ?? null);
-    } catch (error) {
-      if (error instanceof ModelError) throw new ModelError(error.code, error.message, index);
-      throw error;
-    }
-  }
-}
-
-/** Where `checkKeyedMaps` files a keyed set: its node and property. */
-export function keyedMapOf(op: Op): string | null {
-  return op.op === "set" && op.key !== undefined ? `${op.id}\u0000${op.prop}` : null;
 }
 
 /** Undoes applied operations, last first: always allowed, however deep, never checked for cycles. */
@@ -654,19 +451,11 @@ export function applyTransaction(
   // that touched it: checked on what the transaction leaves.
   const check = cycles === true ? new Map<string, { deep: boolean; index: number }>() : null;
   const sink = typeof cycles === "object" ? cycles : null;
-  const keyed = new Map<string, number>();
-  // Layers it makes, and nodes whose link it changes: the copy references there are checked
-  // once it's applied (`resolveMirrors`).
-  const relinked = new Set<string>();
   for (let i = 0; i < ops.length; i++) {
     const op = ops[i] as Op;
-    if (op.op === "create" && typeof op.props.mirrors === "string") relinked.add(op.id);
-    if (op.op === "set" && (op.prop === "mirrors" || op.prop === "instanceOf")) relinked.add(op.id);
     try {
       const back = apply(store, op, false, keep, held);
       if (keep) undo.push(back);
-      const map = keyedMapOf(op);
-      if (map !== null) keyed.set(map, i);
     } catch (error) {
       // Rolling back may delete the only page a failed transaction created, and puts back
       // what the transaction removed however deep it was.
@@ -683,14 +472,6 @@ export function applyTransaction(
       check.set(candidate.id, { deep, index: i });
     }
   }
-  if (relinked.size > 0) resolveUnder(store, relinked);
-  if (keyed.size > 0)
-    try {
-      checkKeyedMaps(store, keyed);
-    } catch (error) {
-      if (rollback) takeBack(store, undo);
-      throw error;
-    }
   if (check)
     for (const [id, { deep, index }] of check)
       if (instanceCycleAt(store, id, deep)) {

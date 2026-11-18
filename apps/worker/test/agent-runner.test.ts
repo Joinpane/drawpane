@@ -34,7 +34,7 @@ async function join(browser: Parameters<typeof openSocket>[0], fileId: string) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 2,
     clientId: "person",
     revn: null,
     copies: ["materialized", "compact"],
@@ -694,7 +694,7 @@ describe("a commit whose inputs a cache hid from the read set", () => {
         type: "frame",
         parent: person.page.id,
         key: "a1",
-        props: { propValues: {}, instanceOf: box, x: 500 },
+        props: { instanceOf: box, x: 500 },
       },
     ]);
     const { deps, runs } = firstRunPaused(fileId, async () => {
@@ -745,7 +745,7 @@ describe("a commit whose inputs a cache hid from the read set", () => {
         type: "frame",
         parent: person.page.id,
         key: "a1",
-        props: { propValues: {}, instanceOf: box, x: 500 },
+        props: { instanceOf: box, x: 500 },
       },
     ]);
     const { deps, runs } = firstRunPaused(fileId, async () => {
@@ -800,7 +800,7 @@ describe("a commit whose inputs a cache hid from the read set", () => {
           type: "frame",
           parent: person.page.id,
           key: "a1",
-          props: { propValues: {}, instanceOf: box, width: 10, height: 10, opacity: 0.7, x: 100 },
+          props: { instanceOf: box, width: 10, height: 10, opacity: 0.7, x: 100 },
         },
       ]);
     });
@@ -1026,7 +1026,7 @@ describe("a commit's scope", () => {
           type: "frame",
           parent: person.page.id,
           key: "a1",
-          props: { propValues: {}, instanceOf: box, x: 100 },
+          props: { instanceOf: box, x: 100 },
         },
       ]);
     });

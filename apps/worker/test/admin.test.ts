@@ -11,7 +11,7 @@ async function edit(browser: Parameters<typeof openSocket>[0], fileId: string, c
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 2,
     clientId: `c-${fileId}`,
     revn: null,
     copies: ["materialized", "compact"],
@@ -74,7 +74,7 @@ describe("instance health", () => {
     const reporter = await openSocket(ana.browser, file.id);
     reporter.send({
       t: "hello",
-      protocol: 3,
+      protocol: 2,
       clientId: "reporter",
       revn: null,
       copies: ["materialized", "compact"],

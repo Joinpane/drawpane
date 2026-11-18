@@ -40,7 +40,7 @@ async function newFile(name = "Kit") {
   );
   // The room learns its file id when someone opens it.
   const socket = await openSocket(owner.browser, file.id);
-  socket.send({ t: "hello", protocol: 3, clientId: `c-${file.id}`, revn: null, copies: BOTH });
+  socket.send({ t: "hello", protocol: 2, clientId: `c-${file.id}`, revn: null, copies: BOTH });
   await socket.next("welcome");
   socket.ws.close();
   return { ...owner, fileId: file.id };
@@ -70,7 +70,7 @@ async function open(browser: Browser, fileId: string, reads = BOTH) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 2,
     clientId: `o-${crypto.randomUUID()}`,
     revn: null,
     copies: reads,
@@ -150,7 +150,7 @@ describe("converting a file stored materialized", { timeout: 120_000 }, () => {
       room.convertStepWork = 0;
     });
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 3, clientId: "editor", revn: null, copies: BOTH });
+    socket.send({ t: "hello", protocol: 2, clientId: "editor", revn: null, copies: BOTH });
     expect((await socket.next<{ copies: string }>("welcome")).copies).toBe("materialized");
     // A few steps in, someone edits a main and its copies, as a materialized editor does.
     for (let i = 0; i < 5; i++) await runDurableObjectAlarm(roomOf(fileId));
@@ -209,11 +209,10 @@ describe("converting a file stored materialized", { timeout: 120_000 }, () => {
     });
     await runDurableObjectAlarm(roomOf(fileId));
     expect((await roomOf(fileId).copiesFormat()).copies).toBe("materialized");
-    // A client from before compact copies would edit it with operations it can't read since keyed
-    // sets (protocol 3, decision 0035): it's told to reload.
+    // A client from before compact copies still opens it.
     const old = await openSocket(browser, fileId);
     old.send({ t: "hello", protocol: 1, clientId: "old", revn: null });
-    expect((await old.next<{ code: string }>("error")).code).toBe("reload");
+    expect((await old.next<{ mode: string }>("welcome")).mode).toBe("snapshot");
 
     // Turned on, it converts; turned off again, restoring the version saved before puts the
     // file back as it was stored, materialized.
@@ -553,7 +552,7 @@ describe("what the review of the conversion found", { timeout: 120_000 }, () => 
           type: "frame",
           parent: page.id,
           key: keyBetween(keyBetween(null, null), null),
-          props: { propValues: {}, name: "Badge", instanceOf: main, width: 40, height: 20, x: 100 },
+          props: { name: "Badge", instanceOf: main, width: 40, height: 20, x: 100 },
         },
       ],
     });
@@ -686,7 +685,7 @@ describe("what the review of the conversion found", { timeout: 120_000 }, () => 
     const { browser, fileId } = await materializedFile(kit.nodes);
     // A tab of this version (it reads both forms), loaded while the file was materialized.
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 3, clientId: "before", revn: null, copies: BOTH });
+    socket.send({ t: "hello", protocol: 2, clientId: "before", revn: null, copies: BOTH });
     const welcome = await socket.next<{ mode: string; copies: string }>("welcome");
     expect([welcome.mode, welcome.copies]).toEqual(["snapshot", "materialized"]);
     await convert(fileId);
@@ -779,7 +778,7 @@ const placeInstance = (id: string, page: string, main: string, n = 5): Op => ({
   type: "frame",
   parent: page,
   key: at(n),
-  props: { propValues: {}, instanceOf: main, x: 300 + n * 10, y: 0 },
+  props: { instanceOf: main, x: 300 + n * 10, y: 0 },
 });
 
 describe("what the second review of the conversion found", { timeout: 120_000 }, () => {
@@ -815,7 +814,7 @@ describe("what the second review of the conversion found", { timeout: 120_000 },
       type: "frame",
       parent: page,
       key: at(2),
-      props: { propValues: {}, instanceOf: "BaseMain", isComponent: true, x: 100 },
+      props: { instanceOf: "BaseMain", isComponent: true, x: 100 },
     },
   ];
 
@@ -1095,13 +1094,8 @@ describe("what the second review of the conversion found", { timeout: 120_000 },
 
   it("never sends compact changes to a tab from before them that was open when the file converted", async () => {
     const { browser, fileId } = await materializedFile(kit.nodes);
-    // Since keyed sets (protocol 3) a tab from before compact copies doesn't edit a materialized
-    // file: it's told to reload. One that was let in before is checked as such below.
-    const refused = await openSocket(browser, fileId);
-    refused.send({ t: "hello", protocol: 1, clientId: "old-refused", revn: null });
-    expect((await refused.next<{ code: string }>("error")).code).toBe("reload");
     const old = await openSocket(browser, fileId);
-    old.send({ t: "hello", protocol: 3, clientId: "old-across", revn: null });
+    old.send({ t: "hello", protocol: 1, clientId: "old-across", revn: null });
     expect((await old.next<{ copies?: string }>("welcome")).copies).toBe("materialized");
     for (;;) if ((await old.next<{ done: boolean }>("snapshot")).done) break;
     await convert(fileId);
@@ -1336,7 +1330,7 @@ describe("what the third review of the conversion found", { timeout: 120_000 }, 
       type: "frame",
       parent: "Btn",
       key: at(0),
-      props: { propValues: {}, instanceOf: "Icon" },
+      props: { instanceOf: "Icon" },
     },
     placeInstance("PlacedBtn", page, "Btn", 3),
     {
@@ -1353,7 +1347,7 @@ describe("what the third review of the conversion found", { timeout: 120_000 }, 
       type: "frame",
       parent: "CardOfBtn",
       key: at(0),
-      props: { propValues: {}, instanceOf: "Btn" },
+      props: { instanceOf: "Btn" },
     },
     placeInstance("PlacedCard", page, "CardOfBtn", 6),
   ];
@@ -1634,7 +1628,7 @@ describe("a main containing an instance of itself (the fourth review)", {
     type: "frame",
     parent,
     key,
-    props: { propValues: {}, instanceOf: of },
+    props: { instanceOf: of },
   });
 
   it("is refused by the room, whoever sends it", async () => {
@@ -1659,7 +1653,7 @@ describe("a main containing an instance of itself (the fourth review)", {
           type: "frame",
           parent: "CyA",
           key: "a5",
-          props: { propValues: {}, instanceOf: "CyB" },
+          props: { instanceOf: "CyB" },
         },
       ],
     });
@@ -1716,8 +1710,7 @@ describe("what the fifth review found", { timeout: 120_000 }, () => {
     type: "frame",
     parent,
     key,
-    // An instance keeps a record (decision 0035).
-    props: props.instanceOf && !props.mirrors ? { propValues: {}, ...props } : props,
+    props,
   });
 
   it("restores a version whose components hold each other the other way round", async () => {
@@ -1757,20 +1750,8 @@ describe("what the fifth review found", { timeout: 120_000 }, () => {
       { id: "LpPage", type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page" } },
       { id: "LpA", type: "frame", parent: "LpPage", key: "a0", props: { isComponent: true } },
       { id: "LpRect", type: "rect", parent: "LpA", key: "a0", props: {} },
-      {
-        id: "LpSelf",
-        type: "frame",
-        parent: "LpA",
-        key: "a1",
-        props: { propValues: {}, instanceOf: "LpA" },
-      },
-      {
-        id: "LpI",
-        type: "frame",
-        parent: "LpPage",
-        key: "a1",
-        props: { propValues: {}, instanceOf: "LpA" },
-      },
+      { id: "LpSelf", type: "frame", parent: "LpA", key: "a1", props: { instanceOf: "LpA" } },
+      { id: "LpI", type: "frame", parent: "LpPage", key: "a1", props: { instanceOf: "LpA" } },
     ];
     const { importId } = await browser.json<{ importId: string }>(`/api/files/${fileId}/imports`, {
       method: "POST",
@@ -1792,13 +1773,7 @@ describe("what the fifth review found", { timeout: 120_000 }, () => {
       { id: "BkPage", type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page" } },
       { id: "BkMain", type: "frame", parent: "BkPage", key: "a0", props: { isComponent: true } },
       { id: "BkRect", type: "rect", parent: "BkMain", key: "a0", props: { name: "R" } },
-      {
-        id: "BkInst",
-        type: "frame",
-        parent: "BkPage",
-        key: "a1",
-        props: { propValues: {}, instanceOf: "BkMain" },
-      },
+      { id: "BkInst", type: "frame", parent: "BkPage", key: "a1", props: { instanceOf: "BkMain" } },
       {
         id: "BkCopy",
         type: "rect",
@@ -1965,12 +1940,8 @@ describe("what the seventh review found", { timeout: 120_000 }, () => {
     expect((await roomOf(fileId).copiesFormat()).copies).toBe("materialized");
     const placeholder = ["drawpane-reload-page", "drawpane-reload-text"];
 
-    // A tab from before compact copies is told to reload (protocol 3, decision 0035).
-    const before = await openSocket(browser, fileId);
-    before.send({ t: "hello", protocol: 1, clientId: `c-${newId()}`, revn: null });
-    expect((await before.next<{ code: string }>("error")).code).toBe("reload");
-    // A client that doesn't say it can download.
-    for (const message of [{ protocol: 3, copies: BOTH }]) {
+    // A tab from before compact copies, and a client that doesn't say it can download.
+    for (const message of [{ protocol: 1 }, { protocol: 2, copies: BOTH }]) {
       const { socket, welcome, nodes: seen } = await hello(browser, fileId, message);
       expect(welcome).toMatchObject({ role: "viewer", revn: 0, mode: "snapshot" });
       expect(seen.map((n) => n.id)).toEqual(placeholder);
@@ -1990,38 +1961,13 @@ describe("what the seventh review found", { timeout: 120_000 }, () => {
       again.socket.ws.close();
     }
     // A client that can download does.
-    const current = await hello(browser, fileId, { protocol: 3, copies: BOTH, download: true });
+    const current = await hello(browser, fileId, { protocol: 2, copies: BOTH, download: true });
     expect(current.welcome).toMatchObject({ role: "owner", mode: "download" });
     current.socket.ws.close();
     expect(await stored(fileId)).toHaveLength(46);
   });
 
-  it("welcomes a tab from before keyed sets as a viewer, its safe queued edit applied, in a file stored either way", async () => {
-    // Review 5 of #187: it's no longer an editor; what it held unsent applies when safe.
-    const nodes: NodeRecord[] = [
-      { id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} },
-      { id: "T", parent: "P", key: "a0", type: "text", props: { characters: "Hi" } },
-    ];
-    for (const off of [true, false]) {
-      const { browser, fileId } = await materializedFile(nodes);
-      await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
-        room.compactCopiesOff = off;
-      });
-      if (!off) await convert(fileId);
-      const socket = await openSocket(browser, fileId);
-      socket.send({ t: "hello", protocol: 2, clientId: `c-${newId()}`, revn: null, copies: BOTH });
-      expect((await socket.next<{ role: string }>("welcome")).role).toBe("viewer");
-      socket.send({
-        t: "txn",
-        seq: 1,
-        ops: [{ op: "set", id: "P", prop: "name", value: "Edited" }],
-      });
-      await socket.next("ack");
-      socket.ws.close();
-    }
-  });
-
-  it("tells a small file stored materialized's tab from before compact copies to reload", async () => {
+  it("still sends a small file stored materialized to a tab from before compact copies, to edit", async () => {
     const nodes: NodeRecord[] = [
       { id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} },
       { id: "T", parent: "P", key: "a0", type: "text", props: { characters: "Hi" } },
@@ -2030,9 +1976,11 @@ describe("what the seventh review found", { timeout: 120_000 }, () => {
     await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
       room.compactCopiesOff = true;
     });
-    const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 1, clientId: `c-${newId()}`, revn: null });
-    expect((await socket.next<{ code: string }>("error")).code).toBe("reload");
+    const { socket, welcome, nodes: seen } = await hello(browser, fileId, { protocol: 1 });
+    expect(welcome).toMatchObject({ role: "owner", mode: "snapshot" });
+    expect(seen.map((n) => n.id).sort()).toEqual(["P", "T"]);
+    socket.send({ t: "txn", seq: 1, ops: [{ op: "set", id: "T", prop: "x", value: 5 }] });
+    expect((await socket.next<{ seq: number }>("ack")).seq).toBe(1);
     socket.ws.close();
   });
 });

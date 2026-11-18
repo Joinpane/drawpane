@@ -115,7 +115,7 @@ describe("compact copies in the editor", () => {
     expect(editor.doc.pageOf(glyph.id)?.id).toBe("p");
     expect(records(editor)).toEqual([]);
     const stored = editor.doc.stored().find((n) => n.id === instance) as NodeRecord;
-    expect(Object.keys(stored.props).sort()).toEqual(["instanceOf", "propValues", "x", "y"]);
+    expect(Object.keys(stored.props).sort()).toEqual(["instanceOf", "x", "y"]);
     // Every presented layer is counted, and listed.
     expect(editor.doc.size).toBe([...editor.doc.nodes()].length);
   });
@@ -231,7 +231,7 @@ describe("compact copies in the editor", () => {
     );
     expect(records(editor)).toEqual([]);
     const stored = editor.doc.stored().find((n) => n.id === instance) as NodeRecord;
-    expect(Object.keys(stored.props).sort()).toEqual(["instanceOf", "propValues", "x", "y"]);
+    expect(Object.keys(stored.props).sort()).toEqual(["instanceOf", "x", "y"]);
   });
 
   it("detaches an instance into stored layers with the same ids, and undoes it", () => {

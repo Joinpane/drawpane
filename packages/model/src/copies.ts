@@ -39,31 +39,17 @@ import { ROOT_ID } from "./ids";
 import { boundaryDrivenProps } from "./laid-out";
 import type { NodeRecord } from "./ops";
 import { keyBetween } from "./order-key";
-import {
-  getProp,
-  isPropName,
-  PROP_REF_FIELDS,
-  PROPS,
-  type PropertyValue,
-  type PropRefField,
-  type Props,
-  propAllowed,
-  propertyKey,
-} from "./schema";
+import { getProp, isPropName, PROPS, type Props, propAllowed } from "./schema";
 import { sha256 } from "./sha256";
 import { MemoryStore } from "./store";
 
-/**
- * Never copied from a main's layer: they link copies, or describe the main
- * itself (its variant values and its properties, decision 0035).
- */
+/** Never copied from a main's layer: they link copies, or describe the main itself. */
 export const COPY_LINK_PROPS: ReadonlySet<string> = new Set([
   "isComponent",
   "componentDescription",
+  // What a main is, not how it looks: its variant values and its properties (decision 0035).
   "variantProps",
   "componentProps",
-  // What one instance set (decision 0035): each copy holds its own.
-  "propValues",
   "mirrors",
   "overrides",
   "unset",
@@ -85,8 +71,8 @@ export const ROOT_LOCAL_PROPS: ReadonlySet<string> = new Set([
   "constraintH",
   "constraintV",
   "instanceOf",
-  // How it's used in the main around it (decision 0035): which properties drive it, and
-  // whether it shows its own on that main's instances.
+  // How it's used in the main around it: which properties drive it, and whether its own show
+  // on that main's instances (decision 0035).
   "propRefs",
   "exposeProps",
 ]);
@@ -149,20 +135,9 @@ interface Built {
   readonly main: string;
   readonly slots: string[];
   readonly kids: Map<string, readonly string[]>;
-  /**
-   * Copy layers a component property drives (decision 0035, item 3): each
-   * one's driven fields and the key its instance's record keeps their value
-   * under. Only those layers.
-   */
-  readonly refs: Map<string, readonly DrivenField[]>;
-  /** Record key → the copy layers `refs` names under it. */
-  readonly driven: Map<string, string[]>;
   /** What its slots were charged (`BuildBudget`). */
   cost: number;
 }
-
-/** A field of a copy layer a property drives, and the record key its value is kept under. */
-export type DrivenField = readonly [field: PropRefField, key: string];
 
 const EMPTY: readonly string[] = Object.freeze([]);
 
@@ -631,82 +606,15 @@ export class CopyView {
     if (!source) return undefined;
     const props = this.#slotBase(slot, source);
     const record = this.record(slot);
-    if (record) {
-      const base = { ...props };
-      merge(props, record.props, source.type);
-      // A driven field is its instance's value or its main's, never the copy's own (item 3).
-      const fields = this.drivenFields(slot.id);
-      if (fields.length > 0) keepDriven(props, base, fields);
-    }
+    if (record) merge(props, record.props, source.type);
     return { id: slot.id, type: source.type, parent: slot.parent, key: slot.key, props };
   }
 
-  /**
-   * The fields of a copy layer a component property drives, each with the key
-   * its instance's record keeps the value under (decision 0035, item 3).
-   * Empty for anything else, or a copy not built.
-   */
-  drivenFields(id: string): readonly DrivenField[] {
-    const slot = this.#slots.get(id);
-    return (slot && this.#built.get(slot.root)?.refs.get(id)) || EMPTY_FIELDS;
-  }
-
-  /** The copy layers built so far that a record key's value drives, in an instance (none when unbuilt). */
-  drivenBy(rootId: string, key: string): readonly string[] {
-    return this.#built.get(rootId)?.driven.get(key) ?? EMPTY;
-  }
-
-  /**
-   * What changing an instance's record changes (`keys` changed, or every key
-   * when null): the copy layers whose driven values change, and those of them
-   * a swap property drives, whose layers come from another main then (to
-   * build again). For `forget`.
-   */
-  recordChanged(
-    rootId: string,
-    keys: Iterable<string> | null,
-  ): { changed: string[]; structural: string[] } {
-    const built = this.#built.get(rootId);
-    const changed: string[] = [];
-    const structural: string[] = [];
-    if (!built) return { changed, structural };
-    const add = (ids: readonly string[] | undefined) => {
-      for (const id of ids ?? EMPTY) {
-        changed.push(id);
-        if (built.refs.get(id)?.some(([field]) => field === "instanceOf")) structural.push(id);
-      }
-    };
-    if (keys === null) for (const ids of built.driven.values()) add(ids);
-    else for (const key of keys) add(built.driven.get(key));
-    return { changed, structural };
-  }
-
-  /** The record a stored instance root keeps its values in (decision 0035, item 3). */
-  #recordOf(rootId: string): Readonly<Record<string, unknown>> {
-    const values = this.#store.get(rootId)?.props.propValues;
-    return (values ?? NO_VALUES) as Readonly<Record<string, unknown>>;
-  }
-
-  /**
-   * The main a copy layer is swapped to, when that's another live main: by
-   * the instance swap property that drives it, as its instance's record
-   * says (decision 0035); else, when no property drives it, by its record.
-   */
-  #swappedMain(
-    slot: CopySlot,
-    source: NodeRecord,
-    refs: readonly DrivenField[] = this.drivenFields(slot.id),
-  ): NodeRecord | undefined {
+  /** The main a copy layer's record swaps it to, when that's another live main. */
+  #swappedMain(slot: CopySlot, source: NodeRecord): NodeRecord | undefined {
     if (source.type !== "frame") return undefined;
-    const driven = refs.find(([field]) => field === "instanceOf");
-    let own: string | null | undefined;
-    if (driven) {
-      const value = this.#recordOf(slot.root)[driven[1]] as { instance?: unknown } | undefined;
-      own = typeof value?.instance === "string" ? value.instance : undefined;
-    } else {
-      const record = this.record(slot);
-      own = record ? swappedTo(record.props) : undefined;
-    }
+    const record = this.record(slot);
+    const own = record ? swappedTo(record.props) : undefined;
     if (!own || own === getProp(source.props, "instanceOf")) return undefined;
     const main = this.#store.get(own);
     return isMainNode(main) ? main : undefined;
@@ -715,39 +623,20 @@ export class CopyView {
   /**
    * A copy layer before its own values: its source's, as copied. A nested
    * instance swapped for another main is that main's instance, placed where
-   * its source is: its root-local values, and the fields the outer
-   * component's properties drive, from the source; the rest the main's, as
-   * an instance root has them.
+   * its source is: its root-local values from the source, the rest the
+   * main's, as an instance root has them.
    */
   #slotBase(slot: CopySlot, source: NodeRecord): Record<string, unknown> {
     const props: Record<string, unknown> = {};
     const swapped = this.#swappedMain(slot, source);
-    this.#copyBase(props, source, swapped);
-    props.mirrors = source.id;
-    const fields = this.drivenFields(slot.id);
-    if (fields.length > 0) {
-      applyPropertyValues(props, fields, this.#recordOf(slot.root));
-      // Swapped by a property: an instance of what it chose. Not swapped: its main layer's.
-      if (fields.some(([field]) => field === "instanceOf")) {
-        if (swapped) props.instanceOf = swapped.id;
-        else if (source.props.instanceOf !== undefined) props.instanceOf = source.props.instanceOf;
-      }
-    }
-    return props;
-  }
-
-  #copyBase(
-    props: Record<string, unknown>,
-    source: NodeRecord,
-    swapped: NodeRecord | undefined,
-  ): void {
     if (swapped) {
       for (const prop of ROOT_LOCAL_PROPS) {
         const value = (source.props as Record<string, unknown>)[prop];
         if (value !== undefined && prop !== "instanceOf") props[prop] = value;
       }
       Object.assign(props, this.#rootBase(swapped));
-      // What the outer component's properties drive stays the outer main's (decision 0035).
+      // What the outer component's properties drive stays the outer main's (decision 0035):
+      // swapping the icon doesn't show an icon a boolean hides.
       for (const prop of boundaryDrivenProps(source)) {
         const value = (source.props as Record<string, unknown>)[prop];
         if (value === undefined) delete props[prop];
@@ -756,6 +645,8 @@ export class CopyView {
     } else
       for (const [prop, value] of Object.entries(source.props))
         if (!COPY_LINK_PROPS.has(prop)) props[prop] = value;
+    props.mirrors = source.id;
+    return props;
   }
 
   #ensureBuilt(rootId: string, reuse?: Map<string, string>): Built | undefined {
@@ -767,17 +658,10 @@ export class CopyView {
     if (!main || this.#building.has(rootId) || this.cyclic(main.id)) return undefined;
     this.#building.add(rootId);
     try {
-      const built: Built = {
-        main: main.id,
-        slots: [],
-        kids: new Map(),
-        refs: new Map(),
-        driven: new Map(),
-        cost: 0,
-      };
+      const built: Built = { main: main.id, slots: [], kids: new Map(), cost: 0 };
       const kids: string[] = [];
       for (const child of this.childIds(main.id))
-        this.#addSlot(built, rootId, rootId, EMPTY, child, kids, reuse, EMPTY);
+        this.#addSlot(built, rootId, rootId, EMPTY, child, kids, reuse);
       built.kids.set(rootId, kids);
       this.#built.set(rootId, built);
       this.#link(main.id, rootId);
@@ -799,8 +683,6 @@ export class CopyView {
     sourceId: string,
     siblings: string[],
     reuse: Map<string, string> | undefined,
-    /** The nested instances above it in this instance, as a record key names them. */
-    scope: readonly string[],
   ): void {
     const source = this.get(sourceId);
     if (!source) return;
@@ -821,200 +703,19 @@ export class CopyView {
     built.slots.push(id);
     siblings.push(id);
     this.#link(sourceId, id);
-    // The fields a property drives here, with where its instance's record keeps their values.
-    const refs = drivenRefs(source, this.record(slot), scope);
-    if (refs.length > 0) {
-      built.refs.set(id, refs);
-      for (const [, key] of refs) {
-        const list = built.driven.get(key);
-        if (list) list.push(id);
-        else built.driven.set(key, [id]);
-      }
-      if (this.#budget) {
-        const cost = refsBytes(refs);
-        this.#charge(cost);
-        built.cost += cost;
-      }
-    }
     // Its layers are its source's, or a swapped-in main's (which it then copies too).
-    const swapped = this.#swappedMain(slot, source, refs)?.id;
+    const swapped = this.#swappedMain(slot, source)?.id;
     if (swapped) {
       this.#swapped.set(id, swapped);
       this.#link(swapped, id);
     }
     const from = swapped ?? sourceId;
     const kids: string[] = [];
-    // A nested instance: what's inside it is its own properties' to drive, under its scope.
-    const inner =
-      swapped || (source.type === "frame" && source.props.instanceOf)
-        ? [...scope, this.ownLayerId(sourceId)]
-        : scope;
     // Swapped to a main that contains its own instance: no layers, as its instances have.
     if (!swapped || !this.cyclic(swapped))
       for (const child of this.childIds(from))
-        this.#addSlot(built, root, id, path, child, kids, reuse, inner);
+        this.#addSlot(built, root, id, path, child, kids, reuse);
     built.kids.set(id, kids);
-  }
-
-  /**
-   * The id of the layer a main holds itself that a copy layer (or what it
-   * copies, in turn) copies: what a record key's scope names a nested
-   * instance by, the same in either copy form. A stored layer's own id.
-   */
-  ownLayerId(id: string): string {
-    let at = id;
-    for (let slot = this.#slots.get(at); slot; slot = this.#slots.get(at)) at = slot.source;
-    return at;
-  }
-}
-
-const EMPTY_FIELDS: readonly DrivenField[] = Object.freeze([]);
-const NO_VALUES: Readonly<Record<string, unknown>> = Object.freeze({});
-
-/** What `Built.refs` holds for a layer, charged as a budget counts. */
-function refsBytes(refs: readonly DrivenField[]): number {
-  let n = ENTRY_BYTES;
-  for (const [, key] of refs) n += ENTRY_BYTES + 2 * key.length;
-  return n;
-}
-
-/**
- * The fields of a copy layer a component property drives (decision 0035,
- * item 3), and where its instance's record keeps each one's value: the
- * property id under `scope`, the nested instances above the layer. Its
- * references are its source's, unless its record unlinks or relinks them.
- */
-export function drivenRefs(
-  source: NodeRecord,
-  record: NodeRecord | undefined,
-  scope: readonly string[],
-): DrivenField[] {
-  const own = record?.props;
-  const refs =
-    own?.propRefs !== undefined
-      ? own.propRefs
-      : own?.unset?.includes("propRefs")
-        ? undefined
-        : source.props.propRefs;
-  if (!refs) return [];
-  const out: DrivenField[] = [];
-  for (const field of PROP_REF_FIELDS) {
-    const id = refs[field];
-    if (id && field !== "slot") out.push([field, propertyKey(scope, id)]);
-  }
-  return out;
-}
-
-/**
- * Whether an instance root keeps a record (decision 0035, item 3). One that
- * exists decides every key, a key it doesn't keep being its main's: an empty
- * record (`{}`) is one. A root without one is from before records, and its
- * layers hold its values.
- */
-export function hasRecord(props: Readonly<Record<string, unknown>>): boolean {
-  return props.propValues !== undefined && props.propValues !== null;
-}
-
-/** A driven field's value in a layer's properties, as a record holds it (null: none fits). */
-export function fieldAsValue(
-  props: Readonly<Record<string, unknown>>,
-  field: string,
-): PropertyValue | null {
-  if (field === "visible") return props.visible !== false;
-  if (field === "characters") return typeof props.characters === "string" ? props.characters : "";
-  if (field === "instanceOf")
-    return typeof props.instanceOf === "string" ? { instance: props.instanceOf } : null;
-  return null;
-}
-
-/**
- * What a copy layer's field a property drives shows (decision 0035, item 3),
- * wherever its link ends or changes form (conversion, detach, unlink), so
- * they agree: its instance's record's value for the key; when the instance
- * keeps a record without the key, its main layer's (`main`, a reset, or a
- * value never set); when it keeps none (from before records), the layer's
- * own. A materialized layer showing another was written before the record's
- * last change. Null when nothing fits the field.
- */
-export function drivenShown(
-  field: string,
-  key: string,
-  root: Readonly<Record<string, unknown>>,
-  layer: Readonly<Record<string, unknown>>,
-  main: Readonly<Record<string, unknown>> | undefined,
-): PropertyValue | null {
-  if (!hasRecord(root)) return fieldAsValue(layer, field);
-  const value = (root.propValues as Record<string, unknown>)[key];
-  const fits =
-    field === "visible"
-      ? typeof value === "boolean"
-      : field === "characters"
-        ? typeof value === "string"
-        : typeof value === "object" && value !== null && "instance" in value;
-  if (value !== undefined && fits) return value as PropertyValue;
-  return main ? fieldAsValue(main, field) : fieldAsValue(layer, field);
-}
-
-/**
- * Puts a record's values on a layer's driven fields (decision 0035, item
- * 3): a boolean's on `visible`, a text's on `characters` (its variable
- * binding taken off, its runs kept to the text). A key the record lacks
- * leaves the field as it is. A swap's (`instanceOf`) is the caller's: it
- * changes which main the layer's layers come from.
- */
-export function applyPropertyValues(
-  props: Record<string, unknown>,
-  fields: readonly DrivenField[],
-  record: Readonly<Record<string, unknown>>,
-): void {
-  for (const [field, key] of fields) {
-    const value = record[key];
-    if (value === undefined) continue;
-    if (field === "visible" && typeof value === "boolean") {
-      if (value) delete props.visible;
-      else props.visible = false;
-    } else if (field === "characters" && typeof value === "string") {
-      props.characters = value;
-      const bindings = props.bindings as Record<string, unknown> | undefined;
-      if (bindings?.characters !== undefined) {
-        const { characters: _, ...rest } = bindings;
-        if (Object.keys(rest).length > 0) props.bindings = rest;
-        else delete props.bindings;
-      }
-      const runs = props.textRuns as ReadonlyArray<{ start: number; end: number }> | undefined;
-      if (runs) {
-        const kept = runs
-          .filter((r) => r.start < value.length && r.end > r.start)
-          .map((r) => (r.end > value.length ? { ...r, end: value.length } : r));
-        if (kept.length > 0) props.textRuns = kept;
-        else delete props.textRuns;
-      }
-    }
-  }
-}
-
-/** The values driven fields have after a copy's record merged in: `base`'s, never the record's own. */
-function keepDriven(
-  props: Record<string, unknown>,
-  base: Readonly<Record<string, unknown>>,
-  fields: readonly DrivenField[],
-): void {
-  for (const [field] of fields) {
-    const props_ = field === "characters" ? ["characters", "bindings"] : [field];
-    for (const prop of props_) {
-      if (prop === "bindings") {
-        // Only the driven field's own binding is the base's; the rest is the copy's.
-        const own = { ...((props.bindings as Record<string, unknown> | undefined) ?? {}) };
-        const want = (base.bindings as Record<string, unknown> | undefined)?.characters;
-        if (want === undefined) delete own.characters;
-        else own.characters = want;
-        if (Object.keys(own).length > 0) props.bindings = own;
-        else delete props.bindings;
-        continue;
-      }
-      if (base[prop] === undefined) delete props[prop];
-      else props[prop] = base[prop];
-    }
   }
 }
 

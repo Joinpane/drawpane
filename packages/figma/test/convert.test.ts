@@ -585,7 +585,7 @@ describe("masks", () => {
     expect(type("Old outline")).toBe("outline");
   });
 
-  it("leave a group used as a mask unmasking, with a note, as Drawpane masks with shapes", () => {
+  it("keep a group used as a mask a mask, by its alpha, as Figma does", () => {
     const { nodes, notes } = convertFile(
       file(
         node({
@@ -609,8 +609,9 @@ describe("masks", () => {
       ),
     );
     validate(nodes);
-    expect(byName(nodes, "Group mask").props.isMask).toBeUndefined();
-    expect(notes.lines().join(" ")).toContain("no longer mask");
+    expect(byName(nodes, "Group mask").props.isMask).toBe(true);
+    expect(byName(nodes, "Group mask").props.maskType).toBe("alpha");
+    expect(notes.lines()).toEqual([]);
   });
 });
 

@@ -28,7 +28,7 @@ async function join(browser: Browser, fileId: string, clientId: string) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 2,
     clientId,
     revn: null,
     copies: ["materialized", "compact"],
@@ -210,44 +210,6 @@ describe("reviewing and merging", () => {
     });
     const after = (await roomOf(mainId).allNodes()) as NodeRecord[];
     expect(after.find((n) => n.id === "r1")?.props.width).toBe(240);
-  });
-
-  it("merges an instance's property values one by one: each side's own value stays", async () => {
-    const { browser, mainId, main, branch } = await mainWithBranch();
-    await main.edit([
-      {
-        op: "create",
-        id: "inst",
-        type: "frame",
-        parent: main.page.id,
-        key: "a1",
-        props: { width: 100, height: 30, propValues: { label: "Before", show: true } },
-      },
-    ]);
-    const { branch: second } = await browser.json<{ branch: BranchInfo }>(
-      `/api/files/${mainId}/branches`,
-      { method: "POST", json: { name: "Values" } },
-    );
-    void branch;
-    const onBranch = await join(browser, second.id, "clientV");
-    // Each side sets a different value, a value at a time (decision 0035, item 15).
-    await onBranch.edit([{ op: "set", id: "inst", prop: "propValues", key: "show", value: false }]);
-    await main.edit([{ op: "set", id: "inst", prop: "propValues", key: "label", value: "Main" }]);
-    const review = await readReview(browser, second.id);
-    const changes = branchChanges(
-      nodeReader(review.base),
-      nodeReader(review.branch),
-      nodeReader(review.main),
-    );
-    expect(changes).toEqual([
-      expect.objectContaining({ id: "inst", field: "propValues", key: "show", conflict: false }),
-    ]);
-    await browser.json(`/api/files/${second.id}/branch/merge`, { method: "POST", json: {} });
-    const after = (await roomOf(mainId).allNodes()) as NodeRecord[];
-    expect(after.find((n) => n.id === "inst")?.props.propValues).toEqual({
-      label: "Main",
-      show: false,
-    });
   });
 
   it("deletes what the branch deleted even where main moved one inside the other", async () => {

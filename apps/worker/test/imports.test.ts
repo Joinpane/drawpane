@@ -63,7 +63,7 @@ async function editor(browser: Browser, fileId: string) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 2,
     clientId: "c-editor",
     revn: null,
     copies: ["materialized", "compact"],
@@ -99,7 +99,7 @@ describe("importing into a new file", () => {
     const socket = await openSocket(browser, fileId);
     socket.send({
       t: "hello",
-      protocol: 3,
+      protocol: 2,
       clientId: "c1",
       revn: null,
       copies: ["materialized", "compact"],
@@ -141,13 +141,7 @@ describe("importing into a new file", () => {
     const { browser, fileId } = await newFile();
     const main = { id: "M1", type: "frame", parent: "P1", key: "a0", props: { isComponent: true } };
     const inner = { id: "R1", type: "rect", parent: "M1", key: "a0", props: { width: 10 } };
-    const copy = {
-      id: "I1",
-      type: "frame",
-      parent: "P1",
-      key: "a1",
-      props: { propValues: {}, instanceOf: "M1" },
-    };
+    const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
     const wrong = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["R1"] } };
     const record = { ...wrong, id: copyId("I1", ["R1"]), props: { path: ["R1"], width: 20 } };
     // A record whose id isn't the one its path derives is refused.
@@ -166,7 +160,7 @@ describe("importing into a new file", () => {
 
     // Over the socket, a record is checked too.
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 3, clientId: "c1", revn: null, copies: ["compact"] });
+    socket.send({ t: "hello", protocol: 2, clientId: "c1", revn: null, copies: ["compact"] });
     expect((await socket.next<{ copies: string }>("welcome")).copies).toBe("compact");
     socket.send({ t: "txn", seq: 1, ops: [{ op: "create", ...wrong }] });
     expect((await socket.next<{ code: string }>("reject")).code).toBe("invalid_id");
@@ -175,13 +169,7 @@ describe("importing into a new file", () => {
   it("refuses override records into a file stored materialized", async () => {
     const { browser, fileId } = await newFile();
     await roomOf(fileId).storeMaterialized([page("P1", "Cover", "a0")]);
-    const copy = {
-      id: "I1",
-      type: "frame",
-      parent: "P1",
-      key: "a1",
-      props: { propValues: {}, instanceOf: "M1" },
-    };
+    const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
     const record = {
       id: copyId("I1", ["X1"]),
       type: "override",
@@ -192,7 +180,7 @@ describe("importing into a new file", () => {
     const socket = await openSocket(browser, fileId);
     socket.send({
       t: "hello",
-      protocol: 3,
+      protocol: 2,
       clientId: "c1",
       revn: null,
       copies: ["materialized", "compact"],
@@ -243,7 +231,7 @@ describe("importing into a new file", () => {
     const socket = await openSocket(browser, fileId);
     socket.send({
       t: "hello",
-      protocol: 3,
+      protocol: 2,
       clientId: "c1",
       revn: 1,
       copies: ["materialized", "compact"],
@@ -398,7 +386,7 @@ describe("importing into a new file", () => {
     const behind = await openSocket(browser, fileId);
     behind.send({
       t: "hello",
-      protocol: 3,
+      protocol: 2,
       clientId: "c2",
       revn: revn - 1,
       copies: ["materialized", "compact"],
@@ -477,13 +465,7 @@ describe("importing into a new file", () => {
 
   it("checks override records in each part and at the commit of an import in parts", async () => {
     const { browser, fileId } = await newFile();
-    const copy = {
-      id: "I1",
-      type: "frame",
-      parent: "P1",
-      key: "a1",
-      props: { propValues: {}, instanceOf: "M1" },
-    };
+    const copy = { id: "I1", type: "frame", parent: "P1", key: "a1", props: { instanceOf: "M1" } };
     const record = { id: "O1", type: "override", parent: "I1", key: "a0", props: { path: ["X1"] } };
     const { importId, part, commit } = await inParts(browser, fileId);
     expect((await part([page("P1", "Cover", "a0"), copy])).status).toBe(200);

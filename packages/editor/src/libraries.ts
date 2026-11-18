@@ -23,11 +23,8 @@ import {
   libraryNodeId,
   type NodeRecord,
   type Op,
-  type PropertyValue,
   type Props,
-  propertyKey,
   ROOT_ID,
-  splitPropertyKey,
   stableJson,
   subtree,
 } from "@drawpane/model";
@@ -146,8 +143,8 @@ function remap(node: NodeRecord, to: (id: string) => string, copied: ReadonlySet
           : v,
       ]),
     );
-  // An instance swap's default and preferred components, and those instances chose (decision
-  // 0035). Property ids aren't node ids: they stay.
+  // An instance swap's default and preferred components (decision 0035). Property ids aren't
+  // node ids: they stay.
   if (Array.isArray(p.componentProps))
     props.componentProps = (p.componentProps as ComponentPropDef[]).map((def) =>
       def.type !== "instance"
@@ -157,17 +154,6 @@ function remap(node: NodeRecord, to: (id: string) => string, copied: ReadonlySet
             ...(typeof def.default === "string" ? { default: to(def.default) } : {}),
             ...(def.preferred ? { preferred: def.preferred.map(to) } : {}),
           },
-    );
-  // A key's scope names layers of mains (decision 0035, item 3), which come along renamed.
-  if (p.propValues && typeof p.propValues === "object")
-    props.propValues = Object.fromEntries(
-      Object.entries(p.propValues as Record<string, PropertyValue>).map(([k, v]) => {
-        const { scope, property } = splitPropertyKey(k);
-        return [
-          propertyKey(scope.map(to), property),
-          v && typeof v === "object" ? { instance: to(v.instance) } : v,
-        ];
-      }),
     );
   // A prototype link to a layer that came along points at its copy; others stay as they were.
   if (Array.isArray(p.reactions))

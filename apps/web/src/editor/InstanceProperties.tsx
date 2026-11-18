@@ -142,13 +142,15 @@ function PropertyControl({ instanceId, row }: { instanceId: string; row: Row }) 
       </select>
     );
   }
+  // Layers that disagree show "Mixed"; setting the property sets them all.
   if (row.type === "boolean")
     return (
       <Switch
-        aria-label={row.name}
+        aria-label={row.mixed ? `${row.name} (mixed)` : row.name}
         checked={row.value === true}
         disabled={disabled}
         onChange={(on) => set(on)}
+        {...(row.mixed ? { label: "Mixed", className: "instance-prop__mixed" } : {})}
       />
     );
   if (row.type === "text")
@@ -156,6 +158,7 @@ function PropertyControl({ instanceId, row }: { instanceId: string; row: Row }) 
       <TextValue
         label={row.name}
         value={typeof row.value === "string" ? row.value : ""}
+        mixed={row.mixed === true}
         disabled={disabled}
         onCommit={set}
       />
@@ -168,11 +171,14 @@ function PropertyControl({ instanceId, row }: { instanceId: string; row: Row }) 
 function TextValue({
   label,
   value,
+  mixed,
   disabled,
   onCommit,
 }: {
   label: string;
   value: string;
+  /** The layers it sets disagree: empty, saying so, until something is typed. */
+  mixed: boolean;
   disabled: boolean;
   onCommit: (v: string) => void;
 }) {
@@ -188,6 +194,7 @@ function TextValue({
       aria-label={label}
       rows={lines}
       value={draft}
+      placeholder={mixed ? "Mixed" : undefined}
       disabled={disabled}
       onChange={(e) => setDraft(e.target.value)}
       onFocus={() => {
@@ -279,7 +286,7 @@ function SwapPicker({ instanceId, row }: { instanceId: string; row: Row }) {
         onClick={() => setOpen((v) => !v)}
       >
         <Icon name="instance" size={12} />
-        <span>{nameOf(current)}</span>
+        <span>{row.mixed ? "Mixed" : nameOf(current)}</span>
       </button>
       {open && button ? (
         <DropdownMenu

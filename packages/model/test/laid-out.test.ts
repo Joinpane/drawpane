@@ -5,9 +5,7 @@ import {
   constrainedValues,
   heldNodeIds,
   laidOutProps,
-  MAX_PROPERTY_VALUES,
   type NodeRecord,
-  PROPS,
   type Props,
 } from "../src/index";
 
@@ -125,16 +123,14 @@ describe("component property values (decision 0035, item 3)", () => {
     ).toEqual(["visible"]);
   });
 
-  it("bounds a record and lists the components it names", () => {
-    const schema = PROPS.propValues.schema;
-    expect(schema.safeParse({ a: true, b: "text", c: { instance: "main1" } }).success).toBe(true);
-    const many = Object.fromEntries(
-      Array.from({ length: MAX_PROPERTY_VALUES + 1 }, (_, i) => [`p${i}`, true]),
-    );
-    expect(schema.safeParse(many).success).toBe(false);
-    expect(schema.safeParse({ a: { instance: "main1", extra: 1 } }).success).toBe(false);
+  it("lists the components a swap definition names", () => {
     expect(
-      heldNodeIds({ propValues: { a: true, c: { instance: "main1" } } } as Props).others,
-    ).toEqual(["main1"]);
+      heldNodeIds({
+        componentProps: [
+          { id: "a", name: "Icon", type: "instance", default: "main1", preferred: ["main2"] },
+          { id: "b", name: "Label", type: "text", default: "Go" },
+        ],
+      } as Props).others,
+    ).toEqual(["main1", "main2"]);
   });
 });

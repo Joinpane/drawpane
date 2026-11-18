@@ -17,38 +17,23 @@
  * laid out again (`relayoutTargets`).
  */
 import {
-  applyPropertyValues,
   boundaryDrivenProps,
   constrainedValues,
   copyChildId,
-  type DrivenField,
   getProp,
   isMainNode,
   isPropName,
   laidOutProps,
-  migrateRecords,
   type NodeRecord,
   newId,
   type Op,
-  type PropertyValue,
   type PropName,
-  type PropRefField,
   type Props,
-  propertyKey,
 } from "@drawpane/model";
 import { LAYOUT_NEUTRAL } from "./compact-copies";
 import { type Doc, Doc as DocCtor } from "./doc";
 import { gridImportOps } from "./layout";
 import { layerName } from "./names";
-import {
-  clearValueOps,
-  fieldValue,
-  ownLayerId,
-  recordAt,
-  recordPlace,
-  scopedValues,
-  shownValues,
-} from "./property-values";
 
 /**
  * Never copied from a main component: they link instances or describe the
@@ -59,8 +44,6 @@ const LINK_PROPS: ReadonlySet<string> = new Set([
   "componentDescription",
   "variantProps",
   "componentProps",
-  // What one instance set (decision 0035): each copy holds its own.
-  "propValues",
   "mirrors",
   "overrides",
 ]);
@@ -335,8 +318,6 @@ export function instantiateOps(
     }
     if (isRoot) {
       props.instanceOf = componentId;
-      // Its record, empty: an instance always keeps one (decision 0035, item 3).
-      props.propValues = {};
       // An instance of a variant is named after its set ("Button"), like Figma.
       const set = componentSetOf(doc, componentId);
       if (set) props.name = getProp(set.props, "name");
@@ -385,34 +366,17 @@ const PLACE_EPSILON = 0.01;
  * place they give it from its main layer's (`constrainedValues`), unless
  * `derive` is false: then what layout decides is only left alone, which is
  * how `pinInstances` reads a file as it was made.
- *
- * A field a component property drives takes the value the record of the
- * instance it's ultimately in keeps for it, or its main layer's when it
- * keeps none, never a value of its own (decision 0035, item 3); a nested
- * instance a swap property drives is an instance of the component the
- * record chose. A pure function of the main, the record and the copy's
- * other overrides, so every client syncing it writes the same. With
- * `properties`, only what the record decides is synced, and which layers
- * the copy has: driven fields, what's inside a nested instance whose
- * chosen component changes, layers made, moved or removed; not other
- * values of the layers it keeps (what layout gave them stays).
  */
 export function syncInstanceOps(
   doc: Doc,
   instanceId: string,
-  {
-    derive = true,
-    properties = false,
-  }: { readonly derive?: boolean; readonly properties?: boolean } = {},
+  { derive = true }: { readonly derive?: boolean } = {},
 ): Op[] {
   const instance = doc.get(instanceId);
   const componentId =
     instance && instance.type === "frame" ? getProp(instance.props, "instanceOf") : null;
   const main = componentId ? doc.get(componentId) : undefined;
   if (!instance || !main || !isMainComponent(main)) return [];
-  // The record its values are in, and where it is in that record (decision 0035).
-  const place = recordPlace(doc, instanceId);
-  const record = place ? recordAt(doc, place) : {};
 
   // Map each main node id to its counterpart in this instance.
   const counterpart = new Map<string, NodeRecord>([[main.id, instance]]);
@@ -431,28 +395,12 @@ export function syncInstanceOps(
 
   const ops: Op[] = [];
   const mainIds = new Set<string>();
-  /** With `properties`: fields synced per layer, and layers synced whole (a swap rebuilt). */
-  const drivenProps = new Map<string, Set<string>>();
-  const whole = new Set<string>();
-
-  /** A copy's driven fields and record keys: its own references when it unlinked them, else its main layer's. */
-  const refsOf = (from: NodeRecord, to: NodeRecord | null) =>
-    to && getProp(to.props, "overrides").includes("propRefs")
-      ? getProp(to.props, "propRefs")
-      : getProp(from.props, "propRefs");
-  const fieldsOf = (from: NodeRecord, to: NodeRecord | null, scope: readonly string[]) => {
-    const out: DrivenField[] = [];
-    for (const [field, id] of Object.entries(refsOf(from, to)))
-      if (id && field !== "slot") out.push([field as PropRefField, propertyKey(scope, id)]);
-    return out;
-  };
 
   const syncProps = (
     from: NodeRecord,
     to: NodeRecord,
     isRoot: boolean,
     only?: (prop: string) => boolean,
-    fields: readonly DrivenField[] = [],
   ) => {
     const overridden = new Set<string>(getProp(to.props, "overrides"));
     // What layout decides (auto layout, hug and fill, auto-sized text, constraints in a resized
@@ -468,25 +416,14 @@ export function syncInstanceOps(
         ? constrainedValues(to, from, doc.get(to.parent), doc.get(from.parent))
         : {};
     for (const prop of laidOut) if (!(prop in derived)) overridden.add(prop);
-    // Glyphs saved with a file were laid out for each copy (decision 0037); a stale set is never
-    // drawn, so the copy's own is kept rather than replaced by its main's.
+    // Glyphs saved with a file were laid out for each copy (decision 0037); a stale set is
+    // never drawn, so the copy's own is kept rather than replaced by its main's.
     if (from.type === "text") overridden.add("glyphLayout");
-    // Driven fields are the record's, or the main layer's: never an override (decision 0035).
-    const source: Record<string, unknown> = { ...from.props };
-    const drives = new Set<string>();
-    for (const [field] of fields)
-      if (field !== "instanceOf") {
-        drives.add(field);
-        overridden.delete(field);
-        if (field === "characters") drives.add("bindings");
-      }
-    if (fields.length > 0) applyPropertyValues(source, fields, record);
-    if (properties && drives.size > 0) drivenProps.set(to.id, drives);
-    const keys = new Set([...Object.keys(source), ...Object.keys(to.props)]);
+    const keys = new Set([...Object.keys(from.props), ...Object.keys(to.props)]);
     for (const prop of keys) {
       if (!isPropName(prop) || LINK_PROPS.has(prop) || overridden.has(prop)) continue;
       if (isRoot && ROOT_LOCAL_PROPS.has(prop)) continue;
-      if (only && !only(prop) && !drives.has(prop)) continue;
+      if (only && !only(prop)) continue;
       const have = to.props[prop];
       if (prop in derived) {
         const want = derived[prop] as number;
@@ -494,7 +431,7 @@ export function syncInstanceOps(
           ops.push({ op: "set", id: to.id, prop, value: want });
         continue;
       }
-      const want = source[prop];
+      const want = from.props[prop];
       if (sameValue(want, have)) continue;
       ops.push({ op: "set", id: to.id, prop, value: want === undefined ? null : want });
     }
@@ -517,35 +454,19 @@ export function syncInstanceOps(
   };
 
   /**
-   * A nested instance swapped for another component: an instance of that
-   * component placed where its main layer is, so it follows that
-   * component, not the main layer. One a swap property drives is swapped as
-   * the record says (`fields`); one none drives, when its `instanceOf` is
-   * overridden.
+   * A nested instance swapped for another component (its `instanceOf`
+   * overridden): an instance of that component placed where its main layer
+   * is, so it follows that component, not the main layer.
    */
-  const swappedMain = (
-    copy: NodeRecord,
-    mainLayer: NodeRecord,
-    fields: readonly DrivenField[],
-  ): NodeRecord | undefined => {
-    const driven = fields.find(([field]) => field === "instanceOf");
-    let own: string | null;
-    if (driven) {
-      const value = record[driven[1]];
-      own = value && typeof value === "object" ? value.instance : null;
-    } else {
-      own = getProp(copy.props, "instanceOf");
-      if (!getProp(copy.props, "overrides").includes("instanceOf")) return undefined;
-    }
+  const swappedMain = (copy: NodeRecord, mainLayer: NodeRecord): NodeRecord | undefined => {
+    const own = getProp(copy.props, "instanceOf");
     if (!own || own === getProp(mainLayer.props, "instanceOf")) return undefined;
+    if (!getProp(copy.props, "overrides").includes("instanceOf")) return undefined;
     const swapped = doc.get(own);
     return isMainNode(swapped) ? swapped : undefined;
   };
 
-  const create = (mainChild: NodeRecord, parent: string, scope: readonly string[]) =>
-    createMirror(doc, mainChild, parent, ops, { record, scope });
-
-  const visit = (mainNode: NodeRecord, instanceParent: NodeRecord, scope: readonly string[]) => {
+  const visit = (mainNode: NodeRecord, instanceParent: NodeRecord) => {
     for (const childId of doc.childIds(mainNode.id)) {
       const mainChild = doc.get(childId);
       if (!mainChild) continue;
@@ -554,60 +475,30 @@ export function syncInstanceOps(
       if (!existing || existing.type !== mainChild.type) {
         if (existing) ops.push({ op: "delete", id: existing.id });
         // Create the missing subtree under its counterpart parent.
-        const created = create(mainChild, instanceParent.id, scope);
+        const created = createMirror(doc, mainChild, instanceParent.id, ops);
         counterpart.set(mainChild.id, created);
         continue;
       }
       if (existing.parent !== instanceParent.id || existing.key !== mainChild.key) {
         ops.push({ op: "move", id: existing.id, parent: instanceParent.id, key: mainChild.key });
       }
-      const fields = fieldsOf(mainChild, existing, scope);
-      const swapped = swappedMain(existing, mainChild, fields);
-      const byProperty = fields.some(([field]) => field === "instanceOf");
-      if (byProperty) {
-        // Which component it is: the record's choice, or its main layer's.
-        const want = swapped?.id ?? getProp(mainChild.props, "instanceOf");
-        if (getProp(existing.props, "instanceOf") !== want) {
-          ops.push({ op: "set", id: existing.id, prop: "instanceOf", value: want });
-          if (properties) whole.add(existing.id);
-        }
-        const marks = getProp(existing.props, "overrides");
-        if (marks.includes("instanceOf"))
-          ops.push({
-            op: "set",
-            id: existing.id,
-            prop: "overrides",
-            value: marks.length > 1 ? marks.filter((m) => m !== "instanceOf") : null,
-          });
-      }
-      const inner =
-        swapped || getProp(mainChild.props, "instanceOf") !== null
-          ? [...scope, ownLayerId(doc, mainChild.id)]
-          : scope;
+      const swapped = swappedMain(existing, mainChild);
       if (swapped) {
         // Where it sits, and what the outer component's properties drive (its visibility, say),
         // are its main layer's; the rest is the swapped-in component's (decision 0035).
         const boundary = new Set([...ROOT_LOCAL_PROPS, ...boundaryDrivenProps(mainChild)]);
-        boundary.delete("instanceOf");
-        syncProps(mainChild, existing, false, (prop) => boundary.has(prop), fields);
+        syncProps(mainChild, existing, false, (prop) => boundary.has(prop));
         syncProps(swapped, existing, true, (prop) => !boundary.has(prop));
         nameAfterSet(existing, swapped.id);
-      } else
-        syncProps(
-          mainChild,
-          existing,
-          false,
-          byProperty ? (prop) => prop !== "instanceOf" : undefined,
-          fields,
-        );
-      visit(swapped ?? mainChild, existing, inner);
+      } else syncProps(mainChild, existing, false);
+      visit(swapped ?? mainChild, existing);
     }
   };
 
   syncProps(main, instance, true);
   // Instances of a variant carry the set's name.
   nameAfterSet(instance, main.id);
-  visit(main, instance, place?.scope ?? []);
+  visit(main, instance);
 
   // Layers whose main counterpart is gone (or that never had one) don't belong in an instance.
   for (const [mainId, node] of counterpart) {
@@ -624,65 +515,18 @@ export function syncInstanceOps(
       }
     }
   }
-  let out = ops;
-  if (properties) {
-    // What the record decides: driven fields, and a nested instance swapped another way whole.
-    // And which layers the copy has, as its main has them (a layer made, moved or removed by a
-    // teammate's edit made without seeing this one's): never other values (laid out ones).
-    const inside = (id: string) => whole.has(id) || doc.ancestors(id).some((a) => whole.has(a.id));
-    const made = new Set<string>();
-    out = ops.filter((op) => {
-      if (op.op !== "set") {
-        if (op.op === "create") made.add(op.id);
-        return true;
-      }
-      if (made.has(op.id)) return true;
-      if (drivenProps.get(op.id)?.has(op.prop)) return true;
-      if ((op.prop === "instanceOf" || op.prop === "overrides") && whole.has(op.id)) return true;
-      return inside(op.id) && op.id !== instanceId;
-    });
-  }
   // Compact copies have their main's structure by construction (a swap rebuilds it): only
   // values are synced.
-  if (doc.compactCopies) return out.filter((op) => op.op === "set");
-  return dedupeDeletes(doc, out);
+  if (doc.compactCopies) return ops.filter((op) => op.op === "set");
+  return dedupeDeletes(doc, ops);
 }
 
-/**
- * The copy of `mainNode` (and what's in it) under `parent`: its main's
- * values, driven fields as `values`' record says (decision 0035).
- */
-function createMirror(
-  doc: Doc,
-  mainNode: NodeRecord,
-  parent: string,
-  ops: Op[],
-  values: {
-    readonly record: Readonly<Record<string, PropertyValue>>;
-    readonly scope: readonly string[];
-  } | null = null,
-): NodeRecord {
+function createMirror(doc: Doc, mainNode: NodeRecord, parent: string, ops: Op[]): NodeRecord {
   const id = newId();
   const props: Record<string, unknown> = {};
   for (const [prop, value] of Object.entries(mainNode.props))
     if (!LINK_PROPS.has(prop)) props[prop] = value;
   props.mirrors = mainNode.id;
-  let from = mainNode;
-  if (values) {
-    const fields: DrivenField[] = [];
-    for (const [field, ref] of Object.entries(getProp(mainNode.props, "propRefs")))
-      if (ref && field !== "slot")
-        fields.push([field as PropRefField, propertyKey(values.scope, ref)]);
-    applyPropertyValues(props, fields, values.record);
-    // Swapped by a property: an instance of what the record chose, its layers that main's.
-    const swap = fields.find(([field]) => field === "instanceOf");
-    const chosen = swap ? values.record[swap[1]] : undefined;
-    const swapped = chosen && typeof chosen === "object" ? doc.get(chosen.instance) : undefined;
-    if (swapped && isMainNode(swapped) && swapped.id !== props.instanceOf) {
-      props.instanceOf = swapped.id;
-      from = swapped;
-    }
-  }
   const record: NodeRecord = {
     id,
     type: mainNode.type,
@@ -691,13 +535,9 @@ function createMirror(
     props: props as Props,
   };
   ops.push({ op: "create", ...record });
-  const inner =
-    values && (from !== mainNode || getProp(mainNode.props, "instanceOf") !== null)
-      ? { record: values.record, scope: [...values.scope, ownLayerId(doc, mainNode.id)] }
-      : values;
-  for (const childId of doc.childIds(from.id)) {
+  for (const childId of doc.childIds(mainNode.id)) {
     const child = doc.get(childId);
-    if (child) createMirror(doc, child, id, ops, inner);
+    if (child) createMirror(doc, child, id, ops);
   }
   return record;
 }
@@ -928,17 +768,8 @@ export function pinInstances(input: readonly NodeRecord[]): {
   // Read as materialized: this is about the file as it was made.
   let doc = new DocCtor({ compactCopies: false });
   doc.reset(input);
-  let nodes = withSets(input, gridImportOps(doc));
+  const nodes = withSets(input, gridImportOps(doc));
   if (nodes !== input) doc.reset(nodes);
-  // What instances set for their properties goes in their records first, the one place a value is
-  // kept (decision 0035, item 3), so a nested instance a swap property swapped is that, not a
-  // structure sync would rebuild; a layer showing another value than its property's is unlinked.
-  // Every instance gets a record, empty when it set nothing (`migrateRecords`).
-  const folded = migrateRecords(nodes).nodes;
-  if (folded !== nodes) {
-    nodes = folded;
-    doc.reset(nodes);
-  }
   const unlinked = new Set<string>();
   let detached = 0;
   for (const root of roots(doc)) {
@@ -978,12 +809,10 @@ export function pinInstances(input: readonly NodeRecord[]): {
   };
   let out: NodeRecord[] = nodes.map((node) => {
     if (unlinked.has(node.id)) {
-      // A plain layer now: what it shows is its own, a record of values its instance set too.
       const props: Record<string, unknown> = { ...node.props };
       delete props.instanceOf;
       delete props.mirrors;
       delete props.overrides;
-      delete props.propValues;
       return { ...node, props: props as Props };
     }
     if (!copiesPlain(node.id)) return node;
@@ -1017,21 +846,6 @@ export function pinInstances(input: readonly NodeRecord[]): {
   return { nodes: out, pinned, detached };
 }
 
-/** `nodes` with `patches`' properties (undefined: removed); the same array when there are none. */
-function _withPatches(
-  nodes: readonly NodeRecord[],
-  patches: ReadonlyMap<string, Record<string, unknown>>,
-): readonly NodeRecord[] {
-  if (patches.size === 0) return nodes;
-  return nodes.map((node) => {
-    const patch = patches.get(node.id);
-    if (!patch) return node;
-    const props: Record<string, unknown> = { ...node.props, ...patch };
-    for (const [prop, value] of Object.entries(patch)) if (value === undefined) delete props[prop];
-    return { ...node, props: props as Props };
-  });
-}
-
 /** `nodes` with `set` operations applied (the same array when there are none). */
 function withSets(nodes: readonly NodeRecord[], ops: readonly Op[]): readonly NodeRecord[] {
   const sets = new Map<string, Record<string, unknown>>();
@@ -1054,13 +868,8 @@ function withSets(nodes: readonly NodeRecord[], ops: readonly Op[]): readonly No
  */
 export function overrideOps(doc: Doc, ops: readonly Op[]): Op[] {
   const marks = new Map<string, Set<string>>();
-  // A layer the operations unlink from its main (detached) has nothing to be an override of.
-  const leaving = new Set<string>();
-  for (const op of ops)
-    if (op.op === "set" && (op.prop === "mirrors" || op.prop === "instanceOf") && !op.value)
-      leaving.add(op.id);
   for (const op of ops) {
-    if (op.op !== "set" || LINK_PROPS.has(op.prop) || leaving.has(op.id)) continue;
+    if (op.op !== "set" || LINK_PROPS.has(op.prop)) continue;
     const node = doc.get(op.id);
     if (!node) continue;
     const isRoot = isInstanceRoot(node);
@@ -1119,133 +928,30 @@ export function resetAllOverridesOps(doc: Doc, instanceId: string): Op[] {
       ops.push({ op: "set", id, prop: "overrides", value: null });
     stack.push(...doc.childIds(id));
   }
-  // Its property values, and its nested instances', go too (decision 0035), each on its own.
-  ops.push(...clearValueOps(doc, instanceId));
   return ops;
 }
 
-/** The operations that remove every value an instance's record holds, a value at a time. */
-export function clearRecordOps(node: NodeRecord): Op[] {
-  return Object.keys(getProp(node.props, "propValues")).map(
-    (key): Op => ({ op: "set", id: node.id, prop: "propValues", key, value: null }),
-  );
-}
-
-/**
- * Turns an instance into a plain frame: no link to the main component,
- * nothing synced. Its layers keep the values they show, its property
- * values' included (decision 0035); its nested instances stay instances of
- * their own components, each with the values its record held for them.
- */
+/** Turns an instance into a plain frame: no link to the main component, nothing synced. */
 export function detachOps(doc: Doc, instanceId: string): Op[] {
   const ops: Op[] = [{ op: "set", id: instanceId, prop: "instanceOf", value: null }];
-  const instance = doc.get(instanceId);
-  const record = instance ? getProp(instance.props, "propValues") : {};
-  // A frame has no properties to set: what they set stays on its layers.
-  const nested: Op[] = [];
-  if (instance) ops.push(...clearRecordOps(instance));
   const stack = [...doc.childIds(instanceId)];
   while (stack.length > 0) {
     const id = stack.pop() as string;
     const node = doc.get(id);
     if (!node) continue;
-    const unlinked = getProp(node.props, "mirrors") !== null;
-    if (unlinked) ops.push({ op: "set", id, prop: "mirrors", value: null });
-    if (getProp(node.props, "overrides").length > 0)
-      ops.push({ op: "set", id, prop: "overrides", value: null });
-    // A layer keeps what its property's value shows (`shownValues`), which with materialized
-    // copies a layer written before the record's last change can lag (compact copies present it).
-    const shown = unlinked && !doc.compactCopies ? shownOps(doc, node) : { ops: [], swap: null };
-    ops.push(...shown.ops);
     if (isInstanceRoot(node)) {
-      // Nested instances stay instances of their own components, with every value they show
-      // (compact copies give them theirs as they're stored on their own). One a swap the record
-      // chose left stale is made an instance of that component (`shownOps`), its layers its.
-      const values = doc.compactCopies ? null : nestedValues(doc, record, node, shown.swap);
-      if (values)
-        for (const [key, value] of Object.entries(values))
-          nested.push({ op: "set", id, prop: "propValues", key, value });
-      if (!doc.compactCopies && !shown.swap) ops.push(...ownComponentOps(doc, id));
+      // Nested instances stay instances of their own components.
+      if (getProp(node.props, "mirrors")) ops.push({ op: "set", id, prop: "mirrors", value: null });
+      if (getProp(node.props, "overrides").length > 0)
+        ops.push({ op: "set", id, prop: "overrides", value: null });
       continue;
     }
-    stack.push(...doc.childIds(id));
-  }
-  return [...ops, ...nested];
-}
-
-/**
- * A nested instance in a materialized copy, about to stand on its own
- * (detached around it): its layers copy its main's copy layers, which copy
- * its own component's. They copy its component's then, one step down, as
- * an instance's layers do, so it follows its component and converts.
- */
-function ownComponentOps(doc: Doc, instanceId: string): Op[] {
-  const ops: Op[] = [];
-  const stack = [...doc.childIds(instanceId)];
-  while (stack.length > 0) {
-    const id = stack.pop() as string;
-    const node = doc.get(id);
-    if (!node) continue;
-    const mirrors = getProp(node.props, "mirrors");
-    const through = mirrors ? getProp(doc.get(mirrors)?.props ?? {}, "mirrors") : null;
-    if (through && doc.has(through)) ops.push({ op: "set", id, prop: "mirrors", value: through });
+    if (getProp(node.props, "mirrors")) ops.push({ op: "set", id, prop: "mirrors", value: null });
+    if (getProp(node.props, "overrides").length > 0)
+      ops.push({ op: "set", id, prop: "overrides", value: null });
     stack.push(...doc.childIds(id));
   }
   return ops;
-}
-
-/**
- * The values a nested instance in a copy shows, as a record of its own for
- * when it's no longer in one (detached): those the outer instance's record
- * keeps under its scope, over those its main layer's own record holds (the
- * values the main around it set, which it shows where the outer record has
- * none), while it's an instance of the same component as that layer. Null
- * when there are none.
- */
-export function nestedValues(
-  doc: Doc,
-  outer: Readonly<Record<string, PropertyValue>>,
-  node: NodeRecord,
-  /** The component it's made an instance of instead, when a swap is handed on. */
-  swap: string | null = null,
-): Record<string, PropertyValue> | null {
-  const own = ownLayerId(doc, node.id);
-  const source = own === node.id ? undefined : doc.get(own);
-  const inherited =
-    source && getProp(source.props, "instanceOf") === (swap ?? getProp(node.props, "instanceOf"))
-      ? getProp(source.props, "propValues")
-      : {};
-  const values = { ...inherited, ...(scopedValues(outer, own) ?? {}) };
-  return Object.keys(values).length > 0 ? values : null;
-}
-
-/**
- * What a materialized copy layer about to be detached keeps of the fields a
- * property drives: each as it shows (`shownValues`), set where the layer
- * holds another (written before the record's last change: the record
- * wins); a nested instance a stale swap left is swapped to the component
- * shown (`swap`), its layers that component's.
- */
-function shownOps(doc: Doc, node: NodeRecord): { ops: Op[]; swap: string | null } {
-  const ops: Op[] = [];
-  let swap: string | null = null;
-  for (const { field, value } of shownValues(doc, node)) {
-    if (field === "instanceOf") {
-      const to = typeof value === "object" ? value.instance : null;
-      if (!to || to === getProp(node.props, "instanceOf")) continue;
-      // Its layers become that component's; it's no longer a copy, so no swap mark.
-      ops.push(
-        ...swapInstanceOps(doc, node.id, to).filter(
-          (op) => !(op.op === "set" && op.id === node.id && op.prop === "overrides"),
-        ),
-      );
-      swap = to;
-      continue;
-    }
-    if (sameValue(fieldValue(node, field), value)) continue;
-    ops.push({ op: "set", id: node.id, prop: field, value: value as boolean | string });
-  }
-  return { ops, swap };
 }
 
 /** Properties of a node that differ from its main counterpart because of an override. */
@@ -1275,9 +981,7 @@ function swapCompactOps(doc: Doc, instance: NodeRecord, target: NodeRecord): Op[
     const id = stack.pop() as string;
     const node = doc.get(id);
     if (!node) continue;
-    // Fields a property drives go by property id, through the instance's record (decision 0035).
-    const driven = getProp(node.props, "propRefs") as Record<string, string | undefined>;
-    const overridden = getProp(node.props, "overrides").filter((prop) => !driven[prop]);
+    const overridden = getProp(node.props, "overrides");
     if (overridden.length > 0) {
       const values: Record<string, unknown> = {};
       for (const prop of overridden)
@@ -1399,9 +1103,7 @@ export function swapInstanceOps(doc: Doc, instanceId: string, componentId: strin
     const id = stack.pop() as string;
     const node = doc.get(id);
     if (!node) continue;
-    // Fields a property drives go by property id, through the instance's record (decision 0035).
-    const driven = getProp(node.props, "propRefs") as Record<string, string | undefined>;
-    const overridden = getProp(node.props, "overrides").filter((prop) => !driven[prop]);
+    const overridden = getProp(node.props, "overrides");
     if (overridden.length > 0) {
       const values: Record<string, unknown> = {};
       for (const prop of overridden)

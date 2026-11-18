@@ -636,8 +636,9 @@ export const ComponentPropDef = z.object({
 export type ComponentPropDef = z.infer<typeof ComponentPropDef>;
 
 /**
- * An instance's value for one component property (decision 0035, item 3): a
- * boolean's, a text's, or the component an instance swap chose.
+ * An instance's value for one component property, as the panel shows and
+ * sets it (decision 0035, item 3): a boolean's, a text's, or the component an
+ * instance swap chose. Read from, and written to, the layers it drives.
  */
 export const PropertyValue = z.union([
   z.boolean(),
@@ -645,71 +646,6 @@ export const PropertyValue = z.union([
   z.object({ instance: z.string().regex(ID_PATTERN) }).strict(),
 ]);
 export type PropertyValue = z.infer<typeof PropertyValue>;
-
-/**
- * The most values one instance's record holds: its own properties' (a set's
- * and a variant's definitions, 64 each) and those of the nested instances
- * in its copy, which it holds too (decision 0035, item 3).
- */
-export const MAX_PROPERTY_VALUES = 512;
-
-/** The most nested instances a record key passes through (`PropertyKey`). */
-export const MAX_PROPERTY_SCOPE = 32;
-
-/**
- * Where a record keeps a value (decision 0035, item 3): a property id for
- * the instance's own property; for a property of a nested instance in its
- * copy, the nested instance's scope first, `scope/propertyId`. A scope is
- * the ids of the main layers each nested instance on the way down copies,
- * from the instance down (`ownLayerId` of each): ids of layers a main holds
- * itself, never copies', so the same in either copy form and kept by a
- * conversion. Neither node ids nor property ids hold "/".
- */
-export const PropertyKey = z
-  .string()
-  .max(65 * MAX_PROPERTY_SCOPE + 64)
-  .regex(new RegExp(`^(?:[0-9A-Za-z_-]{1,64}/){0,${MAX_PROPERTY_SCOPE}}[\\w:.-]{1,64}$`));
-
-/** A record's key for `propertyId` of the nested instance at `scope` (none: the instance's own). */
-export function propertyKey(scope: readonly string[], propertyId: string): string {
-  return scope.length === 0 ? propertyId : `${scope.join("/")}/${propertyId}`;
-}
-
-/** A record key's scope and property id (`propertyKey` taken apart). */
-export function splitPropertyKey(key: string): { scope: string[]; property: string } {
-  const parts = key.split("/");
-  const property = parts.pop() as string;
-  return { scope: parts, property };
-}
-
-/**
- * The most characters one instance's record holds in all, keys and values
- * (decision 0035, item 3). Each value is bounded as a text layer's
- * `characters` is (200,000), but 512 of them aren't: this keeps a record,
- * and an operation that creates the node holding it (a paste, an undone
- * delete, a branch merge), well inside a room's 4 MB message, which each
- * entry's own write is too. Checked on what a transaction leaves, so the
- * edits in one may pass through a larger record on the way (one value
- * grows before another shrinks). A value that doesn't fit isn't set.
- */
-export const MAX_PROPERTY_VALUES_CHARS = 400_000;
-
-/** What a record (or one entry of it) counts against `MAX_PROPERTY_VALUES_CHARS`. */
-export function propertyValueChars(key: string, value: unknown): number {
-  if (typeof value === "string") return key.length + value.length;
-  if (value && typeof value === "object") {
-    const instance = (value as { instance?: unknown }).instance;
-    return key.length + (typeof instance === "string" ? instance.length : 0);
-  }
-  return key.length + 1;
-}
-
-/** The characters a whole record counts (see `propertyValueChars`). */
-export function propertyValuesChars(values: Readonly<Record<string, unknown>>): number {
-  let n = 0;
-  for (const key in values) n += propertyValueChars(key, values[key]);
-  return n;
-}
 
 /** The values of a layer a component property drives: which property drives each. */
 export const PROP_REF_FIELDS = ["visible", "characters", "instanceOf", "slot"] as const;
@@ -744,8 +680,18 @@ const CORNERS = ["frame", "rect"] as const;
 /** Shapes with open ends: line caps and end markers apply. */
 const OPEN_ENDS = ["line", "path"] as const;
 
-/** Layers that can be a mask: anything with a filled outline. */
-const MASKABLE = ["frame", "rect", "ellipse", "polygon", "star", "path"] as const;
+/** Layers that can be a mask: any layer, as in Figma (a shape, a frame, a group, a text, a line). */
+const MASKABLE = [
+  "frame",
+  "group",
+  "rect",
+  "ellipse",
+  "polygon",
+  "star",
+  "line",
+  "path",
+  "text",
+] as const;
 
 /** What an open stroke's end looks like (Figma's arrow and marker ends). */
 export const STROKE_MARKERS = ["none", "arrow", "triangle", "circle", "diamond", "bar"] as const;
@@ -795,14 +741,16 @@ export const PROPS = {
   ),
   effects: prop(z.array(Effect).max(32), [], LAYERS),
   /**
-   * A mask: its outline clips the layers above it in the same parent (up to
-   * the next mask), and it isn't drawn itself, like Figma's "Use as mask".
+   * A mask: it masks the layers above it in the same parent, up to the next
+   * mask or a frame that clips its content, and it isn't drawn itself, like
+   * Figma's "Use as mask" (see the editor's masks.ts).
    */
   isMask: prop(z.boolean(), false, MASKABLE),
   /**
-   * How a mask masks, as in Figma: by its outline (a hard clip), by its
-   * alpha (fills, gradients, opacity and blur fade what's above), or by its
-   * luminance (light shows, dark hides).
+   * How a mask masks, as in Figma: by its outline (a hard clip: whatever it
+   * draws, at full opacity), by its alpha (fills, strokes, gradients,
+   * opacity and effects fade what's above), or by its luminance (light
+   * shows, dark hides).
    */
   maskType: prop(z.enum(["outline", "alpha", "luminance"]), "outline", MASKABLE),
 
@@ -861,28 +809,10 @@ export const PROPS = {
   /**
    * Which of this layer's values a component property drives: a boolean its
    * `visible`, a text its `characters`, an instance swap its `instanceOf`.
-   * An instance's value for the property is that value in its copy.
+   * An instance's value for the property is that value in its copy, as the
+   * copy's layers have it (decision 0035, item 3).
    */
   propRefs: prop(z.partialRecord(z.enum(PROP_REF_FIELDS), PropertyId), {}, LAYERS),
-  /**
-   * The component property values this instance set (decision 0035, item 3),
-   * by `PropertyKey`: its own, and its nested instances'. The only place a
-   * value is kept: a layer a property drives shows the value here, or its
-   * main layer's, wherever it's read (`CopyView`, materialized sync), and
-   * never holds it as an override. Only on an instance that isn't a copy
-   * (a top-level one, or a nested one in a main); not copied from a main.
-   */
-  propValues: prop(
-    z
-      .record(PropertyKey, PropertyValue)
-      .refine((values) => Object.keys(values).length <= MAX_PROPERTY_VALUES, "too many values")
-      .refine(
-        (values) => propertyValuesChars(values) <= MAX_PROPERTY_VALUES_CHARS,
-        "holds too many characters",
-      ),
-    {},
-    CONTAINERS,
-  ),
   /** A nested instance in a main whose properties show on that main's instances (Figma's "exposed"). */
   exposeProps: prop(z.boolean(), false, CONTAINERS),
   instanceOf: prop(z.string().regex(ID_PATTERN).nullable(), null, CONTAINERS),
@@ -1022,9 +952,7 @@ export const PROPS = {
 export type PropName = keyof typeof PROPS;
 
 /** Never held by an override record: they're the copy's link to its main, or not a layer's. */
-// A record of a copy layer holds no property values: its instance's root holds them, nested
-// instances' included (decision 0035, item 3).
-const OVERRIDE_REFUSED: ReadonlySet<string> = new Set(["mirrors", "isComponent", "propValues"]);
+const OVERRIDE_REFUSED: ReadonlySet<string> = new Set(["mirrors", "isComponent"]);
 export type PropValues = { -readonly [K in PropName]: z.infer<(typeof PROPS)[K]["schema"]> };
 /** What a node stores: only the properties that differ from their defaults. */
 export type Props = Partial<PropValues>;
@@ -1045,15 +973,6 @@ const allowedProps: Record<NodeType, ReadonlySet<PropName>> = Object.fromEntries
     ),
   ]),
 ) as unknown as Record<NodeType, ReadonlySet<PropName>>;
-
-/**
- * Properties whose value is a map an operation can set one entry of (a
- * `set` with a `key`), each entry's value checked by the schema given:
- * an instance's component property values (decision 0035, item 15).
- */
-export const KEYED_PROPS: ReadonlyMap<PropName, { key: z.ZodType; value: z.ZodType }> = new Map([
-  ["propValues", { key: PropertyKey, value: PropertyValue }],
-]);
 
 export function isPropName(name: string): name is PropName {
   return Object.hasOwn(PROPS, name);

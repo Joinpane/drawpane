@@ -11,14 +11,7 @@
  * that can't be found is dropped, as the room refuses it from a client in
  * the old form (`#fromOldForm` in file-room.ts), and never sent stale.
  */
-import {
-  heldNodeIds,
-  type NodeRecord,
-  type Op,
-  renameHeldIds,
-  setOpProps,
-  withSetProps,
-} from "@drawpane/model";
+import { heldNodeIds, type NodeRecord, type Op, type Props, renameHeldIds } from "@drawpane/model";
 import type { Doc } from "./doc";
 
 /** What the document in the old form said of a layer an edit names. */
@@ -31,7 +24,7 @@ interface Before {
 function heldBy(op: Op): ReturnType<typeof heldNodeIds> | null {
   if (op.op === "create") return heldNodeIds(op.props);
   if (op.op === "set" && op.value !== null && op.value !== undefined)
-    return heldNodeIds(setOpProps(op));
+    return heldNodeIds({ [op.prop]: op.value } as Props);
   return null;
 }
 
@@ -118,8 +111,10 @@ export class FormChange {
       if (op.op === "create") {
         out.push({ ...op, props: renameHeldIds(op.props, rename) ?? op.props });
       } else if (op.op === "set") {
-        const value = renameHeldIds(setOpProps(op), rename);
-        out.push(value ? withSetProps(op, value) : op);
+        const value = renameHeldIds({ [op.prop]: op.value } as Props, rename);
+        out.push(
+          value ? ({ ...op, value: (value as Record<string, unknown>)[op.prop] } as Op) : op,
+        );
       }
     }
     return out;

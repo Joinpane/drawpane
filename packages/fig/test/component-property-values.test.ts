@@ -1,9 +1,9 @@
 /**
- * The review of component properties phase 1 (#187), as tests: each case
- * failed on #187's head and passes with decision 0035's amended item 3 (an
- * instance's values kept by property id) and the fixes the review asked for.
- * Each runs with copies stored both ways, and checks undo and what another
- * client receives where the case changes structure.
+ * The review of component properties phase 1 (#187), as tests of what
+ * decision 0035 settled on: an instance's property values are the values of
+ * the layers they drive, kept as ordinary overrides. Each runs with copies
+ * stored both ways, and checks undo and what another client receives where
+ * the case changes structure.
  */
 import { readFileSync } from "node:fs";
 import {
@@ -137,8 +137,10 @@ for (const compact of [false, true])
         expect(getProp(editor.doc.get(target)?.props ?? {}, "characters")).toBe("Keep me");
     });
 
-    // Review finding 2 (P1), second case: no layer holds it in between.
-    it("keeps a text value through a variant that has no layer for it", () => {
+    // Review finding 2 (P1), second case: no layer holds it in between. A value is what its
+    // layers hold, so a variant without one drops it, as main drops any override on a layer the
+    // other variant lacks; undo brings it back.
+    it("drops a text value at a variant that has no layer for it, and undo brings it back", () => {
       const nodes = [
         node("p", "page", ROOT_ID, "a0", {}),
         node("set", "frame", "p", "a0", {
@@ -174,21 +176,18 @@ for (const compact of [false, true])
       editor.setInstanceProperty("i", "label", "Keep me");
       editor.setInstanceProperty("i", "State", "No label");
       expect(row(editor, "i", "label")).toBeUndefined();
-      expect(getProp(editor.doc.get("i")?.props ?? {}, "propValues")).toEqual({ label: "Keep me" });
       editor.setInstanceProperty("i", "State", "With label");
-      expect(row(editor, "i", "label")?.value).toBe("Keep me");
+      expect(row(editor, "i", "label")).toMatchObject({ value: "Base", changed: false });
       const target = row(editor, "i", "label")?.targets[0] as string;
-      expect(getProp(peer().get(target)?.props ?? {}, "characters")).toBe("Keep me");
-      // Undoing the round trip and the set leaves no record.
+      expect(getProp(peer().get(target)?.props ?? {}, "characters")).toBe("Base");
+      // Undoing the round trip gives the value back.
       editor.undo();
       editor.undo();
-      editor.undo();
-      expect(getProp(editor.doc.get("i")?.props ?? {}, "propValues")).toEqual({});
-      expect(row(editor, "i", "label")?.value).toBe("Base");
+      expect(row(editor, "i", "label")).toMatchObject({ value: "Keep me", changed: true });
     });
 
-    // Review design note: one property, several layers, one value.
-    it("gives a layer the main adds the value its instances set", () => {
+    // Review design note: one property, several layers that disagree.
+    it("shows Mixed when a layer the main adds holds another value, and an edit sets them all", () => {
       const { editor, id, peer } = open(compact);
       editor.setInstanceProperty("f6-1", "10:1", false);
       editor.commit([
@@ -201,20 +200,29 @@ for (const compact of [false, true])
           props: { name: "Second icon", width: 16, height: 16, propRefs: { visible: "10:1" } },
         },
       ]);
+      // The new layer shows its main layer's value, the other this instance's.
       const boolean = row(editor, "f6-1", "10:1");
       expect(boolean?.targets).toHaveLength(2);
-      expect(boolean?.value).toBe(false);
+      expect(boolean).toMatchObject({ value: null, mixed: true, changed: true });
       const values = (doc: Doc) =>
         boolean?.targets.map((t) => getProp(doc.get(t)?.props ?? {}, "visible"));
+      expect(values(editor.doc)?.sort()).toEqual([false, true]);
+      // Setting it sets both, as overrides, in one transaction.
+      const sentBefore = peer();
+      editor.setInstanceProperty("f6-1", "10:1", false);
+      expect(row(editor, "f6-1", "10:1")).toMatchObject({ value: false, changed: true });
+      expect(row(editor, "f6-1", "10:1")?.mixed).toBeUndefined();
       expect(values(editor.doc)).toEqual([false, false]);
       expect(values(peer())).toEqual([false, false]);
+      expect(values(sentBefore)?.sort()).toEqual([false, true]);
+      for (const t of boolean?.targets ?? [])
+        expect(getProp(editor.doc.get(t)?.props ?? {}, "overrides")).toContain("visible");
       // An instance that didn't set it shows the new layer.
       expect(getProp(editor.doc.get(id("fI6-3_1-6"))?.props ?? {}, "visible")).toBe(true);
     });
 
-    it("sets the property when a layer it drives is edited by hand", () => {
+    it("shows Mixed when a layer it drives is edited by hand, and a reset clears them all", () => {
       const { editor } = open(compact);
-      editor.setInstanceProperty("f6-1", "10:1", true);
       editor.commit([
         {
           op: "create",
@@ -228,15 +236,17 @@ for (const compact of [false, true])
       const targets = row(editor, "f6-1", "10:1")?.targets ?? [];
       expect(targets).toHaveLength(2);
       editor.setProp([targets[1] as string], "visible", false);
-      expect(row(editor, "f6-1", "10:1")?.value).toBe(false);
-      expect(targets.map((t) => getProp(editor.doc.get(t)?.props ?? {}, "visible"))).toEqual([
-        false,
-        false,
-      ]);
-      // Its record has the value (and the label text it held as an override before it had one).
-      expect(getProp(editor.doc.get("f6-1")?.props ?? {}, "propValues")).toMatchObject({
-        "10:1": false,
+      expect(row(editor, "f6-1", "10:1")).toMatchObject({
+        value: null,
+        mixed: true,
+        changed: true,
       });
+      editor.resetInstanceProperty("f6-1", "10:1");
+      expect(row(editor, "f6-1", "10:1")).toMatchObject({ value: true, changed: false });
+      expect(targets.map((t) => getProp(editor.doc.get(t)?.props ?? {}, "visible"))).toEqual([
+        true,
+        true,
+      ]);
     });
 
     // Review finding 3 (P2).
@@ -425,9 +435,7 @@ for (const compact of [false, true])
     it("swaps every layer an instance swap drives, and keeps the choice across a variant switch", () => {
       const { editor } = open(compact);
       editor.setInstanceProperty("f6-1", "10:3", "f4-1");
-      expect(getProp(editor.doc.get("f6-1")?.props ?? {}, "propValues")).toMatchObject({
-        "10:3": { instance: "f4-1" },
-      });
+      expect(row(editor, "f6-1", "10:3")).toMatchObject({ value: "f4-1", changed: true });
       const variant = instanceProperties(editor.doc, "f6-1")?.rows[0];
       const other = variant?.options?.find((o) => o !== variant.value) as string;
       editor.setInstanceProperty("f6-1", variant?.id as string, other);
@@ -442,26 +450,21 @@ for (const compact of [false, true])
       editor.setInstanceProperty("f6-1", "10:2", "Gone");
       editor.select(["f6-1"]);
       editor.resetInstances();
-      expect(getProp(editor.doc.get("f6-1")?.props ?? {}, "propValues")).toEqual({});
       expect(row(editor, "f6-1", "10:1")).toMatchObject({ value: true, changed: false });
       expect(row(editor, "f6-1", "10:2")?.changed).toBe(false);
     });
 
-    it("keeps an imported value, folded into the record at import, across the first switch", () => {
-      const { editor } = open(compact);
-      // The imported outline Button's text is in its record, put there as the file was imported
-      // (`foldPropertyValues`), not an override on its label.
-      expect(getProp(editor.doc.get("f6-1")?.props ?? {}, "propValues")).toEqual({
-        "10:2": "Outline",
-      });
+    it("keeps an imported value, an override on its label, across the first switch", () => {
+      const { editor, id } = open(compact);
+      // The imported outline Button's text is its label's override, as Figma counts it.
+      expect(getProp(editor.doc.get(id("fI6-1_1-7"))?.props ?? {}, "overrides")).toEqual([
+        "characters",
+      ]);
       expect(row(editor, "f6-1", "10:2")).toMatchObject({ value: "Outline", changed: true });
       const variant = instanceProperties(editor.doc, "f6-1")?.rows[0];
       const other = variant?.options?.find((o) => o !== variant.value) as string;
       editor.setInstanceProperty("f6-1", variant?.id as string, other);
-      expect(getProp(editor.doc.get("f6-1")?.props ?? {}, "propValues")).toMatchObject({
-        "10:2": "Outline",
-      });
-      expect(row(editor, "f6-1", "10:2")?.value).toBe("Outline");
+      expect(row(editor, "f6-1", "10:2")).toMatchObject({ value: "Outline", changed: true });
     });
 
     it("lists the old variant noise of a file from before, as it is (no silent cleanup)", () => {

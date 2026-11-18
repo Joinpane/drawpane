@@ -60,6 +60,19 @@ export function hitsNode(scene: Scene, node: NodeRecord, p: Point, tolerance: nu
 }
 
 /**
+ * True when `p` lands where a mask lets its layers show: on its own shape,
+ * or for a group, on any visible layer in it.
+ */
+function hitsMask(scene: Scene, mask: NodeRecord, p: Point): boolean {
+  if (mask.type !== "group") return hitsNode(scene, mask, p, 0);
+  const doc = scene.doc;
+  return doc.childIds(mask.id).some((id) => {
+    const child = doc.get(id);
+    return !!child && child.props.visible !== false && hitsMask(scene, child, p);
+  });
+}
+
+/**
  * A parent's children that may be hit at `p`, topmost first: those whose
  * extent comes within `tolerance` of it (the scene's index finds them),
  * leaving out those a mask clips away at `p` (layers above a mask only
@@ -80,7 +93,7 @@ function reachable(scene: Scene, parentId: string, p: Point, tolerance: number):
     if (mask) {
       let hit = inside.get(mask.id);
       if (hit === undefined) {
-        hit = hitsNode(scene, mask, p, 0);
+        hit = hitsMask(scene, mask, p);
         inside.set(mask.id, hit);
       }
       if (!hit) continue;

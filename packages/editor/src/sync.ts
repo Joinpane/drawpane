@@ -721,11 +721,7 @@ export class SyncEngine {
 
 /**
  * Drops `set` operations that a later `set` of the same property overrides,
- * unless a create, delete or move of that node sits between them. A whole
- * map's set and its entries' (keyed) sets are kept in order: neither is
- * dropped for the other. What bounds a map whole is checked on what the
- * transaction leaves (`checkKeyedMaps`), so dropping an entry's earlier
- * write never makes the rest a transaction the room refuses (decision 0035).
+ * unless a create, delete or move of that node sits between them.
  */
 export function compactOps(ops: readonly Op[]): Op[] {
   const keep = new Array<boolean>(ops.length).fill(true);
@@ -733,8 +729,7 @@ export function compactOps(ops: readonly Op[]): Op[] {
   for (let i = ops.length - 1; i >= 0; i--) {
     const op = ops[i] as Op;
     if (op.op === "set") {
-      // A keyed set (one entry of a map) only overrides a later set of the same entry.
-      const key = `${op.id}\u0000${op.prop}${op.key === undefined ? "" : `\u0000${op.key}`}`;
+      const key = `${op.id}\u0000${op.prop}`;
       if (seen.has(key)) keep[i] = false;
       else seen.add(key);
     } else {

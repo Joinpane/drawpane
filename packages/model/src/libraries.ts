@@ -266,13 +266,13 @@ function references(doc: DocReader, node: NodeRecord): string[] {
     }
   if (p.variableModes && typeof p.variableModes === "object")
     out.push(...Object.keys(p.variableModes as Record<string, string>));
-  // An instance swap's default and preferred components, and one an instance chose (decision
-  // 0035): a component only a swap offers is needed too.
+  // An instance swap's default and preferred components (decision 0035): a component only a
+  // swap offers is needed too.
   for (const id of swapComponentIds(p)) out.push(setOf(doc, id)?.id ?? id);
   return out;
 }
 
-/** The components a node's swap properties name: definitions' defaults and preferred ones, and chosen values. */
+/** The components a node's swap property definitions name: their defaults and preferred ones. */
 export function swapComponentIds(props: Readonly<Record<string, unknown>>): string[] {
   const out: string[] = [];
   if (Array.isArray(props.componentProps))
@@ -286,12 +286,6 @@ export function swapComponentIds(props: Readonly<Record<string, unknown>>): stri
       if (Array.isArray(def.preferred))
         for (const id of def.preferred) if (typeof id === "string") out.push(id);
     }
-  if (props.propValues && typeof props.propValues === "object")
-    for (const value of Object.values(props.propValues as Record<string, unknown>))
-      if (value && typeof value === "object") {
-        const id = (value as { instance?: unknown }).instance;
-        if (typeof id === "string") out.push(id);
-      }
   return out;
 }
 

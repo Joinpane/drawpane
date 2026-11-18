@@ -31,7 +31,7 @@ async function join(browser: Browser, fileId: string, clientId = "person") {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 2,
     clientId,
     revn: null,
     copies: ["materialized", "compact"],
