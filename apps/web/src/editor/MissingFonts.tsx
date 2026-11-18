@@ -16,7 +16,9 @@ import {
   type Editor,
   fontFaceKey,
   fontUsage,
+  glyphTable,
   replaceFontOps,
+  savedText,
   type TextFace,
 } from "@drawpane/editor";
 import { builtInFontAlias, type FontAlias, type TeamFontAlias } from "@drawpane/model";
@@ -153,9 +155,23 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
   const aliased = report.filter((r) => r.status === "aliased");
   // An alias stands in for a family that isn't here; a family here missing a style can't have one.
   const listed = scope === "team" ? missing.filter((r) => r.status === "missing") : missing;
-  const missingLayers = new Set(
+  const missingIds = new Set(
     missing.flatMap((r) => r.styles.filter((s) => s.missing).flatMap((s) => s.layers)),
-  ).size;
+  );
+  // Layers a .fig saved with their glyph outlines draw from them until edited (decision 0037).
+  const table = glyphTable(editor.doc);
+  const drawnFromOutlines = (ids: Iterable<string>) => {
+    let n = 0;
+    for (const id of ids) {
+      const node = editor.doc.get(id);
+      if (node && savedText(node, editor.measurer, table)) n++;
+    }
+    return n;
+  };
+  const outlined = drawnFromOutlines(missingIds);
+  const familyOutlined = (r: FamilyReport) =>
+    drawnFromOutlines(new Set(r.styles.filter((st) => st.missing).flatMap((st) => st.layers)));
+  const missingLayers = missingIds.size - outlined;
 
   const familyFor = (r: FamilyReport) =>
     families[r.family] ?? (r.status === "styles" ? r.family : "");
@@ -226,7 +242,9 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
       ? aliased.length > 0
         ? "Every font in this file is available, some through an alias."
         : "Every font in this file is available."
-      : `${fontCount} in this file ${isAre} available here, so ${layers(missingLayers)} ${shows} in a fallback font or a nearby style.`;
+      : outlined > 0
+        ? `${fontCount} in this file ${isAre} available here. ${layers(outlined)} ${outlined === 1 ? "draws" : "draw"} from the glyph outlines saved with the file, as laid out, until edited${missingLayers > 0 ? `; ${layers(missingLayers)} ${shows} in a fallback font or a nearby style` : ""}.`
+        : `${fontCount} in this file ${isAre} available here, so ${layers(missingLayers)} ${shows} in a fallback font or a nearby style.`;
 
   return (
     <div className="missing-fonts">
@@ -264,6 +282,12 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
                     {r.status === "missing" ? "Missing" : "Missing styles"}
                   </Badge>
                 </div>
+                {familyOutlined(r) > 0 ? (
+                  <p className="missing-fonts__hint">
+                    {layers(familyOutlined(r))} drawn from saved glyph outlines. Edited text shows
+                    in a fallback font.
+                  </p>
+                ) : null}
                 {r.status === "missing" ? (
                   <label className="missing-fonts__row">
                     <span className="missing-fonts__label">Replace with</span>

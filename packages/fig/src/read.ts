@@ -276,6 +276,8 @@ async function buildPages(
   /** Pages of the file left out, whose components come in as detached copies. */
   const omitted = new Set(pages.filter((p) => !chosen.has(p.id)).map((p) => p.id));
   const builder = new RestFileBuilder();
+  /** Glyph outlines, each kept once across the passes. */
+  const outlines = new Map<string, string>();
   let built = 0;
   for (const pass of passes) {
     progress({ stage: "pages", done: built, total });
@@ -292,7 +294,7 @@ async function buildPages(
     const layers = recordLayers(state);
     const ids = new RestIds(state.graph, layers, saved);
     applySwappedLooks(state.graph, ids, raw, layers);
-    const ctx = { graph: state.graph, ids, records: raw, notes };
+    const ctx = { graph: state.graph, ids, records: raw, notes, outlines };
     for (const page of state.graph.getPages(false)) {
       const guid = ids.sourceGuid(page);
       // A pass's graph also holds the pages of components its pages use.

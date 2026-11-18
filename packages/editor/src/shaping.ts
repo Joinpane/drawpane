@@ -377,6 +377,10 @@ export class ShapingMeasurer implements TextMeasurer {
     return this.fonts ? this.fonts.family(family, size) : family;
   }
 
+  missing(family: string, size: number, weight: number, italic: boolean): boolean {
+    return this.fonts?.missing?.(family, size, weight, italic) ?? false;
+  }
+
   width(font: string, text: string, run?: ShapingRun | null): number {
     const shaped = run ? this.shaper.shape(text, run) : null;
     return shaped ? shaped.width : this.base.width(font, text);

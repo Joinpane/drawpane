@@ -38,6 +38,12 @@ export function harfBuzzMeasurerWith(
     shape: (text, run) => measurer.shape(text, run),
     metrics: (font) => measurer.metrics(font),
     family: (family, size) => (fonts ? fonts.family(family, size) : family),
+    // No file for the face it's drawn in: text saved with glyph outlines draws from those
+    // (decision 0037). A face still loading isn't missing yet.
+    missing: (family, size, weight, italic) =>
+      measurer.status(
+        canvasFace({ family: fonts ? fonts.family(family, size) : family, weight, italic }),
+      ) === "unavailable",
     get generation() {
       return measurer.generation + (fonts?.generation ?? 0);
     },

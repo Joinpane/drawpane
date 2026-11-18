@@ -28,6 +28,8 @@ export const NODE_TYPES = [
   "text",
   // What differs in one layer of a component copy (decision 0029): kept under its instance's root.
   "override",
+  // Glyph outlines a file saved with its text (decision 0037): kept at the root, beside pages.
+  "glyphSet",
 ] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
 
@@ -47,7 +49,7 @@ export type LayerType = (typeof LAYER_TYPES)[number];
 
 /** Which child types each parent type accepts. The virtual root holds pages only. */
 export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]>> = {
-  root: ["page", "collection", "textStyle", "library"],
+  root: ["page", "collection", "textStyle", "library", "glyphSet"],
   page: LAYER_TYPES,
   collection: ["variable"],
   variable: [],
@@ -65,6 +67,7 @@ export const CHILD_TYPES: Readonly<Record<NodeType | "root", readonly NodeType[]
   path: [],
   text: [],
   override: [],
+  glyphSet: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -476,6 +479,80 @@ export const TextRun = z
   .refine((run) => run.end > run.start, "a run must end after it starts");
 export type TextRun = z.infer<typeof TextRun>;
 
+/**
+ * Glyph outlines saved with a file's text (decision 0037), so text whose font
+ * isn't here can still be drawn as it was laid out. A glyph's id is a hash of
+ * its outline (`glyphId`); a `glyphSet` node holds a share of the file's
+ * glyphs, and a text layer's `glyphLayout` places them.
+ */
+export const GLYPH_ID_PATTERN = /^[0-9a-f]{16}$/;
+/** Units per em of saved outlines: a glyph's path is in thousandths of its font size, y up. */
+export const GLYPH_UNITS = 1000;
+/** At most this many glyphs in one glyph set, holding at most GLYPH_SET_CHARS of path data. */
+export const GLYPH_SET_GLYPHS = 512;
+export const GLYPH_SET_CHARS = 512_000;
+/** At most this many glyphs placed by one text layer. */
+export const LAYER_GLYPHS = 8192;
+/** At most this many decorations (underline and strikethrough stretches) on one text layer. */
+export const LAYER_GLYPH_DECORATIONS = 1024;
+
+const GlyphOutline = z
+  .string()
+  .max(64_000)
+  .regex(/^[MLQCZ0-9.\- ]*$/, "must be a saved glyph outline");
+
+export const GlyphOutlines = z
+  .record(z.string().regex(GLYPH_ID_PATTERN), GlyphOutline)
+  .refine((m) => {
+    let count = 0;
+    let chars = 0;
+    for (const d of Object.values(m)) {
+      count++;
+      chars += d.length;
+    }
+    return count <= GLYPH_SET_GLYPHS && chars <= GLYPH_SET_CHARS;
+  }, `at most ${GLYPH_SET_GLYPHS} glyphs and ${GLYPH_SET_CHARS} characters of outlines`);
+export type GlyphOutlines = z.infer<typeof GlyphOutlines>;
+
+const perGlyph = (layout: { g: readonly number[] }, list: readonly number[] | undefined) =>
+  list === undefined || list.length === layout.g.length / 3;
+
+/**
+ * Where a text layer's glyphs were placed when its file was saved, by the
+ * app that laid it out (Figma). Drawn only while `key` is the fingerprint
+ * of the layer's text and typography as they are (`glyphKey`): any edit to
+ * either makes it stale, and the text is laid out as usual.
+ */
+export const GlyphLayout = z
+  .object({
+    /** `glyphKey` of what was laid out. */
+    key: z.string().regex(/^[0-9a-f]{16}$/),
+    /** The box it was laid out in. */
+    w: nonNegative,
+    h: nonNegative,
+    /** The glyphs used, each once: ids in the file's glyph sets. */
+    refs: z.array(z.string().regex(GLYPH_ID_PATTERN)).max(LAYER_GLYPHS),
+    /** Per glyph: its index in `refs`, then its origin on the baseline (x, y), in px. */
+    g: z.array(finite).max(LAYER_GLYPHS * 3),
+    /** The font size of every glyph, unless `s` gives each its own. */
+    size: FontSize,
+    s: z.array(FontSize).max(LAYER_GLYPHS).optional(),
+    /** Per glyph, its first character, where that isn't its own index. */
+    c: z.array(z.number().int().min(0)).max(LAYER_GLYPHS).optional(),
+    /** Per glyph, its advance in px: where its underline or strikethrough ends. */
+    a: z.array(finite).max(LAYER_GLYPHS).optional(),
+  })
+  .refine((l) => l.g.length % 3 === 0, "glyphs come in threes: ref, x, y")
+  .refine((l) => {
+    for (let i = 0; i < l.g.length; i += 3) {
+      const ref = l.g[i] as number;
+      if (!Number.isInteger(ref) || ref < 0 || ref >= l.refs.length) return false;
+    }
+    return true;
+  }, "each glyph names one of refs")
+  .refine((l) => perGlyph(l, l.s) && perGlyph(l, l.c) && perGlyph(l, l.a), "one per glyph");
+export type GlyphLayout = z.infer<typeof GlyphLayout>;
+
 /** Only the characters an SVG path `d` attribute can contain. Parsed and checked by the editor. */
 const PathData = z
   .string()
@@ -730,6 +807,13 @@ export const PROPS = {
   /** The text style this layer follows; its typography comes from the style while it does. */
   textStyle: prop(z.string().regex(ID_PATTERN).nullable(), null, ["text"]),
 
+  /**
+   * The glyphs as the app that laid this text out placed them (decision
+   * 0037): drawn instead of laying it out when its font isn't here and it
+   * hasn't changed since. Null when there's none.
+   */
+  glyphLayout: prop(GlyphLayout.nullable(), null, ["text"]),
+
   // Vectors
   pathData: prop(PathData, "", ["path"]),
   windingRule: prop(z.enum(["nonzero", "evenodd"]), "nonzero", ["path"]),
@@ -743,6 +827,9 @@ export const PROPS = {
    * layout (see the editor's reading-order.ts).
    */
   readingOrder: prop(z.array(z.string().regex(ID_PATTERN)).max(500).nullable(), null, CONTAINERS),
+
+  // Glyph sets: saved glyph outlines by id (decision 0037).
+  glyphOutlines: prop(GlyphOutlines, {}, ["glyphSet"]),
 
   // Pages. Null follows the viewer's theme (the `canvas` token).
   backgroundColor: prop(Color.nullable(), null, ["page"]),
