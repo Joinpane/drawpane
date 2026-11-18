@@ -12,6 +12,7 @@ import {
   BINDING_FIELDS,
   BINDING_FIELDS_BY_PROP,
   type BindingKey,
+  bindingRef,
   type Effect,
   getProp,
   type VariableType as ModelVariableType,
@@ -311,7 +312,8 @@ export function variableBindOps(doc: Doc, id: string, key: BindingKey, variableI
   const node = doc.get(id);
   const raw = doc.getUnresolved(id);
   if (!node || !raw) return [];
-  const bindings = { ...getProp(raw.props, "bindings"), [key]: variableId };
+  // With its unit where decision 0034 has one, so it reads the same wherever it goes.
+  const bindings = { ...getProp(raw.props, "bindings"), [key]: bindingRef(key, variableId) };
   const ops: Op[] = [{ op: "set", id, prop: "bindings", value: bindings }];
   const bound = doc.tokens.resolver.resolve({
     ...node,

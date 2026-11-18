@@ -706,6 +706,30 @@ export const BINDING_KEYS = [
 ] as const;
 export type BindingKey = (typeof BINDING_KEYS)[number];
 
+/**
+ * How a binding's variable value maps onto its property (decision 0034),
+ * where 0034 reads it differently from before: `percent` (opacity, as
+ * Figma's: 50 is 50%) and `text` (characters bound to a number or a boolean,
+ * shown as Figma writes them). New code always writes the unit for those
+ * keys; a binding without one is read as it was before 0034, so nothing
+ * stored then ever changes meaning.
+ */
+export const BINDING_UNITS: Readonly<Partial<Record<BindingKey, "percent" | "text">>> = {
+  opacity: "percent",
+  characters: "text",
+};
+export type BindingUnit = "percent" | "text";
+
+/**
+ * A binding: a variable's id (read as before 0034), or the variable with the
+ * unit its value is read in (`BINDING_UNITS`).
+ */
+export const BindingRef = z.union([
+  z.string().regex(ID_PATTERN),
+  z.object({ variable: z.string().regex(ID_PATTERN), unit: z.enum(["percent", "text"]) }),
+]);
+export type BindingRef = z.infer<typeof BindingRef>;
+
 /** What a text style's own values may bind (decision 0034): its typography, as Figma's do. */
 export const TEXT_STYLE_BINDING_KEYS: ReadonlySet<BindingKey> = new Set<BindingKey>([
   "fontFamily",
@@ -996,14 +1020,12 @@ export const PROPS = {
   libraryFile: prop(z.string().regex(ID_PATTERN).nullable(), null, ["library"]),
   libraryPublish: prop(z.string().regex(ID_PATTERN).nullable(), null, ["library"]),
   /**
-   * Bound properties: binding key → variable id (decision 0034). The bound
+   * Bound properties: binding key → variable (decision 0034), an id, or the
+   * id and the unit its value is read in (`BindingRef`). The bound
    * property's stored value is what shows when the binding can't be
    * followed. A text style binds only typography (`TEXT_STYLE_BINDING_KEYS`).
    */
-  bindings: prop(z.partialRecord(z.enum(BINDING_KEYS), z.string().regex(ID_PATTERN)), {}, [
-    ...LAYERS,
-    "textStyle",
-  ]),
+  bindings: prop(z.partialRecord(z.enum(BINDING_KEYS), BindingRef), {}, [...LAYERS, "textStyle"]),
   /** Which mode of each collection applies inside this frame or page: collection id → mode id. */
   variableModes: prop(z.record(z.string().regex(ID_PATTERN), z.string().regex(ID_PATTERN)), {}, [
     "page",

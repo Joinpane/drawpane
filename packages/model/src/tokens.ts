@@ -16,7 +16,10 @@
 import { ROOT_ID } from "./ids";
 import type { NodeRecord } from "./ops";
 import {
+  BINDING_UNITS,
   type BindingKey,
+  type BindingRef,
+  type BindingUnit,
   type Effect,
   getProp,
   type Paint,
@@ -91,6 +94,36 @@ export const BINDING_FIELDS_BY_PROP: ReadonlyMap<string, readonly BindingKey[]> 
     }
   return out;
 })();
+
+/** The variable a binding names (decision 0034): its id, or the id beside its unit. */
+export function bindingVariable(ref: unknown): string | undefined {
+  if (typeof ref === "string") return ref;
+  const variable = (ref as { variable?: unknown } | null)?.variable;
+  return typeof variable === "string" ? variable : undefined;
+}
+
+/** The unit a binding reads its value in, or undefined: as before decision 0034. */
+export function bindingUnit(ref: unknown): BindingUnit | undefined {
+  const unit = (ref as { unit?: unknown } | null)?.unit;
+  return unit === "percent" || unit === "text" ? unit : undefined;
+}
+
+/** A binding of `key` to `variableId` as new code writes it: with its unit where 0034 has one. */
+export function bindingRef(key: BindingKey, variableId: string): BindingRef {
+  const unit = BINDING_UNITS[key];
+  return unit ? { variable: variableId, unit } : variableId;
+}
+
+/** The variables a `bindings` value names, in order. */
+function boundVariables(bindings: unknown): string[] {
+  const out: string[] = [];
+  if (bindings && typeof bindings === "object")
+    for (const ref of Object.values(bindings as Record<string, unknown>)) {
+      const id = bindingVariable(ref);
+      if (id) out.push(id);
+    }
+  return out;
+}
 
 /** Binding keys whose values a layout reads: a change to what they resolve to lays the layer out again. */
 export const LAYOUT_BINDINGS: ReadonlySet<BindingKey> = new Set<BindingKey>([
@@ -173,9 +206,7 @@ export function tokenRefs(props: Readonly<Props>): { variables: string[]; styles
   const p = props as Record<string, unknown>;
   const variables: string[] = [];
   const styles: string[] = [];
-  if (p.bindings && typeof p.bindings === "object")
-    for (const id of Object.values(p.bindings as Record<string, unknown>))
-      if (typeof id === "string") variables.push(id);
+  variables.push(...boundVariables(p.bindings));
   bindsOf(p.fills, variables);
   bindsOf(p.strokes, variables);
   bindsOf(p.effects, variables);
@@ -215,7 +246,12 @@ export function renameTokenIds(props: Readonly<Props>, to: (id: string) => strin
   const out: Record<string, unknown> = { ...p };
   if (p.bindings && typeof p.bindings === "object")
     out.bindings = Object.fromEntries(
-      Object.entries(p.bindings as Record<string, string>).map(([k, v]) => [k, to(v)]),
+      Object.entries(p.bindings as Record<string, unknown>).map(([k, v]) => [
+        k,
+        typeof v === "string"
+          ? to(v)
+          : { ...(v as object), variable: to(bindingVariable(v) ?? "") },
+      ]),
     );
   for (const prop of ["fills", "strokes", "effects"])
     if (Array.isArray(p[prop])) out[prop] = renameBinds(p[prop], to);
@@ -281,15 +317,17 @@ export function layoutVariables(props: Readonly<Props>): string[] {
   const bindings = (props as { bindings?: Record<string, unknown> }).bindings;
   const out: string[] = [];
   if (!bindings) return out;
-  for (const [key, id] of Object.entries(bindings))
-    if (LAYOUT_BINDINGS.has(key as BindingKey) && typeof id === "string") out.push(id);
+  for (const [key, ref] of Object.entries(bindings)) {
+    const id = bindingVariable(ref);
+    if (LAYOUT_BINDINGS.has(key as BindingKey) && id) out.push(id);
+  }
   return out;
 }
 
 // ---------------------------------------------------------------------------
 // Values that differ only where they're bound
 
-type BindingMap = Readonly<Record<string, string>> | undefined;
+type BindingMap = Readonly<Record<string, unknown>> | undefined;
 const CORNER_KEYS = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"];
 const SIDE_KEYS = [
   "strokeTopWeight",
@@ -330,7 +368,8 @@ export function boundAlike(
   if (a === undefined || b === undefined) return false;
   if (prop === "fills" || prop === "strokes" || prop === "effects")
     return JSON.stringify(unboundList(a)) === JSON.stringify(unboundList(b));
-  const same = (key: string) => !!aBindings?.[key] && aBindings[key] === bBindings?.[key];
+  const same = (key: string) =>
+    !!aBindings?.[key] && JSON.stringify(aBindings[key]) === JSON.stringify(bBindings?.[key]);
   if (prop === "cornerRadii" || prop === "strokeWeights") {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
     const keys = prop === "cornerRadii" ? CORNER_KEYS : SIDE_KEYS;
@@ -467,11 +506,8 @@ export class TokenResolver {
       const modes = collection?.type === "collection" ? getProp(collection.props, "modes") : [];
       const mode = at ? this.modeAt(at, variable.parent) : (modes[0]?.id ?? null);
       const values = getProp(variable.props, "values");
-      const first = modes[0]?.id;
-      const value =
-        (mode ? values[mode] : undefined) ??
-        (first ? values[first] : undefined) ??
-        Object.values(values)[0];
+      // A mode without a value falls back to the first value stored, as before decision 0034.
+      const value = (mode ? values[mode] : undefined) ?? Object.values(values)[0];
       if (value === undefined) return undefined;
       if (typeof value === "object") {
         if (value.opacity !== undefined) opacity *= value.opacity;
@@ -623,17 +659,28 @@ export class TokenResolver {
     }
     const bindings = p.bindings;
     if (bindings)
-      for (const [key, variableId] of Object.entries(bindings) as Array<[BindingKey, string]>) {
+      for (const [key, ref] of Object.entries(bindings) as Array<[BindingKey, unknown]>) {
+        const variableId = bindingVariable(ref);
         if (!BINDING_FIELDS[key] || !variableId) continue;
         const resolved = this.value(variableId, node);
-        if (resolved) this.#apply(key, resolved.value, p, out);
+        if (resolved) this.#apply(key, resolved.value, p, out, bindingUnit(ref));
       }
     if (Object.keys(out).length === 0) return node;
     return { ...node, props: { ...p, ...out } as Props };
   }
 
-  /** Writes one binding's value into `out`, over the node's own `p`, when it fits the property. */
-  #apply(key: BindingKey, value: ResolvedValue, p: Props, out: Record<string, unknown>): void {
+  /**
+   * Writes one binding's value into `out`, over the node's own `p`, when it
+   * fits the property, read in the binding's `unit` (decision 0034); without
+   * one, as before 0034.
+   */
+  #apply(
+    key: BindingKey,
+    value: ResolvedValue,
+    p: Props,
+    out: Record<string, unknown>,
+    unit: BindingUnit | undefined,
+  ): void {
     const current = <K extends PropName>(name: K) =>
       (out[name] as Props[K] | undefined) ?? getProp(p, name);
     if (key === "fill" || key === "stroke") {
@@ -677,13 +724,17 @@ export class TokenResolver {
     }
     switch (key) {
       case "opacity":
-        if (typeof value === "number") out.opacity = clampUnit(value / 100);
+        // A percentage, as Figma's; a binding from before 0034 took 1 or less as a fraction.
+        if (typeof value === "number")
+          out.opacity = clampUnit(unit === "percent" || value > 1 ? value / 100 : value);
         return;
       case "visible":
         if (typeof value === "boolean") out.visible = value;
         return;
       case "characters":
         if (typeof value === "string") out.characters = value.slice(0, 200_000);
+        // A number or boolean as Figma writes it; before 0034 only text applied.
+        else if (unit !== "text") return;
         else if (typeof value === "number") out.characters = numberText(value);
         else out.characters = String(value);
         return;

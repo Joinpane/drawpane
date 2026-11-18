@@ -8,6 +8,7 @@ import type { VersionPerson } from "./history";
 import { ID_PATTERN, ROOT_ID } from "./ids";
 import type { NodeRecord } from "./ops";
 import { getProp, type Props } from "./schema";
+import { bindingVariable } from "./tokens";
 
 /** A content hash of everything a published component draws: what tells a change. */
 export const ASSET_HASH = /^[0-9a-f]{16}$/;
@@ -261,8 +262,9 @@ function references(doc: DocReader, node: NodeRecord): string[] {
         if (collection) out.push(collection);
       }
   if (p.bindings && typeof p.bindings === "object")
-    for (const variableId of Object.values(p.bindings as Record<string, string>)) {
-      const collection = collectionOf(doc, variableId);
+    for (const ref of Object.values(p.bindings as Record<string, unknown>)) {
+      const variableId = bindingVariable(ref);
+      const collection = variableId ? collectionOf(doc, variableId) : undefined;
       if (collection) out.push(collection);
     }
   if (p.variableModes && typeof p.variableModes === "object")

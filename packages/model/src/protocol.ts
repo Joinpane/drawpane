@@ -16,10 +16,13 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
  * the client says which ways it can read, at hello.
  *
  * 3: variables and styles (decision 0034): paint, stop and effect bindings,
- * style links, boolean variables, up to 64 modes, and opacity variables read
- * as percentages (files migrated as their rooms load). A client before it
- * (1 or 2) would strip bindings it doesn't know from what it rewrites, so
- * it's told to reload at hello, whatever the file holds.
+ * style links, boolean variables, up to 64 modes, bindings that say their
+ * unit. Old data needs nothing (a binding without a unit reads as before),
+ * but an older tab (1 or 2) can't keep what it doesn't know: it would strip
+ * bindings and links from what it rewrites. So it doesn't write: one that
+ * says hello is told to reload (1, which reconnects on most closes, is shown
+ * a page saying so), and a socket welcomed before the release, whose
+ * attachment says no protocol, has its edits refused and is told the same.
  */
 export const PROTOCOL_VERSION = 3;
 

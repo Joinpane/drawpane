@@ -6,7 +6,13 @@
  */
 import type { Editor } from "@drawpane/editor";
 import { listCollections, resolveVariable, variablesIn } from "@drawpane/editor";
-import { type BindingKey, getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import {
+  type BindingKey,
+  bindingVariable,
+  getProp,
+  type NodeRecord,
+  type Paint,
+} from "@drawpane/model";
 import {
   ColorPicker,
   contrastLevel,
@@ -153,7 +159,8 @@ function SolidTab({
     [editor],
   );
   const context = nodes[0];
-  const bound = bindKey && context ? getProp(context.props, "bindings")[bindKey] : undefined;
+  const bound =
+    bindKey && context ? bindingVariable(getProp(context.props, "bindings")[bindKey]) : undefined;
   const set = (hex: string, name = `${label} color`) => onChange(withPickerValue(paint, hex), name);
 
   return (

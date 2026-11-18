@@ -34,7 +34,7 @@ import type { NodeRecord } from "./ops";
 import { compareSiblings } from "./order-key";
 import { getProp, type Props } from "./schema";
 import { MemoryStore } from "./store";
-import { alikeWhereBound } from "./tokens";
+import { alikeWhereBound, bindingVariable } from "./tokens";
 
 /** How copies are stored in a file: every copy layer, or the compact form (decision 0029). */
 export type CopiesFormat = "materialized" | "compact";
@@ -122,7 +122,8 @@ export function heldNodeIds(props: Readonly<Props>): { layers: string[]; others:
   str(p.textStyle, others);
   if (Array.isArray(p.path)) for (const id of p.path) str(id, others);
   if (p.bindings && typeof p.bindings === "object")
-    for (const id of Object.values(p.bindings as Record<string, unknown>)) str(id, others);
+    for (const ref of Object.values(p.bindings as Record<string, unknown>))
+      str(bindingVariable(ref), others);
   if (p.variableModes && typeof p.variableModes === "object")
     for (const id of Object.keys(p.variableModes as Record<string, unknown>)) str(id, others);
   if (p.values && typeof p.values === "object")

@@ -5,7 +5,6 @@
  * fresh where a cache could hold a stale value.
  */
 import {
-  legacyTokenOps,
   libraryNodeId,
   type NodeRecord,
   type Op,
@@ -512,51 +511,115 @@ describe("what a change walks and lays out (F7, F11, F15)", () => {
   });
 });
 
-describe("old files (F9)", () => {
-  /** A file as stored before decision 0034, migrated as its room loads it. */
-  function migrated(nodes: NodeRecord[]): Doc {
-    const doc = new Doc();
-    doc.resetStored(nodes, "materialized");
-    doc.apply(legacyTokenOps(doc.stored()));
-    return doc;
-  }
+describe("old files mean what they meant (F9)", () => {
+  // Decision 0034: a binding says how its value maps onto the property. One without the field
+  // (every binding written before 0034) is read as it was then; nothing is ever converted.
+  const legacyOpacity = (values: Record<string, number>) => [
+    ...base(),
+    node("o", "variable", "c", { variableType: "number", values }),
+    node("r", "rect", "p", { opacity: 0.5, bindings: { opacity: "o" } } as Props),
+    node("d", "frame", "p", { variableModes: { c: "dark" } }),
+    node("q", "rect", "d", { opacity: 0.3, bindings: { opacity: "o" } } as Props),
+  ];
 
-  it("F9: an opacity binding a file stored before 0034 keeps its look", () => {
-    const doc = migrated([
-      ...base(),
-      node("o", "variable", "c", { variableType: "number", values: { light: 0.5, dark: 30 } }),
-      node("r", "rect", "p", { opacity: 0.5, bindings: { opacity: "o" } } as Props),
-      node("d", "frame", "p", { variableModes: { c: "dark" } }),
-      node("q", "rect", "d", { opacity: 0.3, bindings: { opacity: "o" } } as Props),
-    ]);
-    expect(doc.get("r")?.props.opacity).toBe(0.5);
-    expect(doc.get("q")?.props.opacity).toBe(0.3);
-    // Bound only to opacity: its fractions become the percentages they read as.
-    expect(doc.get("o")?.props.values).toEqual({ light: 50, dark: 30 });
+  for (const compact of [false, true])
+    it(`F9: an opacity binding stored before 0034 keeps its look, as stored (${compact ? "compact" : "materialized"})`, () => {
+      const nodes = legacyOpacity({ light: 0.5, dark: 30 });
+      const doc = new Doc({ compactCopies: compact });
+      doc.resetStored(nodes, compact ? "compact" : "materialized");
+      // Read as it was: 1 or less a fraction, more a percentage.
+      expect(doc.get("r")?.props.opacity).toBe(0.5);
+      expect(doc.get("q")?.props.opacity).toBe(0.3);
+      // And nothing about it is rewritten.
+      expect(doc.stored()).toEqual(nodes);
+    });
+
+  it("F9: a tiny fraction stays what it was", () => {
+    const doc = new Doc();
+    doc.resetStored(legacyOpacity({ light: 0.005 }), "materialized");
+    expect(doc.get("r")?.props.opacity).toBe(0.005);
   });
 
-  it("F9: a number shared with another use is left as it is; opacity gets its own", () => {
-    const doc = migrated([
-      ...base(),
-      node("o", "variable", "c", { variableType: "number", values: { light: 0.5, dark: 1 } }),
-      node("a", "variable", "c", {
-        variableType: "number",
-        values: { light: { alias: "o" } },
-      } as Props),
-      node("r", "rect", "p", { opacity: 0.5, bindings: { opacity: "o", width: "o" } } as Props),
-      node("s", "rect", "p", { bindings: { opacity: "a" } } as Props),
-    ]);
-    expect(doc.get("o")?.props.values).toEqual({ light: 0.5, dark: 1 });
-    expect(doc.get("r")?.props).toMatchObject({ opacity: 0.5, width: 0.5 });
-    expect(doc.get("s")?.props.opacity).toBe(0.5);
-    const bindings = raw(doc, "r").bindings as Record<string, string>;
-    expect(bindings.width).toBe("o");
-    expect(doc.get(bindings.opacity as string)?.props).toMatchObject({
-      name: expect.stringContaining("(opacity %)"),
-      values: { light: 50, dark: 100 },
-    });
-    // What it made reads as percentages already (the room's version keeps it from running twice).
-    expect(legacyTokenOps(doc.stored())).toEqual([]);
+  it("F9: one variable bound both ways reads through each binding's own unit, with no copy of it", () => {
+    const doc = new Doc();
+    doc.resetStored(
+      [
+        ...base(),
+        node("o", "variable", "c", { variableType: "number", values: { light: 0.5, dark: 50 } }),
+        node("old", "rect", "p", { bindings: { opacity: "o", width: "o" } } as Props),
+        node("new", "rect", "p", {
+          bindings: { opacity: { variable: "o", unit: "percent" } },
+        } as Props),
+        node("d", "frame", "p", { variableModes: { c: "dark" } }),
+        node("newDark", "rect", "d", {
+          bindings: { opacity: { variable: "o", unit: "percent" } },
+        } as Props),
+      ],
+      "materialized",
+    );
+    expect(doc.get("old")?.props).toMatchObject({ opacity: 0.5, width: 0.5 });
+    expect(doc.get("new")?.props.opacity).toBe(0.005);
+    expect(doc.get("newDark")?.props.opacity).toBe(0.5);
+    expect(doc.get("o")?.props.values).toEqual({ light: 0.5, dark: 50 });
+    expect(doc.stored().filter((n) => n.type === "variable")).toHaveLength(3);
+  });
+
+  it("F9: binding opacity now writes its unit, and stores what it shows", () => {
+    const e = editor(
+      [
+        ...base(),
+        node("o", "variable", "c", { variableType: "number", values: { light: 40, dark: 80 } }),
+        node("r", "rect", "p", {}),
+      ],
+      false,
+    );
+    e.bindVariable(["r"], "opacity", "o");
+    expect(raw(e.doc, "r").bindings).toEqual({ opacity: { variable: "o", unit: "percent" } });
+    expect(raw(e.doc, "r").opacity).toBe(0.4);
+    expect(e.doc.get("r")?.props.opacity).toBe(0.4);
+    e.unbindVariable(["r"], "opacity");
+    expect(raw(e.doc, "r").bindings).toBeUndefined();
+    expect(raw(e.doc, "r").opacity).toBe(0.4);
+  });
+
+  it("F9: text bound to a number: as stored before 0034, Figma's way when the binding says so", () => {
+    const doc = new Doc();
+    doc.resetStored(
+      [
+        ...base(),
+        node("n", "variable", "c", { variableType: "number", values: { light: 3, dark: 4 } }),
+        node("old", "text", "p", { characters: "Three", bindings: { characters: "n" } } as Props),
+        node("new", "text", "p", {
+          characters: "Three",
+          bindings: { characters: { variable: "n", unit: "text" } },
+        } as Props),
+      ],
+      "materialized",
+    );
+    expect(doc.get("old")?.props.characters).toBe("Three");
+    expect(doc.get("new")?.props.characters).toBe("3");
+  });
+
+  it("F9: a value missing for a mode falls back to the first one stored, as before", () => {
+    const doc = new Doc();
+    doc.resetStored(
+      [
+        node("p", "page", ROOT_ID),
+        node("t", "collection", ROOT_ID, {
+          modes: [
+            { id: "light", name: "Light" },
+            { id: "dark", name: "Dark" },
+            { id: "dim", name: "Dim" },
+          ],
+        }),
+        // No value for Dim; Dark's was stored first, Light (the default) second.
+        node("n", "variable", "t", { variableType: "number", values: { dark: 30, light: 10 } }),
+        node("f", "frame", "p", { variableModes: { t: "dim" } }),
+        node("r", "rect", "f", { width: 1, bindings: { width: "n" } } as Props),
+      ],
+      "materialized",
+    );
+    expect(doc.get("r")?.props.width).toBe(30);
   });
 });
 

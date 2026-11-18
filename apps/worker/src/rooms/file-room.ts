@@ -39,9 +39,7 @@ import {
   type ServerMessage,
   SNAPSHOT_CHUNK_SIZE,
   snapshotCopies,
-  snapshotTokens,
   summarizeEdits,
-  TOKENS_VERSION,
   type VersionReason,
 } from "@drawpane/model";
 import {
@@ -149,7 +147,6 @@ import {
 import { reloadPlaceholder, sendSocketSnapshot, socketFits } from "./socket-snapshot";
 import { NODE_SCHEMA, SqlNodeStore } from "./sql-store";
 import { applyThreeWay, planThreeWay, type ThreeWayTables } from "./three-way";
-import { legacyTableOps, migrateTable } from "./token-migration";
 
 /** How long a confirmed membership is trusted before an edit checks it again. */
 const ACCESS_RECHECK_MS = 60_000;
@@ -294,6 +291,12 @@ interface Attachment {
   viewing?: boolean;
   /** When a viewing client was last sent the file. */
   servedAt?: number;
+  /**
+   * The protocol the client's hello said (`PROTOCOL_VERSION`). Missing on
+   * sockets welcomed before it was recorded, which are tabs from before
+   * variables and styles (decision 0034): such a socket never writes.
+   */
+  protocol?: number;
   /** Whether the file changed since a viewing client was last sent it. */
   stale?: boolean;
 }
@@ -526,13 +529,16 @@ export class FileRoom extends DurableObject<Env> {
         // A new file: stored compact, unless conversion is turned off (COMPACT_COPIES=off).
         if (copies === null)
           this.#setMeta("copies", this.#compactOn() ? "compact" : "materialized");
-        // And in decision 0034's token semantics: nothing in it to migrate.
-        if (this.#meta("tokens") === null) this.#setMeta("tokens", String(TOKENS_VERSION));
         this.#seed();
       } else if (copies === null) this.#setMeta("copies", "materialized");
-      // A file stored before decision 0034's semantics is migrated before anyone reads it.
-      if (Number(this.#meta("tokens") ?? 0) < TOKENS_VERSION) this.#migrateTokens();
       this.#copies = this.#meta("copies") === "compact" ? "compact" : "materialized";
+      // Tabs welcomed by an older release, kept across its update (hibernation): they reload
+      // now, before they can write (decision 0034). A viewer of the reload page stays one.
+      for (const ws of this.ctx.getWebSockets()) {
+        const me = ws.deserializeAttachment() as Attachment | null;
+        if (me?.clientId && !me.viewing && (me.protocol ?? 0) < PROTOCOL_VERSION)
+          this.#reloadOld(ws);
+      }
       this.#converting =
         this.#copies === "materialized" && hasConvertTables(this.#sql, LIVE_CONVERSION);
       // A file from before compact copies converts when its room loads (decision 0029):
@@ -778,17 +784,15 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * For tests: the room as it loads a file stored before decision 0034's
-   * token semantics, `nodes` stored as they are and migrated as at load.
+   * For tests: replaces the file's nodes with `nodes`, stored as they are, in
+   * the form the file keeps (a file an older release saved, say).
    */
-  async loadFromBeforeTokens(nodes: readonly NodeRecord[]): Promise<void> {
+  async storeNodes(nodes: readonly NodeRecord[]): Promise<void> {
     this.ctx.storage.transactionSync(() => {
       this.#sql.exec("DELETE FROM nodes");
       for (const node of nodes) this.#store.insert(node);
-      this.#sql.exec("DELETE FROM meta WHERE k = 'tokens'");
     });
     this.#store.clearCache();
-    if (Number(this.#meta("tokens") ?? 0) < TOKENS_VERSION) this.#migrateTokens();
   }
 
   /** Whether this file is stored materialized and should convert. */
@@ -1327,9 +1331,6 @@ export class FileRoom extends DurableObject<Env> {
           return { ok: false, reason: "invalid", message: error.message };
         throw error;
       }
-      // Saved before decision 0034's semantics: migrated as it's read, as the file was.
-      if (snapshotTokens(source.header) < TOKENS_VERSION)
-        this.#room.transact(() => migrateTable(this.#sql, table));
       // Undoing compact copies (decision 0029): with conversion turned off, a version from before
       // it puts the file back as it was stored then, materialized.
       if (this.#copies === "compact" && versionCopies === "materialized" && !this.#compactOn())
@@ -2116,13 +2117,6 @@ export class FileRoom extends DurableObject<Env> {
       try {
         await loadSnapshot(this.#sql, tables.base, base, this.#room.transact);
         await loadSnapshot(this.#sql, tables.other, other, this.#room.transact);
-        // A side saved before decision 0034's semantics is migrated as it's read, as files are.
-        for (const [table, side] of [
-          [tables.base, base],
-          [tables.other, other],
-        ] as const)
-          if (snapshotTokens(side.header) < TOKENS_VERSION)
-            this.#room.transact(() => migrateTable(this.#sql, table));
       } catch (error) {
         if (error instanceof SnapshotError)
           return { ok: false, reason: "invalid", message: `It can't be read. ${error.message}` };
@@ -2743,6 +2737,16 @@ export class FileRoom extends DurableObject<Env> {
     }
   }
 
+  /** Tells a tab from before the current protocol to reload, and lets it go. */
+  #reloadOld(ws: WebSocket): void {
+    this.#send(ws, {
+      t: "error",
+      code: "reload",
+      message: "Drawpane was updated. Reload the page to keep working on this file.",
+    });
+    this.#close(ws, RELOAD_CLOSE_CODE, "Reload");
+  }
+
   #close(ws: WebSocket, code: number, reason: string): void {
     try {
       ws.close(code, reason);
@@ -2765,16 +2769,11 @@ export class FileRoom extends DurableObject<Env> {
     // copies (1) reconnects on any close but a few, so it's shown a page saying to reload, as a
     // viewer, never the file; a later one (2) is told to reload, which it does.
     if (protocol === 1) {
-      this.#helloToPlaceholder(ws, me, clientId, ["materialized"]);
+      this.#helloToPlaceholder(ws, me, clientId, ["materialized"], protocol);
       return;
     }
     if (protocol < PROTOCOL_VERSION) {
-      this.#send(ws, {
-        t: "error",
-        code: "reload",
-        message: "Drawpane was updated. Reload the page to keep working on this file.",
-      });
-      this.#close(ws, RELOAD_CLOSE_CODE, "Reload");
+      this.#reloadOld(ws);
       return;
     }
     if (!reads.includes(this.#copies)) {
@@ -2823,7 +2822,7 @@ export class FileRoom extends DurableObject<Env> {
         : null;
     // Sent through the socket: a client with tickets only when it fits (#tooLargeToSend).
     if (!canCatchUp && !download && tickets === null && !fitsSocket()) {
-      this.#helloToPlaceholder(ws, me, clientId, reads);
+      this.#helloToPlaceholder(ws, me, clientId, reads, protocol);
       return;
     }
 
@@ -2831,6 +2830,7 @@ export class FileRoom extends DurableObject<Env> {
     // Its changes are in the form the file has now; should that change, they're checked for it.
     me.copies = this.#copies;
     me.reads = [...reads];
+    me.protocol = protocol;
     me.viewing = false;
     me.stale = false;
     ws.serializeAttachment(me);
@@ -2879,10 +2879,12 @@ export class FileRoom extends DurableObject<Env> {
     me: Attachment,
     clientId: string,
     reads: readonly CopiesFormat[],
+    protocol: number,
   ): void {
     me.clientId = clientId;
     me.copies = this.#copies;
     me.reads = [...reads];
+    me.protocol = protocol;
     me.viewing = true;
     me.servedAt = Date.now();
     me.stale = false;
@@ -3062,6 +3064,13 @@ export class FileRoom extends DurableObject<Env> {
     // A client from before compact copies, viewing a file stored compact: it can't edit it.
     if (me.viewing || !this.#reads(me, this.#copies)) {
       this.#reject(ws, seq, ops, "format", RELOAD_TO_EDIT);
+      return;
+    }
+    // A tab welcomed before variables and styles (no protocol recorded, or an older one): it would
+    // strip the bindings and links it doesn't know from what it rewrites (decision 0034).
+    if ((me.protocol ?? 0) < PROTOCOL_VERSION) {
+      this.#reject(ws, seq, ops, "format", RELOAD_TO_EDIT);
+      this.#reloadOld(ws);
       return;
     }
     // Changes in the form the file stored when this client loaded it, which has changed since
@@ -3375,24 +3384,6 @@ export class FileRoom extends DurableObject<Env> {
 
   // -------------------------------------------------------------------------
   // Helpers
-
-  /**
-   * Migrates a file stored before decision 0034's token semantics
-   * (`legacyTokenOps`: opacity variables read as fractions keep their look),
-   * as one logged transaction, so a client catching up gets it too; then
-   * notes the file is current. A migration that fails is tried again when
-   * the room next loads, the file meanwhile as it was.
-   */
-  #migrateTokens(): void {
-    try {
-      const ops = legacyTableOps(this.#sql, "nodes");
-      if (ops.length > 0)
-        this.#commit(ops, { clientId: "system", seq: 0, userId: "system", sessionId: "system" });
-      this.#setMeta("tokens", String(TOKENS_VERSION));
-    } catch (error) {
-      console.error("couldn't migrate the file's variables", error);
-    }
-  }
 
   #seed(): void {
     this.#commit(

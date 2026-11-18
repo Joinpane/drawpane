@@ -169,3 +169,73 @@ describe("text styles (F13)", () => {
     expect(style?.props.fontSize).toBe(12);
   });
 });
+
+describe("bindings say how they read (decision 0034)", () => {
+  it("an imported opacity binding reads its variable as a percentage, text bound to a number as text", () => {
+    const number = { type: "VARIABLE_ALIAS", id: "VariableID:5:1" } as const;
+    const file = {
+      name: "Units",
+      variables: {
+        variableCollections: {
+          "VariableCollectionId:5:0": {
+            id: "VariableCollectionId:5:0",
+            name: "Numbers",
+            modes: [{ modeId: "5:2", name: "Default" }],
+            defaultModeId: "5:2",
+            variableIds: [number.id],
+          },
+        },
+        variables: {
+          [number.id]: {
+            id: number.id,
+            name: "n",
+            variableCollectionId: "VariableCollectionId:5:0",
+            resolvedType: "FLOAT",
+            valuesByMode: { "5:2": 40 },
+          },
+        },
+      },
+      document: {
+        id: "0:0",
+        name: "doc",
+        type: "DOCUMENT",
+        children: [
+          {
+            id: "0:1",
+            name: "Page",
+            type: "CANVAS",
+            children: [
+              {
+                ...rect("6:1", 1),
+                opacity: 0.4,
+                fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1, a: 1 } }],
+                boundVariables: { opacity: number },
+              },
+              {
+                id: "6:2",
+                name: "Count",
+                type: "TEXT",
+                characters: "40",
+                size: { x: 20, y: 20 },
+                relativeTransform: [
+                  [1, 0, 0],
+                  [0, 1, 0],
+                ],
+                style: { fontFamily: "Inter", fontSize: 12 },
+                boundVariables: { characters: number },
+              },
+            ],
+          },
+        ],
+      },
+    } as unknown as Figma.File;
+    const { nodes } = convertFile(file);
+    const variable = drawpaneId(number.id);
+    expect(nodes.find((n) => n.id === drawpaneId("6:1"))?.props.bindings).toEqual({
+      opacity: { variable, unit: "percent" },
+    });
+    expect(nodes.find((n) => n.id === drawpaneId("6:2"))?.props.bindings).toEqual({
+      characters: { variable, unit: "text" },
+    });
+  });
+});

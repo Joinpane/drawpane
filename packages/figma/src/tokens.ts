@@ -12,6 +12,8 @@
  */
 import {
   type BindingKey,
+  type BindingRef,
+  bindingRef,
   keysBetween,
   MAX_MODES,
   type Mode,
@@ -256,15 +258,16 @@ export function layerBindings(
   node: Figma.Node,
   type: NodeType,
   lookup: VariableLookup,
-): Partial<Record<BindingKey, string>> {
-  const out: Partial<Record<BindingKey, string>> = {};
+): Partial<Record<BindingKey, BindingRef>> {
+  const out: Partial<Record<BindingKey, BindingRef>> = {};
   const bound = node.boundVariables as Readonly<Record<string, unknown>> | undefined;
   if (!bound) return out;
   const put = (key: BindingKey, alias: unknown) => {
     const id = lookup(single(alias));
     if (!id) return;
     const prop = DRIVES[key] ?? key;
-    if (propAllowed(type, prop as never)) out[key] = id;
+    // With its unit where decision 0034 has one: Figma's opacity is a percentage.
+    if (propAllowed(type, prop as never)) out[key] = bindingRef(key, id);
   };
   for (const [field, alias] of Object.entries(bound)) {
     const key = FIELDS[field];

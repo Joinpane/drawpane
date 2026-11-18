@@ -1,5 +1,5 @@
 import { BINDING_TARGETS } from "@drawpane/editor";
-import { type BindingKey, getProp, type NodeRecord } from "@drawpane/model";
+import { type BindingKey, bindingVariable, getProp, type NodeRecord } from "@drawpane/model";
 import { Icon } from "@drawpane/ui";
 import { type ReactNode, useCallback, useRef, useState } from "react";
 import { useEditor } from "../hooks";
@@ -7,9 +7,10 @@ import { TokenPicker } from "./TokenPicker";
 
 /** The variable every node binds `key` to, or undefined when none or they differ. */
 export function commonBinding(nodes: readonly NodeRecord[], key: BindingKey): string | undefined {
-  const first = nodes[0] ? getProp(nodes[0].props, "bindings")[key] : undefined;
+  const of = (n: NodeRecord) => bindingVariable(getProp(n.props, "bindings")[key]);
+  const first = nodes[0] ? of(nodes[0]) : undefined;
   if (!first) return undefined;
-  return nodes.every((n) => getProp(n.props, "bindings")[key] === first) ? first : undefined;
+  return nodes.every((n) => of(n) === first) ? first : undefined;
 }
 
 /**

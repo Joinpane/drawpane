@@ -3,11 +3,13 @@ import {
   boundAlike,
   checkNode,
   composeAlpha,
+  heldNodeIds,
   MemoryStore,
   type NodeRecord,
   numberText,
   parseFontStyle,
   ROOT_ID,
+  renameTokenIds,
   TokenResolver,
   tokenRefs,
   usesTokens,
@@ -78,7 +80,7 @@ describe("resolving variables", () => {
         bindings: {
           visible: "on",
           fontStyle: "label",
-          characters: "gap",
+          characters: { variable: "gap", unit: "text" },
           topRightRadius: "gap",
           opacity: "gap",
         },
@@ -223,5 +225,37 @@ describe("values alike where bound", () => {
         { topLeftRadius: "n" },
       ),
     ).toBe(true);
+  });
+});
+
+describe("bindings say how their value maps onto the property (decision 0034)", () => {
+  const rect = (bindings: unknown): NodeRecord => ({
+    id: "r",
+    type: "rect",
+    parent: "p",
+    key: "a0",
+    props: { bindings } as never,
+  });
+  it("an id alone is a binding as before 0034; a unit is only where 0034 reads differently", () => {
+    expect(checkNode(rect({ opacity: "v", width: "w" })).props.bindings).toEqual({
+      opacity: "v",
+      width: "w",
+    });
+    expect(checkNode(rect({ opacity: { variable: "v", unit: "percent" } })).props.bindings).toEqual(
+      { opacity: { variable: "v", unit: "percent" } },
+    );
+    expect(() => checkNode(rect({ width: { variable: "v", unit: "percent" } }))).toThrow(/unit/);
+    expect(() => checkNode(rect({ opacity: { variable: "v", unit: "text" } }))).toThrow(/unit/);
+    expect(() => checkNode(rect({ opacity: { variable: "v" } }))).toThrow();
+  });
+  it("what reads a node's ids sees the variable either way", () => {
+    const props = {
+      bindings: { opacity: { variable: "v", unit: "percent" }, width: "w" },
+    } as never;
+    expect(tokenRefs(props).variables.sort()).toEqual(["v", "w"]);
+    expect(heldNodeIds(props).others.sort()).toEqual(["v", "w"]);
+    expect(renameTokenIds(props, (id) => `x${id}`)).toEqual({
+      bindings: { opacity: { variable: "xv", unit: "percent" }, width: "xw" },
+    });
   });
 });

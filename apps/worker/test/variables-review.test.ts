@@ -1,32 +1,18 @@
 /**
  * The room's side of #186's review (decision 0034): a file stored before
- * variables and styles is migrated as its room loads it, so an opacity
- * variable holding 0.5 still reads as 50% (F9); a table read aside (a
- * version, a branch's base) is migrated the same way; a tab from before
- * reloads at hello; and the MCP tools read values as the canvas shows them
- * (F12: an agent never computes from a value people don't see).
+ * variables and styles is served as it is, and its opacity bindings read as
+ * they did (F9): a binding says how its value maps onto the property, one
+ * without the field means what it meant then, and nothing is converted, in
+ * the file, a version or a snapshot. A tab from before reloads at hello; and
+ * the MCP tools read values as the canvas shows them (F12: an agent never
+ * computes from a value people don't see).
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { Doc } from "@drawpane/editor";
-import {
-  getProp,
-  type NodeRecord,
-  ROOT_ID,
-  snapshotHeaderLine,
-  snapshotTokens,
-  TOKENS_VERSION,
-} from "@drawpane/model";
+import { getProp, type NodeRecord, ROOT_ID, snapshotHeaderLine } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { FileDoc, nodeDetail, resolvedView } from "../src/mcp/document";
 import type { FileRoom } from "../src/rooms/file-room";
-import {
-  createNodeTable,
-  insertNodes,
-  NODE_COLUMNS,
-  type NodeRow,
-  toRecord,
-} from "../src/rooms/node-tables";
-import { migrateTable } from "../src/rooms/token-migration";
 import { openSocket, signedInUser } from "./helpers";
 
 const roomOf = (fileId: string) => env.FILE_ROOM.get(env.FILE_ROOM.idFromName(fileId));
@@ -68,55 +54,37 @@ async function newFile() {
 }
 
 describe("a file stored before variables and styles (F9)", { timeout: 60_000 }, () => {
-  it("F9: is migrated as its room loads it, and opacity looks as it did", async () => {
-    const { fileId } = await newFile();
-    await roomOf(fileId).loadFromBeforeTokens(legacy());
+  it("F9: is served as it is, and opacity looks as it did", async () => {
+    const { browser, fileId } = await newFile();
+    await roomOf(fileId).storeNodes(legacy());
+    // Someone opens it: the room reads it, converting nothing.
+    const socket = await openSocket(browser, fileId);
+    socket.send({
+      t: "hello",
+      protocol: 3,
+      clientId: "reader",
+      revn: null,
+      copies: ["materialized", "compact"],
+    });
+    await socket.next("welcome");
+    socket.ws.close();
     const nodes = (await roomOf(fileId).allNodes()) as NodeRecord[];
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    for (const want of legacy()) expect(byId.get(want.id)).toEqual(want);
+    expect(nodes).toHaveLength(legacy().length);
     const doc = new Doc();
     doc.resetStored(nodes, "materialized");
     expect(doc.get("R1")?.props.opacity).toBe(0.5);
     expect(doc.get("R2")?.props).toMatchObject({ opacity: 0.25, width: 0.25 });
-    // Bound only to opacity: its fraction is now the percentage it read as.
-    expect(getProp((doc.get("O1") as NodeRecord).props, "values")).toEqual({ m1: 50 });
-    // Shared with a width: left as it is; opacity has a variable of its own.
-    expect(getProp((doc.get("W1") as NodeRecord).props, "values")).toEqual({ m1: 0.25 });
-    // Noted as done: it isn't migrated again.
-    const count = nodes.length;
+    expect(getProp((doc.get("O1") as NodeRecord).props, "values")).toEqual({ m1: 0.5 });
+    // No marker, no system edit: nothing to keep in step, nothing to run twice.
     await runInDurableObject(roomOf(fileId), (_room: FileRoom, state) => {
-      const row = state.storage.sql
-        .exec<{ v: string }>("SELECT v FROM meta WHERE k = 'tokens'")
-        .toArray()[0];
-      expect(Number(row?.v)).toBe(TOKENS_VERSION);
-    });
-    expect(((await roomOf(fileId).allNodes()) as NodeRecord[]).length).toBe(count);
-  });
-
-  it("F9: a version or a branch's base read aside is migrated in its table", async () => {
-    const stub = env.FILE_ROOM.get(env.FILE_ROOM.idFromName(`tokens-${crypto.randomUUID()}`));
-    await runInDurableObject(stub, (_room, state) => {
-      const sql = state.storage.sql;
-      createNodeTable(sql, "t_version");
-      insertNodes(sql, "t_version", legacy());
-      sql.exec("UPDATE t_version SET depth = 1 WHERE parent = ?", ROOT_ID);
-      sql.exec("UPDATE t_version SET depth = 2 WHERE parent != ?", ROOT_ID);
-      expect(migrateTable(sql, "t_version")).toBeGreaterThan(0);
-      const rows = sql
-        .exec<NodeRow & { depth: number }>(`SELECT ${NODE_COLUMNS}, depth FROM t_version`)
-        .toArray();
-      const doc = new Doc();
-      doc.resetStored(rows.map(toRecord), "materialized");
-      expect(doc.get("R1")?.props.opacity).toBe(0.5);
-      expect(doc.get("R2")?.props.opacity).toBe(0.25);
-      // The opacity variable made beside a shared one sits under its collection.
-      const fork = rows.find((r) => r.type === "variable" && !["O1", "W1"].includes(r.id));
-      expect(fork?.depth).toBe(2);
+      expect(state.storage.sql.exec("SELECT v FROM meta WHERE k = 'tokens'").toArray()).toEqual([]);
     });
   });
 
-  it("a snapshot says which semantics it's in; one that doesn't is from before", () => {
-    const line = snapshotHeaderLine("F", 3, 0);
-    expect(snapshotTokens(JSON.parse(line))).toBe(TOKENS_VERSION);
-    expect(snapshotTokens(JSON.parse('{"format":"drawpane.snapshot","version":2}'))).toBe(0);
+  it("a snapshot's header says nothing about token semantics: its bindings do", () => {
+    expect(JSON.parse(snapshotHeaderLine("F", 3, 0))).not.toHaveProperty("tokens");
   });
 });
 
