@@ -12,13 +12,14 @@
  * reaches it first (a person's transaction, another run) lets it go.
  */
 import {
+  type Doc,
   type DocReads,
   findTool,
   type HeadlessRenderer,
   ToolFailure,
   type ToolServices,
 } from "@drawpane/editor";
-import type { CopiesFormat, NodeRecord, Op } from "@drawpane/model";
+import { type CopiesFormat, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
 import type { Env } from "../env";
 import { AgentTooLarge } from "../rooms/agent-admission";
 import { AgentEngine, type EngineRun } from "../rooms/agent-engine";
@@ -26,10 +27,10 @@ import { fileFontLoader } from "./harfbuzz";
 import { agentMeasurer } from "./measurer";
 import { headlessRenderer } from "./render";
 import {
-  AGENT_READ_CAP,
   AGENT_RUNNER_V,
+  AGENT_SCOPE_CAP,
   type AgentCommittedNote,
-  type AgentReadSet,
+  type AgentReads,
   type AgentRunAnswer,
   type AgentRunnerApi,
   type AgentRunRequest,
@@ -137,7 +138,7 @@ export class InProcessAgentRunner implements AgentRunnerApi {
             };
         let run: EngineRun;
         this.#running = true;
-        // What the tool and the layout it sets off read: the commit depends on it.
+        // Where the tool and the layout it sets off read: with what it changed, the run's scope.
         const reads = write ? editor.doc.trackReads() : null;
         try {
           run = await engine.run(editor, request.tool, request.input, services);
@@ -162,7 +163,9 @@ export class InProcessAgentRunner implements AgentRunnerApi {
           runId,
           baseRevn,
           ops: run.ops,
-          reads: reads ? readSet(reads, run.ops) : { ids: [], lists: [], instances: [] },
+          reads: reads
+            ? agentReads(editor.doc, reads, run.ops)
+            : { units: [], lists: [], absent: [] },
           result: data ?? null,
           ...(image ? { image } : {}),
         };
@@ -222,17 +225,53 @@ export class InProcessAgentRunner implements AgentRunnerApi {
 }
 
 /**
- * What a run read, less the layers it made (nobody else can have changed
- * those): null when it read everything or more than AGENT_READ_CAP ids.
+ * Where a run read (`AgentReads`), from what its document recorded: each
+ * layer read as the top-level layer it's in, as the document shows it now
+ * (after the run). A layer the run moved is placed where it went; the room
+ * places it where it was, from the run's own operations. Null when it read
+ * every layer, or when that's more than AGENT_SCOPE_CAP ids.
  */
-export function readSet(reads: DocReads, ops: readonly Op[]): AgentReadSet {
+export function agentReads(doc: Doc, reads: DocReads, ops: readonly Op[]): AgentReads {
   if (reads.all) return null;
   const made = new Set<string>();
   for (const op of ops) if (op.op === "create") made.add(op.id);
-  const keep = (ids: Set<string>) => [...ids].filter((id) => !made.has(id));
-  const ids = keep(reads.ids);
-  const lists = keep(reads.lists);
-  const instances = keep(reads.instances);
-  if (ids.length + lists.length + instances.length > AGENT_READ_CAP) return null;
-  return { ids, lists, instances };
+  const units = new Set<string>();
+  const lists = new Set<string>();
+  const absent = new Set<string>();
+  /** The top-level layer (or page, or root-level record) each layer is in; null when it's gone. */
+  const tops = new Map<string, string | null>();
+  const isPage = (id: string) => doc.get(id)?.type === "page";
+  const topOf = (id: string): string | null => {
+    const path: string[] = [];
+    let at = id;
+    let top: string | null = null;
+    for (;;) {
+      const known = tops.get(at);
+      if (known !== undefined) {
+        top = known;
+        break;
+      }
+      path.push(at);
+      const node = doc.get(at);
+      if (!node) break;
+      if (node.parent === ROOT_ID || isPage(node.parent)) {
+        top = at;
+        break;
+      }
+      at = node.parent;
+    }
+    for (const step of path) tops.set(step, top);
+    return top;
+  };
+  for (const id of reads.ids) {
+    if (id === ROOT_ID || made.has(id)) continue;
+    const top = topOf(id);
+    if (top === null) absent.add(id);
+    // A layer the run made is in the scope through the operation that made it.
+    else if (!made.has(top)) units.add(top);
+    if (units.size + absent.size > AGENT_SCOPE_CAP) return null;
+  }
+  for (const id of reads.lists) if (id === ROOT_ID || isPage(id)) lists.add(id);
+  if (units.size + lists.size + absent.size > AGENT_SCOPE_CAP) return null;
+  return { units: [...units], lists: [...lists], absent: [...absent] };
 }

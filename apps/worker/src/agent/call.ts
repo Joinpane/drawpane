@@ -11,7 +11,7 @@
 import { findTool } from "@drawpane/editor";
 import type { Env } from "../env";
 import {
-  AGENT_CLAIM_MS,
+  AGENT_CLAIM_RENEW_MS,
   AGENT_RUNNER_V,
   type AgentAdmission,
   type AgentCallResult,
@@ -25,12 +25,17 @@ import {
   type CommitAgentAnswer,
 } from "./runner-api";
 
-/** How often a call runs again because someone changed what it changed meanwhile, before giving up. */
+/** How often a call runs, when someone keeps changing the frame it works in meanwhile, before giving up. */
 export const AGENT_ATTEMPTS = 3;
+/** The pauses before running again after a stale commit: the frame is busy, so let it settle. */
+export const STALE_PAUSES_MS = [250, 1_000];
+/** How long a call waits for another request with the same call id before giving up. */
+const BUSY_WAIT_MS = 60_000;
 
 export const RUNNER_ABORTED =
   "The agent runner ran out of memory on that call. Nothing was changed. Try a smaller part.";
-export const KEPT_CHANGING = "The file kept changing while that ran. Try again.";
+export const KEPT_CHANGING =
+  "Someone kept changing the frame that call works in while it ran, so nothing was changed. Try again.";
 const KEPT_BUSY = "That call is still running from an earlier request. Try again shortly.";
 
 /**
@@ -57,6 +62,7 @@ export function agentDeps(env: Env, fileId: string): AgentDeps {
         commitAgentRun: async (request) =>
           (await stub.commitAgentRun(request)) as CommitAgentAnswer,
         releaseAgentCall: (request) => stub.releaseAgentCall(request),
+        renewAgentCall: (request) => stub.renewAgentCall(request),
         recordedAgentCall: async (request) =>
           (await stub.recordedAgentCall(request)) as AgentCallResult | null,
       };
@@ -79,9 +85,12 @@ const BUSY_PAUSES_MS = [25, 50, 100, 200, 400, 800, 1000];
  * Runs a write tool for a session and commits what it did as one
  * transaction. A repeated call id answers as recorded, and one still under
  * way elsewhere is waited for and then answers as it did, so concurrent
- * requests with one call id agree. When someone changed what the run
- * depended on while it ran (`stale`), it runs again on the file as it is,
- * up to AGENT_ATTEMPTS times.
+ * requests with one call id agree. Its claim on the call id is renewed
+ * while it runs, and let go when it's answered, so a request that died
+ * holds up another only for AGENT_CLAIM_MS. When someone changed a layer
+ * in the run's scope while it ran (`stale`), it runs again on the file as
+ * it is, after a pause, up to AGENT_ATTEMPTS times; it never commits a
+ * stale run.
  */
 export async function callWriteTool(
   deps: AgentDeps,
@@ -99,6 +108,18 @@ export async function callWriteTool(
   const ids = { v: AGENT_RUNNER_V, fileId, sessionId: call.session.id, callId: call.callId };
   const admission = await admitWrite(deps, ids);
   if (!admission.admitted) return admission.answer;
+  const claim = admission.claim;
+  const renewing =
+    claim === undefined
+      ? undefined
+      : setInterval(
+          () =>
+            void quietly(
+              async () => void (await deps.room().renewAgentCall({ ...ids, claim })),
+              "the room",
+            ),
+          AGENT_CLAIM_RENEW_MS,
+        );
   try {
     const answer = await runAndCommit(deps, call, tool.title);
     if (answer.ok) return answer;
@@ -106,7 +127,7 @@ export async function callWriteTool(
     // may have committed: its recorded answer is the call's.
     return (await deps.room().recordedAgentCall(ids)) ?? answer;
   } finally {
-    const claim = admission.claim;
+    clearInterval(renewing);
     if (claim !== undefined)
       await quietly(() => deps.room().releaseAgentCall({ ...ids, claim }), "the room");
   }
@@ -117,14 +138,13 @@ async function admitWrite(
   deps: AgentDeps,
   ids: { v: number; fileId: string; sessionId: string; callId: string },
 ): Promise<Exclude<AgentAdmission, { busy: true }>> {
-  const until = Date.now() + AGENT_CLAIM_MS + 5_000;
+  const until = Date.now() + BUSY_WAIT_MS;
   for (let attempt = 0; ; attempt++) {
     const admission = await deps.room().admitAgentCall(ids);
     if (!("busy" in admission)) return admission;
-    // The room lets a claim go after AGENT_CLAIM_MS: asking past that is admitted.
+    // A claim its caller stopped renewing goes after AGENT_CLAIM_MS: a live one is waited for.
     if (Date.now() > until) return { admitted: false, answer: { ok: false, message: KEPT_BUSY } };
-    const pause = BUSY_PAUSES_MS[Math.min(attempt, BUSY_PAUSES_MS.length - 1)] as number;
-    await new Promise((resolve) => setTimeout(resolve, pause));
+    await pause(BUSY_PAUSES_MS[Math.min(attempt, BUSY_PAUSES_MS.length - 1)] as number);
   }
 }
 
@@ -141,6 +161,7 @@ async function runAndCommit(
 ): Promise<AgentCallResult> {
   const { fileId } = call.session;
   for (let attempt = 0; attempt < AGENT_ATTEMPTS; attempt++) {
+    if (attempt > 0) await pause(STALE_PAUSES_MS[attempt - 1] ?? 1_000);
     const run = await runOnce(deps, {
       v: AGENT_RUNNER_V,
       fileId,
@@ -220,6 +241,8 @@ async function runOnce(deps: AgentDeps, request: AgentRunRequest): Promise<Agent
     }
   }
 }
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function committedNote(
   fileId: string,

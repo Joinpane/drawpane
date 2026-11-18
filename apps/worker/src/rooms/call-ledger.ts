@@ -138,10 +138,10 @@ export function* loggedSince(
   sql: SqlStorage,
   since: number,
   sessionId: string | null,
-): Generator<{ userId: string; ops: Op[] }> {
+): Generator<{ revn: number; userId: string; ops: Op[] }> {
   // Null leaves nobody out: `session_id IS NOT ?` with null is true of every row.
   const except = sessionId;
-  const pages = boundedPages<number, { user_id: string; ops: string }>(
+  const pages = boundedPages<number, { revn: number; user_id: string; ops: string }>(
     since,
     (after, size) =>
       sql
@@ -155,8 +155,8 @@ export function* loggedSince(
         .map((row) => ({ key: row.revn, n: row.n })),
     (after, last) =>
       sql
-        .exec<{ user_id: string; ops: string }>(
-          "SELECT user_id, ops FROM log WHERE revn > ? AND revn <= ? AND session_id IS NOT ? ORDER BY revn",
+        .exec<{ revn: number; user_id: string; ops: string }>(
+          "SELECT revn, user_id, ops FROM log WHERE revn > ? AND revn <= ? AND session_id IS NOT ? ORDER BY revn",
           after,
           last,
           except,
@@ -164,7 +164,8 @@ export function* loggedSince(
         .toArray(),
   );
   for (const rows of pages)
-    for (const row of rows) yield { userId: row.user_id, ops: JSON.parse(row.ops) as Op[] };
+    for (const row of rows)
+      yield { revn: row.revn, userId: row.user_id, ops: JSON.parse(row.ops) as Op[] };
 }
 
 export class CallLedger {

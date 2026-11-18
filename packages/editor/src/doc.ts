@@ -25,17 +25,16 @@ export interface DocChange {
 type Listener = (change: DocChange) => void;
 
 /**
- * What was read while `trackReads` was on: what a run depended on. An
- * agent run's commit is checked against it (decision 0033), so a layer
- * someone changed meanwhile that the run read makes it run again.
+ * What was read while `trackReads` was on. An agent run's commit uses it
+ * only to find which top-level layers the run worked in (decision 0033):
+ * it needn't name every layer read inside one, and caches that skip a read
+ * don't matter, so long as something in each top-level layer is named.
  */
 export interface DocReads {
-  /** Layers read (presented ids), with what a copy layer is made of: its instance root, main and source. */
+  /** Layers read (presented ids). */
   readonly ids: Set<string>;
-  /** Parents whose child list was read: a layer put in or taken out changes what was read. */
+  /** Parents whose child list was read. */
   readonly lists: Set<string>;
-  /** Mains whose instances were listed (compact copies): a new instance changes what was read. */
-  readonly instances: Set<string>;
   /** Something read every layer (`nodes()`, `stored()`): it depends on all of them. */
   all: boolean;
 }
@@ -138,7 +137,7 @@ export class Doc {
 
   get(id: string): NodeRecord | undefined {
     const node = this.#compact ? this.#compact.view.get(id) : this.#store.get(id);
-    if (this.#reads) this.#read(this.#reads, id, node);
+    if (this.#reads) this.#read(this.#reads, id);
     return node;
   }
 
@@ -148,14 +147,14 @@ export class Doc {
 
   childIds(parent: string): readonly string[] {
     const ids = this.#compact ? this.#compact.view.childIds(parent) : this.#store.childIds(parent);
-    if (this.#reads) this.#readList(this.#reads, parent, ids);
+    if (this.#reads) this.#readList(this.#reads, parent);
     return ids;
   }
 
   pageIds(): readonly string[] {
     const store = this.#compact?.store ?? this.#store;
     const ids = store.childIds(ROOT_ID);
-    if (this.#reads) this.#readList(this.#reads, ROOT_ID, ids);
+    if (this.#reads) this.#readList(this.#reads, ROOT_ID);
     return ids.filter((id) => store.get(id)?.type === "page");
   }
 
@@ -169,7 +168,7 @@ export class Doc {
    * reading costs one check.
    */
   trackReads(): DocReads {
-    this.#reads = { ids: new Set(), lists: new Set(), instances: new Set(), all: false };
+    this.#reads = { ids: new Set(), lists: new Set(), all: false };
     return this.#reads;
   }
 
@@ -177,28 +176,13 @@ export class Doc {
     this.#reads = null;
   }
 
-  #read(reads: DocReads, id: string, node: NodeRecord | undefined): void {
-    if (reads.ids.has(id)) return;
+  #read(reads: DocReads, id: string): void {
     reads.ids.add(id);
-    const main = node?.props.instanceOf;
-    if (typeof main === "string") reads.ids.add(main);
-    const compact = this.#compact;
-    if (!compact) return;
-    // A copy layer is its instance root's main's layer, as overridden (its own record, the same id).
-    let slot = compact.view.knownSlot(id);
-    for (let depth = 0; slot && depth < 32; depth++) {
-      reads.ids.add(slot.root);
-      reads.ids.add(slot.source);
-      const rootMain = compact.store.get(slot.root)?.props.instanceOf;
-      if (typeof rootMain === "string") reads.ids.add(rootMain);
-      slot = compact.view.knownSlot(slot.source);
-    }
   }
 
-  #readList(reads: DocReads, parent: string, ids: readonly string[]): void {
+  #readList(reads: DocReads, parent: string): void {
     reads.lists.add(parent);
     reads.ids.add(parent);
-    for (const id of ids) reads.ids.add(id);
   }
 
   /** Ancestors of `id`, nearest first, excluding the root. */
@@ -218,7 +202,7 @@ export class Doc {
   collectionIds(): readonly string[] {
     const store = this.#compact?.store ?? this.#store;
     const ids = store.childIds(ROOT_ID);
-    if (this.#reads) this.#readList(this.#reads, ROOT_ID, ids);
+    if (this.#reads) this.#readList(this.#reads, ROOT_ID);
     return ids.filter((id) => store.get(id)?.type === "collection");
   }
 
@@ -235,7 +219,7 @@ export class Doc {
   /** Where a copy layer sits (its instance root, path and main layer), when copies are compact. */
   copySlot(id: string): CopySlot | undefined {
     const slot = this.#compact?.view.slot(id);
-    if (this.#reads) this.#read(this.#reads, id, undefined);
+    if (this.#reads) this.#read(this.#reads, id);
     return slot;
   }
 
@@ -243,7 +227,6 @@ export class Doc {
   instanceRoots(mainId: string): readonly string[] {
     const roots = this.#compact?.instanceRoots(mainId) ?? [];
     if (this.#reads) {
-      this.#reads.instances.add(mainId);
       this.#reads.ids.add(mainId);
       for (const id of roots) this.#reads.ids.add(id);
     }
@@ -252,7 +235,7 @@ export class Doc {
 
   /** Whether an instance stores a value a layout reads, so its layout can differ from its main's. */
   layoutDiffers(rootId: string): boolean {
-    if (this.#reads) this.#read(this.#reads, rootId, undefined);
+    if (this.#reads) this.#read(this.#reads, rootId);
     return this.#compact?.layoutDiffers(rootId) ?? false;
   }
 
@@ -271,12 +254,12 @@ export class Doc {
     return {
       get: (id) => {
         const node = store().get(id);
-        if (this.#reads) this.#read(this.#reads, id, node);
+        if (this.#reads) this.#read(this.#reads, id);
         return node;
       },
       childIds: (parent) => {
         const ids = store().childIds(parent);
-        if (this.#reads) this.#readList(this.#reads, parent, ids);
+        if (this.#reads) this.#readList(this.#reads, parent);
         return ids;
       },
       pageIds: () => this.pageIds(),

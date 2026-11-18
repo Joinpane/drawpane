@@ -44,13 +44,12 @@ import {
 import { InProcessAgentRunner } from "../agent/runner";
 import {
   AGENT_CLAIM_MS,
-  AGENT_READ_CAP,
   AGENT_RUNNER_V,
   type AgentAdmission,
   type AgentAdmissionRequest,
   type AgentCallResult,
   type AgentCommittedNote,
-  type AgentReadSet,
+  type AgentReads,
   type AgentRelease,
   type AgentRunAnswer,
   type AgentRunRequest,
@@ -63,7 +62,7 @@ import type { Env, Role } from "../env";
 import { signPayload, verifyPayload } from "../lib/crypto";
 import { answerDocument, type DocumentRequest, SqlFileDoc } from "../mcp/document";
 import { agentPrecheck } from "./agent-admission";
-import { footprint, overlaps, touchedBy, underDeleted } from "./agent-footprint";
+import { leftBy, runScope, type Scope, touchedBy, touches } from "./agent-scope";
 import {
   CALL_SCHEMA,
   CallLedger,
@@ -414,7 +413,7 @@ export type { AgentCallResult, AgentSessionRef } from "../agent/runner-api";
 const MAX_AGENT_CHANGE_BYTES = 1 << 20;
 const AGENT_OUT_OF_STEP =
   "Drawpane was updated during that call, and nothing was changed. Try again.";
-const STALE_RUN = "Someone changed the same layers while that ran.";
+const STALE_RUN = "Someone changed the frame that call works in while it ran.";
 
 export interface SavedVersion {
   readonly id: string;
@@ -473,11 +472,20 @@ export class FileRoom extends DurableObject<Env> {
   #runner: InProcessAgentRunner | null = null;
   /**
    * Agent write calls under way, by session and call id: the claim each was
-   * admitted with and when. Another request with the same call id meanwhile
-   * is told it's busy (`admitAgentCall`). Held in memory: a room that
-   * restarts forgets them, and the ledger's replay is the backstop.
+   * admitted with, when it was last renewed, and the revision it was
+   * admitted at. Another request with the same call id meanwhile is told
+   * it's busy (`admitAgentCall`). One not renewed for AGENT_CLAIM_MS is
+   * gone: swept on every admission and renewal. Held in memory: a room
+   * that restarts forgets them, and the ledger's replay is the backstop.
    */
-  readonly #claims = new Map<string, { claim: string; at: number }>();
+  readonly #claims = new Map<string, { claim: string; at: number; revn: number }>();
+  /**
+   * While any write call holds a claim: where each transaction since
+   * revision `from` deleted or moved layers away from (`leftBy`), by
+   * revision, before it applied; null for one that touched everything. A
+   * run's commit is checked against it (`#staleSince`).
+   */
+  #agentWatch: { from: number; readonly left: Map<number, Scope | null> } | null = null;
   /** Copies of the file set aside for downloads, by revision (see exportDocument). */
   readonly #sharedCopies = new Map<
     number,
@@ -2129,14 +2137,15 @@ export class FileRoom extends DurableObject<Env> {
     if (write) {
       const replay = this.#replay(sessionId, callId);
       if (replay) return { admitted: false, answer: replay };
-      const held = this.#claims.get(claimKey(sessionId, callId));
-      if (held && Date.now() - held.at < AGENT_CLAIM_MS) return { admitted: false, busy: true };
+      this.#sweepClaims();
+      if (this.#claims.has(claimKey(sessionId, callId))) return { admitted: false, busy: true };
     }
     const tooLarge = this.#tooLargeForAgents();
     if (tooLarge) return { admitted: false, answer: tooLarge };
     if (!write) return { admitted: true, revn: this.#revn };
     const claim = crypto.randomUUID();
-    this.#claims.set(claimKey(sessionId, callId), { claim, at: Date.now() });
+    this.#claims.set(claimKey(sessionId, callId), { claim, at: Date.now(), revn: this.#revn });
+    this.#agentWatch ??= { from: this.#revn, left: new Map() };
     return { admitted: true, revn: this.#revn, claim };
   }
 
@@ -2145,6 +2154,45 @@ export class FileRoom extends DurableObject<Env> {
     if (request.v !== AGENT_RUNNER_V) return;
     const key = claimKey(request.sessionId, request.callId);
     if (this.#claims.get(key)?.claim === request.claim) this.#claims.delete(key);
+    this.#sweepClaims();
+  }
+
+  /** Keeps a write's claim for another AGENT_CLAIM_MS while its request runs; false when it's gone. */
+  async renewAgentCall(request: AgentRelease): Promise<boolean> {
+    if (request.v !== AGENT_RUNNER_V) return false;
+    this.#sweepClaims();
+    const held = this.#claims.get(claimKey(request.sessionId, request.callId));
+    if (held?.claim !== request.claim) return false;
+    held.at = Date.now();
+    return true;
+  }
+
+  /** How many claims on agent calls are held, expired ones swept first (for tests). */
+  async heldAgentClaims(): Promise<number> {
+    this.#sweepClaims();
+    return this.#claims.size;
+  }
+
+  /**
+   * Drops claims not renewed for AGENT_CLAIM_MS (their callers are gone),
+   * and what the watch kept that no claim's run can still need: all of it
+   * once no claim is left.
+   */
+  #sweepClaims(): void {
+    const now = Date.now();
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const [key, held] of this.#claims) {
+      if (now - held.at >= AGENT_CLAIM_MS) this.#claims.delete(key);
+      else oldest = Math.min(oldest, held.revn);
+    }
+    const watch = this.#agentWatch;
+    if (!watch) return;
+    if (this.#claims.size === 0) {
+      this.#agentWatch = null;
+      return;
+    }
+    // A run's base revision is at least the revision its call was admitted at.
+    for (const revn of watch.left.keys()) if (revn <= oldest) watch.left.delete(revn);
   }
 
   /** What the ledger recorded for a session's call, as its replay; null when nothing is. */
@@ -2166,12 +2214,12 @@ export class FileRoom extends DurableObject<Env> {
    * seen before answers as recorded (a retry finished first).
    *
    * The run was made on `baseRevn`. When the file has moved on since, it's
-   * still committed unless someone's logged operations since then changed
-   * what it depended on (`agent-footprint.ts`): the layers it changed, what
-   * it read, the parents and layout ancestors of what it changed, anything
-   * inside what it deletes. Then it's `stale`, nothing is committed, and
-   * the caller runs it again on the file as it is. Edits elsewhere don't
-   * hold it up.
+   * still committed unless someone's logged operations since then touched
+   * its scope (`agent-scope.ts`): the top-level layers it worked in, the
+   * page's list when it put a top-level layer in or took one out, and the
+   * mains, styles and variables used inside them. Then it's `stale`,
+   * nothing is committed, and the caller runs it again on the file as it
+   * is. Edits in other top-level layers don't hold it up.
    */
   async commitAgentRun(request: CommitAgentRun): Promise<CommitAgentAnswer> {
     const { by, session, callId, ops } = request;
@@ -2222,12 +2270,12 @@ export class FileRoom extends DurableObject<Env> {
 
   /**
    * Whether anyone's logged operations after `since`, the agent's own
-   * sessions included, changed what a run of `ops` that read `reads`
-   * depended on (`agent-footprint.ts`). True as well when the log no longer
-   * reaches back that far, and when that's more than AGENT_READ_CAP ids:
-   * then any change at all since `since` counts.
+   * sessions included, touched the scope of a run of `ops` that read where
+   * `reads` says (`agent-scope.ts`). True as well when the log no longer
+   * reaches back that far, when the scope is the whole file, and when where
+   * a layer was deleted or moved away from since then wasn't noted.
    */
-  #staleSince(since: number, ops: readonly Op[], reads: AgentReadSet | undefined): boolean {
+  #staleSince(since: number, ops: readonly Op[], reads: AgentReads | undefined): boolean {
     if (since >= this.#revn) return false;
     // An import since then replaced the file without logging it.
     if (since < this.#catchupFrom()) return true;
@@ -2235,18 +2283,28 @@ export class FileRoom extends DurableObject<Env> {
       .exec<{ revn: number | null }>("SELECT MIN(revn) AS revn FROM log")
       .one().revn;
     if (oldest === null || oldest > since + 1) return true;
-    const depended = footprint(this.#store, ops, reads);
-    if (!depended) return true;
-    // What changed since, for the deletes: past the cap, taken as inside one.
-    const touched = new Set<string>();
-    for (const { ops: theirs } of loggedSince(this.#sql, since, null))
-      for (const op of theirs) {
-        if (overlaps(op, depended)) return true;
-        if (depended.deletes.length === 0) continue;
-        for (const id of touchedBy(op)) touched.add(id);
-        if (touched.size > AGENT_READ_CAP) return true;
+    const scope = runScope(this.#sql, ops, reads ?? null);
+    if (!scope) return true;
+    const watch = this.#agentWatch;
+    const watched = watch !== null && watch.from <= since;
+    let leftScope = false;
+    const sql = this.#sql;
+    // What everyone did since, read a page at a time: stops at a delete or move away from
+    // the scope, or one whose source wasn't noted (as it applied, `leftBy`).
+    function* theirs(): Generator<Op> {
+      for (const row of loggedSince(sql, since, null)) {
+        if (row.ops.some((op) => op.op === "delete" || op.op === "move")) {
+          const left = watched ? watch.left.get(row.revn) : undefined;
+          if (!left || touches(left, scope as Scope)) {
+            leftScope = true;
+            return;
+          }
+        }
+        yield* row.ops;
       }
-    return underDeleted(this.#sql, touched, depended.deletes);
+    }
+    const touched = touchedBy(sql, theirs());
+    return leftScope || !touched || touches(touched, scope);
   }
 
   // The runner, hosted in-process (decision 0033, migration step 1). These are
@@ -3108,6 +3166,10 @@ export class FileRoom extends DurableObject<Env> {
     // found before (what's deleted) and after (what's made) it applies.
     const touched = this.#converting ? touchedIds(ops) : null;
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
+    // A write call under way: where this deletes or moves layers away from, before it does.
+    const watch = this.#agentWatch;
+    watch?.left.delete(next);
+    const left = watch ? leftBy(this.#sql, ops) : undefined;
     // A file stored compact: what this removes and makes, checked when the transaction ends.
     if (check) this.#noteRemovedMains(ops, check);
     // Every commit is checked for instances inside their own main, held or not (the clients
@@ -3119,6 +3181,7 @@ export class FileRoom extends DurableObject<Env> {
       cycles,
     });
     this.#store.clearCache();
+    if (watch && left !== undefined) watch.left.set(next, left);
     if (check) this.#noteCandidates(ops);
     if (touched) markDirty(this.#sql, "nodes", LIVE_CONVERSION, touched);
     const now = Date.now();

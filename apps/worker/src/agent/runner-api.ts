@@ -53,23 +53,35 @@ export type AgentCallResult =
 // The runner
 
 /**
- * The most ids a run's read set (`AgentReadSet`) names, and the room adds
- * to it (decision 0033). Past it, a run is treated as having read the
- * whole file: any change since its base revision makes it run again.
+ * The most ids a run's scope (`AgentReads`, and what the room makes of it)
+ * may hold, and the most layers the room looks through to close it
+ * (decision 0033). Past either, the run is taken to depend on the whole
+ * file: any change since its base revision makes it run again.
  */
-export const AGENT_READ_CAP = 5_000;
+export const AGENT_SCOPE_CAP = 5_000;
+export const AGENT_SCOPE_SCAN = 50_000;
 
 /**
- * What a write run read on the file it ran on, as the runner's document
- * recorded it (the tool and the layout fix-ups it set off), less the layers
- * it made: `ids` it read, parents whose child list it read (`lists`), and
- * mains whose instances it listed (`instances`). Null when it read the
- * whole file, or more than AGENT_READ_CAP ids.
+ * Where a write run read, as its runner's document recorded it (the tool
+ * and the layout fix-ups it set off), less the layers it made. Only used
+ * to find the run's scope (decision 0033): the top-level layers it worked
+ * in, not each layer it read inside them, so a read a cache skipped
+ * doesn't matter as long as something in the same top-level layer was
+ * read or written.
+ *
+ * - `units`: the top-level layers (children of a page) it read in, and the
+ *   pages and root-level records (variable collections, text styles) it
+ *   read, as the runner's editor shows them after the run.
+ * - `lists`: pages (or the root) whose list of layers it read.
+ * - `absent`: ids it looked for that weren't there: one made meanwhile counts.
+ *
+ * Null when it read something the runner can't place (every layer), or
+ * more than AGENT_SCOPE_CAP ids.
  */
-export type AgentReadSet = {
-  readonly ids: readonly string[];
+export type AgentReads = {
+  readonly units: readonly string[];
   readonly lists: readonly string[];
-  readonly instances: readonly string[];
+  readonly absent: readonly string[];
 } | null;
 
 export interface AgentRunRequest {
@@ -91,8 +103,8 @@ export type AgentRunAnswer =
       readonly baseRevn: number;
       /** What the tool changed, fix-ups included, as stored: empty for a read. */
       readonly ops: Op[];
-      /** What it read to make them: the room checks nobody changed it since `baseRevn`. */
-      readonly reads: AgentReadSet;
+      /** Where it read to make them: with its operations, its scope (`CommitAgentRun`). */
+      readonly reads: AgentReads;
       readonly result: unknown;
       readonly image?: { readonly mimeType: string; readonly base64: string };
     }
@@ -140,17 +152,23 @@ export interface AgentAdmissionRequest {
 /**
  * Whether a call may run: refused (too large, or a replay) answers at once.
  * A write is admitted with a `claim` on its call id, held until it's
- * released (`releaseAgentCall`) or AGENT_CLAIM_MS passes: meanwhile the
- * same call id is `busy`, and asked again after a pause it answers as the
- * first one did. Nothing else holds it up.
+ * released (`releaseAgentCall`) or AGENT_CLAIM_MS passes without the
+ * caller renewing it (`renewAgentCall`): meanwhile the same call id is
+ * `busy`, and asked again after a pause it answers as the first one did.
+ * Nothing else holds it up.
  */
 export type AgentAdmission =
   | { readonly admitted: true; readonly revn: number; readonly claim?: string }
   | { readonly admitted: false; readonly busy: true }
   | { readonly admitted: false; readonly answer: AgentCallResult };
 
-/** How long a claim on a call id holds without being released: a caller that died lets go after it. */
-export const AGENT_CLAIM_MS = 120_000;
+/**
+ * How long a claim on a call id holds unless renewed: a caller that died
+ * (and so stopped renewing) lets go after it. The caller renews every
+ * AGENT_CLAIM_RENEW_MS while its request runs.
+ */
+export const AGENT_CLAIM_MS = 15_000;
+export const AGENT_CLAIM_RENEW_MS = 5_000;
 
 export interface AgentRelease {
   readonly v: number;
@@ -171,18 +189,19 @@ export interface CommitAgentRun {
   /** The revision the run's changes were made on. */
   readonly baseRevn: number;
   readonly ops: Op[];
-  /** What the run read (`AgentRunAnswer.reads`). */
-  readonly reads: AgentReadSet;
+  /** Where the run read (`AgentRunAnswer.reads`). */
+  readonly reads: AgentReads;
   readonly result: unknown;
 }
 
 /**
- * The commit's answer. `stale`: after its base revision someone changed
- * what the run depended on, so nothing was committed and the call should
- * run again on the file as it is now. What it depended on: the layers it
- * changed (or a layer put inside one, or changed inside one it deletes),
- * what it read, and the layout ancestors and old and new parents of what
- * it changed (`agent-footprint.ts`).
+ * The commit's answer. `stale`: after its base revision someone changed a
+ * layer in the run's scope, so nothing was committed and the call should
+ * run again on the file as it is now. The scope (`agent-scope.ts`): the
+ * top-level layers the run read in or changed, the page's list of
+ * top-level layers when it put one in or took one out (or read the list),
+ * and the mains, styles and variables used inside any of those, with their
+ * own top-level layers.
  */
 export type CommitAgentAnswer =
   | AgentCallResult
@@ -194,6 +213,8 @@ export interface AgentRoomApi {
   commitAgentRun(request: CommitAgentRun): Promise<CommitAgentAnswer>;
   /** Lets go of an admitted write's claim on its call id; a claim already gone is fine. */
   releaseAgentCall(request: AgentRelease): Promise<void>;
+  /** Keeps an admitted write's claim for another AGENT_CLAIM_MS; false when it's gone. */
+  renewAgentCall(request: AgentRelease): Promise<boolean>;
   /** What the ledger recorded for a session's call, as a replay; null when it didn't. */
   recordedAgentCall(request: {
     readonly v: number;

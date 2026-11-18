@@ -1,6 +1,6 @@
 /**
  * What a document records as read while `trackReads` is on: what an agent
- * run's commit is checked against (decision 0033).
+ * run's scope is found from (decision 0033), the top-level layers it read in.
  */
 import { copyId, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
@@ -26,7 +26,7 @@ describe("a document's reads", () => {
     d.childIds("f");
     d.untrackReads();
     d.get("p");
-    expect([...reads.ids].sort()).toEqual(["a", "b", "f", "missing"]);
+    expect([...reads.ids].sort()).toEqual(["a", "f", "missing"]);
     expect([...reads.lists]).toEqual(["f"]);
     expect(reads.all).toBe(false);
   });
@@ -45,7 +45,7 @@ describe("a document's reads", () => {
     expect(reads.all).toBe(true);
   });
 
-  it("records what a copy layer is made of: its instance root, main and source layer", () => {
+  it("records a copy layer read by its own id", () => {
     const d = doc(true);
     d.apply([
       { op: "set", id: "f", prop: "isComponent", value: true },
@@ -62,6 +62,6 @@ describe("a document's reads", () => {
     expect(d.get(copy)).toBeDefined();
     const reads = d.trackReads();
     d.get(copy);
-    expect([...reads.ids]).toEqual(expect.arrayContaining([copy, "i", "f", "a"]));
+    expect([...reads.ids]).toEqual([copy]);
   });
 });
