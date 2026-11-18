@@ -207,6 +207,668 @@ describe("a commit after the file moved on", () => {
   });
 });
 
+describe("a commit after the file moved on, checked against what the run read", () => {
+  it("runs again when a person resized the auto layout parent it filled", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      { op: "set", id: box, prop: "layoutMode", value: "row" },
+      { op: "set", id: box, prop: "width", value: 200 },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: box, prop: "width", value: 400 }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "fill-parent-1",
+      tool: "render",
+      input: { parentId: box, jsx: `<Rect w="fill" h={10} />` },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+    const made = out.ok ? (out.result as { ids: string[] }).ids[0] : "";
+    expect((await node(fileId, box))?.props.width).toBe(400);
+    expect((await node(fileId, made as string))?.props.width).toBe(400);
+  });
+
+  it("runs again when a person moved the parent it moves a layer into", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      { op: "set", id: box, prop: "x", value: 100 },
+      {
+        op: "create",
+        id: "destination",
+        type: "frame",
+        parent: person.page.id,
+        key: "a1",
+        props: { x: 200, y: 0, width: 100, height: 100 },
+      },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: "destination", prop: "x", value: 400 }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "reparent-1",
+      tool: "move_nodes",
+      input: { ids: [box], parentId: "destination" },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+    // It keeps its place on the page: x=100, inside a parent now at x=400.
+    const moved = await node(fileId, box);
+    expect(moved?.parent).toBe("destination");
+    expect(moved?.props.x).toBe(-300);
+  });
+
+  it("runs again when a person moved a sibling it placed a new layer beside", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([{ op: "set", id: box, prop: "x", value: 0 }]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: box, prop: "x", value: 110 }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "placement-1",
+      tool: "render",
+      input: { jsx: `<Rect w={10} h={10} />` },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+    const made = out.ok ? (out.result as { ids: string[] }).ids[0] : "";
+    // Placed beside the box where it is now, not where it was.
+    expect((await node(fileId, made as string))?.props.x).not.toBe(110);
+  });
+
+  it("still commits at once when a person edited a layer it didn't read", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      { op: "set", id: box, prop: "layoutMode", value: "row" },
+      { op: "set", id: box, prop: "width", value: 200 },
+      {
+        op: "create",
+        id: "note",
+        type: "rect",
+        parent: person.page.id,
+        key: "a1",
+        props: { name: "Note", x: 0, y: 400, width: 10, height: 10 },
+      },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: "note", prop: "name", value: "Ana's" }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "unread-1",
+      tool: "render",
+      input: { parentId: box, jsx: `<Rect w="fill" h={10} />` },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(1);
+  });
+
+  it("runs again after any change at all when the run read more than it can name", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      {
+        op: "create",
+        id: "note",
+        type: "rect",
+        parent: person.page.id,
+        key: "a1",
+        props: { name: "Note", x: 0, y: 400, width: 10, height: 10 },
+      },
+    ]);
+    // As the runner answers a run that read the whole file, or past AGENT_READ_CAP ids.
+    const real = agentDeps(env, fileId);
+    let runs = 0;
+    const deps: AgentDeps = {
+      room: real.room,
+      runner: () => {
+        const runner = real.runner();
+        return {
+          ...runner,
+          run: async (request) => {
+            const answer = await runner.run(request);
+            if (++runs === 1)
+              await person.edit([{ op: "set", id: "note", prop: "name", value: "Ana's" }]);
+            return answer.ok ? { ...answer, reads: null } : answer;
+          },
+        };
+      },
+    };
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "read-everything-1",
+      tool: "set_props",
+      input: { changes: [{ id: box, props: { w: 80 } }] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toBe(2);
+  });
+});
+
+describe("a delete committed after the file moved on", () => {
+  it("runs again when a person changed a layer inside what it deletes", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      {
+        op: "create",
+        id: "child",
+        type: "rect",
+        parent: box,
+        key: "a0",
+        props: { width: 10, height: 10, name: "before" },
+      },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: "child", prop: "name", value: "Ana's" }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "delete-changed-child-1",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+    expect(await node(fileId, "child")).toBeUndefined();
+  });
+
+  it("runs again when a person put a layer deeper inside what it deletes", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      { op: "create", id: "child", type: "frame", parent: box, key: "a0", props: { width: 10 } },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1)
+        await person.edit([
+          { op: "create", id: "grandchild", type: "rect", parent: "child", key: "a0", props: {} },
+        ]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "delete-deeper-1",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+  });
+
+  it("commits at once when a person changed a layer outside what it deletes", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      {
+        op: "create",
+        id: "outside",
+        type: "frame",
+        parent: person.page.id,
+        key: "a1",
+        props: { x: 300, width: 10, height: 10 },
+      },
+      { op: "create", id: "inside", type: "rect", parent: "outside", key: "a0", props: {} },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: "inside", prop: "name", value: "Ana's" }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "delete-elsewhere-1",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(1);
+  });
+});
+
+describe("requests with the same call id at once", () => {
+  /** Deps whose runner waits at `gate` before running, saying when it got there. */
+  function gated(fileId: string) {
+    const real = agentDeps(env, fileId);
+    let reached!: () => void;
+    let resume!: () => void;
+    const waiting = new Promise<void>((r) => {
+      reached = r;
+    });
+    const gate = new Promise<void>((r) => {
+      resume = r;
+    });
+    const deps: AgentDeps = {
+      room: real.room,
+      runner: () => ({
+        ...real.runner(),
+        run: async (request) => {
+          reached();
+          await gate;
+          return real.runner().run(request);
+        },
+      }),
+    };
+    return { real, deps, waiting, resume };
+  }
+
+  it("agree: the later one waits for the first and answers as it did", async () => {
+    const { fileId, box, by, session } = await setup();
+    const { real, deps: slow, waiting, resume } = gated(fileId);
+    let busy!: () => void;
+    const sawBusy = new Promise<void>((r) => {
+      busy = r;
+    });
+    const watching: AgentDeps = {
+      runner: real.runner,
+      room: () => {
+        const room = real.room();
+        return {
+          ...room,
+          admitAgentCall: async (request) => {
+            const admission = await room.admitAgentCall(request);
+            if ("busy" in admission) busy();
+            return admission;
+          },
+        };
+      },
+    };
+    const args = {
+      by,
+      session,
+      callId: "same-delete-1",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    };
+    const first = callWriteTool(slow, args);
+    await waiting;
+    const second = callWriteTool(watching, args);
+    // The second is held until the first is answered; before claims it ran and committed.
+    await Promise.race([second, sawBusy]);
+    resume();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toMatchObject({ ok: true, replayed: false });
+    expect(b).toMatchObject({ ok: true, replayed: true, revn: a.ok ? a.revn : -1 });
+  });
+
+  it("answer a failed run with the call's recorded success when another committed it", async () => {
+    const { fileId, box, by, session } = await setup();
+    const { real, deps, waiting, resume } = gated(fileId);
+    // As if the room restarted after admitting it, forgetting its claim.
+    const forgetful: AgentDeps = {
+      runner: deps.runner,
+      room: () => {
+        const room = real.room();
+        return {
+          ...room,
+          admitAgentCall: async (request) => {
+            const admission = await room.admitAgentCall(request);
+            if (admission.admitted && admission.claim && request.sessionId && request.callId)
+              await room.releaseAgentCall({
+                v: request.v,
+                fileId: request.fileId,
+                sessionId: request.sessionId,
+                callId: request.callId,
+                claim: admission.claim,
+              });
+            return admission;
+          },
+        };
+      },
+    };
+    const args = {
+      by,
+      session,
+      callId: "same-delete-2",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    };
+    const second = callWriteTool(forgetful, args);
+    await waiting;
+    const first = await callWriteTool(real, args);
+    resume();
+    // Its run fails (the box is gone), and the ledger has the first one's success.
+    const out = await second;
+    expect(first).toMatchObject({ ok: true, replayed: false });
+    expect(out).toMatchObject({ ok: true, replayed: true, revn: first.ok ? first.revn : -1 });
+  });
+});
+
+describe("a commit after the file moved on, checked against what the run read", () => {
+  it("runs again when a person resized the auto layout parent it filled", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      { op: "set", id: box, prop: "layoutMode", value: "row" },
+      { op: "set", id: box, prop: "width", value: 200 },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: box, prop: "width", value: 400 }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "fill-parent-1",
+      tool: "render",
+      input: { parentId: box, jsx: `<Rect w="fill" h={10} />` },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+    const made = out.ok ? (out.result as { ids: string[] }).ids[0] : "";
+    expect((await node(fileId, box))?.props.width).toBe(400);
+    expect((await node(fileId, made as string))?.props.width).toBe(400);
+  });
+
+  it("runs again when a person moved the parent it moves a layer into", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      { op: "set", id: box, prop: "x", value: 100 },
+      {
+        op: "create",
+        id: "destination",
+        type: "frame",
+        parent: person.page.id,
+        key: "a1",
+        props: { x: 200, y: 0, width: 100, height: 100 },
+      },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: "destination", prop: "x", value: 400 }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "reparent-1",
+      tool: "move_nodes",
+      input: { ids: [box], parentId: "destination" },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+    // It keeps its place on the page: x=100, inside a parent now at x=400.
+    const moved = await node(fileId, box);
+    expect(moved?.parent).toBe("destination");
+    expect(moved?.props.x).toBe(-300);
+  });
+
+  it("runs again when a person moved a sibling it placed a new layer beside", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([{ op: "set", id: box, prop: "x", value: 0 }]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: box, prop: "x", value: 110 }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "placement-1",
+      tool: "render",
+      input: { jsx: `<Rect w={10} h={10} />` },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+    const made = out.ok ? (out.result as { ids: string[] }).ids[0] : "";
+    // Placed beside the box where it is now, not where it was.
+    expect((await node(fileId, made as string))?.props.x).not.toBe(110);
+  });
+
+  it("still commits at once when a person edited a layer it didn't read", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      { op: "set", id: box, prop: "layoutMode", value: "row" },
+      { op: "set", id: box, prop: "width", value: 200 },
+      {
+        op: "create",
+        id: "note",
+        type: "rect",
+        parent: person.page.id,
+        key: "a1",
+        props: { name: "Note", x: 0, y: 400, width: 10, height: 10 },
+      },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: "note", prop: "name", value: "Ana's" }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "unread-1",
+      tool: "render",
+      input: { parentId: box, jsx: `<Rect w="fill" h={10} />` },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(1);
+  });
+
+  it("runs again after any change at all when the run read more than it can name", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      {
+        op: "create",
+        id: "note",
+        type: "rect",
+        parent: person.page.id,
+        key: "a1",
+        props: { name: "Note", x: 0, y: 400, width: 10, height: 10 },
+      },
+    ]);
+    // As the runner answers a run that read the whole file, or past AGENT_READ_CAP ids.
+    const real = agentDeps(env, fileId);
+    let runs = 0;
+    const deps: AgentDeps = {
+      room: real.room,
+      runner: () => {
+        const runner = real.runner();
+        return {
+          ...runner,
+          run: async (request) => {
+            const answer = await runner.run(request);
+            if (++runs === 1)
+              await person.edit([{ op: "set", id: "note", prop: "name", value: "Ana's" }]);
+            return answer.ok ? { ...answer, reads: null } : answer;
+          },
+        };
+      },
+    };
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "read-everything-1",
+      tool: "set_props",
+      input: { changes: [{ id: box, props: { w: 80 } }] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toBe(2);
+  });
+});
+
+describe("a delete committed after the file moved on", () => {
+  it("runs again when a person changed a layer inside what it deletes", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      {
+        op: "create",
+        id: "child",
+        type: "rect",
+        parent: box,
+        key: "a0",
+        props: { width: 10, height: 10, name: "before" },
+      },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: "child", prop: "name", value: "Ana's" }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "delete-changed-child-1",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+    expect(await node(fileId, "child")).toBeUndefined();
+  });
+
+  it("runs again when a person put a layer deeper inside what it deletes", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      { op: "create", id: "child", type: "frame", parent: box, key: "a0", props: { width: 10 } },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1)
+        await person.edit([
+          { op: "create", id: "grandchild", type: "rect", parent: "child", key: "a0", props: {} },
+        ]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "delete-deeper-1",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(2);
+  });
+
+  it("commits at once when a person changed a layer outside what it deletes", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      {
+        op: "create",
+        id: "outside",
+        type: "frame",
+        parent: person.page.id,
+        key: "a1",
+        props: { x: 300, width: 10, height: 10 },
+      },
+      { op: "create", id: "inside", type: "rect", parent: "outside", key: "a0", props: {} },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1) await person.edit([{ op: "set", id: "inside", prop: "name", value: "Ana's" }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "delete-elsewhere-1",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect(runs).toHaveLength(1);
+  });
+});
+
+describe("requests with the same call id at once", () => {
+  /** Deps whose runner waits at `gate` before running, saying when it got there. */
+  function gated(fileId: string) {
+    const real = agentDeps(env, fileId);
+    let reached!: () => void;
+    let resume!: () => void;
+    const waiting = new Promise<void>((r) => {
+      reached = r;
+    });
+    const gate = new Promise<void>((r) => {
+      resume = r;
+    });
+    const deps: AgentDeps = {
+      room: real.room,
+      runner: () => ({
+        ...real.runner(),
+        run: async (request) => {
+          reached();
+          await gate;
+          return real.runner().run(request);
+        },
+      }),
+    };
+    return { real, deps, waiting, resume };
+  }
+
+  it("agree: the later one waits for the first and answers as it did", async () => {
+    const { fileId, box, by, session } = await setup();
+    const { real, deps: slow, waiting, resume } = gated(fileId);
+    let busy!: () => void;
+    const sawBusy = new Promise<void>((r) => {
+      busy = r;
+    });
+    const watching: AgentDeps = {
+      runner: real.runner,
+      room: () => {
+        const room = real.room();
+        return {
+          ...room,
+          admitAgentCall: async (request) => {
+            const admission = await room.admitAgentCall(request);
+            if ("busy" in admission) busy();
+            return admission;
+          },
+        };
+      },
+    };
+    const args = {
+      by,
+      session,
+      callId: "same-delete-1",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    };
+    const first = callWriteTool(slow, args);
+    await waiting;
+    const second = callWriteTool(watching, args);
+    // The second is held until the first is answered; before claims it ran and committed.
+    await Promise.race([second, sawBusy]);
+    resume();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toMatchObject({ ok: true, replayed: false });
+    expect(b).toMatchObject({ ok: true, replayed: true, revn: a.ok ? a.revn : -1 });
+  });
+
+  it("answer a failed run with the call's recorded success when another committed it", async () => {
+    const { fileId, box, by, session } = await setup();
+    const { real, deps, waiting, resume } = gated(fileId);
+    // As if the room restarted after admitting it, forgetting its claim.
+    const forgetful: AgentDeps = {
+      runner: deps.runner,
+      room: () => {
+        const room = real.room();
+        return {
+          ...room,
+          admitAgentCall: async (request) => {
+            const admission = await room.admitAgentCall(request);
+            if (admission.admitted && admission.claim && request.sessionId && request.callId)
+              await room.releaseAgentCall({
+                v: request.v,
+                fileId: request.fileId,
+                sessionId: request.sessionId,
+                callId: request.callId,
+                claim: admission.claim,
+              });
+            return admission;
+          },
+        };
+      },
+    };
+    const args = {
+      by,
+      session,
+      callId: "same-delete-2",
+      tool: "delete_nodes",
+      input: { ids: [box] },
+    };
+    const second = callWriteTool(forgetful, args);
+    await waiting;
+    const first = await callWriteTool(real, args);
+    resume();
+    // Its run fails (the box is gone), and the ledger has the first one's success.
+    const out = await second;
+    expect(first).toMatchObject({ ok: true, replayed: false });
+    expect(out).toMatchObject({ ok: true, replayed: true, revn: first.ok ? first.revn : -1 });
+  });
+});
+
 describe("the main Worker's side of a call", () => {
   it("asks for a fresh runner for every request, and ignores a runner that doesn't hear back", async () => {
     const { fileId, box, by, session } = await setup();

@@ -11,7 +11,9 @@
 import { findTool } from "@drawpane/editor";
 import type { Env } from "../env";
 import {
+  AGENT_CLAIM_MS,
   AGENT_RUNNER_V,
+  type AgentAdmission,
   type AgentCallResult,
   type AgentCommittedNote,
   type AgentRequester,
@@ -29,6 +31,7 @@ export const AGENT_ATTEMPTS = 3;
 export const RUNNER_ABORTED =
   "The agent runner ran out of memory on that call. Nothing was changed. Try a smaller part.";
 export const KEPT_CHANGING = "The file kept changing while that ran. Try again.";
+const KEPT_BUSY = "That call is still running from an earlier request. Try again shortly.";
 
 /**
  * Who the call talks to. Each is a factory, called again for every request:
@@ -53,6 +56,9 @@ export function agentDeps(env: Env, fileId: string): AgentDeps {
           >,
         commitAgentRun: async (request) =>
           (await stub.commitAgentRun(request)) as CommitAgentAnswer,
+        releaseAgentCall: (request) => stub.releaseAgentCall(request),
+        recordedAgentCall: async (request) =>
+          (await stub.recordedAgentCall(request)) as AgentCallResult | null,
       };
     },
     runner: () => {
@@ -66,11 +72,16 @@ export function agentDeps(env: Env, fileId: string): AgentDeps {
   };
 }
 
+/** The pauses before asking again about a call id another request holds, growing to the last. */
+const BUSY_PAUSES_MS = [25, 50, 100, 200, 400, 800, 1000];
+
 /**
  * Runs a write tool for a session and commits what it did as one
- * transaction. A repeated call id answers as recorded. When someone changed
- * the layers it changed while it ran (`stale`), it runs again on the file
- * as it is, up to AGENT_ATTEMPTS times.
+ * transaction. A repeated call id answers as recorded, and one still under
+ * way elsewhere is waited for and then answers as it did, so concurrent
+ * requests with one call id agree. When someone changed what the run
+ * depended on while it ran (`stale`), it runs again on the file as it is,
+ * up to AGENT_ATTEMPTS times.
  */
 export async function callWriteTool(
   deps: AgentDeps,
@@ -85,10 +96,50 @@ export async function callWriteTool(
   const tool = findTool(call.tool);
   if (tool?.level !== "write") return { ok: false, message: `There's no write tool ${call.tool}.` };
   const { fileId } = call.session;
-  const admission = await deps
-    .room()
-    .admitAgentCall({ v: AGENT_RUNNER_V, fileId, sessionId: call.session.id, callId: call.callId });
+  const ids = { v: AGENT_RUNNER_V, fileId, sessionId: call.session.id, callId: call.callId };
+  const admission = await admitWrite(deps, ids);
   if (!admission.admitted) return admission.answer;
+  try {
+    const answer = await runAndCommit(deps, call, tool.title);
+    if (answer.ok) return answer;
+    // A request with this call id that ran despite the claim (the room restarted meanwhile)
+    // may have committed: its recorded answer is the call's.
+    return (await deps.room().recordedAgentCall(ids)) ?? answer;
+  } finally {
+    const claim = admission.claim;
+    if (claim !== undefined)
+      await quietly(() => deps.room().releaseAgentCall({ ...ids, claim }), "the room");
+  }
+}
+
+/** Admits a write, waiting out another request with the same call id until it's answered. */
+async function admitWrite(
+  deps: AgentDeps,
+  ids: { v: number; fileId: string; sessionId: string; callId: string },
+): Promise<Exclude<AgentAdmission, { busy: true }>> {
+  const until = Date.now() + AGENT_CLAIM_MS + 5_000;
+  for (let attempt = 0; ; attempt++) {
+    const admission = await deps.room().admitAgentCall(ids);
+    if (!("busy" in admission)) return admission;
+    // The room lets a claim go after AGENT_CLAIM_MS: asking past that is admitted.
+    if (Date.now() > until) return { admitted: false, answer: { ok: false, message: KEPT_BUSY } };
+    const pause = BUSY_PAUSES_MS[Math.min(attempt, BUSY_PAUSES_MS.length - 1)] as number;
+    await new Promise((resolve) => setTimeout(resolve, pause));
+  }
+}
+
+async function runAndCommit(
+  deps: AgentDeps,
+  call: {
+    readonly by: AgentRequester;
+    readonly session: AgentSessionRef;
+    readonly callId: string;
+    readonly tool: string;
+    readonly input: unknown;
+  },
+  label: string,
+): Promise<AgentCallResult> {
+  const { fileId } = call.session;
   for (let attempt = 0; attempt < AGENT_ATTEMPTS; attempt++) {
     const run = await runOnce(deps, {
       v: AGENT_RUNNER_V,
@@ -105,9 +156,10 @@ export async function callWriteTool(
         session: call.session,
         callId: call.callId,
         tool: call.tool,
-        label: tool.title,
+        label,
         baseRevn: run.baseRevn,
         ops: run.ops,
+        reads: run.reads,
         result: run.result,
       });
     } catch (error) {
@@ -133,7 +185,9 @@ export async function callReadTool(
   if (!tool || tool.level === "write")
     return { ok: false, message: `There's no read tool ${call.tool}.` };
   const admission = await deps.room().admitAgentCall({ v: AGENT_RUNNER_V, fileId: call.fileId });
-  if (!admission.admitted) return admission.answer;
+  // A read has no call id, so nothing is ever busy for it.
+  if (!admission.admitted)
+    return "busy" in admission ? { ok: false, message: KEPT_BUSY } : admission.answer;
   const run = await runOnce(deps, {
     v: AGENT_RUNNER_V,
     fileId: call.fileId,
@@ -181,11 +235,11 @@ function committedNote(
  * answering (a WASM overrun is enforced after the call) has dropped its
  * editor anyway, which is what any failure here means.
  */
-async function quietly(tell: () => Promise<void>): Promise<void> {
+async function quietly(tell: () => Promise<void>, who = "the agent runner"): Promise<void> {
   try {
     await tell();
   } catch (error) {
-    console.warn("the agent runner didn't hear back", error);
+    console.warn(`${who} didn't hear back`, error);
   }
 }
 

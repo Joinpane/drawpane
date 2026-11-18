@@ -613,6 +613,11 @@ export class Editor {
       if (emptied.length > 0) inverse = [...this.sync.commit(emptied), ...inverse];
       let touched = this.#touchedBy([...ops, ...emptied], inverse);
       let lastOps: readonly Op[] = first;
+      // Text styles this deleted (their inverse makes them again): the only deletes whose
+      // followers are looked for (an agent run's commit depends on what that reads).
+      const deletedStyles = new Set(
+        inverse.filter((o) => o.op === "create" && o.type === "textStyle").map((o) => o.id),
+      );
       // Derived writes until nothing changes: instances follow their main
       // component, bound properties follow their variables, text sizes to its
       // content, auto layout places children. Each can feed the next.
@@ -625,7 +630,11 @@ export class Editor {
         const resolved = variableFixupOps(this.doc, [...lastOps, ...synced]);
         if (resolved.length > 0) roundInverse = [...this.sync.commit(resolved), ...roundInverse];
         // Text layers follow their text style.
-        const styled = textStyleFixupOps(this.doc, [...lastOps, ...synced, ...resolved]);
+        const styled = textStyleFixupOps(
+          this.doc,
+          [...lastOps, ...synced, ...resolved],
+          round === 0 ? deletedStyles : undefined,
+        );
         if (styled.length > 0) roundInverse = [...this.sync.commit(styled), ...roundInverse];
         const derivedSoFar = [...synced, ...resolved, ...styled];
         const text = this.#textFixups([...live, ...derivedSoFar.map((o) => o.id), ...relayout]);

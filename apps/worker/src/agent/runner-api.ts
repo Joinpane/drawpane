@@ -52,6 +52,26 @@ export type AgentCallResult =
 // ---------------------------------------------------------------------------
 // The runner
 
+/**
+ * The most ids a run's read set (`AgentReadSet`) names, and the room adds
+ * to it (decision 0033). Past it, a run is treated as having read the
+ * whole file: any change since its base revision makes it run again.
+ */
+export const AGENT_READ_CAP = 5_000;
+
+/**
+ * What a write run read on the file it ran on, as the runner's document
+ * recorded it (the tool and the layout fix-ups it set off), less the layers
+ * it made: `ids` it read, parents whose child list it read (`lists`), and
+ * mains whose instances it listed (`instances`). Null when it read the
+ * whole file, or more than AGENT_READ_CAP ids.
+ */
+export type AgentReadSet = {
+  readonly ids: readonly string[];
+  readonly lists: readonly string[];
+  readonly instances: readonly string[];
+} | null;
+
 export interface AgentRunRequest {
   readonly v: number;
   readonly fileId: string;
@@ -71,6 +91,8 @@ export type AgentRunAnswer =
       readonly baseRevn: number;
       /** What the tool changed, fix-ups included, as stored: empty for a read. */
       readonly ops: Op[];
+      /** What it read to make them: the room checks nobody changed it since `baseRevn`. */
+      readonly reads: AgentReadSet;
       readonly result: unknown;
       readonly image?: { readonly mimeType: string; readonly base64: string };
     }
@@ -115,10 +137,28 @@ export interface AgentAdmissionRequest {
   readonly callId?: string;
 }
 
-/** Whether a call may run: refused (too large, or a replay) answers at once. */
+/**
+ * Whether a call may run: refused (too large, or a replay) answers at once.
+ * A write is admitted with a `claim` on its call id, held until it's
+ * released (`releaseAgentCall`) or AGENT_CLAIM_MS passes: meanwhile the
+ * same call id is `busy`, and asked again after a pause it answers as the
+ * first one did. Nothing else holds it up.
+ */
 export type AgentAdmission =
-  | { readonly admitted: true; readonly revn: number }
+  | { readonly admitted: true; readonly revn: number; readonly claim?: string }
+  | { readonly admitted: false; readonly busy: true }
   | { readonly admitted: false; readonly answer: AgentCallResult };
+
+/** How long a claim on a call id holds without being released: a caller that died lets go after it. */
+export const AGENT_CLAIM_MS = 120_000;
+
+export interface AgentRelease {
+  readonly v: number;
+  readonly fileId: string;
+  readonly sessionId: string;
+  readonly callId: string;
+  readonly claim: string;
+}
 
 export interface CommitAgentRun {
   readonly v: number;
@@ -131,13 +171,18 @@ export interface CommitAgentRun {
   /** The revision the run's changes were made on. */
   readonly baseRevn: number;
   readonly ops: Op[];
+  /** What the run read (`AgentRunAnswer.reads`). */
+  readonly reads: AgentReadSet;
   readonly result: unknown;
 }
 
 /**
- * The commit's answer. `stale`: someone changed a layer the run changed
- * (or put a layer inside one) after its base revision, so nothing was
- * committed and the call should run again on the file as it is now.
+ * The commit's answer. `stale`: after its base revision someone changed
+ * what the run depended on, so nothing was committed and the call should
+ * run again on the file as it is now. What it depended on: the layers it
+ * changed (or a layer put inside one, or changed inside one it deletes),
+ * what it read, and the layout ancestors and old and new parents of what
+ * it changed (`agent-footprint.ts`).
  */
 export type CommitAgentAnswer =
   | AgentCallResult
@@ -147,4 +192,13 @@ export type CommitAgentAnswer =
 export interface AgentRoomApi {
   admitAgentCall(request: AgentAdmissionRequest): Promise<AgentAdmission>;
   commitAgentRun(request: CommitAgentRun): Promise<CommitAgentAnswer>;
+  /** Lets go of an admitted write's claim on its call id; a claim already gone is fine. */
+  releaseAgentCall(request: AgentRelease): Promise<void>;
+  /** What the ledger recorded for a session's call, as a replay; null when it didn't. */
+  recordedAgentCall(request: {
+    readonly v: number;
+    readonly fileId: string;
+    readonly sessionId: string;
+    readonly callId: string;
+  }): Promise<AgentCallResult | null>;
 }

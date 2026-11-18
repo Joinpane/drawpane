@@ -112,10 +112,7 @@ export function overlap(theirs: readonly Op[], ids: ReadonlySet<string>): string
 /**
  * The first logged transaction after `since`, by anyone but `sessionId`
  * (by anyone at all when it's null), whose operations overlap `ids`: who,
- * and which. The log keeps 10,000
- * transactions of up to a message each (typing in a text of 200,000
- * characters logs all of them every keystroke), so it's read a page bounded
- * by characters at a time, stopping at the first.
+ * and which.
  */
 export function firstOverlap(
   sql: SqlStorage,
@@ -123,6 +120,25 @@ export function firstOverlap(
   sessionId: string | null,
   ids: ReadonlySet<string>,
 ): { userId: string; ids: string[] } | null {
+  for (const row of loggedSince(sql, since, sessionId)) {
+    const hit = overlap(row.ops, ids);
+    if (hit.length > 0) return { userId: row.userId, ids: hit };
+  }
+  return null;
+}
+
+/**
+ * The logged transactions after `since`, oldest first, by anyone but
+ * `sessionId` (by anyone at all when it's null). The log keeps 10,000
+ * transactions of up to a message each (typing in a text of 200,000
+ * characters logs all of them every keystroke), so it's read a page bounded
+ * by characters at a time, and a caller that stops early reads no further.
+ */
+export function* loggedSince(
+  sql: SqlStorage,
+  since: number,
+  sessionId: string | null,
+): Generator<{ userId: string; ops: Op[] }> {
   // Null leaves nobody out: `session_id IS NOT ?` with null is true of every row.
   const except = sessionId;
   const pages = boundedPages<number, { user_id: string; ops: string }>(
@@ -148,11 +164,7 @@ export function firstOverlap(
         .toArray(),
   );
   for (const rows of pages)
-    for (const row of rows) {
-      const hit = overlap(JSON.parse(row.ops) as Op[], ids);
-      if (hit.length > 0) return { userId: row.user_id, ids: hit };
-    }
-  return null;
+    for (const row of rows) yield { userId: row.user_id, ops: JSON.parse(row.ops) as Op[] };
 }
 
 export class CallLedger {

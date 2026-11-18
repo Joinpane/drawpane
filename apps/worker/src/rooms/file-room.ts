@@ -43,11 +43,15 @@ import {
 } from "@drawpane/model";
 import { InProcessAgentRunner } from "../agent/runner";
 import {
+  AGENT_CLAIM_MS,
+  AGENT_READ_CAP,
   AGENT_RUNNER_V,
   type AgentAdmission,
   type AgentAdmissionRequest,
   type AgentCallResult,
   type AgentCommittedNote,
+  type AgentReadSet,
+  type AgentRelease,
   type AgentRunAnswer,
   type AgentRunRequest,
   type AgentSessionRef,
@@ -59,7 +63,15 @@ import type { Env, Role } from "../env";
 import { signPayload, verifyPayload } from "../lib/crypto";
 import { answerDocument, type DocumentRequest, SqlFileDoc } from "../mcp/document";
 import { agentPrecheck } from "./agent-admission";
-import { CALL_SCHEMA, CallLedger, changedIds, firstOverlap, type StepCall } from "./call-ledger";
+import { footprint, overlaps, touchedBy, underDeleted } from "./agent-footprint";
+import {
+  CALL_SCHEMA,
+  CallLedger,
+  changedIds,
+  firstOverlap,
+  loggedSince,
+  type StepCall,
+} from "./call-ledger";
 import {
   applyConversion,
   CONVERT_STEP_WORK,
@@ -459,6 +471,13 @@ export class FileRoom extends DurableObject<Env> {
    * committed, which it does itself once it has a script of its own.
    */
   #runner: InProcessAgentRunner | null = null;
+  /**
+   * Agent write calls under way, by session and call id: the claim each was
+   * admitted with and when. Another request with the same call id meanwhile
+   * is told it's busy (`admitAgentCall`). Held in memory: a room that
+   * restarts forgets them, and the ledger's replay is the backstop.
+   */
+  readonly #claims = new Map<string, { claim: string; at: number }>();
   /** Copies of the file set aside for downloads, by revision (see exportDocument). */
   readonly #sharedCopies = new Map<
     number,
@@ -2105,13 +2124,39 @@ export class FileRoom extends DurableObject<Env> {
     this.#adopt(request.fileId);
     if (request.v !== AGENT_RUNNER_V)
       return { admitted: false, answer: { ok: false, message: AGENT_OUT_OF_STEP } };
-    if (request.sessionId !== undefined && request.callId !== undefined) {
-      const replay = this.#replay(request.sessionId, request.callId);
+    const { sessionId, callId } = request;
+    const write = sessionId !== undefined && callId !== undefined;
+    if (write) {
+      const replay = this.#replay(sessionId, callId);
       if (replay) return { admitted: false, answer: replay };
+      const held = this.#claims.get(claimKey(sessionId, callId));
+      if (held && Date.now() - held.at < AGENT_CLAIM_MS) return { admitted: false, busy: true };
     }
     const tooLarge = this.#tooLargeForAgents();
     if (tooLarge) return { admitted: false, answer: tooLarge };
-    return { admitted: true, revn: this.#revn };
+    if (!write) return { admitted: true, revn: this.#revn };
+    const claim = crypto.randomUUID();
+    this.#claims.set(claimKey(sessionId, callId), { claim, at: Date.now() });
+    return { admitted: true, revn: this.#revn, claim };
+  }
+
+  /** Lets go of a write's claim on its call id (`admitAgentCall`), if it still holds it. */
+  async releaseAgentCall(request: AgentRelease): Promise<void> {
+    if (request.v !== AGENT_RUNNER_V) return;
+    const key = claimKey(request.sessionId, request.callId);
+    if (this.#claims.get(key)?.claim === request.claim) this.#claims.delete(key);
+  }
+
+  /** What the ledger recorded for a session's call, as its replay; null when nothing is. */
+  async recordedAgentCall(request: {
+    v: number;
+    fileId: string;
+    sessionId: string;
+    callId: string;
+  }): Promise<AgentCallResult | null> {
+    this.#adopt(request.fileId);
+    if (request.v !== AGENT_RUNNER_V) return null;
+    return this.#replay(request.sessionId, request.callId);
   }
 
   /**
@@ -2121,10 +2166,12 @@ export class FileRoom extends DurableObject<Env> {
    * seen before answers as recorded (a retry finished first).
    *
    * The run was made on `baseRevn`. When the file has moved on since, it's
-   * still committed unless someone's logged operations since then changed a
-   * layer it changed, or put a layer inside one (the overlap agent undo
-   * checks): then it's `stale`, nothing is committed, and the caller runs
-   * it again on the file as it is. Edits elsewhere don't hold it up.
+   * still committed unless someone's logged operations since then changed
+   * what it depended on (`agent-footprint.ts`): the layers it changed, what
+   * it read, the parents and layout ancestors of what it changed, anything
+   * inside what it deletes. Then it's `stale`, nothing is committed, and
+   * the caller runs it again on the file as it is. Edits elsewhere don't
+   * hold it up.
    */
   async commitAgentRun(request: CommitAgentRun): Promise<CommitAgentAnswer> {
     const { by, session, callId, ops } = request;
@@ -2150,7 +2197,7 @@ export class FileRoom extends DurableObject<Env> {
         message: "That's too much to change in one call. Build it in parts: one section per call.",
       };
     const moved = request.baseRevn !== this.#revn;
-    if (moved && this.#staleSince(request.baseRevn, changedIds(ops)))
+    if (moved && this.#staleSince(request.baseRevn, ops, request.reads))
       return { ok: false, stale: true, message: STALE_RUN };
     const author = { clientId: "agent", seq: 0, userId: by.userId, sessionId: session.id };
     let revn: number;
@@ -2174,11 +2221,13 @@ export class FileRoom extends DurableObject<Env> {
   }
 
   /**
-   * Whether anyone's logged operations after `since` changed (or put
-   * something inside) any of `ids`, the agent's own sessions included;
-   * true as well when the log no longer reaches back that far.
+   * Whether anyone's logged operations after `since`, the agent's own
+   * sessions included, changed what a run of `ops` that read `reads`
+   * depended on (`agent-footprint.ts`). True as well when the log no longer
+   * reaches back that far, and when that's more than AGENT_READ_CAP ids:
+   * then any change at all since `since` counts.
    */
-  #staleSince(since: number, ids: ReadonlySet<string>): boolean {
+  #staleSince(since: number, ops: readonly Op[], reads: AgentReadSet | undefined): boolean {
     if (since >= this.#revn) return false;
     // An import since then replaced the file without logging it.
     if (since < this.#catchupFrom()) return true;
@@ -2186,7 +2235,18 @@ export class FileRoom extends DurableObject<Env> {
       .exec<{ revn: number | null }>("SELECT MIN(revn) AS revn FROM log")
       .one().revn;
     if (oldest === null || oldest > since + 1) return true;
-    return firstOverlap(this.#sql, since, null, ids) !== null;
+    const depended = footprint(this.#store, ops, reads);
+    if (!depended) return true;
+    // What changed since, for the deletes: past the cap, taken as inside one.
+    const touched = new Set<string>();
+    for (const { ops: theirs } of loggedSince(this.#sql, since, null))
+      for (const op of theirs) {
+        if (overlaps(op, depended)) return true;
+        if (depended.deletes.length === 0) continue;
+        for (const id of touchedBy(op)) touched.add(id);
+        if (touched.size > AGENT_READ_CAP) return true;
+      }
+    return underDeleted(this.#sql, touched, depended.deletes);
   }
 
   // The runner, hosted in-process (decision 0033, migration step 1). These are
@@ -3692,4 +3752,9 @@ function pinSweepFlag(to: CopiesFormat, gen: number): string {
 function parsePinSweep(flag: string, copies: CopiesFormat, gen: number): PinSweep {
   const [to, at] = flag.split(":");
   return to === "compact" || to === "materialized" ? { to, gen: Number(at) } : { to: copies, gen };
+}
+
+/** A claim's key: a session's call id. */
+function claimKey(sessionId: string, callId: string): string {
+  return `${sessionId}\u0000${callId}`;
 }

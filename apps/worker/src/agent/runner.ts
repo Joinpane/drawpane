@@ -11,7 +11,13 @@
  * editor holds changes the file doesn't have yet, so anything else that
  * reaches it first (a person's transaction, another run) lets it go.
  */
-import { findTool, type HeadlessRenderer, ToolFailure, type ToolServices } from "@drawpane/editor";
+import {
+  type DocReads,
+  findTool,
+  type HeadlessRenderer,
+  ToolFailure,
+  type ToolServices,
+} from "@drawpane/editor";
 import type { CopiesFormat, NodeRecord, Op } from "@drawpane/model";
 import type { Env } from "../env";
 import { AgentTooLarge } from "../rooms/agent-admission";
@@ -20,8 +26,10 @@ import { fileFontLoader } from "./harfbuzz";
 import { agentMeasurer } from "./measurer";
 import { headlessRenderer } from "./render";
 import {
+  AGENT_READ_CAP,
   AGENT_RUNNER_V,
   type AgentCommittedNote,
+  type AgentReadSet,
   type AgentRunAnswer,
   type AgentRunnerApi,
   type AgentRunRequest,
@@ -129,9 +137,12 @@ export class InProcessAgentRunner implements AgentRunnerApi {
             };
         let run: EngineRun;
         this.#running = true;
+        // What the tool and the layout it sets off read: the commit depends on it.
+        const reads = write ? editor.doc.trackReads() : null;
         try {
           run = await engine.run(editor, request.tool, request.input, services);
         } finally {
+          if (write) editor.doc.untrackReads();
           this.#running = false;
         }
         // Text in a font not loaded yet: load it, and run again so it's measured right.
@@ -151,6 +162,7 @@ export class InProcessAgentRunner implements AgentRunnerApi {
           runId,
           baseRevn,
           ops: run.ops,
+          reads: reads ? readSet(reads, run.ops) : { ids: [], lists: [], instances: [] },
           result: data ?? null,
           ...(image ? { image } : {}),
         };
@@ -207,4 +219,20 @@ export class InProcessAgentRunner implements AgentRunnerApi {
     });
     return this.#rendering;
   }
+}
+
+/**
+ * What a run read, less the layers it made (nobody else can have changed
+ * those): null when it read everything or more than AGENT_READ_CAP ids.
+ */
+export function readSet(reads: DocReads, ops: readonly Op[]): AgentReadSet {
+  if (reads.all) return null;
+  const made = new Set<string>();
+  for (const op of ops) if (op.op === "create") made.add(op.id);
+  const keep = (ids: Set<string>) => [...ids].filter((id) => !made.has(id));
+  const ids = keep(reads.ids);
+  const lists = keep(reads.lists);
+  const instances = keep(reads.instances);
+  if (ids.length + lists.length + instances.length > AGENT_READ_CAP) return null;
+  return { ids, lists, instances };
 }
