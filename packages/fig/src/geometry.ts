@@ -44,6 +44,8 @@ export function commandsToGlyph(blob: Uint8Array): string | null {
   const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
   const parts: string[] = [];
   let at = 0;
+  /** Whether a path is open: Figma's blobs may close before their first move, which SVG refuses. */
+  let open = false;
   while (at < blob.length) {
     const op = blob[at] as number;
     const count = ARGS[op as 0];
@@ -55,9 +57,15 @@ export function commandsToGlyph(blob: Uint8Array): string | null {
       if (!Number.isFinite(v) || Math.abs(v) > 1000) return null;
       args.push(glyphNumber(v));
     }
-    parts.push(
-      args.length > 0 ? `${LETTER[op as 0]}${args.join(" ")}` : (LETTER[op as 0] as string),
-    );
+    if (op === 0) {
+      if (open) parts.push("Z");
+      open = false;
+      continue;
+    }
+    // A line or curve before any move starts at the origin, as SVG's would after "M0 0".
+    if (!open && op !== 1) parts.push("M0 0");
+    open = true;
+    parts.push(`${LETTER[op as 0]}${args.join(" ")}`);
   }
   return parts.join(" ");
 }

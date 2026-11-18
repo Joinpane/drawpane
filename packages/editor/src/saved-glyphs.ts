@@ -198,9 +198,18 @@ const num = (n: number) => {
 /** An outline placed: scaled by `k` (px per unit), flipped up, its origin at (x, y). */
 function placed(d: string, k: number, x: number, y: number, into: string[]): void {
   const re = /([MLQCZ])([^MLQCZ]*)/g;
+  // SVG path data must start with a move; an outline saved before imports dropped a leading
+  // close (decision 0037) may not, and one bad glyph would empty the whole path.
+  let moved = false;
   for (let m = re.exec(d); m !== null; m = re.exec(d)) {
     const letter = m[1] as string;
     const args = (m[2] as string).trim();
+    if (letter === "M") moved = true;
+    else if (!moved) {
+      if (letter === "Z") continue;
+      into.push(`M${num(x)} ${num(y)}`);
+      moved = true;
+    }
     if (!args) {
       into.push(letter);
       continue;

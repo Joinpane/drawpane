@@ -162,6 +162,26 @@ describe("saved glyphs", () => {
     expect(groups[0]?.bars[0]?.y).toBeCloseTo(18 + 20 / 5);
   });
 
+  it("start each path with a move, whatever the saved outline starts with", () => {
+    const { text, sets } = imported();
+    // An outline as imports before this fix saved some: a close before its first move.
+    const old = sets.map((set) => ({
+      ...set,
+      props: {
+        ...set.props,
+        glyphOutlines: Object.fromEntries(
+          Object.entries(getProp(set.props, "glyphOutlines")).map(([id, d]) => [id, `Z ${d}`]),
+        ),
+      },
+    }));
+    const doc = docOf(text, old);
+    const s = saved(doc);
+    if (!s) throw new Error("not drawn from its glyphs");
+    const d = savedGlyphGroups(s, doc.get("t") as NodeRecord)[0]?.d ?? "";
+    expect(d.startsWith("M0 18L10 18")).toBe(true);
+    expect(d).not.toMatch(/Z(?!M|$)/);
+  });
+
   it("go into SVG as paths, strokes around them", () => {
     const { text, sets } = imported({
       strokes: [{ type: "solid", color: "#0000ff" }],

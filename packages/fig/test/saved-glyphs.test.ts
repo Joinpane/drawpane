@@ -34,8 +34,9 @@ function blob(commands: Array<[number, ...number[]]>): Uint8Array {
   }
   return out;
 }
-// 1 move, 2 line, 0 close.
-const SQUARE = blob([[1, 0.1, 0], [2, 0.6, 0], [2, 0.6, 0.5], [2, 0.1, 0.5], [0]]);
+// 1 move, 2 line, 0 close. Figma's own glyphs often start with a close, which SVG path data
+// can't: the import drops it.
+const SQUARE = blob([[0], [1, 0.1, 0], [2, 0.6, 0], [2, 0.6, 0.5], [2, 0.1, 0.5], [0]]);
 const TRIANGLE = blob([[1, 0.05, 0], [2, 0.55, 0], [2, 0.3, 0.6], [0]]);
 
 function fixture() {
