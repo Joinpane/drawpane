@@ -7,13 +7,20 @@
  *
  * The caps fit inside a Worker's 128 MB together with what else is held
  * there at once (decision 0033, answer 2): a 17 MB baseline, the headless
- * editor's 48 MiB meter, and these two, 121.8 MB in all.
+ * editor's 48 MiB meter, and these two, 127.1 MB in all.
  *
- * - resvg, 40 MiB: a 2048 × 2048 picture (the most a render may be) takes
- *   34 MiB flat or with one translucent group; two nested groups or a
- *   shadow at that size don't fit, and fail cleanly.
- * - HarfBuzz, 12 MiB: font files are copied into it, shared by file, with
- *   room left for shaping.
+ * - HarfBuzz, 32 MiB: text in every language must measure. Font files are
+ *   copied into it whole, one copy per file (`harfbuzz-faces.ts`), and CJK
+ *   files are large. Measured with harfbuzzjs 1.6.4 on Google's variable
+ *   files: Noto Sans SC (17.7 MB) holds 20.5 MiB, KR (10.4 MB) 12.1 MiB,
+ *   TC (11.9 MB) 13.8 MiB, JP (9.5 MB) 11.1 MiB, Inter 0.6 MiB. A file in
+ *   SC at four weights and Inter at three holds 24.6 MiB; SC with JP or KR
+ *   as well, 31 to 32 MiB, which fits; SC with TC doesn't.
+ * - resvg, 25 MiB: what's left. It holds a render's font files too (a
+ *   static Noto Sans SC weight is 10.1 MiB), its images and its pixels. A
+ *   2048 × 2048 picture took 34 MiB flat and 107 MiB with a shadow, so
+ *   large pictures are drawn smaller to fit (`headless-render.ts`), down to
+ *   256 px on their longest side.
  *
  * A Worker can't compile WebAssembly at run time, so its modules are
  * rewritten at build time (`apps/worker/scripts/cap-wasm.ts`); Node
@@ -21,9 +28,9 @@
  */
 
 /** resvg's cap, in bytes. */
-export const RESVG_MAX_BYTES = 40 << 20;
+export const RESVG_MAX_BYTES = 25 << 20;
 /** HarfBuzz's cap, in bytes. */
-export const HARFBUZZ_MAX_BYTES = 12 << 20;
+export const HARFBUZZ_MAX_BYTES = 32 << 20;
 
 /** WebAssembly pages are 64 KiB. */
 const PAGE = 1 << 16;

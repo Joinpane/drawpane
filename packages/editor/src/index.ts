@@ -39,6 +39,7 @@ export * from "./presets";
 export * from "./prototype";
 export * from "./reading-order";
 export * from "./render";
+export * from "./render-memory";
 export * from "./rich-text";
 export * from "./scene";
 export * from "./shaping";

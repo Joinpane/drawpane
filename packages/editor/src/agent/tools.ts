@@ -216,7 +216,7 @@ const exportImage = defineTool({
   description: [
     "Renders a layer, or a whole page by its id, as a PNG you can see: look at your work after render or set_props,",
     "and check spacing, alignment, contrast and text wrapping as a person would.",
-    `Without a scale, it's sized to about ${EXPORT_IMAGE_FIT} px on its longest side (up to 2×). Returns the image, its size,`,
+    `Without a scale, it's sized to about ${EXPORT_IMAGE_FIT} px on its longest side (up to 2×). A picture too large for the memory rendering has is drawn smaller, and \`reduced\` says so. Returns the image, its size,`,
     "and anything drawn only approximately or left out (a font or image that couldn't be had, or an image too large to draw here, shown as a grey crossed placeholder).",
   ].join(" "),
   input: z.object({
@@ -252,6 +252,7 @@ const exportImage = defineTool({
           ]
         : []),
     ];
+    const reduced = png.reduced;
     return {
       data: {
         id: nodeId,
@@ -259,6 +260,11 @@ const exportImage = defineTool({
         height: png.height,
         scale: png.scale,
         bounds: png.bounds,
+        ...(reduced
+          ? {
+              reduced: `Drawn smaller than asked, at ${png.width} × ${png.height} (scale ${png.scale}) instead of ${reduced.width} × ${reduced.height} (scale ${reduced.scale}): the full size needs more memory than rendering here has. Export a smaller layer to see it in more detail.`,
+            }
+          : {}),
         ...(notes.length > 0 ? { approximate: notes } : {}),
       },
       image: { mimeType: "image/png", base64: base64(png.png) },

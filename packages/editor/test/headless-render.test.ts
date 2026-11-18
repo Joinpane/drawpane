@@ -2,18 +2,24 @@ import { readFileSync } from "node:fs";
 import { DEFAULT_GLASS, type Op, ROOT_ID } from "@drawpane/model";
 import type { Face, ResvgRasteriser } from "@drawpane/raster";
 import { nodeRasteriser } from "@drawpane/raster/node";
+import { RESVG_MAX_BYTES } from "@drawpane/raster/wasm-limits";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
 import {
   approximations,
   base64,
   createHeadlessRenderer,
+  FONTS_OUT_OF_MEMORY,
   facesUsed,
   HEADLESS_IMAGE_BYTES,
   type ImageBytesLoader,
   type ImageFile,
   imageCost,
+  MIN_HEADLESS_SIDE,
+  PICTURE_OUT_OF_MEMORY,
 } from "../src/headless-render";
+import { bytesPerPixel, RASTER_BASE_BYTES } from "../src/render-memory";
+import { Scene } from "../src/scene";
 import type { TextMeasurer } from "../src/text";
 
 const measurer: TextMeasurer = {
@@ -252,10 +258,15 @@ describe("renderPng", () => {
       },
     });
     const out = await r.renderPng(d, "r");
-    const fit = Math.floor(HEADLESS_IMAGE_BYTES / cost);
+    // What images may hold: HEADLESS_IMAGE_BYTES at most, and less than resvg's capped memory,
+    // which the picture needs room in too.
+    const budget = asked.rooms[0] ?? 0;
+    expect(budget).toBeLessThanOrEqual(HEADLESS_IMAGE_BYTES);
+    expect(budget).toBeLessThan(RESVG_MAX_BYTES - RASTER_BASE_BYTES);
+    const fit = Math.floor(budget / cost);
     expect(read).toBe(fit);
     // One at a time, each asked with what's left; those past it are asked and not read.
-    expect(asked.rooms[1]).toBe(HEADLESS_IMAGE_BYTES - cost);
+    expect(asked.rooms[1]).toBe(budget - cost);
     expect(asked.images.length).toBe(32);
     expect(out.skippedImages).toEqual(refs.slice(fit));
     expect(out.missingImages).toEqual([]);
@@ -321,6 +332,112 @@ describe("renderPng", () => {
     await expect(r.renderPng(d, "nope")).rejects.toThrow("no layer");
     await expect(r.renderPng(d, "r", { scale: 2 })).rejects.toThrow("too large");
     await expect(r.renderPng(d, "r", { scale: 0 })).rejects.toThrow("positive");
+  });
+});
+
+describe("renderPng in the rasteriser's capped memory", () => {
+  /** A 2000 × 2000 frame with a child as large casting a shadow: 107 MiB at 2048 px, measured. */
+  const shadowed = () =>
+    doc([
+      layer("f", "frame", { width: 2000, height: 2000 }),
+      layer(
+        "c",
+        "frame",
+        {
+          width: 2000,
+          height: 2000,
+          fills: [{ type: "solid", color: "#ff0000" }],
+          effects: [{ type: "drop-shadow", x: 0, y: 4, blur: 16, spread: 0, color: "#00000040" }],
+        },
+        "f",
+      ),
+    ]);
+
+  it("draws a picture too large for it at the largest scale that fits, and says so", async () => {
+    const d = shadowed();
+    const out = await renderer().r.renderPng(d, "f", { scale: 1 });
+    expect(out.reduced).toEqual({ width: 2000, height: 2000, scale: 1 });
+    expect(out.scale).toBeLessThan(1);
+    expect(out.width).toBe(out.height);
+    expect(out.width).toBeGreaterThanOrEqual(MIN_HEADLESS_SIDE);
+    // The largest that fits: what it's estimated to hold is inside the cap, and not far inside.
+    const held = (w: number) =>
+      RASTER_BASE_BYTES + bytesPerPixel(new Scene(d), ["f"], out.bounds) * w * w;
+    expect(held(out.width)).toBeLessThanOrEqual(RESVG_MAX_BYTES);
+    expect(held(Math.ceil(out.width * 1.03))).toBeGreaterThan(RESVG_MAX_BYTES);
+    const px = rasteriser.pixels(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${out.width}" height="${out.height}"><image width="${out.width}" height="${out.height}" href="data:image/png;base64,${base64(out.png)}"/></svg>`,
+      { scale: 1, fonts: [] },
+    );
+    const mid = (Math.floor(out.height / 2) * out.width + Math.floor(out.width / 2)) * 4;
+    expect([...px.data.subarray(mid, mid + 4)]).toEqual([255, 0, 0, 255]);
+  });
+
+  it("draws one that fits as asked, and says nothing", async () => {
+    const out = await renderer().r.renderPng(shadowed(), "f", { scale: 0.25 });
+    expect(out.reduced).toBeUndefined();
+    expect([out.width, out.scale]).toEqual([500, 0.25]);
+  });
+
+  /** A renderer over the real rasteriser that fails as resvg does past its cap, as `fail` says. */
+  function trapping(fail: (call: number) => boolean, memory?: number) {
+    const scales: number[] = [];
+    const r = createHeadlessRenderer({
+      measurer,
+      fonts: async () => font.buffer.slice(font.byteOffset, font.byteOffset + font.byteLength),
+      images: async () => null,
+      rasteriser: {
+        ...(memory === undefined ? {} : { memory }),
+        rasterise(svg, options) {
+          scales.push(options.scale);
+          if (fail(scales.length)) {
+            const error = new Error("out of memory");
+            error.name = "RasterOutOfMemory";
+            throw error;
+          }
+          return rasteriser.rasterise(svg, options);
+        },
+      },
+    });
+    return { r, scales };
+  }
+
+  it("draws once more at half the scale when it runs out all the same", async () => {
+    const d = doc([layer("r", "rect", { width: 400, height: 200 })]);
+    const { r, scales } = trapping((call) => call === 1);
+    const out = await r.renderPng(d, "r", { scale: 1 });
+    expect(scales).toEqual([1, 0.5]);
+    expect([out.width, out.height, out.scale]).toEqual([200, 100, 0.5]);
+    expect(out.reduced).toEqual({ width: 400, height: 200, scale: 1 });
+  });
+
+  it("fails cleanly when half the scale runs out too", async () => {
+    const d = doc([layer("r", "rect", { width: 400, height: 200 })]);
+    const { r, scales } = trapping(() => true);
+    await expect(r.renderPng(d, "r", { scale: 1 })).rejects.toThrow(PICTURE_OUT_OF_MEMORY);
+    expect(scales).toEqual([1, 0.5]);
+  });
+
+  it("fails cleanly, without drawing, when even the smallest picture wouldn't fit", async () => {
+    // 40 frames nested, each translucent: about 450 bytes a pixel, so 31 MiB at 256 × 256.
+    const name = (i: number) => `n${String.fromCharCode(i < 26 ? 65 + i : 71 + i)}`;
+    const nested = [layer(name(0), "frame", { width: 2000, height: 2000 })];
+    for (let i = 1; i < 40; i++)
+      nested.push(
+        layer(name(i), "frame", { width: 2000, height: 2000, opacity: 0.9 }, name(i - 1)),
+      );
+    const deep = doc(nested);
+    const { r, scales } = trapping(() => false, RESVG_MAX_BYTES);
+    await expect(r.renderPng(deep, name(0), { scale: 1 })).rejects.toThrow(PICTURE_OUT_OF_MEMORY);
+    expect(scales).toEqual([]);
+  });
+
+  it("says when it's the fonts that leave too little room", async () => {
+    const d = doc([layer("t", "text", { characters: "Hi", fontFamily: "Instrument Sans" })]);
+    // Room for the module and the picture (a few kB), but not for the font file as well.
+    const { r, scales } = trapping(() => false, RASTER_BASE_BYTES + font.length / 2);
+    await expect(r.renderPng(d, "t", { scale: 1 })).rejects.toThrow(FONTS_OUT_OF_MEMORY);
+    expect(scales).toEqual([]);
   });
 });
 

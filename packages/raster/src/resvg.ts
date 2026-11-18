@@ -63,6 +63,12 @@ export interface Pixels {
  */
 export interface Rasteriser {
   rasterise(svg: string, options: RasterOptions): Raster | Promise<Raster>;
+  /**
+   * The most memory a render may use, in bytes, when it's capped: a render
+   * past it fails with `RasterOutOfMemory`. The renderer draws a picture
+   * smaller to fit in it. Absent when it isn't known.
+   */
+  readonly memory?: number;
 }
 
 /** resvg, in this isolate: at once, and as pixels too. */
@@ -113,6 +119,8 @@ export async function resvgRasteriser(
   });
   const module = await compiled;
   return {
+    // A Worker's module was capped at the same number when it was built (apps/worker/scripts/cap-wasm.ts).
+    memory: RESVG_MAX_BYTES,
     rasterise: (svg, options) =>
       draw(module, svg, options, (image) => ({
         png: image.asPng(),

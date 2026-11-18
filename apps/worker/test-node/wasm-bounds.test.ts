@@ -7,7 +7,9 @@
  * give the right answer:
  *
  * - resvg draws each picture in an instance of its own, since a trap leaves
- *   an instance unusable and what it held unfreed;
+ *   an instance unusable and what it held unfreed. A picture estimated not
+ *   to fit is drawn smaller, and says so; one that traps all the same is
+ *   drawn once more at half the scale;
  * - harfbuzzjs (patched) throws when `malloc` answers 0, instead of copying
  *   a font file to address 0, after which text already loaded measured 0
  *   wide with no error.
@@ -21,10 +23,12 @@ import { join } from "node:path";
 import {
   createHeadlessRenderer,
   type FaceFileLoader,
+  MIN_HEADLESS_SIDE,
   PICTURE_OUT_OF_MEMORY,
   ToolFailure,
 } from "@drawpane/editor";
 import { checkNode, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import type { Rasteriser } from "@drawpane/raster";
 import { nodeRasteriser } from "@drawpane/raster/node";
 import {
   HARFBUZZ_MAX_BYTES,
@@ -58,6 +62,49 @@ function room(name: string, nodes: NodeRecord[]) {
   return r;
 }
 
+/** export_image's renderer over `rasteriser`, for the editor's document. */
+async function renderServices(editor: ReturnType<typeof editorOf>, rasteriser: Rasteriser) {
+  const renderer = createHeadlessRenderer({
+    measurer: STANDIN,
+    fonts: async () => null,
+    images: async () => null,
+    rasteriser,
+  });
+  return {
+    renderPng: (id: string, options: object) => renderer.renderPng(editor.doc, id, options),
+  };
+}
+
+/** Frame F, 2048 px, and 20 frames nested in it as large, each at 90% opacity. */
+function nestedFrames(): NodeRecord[] {
+  const nodes: NodeRecord[] = [
+    {
+      id: "F",
+      parent: "P",
+      key: "a0",
+      type: "frame",
+      props: { width: 2048, height: 2048, clipContent: true },
+    } as NodeRecord,
+  ];
+  let parent = "F";
+  for (let i = 0; i < 20; i++) {
+    nodes.push({
+      id: `G${i}`,
+      parent,
+      key: "a0",
+      type: "frame",
+      props: {
+        width: 2048,
+        height: 2048,
+        opacity: 0.9,
+        fills: [{ type: "solid", color: "#ff0000" }],
+      },
+    } as NodeRecord);
+    parent = `G${i}`;
+  }
+  return nodes;
+}
+
 /** The headless editor over a room's rows, as the room builds it. */
 function editorOf(engine: AgentEngine, r: ReturnType<typeof room>) {
   const store = new SqlNodeStore(r.sql);
@@ -84,8 +131,28 @@ describe("the WebAssembly modules", () => {
 });
 
 describe("resvg-nested: 20 nested 2048 px frames at 90% opacity", () => {
-  it("fails export_image cleanly, and draws a small layer right after", async () => {
+  it("draws export_image smaller to fit, and says so", async () => {
     // Uncapped, resvg grew to 666.6 MiB at scale 1 and 375.4 MiB at the default (review 2).
+    const r = room("resvg-nested-fit", nestedFrames());
+    const engine = new AgentEngine(STANDIN);
+    const editor = editorOf(engine, r);
+    const services = await renderServices(editor, await nodeRasteriser());
+    for (const [input, asked] of [
+      [{ id: "F", scale: 1 }, "2048 × 2048 (scale 1)"],
+      [{ id: "F" }, "1536 × 1536 (scale 0.75)"],
+    ] as const) {
+      const { result } = await engine.run(editor, "export_image", input, services);
+      const data = result.data as { width: number; height: number; reduced: string };
+      expect(data.width).toBe(data.height);
+      expect(data.width).toBeGreaterThanOrEqual(MIN_HEADLESS_SIDE);
+      expect(data.width).toBeLessThan(1024);
+      expect(data.reduced).toContain(`at ${data.width} × ${data.height}`);
+      expect(data.reduced).toContain(`instead of ${asked}`);
+    }
+    r.close();
+  });
+
+  it("without the estimate, fails export_image cleanly, and draws a small layer right after", async () => {
     const nodes: NodeRecord[] = [
       {
         id: "F",
@@ -115,35 +182,16 @@ describe("resvg-nested: 20 nested 2048 px frames at 90% opacity", () => {
         },
       },
     ];
-    let parent = "F";
-    for (let i = 0; i < 20; i++) {
-      nodes.push({
-        id: `G${i}`,
-        parent,
-        key: "a0",
-        type: "frame",
-        props: {
-          width: 2048,
-          height: 2048,
-          opacity: 0.9,
-          fills: [{ type: "solid", color: "#ff0000" }],
-        },
-      } as NodeRecord);
-      parent = `G${i}`;
-    }
+    nodes.push(...nestedFrames().slice(1));
     const r = room("resvg-nested", nodes);
     const engine = new AgentEngine(STANDIN);
     const editor = editorOf(engine, r);
     const rasteriser = await nodeRasteriser();
-    const renderer = createHeadlessRenderer({
-      measurer: STANDIN,
-      fonts: async () => null,
-      images: async () => null,
-      rasteriser,
+    // The rasteriser without its `memory`: nothing is drawn smaller first, so each picture runs
+    // out (at its scale, and at half that), as a rasteriser that can't say how much it has does.
+    const services = await renderServices(editor, {
+      rasterise: (svg, options) => rasteriser.rasterise(svg, options),
     });
-    const services = {
-      renderPng: (id: string, options: object) => renderer.renderPng(editor.doc, id, options),
-    };
     for (const input of [{ id: "F", scale: 1 }, { id: "F" }]) {
       const failed = engine.run(editor, "export_image", input, services);
       await expect(failed).rejects.toBeInstanceOf(ToolFailure);
@@ -162,6 +210,48 @@ describe("resvg-nested: 20 nested 2048 px frames at 90% opacity", () => {
       { scale: 1, fonts: [] },
     );
     expect([...px.data.subarray(0, 4)]).toEqual([0, 255, 0, 255]);
+    r.close();
+  });
+});
+
+describe("a shadow on a 2048 px frame: 107 MiB to draw at full size", () => {
+  it("draws export_image smaller, inside the cap, and says from what to what", async () => {
+    const r = room("shadow", [
+      { id: "F", parent: "P", key: "a0", type: "frame", props: { width: 2048, height: 2048 } },
+      {
+        id: "S",
+        parent: "F",
+        key: "a0",
+        type: "frame",
+        props: {
+          width: 2048,
+          height: 2048,
+          fills: [{ type: "solid", color: "#ff0000" }],
+          effects: [{ type: "drop-shadow", x: 0, y: 4, blur: 16, spread: 0, color: "#00000040" }],
+        },
+      },
+    ] as NodeRecord[]);
+    const engine = new AgentEngine(STANDIN);
+    const editor = editorOf(engine, r);
+    const rasteriser = await nodeRasteriser();
+    // Counts what it's asked to draw: drawn once, at the scale chosen, without running out.
+    const scales: number[] = [];
+    const services = await renderServices(editor, {
+      memory: RESVG_MAX_BYTES,
+      rasterise: (svg, options) => {
+        scales.push(options.scale);
+        return rasteriser.rasterise(svg, options);
+      },
+    });
+    const { result } = await engine.run(editor, "export_image", { id: "F", scale: 1 }, services);
+    const data = result.data as { width: number; height: number; scale: number; reduced: string };
+    expect(scales).toEqual([data.scale]);
+    expect(data.width).toBe(data.height);
+    expect(data.width).toBeGreaterThan(512);
+    expect(data.width).toBeLessThan(2048);
+    expect(data.reduced).toBe(
+      `Drawn smaller than asked, at ${data.width} × ${data.height} (scale ${data.scale}) instead of 2048 × 2048 (scale 1): the full size needs more memory than rendering here has. Export a smaller layer to see it in more detail.`,
+    );
     r.close();
   });
 });
