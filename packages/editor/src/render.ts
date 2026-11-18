@@ -2590,7 +2590,20 @@ export class CanvasRenderer {
       );
     else copyExtended(ctx.canvas, behind, x0, y0, x1 - x0, y1 - y0, within);
     if (node.type === "text") {
-      // As in Figma, it shows where the layer paints: under text, its glyphs, not its box.
+      // As in Figma, the layer is its fills over the blur, cut to its glyphs once: under
+      // opaque fills none of the blur shows, not even at the glyphs' anti-aliased edges.
+      const fills = getProp(node.props, "fills").filter((f) => f.visible !== false);
+      if (
+        fills.some(
+          (f) =>
+            f.type === "solid" &&
+            (f.opacity ?? 1) >= 1 &&
+            opaqueColor(f.color) &&
+            (f.blendMode ?? "normal") === "normal",
+        )
+      )
+        return;
+      // Otherwise it shows where the layer paints: under its glyphs, not its box.
       this.#blurGlyphs = scratch(this.#blurGlyphs, x1 - x0, y1 - y0);
       const glyphs = this.#blurGlyphs?.getContext("2d") as Ctx | null | undefined;
       if (!this.#blurGlyphs || !glyphs) return;

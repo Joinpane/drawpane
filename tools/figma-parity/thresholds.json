@@ -288,7 +288,8 @@
     "button": 1.29,
     "layer-dodge": 0.34,
     "layer-multiply": 0.34,
-    "blur-text": 2.53
+    "blur-text": 2.41,
+    "blur-text-faint": 3.44
   },
   "glass-dark": {
     "default-black": 1.22,
