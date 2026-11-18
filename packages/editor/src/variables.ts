@@ -106,60 +106,141 @@ export function resolveVariable(
   return doc.tokens.resolver.value(variableId, nodeId)?.value;
 }
 
-/** A list of paints or effects with the bindings of fields whose values were changed by hand taken off. */
-function unbindChanged<T extends Paint | Effect>(
-  next: readonly T[],
-  before: readonly T[],
-): T[] | null {
+type Item = Record<string, unknown> & { bind?: Record<string, string>; stops?: unknown };
+type Stop = { color: string; bind?: { color?: string } } & Record<string, unknown>;
+
+const json = (value: unknown) => JSON.stringify(value);
+const sameBind = (a: unknown, b: unknown) => json(a ?? null) === json(b ?? null);
+
+/**
+ * The item of `before` each item of `next` is, when it's one of them: the
+ * same item exactly (reordered or kept), else an unused one binding the same
+ * variables (edited, perhaps moved too), else the one at its index. So a
+ * reorder keeps every binding, and an edit is compared with the item it
+ * edits, wherever it moved.
+ */
+function matchItems<T>(next: readonly T[], before: readonly T[]): Array<T | undefined> {
+  const used = new Set<number>();
+  const out: Array<T | undefined> = next.map(() => undefined);
+  const take = (i: number, j: number) => {
+    used.add(j);
+    out[i] = before[j];
+  };
+  const keys = before.map(json);
+  next.forEach((item, i) => {
+    const key = json(item);
+    const j = keys.findIndex((k, at) => !used.has(at) && k === key);
+    if (j !== -1) take(i, j);
+  });
+  next.forEach((item, i) => {
+    if (out[i] !== undefined) return;
+    const bind = (item as { bind?: unknown }).bind;
+    if (!bind) return;
+    const j = before.findIndex(
+      (b, at) =>
+        !used.has(at) &&
+        (b as { type?: unknown }).type === (item as { type?: unknown }).type &&
+        sameBind((b as { bind?: unknown }).bind, bind),
+    );
+    if (j !== -1) take(i, j);
+  });
+  next.forEach((_, i) => {
+    if (out[i] === undefined && i < before.length && !used.has(i)) take(i, i);
+  });
+  return out;
+}
+
+/** A gradient's stops with the bindings of stops whose colour was changed by hand taken off. */
+function unbindStops(stops: readonly Stop[], before: readonly Stop[] | undefined): Stop[] | null {
+  if (!stops.some((stop) => stop.bind?.color)) return null;
+  const prior = matchItems(stops, before ?? []);
   let changed = false;
-  const out = next.map((item, i) => {
-    const prior = before[i] as (T & { bind?: Record<string, string> }) | undefined;
-    const bind = (item as { bind?: Record<string, string> }).bind;
-    let result = item;
-    if (bind && prior && prior.type === item.type) {
-      const kept: Record<string, string> = {};
-      for (const [field, id] of Object.entries(bind)) {
-        const a = (item as Record<string, unknown>)[field];
-        const b = (prior as Record<string, unknown>)[field];
-        if (JSON.stringify(a) === JSON.stringify(b)) kept[field] = id;
-      }
-      if (Object.keys(kept).length !== Object.keys(bind).length) {
-        changed = true;
-        const { bind: _gone, ...rest } = item as T & { bind?: unknown };
-        result = (Object.keys(kept).length > 0 ? { ...rest, bind: kept } : rest) as T;
-      }
-    }
-    const stops = (result as { stops?: Array<{ color: string; bind?: { color?: string } }> }).stops;
-    const priorStops = (prior as { stops?: Array<{ color: string }> } | undefined)?.stops;
-    if (
-      stops &&
-      priorStops &&
-      stops.some((stop, j) => stop.bind?.color && stop.color !== priorStops[j]?.color)
-    ) {
-      changed = true;
-      result = {
-        ...result,
-        stops: stops.map((stop, j) => {
-          if (!stop.bind?.color || stop.color === priorStops[j]?.color) return stop;
-          const { bind: _gone, ...rest } = stop;
-          return rest;
-        }),
-      } as T;
-    }
-    return result;
+  const out = stops.map((stop, j) => {
+    if (!stop.bind?.color) return stop;
+    if (prior[j] && prior[j].color === stop.color) return stop;
+    changed = true;
+    const { bind: _gone, ...rest } = stop;
+    return rest as Stop;
   });
   return changed ? out : null;
 }
 
 /**
- * Detaches bindings when a person sets a bound property by hand, unless the
- * same edit also sets the node's bindings (binding a variable sets both).
- * For paints and effects, only the fields whose values changed lose their
- * binding (compared with what they showed, resolved).
+ * A list of paints or effects with the bindings of fields whose values were
+ * changed by hand taken off (decision 0034): each item compared with the one
+ * it was (`matchItems`), so reordering keeps bindings and an edit detaches
+ * only the fields it changed. A paint's own opacity is its own, on top of a
+ * bound colour's alpha: setting it leaves the colour bound.
+ */
+function unbindChanged<T extends Paint | Effect>(
+  next: readonly T[],
+  before: readonly T[],
+): T[] | null {
+  let changed = false;
+  const prior = matchItems(next as readonly Item[], before as readonly Item[]);
+  const out = next.map((item, i) => {
+    const was = prior[i];
+    let result = item as unknown as Item;
+    const bind = result.bind;
+    if (bind) {
+      const kept: Record<string, string> = {};
+      // Nothing it was: a new item's bindings are as given.
+      if (!was || was.type !== result.type) Object.assign(kept, bind);
+      else
+        for (const [field, id] of Object.entries(bind))
+          if (json(result[field]) === json(was[field])) kept[field] = id;
+      if (Object.keys(kept).length !== Object.keys(bind).length) {
+        changed = true;
+        const { bind: _gone, ...rest } = result;
+        result = Object.keys(kept).length > 0 ? { ...rest, bind: kept } : rest;
+      }
+    }
+    if (Array.isArray(result.stops)) {
+      const stops = unbindStops(
+        result.stops as Stop[],
+        Array.isArray(was?.stops) ? (was.stops as Stop[]) : undefined,
+      );
+      if (stops) {
+        changed = true;
+        result = { ...result, stops };
+      }
+    }
+    return result as unknown as T;
+  });
+  return changed ? out : null;
+}
+
+/** The style link that drives each paint or effect list, and the style's own list. */
+const STYLE_LINKS = {
+  fills: "fillStyle",
+  strokes: "strokeStyle",
+  effects: "effectStyle",
+} as const satisfies Record<string, PropName>;
+
+/**
+ * Detaches what a person's edit replaces (decision 0034), in the same
+ * change, unless the same edit sets the node's bindings or links (binding a
+ * variable, linking a style):
+ * - a paint or effect list set to anything other than what it shows lets go
+ *   of the style it links (the list written is the style's, as shown, with
+ *   the edit), so the edit sticks;
+ * - in paints, gradient stops and effects, the fields whose values changed
+ *   lose their bindings, each item compared with the one it was (a
+ *   reorder detaches nothing);
+ * - a property bound in `bindings` set by hand loses that binding.
  */
 export function unbindOps(doc: Doc, ops: readonly Op[]): Op[] {
   const settingBindings = new Set(
     ops.filter((o) => o.op === "set" && o.prop === "bindings").map((o) => o.id),
+  );
+  const settingLinks = new Set(
+    ops
+      .filter(
+        (o) =>
+          o.op === "set" &&
+          (o.prop === "fillStyle" || o.prop === "strokeStyle" || o.prop === "effectStyle"),
+      )
+      .map((o) => `${o.id}/${(o as { prop: string }).prop}`),
   );
   const removals = new Map<string, Set<BindingKey>>();
   const out: Op[] = [];
@@ -174,6 +255,14 @@ export function unbindOps(doc: Doc, ops: readonly Op[]): Op[] {
         const before = getProp(node.props, op.prop) as readonly (Paint | Effect)[];
         const next = unbindChanged(op.value as readonly (Paint | Effect)[], before);
         if (next) out.push({ op: "set", id: op.id, prop: op.prop, value: next });
+        const link = STYLE_LINKS[op.prop];
+        const linked = doc.getUnresolved(op.id)?.props[link];
+        if (
+          typeof linked === "string" &&
+          !settingLinks.has(`${op.id}/${link}`) &&
+          json(op.value) !== json(before)
+        )
+          out.push({ op: "set", id: op.id, prop: link, value: null });
       }
     }
     const keys = BINDING_FIELDS_BY_PROP.get(op.prop);
@@ -200,6 +289,86 @@ export function unbindOps(doc: Doc, ops: readonly Op[]): Op[] {
     });
   }
   return out;
+}
+
+/** Paints or effects with every variable binding taken off, values as given. */
+function withoutBinds<T>(list: readonly T[]): T[] {
+  return list.map((item) => {
+    const { bind: _gone, ...rest } = item as Item;
+    if (Array.isArray(rest.stops))
+      rest.stops = (rest.stops as Stop[]).map(({ bind: _stop, ...stop }) => stop);
+    return rest as unknown as T;
+  });
+}
+
+/**
+ * Binding `key` of a node to `variableId` (decision 0034): the binding, and
+ * the fields it drives set to what it shows once bound, so what's stored
+ * (what shows when the binding can't be followed) is what was shown, not
+ * an older value. Empty when the node can't take it.
+ */
+export function variableBindOps(doc: Doc, id: string, key: BindingKey, variableId: string): Op[] {
+  const node = doc.get(id);
+  const raw = doc.getUnresolved(id);
+  if (!node || !raw) return [];
+  const bindings = { ...getProp(raw.props, "bindings"), [key]: variableId };
+  const ops: Op[] = [{ op: "set", id, prop: "bindings", value: bindings }];
+  const bound = doc.tokens.resolver.resolve({
+    ...node,
+    props: { ...node.props, bindings },
+  });
+  for (const prop of BINDING_FIELDS[key].props) {
+    const value = bound.props[prop];
+    if (value !== undefined && json(value) !== json(raw.props[prop]))
+      ops.push({ op: "set", id, prop, value: value as never });
+  }
+  return ops;
+}
+
+/**
+ * Detaching `key` from a node by choice (decision 0034): the binding goes,
+ * and the fields it drove keep what they show now, whatever mode or value
+ * gave it. For `fill` and `stroke`, the variables the paints themselves bind
+ * (their colours, opacities and gradient stops) go too, and a linked style
+ * with them: the paints are kept as shown. Empty when nothing's bound.
+ */
+export function variableDetachOps(doc: Doc, id: string, key: BindingKey): Op[] {
+  const node = doc.get(id);
+  const raw = doc.getUnresolved(id);
+  if (!node || !raw) return [];
+  const bindings = getProp(raw.props, "bindings");
+  const ops: Op[] = [];
+  const prop = key === "fill" ? "fills" : key === "stroke" ? "strokes" : null;
+  const link = key === "fill" ? "fillStyle" : key === "stroke" ? "strokeStyle" : null;
+  const shown = prop ? (getProp(node.props, prop) as readonly Paint[]) : [];
+  const paintsBound =
+    prop !== null &&
+    (shown.some((p) => (p as Item).bind || Array.isArray((p as Item).stops)) ||
+      (link !== null && typeof raw.props[link] === "string"));
+  if (!bindings[key] && !paintsBound) return [];
+  if (bindings[key]) {
+    const next = { ...bindings };
+    delete next[key];
+    ops.push({
+      op: "set",
+      id,
+      prop: "bindings",
+      value: Object.keys(next).length > 0 ? next : null,
+    });
+  }
+  if (prop) {
+    const value = withoutBinds(shown);
+    if (json(value) !== json(raw.props[prop])) ops.push({ op: "set", id, prop, value });
+    if (link && typeof raw.props[link] === "string")
+      ops.push({ op: "set", id, prop: link, value: null });
+    return ops;
+  }
+  for (const field of BINDING_FIELDS[key].props) {
+    const value = node.props[field];
+    if (value !== undefined && json(value) !== json(raw.props[field]))
+      ops.push({ op: "set", id, prop: field, value: value as never });
+  }
+  return ops;
 }
 
 /** CSS custom property name for a variable: "brand/500" → "--brand-500". */

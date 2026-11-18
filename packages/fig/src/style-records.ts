@@ -22,6 +22,16 @@ const rgba = (c: Color | undefined): Figma.RGBA => ({
 });
 
 const STYLE_TYPES = new Set(["FILL", "EFFECT", "TEXT", "GRID"]);
+/** The fields of a text style a variable can drive: the record's names, and REST's. */
+const TEXT_FIELDS: Readonly<Record<string, string>> = {
+  FONT_FAMILY: "fontFamily",
+  FONT_STYLE: "fontStyle",
+  FONT_WEIGHT: "fontWeight",
+  FONT_SIZE: "fontSize",
+  LINE_HEIGHT: "lineHeight",
+  LETTER_SPACING: "letterSpacing",
+  PARAGRAPH_SPACING: "paragraphSpacing",
+};
 
 function paint(p: Raw, aliasOf: AliasOf): Figma.Paint | null {
   const common = {
@@ -165,7 +175,20 @@ export function styleFromRecord(
     node.effects = ((r.effects as Raw[] | undefined) ?? [])
       .map((e) => effect(e, aliasOf))
       .filter((e) => e !== null);
-  if (styleType === "TEXT") node.style = typeStyle(r);
+  if (styleType === "TEXT") {
+    node.style = typeStyle(r);
+    // Its typography's bindings (decision 0034), read as Open Pencil reads a layer's.
+    const bound: Record<string, Figma.VariableAlias> = {};
+    const entries = (r.variableConsumptionMap as { entries?: Raw[] } | undefined)?.entries ?? [];
+    for (const entry of entries) {
+      const field = TEXT_FIELDS[entry.variableField as string];
+      const data = entry.variableData as { dataType?: string } | undefined;
+      if (!field || data?.dataType !== "ALIAS") continue;
+      const alias = aliasOf(data);
+      if (alias) bound[field] = alias;
+    }
+    if (Object.keys(bound).length > 0) node.boundVariables = bound;
+  }
   return {
     meta: {
       name,

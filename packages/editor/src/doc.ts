@@ -96,10 +96,12 @@ export class Doc {
     this.#compact = this.#compactCopies ? new CompactCopies() : null;
     this.#tokens = new TokenView({
       get: (id) => this.#raw(id),
-      childIds: (id) => this.childIds(id),
+      builtChildIds: (id) =>
+        this.#compact ? this.#compact.view.builtChildIds(id) : this.#store.childIds(id),
       stored: (id) => (this.#compact?.store ?? this.#store).get(id),
       storedNodes: () => (this.#compact?.store ?? this.#store).nodes(),
       builtFrom: (ids) => this.#compact?.view.builtFrom(ids) ?? new Set(ids),
+      meter: () => this.#meter,
     });
   }
 
@@ -272,20 +274,25 @@ export class Doc {
       const applied = this.#compact.apply(ops, options);
       this.#lastStored = applied.stored;
       this.#lastStoredInverse = applied.storedInverse;
-      this.#recordTokens(new Set(applied.ids), new Set(applied.parents), ops);
+      this.#recordTokens(new Set(applied.ids), new Set(applied.parents));
       return applied.inverse;
     }
     const touched = this.#touched(ops);
     const inverse = applyTransaction(this.#store, ops, { held: options.held ?? false });
     this.#lastStored = ops;
     this.#lastStoredInverse = inverse;
-    this.#recordTokens(touched.ids, touched.parents, ops);
+    this.#recordTokens(touched.ids, touched.parents);
     return inverse;
   }
 
-  /** Records a change, with the layers it affects through variables, styles and modes. */
-  #recordTokens(ids: Set<string>, parents: Set<string>, ops: readonly Op[]): void {
-    for (const id of this.#tokens.changed(ids, ops)) ids.add(id);
+  /**
+   * Records a change, with the layers it affects through variables, styles
+   * and modes: read from the stored operations and their inverse, so a change
+   * replayed from a room or rolled back reaches what the one made here does.
+   */
+  #recordTokens(ids: Set<string>, parents: Set<string>): void {
+    for (const id of this.#tokens.changed(ids, this.#lastStored, this.#lastStoredInverse))
+      ids.add(id);
     this.#record(ids, parents, false);
   }
 
@@ -295,7 +302,7 @@ export class Doc {
     const applied = this.#compact.applyStored(ops, options);
     this.#lastStored = applied.stored;
     this.#lastStoredInverse = applied.storedInverse;
-    this.#recordTokens(new Set(applied.ids), new Set(applied.parents), ops);
+    this.#recordTokens(new Set(applied.ids), new Set(applied.parents));
     return applied.inverse;
   }
 

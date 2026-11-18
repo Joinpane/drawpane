@@ -13,11 +13,15 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
 
 /**
  * 2: the room says how the file stores copies (decision 0029), at welcome;
- * the client says which ways it can read, at hello. A client on version 1
- * (from before compact copies) is served only a file stored materialized,
- * and told to reload otherwise.
+ * the client says which ways it can read, at hello.
+ *
+ * 3: variables and styles (decision 0034): paint, stop and effect bindings,
+ * style links, boolean variables, up to 64 modes, and opacity variables read
+ * as percentages (files migrated as their rooms load). A client before it
+ * (1 or 2) would strip bindings it doesn't know from what it rewrites, so
+ * it's told to reload at hello, whatever the file holds.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** The close code that tells a client the room needs a newer one: reload the page. */
 export const RELOAD_CLOSE_CODE = 4426;
@@ -66,8 +70,8 @@ export function latencyBucket(ms: number): number {
 export const ClientMessage = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("hello"),
-    /** 1 from clients before compact copies, which read materialized files only. */
-    protocol: z.union([z.literal(1), z.literal(PROTOCOL_VERSION)]),
+    /** Older clients (1: before compact copies, 2: before variables and styles) are told to reload. */
+    protocol: z.union([z.literal(1), z.literal(2), z.literal(PROTOCOL_VERSION)]),
     /** Stable per browser tab; used to make resent transactions idempotent. */
     clientId: Id,
     /** Last revision this client has fully applied, or null for a fresh load. */

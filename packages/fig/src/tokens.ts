@@ -143,12 +143,13 @@ export function layerBoundVariables(
 
 /**
  * The variable a paint's colour is bound to (`fills/0/color`), as REST's
- * alias, when it gives, at the layer, the colour Figma saved. A copy of a
- * component swapped for another variant can carry the colour binding of the
- * layer it replaced (Open Pencil keeps it) while its saved colour is right:
- * such a binding is stale, and the paint keeps its colour. Numbers aren't
- * checked this way: a copy's saved size is often its main's, which is what
- * resolving fixes (a slider's thumb in another style).
+ * alias. Which variable comes from provenance (decision 0034): the layer's
+ * own binding, or, for a nested instance swapped to another variant, the one
+ * `applySwappedLooks` carried over from the component now chosen. The
+ * colour Figma saved isn't evidence against it (a copy in another mode
+ * saves another colour): `differs`, when given, is told when the binding
+ * resolves at the layer to another colour than the one saved, as a
+ * diagnostic only.
  */
 export function paintColor(
   n: SceneNode,
@@ -156,23 +157,30 @@ export function paintColor(
   index: number,
   aliasOf: AliasOf,
   graph: SceneGraph,
+  differs?: (resolved: Figma.RGBA, saved: Figma.RGBA) => void,
 ): Figma.VariableAlias | undefined {
   const id = n.boundVariables[`${list}/${index}/color`];
   if (!id) return undefined;
-  const paint = (list === "fills" ? n.fills : n.strokes)[index];
-  const color = graph.resolveColorVariableForNode(n.id, id);
-  if (paint?.type === "SOLID" && paint.color && color) {
-    const near = (a: number, b: number) => Math.abs(a - b) <= 1.5 / 255;
-    const alpha = (paint.opacity ?? 1) * (paint.color.a ?? 1);
-    if (
-      !near(paint.color.r, color.r) ||
-      !near(paint.color.g, color.g) ||
-      !near(paint.color.b, color.b) ||
-      !near(alpha, color.a ?? 1)
-    )
-      return undefined;
+  const alias = aliasOf(id);
+  if (alias && differs) {
+    const paint = (list === "fills" ? n.fills : n.strokes)[index];
+    const color = graph.resolveColorVariableForNode(n.id, id);
+    if (paint?.type === "SOLID" && paint.color && color) {
+      const near = (a: number, b: number) => Math.abs(a - b) <= 1.5 / 255;
+      const alpha = (paint.opacity ?? 1) * (paint.color.a ?? 1);
+      if (
+        !near(paint.color.r, color.r) ||
+        !near(paint.color.g, color.g) ||
+        !near(paint.color.b, color.b) ||
+        !near(alpha, color.a ?? 1)
+      )
+        differs(
+          { r: color.r, g: color.g, b: color.b, a: color.a ?? 1 },
+          { ...paint.color, a: alpha },
+        );
+    }
   }
-  return aliasOf(id);
+  return alias;
 }
 
 /** The modes a layer sets, by REST collection ids, for collections the file has. */

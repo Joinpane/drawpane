@@ -25,8 +25,8 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 /** How a room stores copies in this run (the tests' second run turns compact copies on). */
 const roomForm = (): CopiesFormat => (compactCopiesDefault() ? "compact" : "materialized");
-/** What a client says it reads in its hello (protocol 2). */
-const HELLO = { t: "hello", protocol: 2, copies: ["materialized", "compact"] } as const;
+/** What a client says it reads in its hello (protocol 3). */
+const HELLO = { t: "hello", protocol: 3, copies: ["materialized", "compact"] } as const;
 
 /** A FileRoom stand-in with the same ordering, dedupe, catch-up and download rules. */
 class FakeRoom {
@@ -796,7 +796,7 @@ describe("SyncEngine room requests", () => {
     expect(sent).toEqual([
       {
         t: "hello",
-        protocol: 2,
+        protocol: 3,
         clientId: "c1",
         revn: null,
         copies: ["materialized", "compact"],

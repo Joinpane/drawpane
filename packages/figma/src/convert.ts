@@ -23,13 +23,7 @@ import {
   parseSvgPath,
   serializePath,
 } from "@drawpane/import-kit";
-import {
-  BINDING_FIELDS_BY_PROP,
-  keysBetween,
-  type NodeRecord,
-  propAllowed,
-  ROOT_ID,
-} from "@drawpane/model";
+import { boundAlike, keysBetween, type NodeRecord, propAllowed, ROOT_ID } from "@drawpane/model";
 import { convertEffects } from "./effects";
 import { drawpaneId, mirroredId, mirroredUnder } from "./ids";
 import { childLayout, containerLayout, layoutGrids } from "./layout";
@@ -501,47 +495,6 @@ const NOT_OVERRIDES = new Set([
 ]);
 
 type Bindings = Readonly<Record<string, string>> | undefined;
-const CORNER_KEYS = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"];
-const SIDE_KEYS = [
-  "strokeTopWeight",
-  "strokeRightWeight",
-  "strokeBottomWeight",
-  "strokeLeftWeight",
-];
-
-/** Paints or effects with the fields they bind blanked: what's their own, whatever variables give. */
-function unboundList(list: unknown): unknown {
-  if (!Array.isArray(list)) return list;
-  return list.map((item: Record<string, unknown>) => {
-    const out: Record<string, unknown> = { ...item };
-    const bind = item.bind as Record<string, string> | undefined;
-    if (bind) for (const field of Object.keys(bind)) out[field] = null;
-    // A bound colour's alpha is saved as the paint's opacity: it's the variable's too.
-    if (bind?.color && item.type === "solid") out.opacity = null;
-    if (Array.isArray(item.stops))
-      out.stops = (item.stops as Array<Record<string, unknown>>).map((stop) =>
-        stop.bind ? { ...stop, color: null } : stop,
-      );
-    return out;
-  });
-}
-
-/**
- * Whether a copy's value differs from its main's only where both bind the
- * same variables (decision 0034): Figma saved each resolved in its own
- * modes, and Drawpane resolves them where each is, so it's no override.
- */
-function boundAlike(prop: string, a: unknown, b: unknown, la: Bindings, lb: Bindings): boolean {
-  if (prop === "fills" || prop === "strokes" || prop === "effects")
-    return JSON.stringify(unboundList(a)) === JSON.stringify(unboundList(b));
-  const same = (key: string) => !!la?.[key] && la[key] === lb?.[key];
-  if (prop === "cornerRadii" || prop === "strokeWeights") {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-    const keys = prop === "cornerRadii" ? CORNER_KEYS : SIDE_KEYS;
-    return a.every((v, i) => v === b[i] || same(keys[i] as string));
-  }
-  return (BINDING_FIELDS_BY_PROP.get(prop) ?? []).some(same);
-}
 
 /**
  * Marks what each instance's layers change from the main component's: the
@@ -569,11 +522,10 @@ function markOverrides(
       const a = (layer.props as Props)[k];
       const b = (main.props as Props)[k];
       if (JSON.stringify(a) === JSON.stringify(b)) continue;
-      if (b !== undefined && boundAlike(k, a, b, la, lb)) {
-        // Stored as the main's: the copy shows what its variables give where it is.
-        (layer.props as Props)[k] = structuredClone(b);
-        continue;
-      }
+      // Differing only where both bind the same variables: no override (it shows what they give
+      // where it is). The copy keeps the value Figma saved for it, what shows when they can't be
+      // followed and what a reader without the resolver sees (decision 0034).
+      if (boundAlike(k, a, b, la, lb)) continue;
       changed.push(k);
     }
     // A nested instance swapped for another component overrides which one it is.

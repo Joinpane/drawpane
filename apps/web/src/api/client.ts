@@ -4,10 +4,13 @@ import {
   type BranchReviewNodes,
   type CopiesFormat,
   type LibraryPublish,
+  migratedNodes,
   type NodeRecord,
   parseBranchReview,
   type Resolution,
   snapshotCopies,
+  snapshotTokens,
+  TOKENS_VERSION,
   type VersionInfo,
 } from "@drawpane/model";
 
@@ -170,7 +173,12 @@ async function requestSnapshot(
   if (!snapshot) throw new ApiError(500, "internal", "That file couldn't be read.");
   return {
     revn: snapshot.header.revn,
-    nodes: snapshot.nodes,
+    // Saved before decision 0034's semantics (a version, a library's publish): migrated as its
+    // room migrates a file, so it looks as it did.
+    nodes:
+      snapshotTokens(snapshot.header) < TOKENS_VERSION
+        ? migratedNodes(snapshot.nodes)
+        : snapshot.nodes,
     copies: snapshotCopies(snapshot.header),
   };
 }

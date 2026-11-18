@@ -122,7 +122,14 @@ import {
   textStyleFixupOps,
   textStyleUsers,
 } from "./text-styles";
-import { BINDING_TARGETS, unbindOps, type VariableType, variablesIn } from "./variables";
+import {
+  BINDING_TARGETS,
+  unbindOps,
+  type VariableType,
+  variableBindOps,
+  variableDetachOps,
+  variablesIn,
+} from "./variables";
 
 import type { BooleanEngine, BooleanEngineLoader, BooleanOp } from "./vector/boolean";
 import * as vector from "./vector/commands";
@@ -2783,32 +2790,19 @@ export class Editor {
     for (const id of ids) {
       const node = this.doc.get(id);
       if (!node || !propAllowed(node.type, BINDING_TARGETS[key].prop)) continue;
-      ops.push({
-        op: "set",
-        id,
-        prop: "bindings",
-        value: { ...getProp(node.props, "bindings"), [key]: variableId },
-      });
+      // The fields it drives take what it shows, as their fallback (decision 0034).
+      ops.push(...variableBindOps(this.doc, id, key, variableId));
     }
     if (ops.length > 0) this.commit(ops, `Use ${getProp(variable.props, "name")}`);
   }
 
-  /** Detaches a variable from a property, keeping its current value. */
+  /**
+   * Detaches a variable from a property, keeping what it shows now (in the
+   * mode it's in): every field the binding drove is set to it, in one step.
+   */
   unbindVariable(ids: readonly string[], key: BindingKey): void {
     const ops: Op[] = [];
-    for (const id of ids) {
-      const node = this.doc.get(id);
-      const bindings = node ? getProp(node.props, "bindings") : {};
-      if (!node || !bindings[key]) continue;
-      const next = { ...bindings };
-      delete next[key];
-      ops.push({
-        op: "set",
-        id,
-        prop: "bindings",
-        value: Object.keys(next).length > 0 ? next : null,
-      });
-    }
+    for (const id of ids) ops.push(...variableDetachOps(this.doc, id, key));
     if (ops.length > 0) this.commit(ops, "Detach variable");
   }
 

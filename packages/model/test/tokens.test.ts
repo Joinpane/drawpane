@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  boundAlike,
+  checkNode,
   composeAlpha,
   MemoryStore,
   type NodeRecord,
@@ -129,8 +131,9 @@ describe("resolving variables", () => {
       string,
       unknown
     >;
-    // The bound colour's alpha replaces the saved opacity (Figma saves the alpha there).
-    expect((p.fills as Array<{ opacity?: number }>)[0]?.opacity).toBeUndefined();
+    // The bound colour gives the colour and its alpha; the paint's own opacity is a person's,
+    // on top (Figma's duplicated alpha is folded into the colour at import, not here).
+    expect((p.fills as Array<{ opacity?: number }>)[0]?.opacity).toBe(0.5);
     expect(p.fills).toMatchObject([
       { color: "#00000080" },
       { stops: [{ color: "#000000" }, { color: "#00ff00" }] },
@@ -176,5 +179,49 @@ describe("resolving variables", () => {
     expect(numberText(1.005)).toBe("1.00");
     expect(parseFontStyle("Bold")).toEqual({ weight: 700, italic: false });
     expect(parseFontStyle("ExtraLight Italic")).toEqual({ weight: 200, italic: true });
+  });
+});
+
+describe("text style bindings (F13)", () => {
+  it("a text style may bind its typography, and nothing else", () => {
+    const style = (bindings: Record<string, string>): NodeRecord => ({
+      id: "ts",
+      type: "textStyle",
+      parent: ROOT_ID,
+      key: "a0",
+      props: { name: "Body", fontSize: 12, bindings } as never,
+    });
+    expect(checkNode(style({ fontSize: "v", lineHeight: "w" })).props.bindings).toEqual({
+      fontSize: "v",
+      lineHeight: "w",
+    });
+    expect(() => checkNode(style({ width: "v" }))).toThrow(/can't bind "width"/);
+    // Kept, but not presented yet: its values are what they're read as.
+    const store = file([style({ fontSize: "gap" })]);
+    const ts = store.get("ts") as NodeRecord;
+    expect(new TokenResolver(store).resolve(ts)).toBe(ts);
+  });
+});
+
+describe("values alike where bound", () => {
+  it("differ only in the fields both bind to the same variables", () => {
+    const a = [{ type: "solid", color: "#000000", bind: { color: "v" } }];
+    const b = [{ type: "solid", color: "#ffffff", bind: { color: "v" } }];
+    expect(boundAlike("fills", a, b, undefined, undefined)).toBe(true);
+    expect(boundAlike("fills", a, [{ ...b[0], bind: { color: "w" } }], undefined, undefined)).toBe(
+      false,
+    );
+    expect(boundAlike("fills", a, [{ ...b[0], opacity: 0.5 }], undefined, undefined)).toBe(false);
+    expect(boundAlike("width", 20, 40, { width: "n" }, { width: "n" })).toBe(true);
+    expect(boundAlike("width", 20, 40, { width: "n" }, { width: "m" })).toBe(false);
+    expect(
+      boundAlike(
+        "cornerRadii",
+        [1, 2, 3, 4],
+        [9, 2, 3, 4],
+        { topLeftRadius: "n" },
+        { topLeftRadius: "n" },
+      ),
+    ).toBe(true);
   });
 });

@@ -184,6 +184,63 @@ export function tokenRefs(props: Readonly<Props>): { variables: string[]; styles
   return { variables, styles };
 }
 
+function renameBinds(list: unknown, to: (id: string) => string): unknown {
+  if (!Array.isArray(list)) return list;
+  const bind = (item: Bound) =>
+    item?.bind
+      ? {
+          ...item,
+          bind: Object.fromEntries(
+            Object.entries(item.bind).map(([k, v]) => [k, typeof v === "string" ? to(v) : v]),
+          ),
+        }
+      : item;
+  return (list as Array<Bound & { stops?: unknown }>).map((item) => {
+    const out = bind(item) as Bound & { stops?: unknown };
+    return Array.isArray(out?.stops)
+      ? { ...out, stops: (out.stops as Bound[]).map((stop) => bind(stop)) }
+      : out;
+  });
+}
+
+/**
+ * `props` with every variable, style and collection id it holds renamed by
+ * `to` (decision 0034), payloads kept whole: `bindings`, what paints, their
+ * stops, effects and text runs bind, the style links, a variable's aliases
+ * (their `opacity` too), and the collections `variableModes` sets. For
+ * copying tokens and what uses them to new ids (a library's copies).
+ */
+export function renameTokenIds(props: Readonly<Props>, to: (id: string) => string): Props {
+  const p = props as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...p };
+  if (p.bindings && typeof p.bindings === "object")
+    out.bindings = Object.fromEntries(
+      Object.entries(p.bindings as Record<string, string>).map(([k, v]) => [k, to(v)]),
+    );
+  for (const prop of ["fills", "strokes", "effects"])
+    if (Array.isArray(p[prop])) out[prop] = renameBinds(p[prop], to);
+  if (Array.isArray(p.textRuns))
+    out.textRuns = (p.textRuns as Array<Record<string, unknown>>).map((run) =>
+      Array.isArray(run?.fills) ? { ...run, fills: renameBinds(run.fills, to) } : run,
+    );
+  for (const link of ["fillStyle", "strokeStyle", "effectStyle", "textStyle"])
+    if (typeof p[link] === "string") out[link] = to(p[link] as string);
+  if (p.variableModes && typeof p.variableModes === "object")
+    out.variableModes = Object.fromEntries(
+      Object.entries(p.variableModes as Record<string, string>).map(([k, v]) => [to(k), v]),
+    );
+  if (p.values && typeof p.values === "object")
+    out.values = Object.fromEntries(
+      Object.entries(p.values as Record<string, unknown>).map(([mode, v]) => [
+        mode,
+        v && typeof v === "object" && typeof (v as { alias?: unknown }).alias === "string"
+          ? { ...(v as object), alias: to((v as { alias: string }).alias) }
+          : v,
+      ]),
+    );
+  return out as Props;
+}
+
 function listBinds(list: unknown): boolean {
   if (!Array.isArray(list)) return false;
   for (const item of list as Array<Bound & { stops?: unknown }>) {
@@ -213,6 +270,84 @@ export function bindsLayout(props: Readonly<Props>): boolean {
   if (!bindings) return false;
   for (const key of Object.keys(bindings)) if (LAYOUT_BINDINGS.has(key as BindingKey)) return true;
   return false;
+}
+
+/**
+ * The variables a node's layout reads through its bindings (a bound
+ * padding, a font size): a change to what one of these resolves to lays it
+ * out again; a change to anything else it binds (a colour) doesn't.
+ */
+export function layoutVariables(props: Readonly<Props>): string[] {
+  const bindings = (props as { bindings?: Record<string, unknown> }).bindings;
+  const out: string[] = [];
+  if (!bindings) return out;
+  for (const [key, id] of Object.entries(bindings))
+    if (LAYOUT_BINDINGS.has(key as BindingKey) && typeof id === "string") out.push(id);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Values that differ only where they're bound
+
+type BindingMap = Readonly<Record<string, string>> | undefined;
+const CORNER_KEYS = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"];
+const SIDE_KEYS = [
+  "strokeTopWeight",
+  "strokeRightWeight",
+  "strokeBottomWeight",
+  "strokeLeftWeight",
+];
+
+/** Paints or effects with the fields they bind blanked: what's their own, whatever variables give. */
+function unboundList(list: unknown): unknown {
+  if (!Array.isArray(list)) return list;
+  return list.map((item: Record<string, unknown>) => {
+    const out: Record<string, unknown> = { ...item };
+    const bind = item?.bind as Record<string, string> | undefined;
+    if (bind) for (const field of Object.keys(bind)) out[field] = null;
+    if (Array.isArray(item?.stops))
+      out.stops = (item.stops as Array<Record<string, unknown>>).map((stop) =>
+        stop?.bind ? { ...stop, color: null } : stop,
+      );
+    return out;
+  });
+}
+
+/**
+ * Whether two values of a property differ only where both bind the same
+ * variables (decision 0034): a copy's saved value and its main's, each
+ * resolved in its own modes. A copy that differs from its main only so
+ * isn't overriding it: it shows what its variables give where it is.
+ * `a` and `b` are the bindings of the nodes holding each.
+ */
+export function boundAlike(
+  prop: string,
+  a: unknown,
+  b: unknown,
+  aBindings: BindingMap,
+  bBindings: BindingMap,
+): boolean {
+  if (a === undefined || b === undefined) return false;
+  if (prop === "fills" || prop === "strokes" || prop === "effects")
+    return JSON.stringify(unboundList(a)) === JSON.stringify(unboundList(b));
+  const same = (key: string) => !!aBindings?.[key] && aBindings[key] === bBindings?.[key];
+  if (prop === "cornerRadii" || prop === "strokeWeights") {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    const keys = prop === "cornerRadii" ? CORNER_KEYS : SIDE_KEYS;
+    return a.every((v, i) => v === b[i] || same(keys[i] as string));
+  }
+  return (BINDING_FIELDS_BY_PROP.get(prop) ?? []).some(same);
+}
+
+/** `boundAlike` for two nodes' values: a comparison a copy's own values are worked out with. */
+export function alikeWhereBound(
+  own: Readonly<Record<string, unknown>>,
+  base: Readonly<Record<string, unknown>>,
+): (prop: string, a: unknown, b: unknown) => boolean {
+  const ownBindings = own.bindings as BindingMap;
+  const baseBindings = base.bindings as BindingMap;
+  if (!usesTokens(own as Props) && !usesTokens(base as Props)) return () => false;
+  return (prop, a, b) => boundAlike(prop, a, b, ownBindings, baseBindings);
 }
 
 // ---------------------------------------------------------------------------
@@ -383,12 +518,10 @@ export class TokenResolver {
       if (bind) {
         if (next.type === "solid") {
           const color = this.#color(bind.color, at);
-          // As Figma: a bound colour gives the paint its alpha too. Figma saves that alpha as the
-          // paint's opacity, so the stored opacity is the variable's, not one on top of it.
-          if (color !== undefined) {
-            const { opacity: _saved, ...rest } = next;
-            next = { ...rest, color };
-          }
+          // A bound colour gives the paint its colour and alpha; the paint's own opacity applies
+          // on top, as a person set it. Figma saves the variable's alpha as the paint's opacity
+          // too: the importers fold that into the colour once (alpha normalised at import).
+          if (color !== undefined && color !== next.color) next = { ...next, color };
         }
         const opacity = this.#number(bind.opacity, at);
         if (opacity !== undefined) next = { ...next, opacity: clampUnit(opacity / 100) };
@@ -466,7 +599,9 @@ export class TokenResolver {
    */
   resolve(node: NodeRecord): NodeRecord {
     const p = node.props as Props;
-    if (!usesTokens(p)) return node;
+    // A text style's bindings are kept (decision 0034) but not yet presented: text layers take
+    // a style's values as written (text-styles.ts), so its own values stay what they're read as.
+    if (node.type === "textStyle" || !usesTokens(p)) return node;
     const out: Record<string, unknown> = {};
     const fillStyle = this.#style(p.fillStyle, "paintStyle");
     const strokeStyle = this.#style(p.strokeStyle, "paintStyle");

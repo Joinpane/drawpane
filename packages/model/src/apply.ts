@@ -3,6 +3,7 @@ import { isValidId, ROOT_ID } from "./ids";
 import type { CreateOp, DeleteOp, MoveOp, NodeRecord, Op, SetOp } from "./ops";
 import { isValidOrderKey } from "./order-key";
 import {
+  type BindingKey,
   CHILD_TYPES,
   isPropName,
   NODE_TYPES,
@@ -10,6 +11,7 @@ import {
   PROPS,
   type PropName,
   propAllowed,
+  TEXT_STYLE_BINDING_KEYS,
 } from "./schema";
 import { deeperThan, type NodeStore } from "./store";
 
@@ -101,6 +103,10 @@ function checkValue(type: NodeType, prop: string, value: unknown): asserts prop 
     const issue = result.error.issues[0];
     throw new ModelError("invalid_value", `"${prop}" ${issue?.message ?? "is invalid"}.`);
   }
+  if (type === "textStyle" && prop === "bindings")
+    for (const key of Object.keys(value as object))
+      if (!TEXT_STYLE_BINDING_KEYS.has(key as BindingKey))
+        throw new ModelError("invalid_value", `A text style can't bind "${key}".`);
 }
 
 /**

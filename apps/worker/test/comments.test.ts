@@ -13,7 +13,7 @@ async function newFile() {
   const socket = await openSocket(owner.browser, file.id);
   socket.send({
     t: "hello",
-    protocol: 2,
+    protocol: 3,
     clientId: `c-${file.id}`,
     revn: null,
     copies: ["materialized", "compact"],
@@ -342,7 +342,7 @@ describe("comments in the room", () => {
     const a = await openSocket(browser, fileId);
     a.send({
       t: "hello",
-      protocol: 2,
+      protocol: 3,
       clientId: "clientA",
       revn: null,
       copies: ["materialized", "compact"],
@@ -351,7 +351,7 @@ describe("comments in the room", () => {
     const b = await openSocket(viewer.browser, fileId);
     b.send({
       t: "hello",
-      protocol: 2,
+      protocol: 3,
       clientId: "clientB",
       revn: null,
       copies: ["materialized", "compact"],
@@ -388,7 +388,7 @@ describe("comments in the room", () => {
     expect(await room.broadcastComments({ kind: "deleted", threadId: "x" })).toBe(0);
     a.send({
       t: "hello",
-      protocol: 2,
+      protocol: 3,
       clientId: "clientA",
       revn: null,
       copies: ["materialized", "compact"],

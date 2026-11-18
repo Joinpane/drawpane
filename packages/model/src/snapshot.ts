@@ -18,9 +18,14 @@
  * `copies` says how its copies are stored (decision 0029): `compact` for a
  * file that stores override records; missing (every snapshot saved before
  * phase 4b) means materialized.
+ *
+ * `tokens` is the token semantics its nodes are in (decision 0034,
+ * `TOKENS_VERSION`); missing (every snapshot saved before) means 0, which a
+ * reader migrates (`legacyTokenOps`) before using.
  */
 import type { CopiesFormat } from "./convert";
 import type { NodeRecord } from "./ops";
+import { TOKENS_VERSION } from "./token-migration";
 
 export const SNAPSHOT_FORMAT = "drawpane.snapshot";
 
@@ -32,6 +37,13 @@ export interface SnapshotHeader {
   readonly at: number;
   /** How its copies are stored; missing means materialized. */
   readonly copies?: CopiesFormat;
+  /** The token semantics its nodes are in (`TOKENS_VERSION`); missing means 0. */
+  readonly tokens?: number;
+}
+
+/** The token semantics a snapshot's nodes are in, from its header: 0 when it doesn't say. */
+export function snapshotTokens(header: { readonly tokens?: unknown }): number {
+  return typeof header.tokens === "number" && Number.isInteger(header.tokens) ? header.tokens : 0;
 }
 
 /** How a snapshot's copies are stored, from its header. */
@@ -45,6 +57,8 @@ export function snapshotHeaderLine(
   revn: number,
   at: number,
   copies: CopiesFormat = "materialized",
+  /** The token semantics the nodes are in: a room's own are always current (migrated as it loads). */
+  tokens: number = TOKENS_VERSION,
 ): string {
   return `${JSON.stringify({
     format: SNAPSHOT_FORMAT,
@@ -53,6 +67,7 @@ export function snapshotHeaderLine(
     revn,
     at,
     ...(copies === "compact" ? { copies } : {}),
+    ...(tokens > 0 ? { tokens } : {}),
   })}\n`;
 }
 

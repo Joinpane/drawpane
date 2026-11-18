@@ -161,7 +161,7 @@ async function importBig(browser: Browser, fileId: string, last?: NodeRecord[]) 
 async function editor(browser: Browser, fileId: string, clientId: string) {
   const socket = await openSocket(browser, fileId);
   const { revn } = await roomOf(fileId).stats();
-  socket.send({ t: "hello", protocol: 2, clientId, revn, copies: ["materialized", "compact"] });
+  socket.send({ t: "hello", protocol: 3, clientId, revn, copies: ["materialized", "compact"] });
   await socket.next("welcome", 10_000);
   let seq = 0;
   return async (ops: Op[]) => {
@@ -202,7 +202,7 @@ describe("files larger than one message", () => {
       const reader = await openSocket(owner.browser, fileId);
       reader.send({
         t: "hello",
-        protocol: 2,
+        protocol: 3,
         clientId: "reader",
         revn: null,
         copies: ["materialized", "compact"],
@@ -213,7 +213,7 @@ describe("files larger than one message", () => {
       const socket = await openSocket(owner.browser, fileId);
       socket.send({
         t: "hello",
-        protocol: 2,
+        protocol: 3,
         clientId: "no-download",
         revn: null,
         copies: ["materialized", "compact"],

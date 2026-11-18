@@ -629,6 +629,17 @@ export const BINDING_KEYS = [
 ] as const;
 export type BindingKey = (typeof BINDING_KEYS)[number];
 
+/** What a text style's own values may bind (decision 0034): its typography, as Figma's do. */
+export const TEXT_STYLE_BINDING_KEYS: ReadonlySet<BindingKey> = new Set<BindingKey>([
+  "fontFamily",
+  "fontStyle",
+  "fontWeight",
+  "fontSize",
+  "lineHeight",
+  "letterSpacing",
+  "paragraphSpacing",
+]);
+
 // ---------------------------------------------------------------------------
 // Property registry
 
@@ -897,8 +908,15 @@ export const PROPS = {
   // A library this file uses (decision 0010): the library's file, and the publish its copies are from.
   libraryFile: prop(z.string().regex(ID_PATTERN).nullable(), null, ["library"]),
   libraryPublish: prop(z.string().regex(ID_PATTERN).nullable(), null, ["library"]),
-  /** Bound properties: binding key → variable id. The bound property holds the resolved value. */
-  bindings: prop(z.partialRecord(z.enum(BINDING_KEYS), z.string().regex(ID_PATTERN)), {}, LAYERS),
+  /**
+   * Bound properties: binding key → variable id (decision 0034). The bound
+   * property's stored value is what shows when the binding can't be
+   * followed. A text style binds only typography (`TEXT_STYLE_BINDING_KEYS`).
+   */
+  bindings: prop(z.partialRecord(z.enum(BINDING_KEYS), z.string().regex(ID_PATTERN)), {}, [
+    ...LAYERS,
+    "textStyle",
+  ]),
   /** Which mode of each collection applies inside this frame or page: collection id → mode id. */
   variableModes: prop(z.record(z.string().regex(ID_PATTERN), z.string().regex(ID_PATTERN)), {}, [
     "page",

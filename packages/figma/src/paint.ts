@@ -62,14 +62,26 @@ export function convertPaint(
 ): Paint | null {
   const color = variables?.(p.boundVariables?.color);
   const bind = color ? { bind: { color } } : {};
+  // Alpha normalised once, here (decision 0034): Figma saves a bound colour's alpha as the
+  // paint's opacity too. Folded into the stored colour (what shows if the variable can't be
+  // followed), the paint keeps no opacity of its own; one a person sets later is theirs, on top.
+  const folded = !!color && p.type === "SOLID";
   const common = {
     ...(p.visible === false ? { visible: false } : {}),
-    ...(p.opacity !== undefined && p.opacity < 0.999 ? { opacity: round4(p.opacity) } : {}),
+    ...(!folded && p.opacity !== undefined && p.opacity < 0.999
+      ? { opacity: round4(p.opacity) }
+      : {}),
     ...(blendMode(p.blendMode) ? { blendMode: blendMode(p.blendMode) } : {}),
   };
   switch (p.type) {
     case "SOLID":
-      return p.color ? { type: "solid", color: hexColor(p.color), ...common, ...bind } : null;
+      if (!p.color) return null;
+      return {
+        type: "solid",
+        color: folded ? hexColor(p.color, (p.color.a ?? 1) * (p.opacity ?? 1)) : hexColor(p.color),
+        ...common,
+        ...bind,
+      };
     case "GRADIENT_LINEAR":
     case "GRADIENT_RADIAL":
     case "GRADIENT_ANGULAR":

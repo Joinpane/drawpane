@@ -4,7 +4,7 @@
  * outline, one node, a search, its components, its tokens. Bounded, so a
  * big file can't flood a model's context.
  */
-import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { getProp, type NodeRecord, ROOT_ID, TokenResolver } from "@drawpane/model";
 import type { TableReader } from "../rooms/node-tables";
 
 /** What the views below read a document through. */
@@ -65,6 +65,44 @@ function pageOf(doc: DocView, id: string): NodeRecord | undefined {
   for (let node = doc.get(id); node; node = doc.get(node.parent))
     if (node.type === "page") return node;
   return undefined;
+}
+
+/** How many nodes a resolved view keeps while it resolves (ancestors, variables): then it starts over. */
+const RESOLVE_CACHE = 4096;
+
+/**
+ * `doc` with variables and linked styles resolved where each layer is
+ * (decision 0034), as the canvas shows them, so an agent never reads (and
+ * computes from) a value other than what people see: a copy in a frame set
+ * to Dark reads its Dark values, a bound width what its variable gives.
+ * Bindings and links are still there to read. Nothing is kept past a few
+ * thousand nodes it looked at (ancestors for modes, variables, styles).
+ */
+export function resolvedView(doc: DocView): DocView {
+  const seen = new Map<string, NodeRecord | undefined>();
+  const get = (id: string) => {
+    if (seen.has(id)) return seen.get(id);
+    const node = doc.get(id);
+    if (seen.size >= RESOLVE_CACHE) seen.clear();
+    seen.set(id, node);
+    return node;
+  };
+  const resolver = new TokenResolver({ get });
+  const present = (node: NodeRecord | undefined) => node && resolver.resolve(node);
+  return {
+    get: (id) => present(doc.get(id)),
+    *children(id) {
+      for (const node of doc.children(id)) yield resolver.resolve(node);
+    },
+    childIds: (id) => doc.childIds(id),
+    childCount: (id) => doc.childCount(id),
+    pageIds: () => doc.pageIds(),
+    pageCount: () => doc.pageCount(),
+    pageOf: (id) => present(doc.pageOf(id)),
+    *onPages() {
+      for (const node of doc.onPages()) yield resolver.resolve(node);
+    },
+  };
 }
 
 /** A document held in memory: for tests, and files small enough to read whole. */

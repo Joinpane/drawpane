@@ -10,7 +10,9 @@
  * keeps the record's own properties, so an outline button swapped for a
  * filled one keeps the outline's white fill and border while its label takes
  * the filled one's colour. Here every such property still equal to the old
- * component's (so not an override) takes the new component's value.
+ * component's, bound to what the old component binds it to (so not an
+ * override), takes the new component's value and its binding: a swapped
+ * button's fill follows the filled variant's variable, in every mode.
  */
 import type { SceneGraph, SceneNode } from "@open-pencil/scene-graph";
 import type { RestIds } from "./ids";
@@ -37,6 +39,16 @@ const LOOK = [
 ] as const;
 
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
+
+type Bound = Readonly<Record<string, string>>;
+
+/** The variables a node binds a look field to (`fills/0/color` for a list's, the field's own name otherwise). */
+function bindingsOf(bound: Bound | undefined, field: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, id] of Object.entries(bound ?? {}))
+    if (key === field || key.startsWith(`${field}/`)) out[key] = id;
+  return out;
+}
 
 /**
  * Gives swapped nested instances their new component's look where they
@@ -67,9 +79,23 @@ export function applySwappedLooks(
     const own = node as unknown as Record<string, unknown>;
     const was = oldMain as unknown as Record<string, unknown>;
     const next = newMain as unknown as Record<string, unknown>;
-    for (const field of LOOK)
-      if (same(own[field], was[field]) && !same(own[field], next[field]))
-        updates[field] = structuredClone(next[field]);
+    // Provenance, not colour (decision 0034): a field the instance doesn't override (its value
+    // and its binding both the old component's) takes the new component's value and binding.
+    // A binding of its own (another variable than the old component's) is an override, kept.
+    const bound = { ...(node.boundVariables as Bound | undefined) };
+    let rebound = false;
+    for (const field of LOOK) {
+      const ownBinds = bindingsOf(node.boundVariables as Bound, field);
+      const wasBinds = bindingsOf(oldMain.boundVariables as Bound, field);
+      if (!same(own[field], was[field]) || !same(ownBinds, wasBinds)) continue;
+      if (!same(own[field], next[field])) updates[field] = structuredClone(next[field]);
+      const nextBinds = bindingsOf(newMain.boundVariables as Bound, field);
+      if (same(ownBinds, nextBinds)) continue;
+      for (const key of Object.keys(ownBinds)) delete bound[key];
+      Object.assign(bound, nextBinds);
+      rebound = true;
+    }
+    if (rebound) updates.boundVariables = bound;
     if (Object.keys(updates).length > 0) {
       graph.updateNode(node.id, updates as Partial<SceneNode>);
       changed++;

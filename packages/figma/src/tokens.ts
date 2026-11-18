@@ -19,6 +19,7 @@ import {
   type NodeType,
   propAllowed,
   ROOT_ID,
+  TEXT_STYLE_BINDING_KEYS,
   VARIABLE_SCOPES,
   type VariableScope,
   type VariableValue,
@@ -348,6 +349,14 @@ export function convertStyles(
         type = "textStyle";
         const text = textProps(node, images, notes, lookup);
         for (const prop of TEXT_STYLE_PROPS) if (text[prop] !== undefined) props[prop] = text[prop];
+        // Its typography's bindings are kept (decision 0034), so the style follows its variables
+        // once text styles are presented; meanwhile its values are what Figma saved.
+        const bindings = Object.fromEntries(
+          Object.entries(layerBindings(node, "text", lookup)).filter(([key]) =>
+            TEXT_STYLE_BINDING_KEYS.has(key as BindingKey),
+          ),
+        );
+        if (Object.keys(bindings).length > 0) props.bindings = bindings;
         break;
       }
       default:
