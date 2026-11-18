@@ -25,7 +25,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { drawpaneId } from "@drawpane/figma";
-import { IMPORT_PART_BYTES } from "@drawpane/model";
 import { type Browser, expect, type Page, test } from "@playwright/test";
 import {
   type DrawpaneNode,
@@ -34,6 +33,7 @@ import {
 } from "../../../tools/kit-parity/src/layout-diff";
 import { type FrameScore, reportHtml, summarize } from "../../../tools/kit-parity/src/report";
 import { addPasskey } from "./fresh-instance";
+import { importConverted } from "./import-converted";
 
 const OUT = process.env.E2E_KIT_PARITY;
 const STAGE = process.env.E2E_KIT_PARITY_STAGE ?? "render";
@@ -111,58 +111,6 @@ async function signIn(browser: Browser, baseURL: string): Promise<Page> {
   await page.getByRole("button", { name: "Create account with a passkey" }).click();
   await expect(page.getByRole("heading", { name: "Recent files" })).toBeVisible();
   return page;
-}
-
-/** Fills a new file with the converted nodes, as the dashboard's import saves them. */
-async function importConverted(page: Page, cache: string): Promise<string> {
-  const meta = readJson<{ key: string; images: { sha: string; mime: string }[]; fig: string }>(
-    join(cache, "meta.json"),
-  );
-  const teams = await (await page.request.get("/api/teams")).json();
-  const projects = await (
-    await page.request.get(`/api/teams/${teams.teams[0].id}/projects`)
-  ).json();
-  const created = await (
-    await page.request.post(`/api/projects/${projects.projects[0].id}/files`, {
-      data: { name: "Kit parity" },
-    })
-  ).json();
-  const fileId = created.file.id as string;
-  for (const image of meta.images) {
-    const response = await page.request.post(`/api/files/${fileId}/media`, {
-      data: readFileSync(join(cache, "images", image.sha)),
-      headers: { "content-type": image.mime },
-    });
-    const body = await response.json();
-    if (body.sha !== image.sha) throw new Error(`Image ${image.sha} stored as ${body.sha}`);
-  }
-  const begun = await (
-    await page.request.post(`/api/files/${fileId}/imports`, { data: {} })
-  ).json();
-  const imports = `/api/files/${fileId}/imports/${begun.importId}`;
-  const lines = readFileSync(join(cache, "nodes.ndjson"), "utf8").split("\n").filter(Boolean);
-  let part: string[] = [];
-  let bytes = 0;
-  const send = async () => {
-    const response = await page.request.post(`${imports}/parts`, {
-      data: `{"nodes":[${part.join(",")}]}`,
-      headers: { "content-type": "application/json" },
-    });
-    if (!response.ok()) throw new Error(`A part was refused: ${await response.text()}`);
-    part = [];
-    bytes = 0;
-  };
-  for (const line of lines) {
-    const size = Buffer.byteLength(line);
-    if (part.length > 0 && bytes + size > IMPORT_PART_BYTES) await send();
-    part.push(line);
-    bytes += size;
-  }
-  if (part.length > 0) await send();
-  const committed = await page.request.post(`${imports}/commit`, { data: {} });
-  if (!committed.ok()) throw new Error(`The import wasn't committed: ${await committed.text()}`);
-  console.log(`Imported ${lines.length} nodes and ${meta.images.length} images.`);
-  return fileId;
 }
 
 function git(): { head: string; dirty: boolean } {
