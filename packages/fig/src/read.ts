@@ -38,6 +38,7 @@ import { prepareStyles } from "./styles";
 import { applySwappedLooks } from "./swaps";
 import { aliasReader, styleFinder } from "./tokens";
 import { prepareVariables } from "./variables";
+import { prepareVariantOptions, type VariantResolver, variantResolver } from "./variants";
 
 /** Larger files are refused before reading: decoding one needs several times its size in memory. */
 export const MAX_FILE_BYTES = 400 * 1024 * 1024;
@@ -205,6 +206,7 @@ export async function openFig(bytes: Uint8Array, options: OpenOptions = {}): Pro
     );
   prepareStyles(records);
   prepareVariables(records);
+  prepareVariantOptions(records);
 
   const pageList = pageRecords(records);
   const estimates = estimateLayers(records, pageList);
@@ -252,7 +254,7 @@ async function buildPages(
 
   const notes = new FigNotes();
   const missing = new Set<string>();
-  const assembly: DocumentAssemblyOptions = {
+  const assembly: DocumentAssemblyOptions & { resolveVariant: VariantResolver } = {
     // Figma saves the sizes, places and shapes it worked out for the layers of each copy
     // (`derivedSymbolData`): an icon placeholder shrunk to 16 resizes its icons uniformly
     // whatever their constraints, overridden text keeps the width its own characters take,
@@ -271,6 +273,9 @@ async function buildPages(
     // Variables don't come across (layers carry their values), so neither do ones Open Pencil
     // can't read, such as a variable computed from an expression.
     onUnsupportedResource: () => {},
+    // A nested instance whose variant property is bound to a variable shows the variant its
+    // value names in the modes where the copy is placed (variants.ts; a patched hook).
+    resolveVariant: variantResolver(raw),
   };
 
   const passes = planPasses(pages, chosen, records.length, options.pageAtATime);

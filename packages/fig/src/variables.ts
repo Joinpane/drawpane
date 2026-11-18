@@ -8,6 +8,14 @@
  * `ADDITION`, ...) with no way to skip it. Variables don't come across into
  * Drawpane, and Figma saves each layer's value with the layer, so such a
  * binding is dropped and the layer keeps its saved value.
+ *
+ * One expression is kept aside rather than lost: a variant property bound
+ * to a variable (`RESOLVE_VARIANT`, on the `VARIANT_PROPERTIES` field), as
+ * Apple's kits switch Light and Dark. Figma saves the variant it shows for a
+ * record, but a copy of a component placed in another mode shows another
+ * variant of its nested instances, which nothing saves. The binding goes in
+ * `variantPropertiesBinding` on the record or override, where the patched
+ * Open Pencil hands it to `variants.ts` as it builds each copy.
  */
 import type { NodeChange } from "@open-pencil/kiwi/fig/codec";
 
@@ -71,22 +79,43 @@ function pruneMap(map: unknown): number {
   return dropped;
 }
 
+/** The field a variant property binding is kept in, for `variants.ts`. */
+export const VARIANT_BINDING = "variantPropertiesBinding";
+
+/** Keeps a variant property binding aside (see above) before its map is pruned. */
+function keepVariantBinding(fields: Record_): void {
+  for (const map of [fields.variableConsumptionMap, fields.parameterConsumptionMap]) {
+    const entries = (map as { entries?: unknown } | undefined)?.entries;
+    if (!Array.isArray(entries)) continue;
+    for (const e of entries as Record_[]) {
+      const data = e?.variableData as Data | undefined;
+      if (
+        e?.variableField === "VARIANT_PROPERTIES" &&
+        data?.value?.expressionValue?.expressionFunction === "RESOLVE_VARIANT"
+      ) {
+        fields[VARIANT_BINDING] = data;
+        return;
+      }
+    }
+  }
+}
+
 /** A record, an override or a text run, and everything nested in it. */
-function prune(fields: Record_): number {
+function prune(fields: Record_, instance = false): number {
+  if (instance) keepVariantBinding(fields);
   let dropped = pruneMap(fields.variableConsumptionMap) + pruneMap(fields.parameterConsumptionMap);
   const table = (fields.textData as Record_ | undefined)?.styleOverrideTable;
   if (Array.isArray(table)) for (const run of table) dropped += prune(run as Record_);
-  for (const list of [
-    (fields.symbolData as Record_ | undefined)?.symbolOverrides,
-    fields.derivedSymbolData,
-  ])
-    if (Array.isArray(list)) for (const o of list) dropped += prune(o as Record_);
+  const overrides = (fields.symbolData as Record_ | undefined)?.symbolOverrides;
+  if (Array.isArray(overrides)) for (const o of overrides) dropped += prune(o as Record_, true);
+  const derived = fields.derivedSymbolData;
+  if (Array.isArray(derived)) for (const o of derived) dropped += prune(o as Record_);
   return dropped;
 }
 
 /** Takes out every binding Open Pencil can't evaluate; how many it took out. */
 export function prepareVariables(records: readonly NodeChange[]): number {
   let dropped = 0;
-  for (const r of records as unknown as Record_[]) dropped += prune(r);
+  for (const r of records as unknown as Record_[]) dropped += prune(r, r.type === "INSTANCE");
   return dropped;
 }
