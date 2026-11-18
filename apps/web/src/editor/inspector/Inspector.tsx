@@ -5,11 +5,12 @@
  */
 import type { Editor } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { ColorPicker, IconButton, Popover, PropertySection } from "@drawpane/ui";
+import { Button, ColorPicker, Icon, IconButton, Popover, PropertySection } from "@drawpane/ui";
 import { memo, useDeferredValue, useRef, useState } from "react";
 import { ComponentSection } from "../ComponentSection";
 import { useDocVersion, useEditor, useEditorState } from "../hooks";
 import { layerKind } from "../layer-kinds";
+import { useFontReport } from "../MissingFonts";
 import { textViews } from "../text-views";
 import { ModesSection } from "../tokens/ModesSection";
 import { CombineSection, PathSection } from "../VectorSections";
@@ -27,6 +28,7 @@ import { ShapeSection } from "./ShapeSection";
 import { TextSection } from "./TextSection";
 import "./inspector.css";
 import { shortcutFor } from "../actions";
+import { openMissingFonts } from "../ui-state";
 import { AccessibilitySection } from "./AccessibilitySection";
 
 /**
@@ -184,11 +186,54 @@ function PageInspector() {
           </button>
         )}
       </PropertySection>
+      <FontsSection editor={editor} />
       <p className="inspector__hint">
         Select a layer to edit it, or press {shortcutFor("view.command")} to search and set values
         by name.
       </p>
     </div>
+  );
+}
+
+/**
+ * The file's fonts, when some aren't here or show through an alias (decision
+ * 0034): a line saying so, and the missing fonts panel a click away.
+ */
+function FontsSection({ editor }: { editor: Editor }) {
+  const report = useFontReport(editor);
+  if (!report || report.length === 0) return null;
+  const missing = report.filter((r) => r.status !== "aliased");
+  const aliased = report.filter((r) => r.status === "aliased");
+  const layers = new Set(
+    missing.flatMap((r) => r.styles.filter((s) => s.missing).flatMap((s) => s.layers)),
+  ).size;
+  return (
+    <PropertySection
+      title="Fonts"
+      actions={
+        <Button size="sm" variant="ghost" onClick={() => openMissingFonts(editor)}>
+          {missing.length > 0 ? "Replace…" : "Review"}
+        </Button>
+      }
+    >
+      {missing.length > 0 ? (
+        <p className="inspector__fonts inspector__fonts--missing">
+          <Icon name="warning" size={12} />
+          <span>
+            {missing.length === 1 ? `${missing[0]?.family} is` : `${missing.length} fonts are`}{" "}
+            missing here, on {layers === 1 ? "1 layer" : `${layers} layers`}.
+          </span>
+        </p>
+      ) : null}
+      {aliased.map((r) => (
+        <p key={r.family} className="inspector__fonts">
+          <Icon name="link" size={12} />
+          <span>
+            {r.family} shows in {r.drawnIn.join(" and ")}.
+          </span>
+        </p>
+      ))}
+    </PropertySection>
   );
 }
 

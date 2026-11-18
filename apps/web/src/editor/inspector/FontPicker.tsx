@@ -47,8 +47,11 @@ export function useFonts(): number {
   return useSyncExternalStore(fonts.subscribe, () => fonts.version);
 }
 
-/** Whether a family resolves to something that renders (false once we know it's missing). */
-export function useFontStatus(family: string | null): "ok" | "missing" | "unknown" {
+/**
+ * Whether a family resolves to something that renders: itself, through a
+ * font alias (decision 0034), or not at all (once we know it's missing).
+ */
+export function useFontStatus(family: string | null): "ok" | "alias" | "missing" | "unknown" {
   useFonts();
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   useEffect(() => {
@@ -63,6 +66,7 @@ export function useFontStatus(family: string | null): "ok" | "missing" | "unknow
   }, [family, checked]);
   if (!family) return "unknown";
   if (fonts.get(family)) return "ok";
+  if (family in checked && !checked[family] && fonts.standIns(family).length > 0) return "alias";
   return family in checked ? (checked[family] ? "ok" : "missing") : "unknown";
 }
 
@@ -128,6 +132,13 @@ export function FontPicker({
             title={`${family} isn't available here, so it shows in a fallback font.`}
           >
             <Icon name="warning" size={12} />
+          </span>
+        ) : status === "alias" && family ? (
+          <span
+            className="font-trigger__alias"
+            title={`${family} isn't here itself: it shows in ${fonts.standIns(family).join(" or ")}, through a font alias.`}
+          >
+            <Icon name="link" size={12} />
           </span>
         ) : null}
         <Icon name="chevron-down" size={12} />

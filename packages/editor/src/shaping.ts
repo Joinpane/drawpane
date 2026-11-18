@@ -21,7 +21,14 @@
 import type { FontFeatures } from "@drawpane/model";
 import { type Face, type FontBytesLoader, faceKey } from "@drawpane/raster";
 import { sharedFace } from "./harfbuzz-faces";
-import type { FontMetrics, ShapedGlyph, ShapedText, ShapingRun, TextMeasurer } from "./text";
+import type {
+  FontMetrics,
+  FontResolver,
+  ShapedGlyph,
+  ShapedText,
+  ShapingRun,
+  TextMeasurer,
+} from "./text";
 
 type HarfBuzz = typeof import("harfbuzzjs");
 type HbFont = InstanceType<HarfBuzz["Font"]>;
@@ -362,7 +369,13 @@ export class ShapingMeasurer implements TextMeasurer {
   constructor(
     readonly base: TextMeasurer & { invalidate(): void },
     readonly shaper: Shaper,
+    /** Font aliases (decision 0034): which family text is drawn in. */
+    readonly fonts: FontResolver | null = null,
   ) {}
+
+  family(family: string, size: number): string {
+    return this.fonts ? this.fonts.family(family, size) : family;
+  }
 
   width(font: string, text: string, run?: ShapingRun | null): number {
     const shaped = run ? this.shaper.shape(text, run) : null;
@@ -378,7 +391,7 @@ export class ShapingMeasurer implements TextMeasurer {
   }
 
   get generation(): number {
-    return (this.base.generation ?? 0) + this.shaper.generation;
+    return (this.base.generation ?? 0) + this.shaper.generation + (this.fonts?.generation ?? 0);
   }
 
   /** Call after web fonts load: earlier measurements used fallback fonts. */

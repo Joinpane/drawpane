@@ -9,6 +9,10 @@
  *
  * Only the team's members can read its fonts: the stylesheet and files
  * check membership, like images do. Fonts never leave this server.
+ *
+ * A team also keeps font aliases (decision 0034): a family it doesn't have,
+ * drawn in families it does, in every file, without rewriting them. Listed
+ * with the fonts, so the editor gets both in one request.
  */
 
 import { brotliDecompressSync, inflateSync } from "node:zlib";
@@ -16,10 +20,15 @@ import {
   FONT_CSS_FORMAT,
   FONT_MAX_BYTES,
   FONT_MIME,
+  FontAliasError,
+  type FontAliasTarget,
   FontError,
   type FontFormat,
   newId,
+  parseFontAlias,
   readFontMeta,
+  TEAM_FONT_ALIAS_LIMIT,
+  type TeamFontAlias,
   type TeamFontFace,
 } from "@drawpane/model";
 import { Hono } from "hono";
@@ -88,6 +97,36 @@ async function faces(db: D1Database, teamId: string): Promise<TeamFontFace[]> {
   return results.map(toFace);
 }
 
+interface AliasRow {
+  family: string;
+  targets: string;
+  updated_by_name: string | null;
+  updated_at: number;
+}
+
+/** A team's font aliases, by family. Rows that don't parse (never written so) are left out. */
+export async function teamFontAliases(db: D1Database, teamId: string): Promise<TeamFontAlias[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT a.family, a.targets, u.name AS updated_by_name, a.updated_at
+         FROM team_font_aliases a LEFT JOIN users u ON u.id = a.updated_by
+        WHERE a.team_id = ? ORDER BY a.family COLLATE NOCASE`,
+    )
+    .bind(teamId)
+    .all<AliasRow>();
+  return results.flatMap((row) => {
+    try {
+      const alias = parseFontAlias({
+        family: row.family,
+        targets: JSON.parse(row.targets) as FontAliasTarget[],
+      });
+      return [{ ...alias, updatedBy: row.updated_by_name, updatedAt: row.updated_at }];
+    } catch {
+      return [];
+    }
+  });
+}
+
 /** A CSS string literal: quotes and backslashes escaped, nothing that ends the rule. */
 const cssString = (text: string) =>
   `"${text.replace(/["\\]/g, "\\$&").replace(/[\n\r{}<>]/g, "")}"`;
@@ -112,7 +151,63 @@ export const teamFonts = new Hono<AppContext>()
     const user = requireUser(c);
     const teamId = c.req.param("teamId");
     await requireTeamRole(c.env, user.id, teamId, "viewer");
-    return c.json({ faces: await faces(c.env.DB, teamId) });
+    const [list, aliases] = await Promise.all([
+      faces(c.env.DB, teamId),
+      teamFontAliases(c.env.DB, teamId),
+    ]);
+    return c.json({ faces: list, aliases });
+  })
+
+  // Sets the team's alias for a family (replacing any), for everyone on the team.
+  .put("/teams/:teamId/font-aliases", async (c) => {
+    const user = requireUser(c);
+    const teamId = c.req.param("teamId");
+    await requireTeamRole(c.env, user.id, teamId, "editor");
+    let alias: ReturnType<typeof parseFontAlias>;
+    try {
+      alias = parseFontAlias(await c.req.json().catch(() => null));
+    } catch (error) {
+      if (error instanceof FontAliasError) throw badRequest(error.message);
+      throw error;
+    }
+    const existing = await c.env.DB.prepare(
+      "SELECT 1 FROM team_font_aliases WHERE team_id = ? AND family = ?",
+    )
+      .bind(teamId, alias.family)
+      .first();
+    if (!existing) {
+      const count = await c.env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM team_font_aliases WHERE team_id = ?",
+      )
+        .bind(teamId)
+        .first<{ n: number }>();
+      if ((count?.n ?? 0) >= TEAM_FONT_ALIAS_LIMIT)
+        throw conflict(`A team can keep up to ${TEAM_FONT_ALIAS_LIMIT} font aliases.`);
+    }
+    await c.env.DB.prepare(
+      `INSERT INTO team_font_aliases (team_id, family, targets, updated_by, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (team_id, family) DO UPDATE
+         SET targets = excluded.targets, updated_by = excluded.updated_by,
+             updated_at = excluded.updated_at`,
+    )
+      .bind(teamId, alias.family, JSON.stringify(alias.targets), user.id, Date.now())
+      .run();
+    const saved = (await teamFontAliases(c.env.DB, teamId)).find((a) => a.family === alias.family);
+    return c.json({ alias: saved ?? null }, existing ? 200 : 201);
+  })
+
+  .delete("/teams/:teamId/font-aliases/:family", async (c) => {
+    const user = requireUser(c);
+    const teamId = c.req.param("teamId");
+    await requireTeamRole(c.env, user.id, teamId, "editor");
+    const row = await c.env.DB.prepare(
+      "DELETE FROM team_font_aliases WHERE team_id = ? AND family = ? RETURNING family",
+    )
+      .bind(teamId, c.req.param("family"))
+      .first();
+    if (!row) throw notFound("That alias was already removed.");
+    return c.json({ ok: true });
   })
 
   .post("/teams/:teamId/fonts", async (c) => {

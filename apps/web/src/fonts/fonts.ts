@@ -12,10 +12,25 @@
  *   team's members. A team font wins over any other family of its name.
  *
  * Anything else a file names is missing: it renders in the fallback until
- * someone installs or swaps it.
+ * someone installs or swaps it, unless a font alias stands in for it
+ * (decision 0034): "SF Pro" drawn in the team's "SF Pro Text" below 20 px
+ * and "SF Pro Display" from 20 px, say, or whatever the team mapped it to.
+ * The registry is the editor's `FontResolver`: layout asks it which family
+ * each run is drawn in.
  */
 
-import type { TeamFontFace } from "@drawpane/model";
+import type { FontResolver } from "@drawpane/editor";
+import {
+  aliasSources,
+  aliasTargets,
+  type FontAlias,
+  type FontAliasIndex,
+  type FontResolution,
+  fontAliasIndex,
+  resolveFont,
+  type TeamFontAlias,
+  type TeamFontFace,
+} from "@drawpane/model";
 
 export type FontSource = "bundled" | "system" | "google" | "local" | "team";
 
@@ -173,8 +188,10 @@ async function serverAllowsGoogle(): Promise<boolean> {
   }
 }
 
-class FontRegistry {
+class FontRegistry implements FontResolver {
   readonly #known = new Map<string, FontFamily>();
+  #aliases: readonly TeamFontAlias[] | null = null;
+  #aliasIndex: FontAliasIndex = new Map();
   #google: readonly FontFamily[] | null = null;
   #googleLoading: Promise<readonly FontFamily[]> | null = null;
   #googleEnabled: boolean | null = null;
@@ -247,6 +264,72 @@ class FontRegistry {
     return this.#team;
   }
 
+  /** The team's font aliases once loaded. */
+  get aliases(): readonly TeamFontAlias[] | null {
+    return this.#aliases;
+  }
+
+  /** What `resolve` would answer now: known, or (until the catalog is in) maybe. */
+  #here(name: string): boolean {
+    // Until the Google catalog is in, a family nobody knows yet may be a Google one: it isn't
+    // aliased, so text never jumps to a stand-in and back as the catalog arrives.
+    return this.get(name) !== null || this.#google === null;
+  }
+
+  /** How text named `family` at `size` px is drawn now: itself, through an alias, or missing. */
+  resolution(family: string, size: number): FontResolution {
+    return resolveFont(family, size, (n) => this.#here(n), this.#aliasIndex);
+  }
+
+  /** The family text named `family` at `size` px is drawn in (the editor's `FontResolver`). */
+  family(family: string, size: number): string {
+    return this.resolution(family, size).family;
+  }
+
+  /** Families text named `family` may be drawn in through aliases, those that are here. */
+  standIns(family: string): readonly string[] {
+    return aliasTargets(family, this.#aliasIndex).filter((n) => this.get(n) !== null);
+  }
+
+  /** Families that may be drawn in `family` through an alias (the reverse of `standIns`). */
+  aliasedTo(family: string): readonly string[] {
+    return aliasSources(family, this.#aliasIndex);
+  }
+
+  /** The registry's version: what families resolve to may have changed when it moves. */
+  get generation(): number {
+    return this.#version;
+  }
+
+  /**
+   * Sets the team's alias for a family, for everyone on the team, then
+   * reloads the team's fonts. Throws with the server's sentence when refused.
+   */
+  async saveAlias(alias: FontAlias): Promise<void> {
+    const teamId = this.#teamId;
+    if (!teamId) throw new Error("This file isn't in a team.");
+    const response = await fetch(`/api/teams/${encodeURIComponent(teamId)}/font-aliases`, {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(alias),
+    });
+    if (!response.ok) throw new Error(await errorMessage(response));
+    await this.loadTeam(teamId);
+  }
+
+  /** Removes the team's alias for a family. */
+  async removeAlias(family: string): Promise<void> {
+    const teamId = this.#teamId;
+    if (!teamId) return;
+    const response = await fetch(
+      `/api/teams/${encodeURIComponent(teamId)}/font-aliases/${encodeURIComponent(family)}`,
+      { method: "DELETE", credentials: "same-origin" },
+    );
+    if (!response.ok && response.status !== 404) throw new Error(await errorMessage(response));
+    await this.loadTeam(teamId);
+  }
+
   /**
    * Uses a team's fonts (the open file's team): lists them, and reloads
    * their stylesheet when the files changed. Call again to pick up uploads.
@@ -254,15 +337,25 @@ class FontRegistry {
   async loadTeam(teamId: string): Promise<readonly FontFamily[]> {
     this.#teamId = teamId;
     let faces: TeamFontFace[] = [];
+    let aliases: TeamFontAlias[] = [];
     try {
       const response = await fetch(`/api/teams/${encodeURIComponent(teamId)}/fonts`, {
         credentials: "same-origin",
       });
-      if (response.ok) faces = ((await response.json()) as { faces: TeamFontFace[] }).faces;
+      if (response.ok) {
+        const body = (await response.json()) as {
+          faces: TeamFontFace[];
+          aliases?: TeamFontAlias[];
+        };
+        faces = body.faces;
+        aliases = body.aliases ?? [];
+      }
     } catch {
       // Offline or signed out: the team's fonts show as missing until the next load.
     }
     if (this.#teamId !== teamId) return [];
+    this.#aliases = aliases;
+    this.#aliasIndex = fontAliasIndex(aliases);
     const list = teamFamilies(faces);
     this.#teamKnown.clear();
     for (const f of list) this.#teamKnown.set(f.family, f);
@@ -453,6 +546,17 @@ class FontRegistry {
     }
     return pending;
   }
+}
+
+/** The sentence an API error carries, or its status. */
+async function errorMessage(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { error?: { message?: string } };
+    if (body.error?.message) return body.error.message;
+  } catch {
+    // Not JSON.
+  }
+  return `The server said ${response.status}.`;
 }
 
 /** A short, stable hash of a string (FNV-1a), for cache-busting URLs. */

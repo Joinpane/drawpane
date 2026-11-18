@@ -17,6 +17,7 @@ import { colors } from "@drawpane/ui";
 import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
 import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
+import { fonts } from "../fonts/fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
 import { FrameNameEditor } from "./FrameNameEditor";
@@ -247,6 +248,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       measurer.invalidate();
       if (event) {
         const families = loadedFamilies(event.fontfaces);
+        // Text named by an alias ("SF Pro") is drawn in what just loaded ("SF Pro Text") too.
+        for (const family of [...families])
+          for (const from of fonts.aliasedTo(family)) families.add(from);
         if (families.size > 0) editor.refitText(families);
       }
       contentDirty = overlayDirty = true;
@@ -260,6 +264,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       schedule();
     });
     void document.fonts.load(fontString({})).then(() => onFonts());
+    // The team's fonts, aliases or the catalog arrived: a run may be drawn in another family now.
+    const offRegistry = fonts.subscribe(() => {
+      contentDirty = overlayDirty = true;
+      schedule();
+    });
 
     const themeObserver = new MutationObserver(() => {
       theme = readTheme();
@@ -279,6 +288,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       offImages();
       offState();
       document.fonts.removeEventListener("loadingdone", onFonts);
+      offRegistry();
       offShaper();
       offFonts();
       if (frame) cancelAnimationFrame(frame);
