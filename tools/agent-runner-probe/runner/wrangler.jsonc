@@ -1,0 +1,14 @@
+// drawpane-oom-probe-runner. No account_id here: wrangler reads CLOUDFLARE_ACCOUNT_ID.
+// No bindings, no route, no workers.dev URL: it's reached only through the room's bindings.
+{
+  "name": "drawpane-oom-probe-runner",
+  "main": "runner.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [{ "name": "RUNNER_DO", "class_name": "RunnerDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RunnerDO"] }],
+  "observability": { "enabled": true }
+}

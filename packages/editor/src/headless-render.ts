@@ -21,6 +21,15 @@
  * (grey, crossed) and it's listed in `skippedImages`, so the rest can still
  * be checked.
  *
+ * A picture is drawn in the rasteriser's memory, which is capped (decision
+ * 0033): when the rasteriser says how much it has (`Rasteriser.memory`),
+ * what the render will hold is estimated first (`render-memory.ts`: its
+ * font files, its images, and its pixels times how deeply its groups and
+ * effects nest), and a picture that wouldn't fit is drawn at the largest
+ * scale that does, down to MIN_HEADLESS_SIDE on its longest side, and says
+ * so (`reduced`). One that runs out all the same is drawn once more at half
+ * that scale, in a fresh instance, before the render fails.
+ *
  * Effects SVG can only approximate (glass, noise, texture) or can't draw at
  * all (background blur) are listed with the picture, so a tool can say the
  * image is approximate. Everything else is meant to match the canvas: the
@@ -32,6 +41,7 @@ import type { Face, FontBytesLoader, Rasteriser } from "@drawpane/raster";
 import type { Doc } from "./doc";
 import { ExportError, exportBounds, fitScale, imageRefs, snapToPixels } from "./export";
 import type { Rect } from "./geometry";
+import { bytesPerPixel, RASTER_BASE_BYTES } from "./render-memory";
 import { textSpans } from "./rich-text";
 import { Scene } from "./scene";
 import { exportSvg, IMAGE_PLACEHOLDER, type SvgImageSource } from "./svg";
@@ -61,8 +71,11 @@ export type ImageBytesLoader = (
 /**
  * The most a render may hold for its images at once (`imageCost`): beside
  * what the headless editor holds (decision 0026), its output's pixels, and
- * the room's own baseline, inside a Durable Object's 128 MB. A 2,000 ×
- * 2,000 image fits; a 12-megapixel photo (48 MB decoded) doesn't.
+ * the room's own baseline, inside a Durable Object's 128 MB. Images are
+ * drawn in the rasteriser's memory, so where it says how much it has
+ * (`Rasteriser.memory`) they get less: what's left of it after the font
+ * files and the smallest picture. In resvg's 25 MiB with no fonts, a
+ * 2,000 × 2,000 image fits; a 12-megapixel photo (48 MB decoded) doesn't.
  */
 export const HEADLESS_IMAGE_BYTES = 32 << 20;
 
@@ -129,11 +142,41 @@ export interface HeadlessPng {
    * them would hold more than a render may (HEADLESS_IMAGE_BYTES), by hash.
    */
   readonly skippedImages: readonly string[];
+  /**
+   * The size asked for, when the picture was drawn smaller than that to fit
+   * in the rasteriser's memory: `width`, `height` and `scale` are what it
+   * was drawn at.
+   */
+  readonly reduced?: { readonly width: number; readonly height: number; readonly scale: number };
 }
 
 /** A Worker has 128 MB: a picture's pixels, and the layers its filters draw into, must fit well inside. */
 export const MAX_HEADLESS_SIDE = 4096;
 export const MAX_HEADLESS_PIXELS = 2048 * 2048;
+
+/** A picture the rasteriser ran out of memory drawing, even at the smallest it draws one to fit. */
+export const PICTURE_OUT_OF_MEMORY =
+  "That picture needs more memory than rendering here has. Export a smaller layer or a lower scale.";
+
+/** A picture whose font files alone leave the rasteriser too little memory to draw it at all. */
+export const FONTS_OUT_OF_MEMORY =
+  "That picture's fonts need more memory than rendering here has. Export a part of it set in fewer fonts or font weights.";
+
+/**
+ * The shortest a picture drawn smaller to fit may be on its longest side:
+ * still enough to see a layout by. One asked for smaller than this isn't
+ * made any smaller.
+ */
+export const MIN_HEADLESS_SIDE = 256;
+
+/** A scale rounded down to three significant figures, so it reads back cleanly. */
+function roundScale(scale: number): number {
+  const p = 10 ** (2 - Math.floor(Math.log10(scale)));
+  return Math.floor(scale * p) / p;
+}
+
+const isRasterOutOfMemory = (error: unknown) =>
+  error instanceof Error && error.name === "RasterOutOfMemory";
 
 const DEFAULT_FALLBACK = "Instrument Sans";
 
@@ -216,27 +259,31 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
         return bytes ? new Uint8Array(bytes) : null;
       }),
     );
-    return {
-      fonts: [...files, ...stand].filter((f): f is Uint8Array => f !== null),
-      missing: missing.map(faceName),
-    };
+    // Each file once (faces can share one), since the rasteriser copies in every file it's handed.
+    const unique = new Map<ArrayBufferLike, Uint8Array>();
+    for (const f of [...files, ...stand]) if (f && !unique.has(f.buffer)) unique.set(f.buffer, f);
+    return { fonts: [...unique.values()], missing: missing.map(faceName) };
   };
 
   /**
    * The images the render draws (`drawn`: the refs of the image fills the
    * SVG draws; `tiled`: those a tiled fill repeats), loaded one at a time,
    * each charged before it's read (`imageCost`, and a tiled one's data:
-   * URL). One past what's left of HEADLESS_IMAGE_BYTES is skipped, drawn as
-   * a placeholder, and the rest are still loaded.
+   * URL). One past what's left of `budget` (HEADLESS_IMAGE_BYTES at most)
+   * is skipped, drawn as a placeholder, and the rest are still loaded.
    */
-  const imagesFor = async (drawn: readonly string[], tiled: ReadonlySet<string>) => {
+  const imagesFor = async (
+    drawn: readonly string[],
+    tiled: ReadonlySet<string>,
+    budget: number,
+  ) => {
     const sources = new Map<string, SvgImageSource>();
     const files = new Map<string, Uint8Array>();
     const missing: string[] = [];
     const skipped: string[] = [];
     let held = 0;
     for (const ref of drawn) {
-      const room = HEADLESS_IMAGE_BYTES - held;
+      const room = Math.max(0, budget - held);
       const file = await deps.images(ref, room).catch(() => null);
       if (!file) {
         missing.push(ref);
@@ -265,7 +312,7 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
       });
       files.set(href, file.bytes);
     }
-    return { sources, files, missing: missing.sort(), skipped: skipped.sort() };
+    return { sources, files, held, missing: missing.sort(), skipped: skipped.sort() };
   };
 
   return {
@@ -287,9 +334,13 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
             ));
       if (!(scale > 0) || !Number.isFinite(scale))
         throw new ExportError("Scale must be a positive number.");
-      const bounds = snapToPixels(found, scale);
-      const width = Math.round(bounds.width * scale);
-      const height = Math.round(bounds.height * scale);
+      /** The page rect drawn at a scale, snapped to its pixels, and its size in them. */
+      const at = (s: number) => {
+        const rect = snapToPixels(found, s);
+        return { rect, width: Math.round(rect.width * s), height: Math.round(rect.height * s) };
+      };
+      const asked = at(scale);
+      const { width, height } = asked;
       if (
         width > MAX_HEADLESS_SIDE ||
         height > MAX_HEADLESS_SIDE ||
@@ -298,40 +349,96 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
         throw new ExportError(
           `That render is too large (${width} × ${height}). Try a smaller scale or a smaller layer.`,
         );
-      const svgOptions = { outlineFeatures: true, raster: scale };
+      const svgOptions = (s: number) => ({ outlineFeatures: true, raster: s });
       // The images the SVG draws (visible fills of visible layers, inside what's drawn), found by
       // writing it once without them: only when the layers have an image fill at all.
       const drawn = new Set<string>();
       const tiled = new Set<string>();
       if (imageRefs(doc, ids).length > 0)
-        exportSvg(scene, deps.measurer, ids, bounds, {
-          ...svgOptions,
+        exportSvg(scene, deps.measurer, ids, asked.rect, {
+          ...svgOptions(scale),
           images: (ref, tile) => {
             drawn.add(ref);
             if (tile) tiled.add(ref);
             return null;
           },
         });
-      const [fonts, images] = await Promise.all([
-        fontsFor(facesUsed(doc, ids)),
-        imagesFor([...drawn].sort(), tiled),
-      ]);
+
+      // What the render will hold in the rasteriser (render-memory.ts), when it says how much it
+      // has: its font files and images, whatever the scale, and its pixels times `perPixel`.
+      const memory = deps.rasteriser.memory;
+      const perPixel = bytesPerPixel(scene, ids, asked.rect);
+      const pixels = (s: number) => {
+        const size = at(s);
+        return size.width * size.height;
+      };
+      const longest = Math.max(width, height);
+      const smallest =
+        longest > MIN_HEADLESS_SIDE ? roundScale((scale * MIN_HEADLESS_SIDE) / longest) : scale;
+      const fonts = await fontsFor(facesUsed(doc, ids));
+      let fixed = RASTER_BASE_BYTES + fonts.fonts.reduce((n, f) => n + f.length, 0);
+      const least = perPixel * pixels(smallest);
+      if (memory !== undefined && fixed + least > memory)
+        throw new ExportError(
+          RASTER_BASE_BYTES + least <= memory ? FONTS_OUT_OF_MEMORY : PICTURE_OUT_OF_MEMORY,
+        );
+      // Images take what's left once the smallest picture is drawn: a photo seen smaller beats a
+      // placeholder.
+      const images = await imagesFor(
+        [...drawn].sort(),
+        tiled,
+        memory === undefined
+          ? HEADLESS_IMAGE_BYTES
+          : Math.min(HEADLESS_IMAGE_BYTES, memory - fixed - least),
+      );
+      fixed += images.held;
+
+      /** The largest scale, up to the one asked for, whose render fits in `memory`. */
+      const fitting = (room: number): number => {
+        const fits = (s: number) => fixed + perPixel * pixels(s) <= room;
+        if (fits(scale)) return scale;
+        let s = roundScale(scale * Math.sqrt((room - fixed) / (perPixel * width * height)));
+        while (s > smallest && !fits(s)) s = roundScale(s * 0.98);
+        return Math.max(s, smallest);
+      };
+
       const skipped = new Set(images.skipped);
-      const svg = exportSvg(scene, deps.measurer, ids, bounds, {
-        ...svgOptions,
-        images: (ref) => images.sources.get(ref) ?? (skipped.has(ref) ? IMAGE_PLACEHOLDER : null),
-      });
-      const raster = await deps.rasteriser.rasterise(svg, {
-        scale,
-        fonts: fonts.fonts,
-        fallbackFamily: fallback,
-        background: options.background ?? null,
-        images: images.files,
-      });
+      const draw = (s: number) =>
+        deps.rasteriser.rasterise(
+          exportSvg(scene, deps.measurer, ids, at(s).rect, {
+            ...svgOptions(s),
+            images: (ref) =>
+              images.sources.get(ref) ?? (skipped.has(ref) ? IMAGE_PLACEHOLDER : null),
+          }),
+          {
+            scale: s,
+            fonts: fonts.fonts,
+            fallbackFamily: fallback,
+            background: options.background ?? null,
+            images: images.files,
+          },
+        );
+      let drawnAt = memory === undefined ? scale : fitting(memory);
+      let raster: Awaited<ReturnType<Rasteriser["rasterise"]>>;
+      try {
+        raster = await draw(drawnAt);
+      } catch (error) {
+        if (!isRasterOutOfMemory(error)) throw error;
+        // Past the estimate all the same: once more at half the scale, in a fresh instance.
+        drawnAt = roundScale(drawnAt / 2);
+        try {
+          raster = await draw(drawnAt);
+        } catch (again) {
+          // resvg ran out of its capped memory (decision 0033) at half the scale too.
+          if (isRasterOutOfMemory(again)) throw new ExportError(PICTURE_OUT_OF_MEMORY);
+          throw again;
+        }
+      }
       return {
         ...raster,
-        bounds,
-        scale,
+        bounds: at(drawnAt).rect,
+        scale: drawnAt,
+        ...(drawnAt !== scale ? { reduced: { width, height, scale } } : {}),
         approximate: approximations(doc, ids),
         missingFonts: fonts.missing,
         missingImages: images.missing,

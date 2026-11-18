@@ -1,8 +1,11 @@
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
+import { capWasm } from "./scripts/cap-wasm.ts";
 
 export default defineConfig(async () => {
   const migrations = await readD1Migrations("./migrations");
+  // The capped WebAssembly the Worker bundles (decision 0033, item 4.2).
+  capWasm();
   return {
     plugins: [
       cloudflareTest({

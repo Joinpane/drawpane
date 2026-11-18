@@ -620,6 +620,11 @@ export class Editor {
       // switch) are laid out here, by the client that made the change (decision 0034).
       for (const id of this.doc.takeTokenLayout()) touched.add(id);
       let lastOps: readonly Op[] = first;
+      // Text styles this deleted (their inverse makes them again): the only deletes whose
+      // followers are looked for (an agent run's commit depends on what that reads).
+      const deletedStyles = new Set(
+        inverse.filter((o) => o.op === "create" && o.type === "textStyle").map((o) => o.id),
+      );
       // Derived writes until nothing changes: instances follow their main
       // component, bound properties follow their variables, text sizes to its
       // content, auto layout places children. Each can feed the next.
@@ -630,7 +635,11 @@ export class Editor {
         const synced = propagationOps(this.doc, live);
         let roundInverse: Op[] = synced.length > 0 ? this.sync.commit(synced) : [];
         // Text layers follow their text style.
-        const styled = textStyleFixupOps(this.doc, [...lastOps, ...synced]);
+        const styled = textStyleFixupOps(
+          this.doc,
+          [...lastOps, ...synced],
+          round === 0 ? deletedStyles : undefined,
+        );
         if (styled.length > 0) roundInverse = [...this.sync.commit(styled), ...roundInverse];
         const derivedSoFar = [...synced, ...styled];
         const text = this.#textFixups([...live, ...derivedSoFar.map((o) => o.id), ...relayout]);
