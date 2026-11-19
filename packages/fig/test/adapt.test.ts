@@ -619,6 +619,45 @@ describe("layers", () => {
     expect(adapted.effects?.[1]).not.toHaveProperty("blendMode");
   });
 
+  it("keeps glass's settings, by the record's names for them", () => {
+    const { page, add, adapt } = scene();
+    const rect = add("RECTANGLE", page.id, "6:10", {
+      width: 70,
+      height: 70,
+      // Open Pencil's graph has glass without its settings; the record has them.
+      effects: [{ type: "GLASS", visible: true } as unknown as SceneNode["effects"][number]],
+    });
+    const raw = new Map<string, RawRecord>([
+      [
+        "6:10",
+        {
+          effects: [
+            {
+              type: "GLASS",
+              radius: 6,
+              refractionRadius: 30,
+              refractionIntensity: 0.7,
+              specularAngle: 315,
+              specularIntensity: 0.4,
+              chromaticAberration: 0.2,
+              reflectionDistance: 0.2,
+            },
+          ],
+        },
+      ],
+    ]);
+    expect(adapt(rect, raw).effects?.[0]).toEqual({
+      type: "GLASS",
+      radius: 6,
+      depth: 30,
+      refraction: 0.7,
+      lightAngle: 315,
+      lightIntensity: 0.4,
+      dispersion: 0.2,
+      splay: 0.2,
+    });
+  });
+
   it("maps paints: solid, gradient handles, a cropped image", () => {
     const { page, add, adapt } = scene();
     const rect = add("RECTANGLE", page.id, "6:1", {

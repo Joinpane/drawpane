@@ -8,6 +8,11 @@ How close Drawpane draws to Figma, measured cell by cell and kept from drifting.
 
 Suites with random grain (noise, texture) compare after blurring both sides (`"blur"` in the scene file), so they measure density and tone, not where each grain falls.
 
+Two kinds of suite are drawn as an export draws them rather than on the canvas (decision 0039):
+
+- `"background": "none"`: cells with no background, so what they let through of an empty backdrop shows in the render's alpha (`glass-alpha`). They're compared laid over white and over black, so alpha counts as much as colour.
+- `"export": "<name>"`: each cell exports its layer of that name, not the whole cell, as Figma exports a layer on a page: its glass and background blur see what's under it in the cell (`glass-context`).
+
 ## Running it
 
 ```sh
@@ -16,6 +21,8 @@ cd apps/web
 E2E_PORT=8943 npx playwright test e2e/parity            # check against the thresholds
 E2E_PORT=8943 UPDATE_THRESHOLDS=1 npx playwright test e2e/parity   # record new ones
 ```
+
+The suite's own instance listens on 8941; `PARITY_PORT` moves it when another checkout runs the suite at the same time.
 
 ## Changing scenes
 

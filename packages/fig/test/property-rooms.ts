@@ -4,7 +4,8 @@
  * as `FileRoom` does, and the checks that every client and the room agree.
  *
  * The room applies each transaction to its own store as stored, all or
- * nothing, acknowledges or rejects it, and broadcasts it to the others,
+ * nothing, acknowledges or rejects it, and broadcasts it to the others
+ * (then commits the copy references it left stale, as `FileRoom` does),
  * which replay it through their `SyncEngine` (rebasing what they haven't
  * sent). Delivery is explicit, so a test (or a generated schedule) decides
  * what each client has seen when it edits.
@@ -26,6 +27,7 @@ import {
   type NodeRecord,
   type Op,
   ROOT_ID,
+  referenceFixes,
   type ServerMessage,
 } from "@drawpane/model";
 import { expect } from "vitest";
@@ -494,9 +496,12 @@ export class Room {
     this.lastSeq.set(from.name, message.seq);
     from.inbox.push({ t: "ack", seq: message.seq, revn: this.revn });
     this.broadcast(ops, from);
+    // As FileRoom does: copy references the change left stale, fixed as the room's own change.
+    const fixes = referenceFixes(this.store, ops);
+    if (fixes.length > 0) this.commit(fixes);
   }
 
-  /** A transaction the room makes itself (a branch merge), passed to every client. */
+  /** A transaction the room makes itself (a branch merge, a reference fix), passed to every client. */
   commit(ops: readonly Op[]): void {
     applyTransaction(this.store, [...ops]);
     this.revn++;

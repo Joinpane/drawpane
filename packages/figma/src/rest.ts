@@ -80,6 +80,17 @@ export interface Effect {
   readonly secondaryColor?: RGBA;
   readonly opacity?: number;
   readonly clipToShape?: boolean;
+  /**
+   * Glass, as Figma's plugin API names its settings (the REST API leaves them out; a `.fig`
+   * has them): light 0–1 and its angle in degrees, refraction 0–1, depth px, dispersion and
+   * splay 0–1. Its frost is `radius`.
+   */
+  readonly lightIntensity?: number;
+  readonly lightAngle?: number;
+  readonly refraction?: number;
+  readonly depth?: number;
+  readonly dispersion?: number;
+  readonly splay?: number;
 }
 
 export interface TypeStyle {
