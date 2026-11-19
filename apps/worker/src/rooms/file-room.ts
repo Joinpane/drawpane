@@ -34,7 +34,7 @@ import {
   type Resolution,
   type RestoredVersion,
   ROOT_ID,
-  referenceFixes,
+  referenceFixesWithin,
   renameHeldIds,
   type ServerMessage,
   SNAPSHOT_CHUNK_SIZE,
@@ -3103,11 +3103,22 @@ export class FileRoom extends DurableObject<Env> {
    * any other; no client fixes them itself. A fix that can't apply is left
    * out (the references stay as they are, for conversion to keep or report),
    * and never refuses the change before it.
+   *
+   * The pass reads at most `REFERENCE_FIX_BUDGET` (model), so a commit that
+   * relinks most of a large file can't hold the room: past it, the fixes
+   * found so far are committed, and the layers it didn't reach keep their
+   * references until a later change relinks them; conversion keeps such a
+   * layer as the copy at its place meanwhile.
    */
   #fixReferences(ops: readonly Op[]): void {
     let fixes: Op[];
     try {
-      fixes = referenceFixes(this.#store, ops);
+      const found = referenceFixesWithin(this.#store, ops);
+      fixes = found.ops;
+      if (!found.complete)
+        console.warn(
+          `copy references: fixed ${fixes.length}, then stopped at the pass's budget; the rest wait for a later change`,
+        );
     } finally {
       this.#store.clearCache();
     }

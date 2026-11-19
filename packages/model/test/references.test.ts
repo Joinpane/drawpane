@@ -13,6 +13,7 @@ import {
   type Op,
   ROOT_ID,
   referenceFixes,
+  referenceFixesWithin,
 } from "../src";
 
 const node = (
@@ -140,5 +141,62 @@ describe("referenceFixes", () => {
     expect(
       referenceFixes(store, [{ op: "set", id: "ni", prop: "instanceOf", value: "leaf" }]),
     ).toEqual([]);
+  });
+});
+
+describe("referenceFixes' cost (review 9 of #209)", () => {
+  /**
+   * A copy of `main` whose `size` children all copy an old main's layers
+   * instead of `main`'s: every one is stale, and `main`'s children are the
+   * matches. Counts what the fixes read.
+   */
+  function staleSiblings(size: number) {
+    const reads = { get: 0, childIds: 0 };
+    const frame = (id: string, parent: string, props: Record<string, unknown> = {}): NodeRecord =>
+      node(id, "frame", parent, "a0", props);
+    const copies = Array.from({ length: size }, (_, i) => `c${i}`);
+    const mains = Array.from({ length: size }, (_, i) => `m${i}`);
+    const reader = {
+      get(id: string): NodeRecord | undefined {
+        reads.get++;
+        if (id === "inst") return frame(id, "p", { instanceOf: "main" });
+        if (id === "main") return frame(id, "p", { isComponent: true });
+        if (id === "p") return node(id, "page", ROOT_ID, "a0", {});
+        if (id.startsWith("c")) return frame(id, "inst", { mirrors: `s${id.slice(1)}` });
+        if (id.startsWith("s")) return frame(id, "old", { mirrors: `m${id.slice(1)}` });
+        if (id.startsWith("m")) return frame(id, "main");
+        return undefined;
+      },
+      childIds(id: string): readonly string[] {
+        reads.childIds++;
+        if (id === "inst") return copies;
+        if (id === "main") return mains;
+        return [];
+      },
+    };
+    const ops: Op[] = [{ op: "set", id: "inst", prop: "instanceOf", value: "main" }];
+    return { reader, ops, reads };
+  }
+
+  it("reads each target's children once: linear in the layers it walks", () => {
+    const size = 4000;
+    const { reader, ops, reads } = staleSiblings(size);
+    const fixes = referenceFixes(reader, ops);
+    expect(fixes).toHaveLength(size);
+    expect(fixes[0]).toEqual({ op: "set", id: "c0", prop: "mirrors", value: "m0" });
+    // A few reads per layer, not one scan of the target's children per stale sibling (8M here).
+    expect(reads.get + reads.childIds).toBeLessThan(20 * size);
+  });
+
+  it("stops at its budget, with the fixes found so far, each one whole, and says so", () => {
+    const { reader, ops } = staleSiblings(4000);
+    const all = referenceFixesWithin(reader, ops, Number.POSITIVE_INFINITY);
+    expect(all.complete).toBe(true);
+    const cut = referenceFixesWithin(reader, ops, 5000);
+    expect(cut.complete).toBe(false);
+    expect(cut.ops.length).toBeGreaterThan(0);
+    expect(cut.ops.length).toBeLessThan(all.ops.length);
+    // The same fixes, in the same order, as far as it went.
+    expect(cut.ops).toEqual(all.ops.slice(0, cut.ops.length));
   });
 });
