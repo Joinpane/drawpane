@@ -1438,9 +1438,37 @@ export class CanvasRenderer {
     under.clearRect(0, 0, canvas.width, canvas.height);
     this.#context = { phase: "record", readers, seen: new Map() };
     this.#until = new Set(ids);
+    // Only what the readers read is drawn: the page around each, as far as it reads (as
+    // `#backdropFor` keeps it). A layer touching none of that can't change what they see.
+    const parts: Rect[] = [];
+    for (const id of readers) {
+      const node = doc.get(id);
+      const b = this.#scene.bounds(id);
+      if (!node || !b) continue;
+      let pad = 0;
+      for (const e of getProp(node.props, "effects")) {
+        if (e.visible === false) continue;
+        if (e.type === "glass") {
+          const p = glassParams(e, camera.zoom);
+          pad = Math.max(pad, p.margin + Math.ceil(3 * p.sigma) + 2);
+        } else if (e.type === "background-blur")
+          pad = Math.max(pad, Math.ceil(blurSigma(e.radius) * camera.zoom * 3) + 2);
+      }
+      // In page units, with a device pixel to spare for antialiasing.
+      const grow = (pad + 2) / camera.zoom;
+      parts.push({
+        x: b.x - grow,
+        y: b.y - grow,
+        width: b.width + grow * 2,
+        height: b.height + grow * 2,
+      });
+    }
+    const outer = this.#parts;
+    this.#parts = parts;
     try {
       for (const id of doc.childIds(page.id)) this.#draw(under, id, camera, 1, rect);
     } finally {
+      this.#parts = outer;
       this.#until = null;
       this.#context.phase = "replay";
     }
