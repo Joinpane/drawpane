@@ -1,0 +1,15 @@
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  // The render engine spike's Worker (decision 0040). Local only: `wrangler dev`, never
+  // deployed. It bundles the engine's CPU build and HarfBuzz, capped (scripts/cap-wasm.mjs).
+  "name": "drawpane-render-engine-spike",
+  "main": "index.ts",
+  "compatibility_date": "2026-11-01",
+  // As the agent runner: HarfBuzz's loader looks for Node's modules.
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  // HarfBuzz's Node branch makes a `require` from its own URL, which the bundle leaves unset;
+  // its WebAssembly comes through the `instantiateWasm` hook, so nothing is read from it.
+  "define": { "import.meta.url": "\"file:///spike/worker.js\"" },
+  "rules": [{ "type": "Data", "globs": ["**/*.ttf"], "fallthrough": true }]
+}
