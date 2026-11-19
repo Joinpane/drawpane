@@ -73,34 +73,45 @@ export function deviceBox(
   };
 }
 
-/** What a drawing reads from its context besides its own calls: carried to the scratch canvas. */
+/**
+ * What a drawing reads from its context besides its own calls: carried to the scratch canvas.
+ * Only what differs is set: setting a font or a filter parses it again, and most blends in a
+ * row share them.
+ */
 function copyState(from: Ctx, to: Ctx): void {
-  to.globalAlpha = from.globalAlpha;
+  const a = from as unknown as Record<string, unknown>;
+  const b = to as unknown as Record<string, unknown>;
+  for (const key of STATE) if (b[key] !== a[key]) b[key] = a[key];
+  if ("letterSpacing" in from && "letterSpacing" in to && b.letterSpacing !== a.letterSpacing)
+    b.letterSpacing = a.letterSpacing;
   to.globalCompositeOperation = "source-over";
-  to.filter = from.filter;
-  to.fillStyle = from.fillStyle;
-  to.strokeStyle = from.strokeStyle;
-  to.lineWidth = from.lineWidth;
-  to.lineJoin = from.lineJoin;
-  to.lineCap = from.lineCap;
-  to.miterLimit = from.miterLimit;
-  to.setLineDash(from.getLineDash());
-  to.lineDashOffset = from.lineDashOffset;
-  to.font = from.font;
-  to.textAlign = from.textAlign;
-  to.textBaseline = from.textBaseline;
-  to.direction = from.direction;
-  if ("letterSpacing" in from && "letterSpacing" in to)
-    (to as Ctx & { letterSpacing: string }).letterSpacing = (
-      from as Ctx & { letterSpacing: string }
-    ).letterSpacing;
-  to.imageSmoothingEnabled = from.imageSmoothingEnabled;
-  to.imageSmoothingQuality = from.imageSmoothingQuality;
-  to.shadowColor = from.shadowColor;
-  to.shadowBlur = from.shadowBlur;
-  to.shadowOffsetX = from.shadowOffsetX;
-  to.shadowOffsetY = from.shadowOffsetY;
+  const dash: number[] = from.getLineDash();
+  const had: number[] = to.getLineDash();
+  if (dash.length !== had.length || dash.some((d: number, i: number) => d !== had[i]))
+    to.setLineDash(dash);
 }
+
+const STATE = [
+  "globalAlpha",
+  "filter",
+  "fillStyle",
+  "strokeStyle",
+  "lineWidth",
+  "lineJoin",
+  "lineCap",
+  "miterLimit",
+  "lineDashOffset",
+  "font",
+  "textAlign",
+  "textBaseline",
+  "direction",
+  "imageSmoothingEnabled",
+  "imageSmoothingQuality",
+  "shadowColor",
+  "shadowBlur",
+  "shadowOffsetX",
+  "shadowOffsetY",
+] as const;
 
 function canvas(existing: AnyCanvas | null, w: number, h: number): AnyCanvas | null {
   let c = existing;
@@ -109,9 +120,13 @@ function canvas(existing: AnyCanvas | null, w: number, h: number): AnyCanvas | n
     else if (typeof document !== "undefined") c = document.createElement("canvas");
     else return null;
   }
-  // Grown, never shrunk: burns of every size share it without reallocating.
-  if (c.width < w) c.width = w;
-  if (c.height < h) c.height = h;
+  // Kept while it fits and is no more than four times the size needed, else made to fit (to a
+  // multiple of 64, so sizes close together share one). Chromium snapshots a canvas that's
+  // drawn from and copies all of it when it's next drawn into: one grown once for a whole
+  // screen would cost that copy for every small blend drawn through it.
+  if (c.width >= w && c.height >= h && c.width * c.height <= Math.max(4 * w * h, 65_536)) return c;
+  c.width = Math.ceil(w / 64) * 64;
+  c.height = Math.ceil(h / 64) * 64;
   return c;
 }
 
@@ -119,16 +134,17 @@ type Apart = GlobalCompositeOperation | LinearMode;
 
 /**
  * Drawing apart, then blending in, bounded by a box and the canvas; the
- * scratch canvases are kept and only grow.
+ * scratch canvases are kept while they fit (see `canvas`).
  *
  * - Any canvas mode: the drawing, made on a scratch canvas as `ctx` would
  *   make it, is laid on `ctx` in that mode (for drawings a canvas blends
  *   wrongly in place: a shadow cast from a shape drawn off the canvas comes
  *   out empty in Chrome when blended).
- * - Linear dodge or burn over an opaque canvas: what's under the box is
- *   copied (inverted, for burn) to a scratch canvas, the drawing (inverted,
- *   for burn) is added ("lighter"), and the sum goes back (inverted back),
- *   through `ctx`'s clip.
+ * - Linear dodge over an opaque canvas: the drawing added ("lighter").
+ * - Linear burn over an opaque canvas, in place: what's under the box is
+ *   inverted (a white difference), the drawing inverted is added, and the
+ *   box is inverted back, through `ctx`'s clip. Nothing reads the canvas
+ *   into another: Chromium would copy all of it on the next draw.
  * - Linear dodge or burn over a canvas that may be see-through, exactly:
  *   the sum laid on black (an opaque picture of the premultiplied colour),
  *   clamped by normal blending's alpha as a grey (darken), divided by it
@@ -170,9 +186,10 @@ export class BlendApart {
       draw(ctx);
       return;
     }
-    // The drawing alone, as `ctx` would draw it, moved to the scratch canvas's corner.
-    src.save();
+    // The drawing alone, as `ctx` would draw it, moved to the scratch canvas's corner. The state
+    // is copied before saving, so it's what the scratch canvas keeps for the next one.
     copyState(ctx, src);
+    src.save();
     const t = ctx.getTransform();
     src.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0);
     draw(src);
@@ -191,6 +208,27 @@ export class BlendApart {
       return;
     }
     const invert = mode === "linear-burn" ? "invert(1)" : "none";
+    if (opaque) {
+      // Burn over an opaque canvas, in place: what's there inverted (a white difference: the
+      // canvas stays opaque), the drawing inverted added, and inverted back. Never reading the
+      // canvas into another, which would cost a copy of all of it (see `canvas`).
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.shadowColor = "transparent";
+      ctx.filter = "none";
+      ctx.fillStyle = "#fff";
+      ctx.globalCompositeOperation = "difference";
+      ctx.fillRect(x0, y0, w, h);
+      ctx.globalCompositeOperation = "lighter";
+      ctx.filter = invert;
+      ctx.drawImage(drawing, 0, 0, w, h, x0, y0, w, h);
+      ctx.filter = "none";
+      ctx.globalCompositeOperation = "difference";
+      ctx.fillRect(x0, y0, w, h);
+      ctx.restore();
+      return;
+    }
     const sum = this.#scratch(1, w, h);
     if (!sum) return;
     // What's there plus the drawing (their inverses, for burn).
@@ -199,7 +237,7 @@ export class BlendApart {
     sum.globalCompositeOperation = "lighter";
     sum.drawImage(drawing, 0, 0, w, h, 0, 0, w, h);
     sum.filter = "none";
-    if (!opaque) {
+    {
       const over = this.#scratch(2, w, h);
       const alpha = this.#scratch(3, w, h);
       if (!over || !alpha) return;
