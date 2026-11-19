@@ -890,7 +890,7 @@ export function exportSvg(
       const shape = shapeOf(node, w, h);
       if (shape) {
         dropShadows(node, w, h, matrix, shape, shadows, base);
-        glassRim(node, shape, transform, below);
+        glassRim(node, shape, transform, below, [...base, shadows]);
         const box = regionRect(matrix, 0, 0, w, h, 1);
         if (node.type !== "line")
           for (const paint of getProp(node.props, "fills")) {
@@ -1024,31 +1024,39 @@ export function exportSvg(
   };
 
   /**
-   * Glass, as far as SVG goes (decision 0007): SVG can't see what's behind a
-   * layer, so it gets the light on its rim, a stroke inside the shape fading
-   * from the lit side, under its fills. PNG export has the real effect.
+   * Glass, as far as SVG goes (decision 0007): the light on its rim, a stroke
+   * inside the shape fading from the lit side, under its fills. PNG export has
+   * the real effect. As there (and in Figma, decision 0039), glass shows only
+   * what's behind it: the light is only as opaque as what's under the layer
+   * in its group, and over nothing there's none.
    */
   const glassRim = (
     node: NodeRecord,
     shape: { tag: string; attrs: string },
     transform: string,
     into: string[],
+    /** What's under the layer in its group. */
+    backdrop: readonly string[][],
   ) => {
     const glass = getProp(node.props, "effects").find(
       (e) => e.type === "glass" && e.visible !== false,
     );
     if (glass?.type !== "glass" || glass.intensity <= 0 || glass.depth <= 0) return;
+    const under = referenced(backdrop);
+    if (under.length === 0) return;
     const radians = (glass.angle * Math.PI) / 180;
     const lx = Math.sin(radians) * 0.5;
     const ly = -Math.cos(radians) * 0.5;
     const light = out.id("light");
     const clip = out.id("clip");
+    const behind = out.id("behind");
     out.defs.push(
       `<linearGradient id="${light}"${attr("x1", round2(0.5 + lx))}${attr("y1", round2(0.5 + ly))}${attr("x2", round2(0.5 - lx))}${attr("y2", round2(0.5 - ly))}><stop offset="0" stop-color="#fff"${attr("stop-opacity", round2((glass.intensity / 100) * 0.7))}/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>`,
       `<clipPath id="${clip}"><${shape.tag}${transform}${shape.attrs}/></clipPath>`,
+      `<mask id="${behind}" mask-type="alpha" maskUnits="userSpaceOnUse">${under.join("")}</mask>`,
     );
     into.push(
-      `<g clip-path="url(#${clip})"><${shape.tag}${transform}${shape.attrs} fill="none" stroke="url(#${light})"${attr("stroke-width", round2(glass.depth))}/></g>`,
+      `<g clip-path="url(#${clip})" mask="url(#${behind})"><${shape.tag}${transform}${shape.attrs} fill="none" stroke="url(#${light})"${attr("stroke-width", round2(glass.depth))}/></g>`,
     );
   };
 
