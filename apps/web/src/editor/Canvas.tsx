@@ -135,6 +135,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             contentDirty = true;
             schedule();
           };
+          // A read-back frame (headless) is on screen once it lands: show it then.
+          view.onPresented = (frameExact) => {
+            if (engine !== view) return;
+            showEngine(true);
+            timing.exact = frameExact;
+          };
           (window as unknown as { drawpaneEngineView?: EngineView }).drawpaneEngineView = view;
           contentDirty = true;
           schedule();
@@ -188,10 +194,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       const s = editor.s;
       const t0 = performance.now();
       const page = s.pageId ? editor.doc.get(s.pageId) : undefined;
-      const drewEngine =
-        contentDirty &&
-        s.pageId !== null &&
-        (engine?.draw(
+      // The engine draws the page when it can (decision 0040). Which canvas shows changes only
+      // when a content frame is drawn, and only to one whose frame is on screen: an overlay-only
+      // redraw never hides the engine's frame, and a read-back frame shows once it lands.
+      let drewEngine = false;
+      if (contentDirty && s.pageId !== null && engine) {
+        const r = engine.draw(
           s.pageId,
           s.camera,
           contentCanvas.width,
@@ -199,13 +207,30 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           dpr,
           (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor,
           { hidden: renderer.hidden, whole: s.editingText },
-        ) ??
-          false);
-      if (engine) showEngine(drewEngine);
-      if (drewEngine) {
-        contentDirty = false;
-        timing.exact = true;
-      } else if (contentDirty && s.pageId) {
+          exact || whole,
+        );
+        if (r.drawn) {
+          drewEngine = true;
+          contentDirty = false;
+          exact = false;
+          whole = false;
+          clearTimeout(settle);
+          if (r.ready) {
+            showEngine(true);
+            timing.exact = r.exact;
+          } else timing.exact = false;
+          // A stand-in (a pan shifted, a zoom scaled, unreadable text as bars): an exact frame
+          // follows once the camera rests.
+          if (!r.exact)
+            settle = window.setTimeout(() => {
+              exact = true;
+              contentDirty = true;
+              schedule();
+            }, SETTLE_MS);
+        }
+      }
+      if (!drewEngine && contentDirty && s.pageId) {
+        if (engine) showEngine(false);
         // Truncated text shows all its lines while it's being edited.
         renderer.whole = s.editingText;
         const done = renderer.render(

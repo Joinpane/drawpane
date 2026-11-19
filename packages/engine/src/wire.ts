@@ -143,7 +143,8 @@ export type WirePaint =
       readonly tile: boolean;
       readonly opacity: number;
     }
-  | { readonly kind: "placeholder" };
+  /** The loading checkerboard, at the image paint's opacity. */
+  | { readonly kind: "placeholder"; readonly opacity: number };
 
 export interface StrokeStyle {
   readonly width: number;
@@ -235,14 +236,16 @@ export class ListWriter {
     this.#view.setUint32(this.#at, v >>> 0, true);
     this.#at += 4;
   }
+  // Numbers are written as they are: one that isn't finite (or overflows an f32) reaches the
+  // engine as infinity or NaN, which refuses the message as malformed, never draws it as zero.
   f32(v: number): void {
     this.#reserve(4);
-    this.#view.setFloat32(this.#at, Number.isFinite(v) ? v : 0, true);
+    this.#view.setFloat32(this.#at, v, true);
     this.#at += 4;
   }
   f64(v: number): void {
     this.#reserve(8);
-    this.#view.setFloat64(this.#at, Number.isFinite(v) ? v : 0, true);
+    this.#view.setFloat64(this.#at, v, true);
     this.#at += 8;
   }
   matrix(m: Matrix): void {
@@ -260,7 +263,7 @@ export class ListWriter {
     for (let i = 0; i < padded; i++) this.#bytes[this.#at + i] = i < n ? (p.verbs[i] as number) : 0;
     this.#at += padded;
     for (const c of p.coords) {
-      this.#view.setFloat32(this.#at, Number.isFinite(c) ? c : 0, true);
+      this.#view.setFloat32(this.#at, c, true);
       this.#at += 4;
     }
   }
@@ -425,12 +428,18 @@ export class ListWriter {
         this.f32(p.opacity);
         return;
       case "placeholder":
+        this.f32(p.opacity);
     }
   }
 
-  /** The finished message. */
+  /** The finished message: a view of the writer's buffer (no copy; the writer is done with it). */
   finish(): Uint8Array {
     this.#view.setUint32(this.#countAt, this.#commands, true);
-    return this.#bytes.slice(0, this.#at);
+    return this.#bytes.subarray(0, this.#at);
+  }
+
+  /** Bytes written so far. */
+  get length(): number {
+    return this.#at;
   }
 }

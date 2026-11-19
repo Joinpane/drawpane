@@ -126,6 +126,8 @@ pub enum Paint {
         opacity: f32,
     },
     Placeholder,
+    /// The loading checkerboard at an image paint's opacity.
+    PlaceholderAt(f32),
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +223,12 @@ impl Rec {
             Paint::Placeholder => {
                 w.u32(7);
                 w.u32(0);
+                w.f32(1.0);
+            }
+            Paint::PlaceholderAt(opacity) => {
+                w.u32(7);
+                w.u32(0);
+                w.f32(*opacity);
             }
         }
     }

@@ -1,6 +1,7 @@
 // The engine's Worker build in workerd beside the agent runner's set (index.ts), under
-// decision 0033's caps: the engine's module capped at 25 MiB (resvg's place), HarfBuzz's at
-// 32 MiB, written into wasm/ (not committed). Starts `wrangler dev` on
+// decision 0033's caps: the engine's module as shipped (its memory section holds its 25 MiB
+// maximum, resvg's place: checked here, never rewritten), HarfBuzz's capped at 32 MiB, written
+// into wasm/ (not committed). Starts `wrangler dev` on
 // ENGINE_WORKERD_PORT (8979) and runs the cases, measuring the workerd process's resident memory
 // from outside (a Worker can't see its own):
 //
@@ -27,8 +28,16 @@ const ENGINE_MAX_BYTES = 25 * 1024 * 1024;
 const ISOLATE_BYTES = 128 * 1000 * 1000;
 const wasmDir = join(here, "wasm");
 mkdirSync(wasmDir, { recursive: true });
+// The shipped Worker module must carry its own maximum: the harness tests those bytes.
+{
+  const shipped = new Uint8Array(
+    readFileSync(join(here, "../../packages/engine/dist/worker/engine_bg.wasm")),
+  );
+  if (memoryLimits(shipped)?.max !== ENGINE_MAX_BYTES / 65536)
+    throw new Error("the engine's Worker module doesn't carry its 25 MiB memory maximum");
+  writeFileSync(join(wasmDir, "engine.wasm"), shipped);
+}
 for (const [name, from, max] of [
-  ["engine.wasm", join(here, "../../packages/engine/dist/worker/engine_bg.wasm"), ENGINE_MAX_BYTES],
   [
     "harfbuzz.wasm",
     require.resolve("harfbuzzjs/dist/harfbuzz.wasm", {

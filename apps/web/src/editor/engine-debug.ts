@@ -138,8 +138,11 @@ export function engineDebug(editor: Editor) {
       for (let waited = 0; waited < 20_000 && loading(make().b); waited += 100)
         await new Promise((r) => setTimeout(r, 100));
       const t0 = performance.now();
-      // A fresh list replaces whatever the engine held, at any revision.
-      const { b, list } = make();
+      // A fresh list replaces whatever the engine held: made for a revision past the engine's
+      // (fresh lists only move the revision forward).
+      const b = builder(options.pageId);
+      b.acknowledge(false, e.revision);
+      const list = options.ids ? b.buildLayers(options.ids) : b.build(options.pageId);
       const t1 = performance.now();
       const applied = e.apply(list);
       const t2 = performance.now();

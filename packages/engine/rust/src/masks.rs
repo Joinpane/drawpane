@@ -98,6 +98,32 @@ impl<T> MaskCache<T> {
         out
     }
 
+    pub fn set_budget(&mut self, budget: usize) {
+        self.budget = budget;
+    }
+
+    /// Drops the masks `drop` picks (the GPU atlas reusing a shelf); answers how many.
+    pub fn evict_where(&mut self, mut drop: impl FnMut(&T) -> bool) -> usize {
+        let before = self.map.len();
+        let mut freed = 0usize;
+        self.map.retain(|_, e| {
+            let keep = !drop(&e.value);
+            if !keep {
+                freed += e.bytes;
+            }
+            keep
+        });
+        self.bytes -= freed;
+        let n = before - self.map.len();
+        self.stats.evicted += n as u64;
+        n
+    }
+
+    /// The frame being drawn (masks used in it are never evicted during it).
+    pub fn frame(&self) -> u64 {
+        self.frame
+    }
+
     /// Drops every mask (the GPU atlas was reset, or the device lost).
     pub fn clear(&mut self) -> Vec<T> {
         self.bytes = 0;

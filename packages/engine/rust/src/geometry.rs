@@ -2,14 +2,18 @@
 //! clip, and later shadow and glass distance) draws the same curve (decision 0040, "Corner
 //! smoothing").
 
-use vello_common::kurbo::{BezPath, Ellipse, Point, Shape};
-
-/// How far a "huge" box reaches: past anything a page draws, inside what f32 keeps exact enough.
-pub const FAR: f64 = 1.0e6;
+use vello_common::kurbo::{BezPath, Ellipse, Point, Rect, Shape};
 
 /// The canvas's tolerance for turning arcs into curves is far finer than a pixel; kurbo's
 /// default (0.1) is a tenth of a unit, which at high zoom shows. Shapes are generated at this.
 const TOLERANCE: f64 = 1e-3;
+
+/// The tolerance for an arc of radius `r`: `TOLERANCE` up to a radius of 100,000 units, then a
+/// hundred-millionth of the radius, so an arc is at most about 22 cubics a quarter however large
+/// it is (kurbo's count grows with the sixth root of radius over tolerance).
+pub fn tolerance(r: f64) -> f64 {
+    (r.abs() * 1e-8).max(TOLERANCE)
+}
 
 /// A box `w` × `h` with corner radii (top left, top right, bottom right, bottom left), each kept
 /// to half the shorter side, as the canvas renderer keeps them (`render.ts`, `#buildShape`).
@@ -39,7 +43,7 @@ pub fn rounded_rect(w: f32, h: f32, radii: [f32; 4], smoothing: f32) -> BezPath 
             return;
         }
         let arc = vello_common::kurbo::Arc::new(c, (r, r), start, core::f64::consts::FRAC_PI_2, 0.0);
-        arc.to_cubic_beziers(TOLERANCE, |a, b, e| p.curve_to(a, b, e));
+        arc.to_cubic_beziers(tolerance(r), |a, b, e| p.curve_to(a, b, e));
     };
     use core::f64::consts::{FRAC_PI_2, PI};
     p.move_to((tl, 0.0));
@@ -67,16 +71,16 @@ pub fn rounded_rect(w: f32, h: f32, radii: [f32; 4], smoothing: f32) -> BezPath 
 /// `ellipse(w/2, h/2, w/2, h/2, 0, 0, 2π)`).
 pub fn ellipse(w: f32, h: f32) -> BezPath {
     let (w, h) = (f64::from(w), f64::from(h));
-    Ellipse::new((w / 2.0, h / 2.0), (w.abs() / 2.0, h.abs() / 2.0), 0.0).to_path(TOLERANCE)
+    Ellipse::new((w / 2.0, h / 2.0), (w.abs() / 2.0, h.abs() / 2.0), 0.0).to_path(tolerance(w.abs().max(h.abs()) / 2.0))
 }
 
-/// A box far larger than any page, for clipping to everything outside a shape (even-odd).
-pub fn far_rect() -> BezPath {
+/// A box as a path, clockwise.
+pub fn rect_path(r: Rect) -> BezPath {
     let mut p = BezPath::new();
-    p.move_to((-FAR, -FAR));
-    p.line_to((FAR, -FAR));
-    p.line_to((FAR, FAR));
-    p.line_to((-FAR, FAR));
+    p.move_to((r.x0, r.y0));
+    p.line_to((r.x1, r.y0));
+    p.line_to((r.x1, r.y1));
+    p.line_to((r.x0, r.y1));
     p.close_path();
     p
 }
@@ -96,6 +100,15 @@ mod tests {
             p.segments()
                 .any(|s| (s.start().x - 10.0).abs() < 1e-9 && s.start().y.abs() < 1e-9)
         );
+    }
+
+    #[test]
+    fn huge_curves_stay_a_few_cubics() {
+        // At the canvas's fixed tolerance an ellipse this size would be millions of cubics.
+        assert!(ellipse(3.0e38, 3.0e38).elements().len() < 128);
+        assert!(rounded_rect(3.0e38, 3.0e38, [1.0e38; 4], 0.0).elements().len() < 128);
+        // A normal one keeps the canvas's precision.
+        assert!(ellipse(100.0, 100.0).elements().len() >= 5);
     }
 
     #[test]

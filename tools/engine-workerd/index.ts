@@ -17,7 +17,7 @@ import {
   type ShapingRun,
   type TextMeasurer,
 } from "@drawpane/editor";
-import { type EngineModule, loadEngineSync, RenderEngine } from "@drawpane/engine";
+import { type EngineModule, ErrorCode, loadEngineSync, RenderEngine } from "@drawpane/engine";
 import * as glue from "@drawpane/engine/worker-glue";
 import { harfBuzzMeasurerWith } from "../../apps/agent-runner/src/harfbuzz-measurer";
 import interFile from "../../apps/web/e2e/fixtures/Inter-Variable.ttf";
@@ -141,18 +141,28 @@ async function handle(request: Request): Promise<Response> {
       );
     // A fresh engine per render, as decision 0033 gives every render a fresh instance's worth of
     // state (one module instance per isolate: its memory is the cap, reused).
+    // The Worker build's budgets (WORKER_LIMITS) apply: the shipped module's memory is capped at
+    // 25 MiB, and an export is admitted against it before it starts.
     const engine = new RenderEngine(module, { glyphMaskBytes: 4 << 20 });
     const applied = engine.apply(list);
-    if (!applied.ok)
-      return Response.json({ error: applied.message, code: applied.code }, { status: 500 });
+    if (!applied.ok) {
+      engine.dispose();
+      return Response.json(
+        { error: applied.message, code: applied.code },
+        { status: applied.code === ErrorCode.Limit ? 413 : 500 },
+      );
+    }
     // The scene fills the frame: cards at the scale that makes the grid as wide as the output.
     const cols = Math.ceil(Math.sqrt(cards));
     const zoom = width / (cols * 260);
+    // The engine goes however the stream ends: read to the end, failed or cancelled.
     const stream = engine.renderPngStream(
       width,
       height,
       { zoom, x: 0, y: 0, dpr: 1 },
       [1, 1, 1, 1],
+      undefined,
+      () => engine.dispose(),
     );
     const report = {
       width,
@@ -172,12 +182,7 @@ async function handle(request: Request): Promise<Response> {
     }
     // Streamed: each band is drawn and compressed as the response is read. The engine's and
     // HarfBuzz's memory are reported at the end, in a trailer request (`/memory`).
-    const disposing = new TransformStream<Uint8Array, Uint8Array>({
-      flush() {
-        engine.dispose();
-      },
-    });
-    return new Response(stream.value.pipeThrough(disposing), {
+    return new Response(stream.value, {
       headers: { "content-type": "image/png", "x-engine-report": JSON.stringify(report) },
     });
   }

@@ -14,10 +14,50 @@ const here = join(dirname(fileURLToPath(import.meta.url)), "..");
 const rust = join(here, "rust");
 const BUDGETS = { worker: 400 * 1000, browser: 1000 * 1000 };
 
+/**
+ * The Worker build's linear memory may grow to 25 MiB and no further (decision 0040, "Worker
+ * memory"): its memory section says so, so a host can't let it grow past its share of an
+ * isolate's 128 MB. The browser build has no maximum.
+ */
+const WORKER_MEMORY_BYTES = 25 << 20;
 const all = [
-  { name: "worker", features: [] },
-  { name: "browser", features: ["--features", "gpu"] },
+  {
+    name: "worker",
+    features: [],
+    rustflags: `-C link-arg=--max-memory=${WORKER_MEMORY_BYTES}`,
+  },
+  { name: "browser", features: ["--features", "gpu"], rustflags: "" },
 ];
+
+/**
+ * After a trap a module's instance is gone, and wasm-bindgen's glue keeps one instance per
+ * module: this export renews it from the module already compiled (no compiling at run time,
+ * which Workers forbid). The engine's facade (`src/index.ts`) calls it.
+ */
+const RENEW = `
+/** Drawpane: a new instance of the module, after a trap left the last one unusable. */
+export function __drawpaneRenew() {
+    const module = wasmModule;
+    if (module === undefined) throw new Error("the engine was never instantiated");
+    wasm = undefined;
+    wasmInstance = undefined;
+    __wbg_init_promise = undefined;
+    return initSync({ module });
+}
+`;
+
+function addRenew(file) {
+  const js = readFileSync(file, "utf8");
+  if (js.includes("__drawpaneRenew")) return;
+  for (const name of [
+    "let wasmModule, wasmInstance, wasm;",
+    "let __wbg_init_promise;",
+    "function initSync(",
+  ])
+    if (!js.includes(name))
+      throw new Error(`wasm-bindgen's glue changed (no "${name}"): update RENEW in build.mjs`);
+  writeFileSync(file, js + RENEW);
+}
 // ENGINE_ONLY=worker builds one module (while iterating); the size check reads both.
 const builds = process.env.ENGINE_ONLY
   ? all.filter((b) => b.name === process.env.ENGINE_ONLY)
@@ -43,8 +83,8 @@ if (!skip) {
     // CI and new checkouts: the folder's toolchain file must be trusted before mise uses it.
     execFileSync("mise", ["trust", "--quiet", join(here, "mise.toml")], { stdio: "ignore" });
   } catch {}
-  const env = { ...process.env, RUSTFLAGS: "-C target-feature=+simd128" };
   for (const b of builds) {
+    const env = { ...process.env, RUSTFLAGS: `-C target-feature=+simd128 ${b.rustflags}`.trim() };
     run(
       "mise",
       [
@@ -76,6 +116,7 @@ if (!skip) {
       "engine",
       join(rust, "target", b.name, "wasm32-unknown-unknown", "release", "drawpane_engine.wasm"),
     ]);
+    addRenew(join(here, "dist", b.name, "engine.js"));
   }
 }
 

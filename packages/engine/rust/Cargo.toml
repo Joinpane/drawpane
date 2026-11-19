@@ -35,7 +35,7 @@ wasm-bindgen = "=0.2.130"
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 futures-channel = { version = "0.3", optional = true }
-web-sys = { version = "0.3", optional = true, features = ["HtmlCanvasElement", "OffscreenCanvas", "console"] }
+web-sys = { version = "0.3", optional = true, features = ["HtmlCanvasElement", "OffscreenCanvas", "console", "Window", "Performance"] }
 
 [dev-dependencies]
 drawpane-engine = { path = ".", features = ["test-kernels"] }

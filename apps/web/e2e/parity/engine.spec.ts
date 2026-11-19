@@ -176,7 +176,7 @@ test.describe("Render engine parity", () => {
           return out;
         });
       }, frames);
-      const worker = new RenderEngine(await loadNodeEngine("worker"));
+      const workerModule = await loadNodeEngine("worker");
 
       const results: CellResult[] = [];
       const failures: string[] = [];
@@ -188,8 +188,9 @@ test.describe("Render engine parity", () => {
         const width = rect.width * SCALE;
         const height = rect.height * SCALE;
         const background: [number, number, number, number] = clear ? [0, 0, 0, 0] : [1, 1, 1, 1];
-        // Each cell as the canvas renderer's parity spec takes it: exported cells drawn alone
-        // (the exported layer and what's in it), the others with the page under them.
+        // Each cell drawn alone, its frame and what's in it, on the page's background: the engine
+        // refuses a page holding anything it doesn't draw whole (anywhere on it), so a cell is its
+        // own list, as an export of it is.
         const opts = {
           pageId,
           rect,
@@ -197,7 +198,7 @@ test.describe("Render engine parity", () => {
           width,
           height,
           background,
-          ...(clear ? { ids: [frames[i] as string] } : {}),
+          ids: [frames[i] as string],
         };
         const cpu = await page.evaluate(
           (o) => (window as unknown as Engine).drawpaneEngine.render({ ...o, backend: "cpu" }),
@@ -258,12 +259,15 @@ test.describe("Render engine parity", () => {
               `${cell.id}: GPU ${figmaGpu} from Figma (the canvas renderer may be ${limit})`,
             );
         }
-        // The Worker's build draws the same list bit for bit.
+        // The Worker's build draws the same list bit for bit (an engine of its own per cell: each
+        // cell's list is a fresh list from revision 0).
         const cellList = await page.evaluate(
           ({ pageId, ids }) => (window as unknown as Engine).drawpaneEngine.list(pageId, ids),
-          { pageId, ids: clear ? [frames[i] as string] : undefined },
+          { pageId, ids: [frames[i] as string] },
         );
-        expect(worker.apply(Uint8Array.from(Buffer.from(cellList.list, "base64"))).ok).toBe(true);
+        const worker = new RenderEngine(workerModule);
+        const applied = worker.apply(Uint8Array.from(Buffer.from(cellList.list, "base64")));
+        expect(applied.ok, applied.ok ? "" : applied.message).toBe(true);
         const w = worker.renderCpu(
           width,
           height,
@@ -272,6 +276,7 @@ test.describe("Render engine parity", () => {
           false,
         );
         const workerIdentical = w.ok && Buffer.from(w.value.pixels).equals(cpuPx);
+        worker.dispose();
         if (!workerIdentical)
           failures.push(
             `${cell.id}: the Worker build's pixels differ from the browser build's CPU path`,
@@ -291,7 +296,6 @@ test.describe("Render engine parity", () => {
           `<tr><th>${cell.id}<br><small>Figma: CPU ${figmaCpu} · GPU ${figmaGpu}${limit !== undefined ? ` · canvas may be ${limit}` : ""}<br>alpha-aware: mean ${vsFigma.mean.toFixed(2)} · alpha ${vsFigma.alphaMean.toFixed(2)} · worst tile ${vsFigma.worstTile.toFixed(1)}<br>CPU/GPU: mean ${cg.mean.toFixed(3)} · p99 ${cg.p99} · worst tile ${cg.worstTile.toFixed(2)}</small></th><td><img src="data:image/png;base64,${readFileSync(golden).toString("base64")}"></td><td><img src="${await img(cpu.rgba)}"></td><td><img src="${await img(gpu.rgba)}"></td></tr>`,
         );
       }
-      worker.dispose();
       all[suite.suite] = results;
       const drawn = results.filter((r) => r.status === "drawn");
       const mean = (k: "figmaCpu" | "figmaGpu") =>

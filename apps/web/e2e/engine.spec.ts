@@ -42,7 +42,7 @@ type W = {
   };
   drawpaneFrames: { redraw(): void };
   drawpaneEngineView?: {
-    last: { supported: boolean; records: number };
+    last: { supported: boolean; records: number; exact: boolean; plan: string };
     engine: {
       gpuPixels(): Promise<{ ok: boolean; value?: Uint8Array; message?: string }>;
       loseGpu(): void;
@@ -56,6 +56,7 @@ type W = {
   };
 
   fallbacks?: unknown[];
+  pageFallbacks?: Array<{ pageId: string; features: Record<string, number> }>;
 };
 
 const frames = (page: Page, n = 4) =>
@@ -75,8 +76,20 @@ const showing = (page: Page) =>
     };
   });
 
-/** The engine's on-screen frame against a fresh engine's render of the same view, on the GPU. */
+/** Waits for the frame shown to be exact: a stand-in (a pan, a zoom, bars) gives way to one at rest. */
+const settled = (page: Page) =>
+  expect
+    .poll(() => page.evaluate(() => (window as unknown as W).drawpaneEngineView?.last.exact), {
+      timeout: 10_000,
+    })
+    .toBe(true);
+
+/**
+ * The engine's on-screen frame, once exact, against a fresh engine's render of the same view, on
+ * the GPU.
+ */
 async function screenMatchesFresh(page: Page): Promise<{ identical: boolean; mean: number }> {
+  await settled(page);
   const r = await page.evaluate(async () => {
     const w = window as unknown as W;
     const view = w.drawpaneEngineView;
@@ -142,11 +155,17 @@ test.describe
         // NVIDIA on the GPU bench): frames come back through a buffer instead. Presentation
         // itself is checked on a real laptop.
         localStorage.setItem("drawpane:engine-present", "readback");
+        // This VM's only WebGPU adapter is SwiftShader, which the editor refuses by default.
+        localStorage.setItem("drawpane:engine-software", "allow");
       });
       await page.addInitScript(() => {
         (window as unknown as W).fallbacks = [];
+        (window as unknown as W).pageFallbacks = [];
         window.addEventListener("drawpane:renderer-fallback", (e) =>
           (window as unknown as W).fallbacks?.push((e as CustomEvent).detail),
+        );
+        window.addEventListener("drawpane:renderer-page-fallback", (e) =>
+          (window as unknown as W).pageFallbacks?.push((e as CustomEvent).detail),
         );
       });
       await page.reload();
@@ -263,6 +282,13 @@ test.describe
       expect(notes.some((n) => n.includes("drawing with the render engine"))).toBe(true);
     });
 
+    test("keeps the current content visible during an overlay-only redraw", async () => {
+      expect(await showing(page)).toEqual({ engine: true, content: false });
+      await page.evaluate(() => (window as unknown as W).drawpane.state.set({ selection: [] }));
+      await frames(page);
+      expect(await showing(page)).toEqual({ engine: true, content: false });
+    });
+
     test("follows the camera and patches, equal to a fresh render", async () => {
       expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
       await page.evaluate(() => {
@@ -332,6 +358,26 @@ test.describe
       expect(s.worstTile).toBeLessThan(12);
     });
 
+    test("settles a stand-in into an exact frame once the camera rests", async () => {
+      // Zoomed far out the text is too small to read: interactive frames draw it as bars (and a
+      // zoom scales the last frame); the frame after the camera rests draws every glyph.
+      await page.evaluate(() => (window as unknown as W).drawpane.zoomTo(0.08));
+      await frames(page, 1);
+      await expect
+        .poll(
+          () =>
+            page.evaluate(() => {
+              const v = (window as unknown as W).drawpaneEngineView;
+              return v ? { exact: v.last.exact, plan: v.last.plan } : null;
+            }),
+          { timeout: 10_000 },
+        )
+        .toEqual({ exact: true, plan: "whole" });
+      expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
+      await page.evaluate(() => (window as unknown as W).drawpane.zoomTo(1.7));
+      await frames(page);
+    });
+
     test("leaves a page it can't draw to the canvas renderer, and takes it back", async () => {
       const shadow = await page.evaluate(() => {
         const e = (window as unknown as W).drawpane;
@@ -345,12 +391,20 @@ test.describe
       expect(
         await page.evaluate(() => (window as unknown as W).drawpaneEngineView?.unsupported()),
       ).toEqual({ shadow: 1 });
+      // The page's fallback is reported, with what it holds (an earlier one may be from while its
+      // fonts loaded, when its text couldn't be outlined yet).
+      expect(await page.evaluate(() => (window as unknown as W).pageFallbacks?.at(-1))).toEqual({
+        pageId: expect.any(String),
+        features: { shadow: 1 },
+      });
       await page.evaluate(
         (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
         shadow,
       );
-      await frames(page);
-      expect(await showing(page)).toEqual({ engine: true, content: false });
+      // Read back (headless), the engine's frame shows once it lands, never before.
+      await expect
+        .poll(() => showing(page), { timeout: 15_000 })
+        .toEqual({ engine: true, content: false });
     });
 
     test("falls back to the canvas renderer when the device is lost", async () => {
@@ -379,6 +433,44 @@ test.describe
         return false;
       });
       expect(painted).toBe(true);
+    });
+
+    test("falls back when surface acquisition fails without device loss", async ({ browser }) => {
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:engine-present", "webgpu");
+          const canvas = document.createElement("canvas");
+          const gpuCanvas = canvas.getContext("webgpu");
+          if (!gpuCanvas) throw new Error("the test requires WebGPU");
+          const prototype = Object.getPrototypeOf(gpuCanvas);
+          prototype.getCurrentTexture = () => {
+            throw new DOMException("test surface loss", "InvalidStateError");
+          };
+          (window as unknown as W).fallbacks = [];
+          window.addEventListener("drawpane:renderer-fallback", (e) =>
+            (window as unknown as W).fallbacks?.push((e as CustomEvent).detail),
+          );
+        });
+        await p.goto(page.url());
+        await p.waitForFunction(
+          () => {
+            const w = window as unknown as W;
+            return (w.fallbacks?.length ?? 0) > 0 || (w.drawpaneEngineView?.last.records ?? 0) > 0;
+          },
+          undefined,
+          { timeout: 60_000 },
+        );
+        await frames(p, 8);
+        expect(await showing(p)).toEqual({ engine: false, content: true });
+        expect(await p.evaluate(() => (window as unknown as W).fallbacks)).toHaveLength(1);
+      } finally {
+        await context.close();
+      }
     });
 
     test("falls back when presenting loses the device (headless), never blank", async ({

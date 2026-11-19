@@ -60,14 +60,20 @@ impl<'a> Reader<'a> {
         self.take(n)
     }
 
-    /// A count, refused above `max` before anything is allocated for it.
-    pub fn count(&mut self, max: usize, what: &str) -> Result<usize> {
+    /// The next `n` bytes as a reader of their own: a command is read from one, so nothing in it
+    /// can read (or allocate for) bytes past its own length.
+    pub fn sub(&mut self, n: usize) -> Result<Reader<'a>> {
+        Ok(Reader::new(self.take(n)?))
+    }
+
+    /// A count of items each at least `min_bytes` long, refused above `max`, or when that many
+    /// couldn't fit in what's left, before anything is allocated for it.
+    pub fn count(&mut self, max: usize, what: &str, min_bytes: usize) -> Result<usize> {
         let n = self.u32()? as usize;
         if n > max {
             return Err(EngineError::limit(format!("{what}: {n} is more than {max}")));
         }
-        // Every counted item takes at least four bytes: a count past what's left is malformed.
-        if n > self.remaining() {
+        if n.saturating_mul(min_bytes.max(1)) > self.remaining() {
             return Err(EngineError::malformed(format!(
                 "{what}: {n} items in {} bytes",
                 self.remaining()
@@ -130,7 +136,7 @@ impl<'a> Reader<'a> {
     /// A path: its verb count, coordinate count, the verbs a byte each (padded to four), then
     /// the coordinates. Verbs: 0 move, 1 line, 2 quad, 3 cubic, 4 close.
     pub fn path(&mut self, max_verbs: usize) -> Result<BezPath> {
-        let verbs = self.count(max_verbs.saturating_mul(4), "path verbs")?;
+        let verbs = self.count(max_verbs.saturating_mul(4), "path verbs", 1)?;
         if verbs > max_verbs {
             return Err(EngineError::limit(format!("a path of {verbs} verbs")));
         }

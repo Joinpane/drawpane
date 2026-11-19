@@ -11,25 +11,29 @@ A message is one `ArrayBuffer` of little-endian words: integers `u32`, coordinat
 | magic | u32 | `"DPDL"` |
 | major, minor | u16, u16 | 1, 0. The engine refuses another major, or a minor above its own. |
 | base | u32 | The revision the message applies to, or `0xFFFFFFFF` for a fresh list (which must start with a reset). |
-| revision | u32 | The revision it makes. |
+| revision | u32 | The revision it makes: `base + 1` for a patch; for a fresh list, any revision later than the one the engine holds. Never `0xFFFFFFFF`. |
 | count | u32 | Commands that follow. |
-| commands | | Each: opcode `u32`, body length in bytes `u32`, body. A body of another length than it says is refused. |
+| commands | | Each: opcode `u32`, body length in bytes `u32`, body. Each body is read from its own reader of exactly that length, so a command can't read (or allocate for) the bytes after it; a body of another length than it says is refused. A count inside a body is refused when its items couldn't fit in what's left (each item has a minimum size). |
 
-**A message is one revision, applied whole.** The engine applies each command as it reads it, with an undo log: if any command fails (malformed, an unknown record, a cycle, a limit), everything the message changed is put back and the engine keeps its revision. A fresh list is read through once first, so a malformed one is refused before the graph it would replace is let go; the old graph isn't kept for undo then, so a large page never takes twice its memory. A message for a revision the engine doesn't hold is refused (`ErrorCode.Revision`); the builder then writes a fresh list. A frame is drawn between messages, never during one, so it never shows half a revision.
+**Revisions.** A patch must name the revision the engine holds and make the next one; anything else is refused (`ErrorCode.Revision`) and changes nothing: an old or replayed patch, one that skips a revision, one that makes its own base. A fresh list must move the revision forward, so a stale fresh list can't roll the page back. After a refusal the builder is told (`DisplayListBuilder.acknowledge`) and its next message is a fresh list for a revision past the engine's. An engine made afresh (after a lost device or a trap) holds revision 0.
+
+**A message is one revision, applied whole.** The engine applies a patch's commands as it reads them, with an undo log: if any command fails (malformed, an unknown record, a cycle, a limit), everything the message changed is put back and the engine keeps its revision. A fresh list is built into a graph of its own beside the one it replaces, read once, and swapped in when it's all read and valid: a refused fresh list leaves the old graph, its pixels and its revision exactly as they were. While it's built both graphs count against the graph's budget (`graph_bytes`), so a Worker, whose engine starts empty for each render, never holds two. A frame is drawn between messages, never during one, so it never shows half a revision; an export pins its revision (see "Exports").
 
 ## Commands
 
 | Opcode | Command | Body |
 | --- | --- | --- |
 | 1 | reset | none: every record and glyph goes (images stay; they're resources, not records) |
-| 2 | glyph | `u32` glyph handle, path (in font units, y up) |
-| 3 | glyph free | `u32` glyph handle (refused while a record uses it) |
+| 2 | glyph | `u32` glyph handle, path (in font units, y up). Refused for a handle a record uses: a glyph is immutable while referenced. |
+| 3 | glyph free | `u32` glyph handle (refused while a record uses it). The builder frees a glyph at the end of the message that lets go of its last record. |
 | 4 | set | `u32` record handle, `u32` parent handle, record. Inserts, or replaces in place. A new record goes last among its parent's children; a record set under another parent moves there, last. |
 | 5 | remove | `u32` record handle: it and everything under it |
 | 6 | order | `u32` parent, `u32` count, handles: the parent's children in paint order, exactly its current children |
 | 7 | transform | `u32` record handle, `f64` × 6: only its transform changes (a drag) |
 
-Handle 0 is the page, the root every top-level record hangs from. It can't be set or removed. Record handles are stable layer ids interned by the builder for the session and never reused, so a stale handle can't name another layer. A record can't be its own ancestor, and nesting is capped.
+Handle 0 is the page, the root every top-level record hangs from. It can't be set or removed. Record handles are stable layer ids interned by the builder for the session and never reused, so a stale handle can't name another layer. A record can't be its own ancestor, and nesting is capped, counting the subtree a moved record brings with it.
+
+Each glyph definition gets a serial no other definition has, in any engine, across resets and fresh lists (which start handles over), and the glyph caches key masks by it: a mask made for one outline is never found for another.
 
 ## A record
 
@@ -52,16 +56,16 @@ Handle 0 is the page, the root every top-level record hangs from. It can't be se
 | --- | --- | --- |
 | 1 | path | verb count `u32`, coordinate count `u32`, verbs a byte each padded to four (0 move, 1 line, 2 quad, 3 cubic, 4 close), coordinates `f32`. A segment before the first move is refused. |
 | 2 | rect | w, h, radii (top left, top right, bottom right, bottom left), smoothing: generated by the engine, radii kept to half the shorter side. Smoothing above 0 is refused until the shared squircle function lands. |
-| 3 | ellipse | w, h |
+| 3 | ellipse | w, h. Arcs are generated at the canvas's tolerance (a thousandth of a unit) up to a radius of 100,000 units, then at a hundred-millionth of the radius, so a curve is a few dozen cubics however large. |
 | 4 | glyphs | scale `f32` (font units to its units; the engine flips y), count, then per glyph: handle `u32`, x `f32`, y `f32` (its origin on the baseline). Each glyph keeps its identity, for the glyph cache. |
-| 5 | outside | `u32` an earlier entry: a huge box with that shape cut out (even-odd), what an outside stroke is clipped to |
+| 5 | outside | `u32` an earlier entry: a box with that shape cut out (even-odd), what an outside stroke is clipped to. The engine makes the box where it draws: the viewport mapped into the record's units, and round the shape, so it's right at any size or position (not a fixed "huge" box). |
 
 **Ops:**
 
 | Op | | Body |
 | --- | --- | --- |
 | 1 | fill | path, `u32` even-odd, paint |
-| 2 | stroke | path, width, join (0 miter, 1 round, 2 bevel), cap (0 butt, 1 round, 2 square), miter limit, dash count and dashes, dash offset, paint |
+| 2 | stroke | path, width, join (0 miter, 1 round, 2 bevel), cap (0 butt, 1 round, 2 square), miter limit, dash count and dashes, dash offset, paint. A dash pattern that would cut its path into more pieces than a frame may generate is refused (`Limit`): at decode for shapes whose length is known, when drawn for glyph runs. |
 | 3 | clip | path, `u32` even-odd. A clip path, which doesn't isolate. |
 | 4 | unclip | Clips and unclips balance within a list. |
 | 5 | children | Its children are drawn here, inside the clips open at this point. At most once. |
@@ -72,10 +76,10 @@ Handle 0 is the page, the root every top-level record hangs from. It can't be se
 | Kind | | Body |
 | --- | --- | --- |
 | 1 | solid | RGBA `f32`, straight, paint opacity folded in |
-| 2, 3, 4 | linear, radial, angular | `f64` × 6 mapping the unit gradient into its units (linear along x from 0 to 1; radial and angular about the origin, radius 1; angular from 3 o'clock, clockwise, y down), stop count, then position and RGBA per stop. Colours interpolate unpremultiplied, as the canvas does. |
+| 2, 3, 4 | linear, radial, angular | `f64` × 6 mapping the unit gradient into its units (linear along x from 0 to 1; radial and angular about the origin, radius 1; angular from 3 o'clock, clockwise, y down), stop count, then position and RGBA per stop. Stops are ordered by position as a `CanvasGradient` orders them (stably: stops at one position keep their order), whatever order they arrive in. Colours interpolate unpremultiplied, as the canvas does. |
 | 5 | diamond | Reserved: the model has none (Figma's diamond imports as radial), and the engine refuses it. |
 | 6 | image | image handle `u32`, `f64` × 6 mapping the image's unit square into its units (one tile, when tiled), `u32` flags (1 tile), opacity `f32` |
-| 7 | placeholder | none: the loading checkerboard, fixed to device pixels |
+| 7 | placeholder | opacity `f32`: the loading checkerboard, fixed to device pixels, at the image paint's opacity (as the canvas draws it) |
 
 Strokes' align, per-side widths, fitted dashes and end markers are resolved by the builder into these (inside: a clip to the shape around a double-width stroke; outside: a clip to `outside`; per side: an even-odd region filled), as the canvas renderer draws them.
 
@@ -93,7 +97,23 @@ The records are a tree in paint order: a record's ops, with its children drawn w
 
 ## Limits
 
-A message past a limit is refused whole, with the limit named (`ErrorCode.Limit`): records 4,000,000; path verbs 1,000,000; paths and ops per record 65,536; glyphs per run 65,536; dashes 64; gradient stops 64; message 512 MiB; glyph outlines 64 MiB; nesting 512 records and 512 clips; a frame's or image's longest side 8,192 px; images 256 MiB; a reader's reach 512 px (summed through readers, for bands); band rows 256 and export tiles 1,024 columns.
+A message past a limit is refused whole, with the limit named (`ErrorCode.Limit`): records 4,000,000; path verbs 1,000,000; paths and ops per record 65,536; glyphs per run 65,536; dashes 64; gradient stops 64; message 512 MiB; glyph outlines 64 MiB; the graph 1 GiB (its records and outlines, roughly); nesting 512 records and 512 clips; a frame's or image's longest side 8,192 px; images 256 MiB; a reader's reach 512 px (summed through readers, for bands); bands of at most 256 rows and 2 MiB of output, in export tiles of 1,024 columns.
+
+What the engine generates while drawing is held to limits too, so a legal document can't make a frame take unbounded time or memory before anything can fall back: a frame (or export tile) may generate 4,000,000 path elements (dashes, glyph runs expanded to outlines, shapes; glyphs off the viewport aren't expanded), and open 512 clips and layers at once. A transform that overflows on the device is refused. A refused frame is `Limit`; the editor draws that page with the canvas renderer.
+
+Numbers that aren't finite are refused wherever they are, including a value that overflows an f32 when the builder writes it: TypeScript writes them as they are, never as zero.
+
+The Worker build has smaller budgets (`WORKER_LIMITS` in `src/index.ts`), inside its module's 25 MiB memory maximum: messages 8 MiB, the graph 10 MiB, images 6 MiB, glyph outlines 4 MiB, and an export is admitted against the 25 MiB before it starts (see "Exports").
+
+## Exports
+
+An export renders in bands and tiles (`renderPng`, `renderPngStream`). Before its first byte it's refused, with a typed failure, when:
+- the page holds a shown record the engine doesn't draw, anywhere on it (not only in the export's crop);
+- the frame is larger than 8,192 px on a side;
+- another export is streaming on the engine;
+- its working set (a band, a tile with the readers' reach round it, the scene's rows, the compressor) wouldn't fit beside what the engine holds under its memory budget.
+
+While it streams the engine is pinned: messages and image changes are refused (`ErrorCode.State`), so every band draws one revision. It ends when it's read to the end, fails (the stream errors with the engine's code) or is cancelled; each lets the engine take changes again.
 
 ## Versioning
 

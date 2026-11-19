@@ -39,6 +39,16 @@ export type Result<T = undefined> =
 
 export type Failure = Extract<Result, { ok: false }>;
 
+/** An engine failure where a stream must throw (a PNG stream's error): it keeps the code. */
+export class EngineFailure extends Error {
+  readonly code: ErrorCode;
+  constructor(failure: Failure) {
+    super(failure.message);
+    this.name = "EngineFailure";
+    this.code = failure.code;
+  }
+}
+
 export interface FrameStats {
   readonly records: number;
   readonly culled: number;
@@ -47,7 +57,30 @@ export interface FrameStats {
   readonly maskHits: number;
   readonly maskMisses: number;
   readonly maskBytes: number;
+  /** Records drawn coarse (unreadable text as bars) and skipped as specks. */
+  readonly coarse: number;
+  readonly specks: number;
+  /** Made from the last frame (a pan shifted, a zoom scaled): a stand-in until an exact frame. */
+  readonly standin: boolean;
+  /** No stand-ins and no level of detail: the frame is what an export would draw. */
+  readonly exact: boolean;
+  /** The frame reached the canvas (false: the canvas couldn't take it now; show another). */
+  readonly presented: boolean;
+  /** How a GPU frame was made. */
+  readonly plan: "whole" | "pan" | "zoom" | "unchanged";
+  /** Where a GPU frame's CPU time went, in milliseconds (see `rust/src/gpu.rs`). */
+  readonly ms: {
+    /** The walk and Vello's strips. */
+    readonly encode: number;
+    /** The renderer's preparing and uploading. */
+    readonly render: number;
+    /** Presenting and submitting. */
+    readonly submit: number;
+    readonly total: number;
+  };
 }
+
+const PLANS = ["whole", "pan", "zoom", "unchanged"] as const;
 
 export interface Camera {
   readonly zoom: number;
@@ -73,10 +106,12 @@ export interface GpuInfo {
 export const MAX_SIDE = 8192;
 /** Rows a band export renders at once, at most. */
 export const BAND_ROWS = 256;
+/** Bytes of output a band holds at once, at most. */
+export const BAND_BYTES = 2 << 20;
 
 /** Rows per band for a frame `width` wide: at most 2 MiB of rows, so an export's working set stays small. */
 export function bandRows(width: number): number {
-  return Math.max(16, Math.min(BAND_ROWS, Math.floor((2 << 20) / (Math.max(1, width) * 4))));
+  return Math.max(1, Math.min(BAND_ROWS, Math.floor(BAND_BYTES / (Math.max(1, width) * 4))));
 }
 
 const fail = (code: ErrorCode, message: string): Failure => ({ ok: false, code, message });
@@ -96,17 +131,57 @@ function stats(o: Glue.Outcome): FrameStats {
     maskHits: o.mask_hits,
     maskMisses: o.mask_misses,
     maskBytes: o.mask_bytes,
+    coarse: o.coarse,
+    specks: o.specks,
+    standin: o.standin,
+    exact: !o.standin && o.coarse === 0 && o.specks === 0,
+    presented: o.presented,
+    plan: PLANS[o.plan] ?? "whole",
+    ms: { encode: o.encode_ms, render: o.render_ms, submit: o.submit_ms, total: o.cpu_ms },
   };
 }
 
 const bg = (c: readonly [number, number, number, number]) => new Float32Array(c);
 
 export interface EngineOptions {
-  /** Bytes of rasterised glyph masks to keep per backend (default 16 MiB). */
+  /** Bytes of rasterised glyph masks to keep per backend (default 4 MiB). */
   readonly glyphMaskBytes?: number;
-  /** Bytes of image pixels to keep (default 256 MiB). */
+  /** Bytes of image pixels to keep (default 256 MiB; 6 MiB in the Worker build). */
   readonly imageBytes?: number;
+  /** Bytes the render graph may hold, roughly (default 1 GiB; 10 MiB in the Worker build). */
+  readonly graphBytes?: number;
+  /** Bytes of one display-list message (default 512 MiB; 8 MiB in the Worker build). */
+  readonly messageBytes?: number;
+  /** Bytes of glyph outlines (default 64 MiB; 4 MiB in the Worker build). */
+  readonly glyphOutlineBytes?: number;
+  /** Bytes the whole engine may hold, for admitting an export (0: no check; 25 MiB in the Worker build). */
+  readonly memoryBytes?: number;
+  /** Bytes of GPU memory the engine allocates (default 768 MiB). */
+  readonly gpuBytes?: number;
 }
+
+/**
+ * The Worker build's budgets, inside its 25 MiB of linear memory (decision 0040, "Worker
+ * memory"; the module's memory section holds the maximum): a message is copied in whole, and an
+ * export's working set (a 2 MiB band, a tile, the compressor) is admitted beside what's held.
+ */
+export const WORKER_LIMITS: Required<Omit<EngineOptions, "gpuBytes" | "glyphMaskBytes">> = {
+  memoryBytes: 25 << 20,
+  graphBytes: 10 << 20,
+  messageBytes: 8 << 20,
+  imageBytes: 6 << 20,
+  glyphOutlineBytes: 4 << 20,
+};
+
+const LIMIT_NAMES: Record<keyof EngineOptions, string> = {
+  glyphMaskBytes: "glyph_mask_bytes",
+  imageBytes: "image_bytes",
+  graphBytes: "graph_bytes",
+  messageBytes: "message_bytes",
+  glyphOutlineBytes: "glyph_outline_bytes",
+  memoryBytes: "memory_bytes",
+  gpuBytes: "gpu_bytes",
+};
 
 /** One loaded build of the engine's module. */
 export interface EngineModule {
@@ -114,18 +189,42 @@ export interface EngineModule {
   readonly build: "browser" | "worker";
   /** Bytes of WebAssembly memory now: it only grows, so after a render it's the peak. */
   memoryBytes(): number;
+  /** An instance trapped: engines made from here on get a new one (see `RenderEngine`). */
+  trapped?: boolean;
 }
 
 /** An engine: a render graph patched by display lists, drawn on the CPU or the GPU. */
 export class RenderEngine {
   readonly #module: EngineModule;
-  #engine: Glue.Engine | null;
+  #engine: Glue.Engine | null = null;
   #gpu: GpuInfo | null = null;
   #dead: Failure | null = null;
 
+  /**
+   * An engine on `module`. If an engine on it trapped, the module's instance is renewed first
+   * (its memory is gone with it: every engine on the old instance is dead).
+   */
   constructor(module: EngineModule, options: EngineOptions = {}) {
     this.#module = module;
-    this.#engine = new module.glue.Engine(options.glyphMaskBytes ?? 0, options.imageBytes ?? 0);
+    try {
+      if (module.trapped) {
+        module.glue.__drawpaneRenew();
+        module.trapped = false;
+      }
+      const engine = new module.glue.Engine(0, 0);
+      this.#engine = engine;
+      const limits: EngineOptions = {
+        ...(module.build === "worker" ? WORKER_LIMITS : {}),
+        ...options,
+      };
+      for (const [key, value] of Object.entries(limits) as Array<[keyof EngineOptions, number]>) {
+        if (value === undefined) continue;
+        const r = outcome(engine.setLimit(LIMIT_NAMES[key], value));
+        if (!r.ok) throw new Error(r.message);
+      }
+    } catch (err) {
+      this.#trapped(err);
+    }
   }
 
   get build(): "browser" | "worker" {
@@ -149,9 +248,31 @@ export class RenderEngine {
     return { count: this.#engine?.glyphs ?? 0, bytes: this.#engine?.glyphBytes ?? 0 };
   }
 
+  /** Bytes the engine holds, roughly: its graph, images and glyph masks. */
+  get heldBytes(): number {
+    return this.#engine?.heldBytes ?? 0;
+  }
+
   /** Whether the instance trapped (or was disposed): every call fails from then on. */
   get dead(): boolean {
     return this.#dead !== null;
+  }
+
+  /** Why the engine is dead, if it is. */
+  get failure(): Failure | null {
+    return this.#dead;
+  }
+
+  #trapped(err: unknown): Failure {
+    // A trap (`RuntimeError: unreachable`, or memory that can't grow) leaves the instance
+    // unusable. Its objects are let go without calling into it, never freed into a new one.
+    try {
+      this.#engine?.__destroy_into_raw();
+    } catch {}
+    this.#engine = null;
+    this.#module.trapped = true;
+    this.#dead = fail(ErrorCode.Trap, `the engine trapped: ${String(err)}`);
+    return this.#dead;
   }
 
   #call<T>(fn: (e: Glue.Engine) => T): T | Failure {
@@ -161,14 +282,11 @@ export class RenderEngine {
     try {
       return fn(e);
     } catch (err) {
-      // A trap (`RuntimeError: unreachable`) leaves the instance unusable.
-      this.#dead = fail(ErrorCode.Trap, `the engine trapped: ${String(err)}`);
-      this.#engine = null;
-      return this.#dead;
+      return this.#trapped(err);
     }
   }
 
-  /** Applies a display-list message, all or nothing. */
+  /** Applies a display-list message, all or nothing. Refused while an export streams. */
   apply(bytes: Uint8Array): Result<Applied> {
     const r = this.#call((e) => {
       const o = e.apply(bytes);
@@ -180,24 +298,34 @@ export class RenderEngine {
   }
 
   /** Where pixels may have changed on the device since the last apply, readers included. */
-  dirty(camera: Camera): Float64Array {
-    const r = this.#call((e) => e.dirtyFor(camera.zoom, camera.x, camera.y, camera.dpr));
-    return r instanceof Float64Array ? r : new Float64Array();
+  dirty(camera: Camera): Result<Float64Array> {
+    return this.#value(() =>
+      this.#call((e) => e.dirtyFor(camera.zoom, camera.x, camera.y, camera.dpr)),
+    );
   }
 
   /** A record's children in paint order, as the engine holds them (tests, debugging). */
-  children(id: number): number[] {
-    const r = this.#call((e) => e.children(id));
-    return r instanceof Uint32Array ? [...r] : [];
+  children(id: number): Result<number[]> {
+    return this.#value(() => this.#call((e) => [...e.children(id)]));
   }
 
   /** Records the builder flagged as needing what the engine doesn't draw: [id, bits] pairs. */
-  unsupported(): Array<[number, number]> {
-    const r = this.#call((e) => e.unsupported());
-    if (!(r instanceof Uint32Array)) return [];
-    const out: Array<[number, number]> = [];
-    for (let i = 0; i + 1 < r.length; i += 2) out.push([r[i] as number, r[i + 1] as number]);
-    return out;
+  unsupported(): Result<Array<[number, number]>> {
+    return this.#value(() =>
+      this.#call((e) => {
+        const r = e.unsupported();
+        const out: Array<[number, number]> = [];
+        for (let i = 0; i + 1 < r.length; i += 2) out.push([r[i] as number, r[i + 1] as number]);
+        return out;
+      }),
+    );
+  }
+
+  /** A value or the failure that stopped it, as a Result. */
+  #value<T>(get: () => T | Failure): Result<T> {
+    const v = get();
+    if (isFailure(v)) return v;
+    return { ok: true, value: v } as Result<T>;
   }
 
   putImage(
@@ -210,8 +338,9 @@ export class RenderEngine {
     return this.#call((e) => outcome(e.putImage(id, width, height, rgba, premultiplied))) as Result;
   }
 
-  dropImage(id: number): void {
-    this.#call((e) => e.dropImage(id));
+  /** Lets an image's pixels go (refused while an export streams). */
+  dropImage(id: number): Result {
+    return this.#call((e) => outcome(e.dropImage(id))) as Result;
   }
 
   /** Draws a frame on the CPU: straight RGBA8. */
@@ -239,6 +368,12 @@ export class RenderEngine {
     }) as Result<{ pixels: Uint8Array; stats: FrameStats }>;
   }
 
+  /** Rows a band of a frame `width` wide may have: at most 2 MiB of output. */
+  bandRows(width: number): number {
+    const r = this.#call((e) => e.bandRows(width));
+    return typeof r === "number" ? r : bandRows(width);
+  }
+
   /**
    * Draws a large frame band by band on the CPU, in bounded memory (the band, never the frame):
    * `onBand` gets each band's rows, straight RGBA8. Frames over `MAX_SIDE` are refused.
@@ -251,6 +386,7 @@ export class RenderEngine {
     onBand: (y0: number, rows: number, pixels: Uint8Array) => void,
     rows = bandRows(width),
   ): Result {
+    rows = Math.max(1, Math.min(rows, this.bandRows(width)));
     for (let y0 = 0; y0 < height; y0 += rows) {
       const n = Math.min(rows, height - y0);
       const r = this.#call((e) => {
@@ -267,15 +403,18 @@ export class RenderEngine {
             n,
           ),
         );
-        if (res.ok) onBand(y0, n, e.pixels());
-        return res;
-      }) as Result;
+        return res.ok ? { ok: true as const, value: e.pixels() } : res;
+      }) as Result<Uint8Array>;
       if (!r.ok) return r;
+      onBand(y0, n, r.value);
     }
     return { ok: true };
   }
 
-  /** A PNG of a large frame, rendered and compressed band by band: its chunks, in order. */
+  /**
+   * A PNG of a large frame, rendered and compressed band by band: its chunks, in order. The
+   * engine is pinned to one revision while it's made (patches are refused meanwhile).
+   */
   renderPng(
     width: number,
     height: number,
@@ -284,30 +423,56 @@ export class RenderEngine {
     onChunk: (bytes: Uint8Array) => void,
     rows = bandRows(width),
   ): Result {
-    return this.#call((e) => {
-      const begun = outcome(e.pngBegin(width, height));
-      if (!begun.ok) return begun;
+    const begun = this.#begin(width, height, camera);
+    if (!begun.ok) return begun;
+    rows = Math.max(1, Math.min(rows, this.bandRows(width)));
+    try {
       for (let y0 = 0; y0 < height; y0 += rows) {
         const n = Math.min(rows, height - y0);
-        const r = outcome(
-          e.pngBand(camera.zoom, camera.x, camera.y, camera.dpr, bg(background), n),
-        );
-        if (!r.ok) {
-          e.pngEnd();
-          return r;
-        }
-        const chunk = e.pngTake();
-        if (chunk.length > 0) onChunk(chunk);
+        const r = this.#band(camera, background, n);
+        if (!r.ok) return r;
+        if (r.value.length > 0) onChunk(r.value);
       }
-      onChunk(e.pngEnd());
-      return { ok: true as const };
-    }) as Result;
+      const last = this.#call((e) => e.pngEnd());
+      if (isFailure(last)) return last;
+      onChunk(last);
+      return { ok: true };
+    } finally {
+      this.#call((e) => e.pngAbort());
+    }
+  }
+
+  #begin(width: number, height: number, camera: Camera): Result {
+    return this.#call((e) =>
+      outcome(e.pngBegin(width, height, camera.zoom, camera.x, camera.y, camera.dpr)),
+    ) as Result;
+  }
+
+  #band(
+    camera: Camera,
+    background: readonly [number, number, number, number],
+    rows: number,
+  ): Result<Uint8Array> {
+    return this.#call((e) => {
+      const res = outcome(
+        e.pngBand(camera.zoom, camera.x, camera.y, camera.dpr, bg(background), rows),
+      );
+      return res.ok ? { ok: true as const, value: e.pngTake() } : res;
+    }) as Result<Uint8Array>;
   }
 
   /**
    * A PNG of a large frame as a stream: each band is rendered and compressed when the reader
    * asks for more, so neither the picture nor the compressed file is held whole (a Worker
-   * returns it as a response body). A failure errors the stream with the engine's message.
+   * returns it as a response body).
+   *
+   * - Refused before any byte (a typed failure) when the page holds a layer the engine doesn't
+   *   draw, the frame is too large, another export is streaming, or it wouldn't fit the
+   *   engine's memory budget.
+   * - Pinned to one revision: until the stream ends, errors or is cancelled, the engine refuses
+   *   patches and image changes (`ErrorCode.State`).
+   * - A failure after it starts errors the stream with an `EngineFailure`, which keeps the code.
+   * - `onEnd` is called once, however it ends (done, failed, cancelled), to let the engine go.
    */
   renderPngStream(
     width: number,
@@ -315,40 +480,52 @@ export class RenderEngine {
     camera: Camera,
     background: readonly [number, number, number, number],
     rows = bandRows(width),
+    onEnd: () => void = () => {},
   ): Result<ReadableStream<Uint8Array>> {
-    const begun = this.#call((e) => outcome(e.pngBegin(width, height))) as Result;
+    const begun = this.#begin(width, height, camera);
     if (!begun.ok) return begun;
+    rows = Math.max(1, Math.min(rows, this.bandRows(width)));
     let y0 = 0;
+    let ended = false;
+    const end = () => {
+      if (ended) return;
+      ended = true;
+      this.#call((e) => e.pngAbort());
+      onEnd();
+    };
     const stream = new ReadableStream<Uint8Array>({
       // Each pull draws bands until there are bytes to hand on (the compressor holds small
       // outputs back): a pull that enqueues nothing isn't always called again.
       pull: (controller) => {
-        for (;;) {
-          if (y0 >= height) {
-            const last = this.#call((e) => e.pngEnd());
-            if (last instanceof Uint8Array) controller.enqueue(last);
-            controller.close();
-            return;
+        try {
+          for (;;) {
+            if (y0 >= height) {
+              const last = this.#call((e) => e.pngEnd());
+              if (isFailure(last)) throw new EngineFailure(last);
+              if (last.length > 0) controller.enqueue(last);
+              end();
+              controller.close();
+              return;
+            }
+            const n = Math.min(rows, height - y0);
+            const r = this.#band(camera, background, n);
+            if (!r.ok) throw new EngineFailure(r);
+            y0 += n;
+            if (r.value.length > 0) {
+              controller.enqueue(r.value);
+              return;
+            }
           }
-          const n = Math.min(rows, height - y0);
-          const r = this.#call((e) => {
-            const res = outcome(
-              e.pngBand(camera.zoom, camera.x, camera.y, camera.dpr, bg(background), n),
-            );
-            return res.ok ? { ok: true as const, value: e.pngTake() } : res;
-          }) as Result<Uint8Array>;
-          if (!r.ok) {
-            this.#call((e) => e.pngEnd());
-            controller.error(new Error(r.message));
-            return;
-          }
-          y0 += n;
-          if (r.value.length > 0) {
-            controller.enqueue(r.value);
-            return;
-          }
+        } catch (err) {
+          end();
+          controller.error(
+            err instanceof EngineFailure
+              ? err
+              : new EngineFailure(fail(ErrorCode.State, String(err))),
+          );
         }
       },
+      cancel: () => end(),
     });
     return { ok: true, value: stream };
   }
@@ -436,27 +613,51 @@ export class RenderEngine {
   }
 
   /** Resolves when the GPU has finished what it was given (how the bench times GPU work). */
-  async gpuFinished(): Promise<void> {
+  async gpuFinished(): Promise<Result> {
     const p = this.#call((e) => e.gpuFinished?.());
-    if (p instanceof Promise) await p;
-  }
-
-  /** The last GPU frame, straight RGBA8, read back through a buffer (not the canvas). */
-  async gpuPixels(): Promise<Result<Uint8Array>> {
-    const p = this.#call((e) => e.gpuPixels?.());
+    if (isFailure(p)) return p;
     if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no GPU");
     try {
-      return { ok: true, value: await p };
+      await p;
+      return { ok: true };
     } catch (err) {
       return fail(ErrorCode.Gpu, String(err));
     }
   }
 
-  dispose(): void {
-    this.#engine?.free();
-    this.#engine = null;
-    this.#dead = fail(ErrorCode.State, "the engine was disposed");
+  /** The last GPU frame, straight RGBA8, read back through a buffer (not the canvas). */
+  async gpuPixels(): Promise<Result<Uint8Array>> {
+    const p = this.#call((e) => e.gpuPixels?.());
+    if (isFailure(p)) return p;
+    if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no GPU");
+    let v: Uint8Array | Glue.Outcome;
+    try {
+      v = await p;
+    } catch (err) {
+      return this.#trapped(err);
+    }
+    if (v instanceof Uint8Array) return { ok: true, value: v };
+    return outcome(v) as Result<Uint8Array>;
   }
+
+  dispose(): void {
+    try {
+      this.#engine?.free();
+    } catch (err) {
+      this.#trapped(err);
+    }
+    this.#engine = null;
+    this.#dead ??= fail(ErrorCode.State, "the engine was disposed");
+  }
+}
+
+function isFailure(v: unknown): v is Failure {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    (v as { ok?: unknown }).ok === false &&
+    typeof (v as { code?: unknown }).code === "number"
+  );
 }
 
 interface GPULike {

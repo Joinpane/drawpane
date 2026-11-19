@@ -484,6 +484,20 @@ fn run_sequences(readers: bool, default_cases: u32) {
                 }
             }
             before = after;
+            // Now and then the warmed engine (its glyph masks and images cached) takes a fresh
+            // list in place of its graph, as a page switch does: it must draw what a new one does.
+            if step % 4 == 3 {
+                revision += 1;
+                patched
+                    .apply(&model.fresh(revision))
+                    .unwrap_or_else(|e| panic!("seed {s} step {step}: fresh replacement refused: {e}"));
+                let replaced = render(&mut patched, cam);
+                assert!(
+                    replaced == expected,
+                    "seed {s} step {step}: a fresh list on a warmed engine differs from a new engine's"
+                );
+                before = replaced;
+            }
         }
     }
     assert!(changed_pixels > 0, "the edits changed nothing: the test tests nothing");
@@ -689,5 +703,8 @@ fn exports_larger_than_the_cap_are_refused() {
     let err = e.render_band(8193, 100, cam, [1.0; 4], 0, 10).expect_err("too wide");
     assert_eq!(err.code, ErrorCode::Limit);
     assert!(err.message.contains("8192"), "{}", err.message);
-    assert!(e.render_band(8192, 8192, cam, [1.0; 4], 8000, 192).is_ok());
+    assert!(e.render_band(8192, 8192, cam, [1.0; 4], 8128, 64).is_ok());
+    // A band of more than 2 MiB is refused with the limit named.
+    let err = e.render_band(8192, 8192, cam, [1.0; 4], 0, 65).expect_err("too tall");
+    assert_eq!(err.code, ErrorCode::Limit);
 }

@@ -5,6 +5,7 @@ use crate::error::{EngineError, Result};
 use crate::geometry;
 use crate::limits::Limits;
 use crate::wire::Reader;
+use std::mem::size_of;
 use vello_common::kurbo::{Affine, BezPath, Rect};
 
 pub type Rgba = [f32; 4];
@@ -73,6 +74,52 @@ impl CompactPath {
 
     pub fn is_empty(&self) -> bool {
         self.verbs.is_empty()
+    }
+
+    /// Path elements it expands to.
+    pub fn len(&self) -> usize {
+        self.verbs.len()
+    }
+
+    /// Bytes it holds.
+    pub fn heap_bytes(&self) -> usize {
+        self.verbs.capacity() + self.coords.capacity() * 4
+    }
+
+    /// The length of its control polygon: at least the length of the curve it draws.
+    pub fn polygon_length(&self) -> f64 {
+        let mut total = 0.0f64;
+        let mut last: Option<(f32, f32)> = None;
+        let mut start: Option<(f32, f32)> = None;
+        let mut c = self.coords.as_chunks::<2>().0.iter();
+        for v in &self.verbs {
+            let n = match v {
+                0 => {
+                    last = c.next().map(|xy| (xy[0], xy[1]));
+                    start = last;
+                    continue;
+                }
+                1 => 1,
+                2 => 2,
+                3 => 3,
+                _ => {
+                    if let (Some(a), Some(b)) = (last, start) {
+                        total += f64::from(a.0 - b.0).hypot(f64::from(a.1 - b.1));
+                    }
+                    last = start;
+                    continue;
+                }
+            };
+            for _ in 0..n {
+                if let Some(xy) = c.next() {
+                    if let Some(a) = last {
+                        total += f64::from(xy[0] - a.0).hypot(f64::from(xy[1] - a.1));
+                    }
+                    last = Some((xy[0], xy[1]));
+                }
+            }
+        }
+        total
     }
 
     pub fn to_bez(&self) -> BezPath {
@@ -162,8 +209,17 @@ pub enum Paint {
     /// tens of thousands of records under its cap).
     Gradient(Box<GradientPaint>),
     Image(Box<ImagePaint>),
-    /// An image still loading: a checkerboard fixed to device pixels.
-    Placeholder,
+    /// An image still loading: a checkerboard fixed to device pixels, at the image paint's
+    /// opacity (as the canvas renderer draws it).
+    Placeholder(f32),
+}
+
+fn paint_bytes(p: &Paint) -> usize {
+    match p {
+        Paint::Gradient(g) => size_of::<GradientPaint>() + g.stops.capacity() * size_of::<(f32, Rgba)>(),
+        Paint::Image(_) => size_of::<ImagePaint>(),
+        _ => 0,
+    }
 }
 
 /// The unit gradient (linear along x from 0 to 1; radial, angular and diamond around the origin
@@ -262,6 +318,42 @@ impl Record {
         })
     }
 
+    /// Bytes it holds, roughly: what the render graph is held to (`Limits::graph_bytes`).
+    pub fn heap_bytes(&self) -> usize {
+        let mut b = size_of::<Record>();
+        for p in &self.paths {
+            b += size_of::<PathEntry>()
+                + match p {
+                    PathEntry::Path(c) => c.heap_bytes(),
+                    PathEntry::Glyphs { glyphs, .. } => glyphs.capacity() * size_of::<GlyphInstance>(),
+                    _ => 0,
+                };
+        }
+        for op in self.ops.iter().chain(&self.coarse) {
+            b += size_of::<Op>()
+                + match op {
+                    Op::Stroke { style, paint, .. } => {
+                        size_of::<StrokeStyle>() + style.dashes.capacity() * 4 + paint_bytes(paint)
+                    }
+                    Op::Fill { paint, .. } => paint_bytes(paint),
+                    _ => 0,
+                };
+        }
+        b
+    }
+
+    /// The length of an entry's outline, at most (a glyph run's isn't known here: None).
+    pub fn entry_length(&self, i: u32) -> Option<f64> {
+        match self.paths.get(i as usize)? {
+            PathEntry::Path(p) => Some(p.polygon_length()),
+            // An ellipse's perimeter is shorter than its box's.
+            PathEntry::Rect { w, h, .. } | PathEntry::Ellipse { w, h } => {
+                Some(2.0 * (f64::from(w.abs()) + f64::from(h.abs())))
+            }
+            _ => None,
+        }
+    }
+
     /// A record that draws nothing (an empty group root).
     pub fn empty() -> Self {
         Self {
@@ -328,14 +420,8 @@ impl Record {
             PathEntry::Path(p) => Some(p.to_bez()),
             PathEntry::Rect { w, h, radii, smoothing } => Some(geometry::rounded_rect(*w, *h, *radii, *smoothing)),
             PathEntry::Ellipse { w, h } => Some(geometry::ellipse(*w, *h)),
-            PathEntry::Outside(of) => {
-                let mut p = geometry::far_rect();
-                if let Some(inner) = self.entry_path(*of) {
-                    p.extend(inner);
-                }
-                Some(p)
-            }
-            PathEntry::Glyphs { .. } => None,
+            // Built where it's drawn, around the viewport (`exec.rs`).
+            PathEntry::Outside(_) | PathEntry::Glyphs { .. } => None,
         }
     }
 }
@@ -356,17 +442,18 @@ fn paint(r: &mut Reader, limits: &Limits) -> Result<Paint> {
                 _ => GradientKind::Diamond,
             };
             let matrix = r.affine()?;
-            let n = r.count(limits.stops, "gradient stops")?;
+            let n = r.count(limits.stops, "gradient stops", 20)?;
             if n == 0 {
                 return Err(EngineError::malformed("a gradient without stops"));
             }
             let mut stops = Vec::with_capacity(n);
-            let mut last = 0.0f32;
             for _ in 0..n {
-                let pos = r.f32()?.clamp(0.0, 1.0).max(last);
-                last = pos;
+                let pos = r.f32()?.clamp(0.0, 1.0);
                 stops.push((pos, r.rgba()?));
             }
+            // As a CanvasGradient orders its stops: by offset, those at one offset in the order
+            // they were added.
+            stops.sort_by(|a, b| a.0.total_cmp(&b.0));
             Paint::Gradient(Box::new(GradientPaint { kind, matrix, stops }))
         }
         6 => {
@@ -381,7 +468,7 @@ fn paint(r: &mut Reader, limits: &Limits) -> Result<Paint> {
                 opacity,
             }))
         }
-        7 => Paint::Placeholder,
+        7 => Paint::Placeholder(r.f32()?.clamp(0.0, 1.0)),
         k => return Err(EngineError::malformed(format!("unknown paint kind {k}"))),
     })
 }
@@ -394,7 +481,7 @@ fn stroke_style(r: &mut Reader, limits: &Limits) -> Result<StrokeStyle> {
         return Err(EngineError::malformed("unknown stroke join or cap"));
     }
     let miter = r.f32_nonneg()?;
-    let n = r.count(limits.dashes, "dashes")?;
+    let n = r.count(limits.dashes, "dashes", 4)?;
     let mut dashes = Vec::with_capacity(n);
     for _ in 0..n {
         dashes.push(r.f32_nonneg()?);
@@ -415,7 +502,7 @@ fn stroke_style(r: &mut Reader, limits: &Limits) -> Result<StrokeStyle> {
 }
 
 fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool) -> Result<Vec<Op>> {
-    let n = r.count(limits.record_items, "ops")?;
+    let n = r.count(limits.record_items, "ops", 4)?;
     let mut out = Vec::with_capacity(n);
     let mut clips = 0usize;
     let mut children = false;
@@ -499,7 +586,7 @@ pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
     let coarse_below = r.f32_nonneg()?;
     let reach = r.f32_nonneg()?;
     let unsupported = r.u32()?;
-    let n = r.count(limits.record_items, "paths")?;
+    let n = r.count(limits.record_items, "paths", 8)?;
     let mut paths = Vec::with_capacity(n);
     for i in 0..n {
         paths.push(match r.u32()? {
@@ -523,7 +610,7 @@ pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
             },
             4 => {
                 let scale = r.f32()?;
-                let count = r.count(limits.run_glyphs, "glyphs")?;
+                let count = r.count(limits.run_glyphs, "glyphs", 12)?;
                 let mut glyphs = Vec::with_capacity(count);
                 for _ in 0..count {
                     glyphs.push(GlyphInstance {
@@ -564,5 +651,29 @@ pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
     if record.group() && record.ops.iter().any(|op| !matches!(op, Op::Children)) {
         return Err(EngineError::malformed("a group record with paint of its own"));
     }
+    for op in record.ops.iter().chain(&record.coarse) {
+        if let Op::Stroke { path, style, .. } = op
+            && let Some(length) = record.entry_length(*path)
+        {
+            check_dashes(style, length, limits)?;
+        }
+    }
     Ok(record)
+}
+
+/// Refuses a dash pattern that would cut a stroke `length` long into more pieces than a frame may
+/// generate (`Limits::frame_verbs`): a pattern far finer than its path stalls or exhausts a
+/// stroker, before any drawing can refuse it.
+pub fn check_dashes(style: &StrokeStyle, length: f64, limits: &Limits) -> Result<()> {
+    if style.dashes.is_empty() || length <= 0.0 {
+        return Ok(());
+    }
+    let period: f64 = style.dashes.iter().map(|d| f64::from(*d)).sum();
+    let pieces = length / period * style.dashes.len() as f64;
+    if !pieces.is_finite() || pieces > limits.frame_verbs as f64 {
+        return Err(EngineError::limit(format!(
+            "a dash pattern repeating every {period:e} units on a stroke {length:.0} units long"
+        )));
+    }
+    Ok(())
 }

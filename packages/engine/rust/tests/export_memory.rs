@@ -25,7 +25,7 @@ unsafe impl GlobalAlloc for Counting {
 static A: Counting = Counting;
 
 fn scene(e: &mut Engine) {
-    let mut w = W::new(ANY, 1);
+    let mut w = W::new(ANY, e.store.revision + 1);
     w.reset();
     for i in 0..900u32 {
         let mut r = Rec::new(
@@ -67,11 +67,13 @@ fn band_peak(side: u32) -> usize {
         y: 0.0,
         dpr: 1.0,
     };
+    // Bands of at most 2 MiB (64 rows at 8,192 px).
+    let rows = e.band_rows(side);
     // Warm: the first band allocates what every band reuses.
-    e.render_band(side, side, cam, [1.0; 4], 0, 128).expect("band");
+    e.render_band(side, side, cam, [1.0; 4], 0, rows).expect("band");
     let base = LIVE.load(Ordering::SeqCst);
     PEAK.store(base, Ordering::SeqCst);
-    e.render_band(side, side, cam, [1.0; 4], side / 2, 128).expect("band");
+    e.render_band(side, side, cam, [1.0; 4], side / 2, rows).expect("band");
     PEAK.load(Ordering::SeqCst) - base + base
 }
 
@@ -85,9 +87,9 @@ fn an_export_band_is_bounded() {
         mib(small),
         mib(large)
     );
-    // The band's own rows (8192 × 128 × 4 = 4 MiB) and its tiles are the difference allowed.
+    // The band's own rows (2 MiB) and its tiles are the difference allowed.
     assert!(
-        large < small + 8 * 1024 * 1024,
+        large < small + 6 * 1024 * 1024,
         "{:.1} MiB against {:.1}",
         mib(large),
         mib(small)
@@ -106,8 +108,7 @@ fn patches_dont_leak() {
     };
     e.render_cpu(800, 600, cam, [1.0; 4], true).expect("render");
     let settled = LIVE.load(Ordering::SeqCst);
-    let mut revision = 1;
-    for i in 0..400u32 {
+    for (i, revision) in (0..400u32).zip(1u32..) {
         let mut w = W::new(revision, revision + 1);
         let id = 1 + (i * 7) % 900;
         if i % 2 == 0 {
@@ -127,7 +128,6 @@ fn patches_dont_leak() {
             w.set(id, 0, &r);
         }
         e.apply(&w.finish()).expect("patch");
-        revision += 1;
         if i % 50 == 0 {
             e.render_cpu(800, 600, cam, [1.0; 4], true).expect("render");
         }

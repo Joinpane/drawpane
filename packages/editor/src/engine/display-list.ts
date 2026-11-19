@@ -10,8 +10,13 @@
  * - Layers keep stable handles (a layer's id interned to a number for the session), and glyph
  *   outlines are interned once by their path data, so a font's glyphs cross once.
  *
- * Messages are made for the revision the engine holds: apply each in order, and after an
- * engine error call `build` again.
+ * Messages are made for the revision the engine holds: apply each in order and tell the builder
+ * what came of it (`acknowledge`); after a refusal its next message is a fresh list, for a
+ * revision past the engine's.
+ *
+ * Glyph outlines are counted by the records using them: one no record uses any more is freed
+ * (`glyphFree`) at the end of the message that let it go. A file's saved outlines (its glyph
+ * sets) can change on their own; text drawn from them is encoded again when they do.
  */
 import {
   ANY_REVISION,
@@ -22,6 +27,7 @@ import {
 } from "@drawpane/engine/wire";
 import type { NodeRecord } from "@drawpane/model";
 import { isActiveMask } from "../masks";
+import { glyphTable } from "../saved-glyphs";
 import type { Scene } from "../scene";
 import type { TextMeasurer } from "../text";
 import { encodeLayer, type LayerContext, localTransform } from "./layer";
@@ -76,6 +82,15 @@ export class DisplayListBuilder {
   readonly #image: (ref: string) => EngineImage | null;
   #page: string | null = null;
   #revision = 0;
+  /** The engine refused a message: the next one is a fresh list. */
+  #stale = false;
+  /** The glyph table's version text was last encoded from. */
+  #glyphTable = -1;
+  /** Bytes of the last fresh list. */
+  #lastFresh = 0;
+  /** For counting each glyph once per record (`#useGlyphs`). */
+  #stamp = 0;
+  readonly #seen = new Map<number, number>();
   #version = -1;
   #generation = -1;
   #next = 1;
@@ -84,10 +99,19 @@ export class DisplayListBuilder {
   readonly #nodes = new Map<string, NodeRecord>();
   readonly #kids = new Map<string, Set<string>>();
   readonly #imagesOf = new Map<string, Set<string>>();
+  /** The image refs each layer's record paints. */
+  readonly #imagesBy = new Map<string, readonly string[]>();
   readonly #texts = new Set<string>();
   readonly #pendingText = new Set<string>();
   readonly #extra = new Set<string>();
   #glyphs = new Map<string, number>();
+  /** Each glyph handle's path data, while it's defined. */
+  #glyphData = new Map<number, string>();
+  /** Records using each glyph handle (once per record), and the handles each layer's record uses. */
+  #glyphRefs = new Map<number, number>();
+  readonly #glyphsOf = new Map<string, readonly number[]>();
+  /** Glyphs whose last record let go of them in this message: freed at its end unless used again. */
+  readonly #unused = new Set<number>();
   /** Shaped glyphs by identity: hashing an outline's path data costs more than the rest of a glyph. */
   #shaped = new WeakMap<object, number>();
   #nextGlyph = 1;
@@ -119,6 +143,17 @@ export class DisplayListBuilder {
   /** The revision the engine holds once it has applied every message written so far. */
   get revision(): number {
     return this.#revision;
+  }
+
+  /**
+   * What the engine did with the last message: applied, or refused while holding
+   * `engineRevision`. After a refusal the builder's picture of the engine is wrong, so its next
+   * message is a fresh list, for a revision past the engine's.
+   */
+  acknowledge(applied: boolean, engineRevision: number): void {
+    if (applied) return;
+    this.#revision = Math.max(this.#revision, engineRevision);
+    this.#stale = true;
   }
 
   /** A layer's engine handle, if it's in the list. */
@@ -156,6 +191,7 @@ export class DisplayListBuilder {
       if (g === undefined) {
         g = this.#nextGlyph++;
         this.#glyphs.set(d, g);
+        this.#glyphData.set(g, d);
         this.#newGlyphs.push([g, d]);
       }
       return g;
@@ -167,7 +203,8 @@ export class DisplayListBuilder {
       glyph,
       shapedGlyph: (g) => {
         let h = this.#shaped.get(g);
-        if (h === undefined) {
+        // A handle freed since is gone: intern the outline again.
+        if (h === undefined || !this.#glyphData.has(h)) {
           h = glyph(g.d);
           this.#shaped.set(g, h);
         }
@@ -180,18 +217,76 @@ export class DisplayListBuilder {
 
   #encode(node: NodeRecord, ctx: LayerContext): WireRecord {
     const e = encodeLayer(node, ctx);
+    this.#useGlyphs(node.id, e.record);
     this.#nodes.set(node.id, node);
     if (node.type === "text") this.#texts.add(node.id);
     if (e.textPending) this.#pendingText.add(node.id);
     else this.#pendingText.delete(node.id);
-    for (const ref of e.images) {
-      const set = this.#imagesOf.get(ref) ?? new Set<string>();
-      this.#imagesOf.set(ref, set);
-      set.add(node.id);
-    }
+    this.#useImages(node.id, e.images);
     if (e.record.unsupported) this.unsupported.set(node.id, e.record.unsupported);
     else this.unsupported.delete(node.id);
     return e.record;
+  }
+
+  /** Notes the images a layer's record paints now, forgetting those it painted before. */
+  #useImages(id: string, refs: readonly string[]): void {
+    for (const ref of this.#imagesBy.get(id) ?? []) {
+      const set = this.#imagesOf.get(ref);
+      set?.delete(id);
+      if (set?.size === 0) this.#imagesOf.delete(ref);
+    }
+    for (const ref of refs) {
+      const set = this.#imagesOf.get(ref) ?? new Set<string>();
+      this.#imagesOf.set(ref, set);
+      set.add(id);
+    }
+    if (refs.length > 0) this.#imagesBy.set(id, refs);
+    else this.#imagesBy.delete(id);
+  }
+
+  /** The image refs the page's records paint now: the engine may let the others go. */
+  imagesInUse(): ReadonlySet<string> {
+    return new Set(this.#imagesOf.keys());
+  }
+
+  /** Counts the glyphs a layer's new record uses, and lets go of those its old one did. */
+  #useGlyphs(id: string, record: WireRecord | null): void {
+    // Each glyph once per record: marked with this call's stamp as it's seen.
+    const now: number[] = [];
+    if (record) {
+      const stamp = ++this.#stamp;
+      for (const p of record.paths)
+        if (p.kind === "glyphs")
+          for (let i = 0; i < p.glyphs.length; i += 3) {
+            const g = p.glyphs[i] as number;
+            if (this.#seen.get(g) === stamp) continue;
+            this.#seen.set(g, stamp);
+            now.push(g);
+          }
+    }
+    for (const g of now) this.#glyphRefs.set(g, (this.#glyphRefs.get(g) ?? 0) + 1);
+    for (const g of this.#glyphsOf.get(id) ?? []) {
+      const n = (this.#glyphRefs.get(g) ?? 1) - 1;
+      if (n > 0) this.#glyphRefs.set(g, n);
+      else {
+        this.#glyphRefs.delete(g);
+        this.#unused.add(g);
+      }
+    }
+    if (now.length > 0) this.#glyphsOf.set(id, now);
+    else this.#glyphsOf.delete(id);
+  }
+
+  /** Frees the glyphs no record uses any more (after the commands that let them go). */
+  #freeGlyphs(w: ListWriter): void {
+    for (const g of this.#unused) {
+      const d = this.#glyphData.get(g);
+      if (this.#glyphRefs.has(g) || d === undefined) continue;
+      w.glyphFree(g);
+      this.#glyphData.delete(g);
+      if (this.#glyphs.get(d) === g) this.#glyphs.delete(d);
+    }
+    this.#unused.clear();
   }
 
   #handleOf(id: string): number {
@@ -207,10 +302,12 @@ export class DisplayListBuilder {
     return node.parent === this.#page ? ROOT : (this.#handles.get(node.parent) ?? ROOT);
   }
 
-  #writeGlyphs(w: ListWriter): void {
+  /** Defines the glyphs interned since the last call (before the records that use them). */
+  #writeGlyphs(w: ListWriter): number {
+    const n = this.#newGlyphs.length;
     for (const [g, d] of this.#newGlyphs) w.glyph(g, glyphPath(d));
-    this.stats = { ...this.stats, glyphs: this.#newGlyphs.length };
     this.#newGlyphs = [];
+    return n;
   }
 
   /**
@@ -227,27 +324,48 @@ export class DisplayListBuilder {
     return list;
   }
 
-  /** A fresh list of every layer on `pageId` (or of just `roots` on it, placed on the page). */
+  /**
+   * A fresh list of every layer on `pageId` (or of just `roots` on it, placed on the page),
+   * written as it's walked: each record goes into the message as it's encoded, after the glyphs
+   * it brings, so the page is never held as records too.
+   */
   build(pageId: string, roots?: readonly string[]): Uint8Array {
     const t0 = performance.now();
     const doc = this.#scene.doc;
     this.#page = pageId;
     this.#version = doc.version;
     this.#generation = this.#measurer.generation ?? 0;
+    this.#glyphTable = glyphTable(doc).version;
+    this.#stale = false;
     this.#handles.clear();
     this.#nodes.clear();
     this.#kids.clear();
     this.#imagesOf.clear();
+    this.#imagesBy.clear();
     this.#texts.clear();
     this.#pendingText.clear();
     this.#extra.clear();
     this.unsupported.clear();
     this.#glyphs = new Map();
+    this.#glyphData = new Map();
+    this.#glyphRefs = new Map();
+    this.#glyphsOf.clear();
+    this.#unused.clear();
+    this.#seen.clear();
     this.#shaped = new WeakMap();
     this.#newGlyphs = [];
     this.#nextGlyph = 1;
     const ctx = this.#context();
-    const records: Array<[number, number, WireRecord]> = [];
+    const revision = this.#revision + 1;
+    // Sized for the last fresh list (a page reopened, a reset), so the buffer rarely grows.
+    const w = new ListWriter(
+      ANY_REVISION,
+      revision,
+      Math.max(1 << 20, Math.ceil(this.#lastFresh * 1.1)),
+    );
+    w.reset();
+    let records = 0;
+    let glyphs = 0;
     const top = new Set(roots ?? []);
     const stack = [...(roots ?? doc.childIds(pageId))].reverse();
     while (stack.length > 0) {
@@ -265,23 +383,21 @@ export class DisplayListBuilder {
               ? this.#scene.spaceMatrix(node.parent)
               : this.#scene.worldMatrix(id),
         };
-      records.push([this.#handleOf(id), parent, record]);
+      glyphs += this.#writeGlyphs(w);
+      w.set(this.#handleOf(id), parent, record);
+      records++;
       this.#kid(node.parent, id);
       const kids = doc.childIds(id);
       for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i] as string);
     }
-    const revision = this.#revision + 1;
-    const w = new ListWriter(ANY_REVISION, revision, 1 << 20);
-    w.reset();
-    this.#writeGlyphs(w);
-    for (const [h, p, r] of records) w.set(h, p, r);
     this.#revision = revision;
     const bytes = w.finish();
+    this.#lastFresh = bytes.length;
     this.stats = {
-      ...this.stats,
-      records: records.length,
+      records,
       transforms: 0,
       removed: 0,
+      glyphs,
       bytes: bytes.length,
       ms: performance.now() - t0,
       fresh: true,
@@ -322,6 +438,8 @@ export class DisplayListBuilder {
       this.#texts.delete(at);
       this.#pendingText.delete(at);
       this.unsupported.delete(at);
+      this.#useGlyphs(at, null);
+      this.#useImages(at, []);
       const kids = this.#kids.get(at);
       if (kids) stack.push(...kids);
       this.#kids.delete(at);
@@ -335,7 +453,8 @@ export class DisplayListBuilder {
     const t0 = performance.now();
     const doc = this.#scene.doc;
     const changes = doc.changesSince(this.#version);
-    if (!changes || changes.some((c) => c.reset) || !doc.get(page)) return this.build(page);
+    if (this.#stale || !changes || changes.some((c) => c.reset) || !doc.get(page))
+      return this.build(page);
     const touched = new Set<string>(this.#extra);
     const parents = new Set<string>();
     for (const c of changes) {
@@ -349,6 +468,12 @@ export class DisplayListBuilder {
       for (const id of this.#texts) touched.add(id);
       this.#generation = generation;
     } else for (const id of this.#pendingText) touched.add(id);
+    // A glyph set changed (a file's saved outlines): text drawn from them may draw differently.
+    const table = glyphTable(doc).version;
+    if (table !== this.#glyphTable) {
+      for (const id of this.#texts) touched.add(id);
+      this.#glyphTable = table;
+    }
     this.#version = doc.version;
     if (touched.size === 0 && parents.size === 0) return null;
 
@@ -407,14 +532,14 @@ export class DisplayListBuilder {
     }
     const revision = this.#revision + 1;
     const w = new ListWriter(this.#revision, revision);
-    this.#writeGlyphs(w);
+    const glyphs = this.#writeGlyphs(w);
     for (const [h, p, r] of records) w.set(h, p, r);
     for (const id of moves) {
       const node = doc.get(id);
       const h = this.#handles.get(id);
       if (!node || h === undefined) continue;
       this.#nodes.set(id, node);
-      w.transform(h, localTransform(this.#scene, node));
+      w.transform(h, localTransform(node));
     }
     // Removals after sets (a layer moved out of a removed one is safe in its new parent), and
     // only the topmost of a removed subtree.
@@ -441,11 +566,12 @@ export class DisplayListBuilder {
       }
       w.order(p === page ? ROOT : (this.#handles.get(p) as number), ids);
     }
+    this.#freeGlyphs(w);
     if (w.commands === 0) return null;
     this.#revision = revision;
     const bytes = w.finish();
     this.stats = {
-      ...this.stats,
+      glyphs,
       records: records.length,
       transforms: moves.size,
       removed,

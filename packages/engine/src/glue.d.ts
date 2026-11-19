@@ -18,6 +18,15 @@ export class Outcome {
   readonly mask_hits: number;
   readonly mask_misses: number;
   readonly mask_bytes: number;
+  readonly coarse: number;
+  readonly specks: number;
+  readonly presented: boolean;
+  readonly standin: boolean;
+  readonly plan: number;
+  readonly encode_ms: number;
+  readonly render_ms: number;
+  readonly submit_ms: number;
+  readonly cpu_ms: number;
 }
 
 export class GpuInit {
@@ -36,6 +45,12 @@ export class Engine {
   readonly records: number;
   readonly glyphs: number;
   readonly glyphBytes: number;
+  readonly heldBytes: number;
+  readonly exporting_png: boolean;
+  /** Detaches the object from its finalizer without freeing it (after a trap). */
+  __destroy_into_raw(): number;
+  setLimit(name: string, value: number): Outcome;
+  bandRows(width: number): number;
   apply(bytes: Uint8Array): Outcome;
   dirtyFor(zoom: number, x: number, y: number, dpr: number): Float64Array;
   unsupported(): Uint32Array;
@@ -47,7 +62,7 @@ export class Engine {
     rgba: Uint8Array,
     premultiplied: boolean,
   ): Outcome;
-  dropImage(id: number): void;
+  dropImage(id: number): Outcome;
   renderCpu(
     width: number,
     height: number,
@@ -70,7 +85,7 @@ export class Engine {
     y0: number,
     rows: number,
   ): Outcome;
-  pngBegin(width: number, height: number): Outcome;
+  pngBegin(width: number, height: number, zoom: number, x: number, y: number, dpr: number): Outcome;
   pngBand(
     zoom: number,
     x: number,
@@ -81,6 +96,7 @@ export class Engine {
   ): Outcome;
   pngTake(): Uint8Array;
   pngEnd(): Uint8Array;
+  pngAbort(): void;
   // The browser build only:
   attachGpu?(init: GpuInit): Outcome;
   detachGpu?(): void;
@@ -97,7 +113,8 @@ export class Engine {
   gpuCheck?(): Outcome;
   gpuDestroy?(): void;
   gpuFinished?(): Promise<void>;
-  gpuPixels?(): Promise<Uint8Array>;
+  /** Resolves to the pixels, or to an `Outcome` saying why not; never rejects. */
+  gpuPixels?(): Promise<Uint8Array | Outcome>;
 }
 
 export function listVersion(): Uint32Array;
@@ -112,6 +129,8 @@ export function createGpu(
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
 }
+/** Added to the glue by scripts/build.mjs: a new instance after a trap. */
+export function __drawpaneRenew(): InitOutput;
 export function initSync(module: { module: BufferSource | WebAssembly.Module }): InitOutput;
 export default function init(module?: {
   module_or_path: RequestInfo | URL | Response | BufferSource | WebAssembly.Module;

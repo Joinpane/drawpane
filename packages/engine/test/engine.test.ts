@@ -183,9 +183,13 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
         "pngBand",
         "pngTake",
         "pngEnd",
+        "pngAbort",
+        "setLimit",
+        "bandRows",
       ])
         expect(typeof proto[name], name).toBe("function");
       expect(Array.from(m.glue.listVersion())).toEqual([1, 0]);
+      expect(typeof m.glue.__drawpaneRenew).toBe("function");
     }
     expect(browser.glue.hasGpu()).toBe(true);
     expect(worker.glue.hasGpu()).toBe(false);

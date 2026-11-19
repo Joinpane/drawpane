@@ -24,14 +24,14 @@ import {
 } from "@drawpane/engine/wire";
 import { GLYPH_UNITS, getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { boxOutline, ellipseOutline, fitDashes } from "../dashes";
-import { invert, multiply } from "../geometry";
+import { boxOf, localMatrix } from "../geometry";
 import { gradientMatrix } from "../gradients";
 import { imagePlacement } from "../images";
 import { markersOf, trimmedStroke } from "../markers";
 import { isActiveMask } from "../masks";
 import { postEffects } from "../post-effects";
 import { paintMargin } from "../reach";
-import { fadesAsOne, GREEK_BELOW, largestFontSize } from "../render";
+import { fadesAsOne, GREEK_BELOW, greekLines, largestFontSize } from "../render";
 import { textSpans } from "../rich-text";
 import { glyphTable, type SavedText, savedText } from "../saved-glyphs";
 import type { Scene } from "../scene";
@@ -41,7 +41,6 @@ import {
   drawnBaseline,
   drawnFamily,
   layoutText,
-  lineHeightPx,
   lineOffset,
   type ShapedText,
   type ShapingRun,
@@ -108,10 +107,14 @@ function blendOf(paint: Paint): boolean {
   return paint.blendMode !== undefined && paint.blendMode !== "normal";
 }
 
-/** The local transform: the layer's units to its parent record's. */
-export function localTransform(scene: Scene, node: NodeRecord): Matrix {
+/**
+ * The local transform: the layer's units to its parent record's. A layer's box is placed in its
+ * parent's space, and a group's record is the identity (its children's boxes are in the space
+ * the group sits in), so this is the box's own matrix: no world matrix, no inverse.
+ */
+export function localTransform(node: NodeRecord): Matrix {
   if (node.type === "group") return IDENTITY;
-  return multiply(invert(scene.spaceMatrix(node.parent)), scene.worldMatrix(node.id));
+  return localMatrix(boxOf(node));
 }
 
 class Builder {
@@ -167,7 +170,12 @@ function imageFill(
   const image = ctx.image(paint.ref);
   if (!image) {
     // Loading: the checkerboard over the box, inside the shape (as the canvas renderer draws it).
-    b.ops.push({ op: "fill", path: shape, evenOdd, paint: { kind: "placeholder" } });
+    b.ops.push({
+      op: "fill",
+      path: shape,
+      evenOdd,
+      paint: { kind: "placeholder", opacity: paint.opacity ?? 1 },
+    });
     return;
   }
   const place = imagePlacement(paint.scaleMode, { width: w, height: h }, image, paint.crop);
@@ -405,18 +413,23 @@ function shapedGlyphs(
   y: number,
   ctx: LayerContext,
 ): number[] {
-  const before = new Uint32Array(text.length + 1);
-  for (let i = 0, n = 0; i < text.length; i++) {
-    before[i] = n;
-    if (!isLowSurrogate(text.charCodeAt(i))) n++;
-    before[i + 1] = n;
+  // Letter spacing moves each glyph by the characters before its cluster (code points, not
+  // UTF-16 units); without it nothing moves, and the table isn't made.
+  let before: Uint32Array | null = null;
+  if (spacing !== 0) {
+    before = new Uint32Array(text.length + 1);
+    for (let i = 0, n = 0; i < text.length; i++) {
+      before[i] = n;
+      if (!isLowSurrogate(text.charCodeAt(i))) n++;
+      before[i + 1] = n;
+    }
   }
   const out: number[] = [];
   for (const g of shaped.glyphs) {
     if (!g.d) continue;
     out.push(
       ctx.shapedGlyph ? ctx.shapedGlyph(g) : ctx.glyph(g.d),
-      x + g.x + spacing * (before[g.cluster] ?? 0),
+      x + g.x + (before ? spacing * (before[g.cluster] ?? 0) : 0),
       y - g.y,
     );
   }
@@ -620,8 +633,7 @@ function text(
   // Too small to read on screen: bars where the lines are (`#greek`), in the last visible fill.
   const size = largestFontSize(node);
   if (size > 0) {
-    const lh = lineHeightPx(node.props, ctx.measurer);
-    const lines = Math.max(1, Math.round(height / Math.max(1, lh)));
+    const { lines, lh } = greekLines(node, ctx.measurer);
     const fills = getProp(node.props, "fills");
     const paint = [...fills].reverse().find(shows);
     const greek = paint
@@ -693,7 +705,8 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   if (node.type === "group") {
     b.ops.push({ op: "children" });
   } else if (node.type === "text") {
-    text(b, node, w, h, ctx);
+    // Hidden text draws nothing: it isn't shaped until it shows (showing it encodes it again).
+    if (!hidden) text(b, node, w, h, ctx);
   } else {
     const shape = b.path(shapeEntry(node, w, h));
     const evenOdd = node.type === "path" && getProp(node.props, "windingRule") === "evenodd";
@@ -719,7 +732,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     record: {
       flags,
       opacity,
-      transform: localTransform(scene, node),
+      transform: localTransform(node),
       width: w,
       height: h,
       coarseBelow: size > 0 && b.coarse.length > 0 ? GREEK_BELOW / size : 0,

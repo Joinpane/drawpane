@@ -21,7 +21,7 @@ use crate::limits::Limits;
 use crate::record::{self, Op, PathEntry, Record};
 use crate::wire::{MAGIC, MAJOR, MINOR, Reader};
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use vello_common::kurbo::{Affine, BezPath, Rect};
 
 /// The page: the root every top-level record hangs from. Never set or removed.
@@ -123,11 +123,45 @@ pub struct Store {
     pub revision: u32,
     /// Records with backdrop readers, for invalidation.
     readers: Vec<u32>,
+    /// Records holding features the engine doesn't draw (their `unsupported` bits).
+    unsupported: HashSet<u32>,
+    /// What the records hold, roughly, in bytes (`Record::heap_bytes`): held to `Limits::graph_bytes`.
+    bytes: usize,
     /// Preorder index and subtree end of every record; rebuilt when the structure changes.
     order: Option<HashMap<u32, (u32, u32)>>,
     /// Bumped whenever the structure (parents, children, their order) changes.
     structure: u64,
 }
+
+/// What one message's commands do as they're applied: the undo log and where pixels change. A
+/// fresh list is built into a staged graph that isn't tracked (it's dropped whole on failure).
+struct Txn {
+    track: bool,
+    undo: Vec<Undo>,
+    before: Vec<Dirty>,
+    touched: Vec<u32>,
+    full: bool,
+}
+
+impl Txn {
+    fn new(track: bool) -> Self {
+        Self {
+            track,
+            undo: Vec::new(),
+            before: Vec::new(),
+            touched: Vec::new(),
+            full: false,
+        }
+    }
+    fn push(&mut self, u: Undo) {
+        if self.track {
+            self.undo.push(u);
+        }
+    }
+}
+
+/// Bytes a node costs beside its record: the map entry, its children list and cached bounds.
+const NODE_BYTES: usize = 96;
 
 impl Store {
     pub fn new(limits: Limits) -> Self {
@@ -139,6 +173,8 @@ impl Store {
             glyphs: GlyphStore::default(),
             revision: 0,
             readers: Vec::new(),
+            unsupported: HashSet::new(),
+            bytes: 0,
             order: None,
             structure: 0,
         }
@@ -152,7 +188,18 @@ impl Store {
         self.len() == 0
     }
 
+    /// What the graph holds, roughly, in bytes: its records and their glyph outlines.
+    pub fn bytes(&self) -> usize {
+        self.bytes + self.glyphs.bytes()
+    }
+
     /// Applies a message, all or nothing.
+    ///
+    /// - A patch names the revision the engine holds and makes the next one (`base + 1`).
+    /// - A fresh list (base `ANY_REVISION`) makes a revision later than the one held. It is built
+    ///   beside the graph it replaces and swapped in once it's all read and valid, so a refused
+    ///   one leaves the scene and the revision as they were. Both graphs together must fit
+    ///   `Limits::graph_bytes`.
     pub fn apply(&mut self, bytes: &[u8]) -> Result<Applied> {
         if bytes.len() > self.limits.message_bytes {
             return Err(EngineError::limit("a display list message too large"));
@@ -160,83 +207,124 @@ impl Store {
         let limits = self.limits;
         let mut r = Reader::new(bytes);
         let (base, next, n) = header(&mut r, &limits)?;
-        if base != ANY_REVISION && base != self.revision {
+        if next == ANY_REVISION {
+            return Err(EngineError::new(
+                ErrorCode::Revision,
+                "a message can't make the fresh-list revision",
+            ));
+        }
+        if base == ANY_REVISION {
+            if next <= self.revision {
+                return Err(EngineError::new(
+                    ErrorCode::Revision,
+                    format!(
+                        "a fresh list for revision {next}; the engine holds {}, and revisions only move forward",
+                        self.revision
+                    ),
+                ));
+            }
+            return self.apply_fresh(&mut r, next, n);
+        }
+        if base != self.revision {
             return Err(EngineError::new(
                 ErrorCode::Revision,
                 format!("a patch for revision {base}; the engine holds {}", self.revision),
             ));
         }
-        let fresh = base == ANY_REVISION;
-        if fresh {
-            // A fresh list replaces everything: it's read through once first, so a malformed one
-            // is refused before the graph it would replace is let go. The old graph isn't kept
-            // for undo then, so a large file never takes twice its memory.
-            let mut check = Reader::new(bytes);
-            header(&mut check, &limits)?;
-            for i in 0..n {
-                let command = next_command(&mut check, &limits)?;
-                if i == 0 && !matches!(command, Command::Reset) {
-                    return Err(EngineError::malformed(
-                        "a message for any revision must start with a reset",
-                    ));
-                }
-            }
-            if !check.done() {
-                return Err(EngineError::malformed("bytes after the last command"));
-            }
+        if base.checked_add(1) != Some(next) {
+            return Err(EngineError::new(
+                ErrorCode::Revision,
+                format!(
+                    "a patch from revision {base} must make {}, not {next}",
+                    u64::from(base) + 1
+                ),
+            ));
         }
-        let mut undo = Vec::new();
-        let mut before: Vec<Dirty> = Vec::new();
-        let mut touched: Vec<u32> = Vec::new();
-        let mut full = false;
+        let mut txn = Txn::new(true);
         let before_structure = self.structure;
         // Each command is applied as it's read (never all of them decoded at once), with an undo
         // log: a command that fails puts back everything before it.
-        for i in 0..n {
-            let result = next_command(&mut r, &limits).and_then(|command| {
-                if fresh && i == 0 {
-                    self.reset_without_undo();
-                    full = true;
-                    return Ok(());
-                }
-                self.command(command, &mut undo, &mut before, &mut touched, &mut full)
-            });
+        for _ in 0..n {
+            let result = next_command(&mut r, &limits).and_then(|command| self.command(command, &mut txn));
+            let result = result.and_then(|()| self.check_bytes(0));
             if let Err(e) = result {
-                self.rollback(undo);
+                self.rollback(txn.undo);
                 return Err(e);
             }
         }
         if !r.done() {
-            self.rollback(undo);
+            self.rollback(txn.undo);
             return Err(EngineError::malformed("bytes after the last command"));
         }
         self.revision = next;
-        if full {
+        if txn.full {
             return Ok(Applied {
                 changes: Vec::new(),
                 full: true,
             });
         }
         if self.structure != before_structure {
-            for d in &mut before {
+            for d in &mut txn.before {
                 d.stale = true;
             }
         }
+        let changes = self.changes(std::mem::take(&mut txn.before), &txn.touched);
+        Ok(Applied { changes, full: false })
+    }
+
+    /// A fresh list: built into a staged graph, read once, and swapped in whole.
+    fn apply_fresh(&mut self, r: &mut Reader, next: u32, n: usize) -> Result<Applied> {
+        let limits = self.limits;
+        let mut staged = Store::new(limits);
+        let mut txn = Txn::new(false);
+        let held = self.bytes();
+        for i in 0..n {
+            let command = next_command(r, &limits)?;
+            if i == 0 {
+                if !matches!(command, Command::Reset) {
+                    return Err(EngineError::malformed(
+                        "a message for any revision must start with a reset",
+                    ));
+                }
+                continue;
+            }
+            staged.command(command, &mut txn)?;
+            staged.check_bytes(held)?;
+        }
+        if n == 0 {
+            return Err(EngineError::malformed(
+                "a message for any revision must start with a reset",
+            ));
+        }
+        if !r.done() {
+            return Err(EngineError::malformed("bytes after the last command"));
+        }
+        // Committed: the old graph goes now.
+        self.nodes = staged.nodes;
+        self.glyphs = staged.glyphs;
+        self.readers = staged.readers;
+        self.unsupported = staged.unsupported;
+        self.bytes = staged.bytes;
+        self.order = None;
+        self.structure += 1;
+        self.revision = next;
         Ok(Applied {
-            changes: self.changes(before, &touched),
-            full: false,
+            changes: Vec::new(),
+            full: true,
         })
     }
 
-    /// Lets the whole graph go (the first command of a fresh list, already read through).
-    fn reset_without_undo(&mut self) {
-        let mut nodes = HashMap::new();
-        nodes.insert(ROOT, Node::new(Record::empty(), ROOT));
-        self.nodes = nodes;
-        self.glyphs = GlyphStore::default();
-        self.readers = Vec::new();
-        self.order = None;
-        self.structure += 1;
+    /// Refuses a graph (with `extra` bytes held beside it) past `Limits::graph_bytes`.
+    fn check_bytes(&self, extra: usize) -> Result<()> {
+        let total = self.bytes() + extra;
+        if total > self.limits.graph_bytes {
+            return Err(EngineError::limit(format!(
+                "the render graph would hold {} MiB; the most is {} MiB",
+                total >> 20,
+                self.limits.graph_bytes >> 20
+            )));
+        }
+        Ok(())
     }
 
     fn rollback(&mut self, undo: Vec<Undo>) {
@@ -302,6 +390,18 @@ impl Store {
             .filter(|(_, n)| n.record.reads().is_some())
             .map(|(id, _)| *id)
             .collect();
+        self.unsupported = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.record.unsupported != 0)
+            .map(|(id, _)| *id)
+            .collect();
+        self.bytes = self
+            .nodes
+            .iter()
+            .filter(|(id, _)| **id != ROOT)
+            .map(|(_, n)| n.record.heap_bytes() + NODE_BYTES)
+            .sum();
         self.order = None;
         self.structure += 1;
         for n in self.nodes.values() {
@@ -309,14 +409,20 @@ impl Store {
         }
     }
 
-    fn command(
-        &mut self,
-        command: Command,
-        undo: &mut Vec<Undo>,
-        before: &mut Vec<Dirty>,
-        touched: &mut Vec<u32>,
-        full: &mut bool,
-    ) -> Result<()> {
+    /// How many records deep the subtree under `id` goes (0: no children).
+    fn height(&self, id: u32) -> usize {
+        let mut deepest = 0;
+        let mut stack = vec![(id, 0usize)];
+        while let Some((at, d)) = stack.pop() {
+            deepest = deepest.max(d);
+            if let Some(n) = self.nodes.get(&at) {
+                stack.extend(n.children.iter().map(|c| (*c, d + 1)));
+            }
+        }
+        deepest
+    }
+
+    fn command(&mut self, command: Command, txn: &mut Txn) -> Result<()> {
         match command {
             Command::Reset => {
                 let mut nodes = HashMap::new();
@@ -324,27 +430,29 @@ impl Store {
                 let old = std::mem::replace(&mut self.nodes, nodes);
                 let glyphs = std::mem::take(&mut self.glyphs);
                 let readers = std::mem::take(&mut self.readers);
-                undo.push(Undo::Everything {
+                self.unsupported.clear();
+                self.bytes = 0;
+                txn.push(Undo::Everything {
                     nodes: old,
                     glyphs,
                     readers,
                 });
                 self.order = None;
                 self.structure += 1;
-                before.clear();
-                touched.clear();
-                *full = true;
+                txn.before.clear();
+                txn.touched.clear();
+                txn.full = true;
             }
             Command::Glyph { glyph, path } => {
                 let previous = self.glyphs.define(glyph, path, &self.limits)?;
-                undo.push(Undo::Glyph {
+                txn.push(Undo::Glyph {
                     glyph,
                     before: previous,
                 });
             }
             Command::GlyphFree { glyph } => {
                 let previous = self.glyphs.free(glyph)?;
-                undo.push(Undo::Glyph {
+                txn.push(Undo::Glyph {
                     glyph,
                     before: Some(previous),
                 });
@@ -359,7 +467,13 @@ impl Store {
                     )));
                 }
                 self.glyphs.check(&record)?;
-                // Refuse a cycle (a record under itself) and nesting past the limit.
+                // Refuse a cycle (a record under itself) and nesting past the limit, counting
+                // the subtree a record brings with it when it moves.
+                let existing = self.nodes.get(&id).map(|n| n.parent);
+                let below = match existing {
+                    Some(p) if p != parent => self.height(id),
+                    _ => 0,
+                };
                 let mut depth = 1usize;
                 let mut at = parent;
                 while at != ROOT {
@@ -372,8 +486,15 @@ impl Store {
                     }
                     at = self.nodes.get(&at).map_or(ROOT, |n| n.parent);
                 }
-                self.note_before(id, before, touched);
+                if depth + below > self.limits.depth {
+                    return Err(EngineError::limit("records nested too deep"));
+                }
+                if txn.track {
+                    self.note_before(id, txn);
+                }
                 let reads = record.reads().is_some();
+                let unsupported = record.unsupported != 0;
+                let cost = record.heap_bytes();
                 self.glyphs.retain(&record);
                 let mut structural = true;
                 if let Some(node) = self.nodes.get_mut(&id) {
@@ -382,31 +503,51 @@ impl Store {
                     let old = std::mem::replace(&mut node.record, record);
                     node.parent = parent;
                     node.bounds.set(None);
+                    self.bytes = self.bytes + cost - old.heap_bytes();
                     self.glyphs.release(&old);
-                    let index = self.detach(id, old_parent);
-                    if old_parent != parent {
+                    if structural {
+                        let index = self.detach(id, old_parent);
                         // Its old parent's subtree shrank.
                         self.dirty_up(old_parent);
+                        self.attach(id, parent, None);
+                        txn.push(Undo::Replaced {
+                            id,
+                            record: old,
+                            parent: old_parent,
+                            index,
+                        });
+                    } else {
+                        // In place: same parent, same place among its siblings.
+                        let index = self
+                            .nodes
+                            .get(&parent)
+                            .and_then(|p| p.children.iter().position(|c| *c == id))
+                            .unwrap_or(0);
+                        txn.push(Undo::Replaced {
+                            id,
+                            record: old,
+                            parent,
+                            index,
+                        });
                     }
-                    self.attach(id, parent, if old_parent == parent { Some(index) } else { None });
-                    undo.push(Undo::Replaced {
-                        id,
-                        record: old,
-                        parent: old_parent,
-                        index,
-                    });
                 } else {
                     if self.nodes.len() > self.limits.records {
                         self.glyphs.release(&record);
                         return Err(EngineError::limit("too many records"));
                     }
+                    self.bytes += cost + NODE_BYTES;
                     self.nodes.insert(id, Node::new(record, parent));
                     self.attach(id, parent, None);
-                    undo.push(Undo::Inserted { id });
+                    txn.push(Undo::Inserted { id });
                 }
                 self.readers.retain(|r| *r != id);
                 if reads {
                     self.readers.push(id);
+                }
+                if unsupported {
+                    self.unsupported.insert(id);
+                } else {
+                    self.unsupported.remove(&id);
                 }
                 self.dirty_up(id);
                 if structural {
@@ -423,7 +564,9 @@ impl Store {
                     .get(&id)
                     .ok_or_else(|| EngineError::unknown(format!("no record {id} to remove")))?
                     .parent;
-                self.note_before(id, before, touched);
+                if txn.track {
+                    self.note_before(id, txn);
+                }
                 let index = self.detach(id, parent);
                 self.dirty_up(parent);
                 let mut removed = Vec::new();
@@ -432,11 +575,15 @@ impl Store {
                     if let Some(node) = self.nodes.remove(&at) {
                         stack.extend(node.children.iter().copied());
                         self.glyphs.release(&node.record);
-                        removed.push((at, node));
+                        self.bytes -= node.record.heap_bytes() + NODE_BYTES;
+                        self.unsupported.remove(&at);
+                        if txn.track {
+                            removed.push((at, node));
+                        }
                     }
                 }
                 self.readers.retain(|r| self.nodes.contains_key(r));
-                undo.push(Undo::Removed {
+                txn.push(Undo::Removed {
                     nodes: removed,
                     parent,
                     index,
@@ -458,12 +605,17 @@ impl Store {
                         "an order for {parent} that isn't its children"
                     )));
                 }
+                if node.children == ids {
+                    return Ok(());
+                }
                 // Reordering moves paint in place: where the children paint may look different.
-                for id in &ids {
-                    self.note_before(*id, before, touched);
+                if txn.track {
+                    for id in &ids {
+                        self.note_before(*id, txn);
+                    }
                 }
                 let old = std::mem::replace(&mut self.nodes.get_mut(&parent).expect("checked").children, ids);
-                undo.push(Undo::Order { parent, children: old });
+                txn.push(Undo::Order { parent, children: old });
                 self.order = None;
                 self.structure += 1;
             }
@@ -471,13 +623,15 @@ impl Store {
                 if id == ROOT {
                     return Err(EngineError::malformed("the page has no transform"));
                 }
-                self.note_before(id, before, touched);
-                let node = self
-                    .nodes
-                    .get_mut(&id)
-                    .ok_or_else(|| EngineError::unknown(format!("no record {id} to move")))?;
+                if !self.nodes.contains_key(&id) {
+                    return Err(EngineError::unknown(format!("no record {id} to move")));
+                }
+                if txn.track {
+                    self.note_before(id, txn);
+                }
+                let node = self.nodes.get_mut(&id).expect("checked");
                 let old = std::mem::replace(&mut node.record.transform, transform);
-                undo.push(Undo::Transform { id, transform: old });
+                txn.push(Undo::Transform { id, transform: old });
                 // Its own bounds hold (they're in its units); its ancestors' don't.
                 let parent = node.parent;
                 self.dirty_up(parent);
@@ -519,14 +673,14 @@ impl Store {
     }
 
     /// Notes where `id`'s subtree paints now, before a command changes it.
-    fn note_before(&mut self, id: u32, before: &mut Vec<Dirty>, touched: &mut Vec<u32>) {
-        touched.push(id);
+    fn note_before(&mut self, id: u32, txn: &mut Txn) {
+        txn.touched.push(id);
         if !self.nodes.contains_key(&id) {
             return;
         }
         let (order, end) = self.order_of(id);
         if let Some(rect) = self.world_extent(id) {
-            before.push(Dirty {
+            txn.before.push(Dirty {
                 rect,
                 order,
                 end,
@@ -767,13 +921,22 @@ impl Store {
     /// Records whose features TypeScript flagged as not drawn by the engine.
     pub fn unsupported(&self) -> Vec<(u32, u32)> {
         let mut out: Vec<(u32, u32)> = self
-            .nodes
+            .unsupported
             .iter()
-            .filter(|(_, n)| n.record.unsupported != 0)
-            .map(|(id, n)| (*id, n.record.unsupported))
+            .filter_map(|id| self.nodes.get(id).map(|n| (*id, n.record.unsupported)))
             .collect();
         out.sort_unstable();
         out
+    }
+
+    /// The first shown record holding features the engine doesn't draw, if any: a page with one
+    /// is refused whole, wherever it is (on screen or not, in an export's crop or not).
+    pub fn refusal(&self) -> Option<(u32, u32)> {
+        self.unsupported
+            .iter()
+            .filter(|id| self.drawn(**id))
+            .filter_map(|id| self.nodes.get(id).map(|n| (*id, n.record.unsupported)))
+            .min()
     }
 }
 
@@ -781,7 +944,6 @@ fn overlaps(a: Rect, b: Rect) -> bool {
     a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1
 }
 
-/// Decodes a whole message before anything changes.
 /// Reads a message's header: the revision it applies to, the one it makes, and its command count.
 fn header(r: &mut Reader, limits: &Limits) -> Result<(u32, u32, usize)> {
     if r.u32()? != MAGIC {
@@ -797,54 +959,54 @@ fn header(r: &mut Reader, limits: &Limits) -> Result<(u32, u32, usize)> {
     }
     let base = r.u32()?;
     let next = r.u32()?;
-    let n = r.count(limits.records.saturating_mul(4), "commands")?;
+    let n = r.count(limits.records.saturating_mul(4), "commands", 8)?;
     Ok((base, next, n))
 }
 
-/// Reads one command, checking it's exactly as long as it says.
+/// Reads one command from its own length-bounded reader, checking it's exactly as long as it says.
 fn next_command(r: &mut Reader, limits: &Limits) -> Result<Command> {
     let op = r.u32()?;
     let len = r.u32()? as usize;
     if len > r.remaining() {
         return Err(EngineError::malformed("a command longer than the message"));
     }
-    let start = r.at();
+    let mut c = r.sub(len)?;
     let command = match op {
         1 => Command::Reset,
         2 => Command::Glyph {
-            glyph: r.u32()?,
-            path: r.path(limits.path_verbs)?,
+            glyph: c.u32()?,
+            path: c.path(limits.path_verbs)?,
         },
-        3 => Command::GlyphFree { glyph: r.u32()? },
+        3 => Command::GlyphFree { glyph: c.u32()? },
         4 => {
-            let id = r.u32()?;
-            let parent = r.u32()?;
+            let id = c.u32()?;
+            let parent = c.u32()?;
             Command::Set {
                 id,
                 parent,
-                record: record::decode(r, limits)?,
+                record: record::decode(&mut c, limits)?,
             }
         }
-        5 => Command::Remove { id: r.u32()? },
+        5 => Command::Remove { id: c.u32()? },
         6 => {
-            let parent = r.u32()?;
-            let count = r.count(limits.records, "children")?;
+            let parent = c.u32()?;
+            let count = c.count(limits.records, "children", 4)?;
             let mut ids = Vec::with_capacity(count);
             for _ in 0..count {
-                ids.push(r.u32()?);
+                ids.push(c.u32()?);
             }
             Command::Order { parent, ids }
         }
         7 => Command::Transform {
-            id: r.u32()?,
-            transform: r.affine()?,
+            id: c.u32()?,
+            transform: c.affine()?,
         },
         k => return Err(EngineError::malformed(format!("unknown command {k}"))),
     };
-    if r.at() - start != len {
+    if !c.done() {
         return Err(EngineError::malformed(format!(
             "command {op} is {} bytes, not the {len} it says",
-            r.at() - start
+            c.at()
         )));
     }
     Ok(command)

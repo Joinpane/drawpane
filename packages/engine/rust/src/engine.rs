@@ -63,6 +63,9 @@ pub struct FrameStats {
 
 pub struct Engine {
     pub store: Store,
+    /// Changes whenever what's drawn may have (a message applied, an image put or dropped): a
+    /// frame made from the last one is valid only within one generation.
+    pub generation: u64,
     pub cpu: Cpu,
     /// The band being exported.
     band: Vec<u8>,
@@ -77,6 +80,7 @@ pub struct Engine {
 impl Engine {
     pub fn new(limits: Limits) -> Self {
         Self {
+            generation: 0,
             band: Vec::new(),
             cpu: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side),
             store: Store::new(limits),
@@ -92,10 +96,13 @@ impl Engine {
     }
 
     pub fn apply(&mut self, bytes: &[u8]) -> Result<Applied> {
-        self.store.apply(bytes)
+        let applied = self.store.apply(bytes)?;
+        self.generation += 1;
+        Ok(applied)
     }
 
     pub fn put_image(&mut self, id: u32, width: u32, height: u32, rgba: &[u8], premultiplied: bool) -> Result<()> {
+        self.generation += 1;
         let limits = self.store.limits;
         let levels = images::levels(width, height, rgba, premultiplied, limits.texture_side)?;
         self.cpu.put_image(id, &levels, limits.image_bytes)?;
@@ -111,6 +118,7 @@ impl Engine {
     }
 
     pub fn drop_image(&mut self, id: u32) {
+        self.generation += 1;
         self.cpu.drop_image(id);
         #[cfg(feature = "gpu")]
         {
@@ -119,6 +127,66 @@ impl Engine {
                 gpu.drop_image(id);
             }
         }
+    }
+
+    /// Refuses a page holding a shown record the engine doesn't draw, wherever it is: the caller
+    /// draws the whole page another way.
+    pub fn check_supported(&self) -> Result<()> {
+        match self.store.refusal() {
+            Some((id, bits)) => Err(EngineError::unsupported(format!(
+                "record {id} needs features {bits:#x}; the page is drawn another way"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Bytes the engine holds, roughly: the graph, images (on the CPU) and glyph masks.
+    pub fn held_bytes(&self) -> usize {
+        self.store.bytes() + self.cpu.image_bytes() + self.cpu.masks.stats.bytes
+    }
+
+    /// Rows a band of a frame `width` wide may have: `Limits::band_rows`, and no more than
+    /// `Limits::band_bytes` of output.
+    pub fn band_rows(&self, width: u32) -> u32 {
+        let l = &self.store.limits;
+        let by_bytes = (l.band_bytes / (width.max(1) as usize * 4)).max(1);
+        l.band_rows.min(by_bytes as u32).max(1)
+    }
+
+    /// Refuses an export of a `width` × `height` frame before it starts when its working set
+    /// wouldn't fit beside what the engine holds, under `Limits::memory_bytes` (a Worker's cap;
+    /// zero: no check). The working set is a band of output, a tile of target (with the readers'
+    /// reach round it), the scene's rows, and the compressor.
+    pub fn admit_export(&self, width: u32, height: u32, camera: Camera) -> Result<()> {
+        self.check_size(width, height)?;
+        camera.check()?;
+        self.check_supported()?;
+        let budget = self.store.limits.memory_bytes;
+        if budget == 0 {
+            return Ok(());
+        }
+        let l = &self.store.limits;
+        let rows = self.band_rows(width) as usize;
+        let halo = self.halo(camera.view())? as usize;
+        let cols = (l.export_tile.min(width) as usize + 2 * halo).min(width as usize);
+        let tile_rows = (rows + 2 * halo).min(height as usize);
+        let band = rows * width as usize * 4;
+        // A tile's target and a copy of it for the PNG's straight pixels.
+        let tile = cols * tile_rows * 4 * 2;
+        // vello_cpu keeps per wide tile (256 × 4 px) command lists for the whole frame.
+        let scene = (width as usize).div_ceil(256) * (height as usize).div_ceil(4) * 64;
+        let png = 512 * 1024;
+        let need = band + tile + scene + png;
+        let held = self.held_bytes();
+        if held + need > budget {
+            return Err(EngineError::limit(format!(
+                "an export {width} × {height} px needs {} MiB beside the {} MiB the engine holds; it may hold {} MiB",
+                need.div_ceil(1 << 20),
+                held.div_ceil(1 << 20),
+                budget >> 20
+            )));
+        }
+        Ok(())
     }
 
     fn check_size(&self, width: u32, height: u32) -> Result<()> {
@@ -145,6 +213,7 @@ impl Engine {
     ) -> Result<(&[u8], FrameStats)> {
         self.check_size(width, height)?;
         camera.check()?;
+        self.check_supported()?;
         let (stats, _) = self.cpu_tile(
             width,
             height,
@@ -165,6 +234,7 @@ impl Engine {
     #[cfg(feature = "gpu")]
     pub fn attach_gpu(&mut self, mut gpu: crate::gpu::Gpu) -> Result<()> {
         let budget = self.store.limits.image_bytes;
+        gpu.budget = self.store.limits.gpu_bytes;
         for (id, levels) in &self.image_levels {
             gpu.put_image(*id, levels, budget)?;
         }
@@ -184,6 +254,7 @@ impl Engine {
     ) -> Result<DrawStats> {
         self.check_size(width, height)?;
         camera.check()?;
+        self.check_supported()?;
         let gpu = self
             .gpu
             .as_mut()
@@ -200,7 +271,7 @@ impl Engine {
                 y1: height as i32,
             },
         };
-        gpu.render(&self.store, &frame, background)
+        gpu.render(&self.store, &frame, background, self.generation)
     }
 
     /// Device pixels the readers on the page may read past where they paint, summed through
@@ -258,7 +329,7 @@ impl Engine {
             area: grown,
         };
         let limits = self.store.limits;
-        let draw = exec::draw(&self.store, &mut self.cpu, &frame, limits.glyph_mask_side);
+        let draw = exec::draw(&self.store, &mut self.cpu, &frame, &limits);
         // A scene left part-drawn by a failure is dropped; the next frame starts clean.
         self.cpu.finish();
         Ok((
@@ -286,12 +357,13 @@ impl Engine {
     ) -> Result<&[u8]> {
         self.check_size(width, height)?;
         camera.check()?;
-        if rows == 0 || rows > self.store.limits.band_rows || y0.checked_add(rows).is_none_or(|end| end > height) {
+        self.check_supported()?;
+        let most = self.band_rows(width);
+        if rows == 0 || rows > most || y0.checked_add(rows).is_none_or(|end| end > height) {
             return Err(EngineError::new(
                 ErrorCode::Limit,
                 format!(
-                    "a band of {rows} rows at {y0} in a frame {height} tall; bands are at most {} rows",
-                    self.store.limits.band_rows
+                    "a band of {rows} rows at {y0} in a frame {height} tall; bands {width} px wide are at most {most} rows"
                 ),
             ));
         }

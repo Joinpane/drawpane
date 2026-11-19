@@ -8,6 +8,8 @@
 //! clip paths, which don't isolate. Culling uses the engine's own subtree bounds.
 
 use crate::error::{EngineError, Result};
+use crate::geometry;
+use crate::limits::Limits;
 use crate::masks::{MaskKey, PHASES};
 use crate::record::{GradientKind, Op, Paint, PathEntry, Record, Rgba, StrokeStyle};
 use crate::store::Store;
@@ -175,9 +177,48 @@ pub struct DrawStats {
     pub glyphs_masked: u32,
     pub glyphs_outlined: u32,
     pub reads: u32,
+    /// Records drawn by their coarse ops (unreadable text as bars): a stand-in, not exact.
+    pub coarse: u32,
+    /// Records skipped as specks (under half a device pixel): a stand-in, not exact.
+    pub specks: u32,
+    /// Path elements generated drawing the frame (held to `Limits::frame_verbs`).
+    pub verbs: u64,
+    /// The frame reached the canvas (GPU, presenting): false when the canvas couldn't take it
+    /// now (a timeout, an occluded window), so the caller shows its last picture or another.
+    pub presented: bool,
+    /// The frame was made from the last one (a pan shifted, a zoom scaled): a stand-in.
+    pub standin: bool,
+    /// How it was made (GPU): 0 the whole scene, 1 a pan, 2 a zoom stand-in, 3 unchanged.
+    pub plan: u32,
+    /// Where its CPU time went (GPU, milliseconds): encoding the scene (the walk and Vello's
+    /// strips), the renderer's preparing and uploading, presenting and submitting, and all.
+    pub encode_ms: f64,
+    pub render_ms: f64,
+    pub submit_ms: f64,
+    pub cpu_ms: f64,
 }
 
-pub fn draw<B: Backend>(store: &Store, backend: &mut B, frame: &Frame, glyph_mask_side: u32) -> Result<DrawStats> {
+impl DrawStats {
+    /// Adds another pass's counts (a pan's strips).
+    pub fn add(&mut self, o: &DrawStats) {
+        self.records += o.records;
+        self.culled += o.culled;
+        self.ops += o.ops;
+        self.glyphs_masked += o.glyphs_masked;
+        self.glyphs_outlined += o.glyphs_outlined;
+        self.reads += o.reads;
+        self.coarse += o.coarse;
+        self.specks += o.specks;
+        self.verbs += o.verbs;
+    }
+
+    /// Whether the frame drew every record exactly (no level-of-detail stand-ins).
+    pub fn exact(&self) -> bool {
+        self.coarse == 0 && self.specks == 0
+    }
+}
+
+pub fn draw<B: Backend>(store: &Store, backend: &mut B, frame: &Frame, limits: &Limits) -> Result<DrawStats> {
     let mut walk = Walk {
         store,
         backend,
@@ -190,7 +231,9 @@ pub fn draw<B: Backend>(store: &Store, backend: &mut B, frame: &Frame, glyph_mas
         ),
         open: Vec::new(),
         stats: DrawStats::default(),
-        glyph_mask_side: f64::from(glyph_mask_side),
+        glyph_mask_side: f64::from(limits.glyph_mask_side),
+        verbs_left: limits.frame_verbs,
+        open_scopes: limits.open_scopes,
     };
     let root = store
         .nodes
@@ -220,6 +263,39 @@ struct Walk<'a, B: Backend> {
     open: Vec<Open>,
     stats: DrawStats,
     glyph_mask_side: f64,
+    /// Path elements the frame may still generate.
+    verbs_left: usize,
+    open_scopes: usize,
+}
+
+fn finite(m: Affine) -> bool {
+    m.as_coeffs().iter().all(|v| v.is_finite())
+}
+
+/// The length of a path's control polygon: at least the length of the curve it draws.
+fn polygon_length(p: &BezPath) -> f64 {
+    use vello_common::kurbo::PathEl;
+    let mut total = 0.0;
+    let mut last = vello_common::kurbo::Point::ZERO;
+    let mut start = last;
+    for el in p.elements() {
+        let pts: &[vello_common::kurbo::Point] = match el {
+            PathEl::MoveTo(a) => {
+                last = *a;
+                start = *a;
+                continue;
+            }
+            PathEl::LineTo(a) => &[*a],
+            PathEl::QuadTo(a, b) => &[*a, *b],
+            PathEl::CurveTo(a, b, c) => &[*a, *b, *c],
+            PathEl::ClosePath => &[start],
+        };
+        for q in pts {
+            total += last.distance(*q);
+            last = *q;
+        }
+    }
+    total
 }
 
 fn overlaps(a: Rect, b: Rect) -> bool {
@@ -247,6 +323,11 @@ impl<B: Backend> Walk<'_, B> {
         }
         let world = parent * r.transform;
         let device = self.frame.view * world;
+        if !finite(device) {
+            return Err(EngineError::limit(format!(
+                "record {id}'s transform overflows on the device"
+            )));
+        }
         let Some(bounds) = store.bounds(id) else { return Ok(()) };
         if !overlaps(device.transform_rect_bbox(bounds), self.viewport) {
             self.stats.culled += 1;
@@ -256,6 +337,7 @@ impl<B: Backend> Walk<'_, B> {
             let b = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])));
             if b.width() < 0.5 && b.height() < 0.5 {
                 self.stats.culled += 1;
+                self.stats.specks += 1;
                 return Ok(());
             }
         }
@@ -273,10 +355,14 @@ impl<B: Backend> Walk<'_, B> {
         let isolate = r.isolate() && r.opacity < 1.0;
         let inner = if isolate { 1.0 } else { opacity };
         if isolate {
+            self.scope()?;
             self.backend.scene().push_opacity(opacity);
             self.open.push(Open::Layer);
         }
         let coarse = self.frame.detail && r.coarse_below > 0.0 && scale_of(device) < f64::from(r.coarse_below);
+        if coarse {
+            self.stats.coarse += 1;
+        }
         let ops = if coarse { &r.coarse } else { &r.ops };
         let depth = self.open.len();
         for op in ops {
@@ -285,7 +371,8 @@ impl<B: Backend> Walk<'_, B> {
                 Op::Fill { path, even_odd, paint } => self.fill(r, *path, device, *even_odd, paint, inner)?,
                 Op::Stroke { path, style, paint } => self.stroke(r, *path, device, style, paint, inner)?,
                 Op::Clip { path, even_odd } => {
-                    let p = self.path(r, *path)?;
+                    self.scope()?;
+                    let p = self.path(r, *path, device, 0.0)?;
                     let scene = self.backend.scene();
                     scene.set_transform(device);
                     scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
@@ -325,25 +412,89 @@ impl<B: Backend> Walk<'_, B> {
         Ok(())
     }
 
-    /// An entry as a path in the record's units; glyph runs are built from their outlines.
-    fn path(&self, r: &Record, i: u32) -> Result<BezPath> {
-        if let Some(PathEntry::Glyphs { scale, glyphs }) = r.paths.get(i as usize) {
-            let s = f64::from(*scale);
-            let mut out = BezPath::new();
-            for g in glyphs {
-                let glyph = self
-                    .store
-                    .glyphs
-                    .get(g.glyph)
-                    .ok_or_else(|| EngineError::unknown(format!("glyph {}", g.glyph)))?;
-                let mut p = glyph.path.clone();
-                p.apply_affine(Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]));
-                out.extend(p);
-            }
-            return Ok(out);
+    /// Opens a clip or layer, within `Limits::open_scopes`.
+    fn scope(&self) -> Result<()> {
+        if self.open.len() >= self.open_scopes {
+            return Err(EngineError::limit("clips and layers nested too deep"));
         }
-        r.entry_path(i)
-            .ok_or_else(|| EngineError::malformed(format!("no path {i}")))
+        Ok(())
+    }
+
+    /// Charges `n` generated path elements to the frame's budget.
+    fn spend(&mut self, n: usize) -> Result<()> {
+        self.stats.verbs += n as u64;
+        self.verbs_left = self.verbs_left.checked_sub(n).ok_or_else(|| {
+            EngineError::limit("a frame that would generate more geometry than the engine draws at once")
+        })?;
+        Ok(())
+    }
+
+    /// The viewport in a record's units (under `device`), if it can be mapped back.
+    fn viewport_in(&self, device: Affine) -> Option<Rect> {
+        if device.determinant().abs() < 1e-300 {
+            return None;
+        }
+        let r = device.inverse().transform_rect_bbox(self.viewport.inflate(2.0, 2.0));
+        r.is_finite().then_some(r)
+    }
+
+    /// An entry as a path in the record's units. Glyph runs are built from their outlines, the
+    /// glyphs at least `margin` units off the viewport left out; an outside entry is a box round
+    /// the viewport with the shape cut out. What's built is charged to the frame's budget.
+    fn path(&mut self, r: &Record, i: u32, device: Affine, margin: f64) -> Result<BezPath> {
+        match r.paths.get(i as usize) {
+            Some(PathEntry::Glyphs { scale, glyphs }) => {
+                let s = f64::from(*scale);
+                let view = self.viewport_in(device).map(|v| v.inflate(margin, margin));
+                let mut out = BezPath::new();
+                for g in glyphs {
+                    let glyph = self
+                        .store
+                        .glyphs
+                        .get(g.glyph)
+                        .ok_or_else(|| EngineError::unknown(format!("glyph {}", g.glyph)))?;
+                    let place = Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]);
+                    if let (Some(v), Some(b)) = (view, glyph.bounds)
+                        && !overlaps(place.transform_rect_bbox(b), v)
+                    {
+                        continue;
+                    }
+                    self.spend(glyph.path.elements().len())?;
+                    let mut p = glyph.path.clone();
+                    p.apply_affine(place);
+                    out.extend(p);
+                }
+                Ok(out)
+            }
+            Some(PathEntry::Outside(of)) => {
+                let inner = if matches!(r.paths.get(*of as usize), Some(PathEntry::Glyphs { .. })) {
+                    self.path(r, *of, device, 0.0)?
+                } else {
+                    r.entry_path(*of)
+                        .ok_or_else(|| EngineError::malformed(format!("no path {of}")))?
+                };
+                use vello_common::kurbo::Shape;
+                let shape = if inner.is_empty() {
+                    Rect::ZERO
+                } else {
+                    inner.bounding_box().inflate(1.0, 1.0)
+                };
+                // Everything outside the shape that could show: the viewport, mapped into the
+                // record's units, and round the shape itself (so its hole lies inside the box).
+                let outer = self.viewport_in(device).map_or(shape, |v| v.union(shape));
+                let mut p = geometry::rect_path(outer);
+                self.spend(5)?;
+                p.extend(inner);
+                Ok(p)
+            }
+            _ => {
+                let p = r
+                    .entry_path(i)
+                    .ok_or_else(|| EngineError::malformed(format!("no path {i}")))?;
+                self.spend(p.elements().len())?;
+                Ok(p)
+            }
+        }
     }
 
     /// Sets the scene's paint for `paint` drawn under `device`. False when it paints nothing.
@@ -422,7 +573,10 @@ impl<B: Backend> Walk<'_, B> {
                     *matrix * Affine::scale_non_uniform(1.0 / f64::from(view.width), 1.0 / f64::from(view.height)),
                 );
             }
-            Paint::Placeholder => {
+            Paint::Placeholder(opacity) => {
+                if opacity * alpha <= 0.0 {
+                    return Ok(false);
+                }
                 let source = self.backend.checker();
                 let img = Image {
                     image: source,
@@ -430,7 +584,7 @@ impl<B: Backend> Walk<'_, B> {
                         x_extend: Extend::Repeat,
                         y_extend: Extend::Repeat,
                         quality: ImageQuality::Low,
-                        alpha,
+                        alpha: opacity * alpha,
                     },
                 };
                 let scene = self.backend.scene();
@@ -448,7 +602,7 @@ impl<B: Backend> Walk<'_, B> {
         {
             return self.glyphs(device, f64::from(*scale), glyphs, *c, alpha);
         }
-        let p = self.path(r, i)?;
+        let p = self.path(r, i, device, 0.0)?;
         if !self.set_paint(paint, device, alpha)? {
             return Ok(());
         }
@@ -471,7 +625,23 @@ impl<B: Backend> Walk<'_, B> {
         if style.width <= 0.0 {
             return Ok(());
         }
-        let p = self.path(r, i)?;
+        // A glyph off the viewport by less than the stroke's reach still shows its stroke.
+        let reach = f64::from(style.width) * f64::from(style.miter.max(1.0)) + 1.0;
+        let p = self.path(r, i, device, reach)?;
+        if !style.dashes.is_empty() {
+            // Decode checked the dashes on shapes whose length it knows; a glyph run's is known now.
+            let length = polygon_length(&p);
+            crate::record::check_dashes(
+                style,
+                length,
+                &crate::limits::Limits {
+                    frame_verbs: self.verbs_left,
+                    ..self.store.limits
+                },
+            )?;
+            let period: f64 = style.dashes.iter().map(|d| f64::from(*d)).sum();
+            self.spend((length / period * style.dashes.len() as f64).ceil() as usize)?;
+        }
         if !self.set_paint(paint, device, alpha)? {
             return Ok(());
         }
@@ -534,6 +704,9 @@ impl<B: Backend> Walk<'_, B> {
                 .ok_or_else(|| EngineError::unknown(format!("glyph {}", g.glyph)))?;
             let Some(gb) = glyph.bounds else { continue };
             let m = device * Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]);
+            if !overlaps(m.transform_rect_bbox(gb), self.viewport) {
+                continue;
+            }
             let [a, b, cc, d, e, f] = m.as_coeffs();
             let axis_aligned = b.abs() <= 1e-9 * (a.abs() + d.abs()) && cc.abs() <= 1e-9 * (a.abs() + d.abs());
             let small = gb.width() * a.abs() <= self.glyph_mask_side && gb.height() * d.abs() <= self.glyph_mask_side;
@@ -587,6 +760,7 @@ impl<B: Backend> Walk<'_, B> {
                     continue;
                 }
             }
+            self.spend(glyph.path.elements().len())?;
             let mut p = glyph.path.clone();
             p.apply_affine(Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]));
             outlines.extend(p);

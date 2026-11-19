@@ -6,6 +6,7 @@
 //! code and message. Nothing panics across it: inputs are validated (`wire.rs`, `record.rs`),
 //! sizes are limited (`limits.rs`), and the fuzz tests (`tests/fuzz.rs`) hold that.
 
+pub mod atlas;
 pub mod cpu;
 pub mod engine;
 pub mod error;
@@ -46,6 +47,22 @@ pub struct Outcome {
     pub mask_hits: f64,
     pub mask_misses: f64,
     pub mask_bytes: f64,
+    /// Records drawn coarse (unreadable text as bars) and skipped as specks: a frame with
+    /// either is a level-of-detail stand-in, not exact.
+    pub coarse: u32,
+    pub specks: u32,
+    /// The frame reached the canvas (a GPU frame with a canvas; always true otherwise).
+    pub presented: bool,
+    /// Made from the last frame (a pan shifted, a zoom scaled): a stand-in, not exact.
+    pub standin: bool,
+    /// How a GPU frame was made: 0 whole, 1 pan, 2 zoom stand-in, 3 unchanged.
+    pub plan: u32,
+    /// Its CPU time (milliseconds): encoding, the renderer's preparing and uploading,
+    /// presenting and submitting, and all.
+    pub encode_ms: f64,
+    pub render_ms: f64,
+    pub submit_ms: f64,
+    pub cpu_ms: f64,
 }
 
 #[wasm_bindgen]
@@ -75,6 +92,15 @@ impl Outcome {
             mask_hits: 0.0,
             mask_misses: 0.0,
             mask_bytes: 0.0,
+            coarse: 0,
+            specks: 0,
+            presented: true,
+            standin: false,
+            plan: 0,
+            encode_ms: 0.0,
+            render_ms: 0.0,
+            submit_ms: 0.0,
+            cpu_ms: 0.0,
         }
     }
     fn err(e: EngineError) -> Self {
@@ -94,6 +120,8 @@ impl Outcome {
             mask_hits: s.masks.hits as f64,
             mask_misses: s.masks.misses as f64,
             mask_bytes: s.masks.bytes as f64,
+            coarse: s.draw.coarse,
+            specks: s.draw.specks,
             ..Self::ok()
         }
     }
@@ -182,8 +210,66 @@ impl Engine {
         self.core.store.glyphs.bytes() as f64
     }
 
+    /// Sets a limit by name (`Limits`' fields: `graph_bytes`, `message_bytes`, `image_bytes`,
+    /// `glyph_outline_bytes`, `glyph_mask_bytes`, `memory_bytes`, `gpu_bytes`, `band_bytes`,
+    /// `frame_verbs`), before anything is applied.
+    #[wasm_bindgen(js_name = setLimit)]
+    pub fn set_limit(&mut self, name: &str, value: f64) -> Outcome {
+        if self.core.store.revision != 0 || !value.is_finite() || value < 0.0 {
+            return Outcome::err(EngineError::new(
+                error::ErrorCode::State,
+                "limits are set before the first message, to a number of zero or more",
+            ));
+        }
+        let v = value as usize;
+        let l = &mut self.core.store.limits;
+        match name {
+            "graph_bytes" => l.graph_bytes = v,
+            "message_bytes" => l.message_bytes = v,
+            "image_bytes" => l.image_bytes = v,
+            "glyph_outline_bytes" => l.glyph_outline_bytes = v,
+            "memory_bytes" => l.memory_bytes = v,
+            "gpu_bytes" => l.gpu_bytes = v,
+            "band_bytes" => l.band_bytes = v.max(4),
+            "frame_verbs" => l.frame_verbs = v,
+            "glyph_mask_bytes" => {
+                l.glyph_mask_bytes = v;
+                self.core.cpu.masks.set_budget(v);
+            }
+            other => {
+                return Outcome::err(EngineError::new(error::ErrorCode::State, format!("no limit {other}")));
+            }
+        }
+        Outcome::ok()
+    }
+
+    /// Bytes the engine holds, roughly: the graph, images and glyph masks.
+    #[wasm_bindgen(getter, js_name = heldBytes)]
+    pub fn held_bytes(&self) -> f64 {
+        self.core.held_bytes() as f64
+    }
+
+    /// Rows a band of a frame `width` wide may have.
+    #[wasm_bindgen(js_name = bandRows)]
+    pub fn band_rows(&self, width: u32) -> u32 {
+        self.core.band_rows(width)
+    }
+
+    fn exporting(&self) -> Option<Outcome> {
+        self.png.as_ref().map(|_| {
+            Outcome::err(EngineError::new(
+                error::ErrorCode::State,
+                "an export is in progress: the engine changes once it ends or is cancelled",
+            ))
+        })
+    }
+
     /// Applies a display-list message, all or nothing; answers where pixels may have changed.
+    /// Refused while an export streams, so an export draws one revision.
     pub fn apply(&mut self, bytes: &[u8]) -> Outcome {
+        if let Some(o) = self.exporting() {
+            return o;
+        }
         match self.core.apply(bytes) {
             Ok(a) => {
                 let mut o = Outcome::ok();
@@ -237,12 +323,19 @@ impl Engine {
     /// Uploads an image (RGBA8, straight unless `premultiplied`) under `id`.
     #[wasm_bindgen(js_name = putImage)]
     pub fn put_image(&mut self, id: u32, width: u32, height: u32, rgba: &[u8], premultiplied: bool) -> Outcome {
+        if let Some(o) = self.exporting() {
+            return o;
+        }
         outcome(self.core.put_image(id, width, height, rgba, premultiplied))
     }
 
     #[wasm_bindgen(js_name = dropImage)]
-    pub fn drop_image(&mut self, id: u32) {
+    pub fn drop_image(&mut self, id: u32) -> Outcome {
+        if let Some(o) = self.exporting() {
+            return o;
+        }
         self.core.drop_image(id);
+        Outcome::ok()
     }
 
     /// Draws a frame on the CPU; `pixels()` then answers it (straight RGBA8).
@@ -312,8 +405,19 @@ impl Engine {
 
     /// Starts a PNG of a `width` × `height` frame, written band by band (`pngBand`) in bounded
     /// memory: the compressed bytes are taken as they're made (`pngTake`).
+    ///
+    /// Refused before it starts when the page holds a record the engine doesn't draw (anywhere
+    /// on it), when another export is streaming, or when the export wouldn't fit the engine's
+    /// memory budget. Until it ends (`pngEnd`) or is cancelled (`pngAbort`), the engine refuses
+    /// changes, so every band draws the same revision.
     #[wasm_bindgen(js_name = pngBegin)]
-    pub fn png_begin(&mut self, width: u32, height: u32) -> Outcome {
+    pub fn png_begin(&mut self, width: u32, height: u32, zoom: f64, x: f64, y: f64, dpr: f64) -> Outcome {
+        if let Some(o) = self.exporting() {
+            return o;
+        }
+        if let Err(e) = self.core.admit_export(width, height, Camera { zoom, x, y, dpr }) {
+            return Outcome::err(e);
+        }
         match png::BandPng::new(width, height, self.core.limits().texture_side) {
             Ok(p) => {
                 self.png = Some(p);
@@ -342,6 +446,7 @@ impl Engine {
                 self.png = Some(p);
                 Outcome::ok()
             }
+            // The export ends with its failure: the engine takes changes again.
             Err(e) => Outcome::err(e),
         }
     }
@@ -357,6 +462,24 @@ impl Engine {
     pub fn png_end(&mut self) -> Vec<u8> {
         self.png.take().map(|p| p.finish()).unwrap_or_default()
     }
+
+    /// Cancels the PNG begun, letting its memory go.
+    #[wasm_bindgen(js_name = pngAbort)]
+    pub fn png_abort(&mut self) {
+        self.png = None;
+    }
+
+    /// Whether an export is streaming.
+    #[wasm_bindgen(getter)]
+    pub fn exporting_png(&self) -> bool {
+        self.png.is_some()
+    }
+}
+
+/// A failure as a JS value (an `Outcome`), for promises that resolve to one instead of rejecting.
+#[cfg(feature = "gpu")]
+fn failure(e: EngineError) -> JsValue {
+    JsValue::from(Outcome::err(e))
 }
 
 fn rgba(v: &[f32]) -> [f32; 4] {
@@ -470,7 +593,15 @@ impl Engine {
         {
             Ok(draw) => {
                 let masks = self.core.gpu.as_ref().map(|g| g.masks.stats).unwrap_or_default();
-                Outcome::stats(engine::FrameStats { draw, masks })
+                let mut o = Outcome::stats(engine::FrameStats { draw, masks });
+                o.presented = draw.presented;
+                o.standin = draw.standin;
+                o.plan = draw.plan;
+                o.encode_ms = draw.encode_ms;
+                o.render_ms = draw.render_ms;
+                o.submit_ms = draw.submit_ms;
+                o.cpu_ms = draw.cpu_ms;
+                o
             }
             Err(e) => Outcome::err(e),
         }
@@ -493,7 +624,7 @@ impl Engine {
         }
     }
 
-    /// Resolves when the GPU has finished what it was given.
+    /// Resolves when the GPU has finished what it was given (never rejects).
     #[wasm_bindgen(js_name = gpuFinished)]
     pub fn gpu_finished(&self) -> js_sys::Promise {
         let queue = self.core.gpu.as_ref().map(|g| g.queue.clone());
@@ -505,21 +636,26 @@ impl Engine {
         })
     }
 
-    /// Resolves to the last GPU frame, straight RGBA8, read back through a buffer.
+    /// Resolves to the last GPU frame, straight RGBA8, read back through a buffer, or to an
+    /// `Outcome` saying why not (it never rejects).
     #[wasm_bindgen(js_name = gpuPixels)]
     pub fn gpu_pixels(&self) -> js_sys::Promise {
         let start = self.core.gpu.as_ref().map(|g| g.read_back_start());
         wasm_bindgen_futures::future_to_promise(async move {
-            let (buffer, w, h, row) = match start {
+            let (buffer, w, h, row, flight) = match start {
                 Some(Ok(s)) => s,
-                Some(Err(e)) => return Err(JsValue::from_str(&e.message)),
-                None => return Err(JsValue::from_str("no GPU attached")),
+                Some(Err(e)) => return Ok(failure(e)),
+                None => {
+                    return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
+                }
             };
-            let mut px = gpu::read_back(buffer, w, h, row)
-                .await
-                .map_err(|e| JsValue::from_str(&e.message))?;
-            engine::unpremultiply(&mut px);
-            Ok(js_sys::Uint8Array::from(px.as_slice()).into())
+            match gpu::read_back(buffer, w, h, row, flight).await {
+                Ok(mut px) => {
+                    engine::unpremultiply(&mut px);
+                    Ok(js_sys::Uint8Array::from(px.as_slice()).into())
+                }
+                Err(e) => Ok(failure(e)),
+            }
         })
     }
 }

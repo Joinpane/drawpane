@@ -10,6 +10,7 @@
  * (default 5) runs; the VM is shared, so compare against a baseline run, not a budget.
  */
 import { writeFileSync } from "node:fs";
+import { Session } from "node:inspector";
 import {
   DisplayListBuilder,
   Doc,
@@ -93,7 +94,8 @@ describe.skipIf(!LAYERS || !built("worker"))("the display list at scale", () => 
     counts.sort((a, b) => b.layers - a.layers);
     const largest = counts[0] as { page: string; layers: number };
     const scene = new Scene(doc);
-    const engine = new RenderEngine(await loadNodeEngine("worker"));
+    // The browser build (its CPU path): a page this size is the editor's, past the Worker's budgets.
+    const engine = new RenderEngine(await loadNodeEngine("browser"));
     const builder = new DisplayListBuilder(scene, measurer);
 
     // A fresh list of the largest page, and applying it.
@@ -109,7 +111,22 @@ describe.skipIf(!LAYERS || !built("worker"))("the display list at scale", () => 
       applies.push(time(() => expect(engine.apply(list).ok).toBe(true)));
     }
     const fresh = new DisplayListBuilder(new Scene(doc), measurer);
+    // ENGINE_SCALE_PROFILE=<file>: a CPU profile of the cold build, for Chrome's profiler.
+    const profile = process.env.ENGINE_SCALE_PROFILE;
+    const session = profile ? new Session() : null;
+    if (session) {
+      session.connect();
+      await new Promise((r) => session.post("Profiler.enable", () => r(null)));
+      await new Promise((r) => session.post("Profiler.start", () => r(null)));
+    }
     const coldBuild = time(() => fresh.build(largest.page));
+    if (session && profile) {
+      const taken = await new Promise<unknown>((r) =>
+        session.post("Profiler.stop", (_e, v) => r((v as { profile: unknown }).profile)),
+      );
+      writeFileSync(profile, JSON.stringify(taken));
+      session.disconnect();
+    }
 
     // Patches: a drag (a top-level board moved), one restyle, a hundred restyles.
     const top = doc.childIds(largest.page);
