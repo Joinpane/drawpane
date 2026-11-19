@@ -361,6 +361,11 @@ export function expandOne(type: LayerType, name: string, value: unknown): Props 
     case "radius":
       if (Array.isArray(value)) return { cornerRadii: value as [number, number, number, number] };
       return { cornerRadius: num(value, name) };
+    case "smoothing":
+      // 0 to 1, or a percentage as the inspector shows it ("60%").
+      if (typeof value === "string" && value.endsWith("%"))
+        return { cornerSmoothing: num(value.slice(0, -1), name) / 100 };
+      return { cornerSmoothing: num(value, name) };
     case "clip":
       return { clipContent: value === true || value === "true" };
     case "hidden":
@@ -506,6 +511,8 @@ function attr(name: PropName, value: unknown, node: NodeRecord): string | null {
       return `radius=${json(value)}`;
     case "cornerRadii":
       return value === null ? null : `radius=${json(value)}`;
+    case "cornerSmoothing":
+      return value === 0 ? null : `smoothing=${json(value)}`;
     case "clipContent":
       return value === true ? "clip" : null;
     case "fontSize":

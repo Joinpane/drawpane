@@ -269,6 +269,13 @@ function Summary({ node }: { node: NodeRecord }) {
       token: token("border-radius"),
     });
   }
+  if ((node.type === "frame" || node.type === "rect") && getProp(p, "cornerSmoothing") > 0) {
+    // No CSS for it: shown so a developer knows the corners aren't plain circles.
+    rows.push({
+      label: "Corner smoothing",
+      value: `${Math.round(getProp(p, "cornerSmoothing") * 100)}%`,
+    });
+  }
   const fill = getProp(p, "fills").find((f) => f.type === "solid" && f.visible !== false);
   if (fill?.type === "solid") {
     rows.push({

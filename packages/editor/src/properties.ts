@@ -289,6 +289,7 @@ const LABELS: Readonly<Record<string, string>> = {
   blendMode: "Blend mode",
   cornerRadius: "Corner radius",
   cornerRadii: "Corner radius",
+  cornerSmoothing: "Corner smoothing",
   effects: "Effects",
   width: "Size",
   height: "Size",

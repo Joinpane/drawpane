@@ -7,6 +7,7 @@
 
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { inkOn } from "./contrast";
+import { boxPath, flattenBox, isSquare, layerCorners } from "./corners";
 import { imageRect } from "./crop";
 import { croppingTarget } from "./crop-session";
 import type { Editor } from "./editor";
@@ -237,7 +238,18 @@ export function drawOverlay(
     const isComponentish =
       hovered?.type === "frame" &&
       (getProp(hovered.props, "isComponent") || getProp(hovered.props, "instanceOf") !== null);
-    if (corners) quad(corners, isComponentish ? theme.component : theme.signal, 1);
+    const color = isComponentish ? theme.component : theme.signal;
+    const outline =
+      hovered?.type === "rect" || hovered?.type === "frame" ? boxOutlinePoints(hovered) : null;
+    if (outline) {
+      // A rounded or smoothed box: its outline as drawn (corners.ts), as Figma traces it.
+      const m = scene.worldMatrix(hover);
+      quad(
+        outline.map((p) => apply(m, p)),
+        color,
+        1,
+      );
+    } else if (corners) quad(corners, color, 1);
   }
 
   // Cropping draws its own box, handles and size instead of the selection's.
@@ -1145,4 +1157,13 @@ function drawCrop(
   ctx.fillText(label, bottom.x, bottom.y + 17.5);
   ctx.textAlign = "left";
   ctx.restore();
+}
+
+/** A rectangle's or frame's rounded outline as points in its own box; null when its corners are square. */
+function boxOutlinePoints(node: NodeRecord): Point[] | null {
+  const { radii, smoothing } = layerCorners(node);
+  if (isSquare(radii)) return null;
+  const w = getProp(node.props, "width");
+  const h = getProp(node.props, "height");
+  return flattenBox(boxPath(w, h, radii, smoothing), 8);
 }

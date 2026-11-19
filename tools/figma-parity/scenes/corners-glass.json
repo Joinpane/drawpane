@@ -1,0 +1,135 @@
+{
+  "suite": "corners-glass",
+  "about": "Glass and background blur on smoothed corners, over the striped backdrop: the lens's rim follows the squircle, not a circle.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 4
+  },
+  "background": "#f4f3ef",
+  "backdrop": "stripes",
+  "cells": [
+    {
+      "id": "glass-ios",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 32,
+          "cornerSmoothing": 0.6,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff33"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 80,
+              "depth": 20,
+              "dispersion": 50,
+              "frost": 4,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glass-full",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 60,
+          "y": 20,
+          "width": 120,
+          "height": 120,
+          "cornerRadius": 40,
+          "cornerSmoothing": 1,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff33"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 80,
+              "depth": 20,
+              "dispersion": 50,
+              "frost": 4,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "background-blur",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 32,
+          "cornerSmoothing": 0.6,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff59"
+            }
+          ],
+          "effects": [
+            {
+              "type": "background-blur",
+              "radius": 8
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glass-plain",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 160,
+          "height": 100,
+          "cornerRadius": 32,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff33"
+            }
+          ],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 80,
+              "depth": 20,
+              "dispersion": 50,
+              "frost": 4,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

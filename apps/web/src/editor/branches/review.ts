@@ -42,6 +42,7 @@ const PROP_LABEL: Readonly<Record<string, string>> = {
   effects: "Effects",
   cornerRadius: "Corner radius",
   cornerRadii: "Corners",
+  cornerSmoothing: "Corner smoothing",
   opacity: "Opacity",
   fontSize: "Font size",
   fontFamily: "Font",

@@ -441,7 +441,8 @@ describe("exportSvg", () => {
     expect(pieces).toHaveLength(8);
     // The top edge, 80 long: eight of the 10-long pattern, a dash centred on each end.
     expect(pieces[0]?.slice(1)).toEqual(["M10 0L90 0", "6 4", "3"]);
-    expect(pieces[1]?.[1]).toMatch(/^M90 0A10 10 0 0 1 100 10$/);
+    // The corner, as every renderer draws it (corners.ts): one cubic, as Figma's own geometry.
+    expect(pieces[1]?.[1]).toBe("M90 0C95.523 0 100 4.477 100 10");
     expect(svg).not.toContain('stroke-dasharray="6 4"/>');
   });
 
@@ -732,7 +733,7 @@ describe("exportSvg", () => {
     );
     // Spread grows the box and its corners alike, under the fill.
     expect(svg).toContain(
-      '<g filter="url(#shadow1)"><path transform="translate(10 20)" d="M8 -2H92A10 10 0 0 1 102 8V42A10 10 0 0 1 92 52H8A10 10 0 0 1 -2 42V8A10 10 0 0 1 8 -2Z" fill="#000000" fill-opacity="0.251"/></g><rect transform="translate(10 20)" width="100" height="50" rx="8" fill="#ffffff"/>',
+      '<g filter="url(#shadow1)"><rect transform="translate(10 20)" x="-2" y="-2" width="104" height="54" rx="10" fill="#000000" fill-opacity="0.251"/></g><rect transform="translate(10 20)" width="100" height="50" rx="8" fill="#ffffff"/>',
     );
     // The inner shadow: a ring outside the shape, offset and blurred, clipped to the shape, over the fill.
     expect(svg).toMatch(

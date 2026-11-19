@@ -384,11 +384,15 @@ function isArc(node: Figma.Node): boolean {
 }
 
 function corners(node: Figma.Node): Props {
+  // Smoothing is kept even on square corners, as Figma keeps it: a radius set later (an
+  // instance's override, an edit) is smoothed as the designer chose.
+  const s = node.cornerSmoothing ?? 0;
+  const smoothing: Props = s > 0 ? { cornerSmoothing: Math.min(1, round3(s)) } : {};
   const radii = node.rectangleCornerRadii;
   if (radii && !radii.every((r) => r === radii[0]))
-    return { cornerRadii: radii.map((r) => round3(Math.max(0, r))) };
+    return { cornerRadii: radii.map((r) => round3(Math.max(0, r))), ...smoothing };
   const r = radii?.[0] ?? node.cornerRadius ?? 0;
-  return r > 0 ? { cornerRadius: round3(r) } : {};
+  return r > 0 ? { cornerRadius: round3(r), ...smoothing } : smoothing;
 }
 
 const JOIN = { MITER: "miter", BEVEL: "bevel", ROUND: "round" } as const;

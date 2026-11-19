@@ -216,6 +216,25 @@ function scene() {
 }
 
 describe("layers", () => {
+  it("carries corner smoothing, and nothing when there's none", () => {
+    const { page, add, adapt } = scene();
+    const squircle = add("RECTANGLE", page.id, "2:1", {
+      name: "Squircle",
+      width: 60,
+      height: 60,
+      cornerRadius: 14,
+      cornerSmoothing: 0.6,
+    });
+    const plain = add("RECTANGLE", page.id, "2:2", {
+      name: "Plain",
+      width: 60,
+      height: 60,
+      cornerRadius: 14,
+    });
+    expect(adapt(squircle)).toMatchObject({ cornerRadius: 14, cornerSmoothing: 0.6 });
+    expect(adapt(plain)).not.toHaveProperty("cornerSmoothing");
+  });
+
   it("keeps auto layout, its children's sizing and constraints", () => {
     const { page, add, adapt } = scene();
     const row = add("FRAME", page.id, "1:1", {

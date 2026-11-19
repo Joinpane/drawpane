@@ -237,6 +237,7 @@ const OVERRIDE_FIELDS: Record<string, readonly string[]> = {
   textDecoration: ["textDecoration", "styleIdForText"],
   cornerRadius: ["cornerRadius", "rectangleTopLeftCornerRadius"],
   cornerRadii: ["rectangleTopLeftCornerRadius", "rectangleCornerRadiiIndependent"],
+  cornerSmoothing: ["cornerSmoothing"],
   strokeWeight: ["strokeWeight", "borderTopWeight"],
   strokeWeights: ["borderTopWeight", "borderStrokeWeightsIndependent"],
   width: ["size"],
@@ -1205,8 +1206,11 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
         label: "Corner smoothing (squircles)",
         importance: "visual",
         code: CODE.geometry,
-        how: "a smoothing property on the layer (the model has none)",
-        check: noField("cornerSmoothing"),
+        how: "cornerSmoothing on the layer (decision 0041)",
+        check: hasProp(
+          "cornerSmoothing",
+          (v) => typeof v === "number" && near(v, smoothing, 0.001),
+        ),
       });
 
     // Constraints (children of frames without auto layout).

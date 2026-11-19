@@ -124,6 +124,22 @@
   grid-template-columns: 1fr 1fr;
   gap: var(--space-100);
 }
+/* Corner smoothing: its label, then the track (with the iOS stop under it) and the number. */
+.inspector__smoothing {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-100);
+}
+.inspector__smoothing > .inspector__label {
+  line-height: var(--size-control-sm);
+}
+.inspector__smoothing .dp-slider {
+  align-items: start;
+}
+.inspector__smoothing .dp-slider__track {
+  height: var(--size-control-sm);
+}
 
 /* Paint rows: swatch, value, opacity, visibility, remove */
 .paint-row {

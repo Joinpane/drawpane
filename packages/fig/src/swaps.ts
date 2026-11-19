@@ -39,6 +39,8 @@ const LOOK = [
   "topRightRadius",
   "bottomLeftRadius",
   "bottomRightRadius",
+  "independentCorners",
+  "cornerSmoothing",
   "opacity",
   // Its own auto layout, and the sizes it may take.
   "layoutMode",

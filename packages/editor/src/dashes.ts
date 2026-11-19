@@ -1,10 +1,11 @@
 /**
  * Dashed strokes as Figma draws them: each segment of the outline (a
- * straight edge, a rounded corner, a quarter of an ellipse) gets a whole
+ * straight edge, a rounded or smoothed corner, a quarter of an ellipse) gets a whole
  * number of the dash pattern, stretched or squeezed to fit, with a dash
  * centred on each end. So dashes meet every corner the same way, instead of
  * wherever a continuous pattern happens to fall.
  */
+import { boxPieces } from "./corners";
 
 /** A piece of an outline, in the layer's units, with its length. */
 export type OutlineSegment =
@@ -26,16 +27,13 @@ export type OutlineSegment =
       readonly start: number;
       readonly end: number;
       readonly length: number;
+    }
+  | {
+      /** A box's corner, as corners.ts draws it: its start point, then six numbers per cubic. */
+      readonly kind: "cubic";
+      readonly pts: readonly number[];
+      readonly length: number;
     };
-
-const line = (x0: number, y0: number, x1: number, y1: number): OutlineSegment => ({
-  kind: "line",
-  x0,
-  y0,
-  x1,
-  y1,
-  length: Math.hypot(x1 - x0, y1 - y0),
-});
 
 /** The length of an elliptical arc, by Simpson's rule (exact enough for laying out dashes). */
 function arcLength(rx: number, ry: number, start: number, end: number): number {
@@ -68,32 +66,15 @@ const arc = (
 /**
  * A box's outline, clockwise from the top left: its edges, and its corners
  * where they're rounded (radii top left, top right, bottom right, bottom
- * left, each no more than half the shorter side).
+ * left, with `smoothing`), each corner as corners.ts draws it.
  */
 export function boxOutline(
   w: number,
   h: number,
   radii: readonly [number, number, number, number],
+  smoothing = 0,
 ): OutlineSegment[] {
-  const max = Math.min(w, h) / 2;
-  const [tl, tr, br, bl] = radii.map((r) => Math.max(0, Math.min(r, max))) as [
-    number,
-    number,
-    number,
-    number,
-  ];
-  const q = Math.PI / 2;
-  const out: OutlineSegment[] = [
-    line(tl, 0, w - tr, 0),
-    ...(tr > 0 ? [arc(w - tr, tr, tr, tr, -q, 0)] : []),
-    line(w, tr, w, h - br),
-    ...(br > 0 ? [arc(w - br, h - br, br, br, 0, q)] : []),
-    line(w - br, h, bl, h),
-    ...(bl > 0 ? [arc(bl, h - bl, bl, bl, q, 2 * q)] : []),
-    line(0, h - bl, 0, tl),
-    ...(tl > 0 ? [arc(tl, tl, tl, tl, 2 * q, 3 * q)] : []),
-  ];
-  return out.filter((s) => s.length > 1e-6);
+  return boxPieces(w, h, radii, smoothing);
 }
 
 /** An ellipse filling the box: four quarters, from its rightmost point, clockwise. */

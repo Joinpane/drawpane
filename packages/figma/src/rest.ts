@@ -164,6 +164,8 @@ export interface Node {
   readonly strokeGeometry?: readonly { path: string; windingRule: string }[];
   readonly cornerRadius?: number;
   readonly rectangleCornerRadii?: readonly [number, number, number, number];
+  /** How smooth the corners are, 0 to 1 (iOS uses 0.6); missing is 0. */
+  readonly cornerSmoothing?: number;
   readonly effects?: readonly Effect[];
   readonly clipsContent?: boolean;
   readonly constraints?: { vertical: string; horizontal: string };

@@ -27,6 +27,7 @@ import {
 } from "@drawpane/editor";
 import { type Effect, getProp, type NodeRecord, type Paint } from "@drawpane/model";
 // Not exported from the editor's index; the spike reads them where they live.
+import { boxCommands, fitCorners, type Radii } from "../../../packages/editor/src/corner-geometry";
 import { boxOutline, ellipseOutline, fitDashes } from "../../../packages/editor/src/dashes";
 import { dropShadowCast } from "../../../packages/editor/src/shadows";
 import {
@@ -71,30 +72,20 @@ function rgba(hex: string, alpha: number): Rgba {
 
 const shows = (p: Paint) => p.visible !== false && (p.opacity ?? 1) > 0;
 
-function roundRect(w: number, h: number, radii: readonly number[], inset = 0): Path {
-  const x = -inset;
-  const y = -inset;
+/** A box's outline, grown by `inset` on every side, from the corner geometry every renderer shares. */
+function roundRect(w: number, h: number, radii: readonly number[], inset = 0, smoothing = 0): Path {
+  const p = new Path();
   const W = w + inset * 2;
   const H = h + inset * 2;
-  const p = new Path();
   if (W <= 0 || H <= 0) return p;
-  const max = Math.min(W, H) / 2;
-  const [tl, tr, br, bl] = radii.map((r) => Math.max(0, Math.min(r, max))) as [
-    number,
-    number,
-    number,
-    number,
-  ];
-  const k = 1 - KAPPA;
-  p.moveTo(x + tl, y).lineTo(x + W - tr, y);
-  if (tr > 0) p.cubicTo(x + W - tr * k, y, x + W, y + tr * k, x + W, y + tr);
-  p.lineTo(x + W, y + H - br);
-  if (br > 0) p.cubicTo(x + W, y + H - br * k, x + W - br * k, y + H, x + W - br, y + H);
-  p.lineTo(x + bl, y + H);
-  if (bl > 0) p.cubicTo(x + bl * k, y + H, x, y + H - bl * k, x, y + H - bl);
-  p.lineTo(x, y + tl);
-  if (tl > 0) p.cubicTo(x, y + tl * k, x + tl * k, y, x + tl, y);
-  return p.close();
+  for (const c of boxCommands(W, H, radii as Radii, smoothing)) {
+    if (c[0] === "M") p.moveTo(c[1] - inset, c[2] - inset);
+    else if (c[0] === "L") p.lineTo(c[1] - inset, c[2] - inset);
+    else if (c[0] === "C")
+      p.cubicTo(c[1] - inset, c[2] - inset, c[3] - inset, c[4] - inset, c[5] - inset, c[6] - inset);
+    else p.close();
+  }
+  return p;
 }
 
 function ellipse(cx: number, cy: number, rx: number, ry: number): Path {
@@ -240,9 +231,12 @@ export function buildBoard(
     const w = getProp(node.props, "width");
     const h = getProp(node.props, "height");
     if (node.type === "rect" || node.type === "frame") {
-      const grow = (v: number) =>
-        v > 0 ? Math.max(0, Math.min(v, Math.min(w, h) / 2) + spread) : 0;
-      return roundRect(w, h, radiiOf(node).map(grow), spread);
+      // Each rounded corner's radius as drawn, plus the spread, as the editor's shadows grow it.
+      const smoothing = getProp(node.props, "cornerSmoothing");
+      const grown = fitCorners(w, h, radiiOf(node), smoothing).map((c) =>
+        c.radius > 0 ? Math.max(0, c.radius + spread) : 0,
+      );
+      return roundRect(w, h, grown, spread, smoothing);
     }
     if (node.type === "ellipse") return ellipse(w / 2, h / 2, w / 2 + spread, h / 2 + spread);
     if (node.type === "text") {
@@ -397,7 +391,14 @@ export function buildBoard(
       const mode = p.blendMode && p.blendMode !== "normal" ? p.blendMode : blend;
       blended(mode, deviceBox(m, w, h, reach), () => {
         if (!isUniform(sides) && (node.type === "rect" || node.type === "frame")) {
-          const region = strokeRegion(w, h, radiiOf(node), sides, align);
+          const region = strokeRegion(
+            w,
+            h,
+            radiiOf(node),
+            sides,
+            align,
+            getProp(node.props, "cornerSmoothing"),
+          );
           out.fill(m, parseSvgPath(strokeRegionPath(region)), true, color);
           return;
         }
@@ -412,11 +413,25 @@ export function buildBoard(
         ) {
           // Dashes fitted to each side and corner, as Figma draws them (decision 0013).
           const outline =
-            node.type === "ellipse" ? ellipseOutline(w, h) : boxOutline(w, h, radiiOf(node));
+            node.type === "ellipse"
+              ? ellipseOutline(w, h)
+              : boxOutline(w, h, radiiOf(node), getProp(node.props, "cornerSmoothing"));
           for (const piece of outline) {
             const path = new Path();
             if (piece.kind === "line") path.moveTo(piece.x0, piece.y0).lineTo(piece.x1, piece.y1);
-            else {
+            else if (piece.kind === "cubic") {
+              const c = piece.pts as number[];
+              path.moveTo(c[0] as number, c[1] as number);
+              for (let i = 2; i < c.length; i += 6)
+                path.cubicTo(
+                  c[i] as number,
+                  c[i + 1] as number,
+                  c[i + 2] as number,
+                  c[i + 3] as number,
+                  c[i + 4] as number,
+                  c[i + 5] as number,
+                );
+            } else {
               path.moveTo(
                 piece.cx + piece.rx * Math.cos(piece.start),
                 piece.cy + piece.ry * Math.sin(piece.start),

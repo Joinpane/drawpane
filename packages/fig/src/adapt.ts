@@ -408,6 +408,7 @@ export function adaptNode(
       n.bottomLeftRadius,
     ];
   else if (n.cornerRadius > 0) node.cornerRadius = n.cornerRadius;
+  if (n.cornerSmoothing > 0) node.cornerSmoothing = n.cornerSmoothing;
   if (n.clipsContent) node.clipsContent = true;
   const parentGuid = ids.sourceGuid(parent);
   const parentRaw = parentGuid ? ctx.records.get(parentGuid) : undefined;

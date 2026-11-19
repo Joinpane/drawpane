@@ -67,6 +67,7 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   pointCount: "geometry",
   innerRadius: "geometry",
   cornerRadii: "style",
+  cornerSmoothing: "style",
   isComponent: "component",
   isComponentSet: "component",
   variantProps: "component",

@@ -305,5 +305,39 @@
     "dispersion-split": 0.81,
     "frost-split": 0.95,
     "button-near-black": 1.09
+  },
+  "corners": {
+    "ios-60": 0.34,
+    "full-100": 0.34,
+    "light-20": 0.33,
+    "plain-0": 0.32,
+    "app-icon": 0.37,
+    "pill-no-room": 0.33,
+    "large-radius": 0.37,
+    "over-half": 0.39,
+    "per-corner": 0.33,
+    "per-corner-big": 0.36,
+    "one-big-corner": 0.36,
+    "one-big-smooth": 0.36,
+    "tiny": 0.39,
+    "stroke-inside": 0.39,
+    "stroke-center": 0.41,
+    "stroke-outside": 0.43,
+    "stroke-hairline": 0.4,
+    "stroke-dashed": 0.41,
+    "stroke-sides": 0.49,
+    "clip": 0.34,
+    "drop-shadow": 0.75,
+    "shadow-spread": 0.84,
+    "shadow-shrink": 0.41,
+    "inner-shadow": 0.67,
+    "layer-blur": 1.35,
+    "mask": 0.4
+  },
+  "corners-glass": {
+    "glass-ios": 1.38,
+    "glass-full": 1.21,
+    "background-blur": 1.31,
+    "glass-plain": 1.36
   }
 }
