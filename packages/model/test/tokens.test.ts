@@ -277,4 +277,19 @@ describe("bound sizes keep within their bounds", () => {
     expect(p.height).toBe(32);
     expect(p.width).toBe(50);
   });
+
+  it("an unbound size is left to the layout, whatever its bound min or max gives", () => {
+    const store = file([
+      node("lo", "variable", "c", { variableType: "number", values: { light: 32, dark: 32 } }),
+      node("b", "frame", "dark", {
+        height: 28,
+        minHeight: 32,
+        sizingV: "hug",
+        bindings: { minHeight: "lo" },
+      } as never),
+    ]);
+    const p = new TokenResolver(store).resolve(store.get("b") as NodeRecord).props;
+    expect(p.minHeight).toBe(32);
+    expect(p.height).toBe(28);
+  });
 });

@@ -665,19 +665,20 @@ export class TokenResolver {
         const resolved = this.value(variableId, node);
         if (resolved) this.#apply(key, resolved.value, p, out, bindingUnit(ref));
       }
-    // A size is kept within its min and max, as Figma keeps it, whichever of them is bound.
+    // A bound size is kept within the layer's min and max (bound or not), as Figma keeps it.
+    // An unbound size is the layout's: it's laid out again when what it reads changes.
     for (const [size, min, max] of [
       ["width", "minWidth", "maxWidth"],
       ["height", "minHeight", "maxHeight"],
     ] as const) {
-      if (out[size] === undefined && out[min] === undefined && out[max] === undefined) continue;
-      const value = (out[size] as number | undefined) ?? getProp(p, size);
+      const value = out[size] as number | undefined;
+      if (value === undefined) continue;
       const lo = (out[min] as number | null | undefined) ?? getProp(p, min);
       const hi = (out[max] as number | null | undefined) ?? getProp(p, max);
       let clamped = value;
       if (typeof hi === "number") clamped = Math.min(clamped, hi);
       if (typeof lo === "number") clamped = Math.max(clamped, lo);
-      if (clamped !== getProp(p, size) || out[size] !== undefined) out[size] = clamped;
+      out[size] = clamped;
     }
     if (Object.keys(out).length === 0) return node;
     return { ...node, props: { ...p, ...out } as Props };
