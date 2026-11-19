@@ -67,6 +67,65 @@ export function visibleGrids(node: NodeRecord): LayoutGrid[] {
   return getProp(node.props, "layoutGrids").filter((g) => g.visible !== false);
 }
 
+/** What decides whether a frame's grids show, and whether what's inside a container can. */
+const gridShape = (node: NodeRecord) =>
+  `${node.type}|${node.props.visible !== false}|${visibleGrids(node).length > 0}`;
+
+interface GridFrames {
+  version: number;
+  readonly pageId: string;
+  readonly ids: readonly string[];
+  /** Every frame and group met on the walk, hidden ones included, by `gridShape`. */
+  readonly seen: ReadonlyMap<string, string>;
+}
+const gridFrames = new WeakMap<Doc, GridFrames>();
+
+/**
+ * The frames on a page with layout grids showing, in drawing order. The
+ * overlay asks every frame; a walk of the whole page each time the document
+ * changed cost a large file several milliseconds a frame while dragging. So
+ * edits that change no child list and no container's visibility or grids
+ * (a move, a colour) keep the list as it was.
+ */
+export function framesWithGrids(doc: Doc, pageId: string): readonly string[] {
+  const last = gridFrames.get(doc);
+  if (last && last.pageId === pageId) {
+    if (last.version === doc.version) return last.ids;
+    const changes = doc.changesSince(last.version);
+    const same =
+      changes?.every(
+        (change) =>
+          !change.reset &&
+          change.parents.size === 0 &&
+          [...change.ids].every((id) => {
+            const shape = last.seen.get(id);
+            if (shape === undefined) return true;
+            const node = doc.get(id);
+            return node !== undefined && gridShape(node) === shape;
+          }),
+      ) ?? false;
+    if (same) {
+      last.version = doc.version;
+      return last.ids;
+    }
+  }
+  const ids: string[] = [];
+  const seen = new Map<string, string>();
+  const walk = (id: string) => {
+    for (const child of doc.childIds(id)) {
+      const node = doc.get(child);
+      if (!node || (node.type !== "frame" && node.type !== "group")) continue;
+      seen.set(child, gridShape(node));
+      if (node.props.visible === false) continue;
+      if (visibleGrids(node).length > 0) ids.push(child);
+      walk(child);
+    }
+  };
+  walk(pageId);
+  gridFrames.set(doc, { version: doc.version, pageId, ids, seen });
+  return ids;
+}
+
 /**
  * The edges a layer snaps to inside a frame's layout grids, in page
  * coordinates: column edges on x, row edges on y, a square grid's lines both

@@ -40,3 +40,13 @@ And a few one-off probes in the parity file: a page with a grey background, a se
 - Documents drawn on screen look the same; exports of layers with glass or background blur over transparency or on dark boards change, toward Figma.
 - An export holding glass or background blur draws what's beneath it on the page once more, bounded by the export's rect, and keeps a copy of each such layer's backdrop region. Panning is untouched.
 - SVG export and the headless renderer still show glass without its bend or frost, and without what's outside the exported layers.
+
+## Revision: the export preview's cost (2026-11-19)
+
+The inspector's export preview drew the selection with what's under it (point 3) a beat after every selection and every edit, on the main thread, with a renderer made afresh each time (a new WebGL context and shaders for glass). On a glass board of a large iOS UI kit that was a task of four to five seconds after each nudge or undo, and after selecting a component, during which the editor took no input.
+
+- **One renderer for an editor's previews**, kept: glass's WebGL context, shaders and measured shapes serve every preview after the first.
+- **What's under the export is drawn only where its glass and background blur read it**: around each of them, as far as it reads (what `#backdropFor` keeps), not the whole export rect. A layer touching none of that can't change what they see, so the export comes out the same.
+- **The preview is drawn only while it's on screen** (the inspector often has it scrolled out of view), and when it comes into view.
+
+A large selection full of glass still costs its export's drawing once it's in view (a couple of seconds on a machine without a GPU). Numbers in the pull request.

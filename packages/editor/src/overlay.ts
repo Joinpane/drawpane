@@ -12,7 +12,7 @@ import { imageRect } from "./crop";
 import { croppingTarget } from "./crop-session";
 import type { Editor } from "./editor";
 import { apply, type Point, type Rect } from "./geometry";
-import { gridLines, gridTracks, placedGuides, visibleGrids } from "./grids";
+import { framesWithGrids, gridLines, gridTracks, placedGuides, visibleGrids } from "./grids";
 import type { ImageCache } from "./images";
 import type { Interaction } from "./interaction";
 import { frameLabels, LABEL_FONT } from "./labels";
@@ -894,27 +894,6 @@ export function withAlpha(color: string, alpha: number): string {
   return c;
 }
 
-/** Frames on a page that have layout grids, cached per document version. */
-let gridFrames: { version: number; pageId: string; ids: string[] } | null = null;
-
-function framesWithGrids(editor: Editor, pageId: string): string[] {
-  const doc = editor.doc;
-  if (gridFrames && gridFrames.version === doc.version && gridFrames.pageId === pageId)
-    return gridFrames.ids;
-  const ids: string[] = [];
-  const walk = (id: string) => {
-    for (const child of doc.childIds(id)) {
-      const node = doc.get(child);
-      if (!node || node.props.visible === false) continue;
-      if (node.type === "frame" && visibleGrids(node).length > 0) ids.push(child);
-      if (node.type === "frame" || node.type === "group") walk(child);
-    }
-  };
-  walk(pageId);
-  gridFrames = { version: doc.version, pageId, ids };
-  return ids;
-}
-
 /** A `#rrggbbaa` color as CSS. */
 function cssHex(hex: string): string {
   if (hex.length !== 9) return hex;
@@ -927,7 +906,7 @@ function drawLayoutGrids(ctx: CanvasRenderingContext2D, editor: Editor, dpr: num
   const { camera, viewport, pageId } = editor.s;
   if (!pageId) return;
   const view = camera.visibleRect(viewport);
-  for (const id of framesWithGrids(editor, pageId)) {
+  for (const id of framesWithGrids(editor.doc, pageId)) {
     const node = editor.doc.get(id);
     const b = editor.scene.bounds(id);
     if (!node || !b) continue;
