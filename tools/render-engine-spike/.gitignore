@@ -1,0 +1,8 @@
+# Build output of the spike (decision 0040): Rust targets, wasm-bindgen output, the capped
+# Worker modules and measurement output. Never committed.
+target/
+dist/
+wasm/
+out/
+out-*/
+*.log

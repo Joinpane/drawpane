@@ -158,7 +158,14 @@ describe("ids held in values (heldNodeIds)", () => {
         variableModes: { k: "m1" },
         values: { m1: { alias: "l" }, m2: "#ffffff" },
         modes: [{ id: "m1", name: "Light" }],
+        componentProps: [
+          { id: "10:1", name: "Show", type: "boolean", default: true },
+          { id: "10:2", name: "Icon", type: "instance", default: "m", preferred: ["n", "o"] },
+        ],
       } as Props),
-    ).toEqual({ layers: ["a", "b", "c", "d"], others: ["e", "f", "g", "h", "i", "j", "k", "l"] });
+    ).toEqual({
+      layers: ["a", "b", "c", "d"],
+      others: ["e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o"],
+    });
   });
 });

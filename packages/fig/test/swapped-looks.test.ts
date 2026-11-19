@@ -83,6 +83,37 @@ describe("swapped nested instances", () => {
     expect(after.strokes).toEqual([]);
   });
 
+  it("take the swapped-in component's auto layout, keeping what they override", () => {
+    const { graph, copy, ids, records, layers } = scene({
+      layoutMode: "HORIZONTAL",
+      paddingTop: 4,
+      itemSpacing: 6,
+      // Set by the instance itself: not the old component's, so it stays.
+      paddingLeft: 20,
+    });
+    const [outline, filled] = [...layers.values()];
+    graph.updateNode(outline as string, {
+      layoutMode: "HORIZONTAL",
+      paddingTop: 4,
+      itemSpacing: 6,
+      paddingLeft: 12,
+    });
+    graph.updateNode(filled as string, {
+      layoutMode: "VERTICAL",
+      paddingTop: 8,
+      itemSpacing: 10,
+      paddingLeft: 12,
+    });
+    applySwappedLooks(graph, ids, records, layers);
+    const after = graph.getNode(copy.id) as SceneNode;
+    expect([after.layoutMode, after.paddingTop, after.itemSpacing, after.paddingLeft]).toEqual([
+      "VERTICAL",
+      8,
+      10,
+      20,
+    ]);
+  });
+
   it("leave instances that weren't swapped alone", () => {
     const { graph, copy, ids, records, layers } = scene();
     // Its record names the component it shows: no swap.

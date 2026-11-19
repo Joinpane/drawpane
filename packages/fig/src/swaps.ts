@@ -11,12 +11,18 @@
  * filled one keeps the outline's white fill and border while its label takes
  * the filled one's colour. Here every such property still equal to the old
  * component's (so not an override) takes the new component's value.
+ *
+ * Its auto layout too: a Field whose Input is swapped for a Textarea lays the
+ * Textarea out as a column with its own padding and gap, not the Input's
+ * row. (Kept as the Input's, it also differed from the Textarea's main
+ * everywhere, and came in as overrides, decision 0035.) How it sits in its
+ * parent (grow, stretch, constraints) stays the instance's own.
  */
 import type { SceneGraph, SceneNode } from "@open-pencil/scene-graph";
 import type { RestIds } from "./ids";
 import { guidString, type RawRecord } from "./raw";
 
-/** The look a swap carries over: paints, strokes, effects, corners and opacity. */
+/** What a swap carries over: paints, strokes, effects, corners, opacity and auto layout. */
 const LOOK = [
   "fills",
   "strokes",
@@ -34,6 +40,24 @@ const LOOK = [
   "bottomLeftRadius",
   "bottomRightRadius",
   "opacity",
+  // Its own auto layout, and the sizes it may take.
+  "layoutMode",
+  "layoutWrap",
+  "primaryAxisAlign",
+  "counterAxisAlign",
+  "primaryAxisSizing",
+  "counterAxisSizing",
+  "itemSpacing",
+  "counterAxisSpacing",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "minWidth",
+  "maxWidth",
+  "minHeight",
+  "maxHeight",
+  "clipsContent",
 ] as const;
 
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
