@@ -39,6 +39,9 @@ describe("parsePropertyCommand", () => {
       { prop: "fills", value: [{ type: "solid", color: "#ff5500" }] },
     ]);
     expect(parsePropertyCommand("opacity 50")?.sets).toEqual([{ prop: "opacity", value: 0.5 }]);
+    expect(parsePropertyCommand("smoothing 60%")?.sets).toEqual([
+      { prop: "cornerSmoothing", value: 0.6 },
+    ]);
     expect(parsePropertyCommand("layout row")?.sets).toEqual([
       { prop: "layoutMode", value: "row" },
     ]);

@@ -20,3 +20,6 @@ apps/agent-runner/wasm/
 apps/worker/wasm/
 # The runner as the main Worker's tests build it (apps/worker/vitest.config.ts).
 apps/agent-runner/dist-test/
+# GPU benchmark results (tools/gpu-bench): kept locally, never committed.
+tools/gpu-bench/runs/
+__pycache__/

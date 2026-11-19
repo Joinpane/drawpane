@@ -216,6 +216,25 @@ function scene() {
 }
 
 describe("layers", () => {
+  it("carries corner smoothing, and nothing when there's none", () => {
+    const { page, add, adapt } = scene();
+    const squircle = add("RECTANGLE", page.id, "2:1", {
+      name: "Squircle",
+      width: 60,
+      height: 60,
+      cornerRadius: 14,
+      cornerSmoothing: 0.6,
+    });
+    const plain = add("RECTANGLE", page.id, "2:2", {
+      name: "Plain",
+      width: 60,
+      height: 60,
+      cornerRadius: 14,
+    });
+    expect(adapt(squircle)).toMatchObject({ cornerRadius: 14, cornerSmoothing: 0.6 });
+    expect(adapt(plain)).not.toHaveProperty("cornerSmoothing");
+  });
+
   it("keeps auto layout, its children's sizing and constraints", () => {
     const { page, add, adapt } = scene();
     const row = add("FRAME", page.id, "1:1", {
@@ -468,6 +487,78 @@ describe("layers", () => {
       lineHeightPercentFontSize: 162.5,
     });
     expect(style(laidOut(23))).toMatchObject({ lineHeightUnit: "PIXELS", lineHeightPx: 23 });
+  });
+
+  it("writes component properties as REST keys them, in Figma's order, and the layers they drive", () => {
+    const { page, add, adapt } = scene();
+    const star = add("COMPONENT", page.id, "7:1", { name: "Star", width: 16, height: 16 });
+    const main = add("COMPONENT", page.id, "4:1", {
+      name: "Button",
+      width: 80,
+      height: 32,
+      componentPropertyDefinitions: [
+        { id: "9:2", name: "Label", type: "TEXT", defaultValue: "OK" },
+        { id: "9:1", name: "Show icon", type: "BOOLEAN", defaultValue: "false" },
+        {
+          id: "9:3",
+          name: "Icon",
+          type: "INSTANCE_SWAP",
+          defaultValue: "7:1",
+          preferredValues: ["k-star"],
+          description: "Pick one",
+        },
+      ],
+    });
+    add("TEXT", main.id, "4:2", {
+      name: "Label",
+      text: "OK",
+      componentPropertyReferences: [{ propertyId: "9:2", field: "TEXT" }],
+    });
+    add("INSTANCE", main.id, "4:3", {
+      name: "Icon",
+      componentId: star.id,
+      width: 16,
+      height: 16,
+      isExposedInstance: true,
+      componentPropertyReferences: [
+        { propertyId: "9:1", field: "VISIBLE" },
+        { propertyId: "9:3", field: "INSTANCE_SWAP" },
+      ],
+    });
+    // Figma's order is the saved one (`sortPosition`), which the graph doesn't keep.
+    const raw = new Map<string, RawRecord>([
+      [
+        "4:1",
+        {
+          componentPropDefs: [
+            { id: { sessionID: 9, localID: 1 }, sortPosition: "a" },
+            { id: { sessionID: 9, localID: 2 }, sortPosition: "b" },
+            { id: { sessionID: 9, localID: 3 }, sortPosition: "c" },
+          ],
+        } as RawRecord,
+      ],
+    ]);
+    const rest = adapt(main, raw);
+    expect(rest.componentPropertyDefinitions).toEqual({
+      "Show icon#9:1": { type: "BOOLEAN", defaultValue: false },
+      "Label#9:2": { type: "TEXT", defaultValue: "OK" },
+      "Icon#9:3": {
+        type: "INSTANCE_SWAP",
+        defaultValue: "7:1",
+        preferredValues: [{ type: "COMPONENT", key: "k-star" }],
+        description: "Pick one",
+      },
+    });
+    expect(Object.keys(rest.componentPropertyDefinitions ?? {})).toEqual([
+      "Show icon#9:1",
+      "Label#9:2",
+      "Icon#9:3",
+    ]);
+    expect(rest.children?.[0]?.componentPropertyReferences).toEqual({ characters: "Label#9:2" });
+    expect(rest.children?.[1]).toMatchObject({
+      isExposedInstance: true,
+      componentPropertyReferences: { visible: "Show icon#9:1", mainComponent: "Icon#9:3" },
+    });
   });
 
   it("names an instance's layers after the instance and the component layers they copy", () => {

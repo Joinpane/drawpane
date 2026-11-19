@@ -272,6 +272,9 @@ async function buildParity(figma, suites) {
         spec.cornerRadii;
     } else if (spec.cornerRadius !== undefined && ["rect", "frame"].includes(spec.type))
       node.cornerRadius = spec.cornerRadius;
+    if (spec.cornerSmoothing !== undefined) node.cornerSmoothing = spec.cornerSmoothing;
+    // Frames clip their content unless they say not to, in both.
+    if (spec.type === "frame") node.clipsContent = spec.clipContent !== false;
     node.fills = (spec.fills ?? []).map(paint);
     node.strokes = (spec.strokes ?? []).map(paint);
     if (spec.strokes?.length) {

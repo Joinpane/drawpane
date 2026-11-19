@@ -1,6 +1,6 @@
-import { componentSetOf, layerName, variantProperties } from "@drawpane/editor";
-import { getProp, type NodeRecord } from "@drawpane/model";
-import { IconButton, PropertySection, SegmentedControl } from "@drawpane/ui";
+import { componentSetOf, isComponentSet, variantProperties } from "@drawpane/editor";
+import { type ComponentPropDef, getProp, type NodeRecord } from "@drawpane/model";
+import { IconButton, PropertySection } from "@drawpane/ui";
 import { useState } from "react";
 import { useEditor } from "./hooks";
 
@@ -32,6 +32,7 @@ export function ComponentSetSection({ set }: { set: NodeRecord }) {
           <span className="variant-prop__values">{property.values.join(" · ")}</span>
         </div>
       ))}
+      <ComponentPropertiesList owner={set} />
       <p className="component-hint">
         {variants.length} {variants.length === 1 ? "variant" : "variants"}. Select one to change its
         values or add another like it.
@@ -67,100 +68,45 @@ export function VariantSection({ variant }: { variant: NodeRecord }) {
   );
 }
 
-/** An instance of a variant: switch any property, and the instance swaps to the matching variant. */
-export function InstanceVariantControls({
-  instance,
-  main,
-}: {
-  instance: NodeRecord;
-  main: NodeRecord;
-}) {
-  const editor = useEditor();
-  const set = componentSetOf(editor.doc, main.id);
-  if (!set) return null;
-  const current = getProp(main.props, "variantProps");
-  return (
-    <div className="variant-controls">
-      {variantProperties(editor.doc, set.id).map((property) => (
-        <div key={property.name} className="mode-row">
-          <span className="mode-row__name">{property.name}</span>
-          {property.values.length <= 3 ? (
-            <SegmentedControl
-              label={property.name}
-              options={property.values.map((v) => ({ value: v, label: v }))}
-              value={current[property.name] ?? ""}
-              onChange={(v) => editor.setInstanceVariant(instance.id, property.name, v)}
-            />
-          ) : (
-            <select
-              className="inspector__select"
-              aria-label={property.name}
-              value={current[property.name] ?? ""}
-              onChange={(e) =>
-                editor.setInstanceVariant(instance.id, property.name, e.target.value)
-              }
-            >
-              {property.values.map((v) => (
-                <option key={v} value={v}>
-                  {v}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/** Every override in an instance, by layer, each with its own reset. */
-export function OverridesList({ instance }: { instance: NodeRecord }) {
-  const editor = useEditor();
-  const items: Array<{ node: NodeRecord; prop: string }> = [];
-  const stack = [instance.id];
-  while (stack.length > 0) {
-    const id = stack.pop() as string;
-    const node = editor.doc.get(id);
-    if (!node) continue;
-    for (const prop of getProp(node.props, "overrides")) items.push({ node, prop });
-    if (id !== instance.id && getProp(node.props, "instanceOf") !== null) continue;
-    stack.push(...[...editor.doc.childIds(id)].reverse());
-  }
-  if (items.length === 0) return null;
-  return (
-    <ul className="overrides" aria-label="Overrides">
-      {items.map(({ node, prop }) => (
-        <li key={`${node.id}:${prop}`} className="overrides__item">
-          <span className="overrides__dot" aria-hidden="true" />
-          <span className="overrides__label">
-            {node.id === instance.id ? "Instance" : layerName(node)}
-            <span className="overrides__prop"> · {PROP_LABEL[prop] ?? prop}</span>
-          </span>
-          <IconButton
-            icon="history"
-            label={`Reset ${PROP_LABEL[prop] ?? prop}`}
-            onClick={() => editor.resetOverride(node.id, prop)}
-          />
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-const PROP_LABEL: Record<string, string> = {
-  characters: "text",
-  fills: "fill",
-  strokes: "stroke",
-  visible: "visibility",
-  fontWeight: "weight",
-  fontSize: "size",
-  cornerRadius: "radius",
-  opacity: "opacity",
-  width: "width",
-  height: "height",
-  x: "position",
-  y: "position",
+const TYPE_LABEL: Record<string, string> = {
+  boolean: "Boolean",
+  text: "Text",
+  instance: "Swap",
+  slot: "Slot",
 };
+
+/**
+ * A main's or set's boolean, text and swap properties (decision 0035), each
+ * renamable: layers name a property by its id, so they keep it.
+ */
+export function ComponentPropertiesList({ owner }: { owner: NodeRecord }) {
+  const editor = useEditor();
+  const defs = getProp(owner.props, "componentProps").filter((d) => d.type !== "variant");
+  if (defs.length === 0) return null;
+  const body = defs.map((def) => (
+    <div key={def.id} className="variant-prop">
+      <span className="variant-prop__kind">{TYPE_LABEL[def.type] ?? def.type}</span>
+      <InlineEdit
+        value={def.name}
+        label={`Rename ${def.name}`}
+        onCommit={(name) => editor.renameComponentProperty(owner.id, def.id, name)}
+        className="variant-prop__name"
+      />
+      <span className="variant-prop__values">{defaultLabel(editor.doc, def)}</span>
+    </div>
+  ));
+  if (isComponentSet(owner)) return body;
+  return <PropertySection title="Properties">{body}</PropertySection>;
+}
+
+function defaultLabel(doc: ReturnType<typeof useEditor>["doc"], def: ComponentPropDef): string {
+  if (def.type === "boolean") return def.default === false ? "Off" : "On";
+  if (def.type === "instance") {
+    const node = typeof def.default === "string" ? doc.get(def.default) : undefined;
+    return node ? getProp(node.props, "name") : "";
+  }
+  return typeof def.default === "string" ? def.default : "";
+}
 
 function InlineEdit({
   value,

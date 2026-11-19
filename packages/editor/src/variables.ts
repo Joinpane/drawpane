@@ -35,6 +35,16 @@ export const BINDING_TARGETS: Readonly<Record<BindingKey, { prop: PropName; type
     ).map(([key, target]) => [key, { prop: target.props[0] as PropName, type: target.type }]),
   ) as Record<BindingKey, { prop: PropName; type: VariableType }>;
 
+/** Binding keys that drive a given property (for detaching when it's edited by hand). */
+export const KEYS_BY_PROP = new Map<string, BindingKey[]>();
+for (const [key, target] of Object.entries(BINDING_TARGETS) as Array<
+  [BindingKey, { prop: PropName }]
+>) {
+  const list = KEYS_BY_PROP.get(target.prop) ?? [];
+  list.push(key);
+  KEYS_BY_PROP.set(target.prop, list);
+}
+
 export function listCollections(doc: Doc): NodeRecord[] {
   return doc
     .collectionIds()

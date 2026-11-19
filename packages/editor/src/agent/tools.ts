@@ -121,7 +121,7 @@ const render = defineTool({
     `Elements: ${JSX_TAGS.join(", ")}. Text inside <Text> is its text.`,
     'Short attributes: name, x, y, w and h (a number, "hug" or "fill"), flex ("row", "col", "grid"), gap, p/px/py/pt/pr/pb/pl,',
     'justify ("start", "center", "end", "between"), align (children across, or a text\'s alignment), wrap, fill and stroke ("#rrggbb" or a list of paints),',
-    'radius (a number or four), clip, hidden, opacity (0 to 1), size, weight, font, italic, lineHeight (px, "150%" or "auto"), tracking.',
+    'radius (a number or four), smoothing (corner smoothing, 0 to 1; iOS uses 0.6), clip, hidden, opacity (0 to 1), size, weight, font, italic, lineHeight (px, "150%" or "auto"), tracking.',
     "Any model property works by its name too, with JSON in braces: effects={[...]}, strokeWeight={2}.",
     "Auto layout frames hug their content unless given a size; a text given a width wraps.",
     "Pass parentId to build inside a layer (the page by default), index to place it among its siblings, and replaceId to build over a layer you read with get_jsx.",

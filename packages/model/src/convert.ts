@@ -148,6 +148,17 @@ export function heldNodeIds(props: Readonly<Props>): { layers: string[]; others:
         const stops = (item as { stops?: unknown } | null)?.stops;
         if (Array.isArray(stops)) for (const stop of stops) binds(stop);
       }
+  // An instance swap property's default and preferred components (decision 0035).
+  if (Array.isArray(p.componentProps))
+    for (const def of p.componentProps as Array<{
+      type?: unknown;
+      default?: unknown;
+      preferred?: unknown;
+    }>) {
+      if (def?.type !== "instance") continue;
+      str(def.default, others);
+      if (Array.isArray(def.preferred)) for (const id of def.preferred) str(id, others);
+    }
   return { layers, others };
 }
 
@@ -170,6 +181,7 @@ export const NODE_ID_PROPS: readonly string[] = [
   "fillStyle",
   "strokeStyle",
   "effectStyle",
+  "componentProps",
 ];
 
 /** Whether a node's properties hold ids of other layers (see `renameHeldIds`). */

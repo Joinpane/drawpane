@@ -36,6 +36,7 @@
 import { type BuildBudget, ENTRY_BYTES, idsBytes, nodeBytes, slotBytes } from "./budget";
 import { sameValue } from "./history";
 import { ROOT_ID } from "./ids";
+import { boundaryDrivenProps } from "./laid-out";
 import type { NodeRecord } from "./ops";
 import { keyBetween } from "./order-key";
 import { getProp, isPropName, PROPS, type Props, propAllowed } from "./schema";
@@ -46,6 +47,9 @@ import { MemoryStore } from "./store";
 export const COPY_LINK_PROPS: ReadonlySet<string> = new Set([
   "isComponent",
   "componentDescription",
+  // What a main is, not how it looks: its variant values and its properties (decision 0035).
+  "variantProps",
+  "componentProps",
   "mirrors",
   "overrides",
   "unset",
@@ -67,6 +71,10 @@ export const ROOT_LOCAL_PROPS: ReadonlySet<string> = new Set([
   "constraintH",
   "constraintV",
   "instanceOf",
+  // How it's used in the main around it: which properties drive it, and whether its own show
+  // on that main's instances (decision 0035).
+  "propRefs",
+  "exposeProps",
 ]);
 
 /** The order key every override record has: records aren't layers, so their order means nothing. */
@@ -659,6 +667,13 @@ export class CopyView {
         if (value !== undefined && prop !== "instanceOf") props[prop] = value;
       }
       Object.assign(props, this.#rootBase(swapped));
+      // What the outer component's properties drive stays the outer main's (decision 0035):
+      // swapping the icon doesn't show an icon a boolean hides.
+      for (const prop of boundaryDrivenProps(source)) {
+        const value = (source.props as Record<string, unknown>)[prop];
+        if (value === undefined) delete props[prop];
+        else props[prop] = value;
+      }
     } else
       for (const [prop, value] of Object.entries(source.props))
         if (!COPY_LINK_PROPS.has(prop)) props[prop] = value;

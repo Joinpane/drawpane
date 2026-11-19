@@ -66,6 +66,55 @@
   box-shadow: var(--shadow-focus);
 }
 
+/* No one value: the knob waits at the start, faded. */
+.dp-slider--mixed .dp-slider__track::-webkit-slider-thumb {
+  opacity: 0.4;
+}
+.dp-slider--mixed .dp-slider__track::-moz-range-thumb {
+  opacity: 0.4;
+}
+/* Named stops under the track: a tick and a word, each a button. */
+.dp-slider__rail {
+  display: grid;
+  min-width: 0;
+}
+.dp-slider__marks {
+  position: relative;
+  height: 14px;
+  /* The knob's half width: the track's ends are where its centre stops. */
+  margin: 0 7px;
+}
+.dp-slider__mark {
+  position: absolute;
+  top: 0;
+  left: var(--dp-slider-at);
+  transform: translateX(-50%);
+  padding: 0 var(--space-050);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+  cursor: pointer;
+}
+.dp-slider__mark::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  width: 1px;
+  height: 4px;
+  background: var(--line-strong);
+}
+.dp-slider__mark:hover,
+.dp-slider__mark[aria-pressed="true"] {
+  color: var(--ink);
+}
+.dp-slider__mark:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
 /* LightDial: a lit shape, its light on a ring. */
 .dp-light-dial {
   position: relative;

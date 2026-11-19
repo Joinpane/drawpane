@@ -1,0 +1,30 @@
+{
+  "name": "@drawpane/render-engine-spike",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "Design spike for decision 0040 (not for production): one Rust engine drawn by Vello on WebGPU in the browser and on the CPU in workerd. See README.md.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run",
+    "build:wasm": "./scripts/build-wasm.sh",
+    "measure": "playwright test"
+  },
+  "dependencies": {
+    "@drawpane/editor": "workspace:*",
+    "@drawpane/model": "workspace:*",
+    "@drawpane/raster": "workspace:*",
+    "fast-png": "6.4.0",
+    "harfbuzzjs": "1.6.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261113.1",
+    "@playwright/test": "1.65.0",
+    "@types/node": "26.6.6",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

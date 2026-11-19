@@ -32,6 +32,14 @@
  *   flexbox
  */
 import { getProp, type NodeRecord, type Paint, type Props } from "@drawpane/model";
+import {
+  arcPathData,
+  fitCorners,
+  isSquare,
+  layerCorners,
+  type Radii,
+  spreadRadii,
+} from "./corners";
 import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
 import { exportBounds } from "./export";
 import { type Matrix, type Rect, round2 } from "./geometry";
@@ -358,26 +366,40 @@ function shapeOf(node: NodeRecord, w: number, h: number): { tag: string; attrs: 
       };
     }
     case "rect":
-    case "frame": {
-      const max = Math.min(w, h) / 2;
-      const radii = getProp(node.props, "cornerRadii");
-      if (radii?.some((r) => r > 0)) {
-        const [tl = 0, tr = 0, br = 0, bl = 0] = radii.map((r) => Math.min(r, max));
-        const corners: Corners = [tl, tr, br, bl];
-        return { tag: "path", attrs: attr("d", roundedRectPath(0, 0, w, h, corners)) };
-      }
-      const r = Math.min(getProp(node.props, "cornerRadius"), max);
-      return {
-        tag: "rect",
-        attrs: `${attr("width", w)}${attr("height", h)}${r > 0 ? attr("rx", r) : ""}`,
-      };
-    }
+    case "frame":
+      return boxShape(w, h, layerCorners(node), 0);
     default:
       return null;
   }
 }
 
-type Corners = readonly [tl: number, tr: number, br: number, bl: number];
+/**
+ * A box at (−offset, −offset), `w` × `h`, with these corners, as an element:
+ * a plain `rect` (with `rx` for one radius, as Figma exports it) where its
+ * corners are plain circles all alike, else a path of the outline every
+ * renderer draws (corners.ts): arcs for plain corners, as the canvas draws
+ * them, and Figma's cubics for smoothed ones.
+ */
+function boxShape(
+  w: number,
+  h: number,
+  corners: { radii: Radii; smoothing: number },
+  offset: number,
+): { tag: string; attrs: string } {
+  const { radii, smoothing } = corners;
+  const [first] = fitCorners(w, h, radii, smoothing);
+  const alike = radii.every((r) => r === radii[0]);
+  if (isSquare(radii) || (alike && first.smoothing === 0)) {
+    const at = offset !== 0 ? `${attr("x", -offset)}${attr("y", -offset)}` : "";
+    const r = first.radius;
+    return {
+      tag: "rect",
+      attrs: `${at}${attr("width", w)}${attr("height", h)}${r > 0 ? attr("rx", r) : ""}`,
+    };
+  }
+  const d = arcPathData(w, h, radii, smoothing, -offset, -offset, svgNumber);
+  return { tag: "path", attrs: attr("d", d) };
+}
 
 /**
  * A dashed box's or ellipse's outline, piece by piece (each side, corner or
@@ -393,14 +415,19 @@ export function dashedPieces(
   let outline: OutlineSegment[];
   if (node.type === "ellipse") outline = ellipseOutline(w, h);
   else if (node.type === "rect" || node.type === "frame") {
-    const r = getProp(node.props, "cornerRadius");
-    outline = boxOutline(w, h, getProp(node.props, "cornerRadii") ?? [r, r, r, r]);
+    const { radii, smoothing } = layerCorners(node);
+    outline = boxOutline(w, h, radii, smoothing);
   } else return null;
   const n = svgNumber;
   return outline.map((piece) => {
     let d: string;
     if (piece.kind === "line") d = `M${n(piece.x0)} ${n(piece.y0)}L${n(piece.x1)} ${n(piece.y1)}`;
-    else {
+    else if (piece.kind === "cubic") {
+      const c = piece.pts;
+      d = `M${n(c[0] as number)} ${n(c[1] as number)}`;
+      for (let i = 2; i < c.length; i += 6)
+        d += `C${n(c[i] as number)} ${n(c[i + 1] as number)} ${n(c[i + 2] as number)} ${n(c[i + 3] as number)} ${n(c[i + 4] as number)} ${n(c[i + 5] as number)}`;
+    } else {
       // A corner or a quarter: never more than half a turn, clockwise (y down).
       const at = (t: number) =>
         `${n(piece.cx + piece.rx * Math.cos(t))} ${n(piece.cy + piece.ry * Math.sin(t))}`;
@@ -408,26 +435,6 @@ export function dashedPieces(
     }
     return { d, ...fitDashes(piece.length, pattern) };
   });
-}
-
-/** A rectangle at (x, y) with its own radius per corner, as path data. */
-function roundedRectPath(x: number, y: number, w: number, h: number, corners: Corners): string {
-  const [tl, tr, br, bl] = corners;
-  const n = svgNumber;
-  return [
-    `M${n(x + tl)} ${n(y)}`,
-    `H${n(x + w - tr)}`,
-    tr ? `A${n(tr)} ${n(tr)} 0 0 1 ${n(x + w)} ${n(y + tr)}` : "",
-    `V${n(y + h - br)}`,
-    br ? `A${n(br)} ${n(br)} 0 0 1 ${n(x + w - br)} ${n(y + h)}` : "",
-    `H${n(x + bl)}`,
-    bl ? `A${n(bl)} ${n(bl)} 0 0 1 ${n(x)} ${n(y + h - bl)}` : "",
-    `V${n(y + tl)}`,
-    tl ? `A${n(tl)} ${n(tl)} 0 0 1 ${n(x + tl)} ${n(y)}` : "",
-    "Z",
-  ]
-    .filter(Boolean)
-    .join("");
 }
 
 /**
@@ -451,15 +458,13 @@ function spreadShapeOf(
     };
   }
   if (node.type === "rect" || node.type === "frame") {
-    const max = Math.min(w, h) / 2;
-    const grow = (v: number) => (v > 0 ? Math.max(0, Math.min(v, max) + spread) : 0);
-    const r = getProp(node.props, "cornerRadius");
-    const limit = Math.min(gw, gh) / 2;
-    const [tl = 0, tr = 0, br = 0, bl = 0] = (
-      getProp(node.props, "cornerRadii") ?? [r, r, r, r]
-    ).map((v) => Math.min(grow(v), limit));
-    const corners: Corners = [tl, tr, br, bl];
-    return { tag: "path", attrs: attr("d", roundedRectPath(-spread, -spread, gw, gh, corners)) };
+    const { radii, smoothing } = layerCorners(node);
+    return boxShape(
+      gw,
+      gh,
+      { radii: spreadRadii(w, h, radii, smoothing, spread), smoothing },
+      spread,
+    );
   }
   return shapeOf(node, w, h);
 }
@@ -1077,15 +1082,9 @@ export function exportSvg(
     const reachOf = (weight: number) => regionRect(matrix, 0, 0, w, h, weight * 5 + 1);
     if (!isUniform(sides)) {
       // A width per side: the region between two boxes, filled (see stroke-sides.ts).
-      const r = getProp(node.props, "cornerRadius");
+      const { radii, smoothing } = layerCorners(node);
       const d = strokeRegionPath(
-        strokeRegion(
-          w,
-          h,
-          getProp(node.props, "cornerRadii") ?? [r, r, r, r],
-          sides,
-          getProp(node.props, "strokeAlign"),
-        ),
+        strokeRegion(w, h, radii, sides, getProp(node.props, "strokeAlign"), smoothing),
       );
       for (const paint of paints) {
         const fill = out.paint("fill", paint, w, h);

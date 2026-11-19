@@ -180,6 +180,8 @@ export interface Node {
   readonly strokeGeometry?: readonly { path: string; windingRule: string }[];
   readonly cornerRadius?: number;
   readonly rectangleCornerRadii?: readonly [number, number, number, number];
+  /** How smooth the corners are, 0 to 1 (iOS uses 0.6); missing is 0. */
+  readonly cornerSmoothing?: number;
   readonly effects?: readonly Effect[];
   readonly clipsContent?: boolean;
   readonly constraints?: { vertical: string; horizontal: string };
@@ -229,7 +231,14 @@ export interface Node {
   readonly styleOverrideTable?: Readonly<Record<string, TypeStyle>>;
   // Components
   readonly componentId?: string;
-  readonly componentPropertyDefinitions?: Readonly<Record<string, unknown>>;
+  /** On a component or set: its properties by key ("Name#id"; a variant's is its name). */
+  readonly componentPropertyDefinitions?: Readonly<Record<string, ComponentPropertyDefinition>>;
+  /** Which of this layer's fields a property drives, by the property's key. */
+  readonly componentPropertyReferences?: Readonly<
+    Partial<Record<"visible" | "characters" | "mainComponent", string>>
+  >;
+  /** A nested instance in a component whose properties its instances show. */
+  readonly isExposedInstance?: boolean;
   readonly overrides?: readonly { id: string; overriddenFields: readonly string[] }[];
   readonly booleanOperation?: string;
   readonly arcData?: { startingAngle: number; endingAngle: number; innerRadius: number };
@@ -300,6 +309,16 @@ export interface LocalVariables {
   readonly variables: Readonly<Record<string, Variable>>;
 }
 
+/** A component property, as `componentPropertyDefinitions` gives it. */
+export interface ComponentPropertyDefinition {
+  readonly type: "BOOLEAN" | "TEXT" | "INSTANCE_SWAP" | "VARIANT" | "SLOT" | string;
+  readonly defaultValue?: boolean | string;
+  readonly variantOptions?: readonly string[];
+  /** Components an instance swap offers first, by component (or set) key. */
+  readonly preferredValues?: readonly { type: "COMPONENT" | "COMPONENT_SET"; key: string }[];
+  readonly description?: string;
+}
+
 export interface File {
   readonly name: string;
   readonly document: Node;
@@ -316,7 +335,7 @@ export interface File {
       }
     >
   >;
-  readonly componentSets?: Readonly<Record<string, { name?: string }>>;
+  readonly componentSets?: Readonly<Record<string, { key?: string; name?: string }>>;
   readonly styles?: Readonly<
     Record<
       string,

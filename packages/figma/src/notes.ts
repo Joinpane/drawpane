@@ -34,10 +34,6 @@ export const NOTE_TEXT = {
     "text's per-paragraph styles became one",
     "texts' per-paragraph styles became one",
   ],
-  "component-properties": [
-    "component's boolean, text or swap properties were resolved into its copies",
-    "components' boolean, text or swap properties were resolved into their copies",
-  ],
   "library-component": [
     "copy of a component from a library was detached",
     "copies of components from libraries were detached",

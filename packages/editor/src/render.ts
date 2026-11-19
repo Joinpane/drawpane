@@ -15,6 +15,8 @@
 
 import { type BlendMode, getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
+import { layerCorners, spreadRadii } from "./corners";
+import { boxPath2D } from "./corners-canvas";
 import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
 import { exportBounds } from "./export";
 import { apply, invert, type Matrix, type Rect, rectsIntersect } from "./geometry";
@@ -106,8 +108,8 @@ function dashedOutline(
   let outline: OutlineSegment[];
   if (node.type === "ellipse") outline = ellipseOutline(w, h);
   else if (node.type === "rect" || node.type === "frame") {
-    const r = getProp(node.props, "cornerRadius");
-    outline = boxOutline(w, h, getProp(node.props, "cornerRadii") ?? [r, r, r, r]);
+    const { radii, smoothing } = layerCorners(node);
+    outline = boxOutline(w, h, radii, smoothing);
   } else return null;
   const pattern = getProp(node.props, "strokeDashes");
   return outline.map((piece) => {
@@ -115,6 +117,18 @@ function dashedOutline(
     if (piece.kind === "line") {
       path.moveTo(piece.x0, piece.y0);
       path.lineTo(piece.x1, piece.y1);
+    } else if (piece.kind === "cubic") {
+      const c = piece.pts;
+      path.moveTo(c[0] as number, c[1] as number);
+      for (let i = 2; i < c.length; i += 6)
+        path.bezierCurveTo(
+          c[i] as number,
+          c[i + 1] as number,
+          c[i + 2] as number,
+          c[i + 3] as number,
+          c[i + 4] as number,
+          c[i + 5] as number,
+        );
     } else path.ellipse(piece.cx, piece.cy, piece.rx, piece.ry, 0, piece.start, piece.end);
     return { path, ...fitDashes(piece.length, pattern) };
   });
@@ -2091,20 +2105,9 @@ export class CanvasRenderer {
       }
       case "frame":
       case "rect": {
-        const radii = getProp(node.props, "cornerRadii");
-        const r = getProp(node.props, "cornerRadius");
-        const max = Math.min(w, h) / 2;
-        if (radii)
-          path.roundRect(
-            0,
-            0,
-            w,
-            h,
-            radii.map((v) => Math.min(v, max)),
-          );
-        else if (r > 0) path.roundRect(0, 0, w, h, Math.min(r, max));
-        else path.rect(0, 0, w, h);
-        return path;
+        // Shared by every box of this size and these corners (corners.ts).
+        const { radii, smoothing } = layerCorners(node);
+        return boxPath2D(w, h, radii, smoothing);
       }
       default:
         path.rect(0, 0, w, h);
@@ -2440,13 +2443,14 @@ export class CanvasRenderer {
   #sideStrokes(ctx: Ctx, node: NodeRecord, strokes: readonly Paint[], w: number, h: number) {
     let path = this.#sidePaths.get(node.props);
     if (!path) {
-      const r = getProp(node.props, "cornerRadius");
+      const { radii, smoothing } = layerCorners(node);
       const region = strokeRegion(
         w,
         h,
-        getProp(node.props, "cornerRadii") ?? [r, r, r, r],
+        radii,
         strokeWidths(node),
         getProp(node.props, "strokeAlign"),
+        smoothing,
       );
       path = new Path2D(strokeRegionPath(region));
       this.#sidePaths.set(node.props, path);
@@ -2558,13 +2562,15 @@ export class CanvasRenderer {
       return path;
     }
     if (node.type === "rect" || node.type === "frame") {
-      const radii = getProp(node.props, "cornerRadii");
-      const r = getProp(node.props, "cornerRadius");
-      const max = Math.min(w, h) / 2;
-      const grow = (v: number) => (v > 0 ? Math.max(0, Math.min(v, max) + spread) : 0);
-      const corners = radii ? radii.map(grow) : grow(r);
-      path.roundRect(-spread, -spread, gw, gh, corners);
-      return path;
+      const { radii, smoothing } = layerCorners(node);
+      return boxPath2D(
+        gw,
+        gh,
+        spreadRadii(w, h, radii, smoothing, spread),
+        smoothing,
+        -spread,
+        -spread,
+      );
     }
     return shape;
   }
@@ -2726,8 +2732,7 @@ export class CanvasRenderer {
           );
     // A box's rim is measured from its exact edge: square corners stay square.
     const box = node.type === "rect" || node.type === "frame";
-    const r = box ? getProp(node.props, "cornerRadius") : 0;
-    const corners = box ? (getProp(node.props, "cornerRadii") ?? [r, r, r, r]) : null;
+    const corners = box ? layerCorners(node) : null;
     const within = this.#clipWithin(ctx, node);
     const reach = glassParams(glass, scale);
     const from = this.#backdropFor(ctx, node, reach.margin + Math.ceil(3 * reach.sigma) + 2);
@@ -2736,7 +2741,8 @@ export class CanvasRenderer {
       ...(from ? { source: from } : {}),
       key,
       inradius,
-      corners,
+      corners: corners?.radii ?? null,
+      smoothing: corners?.smoothing ?? 0,
       kind: node.type === "ellipse" ? "ellipse" : "other",
       opaque: this.#opaque.has(ctx.canvas),
       ...(within ? { within } : {}),

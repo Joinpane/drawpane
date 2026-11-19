@@ -675,6 +675,46 @@ describe("PromptField", () => {
 });
 
 describe("SliderField", () => {
+  it("names stops under the track, each a button that sets its value", () => {
+    const onChange = vi.fn();
+    render(
+      <SliderField
+        label="Corner smoothing"
+        value={0}
+        min={0}
+        max={100}
+        unit="%"
+        marks={[{ value: 60, label: "iOS" }]}
+        onChange={onChange}
+      />,
+    );
+    const stop = screen.getByRole("button", { name: "Corner smoothing: iOS, 60%" });
+    expect(stop.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(stop);
+    expect(onChange).toHaveBeenLastCalledWith(60);
+  });
+
+  it("shows a placeholder for no one value, and still takes one", () => {
+    const onChange = vi.fn();
+    render(
+      <SliderField
+        label="Corner smoothing"
+        value={null}
+        placeholder="Mixed"
+        min={0}
+        max={100}
+        onChange={onChange}
+      />,
+    );
+    const number = screen.getByLabelText("Corner smoothing value") as HTMLInputElement;
+    expect(number.value).toBe("");
+    expect(number.placeholder).toBe("Mixed");
+    const track = screen.getByRole("slider", { name: "Corner smoothing" }) as HTMLInputElement;
+    expect(track.getAttribute("aria-valuetext")).toBe("Mixed");
+    fireEvent.change(track, { target: { value: "40" } });
+    expect(onChange).toHaveBeenLastCalledWith(40);
+  });
+
   it("moves evenly along its range by default", () => {
     const onChange = vi.fn();
     render(<SliderField label="Density" value={50} min={0} max={100} onChange={onChange} />);

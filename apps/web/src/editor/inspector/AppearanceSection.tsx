@@ -1,6 +1,7 @@
 /**
  * Appearance: opacity and blend mode, corner radius (one value, or each
- * corner on its own), and whether a frame clips its content.
+ * corner on its own) and corner smoothing, and whether a frame clips its
+ * content.
  */
 import type { Editor } from "@drawpane/editor";
 import {
@@ -10,7 +11,14 @@ import {
   type NodeRecord,
   propAllowed,
 } from "@drawpane/model";
-import { IconButton, NumberField, PropertyRow, PropertySection, Switch } from "@drawpane/ui";
+import {
+  IconButton,
+  NumberField,
+  PropertyRow,
+  PropertySection,
+  SliderField,
+  Switch,
+} from "@drawpane/ui";
 import { useState } from "react";
 import { ApplyModeButton, ModeRows } from "../tokens/ModesSection";
 import { common, Num, Select } from "./fields";
@@ -254,6 +262,41 @@ function Corners({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
           ))}
         </div>
       ) : null}
+      <Smoothing editor={editor} nodes={nodes} />
     </>
+  );
+}
+
+/** Figma's preset for iOS's continuous corners. */
+const IOS_SMOOTHING = 60;
+
+/**
+ * Corner smoothing, 0 to 100%, as Figma's: how far each corner eases into
+ * its edges (decision 0041), with iOS's 60% one click away.
+ */
+function Smoothing({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
+  const ids = nodes.map((n) => n.id);
+  const value = common(nodes, "cornerSmoothing") as number | null;
+  const set = (percent: number) => {
+    const v = Math.round(Math.min(100, Math.max(0, percent))) / 100;
+    // None is no property at all: what a file without smoothing has always meant.
+    editor.setProp(ids, "cornerSmoothing", v === 0 ? null : v, "Corner smoothing");
+  };
+  return (
+    <div className="inspector__smoothing">
+      <span className="inspector__label">Smoothing</span>
+      <SliderField
+        label="Corner smoothing"
+        value={value === null ? null : Math.round(value * 100)}
+        placeholder="Mixed"
+        min={0}
+        max={100}
+        unit="%"
+        marks={[{ value: IOS_SMOOTHING, label: "iOS" }]}
+        onChange={set}
+        onScrubStart={() => editor.beginGesture("Corner smoothing")}
+        onScrubEnd={() => editor.endGesture()}
+      />
+    </div>
   );
 }

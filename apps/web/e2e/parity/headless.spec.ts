@@ -2,7 +2,7 @@
  * Render parity between the canvas and the headless renderer (decision
  * 0023): what an agent's `export_image` shows with an editor open, and with
  * none. Every cell of the Figma parity scenes (tools/figma-parity/scenes)
- * and of the headless ones (tools/headless-parity/scenes: radii and open
+ * (smoothed corners included) and of the headless ones (tools/headless-parity/scenes: radii and open
  * ends, auto layout cards in Inter and Instrument Sans, rich text, image
  * fills) is built in the editor, then exported at 2× both ways:
  *
@@ -50,6 +50,8 @@ const FROM_FIGMA = [
   "glass",
   "grain",
   "linear-blends",
+  "corners",
+  "corners-glass",
 ];
 
 interface Layer {
