@@ -14,6 +14,7 @@
  * deleted, whatever the library did with it.
  */
 import {
+  type ComponentPropDef,
   copyChildId,
   dependencyRoots,
   getProp,
@@ -141,6 +142,18 @@ function remap(node: NodeRecord, to: (id: string) => string, copied: ReadonlySet
           ? { alias: to((v as { alias: string }).alias) }
           : v,
       ]),
+    );
+  // An instance swap's default and preferred components (decision 0035). Property ids aren't
+  // node ids: they stay.
+  if (Array.isArray(p.componentProps))
+    props.componentProps = (p.componentProps as ComponentPropDef[]).map((def) =>
+      def.type !== "instance"
+        ? def
+        : {
+            ...def,
+            ...(typeof def.default === "string" ? { default: to(def.default) } : {}),
+            ...(def.preferred ? { preferred: def.preferred.map(to) } : {}),
+          },
     );
   // A prototype link to a layer that came along points at its copy; others stay as they were.
   if (Array.isArray(p.reactions))

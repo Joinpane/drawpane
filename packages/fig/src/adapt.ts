@@ -437,13 +437,11 @@ export function adaptNode(
 
   if (type === "COMPONENT" || type === "COMPONENT_SET") {
     if (n.componentPropertyDefinitions.length > 0)
-      node.componentPropertyDefinitions = Object.fromEntries(
-        n.componentPropertyDefinitions.map((d) => [
-          d.name,
-          { type: d.type, defaultValue: d.defaultValue },
-        ]),
-      );
+      node.componentPropertyDefinitions = propertyDefinitions(n, raw);
   }
+  const references = propertyReferences(n, ctx);
+  if (references) node.componentPropertyReferences = references;
+  if (type === "INSTANCE" && n.isExposedInstance) node.isExposedInstance = true;
   if (type === "INSTANCE" && n.componentId) {
     const main = ctx.graph.getNode(n.componentId);
     if (main) node.componentId = ids.of(main);
@@ -456,6 +454,73 @@ export function adaptNode(
   }
   if (children.length > 0 || isContainer(type)) node.children = children;
   return node;
+}
+
+/**
+ * A component's properties as REST keys them ("Name#id", a variant's by its
+ * name), in the order Figma shows them (`sortPosition`, which Open Pencil's
+ * graph drops). Booleans are booleans; an instance swap's default is its
+ * component's id, its preferred values component keys.
+ */
+function propertyDefinitions(
+  n: SceneNode,
+  raw: RawRecord | undefined,
+): Record<string, Figma.ComponentPropertyDefinition> {
+  const order = new Map<string, string>();
+  for (const def of raw?.componentPropDefs ?? [])
+    if (def.id && typeof def.sortPosition === "string")
+      order.set(guidString(def.id), def.sortPosition);
+  const defs = [...n.componentPropertyDefinitions];
+  if (order.size > 0)
+    defs.sort((a, b) => {
+      const x = order.get(a.id) ?? "";
+      const y = order.get(b.id) ?? "";
+      return x < y ? -1 : x > y ? 1 : 0;
+    });
+  const out: Record<string, Figma.ComponentPropertyDefinition> = {};
+  for (const d of defs) {
+    const key = d.type === "VARIANT" ? d.name : `${d.name}#${d.id}`;
+    out[key] = {
+      type: d.type,
+      defaultValue: d.type === "BOOLEAN" ? d.defaultValue === "true" : d.defaultValue,
+      ...(d.variantOptions ? { variantOptions: d.variantOptions } : {}),
+      ...(d.type === "INSTANCE_SWAP" && d.preferredValues
+        ? { preferredValues: d.preferredValues.map((key) => ({ type: "COMPONENT" as const, key })) }
+        : {}),
+      ...(d.description ? { description: d.description } : {}),
+    };
+  }
+  return out;
+}
+
+/** Every property's name by its id, per graph: references name properties by id alone. */
+const propertyNames = new WeakMap<SceneGraph, Map<string, string>>();
+
+const REFERENCE_FIELDS = {
+  VISIBLE: "visible",
+  TEXT: "characters",
+  INSTANCE_SWAP: "mainComponent",
+} as const;
+
+/** A layer's links to properties, by the field each drives, keyed as REST keys them. */
+function propertyReferences(
+  n: SceneNode,
+  ctx: AdaptContext,
+): Figma.Node["componentPropertyReferences"] | null {
+  if (n.componentPropertyReferences.length === 0) return null;
+  let names = propertyNames.get(ctx.graph);
+  if (!names) {
+    names = new Map();
+    for (const node of ctx.graph.getAllNodes())
+      for (const d of node.componentPropertyDefinitions) names.set(d.id, d.name);
+    propertyNames.set(ctx.graph, names);
+  }
+  const out: Partial<Record<"visible" | "characters" | "mainComponent", string>> = {};
+  for (const ref of n.componentPropertyReferences) {
+    const field = REFERENCE_FIELDS[ref.field as keyof typeof REFERENCE_FIELDS];
+    if (field) out[field] = `${names.get(ref.propertyId) ?? "Property"}#${ref.propertyId}`;
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 const CONTAINERS = new Set([
@@ -480,7 +545,7 @@ export class RestFileBuilder {
     string,
     { key?: string; name?: string; componentSetId?: string; remote?: boolean; omitted?: boolean }
   > = {};
-  readonly #componentSets: Record<string, { name?: string }> = {};
+  readonly #componentSets: Record<string, { key?: string; name?: string }> = {};
   readonly #styles: Record<string, { name?: string; styleType?: string }> = {};
   /** Layers in the document, pages not counted. */
   layers = 0;
@@ -525,6 +590,10 @@ export class RestFileBuilder {
             this.#components[id] = { ...this.#components[id], name: node.name, omitted: true };
         }
       }
+      if (node.type === "COMPONENT_SET" && node.componentKey) {
+        const id = ctx.ids.of(node);
+        this.#componentSets[id] = { ...this.#componentSets[id], key: node.componentKey };
+      }
       if (node.sharedStyleType)
         this.#styles[ctx.ids.of(node)] = { name: node.name, styleType: node.sharedStyleType };
     }
@@ -535,7 +604,7 @@ export class RestFileBuilder {
     if (node.type === "COMPONENT")
       this.#components[node.id] = { ...this.#components[node.id], name: node.name, remote: false };
     if (node.type === "COMPONENT_SET") {
-      this.#componentSets[node.id] = { name: node.name };
+      this.#componentSets[node.id] = { ...this.#componentSets[node.id], name: node.name };
       for (const c of node.children ?? [])
         if (c.type === "COMPONENT")
           this.#components[c.id] = { ...this.#components[c.id], componentSetId: node.id };

@@ -199,7 +199,8 @@ export async function exportRaster(
         ? "#ffffff"
         : null
       : options.background;
-  renderer.renderNodes(ctx, ids, rect, options.scale, background);
+  // As Figma exports: glass and background blur see what's under the layers on the page.
+  renderer.renderNodes(ctx, ids, rect, options.scale, background, false, true);
   const type = `image/${options.format}`;
   return canvas.convertToBlob({ type, quality: options.quality ?? 0.92 });
 }

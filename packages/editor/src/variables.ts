@@ -45,7 +45,7 @@ export const BINDING_TARGETS: Readonly<Record<BindingKey, { prop: PropName; type
   };
 
 /** Binding keys that drive a given property (for detaching when it's edited by hand). */
-const KEYS_BY_PROP = new Map<string, BindingKey[]>();
+export const KEYS_BY_PROP = new Map<string, BindingKey[]>();
 for (const [key, target] of Object.entries(BINDING_TARGETS) as Array<
   [BindingKey, { prop: PropName }]
 >) {

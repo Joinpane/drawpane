@@ -24,17 +24,21 @@ import {
   serializePath,
 } from "@drawpane/import-kit";
 import {
+  boundaryDrivenProps,
   GlyphTableBuilder,
   keysBetween,
+  laidOutProps,
   type NodeRecord,
   propAllowed,
   ROOT_ID,
+  ROOT_LOCAL_PROPS,
 } from "@drawpane/model";
 import { convertEffects } from "./effects";
 import { drawpaneId, mirroredId, mirroredUnder } from "./ids";
 import { childLayout, containerLayout, layoutGrids } from "./layout";
 import { Notes } from "./notes";
 import { blendMode, convertPaints, hexColor, type ImageLookup } from "./paint";
+import { convertDefinitions, convertReferences, type PropertyLinks } from "./properties";
 import type * as Figma from "./rest";
 import { textProps } from "./text";
 
@@ -134,6 +138,23 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     for (const c of n.children ?? []) index(c);
   };
   index(file.document);
+
+  // Components an instance swap property names: by Figma id, or by key for preferred values.
+  const byKey = new Map<string, string>();
+  for (const [figmaId, c] of Object.entries(file.components ?? {}))
+    if (c.key && present.has(figmaId)) byKey.set(c.key, figmaId);
+  for (const [figmaId, c] of Object.entries(file.componentSets ?? {}))
+    if (c.key && present.has(figmaId)) byKey.set(c.key, figmaId);
+  const links: PropertyLinks = {
+    component: (figmaId) => {
+      const type = present.get(figmaId)?.type;
+      return type === "COMPONENT" || type === "COMPONENT_SET" ? drawpaneId(figmaId) : undefined;
+    },
+    byKey: (key) => {
+      const figmaId = byKey.get(key);
+      return figmaId ? drawpaneId(figmaId) : undefined;
+    },
+  };
 
   /** Instances found, to work out what each one overrides once everything is converted. */
   const instances: string[] = [];
@@ -247,17 +268,17 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
       if (grids.length > 0) props.layoutGrids = grids;
       if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") {
         props[node.type === "COMPONENT" ? "isComponent" : "isComponentSet"] = true;
-        if (
-          node.componentPropertyDefinitions &&
-          Object.keys(node.componentPropertyDefinitions).length > 0
-        )
-          notes.add("component-properties");
+        if (node.componentPropertyDefinitions) {
+          const defs = convertDefinitions(node.componentPropertyDefinitions, links);
+          if (defs.length > 0) props.componentProps = defs;
+        }
         if (node.type === "COMPONENT" && parent.type === "COMPONENT_SET") {
           const vp = variantProps(node.name);
           if (vp) props.variantProps = vp;
         }
       }
       if (node.type === "INSTANCE") {
+        if (node.isExposedInstance) props.exposeProps = true;
         if (node.componentId && present.has(node.componentId)) {
           props.instanceOf = drawpaneId(node.componentId);
           instances.push(id);
@@ -269,6 +290,8 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
           );
       }
     }
+    const refs = convertReferences(node.componentPropertyReferences);
+    if (refs) props.propRefs = refs;
     // A layer inside an instance copies the main component's layer its id names.
     let mirrored = inInstance
       ? ((base && mirroredUnder(node.id, base)) ?? mirroredId(node.id))
@@ -336,6 +359,7 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     });
   });
 
+  inheritPropertyLinks(nodes, byId);
   markOverrides(instances, nodes, byId);
   // The glyph sets go after the pages, at the root.
   const lastPage = pageKeys[pageKeys.length - 1] ?? null;
@@ -479,9 +503,35 @@ const NOT_OVERRIDES = new Set([
   "isComponent",
   "isComponentSet",
   "variantProps",
+  "componentProps",
+  "componentDescription",
   // Each copy's text is laid out for it (decision 0037), like a hug size: not an override.
   "glyphLayout",
 ]);
+
+/**
+ * A copy's links to component properties are its main layer's: Figma lists
+ * them on a component's layers, and may leave them off the copies. A copy
+ * that lists its own (an empty list included: unlinked) keeps them, and
+ * `markOverrides` marks the difference as the copy's own.
+ */
+function inheritPropertyLinks(nodes: readonly NodeRecord[], byId: ReadonlyMap<string, NodeRecord>) {
+  const done = new Set<string>();
+  const settle = (node: NodeRecord, depth: number): void => {
+    if (done.has(node.id) || depth > 256) return;
+    done.add(node.id);
+    const mirror = (node.props as Props).mirrors as string | undefined;
+    const source = mirror ? byId.get(mirror) : undefined;
+    if (!source) return;
+    settle(source, depth + 1);
+    const props = node.props as Props;
+    const from = source.props as Props;
+    if (props.propRefs === undefined && from.propRefs !== undefined) props.propRefs = from.propRefs;
+    if (props.exposeProps === undefined && from.exposeProps !== undefined && node.type === "frame")
+      props.exposeProps = from.exposeProps;
+  };
+  for (const node of nodes) settle(node, 0);
+}
 
 /**
  * Marks what each instance's layers change from the main component's: the
@@ -501,15 +551,41 @@ function markOverrides(
   }
   const diff = (layer: NodeRecord, main: NodeRecord, root: boolean) => {
     const changed: string[] = [];
-    const keys = new Set([...Object.keys(layer.props), ...Object.keys(main.props)]);
+    // What layout decides isn't an override, however it differs (decision 0035).
+    const laidOut = laidOutProps(layer, main, {
+      root,
+      parent: root ? undefined : byId.get(layer.parent),
+      parentSource: root ? undefined : byId.get(main.parent),
+    });
+    // A nested instance swapped for another component is that component's instance, placed
+    // where its main layer is: it's compared with the component, but for where it sits.
+    const of = (layer.props as Props).instanceOf;
+    const swappedTo =
+      !root && typeof of === "string" && of !== (main.props as Props).instanceOf
+        ? byId.get(of)
+        : undefined;
+    const laidOutSwapped = swappedTo ? laidOutProps(layer, swappedTo, { root: true }) : null;
+    // What the outer component's properties drive stays its main layer's (decision 0035).
+    const boundary = new Set(swappedTo ? boundaryDrivenProps(main) : []);
+    const keys = new Set([
+      ...Object.keys(layer.props),
+      ...Object.keys(main.props),
+      ...Object.keys(swappedTo?.props ?? {}),
+    ]);
     for (const k of keys) {
-      if (NOT_OVERRIDES.has(k) || (root && (k === "x" || k === "y"))) continue;
+      if (NOT_OVERRIDES.has(k) || laidOut.has(k)) continue;
+      // Where an instance sits, and how it's used in the main around it, are its own.
+      if (root && ROOT_LOCAL_PROPS.has(k)) continue;
+      let against = main;
+      if (swappedTo && !ROOT_LOCAL_PROPS.has(k) && !boundary.has(k)) {
+        if (laidOutSwapped?.has(k)) continue;
+        against = swappedTo;
+      }
       const a = (layer.props as Props)[k];
-      const b = (main.props as Props)[k];
+      const b = (against.props as Props)[k];
       if (JSON.stringify(a) !== JSON.stringify(b)) changed.push(k);
     }
     // A nested instance swapped for another component overrides which one it is.
-    const of = (layer.props as Props).instanceOf;
     if (!root && of !== undefined && of !== (main.props as Props).instanceOf)
       changed.unshift("instanceOf");
     if (changed.length > 0) (layer.props as Props).overrides = changed.slice(0, 64);

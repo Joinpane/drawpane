@@ -36,7 +36,16 @@ interface Suite {
   readonly suite: string;
   readonly about: string;
   readonly cell: { width: number; height: number; gap: number; columns: number };
+  /**
+   * The cells' background colour; "none" for none, so what a cell lets through of an empty
+   * backdrop shows: those are drawn as an export draws them and compared over white and black.
+   */
   readonly background?: string;
+  /**
+   * The name of the layer each cell exports, as Figma exports a layer on a page: its
+   * glass and background blur see what's under it. Else the cell is exported whole.
+   */
+  readonly export?: string;
   readonly backdrop?: "stripes";
   /** Compare after blurring both by this many px: for grain, whose pixels are random. */
   readonly blur?: number;
@@ -61,6 +70,15 @@ type W = {
     createPage?(): string;
   };
   drawpaneFrames: { redraw(): void; exact: boolean };
+  drawpaneParity: {
+    render(
+      id: string,
+      rect: { x: number; y: number; width: number; height: number },
+      scale: number,
+      width: number,
+      height: number,
+    ): Promise<{ png: string }>;
+  };
 };
 
 const suites: Suite[] = readdirSync(join(ROOT, "scenes"))
@@ -80,8 +98,8 @@ const gridSize = (suite: Suite) => ({
   height: Math.ceil(suite.cells.length / suite.cell.columns) * (suite.cell.height + suite.cell.gap),
 });
 
-/** Builds a suite's cells on the page, as figma-builder.js builds them in Figma. */
-function build(page: Page, suite: Suite) {
+/** Builds a suite's cells on the page, as figma-builder.js builds them in Figma: what each exports. */
+function build(page: Page, suite: Suite): Promise<string[]> {
   return page.evaluate(
     ({ suite, origins }) => {
       const e = (window as unknown as W).drawpane;
@@ -91,15 +109,23 @@ function build(page: Page, suite: Suite) {
           fills: [],
           ...props,
         });
+        if (id && suite.export && props.name === suite.export) exported = id;
         if (id) for (const child of children ?? []) place(child, id, { x: at.x + x, y: at.y + y });
       };
-      suite.cells.forEach((cell, i) => {
+      let exported: string | null = null;
+      const frames = suite.cells.map((cell, i) => {
         const at = origins[i] as { x: number; y: number };
         const frame = e.createLayer(
           "frame",
           { ...at, width: suite.cell.width, height: suite.cell.height },
           e.s.pageId,
-          { clipContent: true, fills: [{ type: "solid", color: suite.background ?? "#ffffff" }] },
+          {
+            clipContent: true,
+            fills:
+              suite.background === "none"
+                ? []
+                : [{ type: "solid", color: suite.background ?? "#ffffff" }],
+          },
         ) as string;
         if (suite.backdrop === "stripes") {
           // Bars both ways over a warm-to-cool gradient, as figma-builder.js draws them.
@@ -141,9 +167,12 @@ function build(page: Page, suite: Suite) {
               },
             );
         }
+        exported = null;
         for (const layer of cell.layers) place(layer, frame, at);
+        return exported ?? frame;
       });
       e.select([]);
+      return frames;
     },
     { suite, origins: suite.cells.map((_, i) => cellOrigin(suite, i)) },
   );
@@ -187,7 +216,6 @@ async function waitForFonts(page: Page, suite: Suite): Promise<void> {
   }, faces);
 }
 
-/** Every cell's pixels on the canvas at 2× (RGBA, base64), in the suite's order. */
 /**
  * Every cell's pixels at 2×, each drawn centred in the view: a suite's grid
  * can be bigger than any viewport.
@@ -232,6 +260,64 @@ function capture(page: Page, suite: Suite): Promise<string[]> {
   );
 }
 
+/**
+ * Every cell drawn alone, as an export draws it (no canvas behind it), at 2×: RGBA as base64.
+ * For suites with no background, whose renders' alpha counts.
+ */
+function captureAlone(page: Page, suite: Suite, frames: readonly string[]): Promise<string[]> {
+  return page.evaluate(
+    async ({ frames, rects, scale }) => {
+      const p = (window as unknown as W).drawpaneParity;
+      const out: string[] = [];
+      for (const [i, id] of frames.entries()) {
+        const rect = rects[i] as { x: number; y: number; width: number; height: number };
+        const w = rect.width * scale;
+        const h = rect.height * scale;
+        const { png } = await p.render(id, rect, scale, w, h);
+        const bytes = Uint8Array.from(atob(png), (ch) => ch.charCodeAt(0));
+        const img = await createImageBitmap(new Blob([bytes], { type: "image/png" }), {
+          premultiplyAlpha: "none",
+        });
+        const c = new OffscreenCanvas(w, h);
+        const ctx = c.getContext("2d") as OffscreenCanvasRenderingContext2D;
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        let s = "";
+        for (let j = 0; j < data.length; j += 0x8000)
+          s += String.fromCharCode(...data.subarray(j, j + 0x8000));
+        out.push(btoa(s));
+      }
+      return out;
+    },
+    { frames, rects: suite.cells.map((_, i) => exportRect(suite, i)), scale: SCALE },
+  );
+}
+
+/** What a cell exports, on the page: the cell, or its layer named by the suite's `export`. */
+function exportRect(
+  suite: Suite,
+  i: number,
+): { x: number; y: number; width: number; height: number } {
+  const at = cellOrigin(suite, i);
+  const layer = suite.export
+    ? suite.cells[i]?.layers.find((l) => l.name === suite.export)
+    : undefined;
+  return layer
+    ? { x: at.x + layer.x, y: at.y + layer.y, width: layer.width, height: layer.height }
+    : { ...at, width: suite.cell.width, height: suite.cell.height };
+}
+
+/** RGBA (base64) laid over an opaque colour (0 to 255 grey): what it looks like over a page. */
+function over(b64: string, grey: number): string {
+  const px = Buffer.from(b64, "base64");
+  for (let i = 0; i < px.length; i += 4) {
+    const a = (px[i + 3] ?? 0) / 255;
+    for (let c = 0; c < 3; c++) px[i + c] = Math.round((px[i + c] ?? 0) * a + grey * (1 - a));
+    px[i + 3] = 255;
+  }
+  return px.toString("base64");
+}
+
 test.describe
   .serial("Render parity with Figma", () => {
     let instance: Instance;
@@ -240,7 +326,9 @@ test.describe
 
     test.beforeAll(async ({ browser }) => {
       test.setTimeout(180_000);
-      instance = await freshInstance(browser, { port: 8941, inspectorPort: 9481 });
+      // PARITY_PORT: another port, when another checkout runs the suite at once.
+      const port = Number(process.env.PARITY_PORT ?? 8941);
+      instance = await freshInstance(browser, { port, inspectorPort: port + 540 });
       await instance.page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
       // PARITY_THROTTLE=6 slows the CPU as a busy CI machine does, to reproduce what only fails there.
       if (process.env.PARITY_THROTTLE) {
@@ -287,7 +375,7 @@ test.describe
           timeout: 15_000,
         });
         await page.keyboard.press("ControlOrMeta+Shift+Backslash");
-        await build(page, suite);
+        const frames = await build(page, suite);
         await waitForFonts(page, suite);
         await page.evaluate(
           ({ grid, scale }) => {
@@ -298,9 +386,8 @@ test.describe
           { grid, scale: SCALE },
         );
         await page.waitForTimeout(1500);
-        const ours = await capture(page, suite);
-        const width = suite.cell.width * SCALE;
-        const height = suite.cell.height * SCALE;
+        const clear = suite.background === "none" || suite.export !== undefined;
+        const ours = clear ? await captureAlone(page, suite, frames) : await capture(page, suite);
 
         const rows: string[] = [];
         const failures: string[] = [];
@@ -308,15 +395,35 @@ test.describe
         for (const [i, cell] of suite.cells.entries()) {
           const golden = join(ROOT, "goldens", suite.suite, `${cell.id}.png`);
           if (!existsSync(golden)) continue;
+          const width = exportRect(suite, i).width * SCALE;
+          const height = exportRect(suite, i).height * SCALE;
           const theirs = await decodePng(page, golden);
           expect(theirs.width, `${cell.id} golden size`).toBe(width);
-          const diff = await compare(
-            page,
-            ours[i] as string,
-            theirs.data,
-            width,
-            height,
-            suite.blur,
+          const diff = clear
+            ? // Over white and over black, so alpha counts as much as colour.
+              await Promise.all(
+                [255, 0].map((grey) =>
+                  compare(
+                    page,
+                    over(ours[i] as string, grey),
+                    over(theirs.data, grey),
+                    width,
+                    height,
+                    suite.blur,
+                  ),
+                ),
+              ).then(([white, black]) => ({
+                mean: Math.round((((white?.mean ?? 0) + (black?.mean ?? 0)) / 2) * 100) / 100,
+                p99: Math.max(white?.p99 ?? 0, black?.p99 ?? 0),
+                heat: white?.heat ?? "",
+              }))
+            : await compare(page, ours[i] as string, theirs.data, width, height, suite.blur);
+          // Drawpane's render, as a file next to the report: for fitting against the golden.
+          mkdirSync(join(OUT, suite.suite), { recursive: true });
+          const ourPng = await encodePng(page, ours[i] as string, width, height);
+          writeFileSync(
+            join(OUT, suite.suite, `${cell.id}.png`),
+            Buffer.from(ourPng.slice(ourPng.indexOf(",") + 1), "base64"),
           );
           (results[suite.suite] as Record<string, number>)[cell.id] = diff.mean;
           const limit = recorded[suite.suite]?.[cell.id];

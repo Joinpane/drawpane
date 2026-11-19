@@ -80,6 +80,17 @@ export interface Effect {
   readonly secondaryColor?: RGBA;
   readonly opacity?: number;
   readonly clipToShape?: boolean;
+  /**
+   * Glass, as Figma's plugin API names its settings (the REST API leaves them out; a `.fig`
+   * has them): light 0–1 and its angle in degrees, refraction 0–1, depth px, dispersion and
+   * splay 0–1. Its frost is `radius`.
+   */
+  readonly lightIntensity?: number;
+  readonly lightAngle?: number;
+  readonly refraction?: number;
+  readonly depth?: number;
+  readonly dispersion?: number;
+  readonly splay?: number;
 }
 
 export interface TypeStyle {
@@ -204,10 +215,27 @@ export interface Node {
   readonly styleOverrideTable?: Readonly<Record<string, TypeStyle>>;
   // Components
   readonly componentId?: string;
-  readonly componentPropertyDefinitions?: Readonly<Record<string, unknown>>;
+  /** On a component or set: its properties by key ("Name#id"; a variant's is its name). */
+  readonly componentPropertyDefinitions?: Readonly<Record<string, ComponentPropertyDefinition>>;
+  /** Which of this layer's fields a property drives, by the property's key. */
+  readonly componentPropertyReferences?: Readonly<
+    Partial<Record<"visible" | "characters" | "mainComponent", string>>
+  >;
+  /** A nested instance in a component whose properties its instances show. */
+  readonly isExposedInstance?: boolean;
   readonly overrides?: readonly { id: string; overriddenFields: readonly string[] }[];
   readonly booleanOperation?: string;
   readonly arcData?: { startingAngle: number; endingAngle: number; innerRadius: number };
+}
+
+/** A component property, as `componentPropertyDefinitions` gives it. */
+export interface ComponentPropertyDefinition {
+  readonly type: "BOOLEAN" | "TEXT" | "INSTANCE_SWAP" | "VARIANT" | "SLOT" | string;
+  readonly defaultValue?: boolean | string;
+  readonly variantOptions?: readonly string[];
+  /** Components an instance swap offers first, by component (or set) key. */
+  readonly preferredValues?: readonly { type: "COMPONENT" | "COMPONENT_SET"; key: string }[];
+  readonly description?: string;
 }
 
 export interface File {
@@ -226,7 +254,7 @@ export interface File {
       }
     >
   >;
-  readonly componentSets?: Readonly<Record<string, { name?: string }>>;
+  readonly componentSets?: Readonly<Record<string, { key?: string; name?: string }>>;
   readonly styles?: Readonly<Record<string, { name?: string; styleType?: string }>>;
   readonly version?: string;
   readonly lastModified?: string;

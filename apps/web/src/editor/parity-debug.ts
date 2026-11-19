@@ -137,7 +137,7 @@ export function parityDebug(editor: Editor) {
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("No 2D context");
       const started = performance.now();
-      renderer.renderNodes(ctx, [id], rect, scale, null);
+      renderer.renderNodes(ctx, [id], rect, scale, null, false, true);
       const ms = Math.round(performance.now() - started);
       const blob = await canvas.convertToBlob({ type: "image/png" });
       return {

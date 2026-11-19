@@ -608,6 +608,49 @@ export const BINDING_KEYS = [
 ] as const;
 export type BindingKey = (typeof BINDING_KEYS)[number];
 
+/**
+ * A component property's id (decision 0035): stable across renames, so the
+ * layers that reference it keep doing so. Not a node id.
+ */
+export const PropertyId = z.string().regex(/^[\w:.-]{1,64}$/);
+
+/** What kind of value a component property takes. */
+export const COMPONENT_PROP_TYPES = ["variant", "boolean", "text", "instance", "slot"] as const;
+export type ComponentPropType = (typeof COMPONENT_PROP_TYPES)[number];
+
+/**
+ * One property a main component (or a component set, for its variants)
+ * defines. A variant's values are its variants' `variantProps`; its entry
+ * here gives it its place and description. `default` is a boolean's or a
+ * text's value, or an instance swap's component; `preferred` lists the
+ * components an instance swap offers first.
+ */
+export const ComponentPropDef = z.object({
+  id: PropertyId,
+  name: z.string().min(1).max(64),
+  type: z.enum(COMPONENT_PROP_TYPES),
+  default: z.union([z.boolean(), z.string().max(10_000)]).optional(),
+  description: z.string().max(500).optional(),
+  preferred: z.array(z.string().regex(ID_PATTERN)).max(64).optional(),
+});
+export type ComponentPropDef = z.infer<typeof ComponentPropDef>;
+
+/**
+ * An instance's value for one component property, as the panel shows and
+ * sets it (decision 0035, item 3): a boolean's, a text's, or the component an
+ * instance swap chose. Read from, and written to, the layers it drives.
+ */
+export const PropertyValue = z.union([
+  z.boolean(),
+  z.string().max(200_000),
+  z.object({ instance: z.string().regex(ID_PATTERN) }).strict(),
+]);
+export type PropertyValue = z.infer<typeof PropertyValue>;
+
+/** The values of a layer a component property drives: which property drives each. */
+export const PROP_REF_FIELDS = ["visible", "characters", "instanceOf", "slot"] as const;
+export type PropRefField = (typeof PROP_REF_FIELDS)[number];
+
 // ---------------------------------------------------------------------------
 // Property registry
 
@@ -757,6 +800,27 @@ export const PROPS = {
   /** A variant's property values, e.g. { State: "Hover", Size: "Large" }. */
   variantProps: prop(z.record(z.string().min(1).max(64), z.string().max(64)), {}, CONTAINERS),
   componentDescription: prop(z.string().max(2000), "", CONTAINERS),
+  /**
+   * Component properties (decision 0035): what a main component, or a set
+   * for its variants, lets its instances set, in the order they're shown.
+   */
+  componentProps: prop(
+    z
+      .array(ComponentPropDef)
+      .max(64)
+      .refine((defs) => new Set(defs.map((d) => d.id)).size === defs.length, "ids must differ"),
+    [],
+    CONTAINERS,
+  ),
+  /**
+   * Which of this layer's values a component property drives: a boolean its
+   * `visible`, a text its `characters`, an instance swap its `instanceOf`.
+   * An instance's value for the property is that value in its copy, as the
+   * copy's layers have it (decision 0035, item 3).
+   */
+  propRefs: prop(z.partialRecord(z.enum(PROP_REF_FIELDS), PropertyId), {}, LAYERS),
+  /** A nested instance in a main whose properties show on that main's instances (Figma's "exposed"). */
+  exposeProps: prop(z.boolean(), false, CONTAINERS),
   instanceOf: prop(z.string().regex(ID_PATTERN).nullable(), null, CONTAINERS),
   mirrors: prop(z.string().regex(ID_PATTERN).nullable(), null, LAYERS),
   overrides: prop(z.array(z.string().max(64)).max(64), [], LAYERS),

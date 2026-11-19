@@ -626,8 +626,16 @@ describe("exportSvg", () => {
     expect(plain).toContain("font-feature-settings: 'tnum' 1");
   });
 
-  it("gives glass its lit rim, under the fills (SVG can't see the backdrop)", () => {
+  it("gives glass its lit rim, under the fills, only as opaque as what's behind", () => {
     const editor = makeEditor([
+      {
+        op: "create",
+        id: "b",
+        type: "rect",
+        parent: "p",
+        key: "Zz",
+        props: { x: 0, y: 0, width: 100, height: 30, fills: [{ type: "solid", color: "#808080" }] },
+      },
       {
         op: "create",
         id: "g",
@@ -645,7 +653,7 @@ describe("exportSvg", () => {
         },
       },
     ]);
-    const svg = svgOf(editor, ["g"]);
+    const svg = svgOf(editor, ["b", "g"]);
     // Lit from the top: the gradient runs top to bottom, white fading out.
     expect(svg).toMatch(
       /<linearGradient id="light\d+" x1="0.5" y1="0" x2="0.5" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.56"\/>/,
@@ -654,6 +662,13 @@ describe("exportSvg", () => {
     const fill = svg.indexOf('fill="#ffffff"');
     expect(rim).toBeGreaterThan(-1);
     expect(rim).toBeLessThan(fill);
+    // Masked by what's under it: the grey band's alpha.
+    expect(svg).toMatch(
+      /<mask id="behind\d+" mask-type="alpha"[^>]*><use href="#under\d+"\/><\/mask>/,
+    );
+    // Over nothing, as in Figma, glass shows nothing: no light either.
+    const alone = svgOf(editor, ["g"]);
+    expect(alone).not.toContain('stroke="url(#light');
   });
 
   it("strokes text around its glyphs: centred, or inside or outside them", () => {

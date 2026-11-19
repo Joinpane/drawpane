@@ -489,6 +489,78 @@ describe("layers", () => {
     expect(style(laidOut(23))).toMatchObject({ lineHeightUnit: "PIXELS", lineHeightPx: 23 });
   });
 
+  it("writes component properties as REST keys them, in Figma's order, and the layers they drive", () => {
+    const { page, add, adapt } = scene();
+    const star = add("COMPONENT", page.id, "7:1", { name: "Star", width: 16, height: 16 });
+    const main = add("COMPONENT", page.id, "4:1", {
+      name: "Button",
+      width: 80,
+      height: 32,
+      componentPropertyDefinitions: [
+        { id: "9:2", name: "Label", type: "TEXT", defaultValue: "OK" },
+        { id: "9:1", name: "Show icon", type: "BOOLEAN", defaultValue: "false" },
+        {
+          id: "9:3",
+          name: "Icon",
+          type: "INSTANCE_SWAP",
+          defaultValue: "7:1",
+          preferredValues: ["k-star"],
+          description: "Pick one",
+        },
+      ],
+    });
+    add("TEXT", main.id, "4:2", {
+      name: "Label",
+      text: "OK",
+      componentPropertyReferences: [{ propertyId: "9:2", field: "TEXT" }],
+    });
+    add("INSTANCE", main.id, "4:3", {
+      name: "Icon",
+      componentId: star.id,
+      width: 16,
+      height: 16,
+      isExposedInstance: true,
+      componentPropertyReferences: [
+        { propertyId: "9:1", field: "VISIBLE" },
+        { propertyId: "9:3", field: "INSTANCE_SWAP" },
+      ],
+    });
+    // Figma's order is the saved one (`sortPosition`), which the graph doesn't keep.
+    const raw = new Map<string, RawRecord>([
+      [
+        "4:1",
+        {
+          componentPropDefs: [
+            { id: { sessionID: 9, localID: 1 }, sortPosition: "a" },
+            { id: { sessionID: 9, localID: 2 }, sortPosition: "b" },
+            { id: { sessionID: 9, localID: 3 }, sortPosition: "c" },
+          ],
+        } as RawRecord,
+      ],
+    ]);
+    const rest = adapt(main, raw);
+    expect(rest.componentPropertyDefinitions).toEqual({
+      "Show icon#9:1": { type: "BOOLEAN", defaultValue: false },
+      "Label#9:2": { type: "TEXT", defaultValue: "OK" },
+      "Icon#9:3": {
+        type: "INSTANCE_SWAP",
+        defaultValue: "7:1",
+        preferredValues: [{ type: "COMPONENT", key: "k-star" }],
+        description: "Pick one",
+      },
+    });
+    expect(Object.keys(rest.componentPropertyDefinitions ?? {})).toEqual([
+      "Show icon#9:1",
+      "Label#9:2",
+      "Icon#9:3",
+    ]);
+    expect(rest.children?.[0]?.componentPropertyReferences).toEqual({ characters: "Label#9:2" });
+    expect(rest.children?.[1]).toMatchObject({
+      isExposedInstance: true,
+      componentPropertyReferences: { visible: "Show icon#9:1", mainComponent: "Icon#9:3" },
+    });
+  });
+
   it("names an instance's layers after the instance and the component layers they copy", () => {
     const { graph, page, add, adapt } = scene();
     const main = add("COMPONENT", page.id, "4:1", { name: "Button", width: 80, height: 32 });
@@ -564,6 +636,45 @@ describe("layers", () => {
     expect(adapted.effects?.[0]?.blendMode).toBe("LINEAR_DODGE");
     // Normal is what a missing one means.
     expect(adapted.effects?.[1]).not.toHaveProperty("blendMode");
+  });
+
+  it("keeps glass's settings, by the record's names for them", () => {
+    const { page, add, adapt } = scene();
+    const rect = add("RECTANGLE", page.id, "6:10", {
+      width: 70,
+      height: 70,
+      // Open Pencil's graph has glass without its settings; the record has them.
+      effects: [{ type: "GLASS", visible: true } as unknown as SceneNode["effects"][number]],
+    });
+    const raw = new Map<string, RawRecord>([
+      [
+        "6:10",
+        {
+          effects: [
+            {
+              type: "GLASS",
+              radius: 6,
+              refractionRadius: 30,
+              refractionIntensity: 0.7,
+              specularAngle: 315,
+              specularIntensity: 0.4,
+              chromaticAberration: 0.2,
+              reflectionDistance: 0.2,
+            },
+          ],
+        },
+      ],
+    ]);
+    expect(adapt(rect, raw).effects?.[0]).toEqual({
+      type: "GLASS",
+      radius: 6,
+      depth: 30,
+      refraction: 0.7,
+      lightAngle: 315,
+      lightIntensity: 0.4,
+      dispersion: 0.2,
+      splay: 0.2,
+    });
   });
 
   it("maps paints: solid, gradient handles, a cropped image", () => {

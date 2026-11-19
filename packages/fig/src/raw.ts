@@ -32,6 +32,13 @@ export interface RawEffect {
   readonly color?: Figma.RGBA;
   readonly opacity?: number;
   readonly clipToShape?: boolean;
+  /** Glass: depth, refraction 0–1, light angle and 0–1, dispersion 0–1, splay 0–1. */
+  readonly refractionRadius?: number;
+  readonly refractionIntensity?: number;
+  readonly specularAngle?: number;
+  readonly specularIntensity?: number;
+  readonly chromaticAberration?: number;
+  readonly reflectionDistance?: number;
 }
 
 export interface RawNumber {
@@ -63,6 +70,13 @@ export interface RawRecord {
   readonly parentIndex?: { readonly guid?: RawGuid; readonly position?: string };
   readonly overrideKey?: RawGuid;
   readonly componentPropRefs?: readonly RawPropRef[];
+  /** A component's property definitions as saved: their order, and a variant's (`variants.ts`). */
+  readonly componentPropDefs?: readonly {
+    readonly id?: RawGuid;
+    readonly name?: string;
+    readonly type?: string;
+    readonly sortPosition?: unknown;
+  }[];
   readonly componentPropAssignments?: readonly RawPropAssignment[];
   readonly symbolData?: {
     /** The component an instance copies. */

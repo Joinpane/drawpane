@@ -159,7 +159,25 @@ export function convertEffect(
         ...visible,
       };
     case "GLASS":
-      return { type: "GLASS", ...visible };
+      // The record's names for the plugin API's (checked against it on a large iOS UI kit):
+      // frost is the radius, depth refractionRadius, splay reflectionDistance.
+      return {
+        type: "GLASS",
+        ...(same?.radius !== undefined ? { radius: same.radius } : {}),
+        ...(same?.refractionRadius !== undefined ? { depth: same.refractionRadius } : {}),
+        ...(same?.refractionIntensity !== undefined
+          ? { refraction: same.refractionIntensity }
+          : {}),
+        ...(same?.specularAngle !== undefined ? { lightAngle: same.specularAngle } : {}),
+        ...(same?.specularIntensity !== undefined
+          ? { lightIntensity: same.specularIntensity }
+          : {}),
+        ...(same?.chromaticAberration !== undefined
+          ? { dispersion: same.chromaticAberration }
+          : {}),
+        ...(same?.reflectionDistance !== undefined ? { splay: same.reflectionDistance } : {}),
+        ...visible,
+      };
     default:
       notes.add("effect-unsupported");
       return null;
