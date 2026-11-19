@@ -62,7 +62,7 @@ A binding names a variable by id. Bindings live with what they bind, so they mov
   | `rowGap` | `rowGap` | `counterAxisSpacing`, `gridRowGap`; `STACK_COUNTER_SPACING`, `GRID_ROW_GAP` | number |
   | `paddingTop`, `paddingRight`, `paddingBottom`, `paddingLeft` | the same | `paddingTop`...; `STACK_PADDING_TOP`... | number |
   | `cornerRadius` | `cornerRadius` | `CORNER_RADIUS` | number |
-  | `topLeftRadius`, `topRightRadius`, `bottomRightRadius`, `bottomLeftRadius` | that corner of `cornerRadii` | `topLeftRadius`...; `RECTANGLE_TOP_LEFT_CORNER_RADIUS`... | number |
+  | `topLeftRadius`, `topRightRadius`, `bottomRightRadius`, `bottomLeftRadius` | that corner of `cornerRadii` | `topLeftRadius`...; `RECTANGLE_TOP_LEFT_CORNER_RADIUS`... (brought only where the corners are independent: otherwise Figma draws the uniform radius and these don't change it) | number |
   | `strokeWeight` | `strokeWeight` | `strokeWeight`; `STROKE_WEIGHT` | number |
   | `strokeTopWeight`, `strokeRightWeight`, `strokeBottomWeight`, `strokeLeftWeight` | that side of `strokeWeights` | `strokeTopWeight`...; `BORDER_TOP_WEIGHT`... | number |
   | `opacity` | `opacity` | `opacity`; `OPACITY` (a percentage, as in Figma: the binding says `unit: "percent"`) | number |
@@ -72,11 +72,13 @@ A binding names a variable by id. Bindings live with what they bind, so they mov
   | `fontStyle` | `fontWeight` and `fontStyle` | `fontStyle`; `FONT_STYLE` ("Semi Bold Italic") | string |
   | `fontWeight` | `fontWeight` | `fontWeight` | number |
   | `fontSize` | `fontSize` | `fontSize`; `FONT_SIZE` | number |
-  | `lineHeight` | `lineHeight`, in px | `lineHeight`; `LINE_HEIGHT` | number |
-  | `letterSpacing` | `letterSpacing`, in px | `letterSpacing`; `LETTER_SPACING` | number |
+  | `lineHeight` | `lineHeight`, in the layer's unit (a percentage of the font size when the layer's is one, else px) | `lineHeight`; `LINE_HEIGHT` | number |
+  | `letterSpacing` | `letterSpacing`, in the layer's unit (px or a percentage of the font size) | `letterSpacing`; `LETTER_SPACING` | number |
   | `paragraphSpacing` | `paragraphSpacing` | `paragraphSpacing`; `PARAGRAPH_SPACING` | number |
 
   A binding is the variable's id, or, where this decision reads a value differently from before, the id with the unit its value is read in: `{ variable, unit: "percent" }` for `opacity` and `{ variable, unit: "text" }` for `characters` (section 12). The old keys `fill` and `stroke` (the first solid paint) are still read, as before.
+
+  Line height and letter spacing take their unit from the layer, as Figma does: a variable worth 5 bound to a letter spacing set in percent is 5% of the font size, and in pixels 5 px. Neither was bindable before this decision, so no stored binding read them otherwise and the binding needs no unit of its own; the unit is the layer's value's, which a copy's override can set. From a `.fig`, the importer reads that unit from the record or the copy's override, since Open Pencil 0.16 keeps pixels only and applies a bound value as pixels whatever the unit.
 - **Paints** (fills and strokes, on layers and in paint styles): `bind: { color, opacity }` on the paint, and `bind: { color }` on each gradient stop. A bound colour gives the paint its colour and its alpha. The paint's own `opacity` is independent: a multiplier a person sets, applied on top of the variable's alpha, never replaced by it. A bound paint opacity is Drawpane's (Figma binds colours only), a percentage like layer opacity.
 - **Alpha is normalised once, at import.** Figma saves a bound colour's alpha twice: in the variable and again as the paint's opacity. Applying both counts it twice (measured on the kit: translucent overlays and invalid fills came out nearly clear); stripping the paint's opacity on every read would throw away a person's later edit. So the importer folds the saved opacity into the stored colour (`#rrggbbaa`, the fallback) and the paint keeps no opacity of its own. A composed alias's `opacity` still multiplies the alpha once, in the resolver.
 - **Effects** (on layers and in effect styles): shadows `bind: { x, y, blur, spread, color, visible }`, blurs `bind: { radius, visible }`. Figma's are `offsetX`, `offsetY`, `radius`, `spread` and `color` (REST), `xVar`, `yVar`, `radiusVar`, `spreadVar` and `colorVar` (`.fig`).
