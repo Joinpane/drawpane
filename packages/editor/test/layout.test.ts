@@ -271,6 +271,46 @@ describe("auto layout", () => {
     expect(box("c1")[3]).toBe(20);
   });
 
+  it("keeps a frame that hugs across only layers that fill it at their size", () => {
+    // A shadcn kit checkbox: a column that hugs its width around one label
+    // set to Fill. Nothing else sizes the column, so the label keeps its
+    // width rather than collapsing to nothing (one letter per line).
+    const column = setup({ layoutMode: "column", sizingH: "hug", width: 204, height: 14 }, [
+      { width: 204, height: 14, sizingH: "fill" },
+    ]);
+    expect(column.box("f")[2]).toBe(204);
+    expect(column.box("c0")[2]).toBe(204);
+    // The kit's card title: a row that hugs its height around a title that fills it.
+    const row = setup({ layoutMode: "row", sizingV: "hug", width: 200, height: 20 }, [
+      { width: 200, height: 20, sizingH: "fill", sizingV: "fill" },
+    ]);
+    expect(row.box("f")[3]).toBe(20);
+    expect(row.box("c0")[3]).toBe(20);
+    // As wrapped lines: a line of only stretching layers is as thick as they are.
+    const wrapped = setup(
+      { layoutMode: "row", layoutWrap: true, sizingV: "hug", width: 100, height: 0, rowGap: 4 },
+      [
+        { width: 80, height: 30 },
+        { width: 80, height: 12, sizingV: "fill" },
+      ],
+    );
+    expect(wrapped.box("f")[3]).toBe(46);
+    // Once something else sizes it, the stretching layers follow again.
+    column.doc.apply([
+      {
+        op: "create",
+        id: "c1",
+        type: "rect",
+        parent: "f",
+        key: "a1",
+        props: { width: 120, height: 10 },
+      },
+    ]);
+    column.doc.apply(layoutOps(column.doc, ["c1"]));
+    expect(column.box("f")[2]).toBe(120);
+    expect(column.box("c0")[2]).toBe(120);
+  });
+
   it("hands a text layer's size to the layout when it fills or stretches, like Figma", () => {
     const { doc, box } = setup(
       { layoutMode: "column", alignItems: "stretch", width: 200 },
