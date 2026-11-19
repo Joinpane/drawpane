@@ -269,6 +269,27 @@ describe("values alike where bound", () => {
     ).toBe(true);
   });
 
+  // Review 4, blocker 2: a value the resolver can't apply leaves the saved one showing.
+  it("aren't alike where a variable's value can't drive the property", () => {
+    const more = new Map<string, NodeRecord>([
+      ...vars,
+      ["zero", node("zero", "variable", "c", { variableType: "number", values: { m: 0 } })],
+      ["blank", node("blank", "variable", "c", { variableType: "string", values: { m: " " } })],
+      ["inter", node("inter", "variable", "c", { variableType: "string", values: { m: "Inter" } })],
+    ]);
+    const at = (id: string) => more.get(id);
+    expect(boundAlike("fontSize", 24, 14, { fontSize: "zero" }, { fontSize: "zero" }, at)).toBe(
+      false,
+    );
+    expect(boundAlike("fontSize", 24, 14, { fontSize: "n" }, { fontSize: "n" }, at)).toBe(true);
+    expect(
+      boundAlike("fontFamily", "A", "B", { fontFamily: "blank" }, { fontFamily: "blank" }, at),
+    ).toBe(false);
+    expect(
+      boundAlike("fontFamily", "A", "B", { fontFamily: "inter" }, { fontFamily: "inter" }, at),
+    ).toBe(true);
+  });
+
   it("aren't alike where the part no binding gives differs: a letter spacing's unit", () => {
     const pct = { unit: "percent", value: 5 };
     const px = { unit: "px", value: 5 };

@@ -82,7 +82,7 @@ const corners = (variable: Guid) => ({
   ].map((field) => binding(field, variable)),
 });
 
-function fixture(swap = true) {
+function fixture(swap = true, literal = false) {
   const parsed = parseFigBuffer(bytes.slice().buffer as ArrayBuffer);
   const records = parsed.nodeChanges;
   const set = records.find((r) => r.type === "VARIABLE_SET") as NodeChange & {
@@ -265,7 +265,7 @@ function fixture(swap = true) {
     number(ids.oldOpacity, "Original opacity", 50, "~Old"),
     number(ids.newOpacity, "New opacity", 80, "~New"),
     number(ids.overrideOpacity, "Override opacity", 50, "~Override"),
-    symbol(ids.oldVariant, "Original", 0.5, ids.oldOpacity),
+    symbol(ids.oldVariant, "Original", 0.5, literal ? undefined : ids.oldOpacity),
     symbol(ids.newVariant, "Replacement", 0.8, ids.newOpacity),
     symbol(ids.host, "Host", 1),
     {
@@ -278,7 +278,9 @@ function fixture(swap = true) {
       size: { x: 40, y: 40 },
       transform: identity(),
       symbolData: { symbolID: ids.oldVariant, symbolOverrides: [] },
-      variableConsumptionMap: { entries: [binding("OPACITY", ids.oldOpacity)] },
+      ...(!literal
+        ? { variableConsumptionMap: { entries: [binding("OPACITY", ids.oldOpacity)] } }
+        : {}),
     },
     {
       ...base,
@@ -295,7 +297,9 @@ function fixture(swap = true) {
             guidPath: { guids: [ids.nested] },
             ...(swap ? { overriddenSymbolID: ids.newVariant } : {}),
             opacity: 0.5,
-            variableConsumptionMap: { entries: [binding("OPACITY", ids.overrideOpacity)] },
+            ...(!literal
+              ? { variableConsumptionMap: { entries: [binding("OPACITY", ids.overrideOpacity)] } }
+              : {}),
           },
         ],
       },
@@ -312,8 +316,8 @@ function fixture(swap = true) {
   );
 }
 
-async function converted(swap = true) {
-  const fig = await readFig(fixture(swap));
+async function converted(swap = true, literal = false) {
+  const fig = await readFig(fixture(swap, literal));
   const { nodes } = convertFile(fig.file as Figma.File);
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const resolver = new TokenResolver(new MemoryStore(nodes));
@@ -401,6 +405,18 @@ describe("bound fields read through the layer", { timeout: 60_000 }, () => {
     const nested = copyOf(ids.swapped, ids.nested);
     expect(nested.props.instanceOf).toBe(drawpaneId(key(ids.newVariant)));
     expect(nested.props.bindings?.opacity).toEqual(wanted);
+  });
+
+  it("R5 variant: retains an explicit equal literal on a swapped instance", async () => {
+    const unswapped = await converted(false, true);
+    const control = unswapped.copyOf(ids.swapped, ids.nested);
+    expect(control.props.opacity).toBe(0.5);
+    expect(control.props.bindings?.opacity).toBeUndefined();
+    const { copyOf } = await converted(true, true);
+    const nested = copyOf(ids.swapped, ids.nested);
+    expect(nested.props.instanceOf).toBe(drawpaneId(key(ids.newVariant)));
+    expect(nested.props.opacity).toBe(0.5);
+    expect(nested.props.bindings?.opacity).toBeUndefined();
   });
 
   it("an unbound letter spacing a style gives stays as Open Pencil reads it", async () => {

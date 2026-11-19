@@ -239,3 +239,52 @@ describe("bindings say how they read (decision 0034)", () => {
     });
   });
 });
+
+it("marks a saved font-size difference when its variable cannot drive the property", () => {
+  const tracking = { type: "VARIABLE_ALIAS", id: "VariableID:1:1" } as const;
+  const text = (id: string, fontSize: number) => ({
+    id,
+    name: "Text",
+    type: "TEXT",
+    characters: "Text",
+    size: { x: 20, y: 20 },
+    relativeTransform: [
+      [1, 0, 0],
+      [0, 1, 0],
+    ],
+    style: { fontFamily: "Inter", fontSize },
+    boundVariables: { fontSize: tracking },
+  });
+  const valid = themed();
+  const page = valid.document.children?.[0];
+  if (!page?.children?.[0] || !page.children[1]) throw new Error("Missing test layers");
+  const file = {
+    ...valid,
+    variables: {
+      ...variables,
+      variables: {
+        [tracking.id]: {
+          ...variables.variables[tracking.id],
+          resolvedType: "FLOAT",
+          valuesByMode: { "1:2": 0, "1:3": 0 },
+        },
+      },
+    },
+    document: {
+      ...valid.document,
+      children: [
+        {
+          ...page,
+          children: [
+            { ...page.children[0], children: [text("2:1", 14)] },
+            { ...page.children[1], children: [text("I3:0;2:1", 24)] },
+          ],
+        },
+      ],
+    },
+  } as unknown as Figma.File;
+  const { nodes } = convertFile(file);
+  const copy = nodes.find((node) => node.id === drawpaneId("I3:0;2:1"));
+  expect(copy?.props.fontSize).toBe(24);
+  expect(copy?.props.overrides).toContain("fontSize");
+});

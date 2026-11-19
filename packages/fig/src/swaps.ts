@@ -90,32 +90,107 @@ const BOUND_LOOK_FIELDS: Readonly<Record<string, string>> = {
   MIN_HEIGHT: "minHeight",
   MAX_HEIGHT: "maxHeight",
 };
-/** The record fields holding the look lists, whose paints and effects carry their own bindings. */
-const LIST_FIELDS: Readonly<Record<string, string>> = {
-  fillPaints: "fills",
-  strokePaints: "strokes",
-  effects: "effects",
+/**
+ * The plain look values an override saves in the units Open Pencil keeps
+ * them in. Open Pencil 0.16 swaps a nested instance itself and drops these
+ * from the override when it does, so they're put back from the record.
+ */
+const PLAIN_LOOK_FIELDS: Readonly<Record<string, string>> = {
+  opacity: "opacity",
+  cornerRadius: "cornerRadius",
+  rectangleTopLeftCornerRadius: "topLeftRadius",
+  rectangleTopRightCornerRadius: "topRightRadius",
+  rectangleBottomLeftCornerRadius: "bottomLeftRadius",
+  rectangleBottomRightCornerRadius: "bottomRightRadius",
+  cornerSmoothing: "cornerSmoothing",
+  strokeWeight: "strokeWeight",
+  borderTopWeight: "borderTopWeight",
+  borderRightWeight: "borderRightWeight",
+  borderBottomWeight: "borderBottomWeight",
+  borderLeftWeight: "borderLeftWeight",
+  stackSpacing: "itemSpacing",
+  stackCounterSpacing: "counterAxisSpacing",
+  stackVerticalPadding: "paddingTop",
+  stackPaddingRight: "paddingRight",
+  stackPaddingBottom: "paddingBottom",
+  stackHorizontalPadding: "paddingLeft",
+};
+
+/**
+ * The record fields an override sets a look field with, by Kiwi name: the
+ * lists (whose paints and effects carry their own bindings) and the plain
+ * values. One an override saves is the instance's own, bound or not.
+ */
+const SET_LOOK_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  fillPaints: ["fills"],
+  strokePaints: ["strokes"],
+  effects: ["effects"],
+  opacity: ["opacity"],
+  cornerRadius: ["cornerRadius"],
+  rectangleTopLeftCornerRadius: ["topLeftRadius"],
+  rectangleTopRightCornerRadius: ["topRightRadius"],
+  rectangleBottomLeftCornerRadius: ["bottomLeftRadius"],
+  rectangleBottomRightCornerRadius: ["bottomRightRadius"],
+  rectangleCornerRadiiIndependent: ["independentCorners"],
+  cornerSmoothing: ["cornerSmoothing"],
+  strokeWeight: ["strokeWeight"],
+  strokeAlign: ["strokeAlign"],
+  borderStrokeWeightsIndependent: ["independentStrokeWeights"],
+  borderTopWeight: ["borderTopWeight"],
+  borderRightWeight: ["borderRightWeight"],
+  borderBottomWeight: ["borderBottomWeight"],
+  borderLeftWeight: ["borderLeftWeight"],
+  stackMode: ["layoutMode"],
+  stackWrap: ["layoutWrap"],
+  stackPrimaryAlignItems: ["primaryAxisAlign"],
+  stackCounterAlignItems: ["counterAxisAlign"],
+  stackPrimarySizing: ["primaryAxisSizing"],
+  stackCounterSizing: ["counterAxisSizing"],
+  stackSpacing: ["itemSpacing"],
+  stackCounterSpacing: ["counterAxisSpacing"],
+  stackVerticalPadding: ["paddingTop"],
+  stackPaddingRight: ["paddingRight"],
+  stackPaddingBottom: ["paddingBottom"],
+  stackHorizontalPadding: ["paddingLeft"],
+  minSize: ["minWidth", "minHeight"],
+  maxSize: ["maxWidth", "maxHeight"],
+  frameMaskDisabled: ["clipsContent"],
 };
 
 /**
  * The look fields the instances around a layer bind or set explicitly in
- * their overrides: the layer's own, kept through a swap (decision 0034).
+ * their overrides: the layer's own, kept through a swap with its value and
+ * binding, even where its value matches the old component's (decision 0034).
  */
-function explicitLooks(overrides: readonly Readonly<Record<string, unknown>>[]): Set<string> {
-  const out = new Set<string>();
+function explicitLooks(overrides: readonly Readonly<Record<string, unknown>>[]): {
+  /** Fields an override binds or sets. */
+  readonly set: Set<string>;
+  /** Fields an override binds. */
+  readonly bound: Set<string>;
+  /** Plain values an override sets, in the units Open Pencil keeps them in (the outermost's). */
+  readonly values: Map<string, unknown>;
+} {
+  const set = new Set<string>();
+  const bound = new Set<string>();
+  const values = new Map<string, unknown>();
   for (const o of overrides) {
     for (const map of [o.variableConsumptionMap, o.parameterConsumptionMap]) {
       const entries = (map as { entries?: { variableField?: unknown }[] } | undefined)?.entries;
       for (const entry of entries ?? []) {
         const field = typeof entry.variableField === "string" ? entry.variableField : "";
         const look = BOUND_LOOK_FIELDS[field];
-        if (look) out.add(look);
+        if (look) {
+          set.add(look);
+          bound.add(look);
+        }
       }
     }
-    for (const [field, look] of Object.entries(LIST_FIELDS))
-      if (o[field] !== undefined) out.add(look);
+    for (const [field, looks] of Object.entries(SET_LOOK_FIELDS))
+      if (o[field] !== undefined) for (const look of looks) set.add(look);
+    for (const [field, look] of Object.entries(PLAIN_LOOK_FIELDS))
+      if (typeof o[field] === "number" && !values.has(look)) values.set(look, o[field]);
   }
-  return out;
+  return { set, bound, values };
 }
 
 type Bound = Readonly<Record<string, string>>;
@@ -168,7 +243,22 @@ export function applySwappedLooks(
     const bound = { ...(node.boundVariables as Bound | undefined) };
     let rebound = false;
     for (const field of LOOK) {
-      if (explicit.has(field) || !same(own[field], was[field])) continue;
+      if (explicit.set.has(field)) {
+        // The override's own: its plain value back where Open Pencil's swap dropped it, and,
+        // unless the override binds it too, no binding of the new component's over it.
+        const value = explicit.values.get(field);
+        if (value === undefined) continue;
+        if (!same(own[field], value)) updates[field] = value;
+        if (!explicit.bound.has(field)) {
+          const binds = bindingsOf(bound, field);
+          if (Object.keys(binds).length > 0) {
+            for (const key of Object.keys(binds)) delete bound[key];
+            rebound = true;
+          }
+        }
+        continue;
+      }
+      if (!same(own[field], was[field])) continue;
       const ownBinds = bindingsOf(node.boundVariables as Bound, field);
       if (!same(own[field], next[field])) updates[field] = structuredClone(next[field]);
       const nextBinds = bindingsOf(newMain.boundVariables as Bound, field);

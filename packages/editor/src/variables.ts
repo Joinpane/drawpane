@@ -169,6 +169,8 @@ function unbindStops(stops: readonly Stop[], before: readonly Stop[] | undefined
   const out = stops.map((stop, j) => {
     if (!stop.bind?.color) return stop;
     if (prior[j] && prior[j].color === stop.color) return stop;
+    // A binding the edit supplies itself (none, or another variable, before) is intended: kept.
+    if (prior[j]?.bind?.color !== stop.bind.color) return stop;
     changed = true;
     const { bind: _gone, ...rest } = stop;
     return rest as Stop;
@@ -180,7 +182,8 @@ function unbindStops(stops: readonly Stop[], before: readonly Stop[] | undefined
  * A list of paints or effects with the bindings of fields whose values were
  * changed by hand taken off (decision 0034): each item compared with the one
  * it was (`matchItems`), so reordering keeps bindings and an edit detaches
- * only the fields it changed. A paint's own opacity is its own, on top of a
+ * only the fields it changed. A binding the edit brings itself (the item had
+ * none on that field, or another variable) is intended and kept. A paint's own opacity is its own, on top of a
  * bound colour's alpha: setting it leaves the colour bound.
  */
 function unbindChanged<T extends Paint | Effect>(
@@ -198,8 +201,12 @@ function unbindChanged<T extends Paint | Effect>(
       // Nothing it was: a new item's bindings are as given.
       if (!was || was.type !== result.type) Object.assign(kept, bind);
       else
-        for (const [field, id] of Object.entries(bind))
-          if (json(result[field]) === json(was[field])) kept[field] = id;
+        for (const [field, id] of Object.entries(bind)) {
+          // A binding the edit supplies itself (none, or another variable, before) is intended:
+          // kept with the value it came with. Only one carried along by a hand edit lets go.
+          const carried = (was.bind as Record<string, string> | undefined)?.[field] === id;
+          if (!carried || json(result[field]) === json(was[field])) kept[field] = id;
+        }
       if (Object.keys(kept).length !== Object.keys(bind).length) {
         changed = true;
         const { bind: _gone, ...rest } = result;

@@ -348,14 +348,45 @@ const fitsType = (type: VariableType, value: unknown) =>
       : typeof value === (type === "boolean" ? "boolean" : "string");
 
 /**
- * Whether a variable gives a value of `type` wherever it's read: in every
- * mode, through every alias, as `TokenResolver.value` follows it (the first
- * variable's type is the value's). Where it can't be followed, a layer bound
- * to it shows its saved value, so that value is the layer's own.
+ * Whether a resolved value drives what `key` binds, as the resolver applies
+ * it (`TokenResolver.#apply`): a font size above 0, a family that isn't
+ * blank, a colour in hex, a number for a number field, characters only text
+ * unless the binding says `text`. One that doesn't leaves the saved value.
+ */
+export function bindingApplies(
+  key: BindingKey,
+  value: unknown,
+  unit: BindingUnit | undefined,
+): boolean {
+  if (key === "fill" || key === "stroke") return typeof value === "string" && HEX.test(value);
+  switch (key) {
+    case "visible":
+      return typeof value === "boolean";
+    case "characters":
+      return (
+        typeof value === "string" ||
+        (unit === "text" && (typeof value === "number" || typeof value === "boolean"))
+      );
+    case "fontFamily":
+      return typeof value === "string" && value.trim() !== "";
+    case "fontStyle":
+      return typeof value === "string";
+    case "fontSize":
+      return typeof value === "number" && Number.isFinite(value) && value > 0;
+    default:
+      return typeof value === "number" && Number.isFinite(value);
+  }
+}
+
+/**
+ * Whether a variable gives a value `accepts` takes wherever it's read: in
+ * every mode, through every alias, as `TokenResolver.value` follows it (the
+ * first variable's type is the value's). Where it doesn't, a layer bound to
+ * it shows its saved value, so that value is the layer's own.
  */
 export function variableFollowed(
   variableId: string,
-  type: VariableType | "any",
+  accepts: (value: unknown) => boolean,
   get: NodeLookup,
 ): boolean {
   const path = new Set<string>();
@@ -364,14 +395,13 @@ export function variableFollowed(
     const variable = get(id);
     if (variable?.type !== "variable") return false;
     const own = as ?? getProp(variable.props, "variableType");
-    if (type !== "any" && own !== type) return false;
     const values = Object.values(getProp(variable.props, "values"));
     if (values.length === 0) return false;
     path.add(id);
     const ok = values.every((value) =>
       typeof value === "object" && value !== null
         ? visit((value as { alias: string }).alias, own)
-        : fitsType(own, value),
+        : fitsType(own, value) && accepts(value),
     );
     path.delete(id);
     return ok;
@@ -379,20 +409,27 @@ export function variableFollowed(
   return visit(variableId, undefined);
 }
 
-/** Whether a layer's binding of `key` gives its value wherever it's read (`variableFollowed`). */
+/** Whether a layer's binding of `key` drives its value wherever it's read (`variableFollowed`). */
 export function bindingFollowed(key: BindingKey, ref: unknown, get: NodeLookup): boolean {
   const id = bindingVariable(ref);
-  const field = BINDING_FIELDS[key];
-  if (!id || !field) return false;
-  const type = key === "characters" && bindingUnit(ref) === "text" ? "any" : field.type;
-  return variableFollowed(id, type, get);
+  if (!id || !BINDING_FIELDS[key]) return false;
+  const unit = bindingUnit(ref);
+  return variableFollowed(id, (value) => bindingApplies(key, value, unit), get);
 }
 
 /** A paint or effect list with the fields its followed binds give taken out. */
 function unboundList(list: unknown, get: NodeLookup): unknown {
   if (!Array.isArray(list)) return list;
   const gives = (field: string, id: unknown) =>
-    typeof id === "string" && variableFollowed(id, field === "color" ? "color" : "number", get);
+    typeof id === "string" &&
+    variableFollowed(
+      id,
+      (value) =>
+        field === "color"
+          ? typeof value === "string" && HEX.test(value)
+          : typeof value === "number" && Number.isFinite(value),
+      get,
+    );
   return list.map((item: Record<string, unknown>) => {
     const out: Record<string, unknown> = { ...item };
     const bind = item?.bind as Record<string, string> | undefined;
@@ -773,6 +810,8 @@ export class TokenResolver {
     out: Record<string, unknown>,
     unit: BindingUnit | undefined,
   ): void {
+    // The same rule the comparison of bound values uses (`bindingFollowed`).
+    if (!bindingApplies(key, value, unit)) return;
     const current = <K extends PropName>(name: K) =>
       (out[name] as Props[K] | undefined) ?? getProp(p, name);
     if (key === "fill" || key === "stroke") {

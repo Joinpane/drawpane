@@ -129,6 +129,39 @@ describe("a commit after the file moved on", () => {
     expect(out).toMatchObject({ ok: false, message: expect.stringMatching(/unit/) });
   });
 
+  it("keeps an explicit nested paint binding written by set_props", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      {
+        op: "create",
+        id: "Colors",
+        type: "collection",
+        parent: "root",
+        key: "a1",
+        props: { modes: [{ id: "m", name: "M" }] },
+      },
+      {
+        op: "create",
+        id: "Color",
+        type: "variable",
+        parent: "Colors",
+        key: "a0",
+        props: { variableType: "color", values: { m: "#123456" } },
+      },
+      { op: "set", id: box, prop: "fills", value: [{ type: "solid", color: "#abcdef" }] },
+    ]);
+    const fills = [{ type: "solid", color: "#aabbcc", bind: { color: "Color" } }];
+    const out = await callWriteTool(agentDeps(env, fileId), {
+      by,
+      session,
+      callId: "set-paint-binding",
+      tool: "set_props",
+      input: { changes: [{ id: box, props: { fills } }] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect((await node(fileId, box))?.props.fills).toEqual(fills);
+  });
+
   it("reruns an edit of a linked fill when its shared paint style changed during the run", async () => {
     const { fileId, person, box, by, session } = await setup();
     const red: Paint[] = [{ type: "solid", color: "#ff0000" }];

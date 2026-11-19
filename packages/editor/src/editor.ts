@@ -717,9 +717,12 @@ export class Editor {
       this.#measuredHere.add(id);
       const width = round2(size.width);
       const height = round2(size.height);
-      if (width !== round2(getProp(node.props, "width")))
+      // A bound size is its binding's: a measured one never becomes its saved value, which is
+      // what shows when the binding can't be followed (decision 0034).
+      const bound = getProp(node.props, "bindings");
+      if (!bound.width && width !== round2(getProp(node.props, "width")))
         ops.push({ op: "set", id, prop: "width", value: width });
-      if (height !== round2(getProp(node.props, "height")))
+      if (!bound.height && height !== round2(getProp(node.props, "height")))
         ops.push({ op: "set", id, prop: "height", value: height });
     }
     return ops;
@@ -2662,18 +2665,9 @@ export class Editor {
     for (const id of ids) {
       const node = this.doc.get(id);
       if (node?.type !== "text") continue;
+      // The layer's own bindings stay: a field it binds is its own (decision 0034), and following
+      // the style leaves it, its value and its unit as they are (`textStyleFixupOps`).
       ops.push({ op: "set", id, prop: "textStyle", value: styleId });
-      // A style sets these properties, so variables bound to them let go.
-      const bindings = getProp(node.props, "bindings");
-      if (styleId && (bindings.fontSize || bindings.fontFamily)) {
-        const { fontSize: _size, fontFamily: _family, ...rest } = bindings;
-        ops.push({
-          op: "set",
-          id,
-          prop: "bindings",
-          value: Object.keys(rest).length > 0 ? rest : null,
-        });
-      }
     }
     if (ops.length > 0) this.commit(ops, styleId ? "Apply text style" : "Detach text style");
   }
@@ -3712,13 +3706,17 @@ export class Editor {
         if (!propAllowed(node.type, prop)) continue;
         let next = value;
         if (prop === "bindings") {
-          const bindings = value as Record<string, unknown>;
-          next = Object.fromEntries(
-            Object.entries(bindings).filter(([key]) => {
-              const target = BINDING_TARGETS[key as BindingKey];
-              return target && propAllowed(node.type, target.prop as PropName);
-            }),
-          );
+          // Only the bindings of the fields pasted change: each takes the copied layer's binding
+          // or none, and the rest of the layer's (its width, say) stay as they are.
+          const copiedBindings = value as Record<string, unknown>;
+          const own = { ...(getProp(node.props, "bindings") as Record<string, unknown>) };
+          for (const key of Object.keys(BINDING_TARGETS) as BindingKey[]) {
+            const target = BINDING_TARGETS[key].prop as PropName;
+            if (!Editor.STYLE_PROPS.includes(target) || !propAllowed(node.type, target)) continue;
+            if (copiedBindings[key] !== undefined) own[key] = copiedBindings[key];
+            else delete own[key];
+          }
+          next = own;
         }
         const isDefault = JSON.stringify(next) === JSON.stringify(defaultOf(prop));
         const current = node.props[prop];
