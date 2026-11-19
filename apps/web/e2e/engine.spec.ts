@@ -274,7 +274,12 @@ test.describe
     });
 
     test("draws the page with the engine, under the overlay", async () => {
-      expect(await showing(page)).toEqual({ engine: true, content: false });
+      const fallbacks = await page.evaluate(() => (window as unknown as W).fallbacks);
+      expect(fallbacks, "the engine fell back").toEqual([]);
+      // Read back (headless), the engine's first frame shows once it lands.
+      await expect
+        .poll(() => showing(page), { timeout: 15_000 })
+        .toEqual({ engine: true, content: false });
       const adapter = await page.evaluate(
         () => (window as unknown as W).drawpaneEngineView?.engine.gpu?.adapter,
       );

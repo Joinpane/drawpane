@@ -330,6 +330,11 @@ impl Gpu {
             }
             None => None,
         };
+        // Everything made from here to the end is checked at once: an adapter that can't make
+        // Vello's pipelines (WebGPU's compatibility mode can't: they interpolate `flat, first`)
+        // or runs out of memory doing it is refused now, with the reason, not mid-frame.
+        let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let (renderer, resources) = Renderer::new(
             &device,
             &queue,
@@ -388,7 +393,7 @@ impl Gpu {
         let mut bindings = TextureBindings::new();
         bindings.insert(ATLAS_ID, atlas_tex.create_view(&Default::default()));
         bindings.insert(CHECKER_ID, checker.create_view(&Default::default()));
-        Ok(Self {
+        let mut gpu = Self {
             adapter: format!(
                 "{} ({:?}, {:?}){}",
                 info.name,
@@ -429,7 +434,20 @@ impl Gpu {
             bytes: (ATLAS_SIDE * ATLAS_SIDE * 4 + 16 * 16 * 4) as usize,
             budget: crate::limits::Limits::default().gpu_bytes,
             readbacks: Rc::new(Cell::new(0)),
-        })
+        };
+        gpu.ensure_scaler();
+        let refused = validation.pop().await;
+        let refused = refused.or(oom.pop().await);
+        if let Some(e) = refused {
+            return Err(EngineError::new(
+                ErrorCode::NoAdapter,
+                format!(
+                    "the engine's GPU pipelines can't be made on this adapter ({}): {e}",
+                    gpu.adapter
+                ),
+            ));
+        }
+        Ok(gpu)
     }
 
     /// GPU memory the engine has allocated.
