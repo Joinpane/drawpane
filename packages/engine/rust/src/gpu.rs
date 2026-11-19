@@ -90,8 +90,6 @@ const PAGE: u32 = 2048;
 const PER_ROW: u32 = PAGE / TILE;
 const PER_PAGE: u32 = PER_ROW * PER_ROW;
 const PAGE_BYTES: usize = (PAGE * PAGE * 4) as usize;
-/// The depth buffer pages are drawn with (Vello's: Depth24Plus, counted as 4 bytes a pixel).
-const PAGE_DEPTH_BYTES: usize = PAGE_BYTES;
 /// Kept free under the budget for what a frame allocates on the way (read-backs, images).
 const HEADROOM: usize = 32 << 20;
 
@@ -175,8 +173,8 @@ pub struct Gpu {
     /// The board textures (decision 0040, phase 2): which tiles are held, where, and how fresh.
     pub tiles: TileCache,
     pages: Vec<Page>,
-    page_depth: Option<wgpu::TextureView>,
-    /// A tile drawn and copied straight into the frame (a frame whose tiles don't fit the budget).
+    /// The tile every tile is drawn into, with its depth buffer, then copied to its slot (or
+    /// straight into the frame, for a frame whose tiles don't fit the budget).
     scratch: Option<(wgpu::Texture, wgpu::TextureView, wgpu::TextureView)>,
     compositor: Option<Compositor>,
     /// The frame shown: what it was drawn for, so the next may stand on it.
@@ -428,7 +426,6 @@ impl Gpu {
             cur: 0,
             tiles: TileCache::new(TILE, 0),
             pages: Vec::new(),
-            page_depth: None,
             scratch: None,
             compositor: None,
             last: None,
@@ -654,27 +651,20 @@ impl Gpu {
 
     /// Bytes the engine holds on the GPU outside its tile pages.
     fn bytes_beside_tiles(&self) -> usize {
-        let pages = self.pages.len() * PAGE_BYTES + if self.page_depth.is_some() { PAGE_DEPTH_BYTES } else { 0 };
-        self.bytes.saturating_sub(pages)
+        self.bytes.saturating_sub(self.pages.len() * PAGE_BYTES)
     }
 
     /// Fits the tiles kept to the budget: what's left of it beside everything else, at most
     /// `tile_bytes`, in whole pages. Pages past it go, with their tiles.
     fn fit_tiles(&mut self, tile_bytes: usize) {
         let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
-        let room = self.budget.saturating_sub(beside).saturating_sub(PAGE_DEPTH_BYTES);
+        let room = self.budget.saturating_sub(beside);
         let pages = (tile_bytes.min(room) / PAGE_BYTES).min(1024);
         while self.pages.len() > pages {
             if let Some(p) = self.pages.pop() {
                 p.texture.destroy();
                 self.bytes -= PAGE_BYTES;
             }
-        }
-        if self.pages.is_empty()
-            && pages == 0
-            && let Some(_d) = self.page_depth.take()
-        {
-            self.bytes -= PAGE_DEPTH_BYTES;
         }
         self.tiles.set_max_slots(pages * PER_PAGE as usize);
     }
@@ -684,23 +674,13 @@ impl Gpu {
         let page = (slot / PER_PAGE) as usize;
         let within = slot % PER_PAGE;
         let (x, y) = ((within % PER_ROW) * TILE, (within / PER_ROW) * TILE);
-        if self.page_depth.is_none() {
-            self.reserve(PAGE_DEPTH_BYTES, 0, "the tiles' depth buffer")?;
-            self.page_depth = Some(self.renderer.create_depth_texture_view(&RenderSize {
-                width: PAGE as u16,
-                height: PAGE as u16,
-            }));
-            self.bytes += PAGE_DEPTH_BYTES;
-        }
         while self.pages.len() <= page {
             self.reserve(PAGE_BYTES, 0, "a page of tiles")?;
             let tex = texture(
                 &self.device,
                 PAGE,
                 PAGE,
-                wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
                 "tiles",
             );
             self.pages.push(Page {
@@ -933,12 +913,14 @@ impl Gpu {
         stats.add(&s);
         let exact = !detail || s.exact();
         let t1 = now();
-        let (page, x, y) = match target {
-            TileTarget::Slot(slot) => {
-                let (p, x, y) = self.slot_place(slot)?;
-                (Some(p), x, y)
-            }
-            TileTarget::Scratch => (None, 0, 0),
+        // Every tile is drawn into the scratch tile, a target of its own size (Vello's work per
+        // render follows its target's size, so a page as the target would cost a page's worth
+        // for each tile), then copied where it goes. The same scene and view either way: the
+        // same pixels.
+        self.ensure_scratch()?;
+        let place = match target {
+            TileTarget::Slot(slot) => Some(self.slot_place(slot)?),
+            TileTarget::Scratch => None,
         };
         let mut encoder = self
             .device
@@ -946,29 +928,11 @@ impl Gpu {
         let mut options = RenderOptions::default();
         let [r, g, b, a] = background;
         let color = vello_common::color::AlphaColor::new([r, g, b, a]);
-        let rects = [RectU16 {
-            x0: x as u16,
-            y0: y as u16,
-            x1: (x + TILE) as u16,
-            y1: (y + TILE) as u16,
-        }];
-        options.target_init = TargetInit::Clear(ClearSettings::Rects { color, rects: &rects });
-        options.offset = (x as i32, y as i32);
-        let (view_t, depth_t) = match page {
-            Some(p) => (
-                &self.pages[p].view,
-                self.page_depth
-                    .as_ref()
-                    .ok_or_else(|| EngineError::new(ErrorCode::State, "no depth for tiles"))?,
-            ),
-            None => {
-                let (_, v, d) = self
-                    .scratch
-                    .as_ref()
-                    .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
-                (v, d)
-            }
-        };
+        options.target_init = TargetInit::Clear(ClearSettings::Viewport { color });
+        let (scratch, view_t, depth_t) = self
+            .scratch
+            .as_ref()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
         self.renderer
             .render(
                 &self.scene,
@@ -982,44 +946,56 @@ impl Gpu {
                 options,
             )
             .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
-        if page.is_none() {
-            // Straight into the frame, where it shows.
-            let t = i64::from(TILE);
-            let fx = i64::from(key.i) * t + plan.origin.0;
-            let fy = i64::from(key.j) * t + plan.origin.1;
-            let (fw, fh) = (i64::from(plan.size.0), i64::from(plan.size.1));
-            let (x0, y0) = (fx.max(0), fy.max(0));
-            let (x1, y1) = ((fx + t).min(fw), (fy + t).min(fh));
-            if x1 > x0 && y1 > y0 {
-                let (scratch, _, _) = self.scratch.as_ref().expect("made above");
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: scratch,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d {
-                            x: (x0 - fx) as u32,
-                            y: (y0 - fy) as u32,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.frames[dst].texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d {
-                            x: x0 as u32,
-                            y: y0 as u32,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::Extent3d {
-                        width: (x1 - x0) as u32,
-                        height: (y1 - y0) as u32,
-                        depth_or_array_layers: 1,
-                    },
-                );
+        // Where it goes: its slot in a page, or (drawn direct) where the frame shows it.
+        let (dst_tex, src, dst, size) = match place {
+            Some((p, x, y)) => (&self.pages[p].texture, (0, 0), (x, y), (TILE, TILE)),
+            None => {
+                let t = i64::from(TILE);
+                let fx = i64::from(key.i) * t + plan.origin.0;
+                let fy = i64::from(key.j) * t + plan.origin.1;
+                let (fw, fh) = (i64::from(plan.size.0), i64::from(plan.size.1));
+                let (x0, y0) = (fx.max(0), fy.max(0));
+                let (x1, y1) = ((fx + t).min(fw), (fy + t).min(fh));
+                if x1 <= x0 || y1 <= y0 {
+                    (&self.frames[dst].texture, (0, 0), (0, 0), (0, 0))
+                } else {
+                    (
+                        &self.frames[dst].texture,
+                        ((x0 - fx) as u32, (y0 - fy) as u32),
+                        (x0 as u32, y0 as u32),
+                        ((x1 - x0) as u32, (y1 - y0) as u32),
+                    )
+                }
             }
+        };
+        if size.0 > 0 && size.1 > 0 {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: scratch,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: src.0,
+                        y: src.1,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: dst_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: dst.0,
+                        y: dst.1,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+            );
         }
         // One render per submission: the renderer writes its buffers through the queue, which a
         // second render in the same encoder would overwrite before the first ran.

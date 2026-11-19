@@ -326,8 +326,14 @@ impl TileCache {
             return e.id;
         }
         if self.levels.len() >= LEVELS {
-            // The least recently used level goes, with its tiles.
-            if let Some(i) = (0..self.levels.len()).min_by_key(|i| self.levels[*i].used) {
+            // A level with no tiles goes first (a zoom passes through a scale a frame, drawing
+            // none), else the least recently used, with its tiles.
+            let empty = |id: u32| !self.tiles.keys().any(|k| k.level == id);
+            let victim = (0..self.levels.len())
+                .filter(|i| empty(self.levels[*i].id))
+                .min_by_key(|i| self.levels[*i].used)
+                .or_else(|| (0..self.levels.len()).min_by_key(|i| self.levels[*i].used));
+            if let Some(i) = victim {
                 let gone = self.levels.remove(i).id;
                 let free = &mut self.free;
                 self.tiles.retain(|k, t| {
@@ -944,6 +950,26 @@ mod tests {
         assert_eq!(c.len(), 12);
         assert!(c.compose(&b, None).exact);
         assert!(c.tiles.keys().all(|k| k.level == b.level));
+    }
+
+    #[test]
+    fn a_zoom_passing_through_scales_keeps_the_levels_that_stand_in() {
+        let mut c = TileCache::new(64, 256);
+        c.begin([1.0; 4], 0);
+        let p = c.plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+        draw_all(&mut c, &p);
+        let last = Last {
+            view: cam(1.0, 0.0, 0.0),
+            size: (100, 80),
+        };
+        // Forty frames of a zoom, each a new scale drawing nothing of its own.
+        for i in 1..=40 {
+            c.begin([1.0; 4], 0);
+            let z = 1.0 + f64::from(i) * 0.01;
+            let _ = c.plan(cam(z, 0.0, 0.0), (100, 80), true, Some(last), false);
+        }
+        assert!(c.level(p.level).is_some(), "the drawn level stayed");
+        assert_eq!(c.len(), p.visible.len());
     }
 
     #[test]
