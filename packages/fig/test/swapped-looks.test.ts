@@ -114,6 +114,33 @@ describe("swapped nested instances", () => {
     ]);
   });
 
+  it("takes the chosen variant's layout binding when the old one resolves in another mode", () => {
+    const { graph, copy, ids, records, layers } = scene();
+    const collection = graph.createCollection("Style");
+    const mode = graph.createMode(collection.id, "Spacious") as string;
+    const regular = graph.createVariable("Regular padding", "FLOAT", collection.id, 10);
+    const compact = graph.createVariable("Compact padding", "FLOAT", collection.id, 8);
+    regular.valuesByMode[mode] = 24;
+    compact.valuesByMode[mode] = 16;
+    const [outline, filled] = [...layers.values()] as [string, string];
+    graph.updateNode(outline, { paddingLeft: 10, boundVariables: { paddingLeft: regular.id } });
+    graph.updateNode(filled, { paddingLeft: 8, boundVariables: { paddingLeft: compact.id } });
+    graph.updateNode(copy.id, {
+      width: 134,
+      paddingLeft: 24,
+      boundVariables: { paddingLeft: regular.id },
+      variableModes: { [collection.id]: mode },
+    });
+
+    applySwappedLooks(graph, ids, records, layers);
+
+    expect(graph.getNode(copy.id)).toMatchObject({
+      width: 134,
+      paddingLeft: 16,
+      boundVariables: { paddingLeft: compact.id },
+    });
+  });
+
   it("leave instances that weren't swapped alone", () => {
     const { graph, copy, ids, records, layers } = scene();
     // Its record names the component it shows: no swap.

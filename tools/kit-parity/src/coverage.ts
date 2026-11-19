@@ -1166,8 +1166,8 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
           label: "Strokes included in auto layout",
           importance: "visual",
           code: CODE.layout,
-          how: "a property for it on the frame (the model has none)",
-          check: noField("strokesIncludedInLayout"),
+          how: "strokesIncludedInLayout on the frame",
+          check: hasProp("strokesIncludedInLayout"),
         });
     }
 

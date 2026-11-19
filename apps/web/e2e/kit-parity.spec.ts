@@ -200,7 +200,10 @@ async function score(page: Page, figma: string, drawpane: string) {
 if (OUT)
   test.use({
     // A 500,000-layer file in one tab.
-    launchOptions: { args: ["--js-flags=--max-old-space-size=8192"] },
+    launchOptions: {
+      args: ["--js-flags=--max-old-space-size=8192"],
+      ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+    },
     // No traces or screenshots: they'd hold hundreds of MB of import, and the file's content
     // belongs in the harness's own output folder, not in test-results.
     trace: "off",

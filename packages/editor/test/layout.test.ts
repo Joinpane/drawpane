@@ -2,6 +2,7 @@ import { type Op, type Props, ROOT_ID } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
+import { Editor } from "../src/editor";
 import {
   gridCellAt,
   gridGeometry,
@@ -74,6 +75,28 @@ describe("auto layout", () => {
     );
     expect(box("f")).toEqual([0, 0, 92, 64]);
     expect(box("c1")).toEqual([6, 34, 80, 20]);
+  });
+
+  it("reserves the frame's own inside stroke in Fill and Hug", () => {
+    const { doc, box } = setup(
+      {
+        layoutMode: "column",
+        width: 100,
+        sizingV: "hug",
+        paddingLeft: 3,
+        strokesIncludedInLayout: true,
+        strokes: [{ type: "solid", color: "#000000" }],
+        strokeWeights: [1, 2, 3, 4],
+      },
+      [{ sizingH: "fill" }],
+    );
+    expect(box("f")).toEqual([0, 0, 100, 24]);
+    expect(box("c0")).toEqual([7, 1, 91, 20]);
+
+    doc.apply([{ op: "set", id: "f", prop: "strokeAlign", value: "outside" }]);
+    doc.apply(layoutOps(doc, ["f"]));
+    expect(box("f")).toEqual([0, 0, 100, 20]);
+    expect(box("c0")).toEqual([3, 0, 97, 20]);
   });
 
   it("shares space between Fill children and respects max", () => {
@@ -180,6 +203,50 @@ describe("auto layout", () => {
     doc.apply(layoutOps(doc, ["dot"]));
     expect(box("badge")).toEqual([200, 40, 20, 8]);
     expect(box("dot")).toEqual([4, 0, 12, 8]);
+  });
+
+  it("keeps hidden layout boxes until shown, including inside a plain frame", () => {
+    const editor = new Editor({ clientId: "test", measurer: { width: () => 0 } });
+    editor.doc.apply([
+      { op: "create", id: "page", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      {
+        op: "create",
+        id: "outer",
+        type: "frame",
+        parent: "page",
+        key: "a0",
+        props: { layoutMode: "row", width: 100, height: 100 },
+      },
+      {
+        op: "create",
+        id: "hidden",
+        type: "frame",
+        parent: "outer",
+        key: "a0",
+        props: { visible: false, width: 100, height: 100 },
+      },
+      {
+        op: "create",
+        id: "badge",
+        type: "frame",
+        parent: "hidden",
+        key: "a0",
+        props: { layoutMode: "row", sizingH: "hug", width: 50, height: 20 },
+      },
+      {
+        op: "create",
+        id: "dot",
+        type: "rect",
+        parent: "badge",
+        key: "a0",
+        props: { width: 20, height: 20 },
+      },
+    ]);
+    editor.state.set({ role: "editor" });
+
+    expect(layoutOps(editor.doc, ["outer", "badge"])).toEqual([]);
+    editor.setProp(["hidden"], "visible", true);
+    expect(editor.doc.get("badge")?.props.width).toBe(20);
   });
 
   it("places a group as the box around its layers, moving them with it", () => {

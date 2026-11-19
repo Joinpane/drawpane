@@ -64,6 +64,19 @@ const LOOK = [
   "clipsContent",
 ] as const;
 
+const LAYOUT_NUMBERS: ReadonlySet<string> = new Set([
+  "itemSpacing",
+  "counterAxisSpacing",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "minWidth",
+  "maxWidth",
+  "minHeight",
+  "maxHeight",
+]);
+
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
 
 /** Kiwi's names for the look fields a variable binds, as an override's consumption map has them. */
@@ -258,9 +271,23 @@ export function applySwappedLooks(
         }
         continue;
       }
-      if (!same(own[field], was[field])) continue;
       const ownBinds = bindingsOf(node.boundVariables as Bound, field);
-      if (!same(own[field], next[field])) updates[field] = structuredClone(next[field]);
+      const oldBinding = oldMain.boundVariables?.[field];
+      // Open Pencil resolved the old layout token where the copy sits. Its
+      // fallback can differ from the old component's without being an override.
+      const inherited =
+        LAYOUT_NUMBERS.has(field) &&
+        oldBinding !== undefined &&
+        ownBinds[field] === oldBinding &&
+        own[field] === graph.resolveNumberVariableForNode(node.id, oldBinding);
+      if (!inherited && !same(own[field], was[field])) continue;
+      const newBinding = newMain.boundVariables?.[field];
+      const resolved =
+        LAYOUT_NUMBERS.has(field) && newBinding
+          ? graph.resolveNumberVariableForNode(node.id, newBinding)
+          : undefined;
+      const value = resolved ?? next[field];
+      if (!same(own[field], value)) updates[field] = structuredClone(value);
       const nextBinds = bindingsOf(newMain.boundVariables as Bound, field);
       if (same(ownBinds, nextBinds)) continue;
       for (const key of Object.keys(ownBinds)) delete bound[key];

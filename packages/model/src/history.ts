@@ -83,6 +83,7 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   clipContent: "style",
   layoutMode: "layout",
   layoutWrap: "layout",
+  strokesIncludedInLayout: "layout",
   gap: "layout",
   rowGap: "layout",
   paddingTop: "layout",

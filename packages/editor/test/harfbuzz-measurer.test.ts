@@ -7,8 +7,9 @@
  * browser's canvas measurer is held in e2e/parity/text.spec.ts.
  */
 import { readFileSync } from "node:fs";
-import type { NodeRecord } from "@drawpane/model";
+import { compactByInstance, getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import { Editor } from "../src/editor";
 import {
   type FaceFileLoader,
   HarfBuzzMeasurer,
@@ -16,7 +17,7 @@ import {
   measuredFaces,
   parseFont,
 } from "../src/harfbuzz-measurer";
-import { fontString, layoutText, type ShapingRun, shapingRun } from "../src/text";
+import { fontString, layoutText, layoutTextNode, type ShapingRun, shapingRun } from "../src/text";
 
 const fixture = (name: string) => {
   const b = readFileSync(new URL(`../../../apps/web/e2e/fixtures/${name}`, import.meta.url));
@@ -302,4 +303,89 @@ describe("measuredFaces", () => {
       { family: "Inter", weight: 600, italic: true, variable: true },
     ]);
   });
+});
+
+it("keeps an imported copy's one-line text box through edits its override blocks", async () => {
+  const m = await measurer();
+  const editor = new Editor({ measurer: m, clientId: "test" });
+  const frame = { width: 220, height: 18, layoutMode: "column", sizingV: "hug" } as const;
+  const label = {
+    width: 220,
+    height: 18,
+    sizingH: "fill",
+    textAutoResize: "height",
+    fontFamily: "Inter",
+    fontSize: 14,
+    lineHeight: { unit: "px", value: 18 },
+  } as const;
+  const value = "Keep this shipping address";
+  const snapshots: NodeRecord[] = [
+    { id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+    { id: "main", type: "frame", parent: "p", key: "a0", props: { ...frame, isComponent: true } },
+    {
+      id: "label",
+      type: "text",
+      parent: "main",
+      key: "a0",
+      props: { ...label, characters: "Label" },
+    },
+    {
+      id: "first",
+      type: "frame",
+      parent: "p",
+      key: "a1",
+      props: { ...frame, instanceOf: "main" },
+    },
+    {
+      id: "firstLabel",
+      type: "text",
+      parent: "first",
+      key: "a0",
+      props: { ...label, mirrors: "label", characters: value, overrides: ["characters"] },
+    },
+    {
+      id: "second",
+      type: "frame",
+      parent: "p",
+      key: "a2",
+      props: { ...frame, width: 110, instanceOf: "main" },
+    },
+    {
+      id: "secondLabel",
+      type: "text",
+      parent: "second",
+      key: "a0",
+      props: {
+        ...label,
+        width: 190,
+        mirrors: "label",
+        characters: value,
+        overrides: ["characters"],
+      },
+    },
+  ];
+  const compact = compactByInstance(snapshots);
+  editor.doc.resetStored(compact.nodes, "compact");
+  editor.state.set({ role: "editor" });
+  editor.setPage("p");
+  const first = compact.ids.get("firstLabel") as string;
+  const second = compact.ids.get("secondLabel") as string;
+  const checkSecond = () => {
+    const node = editor.doc.get(second) as NodeRecord;
+    expect(getProp(node.props, "characters")).toBe(value);
+    expect(getProp(node.props, "width")).toBe(190);
+    expect(layoutTextNode(node, m).lines).toHaveLength(1);
+  };
+
+  expect(editor.doc.takeTokenLayout().size).toBe(0);
+  editor.refitText(new Set(["Inter"]));
+  checkSecond();
+  editor.startTextEdit(first);
+  editor.updateText(first, "Use this address", 16);
+  editor.endTextEdit();
+  checkSecond();
+  editor.startTextEdit("label");
+  editor.updateText("label", "Default label", 13);
+  editor.endTextEdit();
+  checkSecond();
 });

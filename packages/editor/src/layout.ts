@@ -19,6 +19,7 @@
 import { type GridTrack, getProp, type NodeRecord, type Op } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { round2 } from "./geometry";
+import { strokeWidths } from "./stroke-sides";
 
 export interface LayoutBox {
   x: number;
@@ -99,7 +100,7 @@ export function inFlow(node: NodeRecord): boolean {
  * A layer's box as auto layout sees it, in its parent's space: its own
  * position and size, or for a group, the box around everything in it.
  */
-export function layoutBox(doc: Doc, id: string): LayoutBox {
+export function layoutBox(doc: Pick<Doc, "get" | "childIds">, id: string): LayoutBox {
   const node = doc.get(id);
   if (node?.type !== "group") {
     const p = node?.props ?? {};
@@ -218,11 +219,17 @@ function limits(node: NodeRecord, axis: Axis): [number | null, number | null] {
 
 function padding(frame: NodeRecord) {
   const p = frame.props;
+  const [top, right, bottom, left] =
+    getProp(p, "strokesIncludedInLayout") &&
+    getProp(p, "strokeAlign") === "inside" &&
+    getProp(p, "strokes").some((paint) => paint.visible !== false)
+      ? strokeWidths(frame)
+      : [0, 0, 0, 0];
   return {
-    top: getProp(p, "paddingTop"),
-    right: getProp(p, "paddingRight"),
-    bottom: getProp(p, "paddingBottom"),
-    left: getProp(p, "paddingLeft"),
+    top: getProp(p, "paddingTop") + (top ?? 0),
+    right: getProp(p, "paddingRight") + (right ?? 0),
+    bottom: getProp(p, "paddingBottom") + (bottom ?? 0),
+    left: getProp(p, "paddingLeft") + (left ?? 0),
   };
 }
 
@@ -437,15 +444,24 @@ export class LayoutEngine {
   readonly boxes = new Map<string, LayoutBox>();
   /** Which layout frames below the one run are laid out too; the rest keep their insides as they are. */
   readonly #enters: (frame: NodeRecord) => boolean;
+  readonly #touched: ReadonlySet<string> | undefined;
 
-  constructor(doc: Doc, options: { enters?: (frame: NodeRecord) => boolean } = {}) {
+  constructor(
+    doc: Doc,
+    options: { enters?: (frame: NodeRecord) => boolean; touched?: ReadonlySet<string> } = {},
+  ) {
     this.#doc = doc;
     this.#enters = options.enters ?? (() => true);
+    this.#touched = options.touched;
+  }
+
+  #includes(node: NodeRecord): boolean {
+    return getProp(node.props, "visible") || this.#touched?.has(node.id) === true;
   }
 
   /** A child that is a layout frame this run lays out inside. */
   #nested(node: NodeRecord | undefined): node is NodeRecord {
-    return isLayoutFrame(node) && this.#enters(node);
+    return isLayoutFrame(node) && this.#includes(node) && this.#enters(node);
   }
 
   /** Where each group placed in a flow was before, to move its contents by the difference. */
@@ -486,7 +502,7 @@ export class LayoutEngine {
   #settleGroup(groupId: string): void {
     for (const id of this.#doc.childIds(groupId)) {
       const node = this.#doc.get(id);
-      if (node?.type === "group") this.#settleGroup(id);
+      if (node?.type === "group" && this.#includes(node)) this.#settleGroup(id);
       else if (this.#nested(node)) this.run(id);
     }
   }
@@ -551,12 +567,13 @@ export class LayoutEngine {
   measure(frame: NodeRecord): void {
     const children = this.#children(frame);
     for (const child of children) if (this.#nested(child)) this.measure(child);
-    // Layout frames out of the flow (absolute or hidden) still size themselves
-    // and their contents; the flow just doesn't place them. The frames in a
-    // group settle before the group's box is read.
+    // Absolute frames still size themselves. Hidden frames keep their saved
+    // geometry unless the edit reaches them. Frames in a group settle first.
     for (const child of this.#outOfFlow(frame)) this.run(child.id);
-    for (const id of this.#doc.childIds(frame.id))
-      if (this.#doc.get(id)?.type === "group") this.#settleGroup(id);
+    for (const id of this.#doc.childIds(frame.id)) {
+      const child = this.#doc.get(id);
+      if (child?.type === "group" && this.#includes(child)) this.#settleGroup(id);
+    }
     if (isGrid(frame)) this.#measureGrid(frame, children);
     else this.#measureFlex(frame, children);
   }
@@ -1128,12 +1145,40 @@ export function flowLines(doc: Doc, frameId: string): FlowLine[] {
   return new LayoutEngine(doc).lines(frame);
 }
 
-export function layoutOps(doc: Doc, ids: Iterable<string>): Op[] {
-  const roots = layoutRoots(doc, ids);
+export function layoutOps(
+  doc: Doc,
+  ids: Iterable<string>,
+  /** An edit inside a hidden frame can still change its layout. A bulk relayout skips hidden frames. */
+  edited?: ReadonlySet<string>,
+): Op[] {
+  const roots = layoutRoots(doc, edited ? [...ids, ...edited] : ids);
   if (roots.length === 0) return [];
-  const engine = new LayoutEngine(doc);
-  for (const root of roots) engine.run(root);
+  const touched = new Set<string>();
+  for (const id of edited ?? [])
+    for (let node = doc.get(id); node && !touched.has(node.id); node = doc.get(node.parent))
+      touched.add(node.id);
+  const engine = new LayoutEngine(doc, { touched });
+  for (const root of roots) {
+    if (!touched.has(root)) {
+      if (doc.get(root)?.props.visible === false) continue;
+      if (doc.ancestors(root).some((node) => node.props.visible === false)) continue;
+    }
+    engine.run(root);
+  }
   return engine.diff();
+}
+
+/** Visible layout frames below a revealed layer, including through plain frames. */
+export function revealedLayouts(doc: Doc, id: string): string[] {
+  const out: string[] = [];
+  const visit = (id: string): void => {
+    const node = doc.get(id);
+    if (!node || !getProp(node.props, "visible")) return;
+    if (isLayoutFrame(node)) out.push(id);
+    for (const child of doc.childIds(id)) visit(child);
+  };
+  visit(id);
+  return out;
 }
 
 /** Whether a layer's parent's layout sets its size on an axis: it fills, or stretches across. */

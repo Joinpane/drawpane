@@ -194,6 +194,7 @@ export interface Node {
   readonly preserveRatio?: boolean;
   readonly layoutMode?: "NONE" | "HORIZONTAL" | "VERTICAL" | "GRID";
   readonly layoutWrap?: "NO_WRAP" | "WRAP";
+  readonly strokesIncludedInLayout?: boolean;
   readonly primaryAxisAlignItems?: string;
   readonly counterAxisAlignItems?: string;
   readonly primaryAxisSizingMode?: "FIXED" | "AUTO";

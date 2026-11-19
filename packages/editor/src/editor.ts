@@ -83,6 +83,7 @@ import {
   layoutBox,
   layoutOps,
   placedByLayout,
+  revealedLayouts,
 } from "./layout";
 import {
   assetMain,
@@ -621,7 +622,12 @@ export class Editor {
       let touched = this.#touchedBy([...ops, ...emptied], inverse);
       // Layers whose bound layout values now resolve differently (a padding variable, a mode
       // switch) are laid out here, by the client that made the change (decision 0034).
-      for (const id of this.doc.takeTokenLayout()) touched.add(id);
+      for (const id of this.doc.takeTokenLayout()) {
+        touched.add(id);
+        const node = this.doc.get(id);
+        if (node && getProp(node.props, "bindings").visible)
+          for (const frame of revealedLayouts(this.doc, id)) touched.add(frame);
+      }
       let lastOps: readonly Op[] = first;
       // Text styles this deleted (their inverse makes them again): the only deletes whose
       // followers are looked for (an agent run's commit depends on what that reads).
@@ -651,15 +657,21 @@ export class Editor {
         );
         if (styled.length > 0) roundInverse = [...this.sync.commit(styled), ...roundInverse];
         const derivedSoFar = [...synced, ...styled];
-        const text = this.#textFixups([...live, ...derivedSoFar.map((o) => o.id), ...relayout]);
+        const text = this.#textFixups([
+          ...live,
+          ...derivedSoFar.map((o) => o.id),
+          ...relayout.text,
+        ]);
         if (text.length > 0) roundInverse = [...this.sync.commit(text), ...roundInverse];
         const derived = [...derivedSoFar, ...text];
         const afterSync =
           derived.length > 0 ? this.#touchedBy(derived, roundInverse) : new Set<string>();
-        const layoutTargets = [...new Set([...live, ...afterSync, ...relayout])].filter((id) =>
-          this.doc.has(id),
-        );
-        const layout = layoutOps(this.doc, layoutTargets);
+        const edited = new Set([...live, ...afterSync, ...relayout.layout]);
+        const revealed = new Set<string>();
+        for (const op of [...lastOps, ...derivedSoFar])
+          if (op.op === "set" && op.prop === "visible")
+            for (const frame of revealedLayouts(this.doc, op.id)) revealed.add(frame);
+        const layout = layoutOps(this.doc, revealed, edited);
         layout.push(...constraintOps(this.doc, layout));
         layout.push(...pathResizeOps(this.doc, layout));
         const layoutInverse = layout.length > 0 ? this.sync.commit(layout) : [];
@@ -3954,7 +3966,8 @@ export class Editor {
         ...(inserted ? { inserted } : {}),
         ...(sel && caret !== undefined ? { edit: { ...sel, caret } } : {}),
       });
-      ops.push({ op: "set", id, prop: "textRuns", value: runs.length > 0 ? runs : null });
+      if (runs.length > 0 || getProp(node.props, "textRuns").length > 0)
+        ops.push({ op: "set", id, prop: "textRuns", value: runs.length > 0 ? runs : null });
     }
     this.commit(ops, "Edit text");
   }
