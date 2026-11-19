@@ -328,11 +328,14 @@ impl TileCache {
         if self.levels.len() >= LEVELS {
             // A level with no tiles goes first (a zoom passes through a scale a frame, drawing
             // none), else the least recently used, with its tiles.
+            // Never one this frame uses (the frame's own level, made a moment before its ladder).
             let empty = |id: u32| !self.tiles.keys().any(|k| k.level == id);
+            let old = |i: &usize| self.levels[*i].used < frame;
             let victim = (0..self.levels.len())
+                .filter(old)
                 .filter(|i| empty(self.levels[*i].id))
                 .min_by_key(|i| self.levels[*i].used)
-                .or_else(|| (0..self.levels.len()).min_by_key(|i| self.levels[*i].used));
+                .or_else(|| (0..self.levels.len()).filter(old).min_by_key(|i| self.levels[*i].used));
             if let Some(i) = victim {
                 let gone = self.levels.remove(i).id;
                 let free = &mut self.free;
@@ -970,6 +973,30 @@ mod tests {
         }
         assert!(c.level(p.level).is_some(), "the drawn level stayed");
         assert_eq!(c.len(), p.visible.len());
+    }
+
+    #[test]
+    fn a_zooming_frame_never_evicts_its_own_level_for_its_ladder() {
+        // Eight levels held, each with tiles, used before this frame; a zoom to a ninth scale
+        // makes its own level (empty) and then its ladder level: the ladder must not push out
+        // the level the frame was planned at.
+        let mut c = TileCache::new(64, 256);
+        let mut last = None;
+        for k in 0..8 {
+            c.begin([1.0; 4], 0);
+            let z = 1.0 + f64::from(k) * 0.37;
+            let p = c.plan(cam(z, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+            draw_all(&mut c, &p);
+            last = Some(Last {
+                view: cam(z, 0.0, 0.0),
+                size: (100, 80),
+            });
+        }
+        c.begin([1.0; 4], 0);
+        let z = c.plan(cam(5.3, 0.0, 0.0), (100, 80), true, last, false).expect("plan");
+        assert!(c.level(z.level).is_some(), "the frame's level survived its ladder");
+        let comp = c.compose(&z, last);
+        assert!(!comp.exact && comp.pending > 0, "{comp:?}");
     }
 
     #[test]
