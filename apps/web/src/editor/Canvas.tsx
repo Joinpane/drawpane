@@ -239,7 +239,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           s.camera,
           s.viewport,
           dpr,
-          whole ? { exact: true } : { exact, budget: CONTENT_BUDGET },
+          whole ? { exact: true } : { exact, budget: timing.budget ?? CONTENT_BUDGET },
         );
         exact = false;
         whole = false;

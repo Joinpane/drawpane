@@ -9,7 +9,7 @@ import {
 } from "@drawpane/editor";
 import type { NodeRecord } from "@drawpane/model";
 import { Button, PropertySection, SegmentedControl, type SegmentedOption } from "@drawpane/ui";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isMac } from "../app/format";
 import { shortcutFor } from "./actions";
 import { type ExportSettings, exportName, exportSelection, exportSettings } from "./exporting";
@@ -18,6 +18,20 @@ import { imagesFor } from "./media";
 import "./media.css";
 
 const PREVIEW = { width: 232, height: 96 };
+
+/**
+ * One renderer for an editor's previews, kept: what it makes once (glass's WebGL context and
+ * shaders, shapes, measured glyphs) serves every preview after the first.
+ */
+const previewRenderers = new WeakMap<Editor, CanvasRenderer>();
+function previewRenderer(editor: Editor): CanvasRenderer {
+  let renderer = previewRenderers.get(editor);
+  if (!renderer) {
+    renderer = new CanvasRenderer(editor.scene, editor.measurer, { images: imagesFor(editor) });
+    previewRenderers.set(editor, renderer);
+  }
+  return renderer;
+}
 
 const SCALES: readonly SegmentedOption<"1" | "2" | "3">[] = [
   { value: "1", label: "1×" },
@@ -35,14 +49,21 @@ const FORMATS: readonly SegmentedOption<ExportSettings["format"]>[] = [
 
 /**
  * A small picture of what will export, redrawn when the layers settle
- * (never mid-drag). Returns an object URL, revoked when it changes.
+ * (never mid-drag), and only while it's on screen: drawing glass and what
+ * it sees can take a while, and the inspector often has it scrolled out of
+ * view. Returns an object URL, revoked when it changes.
  */
-function useExportPreview(editor: Editor, ids: readonly string[], version: number): string | null {
+function useExportPreview(
+  editor: Editor,
+  ids: readonly string[],
+  version: number,
+  shown: boolean,
+): string | null {
   const gesture = useEditorState((s) => s.gesture);
   const [url, setUrl] = useState<string | null>(null);
   const key = ids.join(",");
   useEffect(() => {
-    if (gesture || typeof OffscreenCanvas === "undefined") return;
+    if (gesture || !shown || typeof OffscreenCanvas === "undefined") return;
     let cancelled = false;
     let made: string | null = null;
     const timer = setTimeout(async () => {
@@ -64,9 +85,7 @@ function useExportPreview(editor: Editor, ids: readonly string[], version: numbe
       );
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      const renderer = new CanvasRenderer(editor.scene, editor.measurer, {
-        images: imagesFor(editor),
-      });
+      const renderer = previewRenderer(editor);
       renderer.renderNodes(ctx, list, rect, scale, null, false, true);
       const blob = await canvas.convertToBlob({ type: "image/png" });
       if (cancelled) return;
@@ -78,7 +97,7 @@ function useExportPreview(editor: Editor, ids: readonly string[], version: numbe
       clearTimeout(timer);
       if (made) URL.revokeObjectURL(made);
     };
-  }, [editor, key, version, gesture]);
+  }, [editor, key, version, gesture, shown]);
   return url;
 }
 
@@ -97,10 +116,26 @@ export function ExportSection({
 }) {
   const settings = useSyncExternalStore(exportSettings.subscribe, exportSettings.get);
   const ids = nodes.map((n) => n.id);
-  const preview = useExportPreview(editor, ids, version);
+  // Whether the section is on screen (the inspector scrolls): the preview is drawn only then.
+  const section = useRef<HTMLDivElement>(null);
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const el = section.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setShown(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) =>
+      setShown(entries.some((e) => e.isIntersecting)),
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const preview = useExportPreview(editor, ids, version, shown);
   const file = exportFileName(exportName(editor, ids), settings.format, settings.scale);
   return (
-    <div className="inspector inspector-export">
+    <div className="inspector inspector-export" ref={section}>
       <PropertySection title="Export">
         {preview ? (
           <div className="export-section__preview">
