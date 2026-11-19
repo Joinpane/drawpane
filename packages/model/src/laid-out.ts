@@ -2,7 +2,8 @@
  * Which of a copy's values layout decides (decision 0035, item 7). Those are
  * never overrides: a copy laid out differently from its main holds other
  * values for them, and its next layout gives them again. Sync leaves them
- * alone, and the importers don't mark them overridden.
+ * alone, and the importers don't mark them overridden. A place or size
+ * constraints give is laid out only while it's what they derive.
  */
 import type { NodeRecord } from "./ops";
 import { getProp } from "./schema";
@@ -76,18 +77,13 @@ export function laidOutProps(
     }
   }
   if (!context.root && !inFlow && parent && parentSource) {
-    // A frame the copy resized moved and stretched its children by their constraints.
-    for (const axis of AXES) {
-      const grown =
-        Math.abs(getProp(parent.props, axis.size) - getProp(parentSource.props, axis.size)) >
-        EPSILON;
-      if (!grown) continue;
-      const constraint = getProp(copy.props, axis.constraint);
-      if (constraint === "end" || constraint === "center") out.add(axis.pos);
-      if (constraint === "stretch" || constraint === "scale") {
-        out.add(axis.pos);
-        out.add(axis.size);
-      }
+    // A frame the copy resized moved and stretched its children by their constraints: a place or
+    // size is laid out where it's what they derive from the main layer's. Anything else is a
+    // person's change on top (review 8 of #187, B1), kept as an override.
+    const derived = constrainedValues(copy, source, parent, parentSource);
+    for (const [prop, want] of Object.entries(derived)) {
+      const have = (copy.props as Record<string, unknown>)[prop];
+      if (typeof have === "number" && Math.abs(have - want) <= EPSILON) out.add(prop);
     }
   }
   return out;

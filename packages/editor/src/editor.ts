@@ -97,7 +97,7 @@ import {
   touchesLibraryCopies,
   updateOps,
 } from "./libraries";
-import { FIELD_OF, findPropertyRow, instanceProperties } from "./properties";
+import { FIELD_OF, findPropertyRow, instanceProperties, type PropertyRow } from "./properties";
 import { readingOrderOf } from "./reading-order";
 import { resetDependentOps } from "./resets";
 import {
@@ -2373,9 +2373,11 @@ export class Editor {
    * Switches an instance to the variant of its set that matches its current
    * properties with `name` set to `value`. Overrides carry over by layer
    * name, as any swap's do; then each property it changed takes the same
-   * value on the new variant's layers, by property id, as Figma carries it
-   * (decision 0035): a label named differently in the other variant keeps
-   * its text. Ordinary overrides, in the same undo step.
+   * value, by property id, on the new variant's layers the name carry gave
+   * nothing for that field (decision 0035): a label named differently in the
+   * other variant keeps its text, and a field the name carry kept is never
+   * replaced (review 8 of #187, B2). Ordinary overrides, in the same undo
+   * step.
    */
   setInstanceVariant(instanceId: string, name: string, value: string): void {
     const instance = this.doc.get(instanceId);
@@ -2393,8 +2395,13 @@ export class Editor {
     this.#swapInstances([instanceId], target.id, "Swap instance");
     for (const row of carried) {
       const now = instanceProperties(this.doc, instanceId)?.rows.find((r) => r.id === row.id);
-      if (now && (now.mixed || now.value !== row.value))
-        this.setInstanceProperty(instanceId, row.id, row.value as boolean | string);
+      const field = now ? FIELD_OF[now.type] : undefined;
+      if (!now || !field) continue;
+      // Only layers fresh from the new variant for that field: the swap marks what it carried.
+      const free = now.targets.filter(
+        (id) => !getProp(this.doc.get(id)?.props ?? {}, "overrides").includes(field),
+      );
+      this.#writeProperty(now, free, row.value as boolean | string);
     }
     this.endGesture();
   }
@@ -2499,9 +2506,14 @@ export class Editor {
       if (typeof value === "string") this.setInstanceVariant(instanceId, row.name, value);
       return;
     }
+    this.#writeProperty(row, row.targets, value);
+  }
+
+  /** Writes a property's value on `targets`, some of the layers it drives, as overrides (one undo step). */
+  #writeProperty(row: PropertyRow, targets: readonly string[], value: boolean | string): void {
     if (row.type === "instance") {
       if (typeof value !== "string") return;
-      const swaps = row.targets.filter(
+      const swaps = targets.filter(
         (id) => getProp(this.doc.get(id)?.props ?? {}, "instanceOf") !== value,
       );
       this.#swapInstances(swaps, value, `Swap ${row.name}`);
@@ -2510,7 +2522,7 @@ export class Editor {
     const field = FIELD_OF[row.type];
     if (!field) return;
     const ops: Op[] = [];
-    for (const id of row.targets) {
+    for (const id of targets) {
       const node = this.doc.get(id);
       if (!node) continue;
       if (field === "visible" && typeof value === "boolean") {

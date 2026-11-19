@@ -76,25 +76,54 @@ export function definitionsOf(doc: Doc, mainId: string): ComponentPropDef[] {
 }
 
 /**
- * The layers under `rootId` (at any depth) that reference each property, by
- * field. Layers inside nested instances are read too: their own main's
- * property ids are its own, so only one the outer main bound them to
- * matches the outer's definitions.
+ * The component a layer's references belong to (review 8 of #187, B5): the
+ * main they were set in. A copy layer that doesn't hold its own references
+ * (`propRefs` not among its overrides) takes its main layer's, so they're
+ * followed down the copy chain to the layer that does, or that copies
+ * nothing; the main component around that layer made them. Undefined when
+ * no main is around it.
  */
-function referencesUnder(doc: Doc, rootId: string): Map<string, string[]> {
+export function referenceOwner(doc: Doc, id: string): string | undefined {
+  let at = doc.get(id);
+  for (let i = 0; at && i < 256; i++) {
+    const mirrors = getProp(at.props, "mirrors");
+    if (!mirrors || getProp(at.props, "overrides").includes("propRefs")) break;
+    const next = doc.get(mirrors);
+    if (!next) break;
+    at = next;
+  }
+  for (let n = at; n && n.type !== "page"; n = doc.get(n.parent))
+    if (isMainComponent(n)) return n.id;
+  return undefined;
+}
+
+/**
+ * The layers under `rootId` (at any depth) that reference each of the
+ * properties of `mainId` (or its set), by field. Property ids are unique
+ * only within one component's definitions, so a reference counts only when
+ * it belongs to that component (`referenceOwner`): a nested instance's
+ * layers reference its own component's properties, reached through it,
+ * unless the outer main bound them to one of its own.
+ */
+function referencesUnder(doc: Doc, rootId: string, mainId: string): Map<string, string[]> {
+  const set = componentSetOf(doc, mainId)?.id;
+  const ours = (owner: string | undefined) =>
+    owner !== undefined &&
+    (owner === mainId || (set !== undefined && componentSetOf(doc, owner)?.id === set));
   const out = new Map<string, string[]>();
   const stack = [...doc.childIds(rootId)].reverse();
   while (stack.length > 0) {
     const id = stack.pop() as string;
     const node = doc.get(id);
     if (!node) continue;
-    for (const [field, propertyId] of Object.entries(getProp(node.props, "propRefs"))) {
-      if (!propertyId) continue;
-      const key = `${propertyId}\u0000${field}`;
-      const list = out.get(key);
-      if (list) list.push(id);
-      else out.set(key, [id]);
-    }
+    const refs = Object.entries(getProp(node.props, "propRefs")).filter(([, p]) => !!p);
+    if (refs.length > 0 && ours(referenceOwner(doc, id)))
+      for (const [field, propertyId] of refs) {
+        const key = `${propertyId}\u0000${field}`;
+        const list = out.get(key);
+        if (list) list.push(id);
+        else out.set(key, [id]);
+      }
     const kids = doc.childIds(id);
     for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i] as string);
   }
@@ -145,7 +174,7 @@ export function instanceProperties(
   if (!main || !isMainComponent(main)) return null;
   const set = componentSetOf(doc, main.id);
   const defs = definitionsOf(doc, main.id);
-  const refs = referencesUnder(doc, instanceId);
+  const refs = referencesUnder(doc, instanceId, main.id);
   const overridden = (id: string, field: string) =>
     getProp(doc.get(id)?.props ?? {}, "overrides").includes(field);
 

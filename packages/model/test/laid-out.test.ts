@@ -65,19 +65,42 @@ describe("laidOutProps", () => {
     expect(sorted(laidOutProps(fixed, fixed, { root: false }))).toEqual([]);
   });
 
-  it("follows constraints only in a frame the copy resized", () => {
+  it("follows constraints only in a frame the copy resized, where it's what they derive", () => {
     const main = layer("frame", { width: 100, height: 40 });
     const wider = layer("frame", { width: 160, height: 40 });
-    const pinned = (constraintH: string) => layer("rect", { constraintH, constraintV: "end" });
-    const at = (child: NodeRecord, parent: NodeRecord) =>
-      sorted(laidOutProps(child, child, { root: false, parent, parentSource: main }));
-    expect(at(pinned("start"), wider)).toEqual([]);
-    expect(at(pinned("end"), wider)).toEqual(["x"]);
-    expect(at(pinned("center"), wider)).toEqual(["x"]);
-    expect(at(pinned("stretch"), wider)).toEqual(["width", "x"]);
-    expect(at(pinned("scale"), wider)).toEqual(["width", "x"]);
+    const source = (constraintH: string) =>
+      layer("rect", { x: 10, width: 20, height: 20, constraintH });
+    // The copy where its constraint puts it in the wider frame (main layer at 10, 20 wide).
+    const placed: Record<string, { x: number; width: number }> = {
+      start: { x: 10, width: 20 },
+      end: { x: 70, width: 20 },
+      center: { x: 40, width: 20 },
+      stretch: { x: 10, width: 80 },
+      scale: { x: 16, width: 32 },
+    };
+    const copy = (constraintH: string, dx = 0, dw = 0) =>
+      layer("rect", {
+        x: (placed[constraintH]?.x ?? 0) + dx,
+        width: (placed[constraintH]?.width ?? 0) + dw,
+        height: 20,
+        constraintH,
+      });
+    const at = (child: NodeRecord, from: NodeRecord, parent: NodeRecord) =>
+      sorted(laidOutProps(child, from, { root: false, parent, parentSource: main }));
+    expect(at(copy("start"), source("start"), wider)).toEqual([]);
+    expect(at(copy("end"), source("end"), wider)).toEqual(["x"]);
+    expect(at(copy("center"), source("center"), wider)).toEqual(["x"]);
+    expect(at(copy("stretch"), source("stretch"), wider)).toEqual(["width", "x"]);
+    expect(at(copy("scale"), source("scale"), wider)).toEqual(["width", "x"]);
+    // Moved or resized on top of what the constraint gives: a person's change (review 8, B1).
+    expect(at(copy("end", 30), source("end"), wider)).toEqual([]);
+    expect(at(copy("center", -5), source("center"), wider)).toEqual([]);
+    expect(at(copy("stretch", 0, 30), source("stretch"), wider)).toEqual(["x"]);
+    expect(at(copy("scale", 30), source("scale"), wider)).toEqual(["width"]);
+    // Within the tolerance Figma's saved decimals need.
+    expect(at(copy("end", 0.004), source("end"), wider)).toEqual(["x"]);
     // Same size as its main's frame: a moved child moved on purpose.
-    expect(at(pinned("scale"), main)).toEqual([]);
+    expect(at(copy("scale"), source("scale"), main)).toEqual([]);
   });
 });
 
