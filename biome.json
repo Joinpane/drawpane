@@ -14,7 +14,8 @@
       "!**/routeTree.gen.ts",
       "!**/*.md",
       "!**/*.svg",
-      "!**/test/fixtures/*.json"
+      "!**/test/fixtures/*.json",
+      "!**/test/main-era/editor-*.mjs"
     ]
   },
   "formatter": {

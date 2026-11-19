@@ -144,76 +144,6 @@ function applyCreate(store: NodeStore, op: CreateOp, held: boolean): Op[] {
   return [{ op: "delete", id: op.id }];
 }
 
-/**
- * Copy references derived top-down by origin. Each
- * layer under an instance copies a child of what its parent copies
- * (`copyTarget`): the parent's main layer for a copy, the main for an
- * instance root following one, the component it's swapped to for a swapped
- * nested instance. A layer whose reference isn't one of those children
- * (written before a teammate's detach, or undone after one) is pointed at
- * the child whose copy chain ends at the same main layer (`origin`) as its
- * reference's: through to the inner component after a detach, back to the
- * outer copy when the detach is undone. Left as it is when no child matches
- * (conversion then says so). Run on what a transaction leaves, parents
- * before children, over the layers it made and those under every node whose
- * link it changed: a pure function of the file, so the room, every client
- * and replay agree.
- */
-function resolveUnder(store: NodeStore, ids: ReadonlySet<string>): void {
-  // Walked from the topmost: one under another that's walked is reached from it, after its parent.
-  const roots = [...ids].filter((id) => {
-    for (let at = store.get(id), i = 0; at && i < MAX_DEPTH; i++) {
-      at = store.get(at.parent);
-      if (at && ids.has(at.id)) return false;
-    }
-    return true;
-  });
-  const seen = new Set<string>();
-  const queue = [...roots];
-  for (let i = 0; i < queue.length; i++) {
-    const id = queue[i] as string;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const node = store.get(id);
-    if (!node) continue;
-    if (typeof node.props.mirrors === "string") resolveMirrors(store, node);
-    for (const child of store.childIds(id)) queue.push(child);
-  }
-}
-
-/** What a node's children copy: its main layer, its main, or the component it's swapped to. */
-function copyTarget(store: NodeStore, node: NodeRecord): string | null {
-  const mirrors = typeof node.props.mirrors === "string" ? node.props.mirrors : null;
-  const instanceOf =
-    node.type === "frame" && typeof node.props.instanceOf === "string"
-      ? node.props.instanceOf
-      : null;
-  if (instanceOf && (!mirrors || store.get(mirrors)?.props.instanceOf !== instanceOf))
-    return instanceOf;
-  return mirrors;
-}
-
-/** The main layer a copy chain ends at. */
-function origin(store: NodeStore, id: string): string {
-  let at = id;
-  for (let i = 0; i < 256; i++) {
-    const next = store.get(at)?.props.mirrors;
-    if (typeof next !== "string" || !store.get(next)) return at;
-    at = next;
-  }
-  return at;
-}
-
-function resolveMirrors(store: NodeStore, node: NodeRecord): void {
-  const mirrors = node.props.mirrors as string;
-  const parent = store.get(node.parent);
-  const target = parent ? copyTarget(store, parent) : null;
-  if (!target || store.get(mirrors)?.parent === target) return;
-  const from = origin(store, mirrors);
-  const match = store.childIds(target).find((child) => origin(store, child) === from);
-  if (match) store.setProp(node.id, "mirrors", match);
-}
-
 /** Every node under `id`, parents before children. */
 export function collectSubtree(store: NodeStore, id: string): NodeRecord[] {
   const root = store.get(id);
@@ -521,13 +451,8 @@ export function applyTransaction(
   // that touched it: checked on what the transaction leaves.
   const check = cycles === true ? new Map<string, { deep: boolean; index: number }>() : null;
   const sink = typeof cycles === "object" ? cycles : null;
-  // Layers it makes, and nodes whose link it changes: the copy references there are derived
-  // once it's applied (`resolveUnder`).
-  const relinked = new Set<string>();
   for (let i = 0; i < ops.length; i++) {
     const op = ops[i] as Op;
-    if (op.op === "create" && typeof op.props.mirrors === "string") relinked.add(op.id);
-    if (op.op === "set" && (op.prop === "mirrors" || op.prop === "instanceOf")) relinked.add(op.id);
     try {
       const back = apply(store, op, false, keep, held);
       if (keep) undo.push(back);
@@ -547,7 +472,6 @@ export function applyTransaction(
       check.set(candidate.id, { deep, index: i });
     }
   }
-  if (relinked.size > 0) resolveUnder(store, relinked);
   if (check)
     for (const [id, { deep, index }] of check)
       if (instanceCycleAt(store, id, deep)) {
