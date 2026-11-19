@@ -218,6 +218,8 @@ export class TokenView {
 
   #add(id: string, node: NodeRecord, refuse = false): void {
     const kind = kindOf(node);
+    // Most layers bind nothing: one look, nothing allocated.
+    if (!kind && !usesTokens(node.props)) return;
     const refs = kind === "variable" || kind === "collection" ? null : tokenRefs(node.props);
     const aliases: string[] = [];
     if (kind === "variable") {

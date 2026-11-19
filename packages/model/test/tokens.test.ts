@@ -259,3 +259,22 @@ describe("bindings say how their value maps onto the property (decision 0034)", 
     });
   });
 });
+
+describe("bound sizes keep within their bounds", () => {
+  it("a bound width or height is clamped by the layer's min and max, as Figma does", () => {
+    const store = file([
+      node("big", "variable", "c", { variableType: "number", values: { light: 40, dark: 40 } }),
+      node("lo", "variable", "c", { variableType: "number", values: { light: 50, dark: 50 } }),
+      node("r", "frame", "dark", {
+        width: 32,
+        height: 32,
+        maxHeight: 32,
+        minHeight: 32,
+        bindings: { height: "big", width: "big", minWidth: "lo" },
+      } as never),
+    ]);
+    const p = new TokenResolver(store).resolve(store.get("r") as NodeRecord).props;
+    expect(p.height).toBe(32);
+    expect(p.width).toBe(50);
+  });
+});
