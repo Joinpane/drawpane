@@ -67,7 +67,7 @@ function useExportPreview(editor: Editor, ids: readonly string[], version: numbe
       const renderer = new CanvasRenderer(editor.scene, editor.measurer, {
         images: imagesFor(editor),
       });
-      renderer.renderNodes(ctx, list, rect, scale);
+      renderer.renderNodes(ctx, list, rect, scale, null, false, true);
       const blob = await canvas.convertToBlob({ type: "image/png" });
       if (cancelled) return;
       made = URL.createObjectURL(blob);

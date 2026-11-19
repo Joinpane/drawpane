@@ -401,11 +401,11 @@ float erfinv(float x) {
 }
 vec2 flipped(vec2 p) { return vec2(p.x, size.y - p.y) / size; }
 vec4 canvasAt(sampler2D t, vec2 p) { return texture(t, flipped(p)); }
-// The backdrop where a bent ray lands, filtered over the footprint of this
+// The backdrop where a bent ray lands (premultiplied), filtered over the footprint of this
 // pixel's ray: where the lens compresses what's behind, mipmaps average it.
-float seenAt(vec2 p, int channel) {
+vec4 seenAt(vec2 p) {
   vec2 uv = flipped(p);
-  return textureGrad(backdrop, uv, dFdx(uv), dFdy(uv))[channel];
+  return textureGrad(backdrop, uv, dFdx(uv), dFdy(uv));
 }
 
 // How far in from a box's edge a region pixel is, in pixels (negative outside): exact, square
@@ -448,10 +448,13 @@ void main() {
   float off = extent > 0.0 ? dot(p - center, along) / extent : 0.0;
   // A convex rim looks in: each pixel there sees the backdrop from further inside.
   vec2 bend = (inward - along * off * splay) * fall * refraction;
-  vec3 seen = vec3(
-    seenAt(p + bend * (1.0 + dispersion), 0),
-    seenAt(p + bend, 1),
-    seenAt(p + bend * (1.0 - dispersion), 2));
+  vec4 red = seenAt(p + bend * (1.0 + dispersion));
+  vec4 green = seenAt(p + bend);
+  vec4 blue = seenAt(p + bend * (1.0 - dispersion));
+  // Premultiplied, so what's behind keeps its alpha: over nothing, glass shows nothing (as
+  // Figma's does), and its light and shade are only as opaque as what they fall on.
+  float seenAlpha = max(red.a, max(green.a, blue.a));
+  vec3 seen = vec3(red.r, green.g, blue.b);
   // Light (given y down) as y up, as Figma lights its glass: a hairline along each edge facing
   // toward the light or away from it (more the more squarely), and a faint shade across the
   // rim, darker facing the light and lighter away, fading in toward the middle.
@@ -460,9 +463,9 @@ void main() {
   float hair = exp(-max(0.0, d - 0.5) / max(tuneA.z, 1e-3));
   float edge = max(tuneB.x * (facing - tuneB.y), 0.0) + max(tuneB.z * (-facing - tuneB.w), 0.0);
   float shading = intensity * tuneC.x * facing * max(0.0, 1.0 - d / max(tuneC.y * depth, 1.0));
-  seen = shading > 0.0 ? mix(seen, vec3(0.0), shading) : mix(seen, vec3(1.0), -shading);
-  seen = mix(seen, vec3(1.0), clamp(intensity * edge * hair, 0.0, 1.0));
-  color = vec4(seen * a, a);
+  seen = shading > 0.0 ? mix(seen, vec3(0.0), shading) : mix(seen, vec3(seenAlpha), -shading);
+  seen = mix(seen, vec3(seenAlpha), clamp(intensity * edge * hair, 0.0, 1.0));
+  color = vec4(seen, seenAlpha) * a;
 }`;
 
 type Program = {
@@ -590,6 +593,18 @@ export interface GlassPaintOptions {
   readonly within?: Bounds;
   /** What the shape is, when it isn't a box with `corners` (an ellipse bends as Figma's do). */
   readonly kind?: GlassKind;
+  /**
+   * The canvas is known to be opaque (the screen over a page's background): the glass, opaque
+   * too, simply goes over what's there. Elsewhere (an export with no background, a layer's own
+   * canvas) what's behind may be see-through: the glass replaces it under the shape, as Figma's
+   * does, rather than going over it (a half-clear backdrop would come out twice as opaque).
+   */
+  readonly opaque?: boolean;
+  /**
+   * Where to read the backdrop instead of the canvas drawn on: a canvas whose top left is
+   * (x, y) on the device (an export's view of what's under it on the page).
+   */
+  readonly source?: { readonly canvas: AnyCanvas; readonly x: number; readonly y: number };
 }
 
 /** Where, and against what, a glass is drawn: for reusing what it drew (see `Drawn`). */
@@ -681,6 +696,8 @@ export class GlassPainter {
       corners = null,
       within,
       kind = "other",
+      opaque = true,
+      source,
     } = options;
     const t = ctx.getTransform();
     const p = glassParams(glass, scale, glassTuning(), inradius, corners ? "box" : kind);
@@ -723,6 +740,7 @@ export class GlassPainter {
     const tune = glassTuning();
     const kept = key ? this.#drawn.get(key.id) : undefined;
     if (
+      opaque &&
       key &&
       kept &&
       whole &&
@@ -752,7 +770,23 @@ export class GlassPainter {
     this.#backdrop = scratch(this.#backdrop, rw, rh);
     const backdrop = this.#backdrop?.getContext("2d") as Ctx | null | undefined;
     if (!this.#backdrop || !backdrop) return;
-    copyExtended(ctx.canvas, backdrop, x0, y0, rw, rh, within);
+    if (source)
+      copyExtended(
+        source.canvas,
+        backdrop,
+        x0 - source.x,
+        y0 - source.y,
+        rw,
+        rh,
+        within && {
+          ...within,
+          x0: within.x0 - source.x,
+          y0: within.y0 - source.y,
+          x1: within.x1 - source.x,
+          y1: within.y1 - source.y,
+        },
+      );
+    else copyExtended(ctx.canvas, backdrop, x0, y0, rw, rh, within);
     // The shape, anti-aliased.
     this.#shape = scratch(this.#shape, rw, rh);
     const mask = this.#shape?.getContext("2d") as Ctx | null | undefined;
@@ -789,7 +823,12 @@ export class GlassPainter {
       };
     }
     if (!gl || !fits(gl, rw, rh) || !this.#draw(gl, p, rw, rh, centre, halfSize, box)) {
-      this.#fallback(ctx, shape, p, x0, y0, rw, rh);
+      this.#fallback(ctx, shape, p, x0, y0, rw, rh, opaque);
+      return;
+    }
+    if (!opaque && ctx.globalCompositeOperation === "source-over") {
+      this.#replace(ctx, gl.canvas, x0, y0, rw, rh);
+      if (key) this.#forget(key.id);
       return;
     }
     this.#place(ctx, gl.canvas, x0, y0, rw, rh);
@@ -859,6 +898,23 @@ export class GlassPainter {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.filter = "none";
+    ctx.drawImage(picture, 0, 0, rw, rh, x0, y0, rw, rh);
+    ctx.restore();
+  }
+
+  /**
+   * Puts the glass where the shape is in place of what was there: what's under the shape cut
+   * out by the mask, then the glass (premultiplied, already cut by the mask) added in. The
+   * context's opacity applies to both, so a faded glass mixes with what was there.
+   */
+  #replace(ctx: Ctx, picture: AnyCanvas, x0: number, y0: number, rw: number, rh: number) {
+    if (!this.#shape) return;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.filter = "none";
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.drawImage(this.#shape, 0, 0, rw, rh, x0, y0, rw, rh);
+    ctx.globalCompositeOperation = "lighter";
     ctx.drawImage(picture, 0, 0, rw, rh, x0, y0, rw, rh);
     ctx.restore();
   }
@@ -951,7 +1007,9 @@ export class GlassPainter {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, tex);
     };
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    // Premultiplied: what's see-through behind stays so through the frost, the mipmaps and
+    // the shader, and averages without dark fringes.
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
     bind(0, g.backdrop);
     gl.texImage2D(
       gl.TEXTURE_2D,
@@ -963,6 +1021,7 @@ export class GlassPainter {
     );
     // Bent rays can land where the lens compresses what's behind: read it through mipmaps.
     gl.generateMipmap(gl.TEXTURE_2D);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     bind(1, g.mask);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.#shape as AnyCanvas);
 
@@ -1056,6 +1115,7 @@ export class GlassPainter {
     y0: number,
     rw: number,
     rh: number,
+    opaque: boolean,
   ) {
     const backdrop = this.#backdrop;
     if (!backdrop) return;
@@ -1082,9 +1142,13 @@ export class GlassPainter {
     }
     ctx.clip(shape);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // What may be see-through behind is replaced, not drawn over (see `GlassPaintOptions.opaque`).
+    if (!opaque && ctx.globalCompositeOperation === "source-over" && ctx.globalAlpha >= 1)
+      ctx.globalCompositeOperation = "copy";
     ctx.filter = p.frost > 0 ? `blur(${p.frost}px)` : "none";
     ctx.drawImage(backdrop, 0, 0, rw, rh, x0, y0, rw, rh);
     ctx.filter = "none";
+    ctx.globalCompositeOperation = "source-over";
     ctx.setTransform(t);
     if (p.intensity > 0 && p.depth > 0) {
       ctx.globalAlpha *= p.intensity * 0.6;

@@ -35,6 +35,7 @@ import {
   type Resolution,
   type RestoredVersion,
   ROOT_ID,
+  referenceFixes,
   renameHeldIds,
   type ServerMessage,
   SNAPSHOT_CHUNK_SIZE,
@@ -215,6 +216,9 @@ const PONG = JSON.stringify({ t: "pong" });
  * would stay on everyone's canvas. A hidden tab's timers can slow to once a
  * minute, so this leaves room for a couple of those.
  */
+/** Who the room's own changes are by: a new file's first page, fixed copy references. */
+const SYSTEM_AUTHOR = { clientId: "system", seq: 0, userId: "system", sessionId: "system" };
+
 export const STALE_MS = 150_000;
 /** How often, at most, a room looks for sessions that have gone quiet. */
 const PRUNE_EVERY_MS = 15_000;
@@ -2359,6 +2363,7 @@ export class FileRoom extends DurableObject<Env> {
       throw error;
     }
     this.#broadcastChange(revn, ops, author);
+    this.#fixReferences(ops);
     void this.#scheduleAlarm();
     return { ok: true, revn, result: data, replayed: false };
   }
@@ -2474,6 +2479,7 @@ export class FileRoom extends DurableObject<Env> {
       throw error;
     }
     this.#broadcastChange(revn, ops, author);
+    this.#fixReferences(ops);
     void this.#scheduleAlarm();
     return { ok: true, revn, result, replayed: false };
   }
@@ -3124,7 +3130,37 @@ export class FileRoom extends DurableObject<Env> {
     }
     this.#send(ws, { t: "ack", seq, revn });
     this.#broadcastChange(revn, ops, author, ws);
+    this.#fixReferences(ops);
     void this.#scheduleAlarm();
+  }
+
+  /**
+   * Copy references `ops` (just committed) left pointing outside what their
+   * parent copies, fixed as the room's own change (`referenceFixes`): logged
+   * as the next revision and sent to everyone, the client that made `ops`
+   * included. Every client, a tab on older code, a catch-up from the log and
+   * a snapshot hold the same references, since the fix is an operation like
+   * any other; no client fixes them itself. A fix that can't apply is left
+   * out (the references stay as they are, for conversion to keep or report),
+   * and never refuses the change before it.
+   */
+  #fixReferences(ops: readonly Op[]): void {
+    let fixes: Op[];
+    try {
+      fixes = referenceFixes(this.#store, ops);
+    } finally {
+      this.#store.clearCache();
+    }
+    if (fixes.length === 0) return;
+    let revn: number;
+    try {
+      revn = this.#commit(fixes, SYSTEM_AUTHOR);
+    } catch (error) {
+      if (!(error instanceof ModelError)) throw error;
+      console.error("couldn't fix copy references", error.message);
+      return;
+    }
+    this.#broadcastChange(revn, fixes, SYSTEM_AUTHOR);
   }
 
   /**
@@ -3397,7 +3433,7 @@ export class FileRoom extends DurableObject<Env> {
           props: { name: "Page 1" },
         },
       ],
-      { clientId: "system", seq: 0, userId: "system", sessionId: "system" },
+      SYSTEM_AUTHOR,
     );
   }
 

@@ -145,6 +145,37 @@ function fadesAsOne(node: NodeRecord, children: number): boolean {
  * see-through (where the canvas's dodge adds alphas: linear-blend.ts).
  */
 
+/** What a layer that reads the backdrop reads, kept from elsewhere: a canvas whose top left is (x, y) on the device. */
+interface Backdrop {
+  readonly canvas: AnyCanvas;
+  readonly x: number;
+  readonly y: number;
+}
+
+/** `b` in a canvas whose top left is (x, y) on the device. */
+const shiftBounds = (b: Bounds, x: number, y: number): Bounds => ({
+  ...b,
+  x0: b.x0 - x,
+  y0: b.y0 - y,
+  x1: b.x1 - x,
+  y1: b.y1 - y,
+});
+
+/**
+ * A paint that comes out the same whatever is under it: opaque, and drawn normally, or white
+ * lightening (Apple's vibrant white text adds itself by linear dodge) or black darkening.
+ */
+function hidesWhatsUnder(paint: Paint): boolean {
+  if (paint.visible === false || paint.type !== "solid" || (paint.opacity ?? 1) < 1) return false;
+  if (!opaqueColor(paint.color)) return false;
+  const mode = paint.blendMode ?? "normal";
+  if (mode === "normal") return true;
+  const hex = paint.color.slice(1, 7).toLowerCase();
+  if (hex === "ffffff") return ["linear-dodge", "screen", "lighten"].includes(mode);
+  if (hex === "000000") return ["linear-burn", "multiply", "darken"].includes(mode);
+  return false;
+}
+
 /** A CSS colour that's certainly opaque: `#rrggbb`, or `#rrggbbff`. */
 const opaqueColor = (css: string) => /^#[0-9a-f]{6}(ff)?$/i.test(css.trim());
 function blendsAsOne(
@@ -506,6 +537,20 @@ export class CanvasRenderer {
   readonly #inradii = new Inradii();
   /** What's behind a background blur, read for it (see #backgroundBlur). */
   #blurBackdrop: AnyCanvas | null = null;
+  /** A background blur under text, cut to its glyphs (see #backgroundBlur). */
+  #blurGlyphs: AnyCanvas | null = null;
+  /**
+   * An export that sees what's under it (`renderNodes`'s `context`): while the page is drawn
+   * up to the exported layers ("record"), what each of their glass and background blur
+   * layers reads is kept; drawing the export itself ("replay"), they read that instead.
+   */
+  #context: {
+    phase: "record" | "replay";
+    readonly readers: ReadonlySet<string>;
+    readonly seen: Map<string, Backdrop>;
+  } | null = null;
+  /** While the page is drawn up to some layers: those still to draw; once none are left, nothing more is. */
+  #until: Set<string> | null = null;
   /** Scratch canvases for drawings blended apart: linear burn, and dodge over see-through (linear-blend.ts). */
   readonly #burn = new BlendApart();
   /** Canvases filled with an opaque background before anything is drawn: linear dodge's quick path. */
@@ -1311,6 +1356,12 @@ export class CanvasRenderer {
     background: string | null = null,
     /** Level of detail (unreadable text as bars), for thumbnails; exports leave it off. */
     detail = false,
+    /**
+     * As Figma exports a layer: its glass and background blur see what's under it on the
+     * page (the frames and sections it's in, what's beneath it; not the page's background),
+     * while everything else draws over nothing. Off, the layers are alone on the canvas.
+     */
+    context = false,
   ): void {
     this.images.frame();
     this.stats = { drawn: 0, culled: 0, ms: 0 };
@@ -1327,11 +1378,91 @@ export class CanvasRenderer {
     this.hidden = new Set();
     this.#detail = detail;
     try {
+      if (context) this.#recordContext(ctx, ids, camera, rect);
       for (const id of ids) this.#draw(ctx, id, camera, 1, rect);
     } finally {
       this.hidden = hidden;
       this.#detail = true;
+      this.#context = null;
+      this.#until = null;
     }
+  }
+
+  /**
+   * For an export that sees what's under it: the page drawn, without its background, up to and
+   * including the layers `ids` into a canvas of the export's size, keeping what each glass
+   * and background blur among them reads there (`#backdropFor`). Skipped when there are none.
+   */
+  #recordContext(ctx: Ctx, ids: readonly string[], camera: Camera, rect: Rect): void {
+    const doc = this.#scene.doc;
+    const readers = new Set<string>();
+    const visit = (id: string) => {
+      const node = doc.get(id);
+      if (!node || node.props.visible === false) return;
+      if (
+        node.type !== "group" &&
+        getProp(node.props, "effects").some(
+          (e) => e.visible !== false && (e.type === "glass" || e.type === "background-blur"),
+        )
+      )
+        readers.add(id);
+      for (const child of doc.childIds(id)) visit(child);
+    };
+    for (const id of ids) visit(id);
+    if (readers.size === 0) return;
+    const first = ids[0];
+    if (first === undefined) return;
+    let page = doc.get(first);
+    while (page && page.type !== "page") page = doc.get(page.parent);
+    if (!page) return;
+    const canvas = scratch(null, ctx.canvas.width, ctx.canvas.height);
+    const under = canvas?.getContext("2d") as Ctx | null | undefined;
+    if (!canvas || !under) return;
+    // Not on the page's background: Figma's exports don't see it (measured: a glass on a frame
+    // straight on a grey page sees nothing there, one in a section sees the section's fill).
+    resetState(under);
+    under.clearRect(0, 0, canvas.width, canvas.height);
+    this.#context = { phase: "record", readers, seen: new Map() };
+    this.#until = new Set(ids);
+    try {
+      for (const id of doc.childIds(page.id)) this.#draw(under, id, camera, 1, rect);
+    } finally {
+      this.#until = null;
+      this.#context.phase = "replay";
+    }
+  }
+
+  /**
+   * Where a glass or background blur reads its backdrop: null for the canvas it's drawn on.
+   * In an export that sees what's under it, what the page had there (`#recordContext`):
+   * kept while recording, `pad` device pixels around the layer's box (all it reads), and
+   * returned when the export itself is drawn. "done" once the last of them is kept: the page
+   * needn't be drawn further.
+   */
+  #backdropFor(ctx: Ctx, node: NodeRecord, pad: number): Backdrop | "done" | null {
+    const context = this.#context;
+    if (!context?.readers.has(node.id)) return null;
+    if (context.phase === "replay") return context.seen.get(node.id) ?? null;
+    const t = ctx.getTransform();
+    const w = getProp(node.props, "width");
+    const h = getProp(node.props, "height");
+    const xs = [t.e, t.a * w + t.e, t.c * h + t.e, t.a * w + t.c * h + t.e];
+    const ys = [t.f, t.b * w + t.f, t.d * h + t.f, t.b * w + t.d * h + t.f];
+    const x0 = Math.max(0, Math.floor(Math.min(...xs)) - pad);
+    const y0 = Math.max(0, Math.floor(Math.min(...ys)) - pad);
+    const x1 = Math.min(ctx.canvas.width, Math.ceil(Math.max(...xs)) + pad);
+    const y1 = Math.min(ctx.canvas.height, Math.ceil(Math.max(...ys)) + pad);
+    if (x1 <= x0 || y1 <= y0) return null;
+    const canvas = scratch(null, x1 - x0, y1 - y0);
+    const copy = canvas?.getContext("2d") as Ctx | null | undefined;
+    if (!canvas || !copy) return null;
+    copy.drawImage(ctx.canvas, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+    context.seen.set(node.id, { canvas, x: x0, y: y0 });
+    // Every reader's backdrop kept: nothing more of the page is needed, this one's own effect
+    // included.
+    if (context.seen.size < context.readers.size) return null;
+    this.#until?.clear();
+    return "done";
   }
 
   /**
@@ -1342,6 +1473,26 @@ export class CanvasRenderer {
    * blending come down from groups as arguments.
    */
   #draw(
+    ctx: Ctx,
+    id: string,
+    camera: Camera,
+    dpr: number,
+    visible: Rect,
+    alpha = 1,
+    inheritedBlend: GlobalCompositeOperation = "source-over",
+  ): void {
+    const until = this.#until;
+    if (!until) {
+      this.#drawLayer(ctx, id, camera, dpr, visible, alpha, inheritedBlend);
+      return;
+    }
+    // Drawing the page up to some layers (`#recordContext`): nothing past the last of them.
+    if (until.size === 0) return;
+    this.#drawLayer(ctx, id, camera, dpr, visible, alpha, inheritedBlend);
+    until.delete(id);
+  }
+
+  #drawLayer(
     ctx: Ctx,
     id: string,
     camera: Camera,
@@ -2445,7 +2596,44 @@ export class CanvasRenderer {
     this.#blurBackdrop = scratch(this.#blurBackdrop, x1 - x0, y1 - y0);
     const behind = this.#blurBackdrop?.getContext("2d") as Ctx | null | undefined;
     if (!this.#blurBackdrop || !behind) return;
-    copyExtended(ctx.canvas, behind, x0, y0, x1 - x0, y1 - y0, this.#clipWithin(ctx, node));
+    const from = this.#backdropFor(ctx, node, reach + 1);
+    if (from === "done") return;
+    const within = this.#clipWithin(ctx, node);
+    if (from)
+      copyExtended(
+        from.canvas,
+        behind,
+        x0 - from.x,
+        y0 - from.y,
+        x1 - x0,
+        y1 - y0,
+        within && shiftBounds(within, from.x, from.y),
+      );
+    else copyExtended(ctx.canvas, behind, x0, y0, x1 - x0, y1 - y0, within);
+    if (node.type === "text") {
+      // As in Figma, the layer is its fills over the blur, cut to its glyphs once: under
+      // opaque fills none of the blur shows, not even at the glyphs' anti-aliased edges.
+      if (getProp(node.props, "fills").some(hidesWhatsUnder)) return;
+      // Otherwise it shows where the layer paints: under its glyphs, not its box.
+      this.#blurGlyphs = scratch(this.#blurGlyphs, x1 - x0, y1 - y0);
+      const glyphs = this.#blurGlyphs?.getContext("2d") as Ctx | null | undefined;
+      if (!this.#blurGlyphs || !glyphs) return;
+      resetState(glyphs);
+      glyphs.clearRect(0, 0, x1 - x0, y1 - y0);
+      glyphs.filter = `blur(${sigma}px)`;
+      glyphs.drawImage(this.#blurBackdrop, 0, 0);
+      glyphs.filter = "none";
+      glyphs.globalCompositeOperation = "destination-in";
+      glyphs.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0);
+      this.#text(glyphs, node, w, "#ffffff", scale);
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = "source-over";
+      ctx.drawImage(this.#blurGlyphs, x0, y0);
+      ctx.restore();
+      return;
+    }
     ctx.save();
     ctx.clip(shape);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -2541,11 +2729,16 @@ export class CanvasRenderer {
     const r = box ? getProp(node.props, "cornerRadius") : 0;
     const corners = box ? (getProp(node.props, "cornerRadii") ?? [r, r, r, r]) : null;
     const within = this.#clipWithin(ctx, node);
+    const reach = glassParams(glass, scale);
+    const from = this.#backdropFor(ctx, node, reach.margin + Math.ceil(3 * reach.sigma) + 2);
+    if (from === "done") return;
     this.#glass.paint(ctx, outline, w, h, glass, scale, {
+      ...(from ? { source: from } : {}),
       key,
       inradius,
       corners,
       kind: node.type === "ellipse" ? "ellipse" : "other",
+      opaque: this.#opaque.has(ctx.canvas),
       ...(within ? { within } : {}),
     });
   }

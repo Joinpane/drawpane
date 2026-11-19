@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
   applyTransaction,
+  DEFAULT_GLASS,
   getProp,
   MemoryStore,
   type NodeRecord,
@@ -9,7 +10,9 @@ import {
 } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { convertFile, drawpaneId, type Figma, mirroredId, networkPath, variantProps } from "../src";
+import { convertEffect } from "../src/effects";
 import { parseTrackList } from "../src/layout";
+import { Notes } from "../src/notes";
 
 /** Creates the nodes in a store the way the room does, parents first: throws on anything invalid. */
 function validate(nodes: readonly NodeRecord[]): MemoryStore {
@@ -787,5 +790,45 @@ describe("list spacing", () => {
     const props = byName(nodes, "Steps").props;
     expect(getProp(props, "paragraphSpacing")).toBe(16);
     expect(getProp(props, "listSpacing")).toBe(8);
+  });
+});
+
+describe("glass", () => {
+  it("takes its settings as a .fig has them, angles about 0", () => {
+    const notes = new Notes();
+    const glass: Figma.Effect = {
+      type: "GLASS",
+      radius: 6,
+      depth: 30,
+      refraction: 0.7,
+      lightAngle: 315,
+      lightIntensity: 0.4,
+      dispersion: 0.2,
+      splay: 0.2,
+    };
+    expect(convertEffect(glass, notes)).toEqual({
+      type: "glass",
+      angle: -45,
+      intensity: 40,
+      refraction: 70,
+      depth: 30,
+      dispersion: 20,
+      frost: 6,
+      splay: 20,
+    });
+    // Glass from before refraction: none set and a rim under a pixel, kept as it is.
+    expect(
+      convertEffect(
+        { type: "GLASS", radius: 80, depth: 0.67, lightAngle: 45, lightIntensity: 0.6 },
+        notes,
+      ),
+    ).toMatchObject({ angle: 45, intensity: 60, refraction: 80, depth: 0.67, frost: 80 });
+    expect(notes.entries()).toEqual([]);
+  });
+
+  it("falls back to Figma's defaults, with a note, when the API leaves its settings out", () => {
+    const notes = new Notes();
+    expect(convertEffect({ type: "GLASS" }, notes)).toEqual(DEFAULT_GLASS);
+    expect(notes.entries()).toEqual([["glass-settings", 1]]);
   });
 });

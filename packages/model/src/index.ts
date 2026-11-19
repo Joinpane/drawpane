@@ -16,6 +16,7 @@ export * from "./ops";
 export * from "./order-key";
 export * from "./protocol";
 export * from "./prototype";
+export * from "./references";
 export * from "./schema";
 export * from "./search";
 export * from "./sha256";

@@ -2,7 +2,7 @@
  * Figma's effects as Drawpane's. Shadow and blur radii mean the same in
  * both (decision 0013: twice the Gaussian's deviation), so they carry over
  * as they are. Figma's REST API returns glass without its settings, so it
- * comes in with Drawpane's defaults and a note.
+ * comes in with Drawpane's defaults and a note; a `.fig` has them all.
  */
 import { DEFAULT_GLASS, DEFAULT_NOISE, DEFAULT_TEXTURE, type Effect } from "@drawpane/model";
 import type { Notes } from "./notes";
@@ -89,9 +89,28 @@ export function convertEffect(e: Figma.Effect, notes: Notes, variables?: Lookup)
         clipToShape: e.clipToShape ?? DEFAULT_TEXTURE.clipToShape,
         ...visible,
       };
-    case "GLASS":
-      notes.add("glass-settings");
-      return { ...DEFAULT_GLASS, ...visible };
+    case "GLASS": {
+      if (e.depth === undefined && e.lightIntensity === undefined) {
+        notes.add("glass-settings");
+        return { ...DEFAULT_GLASS, ...visible };
+      }
+      const share = (v: number | undefined, fallback: number) =>
+        v === undefined ? fallback : clamp(round2(v * 100), 0, 100);
+      // Figma's angles run 0–360; Drawpane keeps them about 0 (315 is −45, the top left).
+      const angle = e.lightAngle ?? DEFAULT_GLASS.angle;
+      return {
+        type: "glass",
+        angle: round2(((((angle + 180) % 360) + 360) % 360) - 180),
+        intensity: share(e.lightIntensity, DEFAULT_GLASS.intensity),
+        // Glass from before Figma had refraction has none set, and a depth under a pixel.
+        refraction: share(e.refraction, DEFAULT_GLASS.refraction),
+        depth: clamp(round2(e.depth ?? DEFAULT_GLASS.depth), 0, 200),
+        dispersion: share(e.dispersion, DEFAULT_GLASS.dispersion),
+        frost: clamp(round2(e.radius ?? DEFAULT_GLASS.frost), 0, 100),
+        splay: share(e.splay, DEFAULT_GLASS.splay),
+        ...visible,
+      };
+    }
     default:
       return null;
   }
