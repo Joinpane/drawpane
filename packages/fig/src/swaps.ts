@@ -66,6 +66,58 @@ const LOOK = [
 
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
 
+/** Kiwi's names for the look fields a variable binds, as an override's consumption map has them. */
+const BOUND_LOOK_FIELDS: Readonly<Record<string, string>> = {
+  CORNER_RADIUS: "cornerRadius",
+  RECTANGLE_TOP_LEFT_CORNER_RADIUS: "topLeftRadius",
+  RECTANGLE_TOP_RIGHT_CORNER_RADIUS: "topRightRadius",
+  RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS: "bottomLeftRadius",
+  RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS: "bottomRightRadius",
+  STROKE_WEIGHT: "strokeWeight",
+  BORDER_TOP_WEIGHT: "borderTopWeight",
+  BORDER_RIGHT_WEIGHT: "borderRightWeight",
+  BORDER_BOTTOM_WEIGHT: "borderBottomWeight",
+  BORDER_LEFT_WEIGHT: "borderLeftWeight",
+  STACK_SPACING: "itemSpacing",
+  STACK_COUNTER_SPACING: "counterAxisSpacing",
+  STACK_PADDING_LEFT: "paddingLeft",
+  STACK_PADDING_TOP: "paddingTop",
+  STACK_PADDING_RIGHT: "paddingRight",
+  STACK_PADDING_BOTTOM: "paddingBottom",
+  OPACITY: "opacity",
+  MIN_WIDTH: "minWidth",
+  MAX_WIDTH: "maxWidth",
+  MIN_HEIGHT: "minHeight",
+  MAX_HEIGHT: "maxHeight",
+};
+/** The record fields holding the look lists, whose paints and effects carry their own bindings. */
+const LIST_FIELDS: Readonly<Record<string, string>> = {
+  fillPaints: "fills",
+  strokePaints: "strokes",
+  effects: "effects",
+};
+
+/**
+ * The look fields the instances around a layer bind or set explicitly in
+ * their overrides: the layer's own, kept through a swap (decision 0034).
+ */
+function explicitLooks(overrides: readonly Readonly<Record<string, unknown>>[]): Set<string> {
+  const out = new Set<string>();
+  for (const o of overrides) {
+    for (const map of [o.variableConsumptionMap, o.parameterConsumptionMap]) {
+      const entries = (map as { entries?: { variableField?: unknown }[] } | undefined)?.entries;
+      for (const entry of entries ?? []) {
+        const field = typeof entry.variableField === "string" ? entry.variableField : "";
+        const look = BOUND_LOOK_FIELDS[field];
+        if (look) out.add(look);
+      }
+    }
+    for (const [field, look] of Object.entries(LIST_FIELDS))
+      if (o[field] !== undefined) out.add(look);
+  }
+  return out;
+}
+
 type Bound = Readonly<Record<string, string>>;
 
 /** The variables a node binds a look field to (`fills/0/color` for a list's, the field's own name otherwise). */
@@ -83,7 +135,7 @@ function bindingsOf(bound: Bound | undefined, field: string): Record<string, str
  */
 export function applySwappedLooks(
   graph: SceneGraph,
-  ids: RestIds,
+  ids: Pick<RestIds, "sourceGuid"> & Partial<Pick<RestIds, "overridesOf">>,
   records: ReadonlyMap<string, RawRecord>,
   layers: ReadonlyMap<string, string>,
 ): number {
@@ -110,10 +162,13 @@ export function applySwappedLooks(
     // the copy's binding was (a main holding the copy may bind it to another variable, and
     // Open Pencil leaves some copies' bindings out). One whose value differs is an override:
     // its value and binding are kept.
+    // A field an override binds or sets is the instance's own, even when it matches the old
+    // component's value (two variables can agree in the mode it was saved in).
+    const explicit = explicitLooks(ids.overridesOf?.(node) ?? []);
     const bound = { ...(node.boundVariables as Bound | undefined) };
     let rebound = false;
     for (const field of LOOK) {
-      if (!same(own[field], was[field])) continue;
+      if (explicit.has(field) || !same(own[field], was[field])) continue;
       const ownBinds = bindingsOf(node.boundVariables as Bound, field);
       if (!same(own[field], next[field])) updates[field] = structuredClone(next[field]);
       const nextBinds = bindingsOf(newMain.boundVariables as Bound, field);

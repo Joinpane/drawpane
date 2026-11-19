@@ -105,7 +105,7 @@ export function bindingVariable(ref: unknown): string | undefined {
 /** The unit a binding reads its value in, or undefined: as before decision 0034. */
 export function bindingUnit(ref: unknown): BindingUnit | undefined {
   const unit = (ref as { unit?: unknown } | null)?.unit;
-  return unit === "percent" || unit === "text" ? unit : undefined;
+  return unit === "percent" || unit === "text" || unit === "bounded" ? unit : undefined;
 }
 
 /** A binding of `key` to `variableId` as new code writes it: with its unit where 0034 has one. */
@@ -337,19 +337,81 @@ const SIDE_KEYS = [
 ];
 
 /** Paints or effects with the fields they bind blanked: what's their own, whatever variables give. */
-function unboundList(list: unknown): unknown {
+/** Reads a file's nodes by id: where variables are looked up. */
+export type NodeLookup = (id: string) => NodeRecord | undefined;
+
+const fitsType = (type: VariableType, value: unknown) =>
+  type === "color"
+    ? typeof value === "string" && HEX.test(value)
+    : type === "number"
+      ? typeof value === "number" && Number.isFinite(value)
+      : typeof value === (type === "boolean" ? "boolean" : "string");
+
+/**
+ * Whether a variable gives a value of `type` wherever it's read: in every
+ * mode, through every alias, as `TokenResolver.value` follows it (the first
+ * variable's type is the value's). Where it can't be followed, a layer bound
+ * to it shows its saved value, so that value is the layer's own.
+ */
+export function variableFollowed(
+  variableId: string,
+  type: VariableType | "any",
+  get: NodeLookup,
+): boolean {
+  const path = new Set<string>();
+  const visit = (id: string, as: VariableType | undefined): boolean => {
+    if (path.size >= MAX_ALIAS_DEPTH || path.has(id)) return false;
+    const variable = get(id);
+    if (variable?.type !== "variable") return false;
+    const own = as ?? getProp(variable.props, "variableType");
+    if (type !== "any" && own !== type) return false;
+    const values = Object.values(getProp(variable.props, "values"));
+    if (values.length === 0) return false;
+    path.add(id);
+    const ok = values.every((value) =>
+      typeof value === "object" && value !== null
+        ? visit((value as { alias: string }).alias, own)
+        : fitsType(own, value),
+    );
+    path.delete(id);
+    return ok;
+  };
+  return visit(variableId, undefined);
+}
+
+/** Whether a layer's binding of `key` gives its value wherever it's read (`variableFollowed`). */
+export function bindingFollowed(key: BindingKey, ref: unknown, get: NodeLookup): boolean {
+  const id = bindingVariable(ref);
+  const field = BINDING_FIELDS[key];
+  if (!id || !field) return false;
+  const type = key === "characters" && bindingUnit(ref) === "text" ? "any" : field.type;
+  return variableFollowed(id, type, get);
+}
+
+/** A paint or effect list with the fields its followed binds give taken out. */
+function unboundList(list: unknown, get: NodeLookup): unknown {
   if (!Array.isArray(list)) return list;
+  const gives = (field: string, id: unknown) =>
+    typeof id === "string" && variableFollowed(id, field === "color" ? "color" : "number", get);
   return list.map((item: Record<string, unknown>) => {
     const out: Record<string, unknown> = { ...item };
     const bind = item?.bind as Record<string, string> | undefined;
-    if (bind) for (const field of Object.keys(bind)) out[field] = null;
+    if (bind)
+      for (const [field, id] of Object.entries(bind)) if (gives(field, id)) out[field] = null;
     if (Array.isArray(item?.stops))
       out.stops = (item.stops as Array<Record<string, unknown>>).map((stop) =>
-        stop?.bind ? { ...stop, color: null } : stop,
+        (stop?.bind as { color?: unknown } | undefined)?.color !== undefined &&
+        gives("color", (stop.bind as { color?: unknown }).color)
+          ? { ...stop, color: null }
+          : stop,
       );
     return out;
   });
 }
+
+/** The part of a bound value its binding doesn't give, the layer's own: a letter spacing's unit. */
+const ownPart = (prop: string, value: unknown): unknown =>
+  prop === "letterSpacing" ? (value as { unit?: unknown } | null)?.unit : undefined;
 
 /**
  * Whether two values of a property differ only where both bind the same
@@ -357,6 +419,11 @@ function unboundList(list: unknown): unknown {
  * resolved in its own modes. A copy that differs from its main only so
  * isn't overriding it: it shows what its variables give where it is.
  * `a` and `b` are the bindings of the nodes holding each.
+ *
+ * A value, its binding and its fallback are one: the bindings must be the
+ * same (their units too), each must give a value wherever it's read (where
+ * it can't, the saved value shows and is the layer's own), and the part of
+ * the value no binding gives (a letter spacing's unit) must agree.
  */
 export function boundAlike(
   prop: string,
@@ -364,29 +431,38 @@ export function boundAlike(
   b: unknown,
   aBindings: BindingMap,
   bBindings: BindingMap,
+  get: NodeLookup,
 ): boolean {
   if (a === undefined || b === undefined) return false;
   if (prop === "fills" || prop === "strokes" || prop === "effects")
-    return JSON.stringify(unboundList(a)) === JSON.stringify(unboundList(b));
-  const same = (key: string) =>
-    !!aBindings?.[key] && JSON.stringify(aBindings[key]) === JSON.stringify(bBindings?.[key]);
+    return JSON.stringify(unboundList(a, get)) === JSON.stringify(unboundList(b, get));
+  const same = (key: string) => {
+    const ref = aBindings?.[key];
+    return (
+      !!ref &&
+      JSON.stringify(ref) === JSON.stringify(bBindings?.[key]) &&
+      bindingFollowed(key as BindingKey, ref, get)
+    );
+  };
   if (prop === "cornerRadii" || prop === "strokeWeights") {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
     const keys = prop === "cornerRadii" ? CORNER_KEYS : SIDE_KEYS;
     return a.every((v, i) => v === b[i] || same(keys[i] as string));
   }
-  return (BINDING_FIELDS_BY_PROP.get(prop) ?? []).some(same);
+  if (!(BINDING_FIELDS_BY_PROP.get(prop) ?? []).some(same)) return false;
+  return JSON.stringify(ownPart(prop, a)) === JSON.stringify(ownPart(prop, b));
 }
 
 /** `boundAlike` for two nodes' values: a comparison a copy's own values are worked out with. */
 export function alikeWhereBound(
   own: Readonly<Record<string, unknown>>,
   base: Readonly<Record<string, unknown>>,
+  get: NodeLookup,
 ): (prop: string, a: unknown, b: unknown) => boolean {
   const ownBindings = own.bindings as BindingMap;
   const baseBindings = base.bindings as BindingMap;
   if (!usesTokens(own as Props) && !usesTokens(base as Props)) return () => false;
-  return (prop, a, b) => boundAlike(prop, a, b, ownBindings, baseBindings);
+  return (prop, a, b) => boundAlike(prop, a, b, ownBindings, baseBindings, get);
 }
 
 // ---------------------------------------------------------------------------
@@ -665,14 +741,15 @@ export class TokenResolver {
         const resolved = this.value(variableId, node);
         if (resolved) this.#apply(key, resolved.value, p, out, bindingUnit(ref));
       }
-    // A bound size is kept within the layer's min and max (bound or not), as Figma keeps it.
-    // An unbound size is the layout's: it's laid out again when what it reads changes.
+    // A size bound `bounded` is kept within the layer's min and max (bound or not), as Figma
+    // keeps it. One bound before 0034 (no unit) is the variable's value as it is, as it was
+    // then. An unbound size is the layout's: it's laid out again when what it reads changes.
     for (const [size, min, max] of [
       ["width", "minWidth", "maxWidth"],
       ["height", "minHeight", "maxHeight"],
     ] as const) {
       const value = out[size] as number | undefined;
-      if (value === undefined) continue;
+      if (value === undefined || bindingUnit(bindings?.[size]) !== "bounded") continue;
       const lo = (out[min] as number | null | undefined) ?? getProp(p, min);
       const hi = (out[max] as number | null | undefined) ?? getProp(p, max);
       let clamped = value;

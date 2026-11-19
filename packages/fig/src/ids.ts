@@ -61,19 +61,16 @@ export class RestIds {
   }
 
   /**
-   * A field as Figma saved it for a layer: from the outermost instance
-   * override that names the layer, else from the record it is or copies.
-   * Open Pencil keeps some fields only in its own units (letter spacing in
-   * pixels), so what Figma meant is read here.
+   * The instance overrides that name a layer, outermost first: what the
+   * instances around it saved for it over the record it copies. None for a
+   * layer that is a record.
    */
-  savedField(node: SceneNode, field: string): unknown {
+  overridesOf(node: SceneNode): Readonly<Record<string, unknown>>[] {
     const records = this.#saved?.records;
-    if (!records) return undefined;
+    if (!records || this.#record.has(node.id)) return [];
     const guid = this.sourceGuid(node);
     const own = guid ? records.get(guid) : undefined;
-    if (!own) return undefined;
-    const read = (fields: object) => (fields as Record<string, unknown>)[field];
-    if (this.#record.has(node.id)) return read(own);
+    if (!own) return [];
     // The instances around the layer, outermost first, and the record it copies last.
     const chain: RawRecord[] = [own];
     for (let at = this.#instanceAbove(node); at; at = this.#instanceAbove(at)) {
@@ -82,15 +79,26 @@ export class RestIds {
       if (!record) break;
       chain.unshift(record);
     }
+    const out: Readonly<Record<string, unknown>>[] = [];
     for (let i = 0; i < chain.length - 1; i++) {
       const below = chain.slice(i + 1);
-      for (const o of (chain[i] as RawRecord).symbolData?.symbolOverrides ?? []) {
-        if (!pathNames(o.guidPath?.guids, below)) continue;
-        const value = read(o);
-        if (value !== undefined) return value;
-      }
+      for (const o of (chain[i] as RawRecord).symbolData?.symbolOverrides ?? [])
+        if (pathNames(o.guidPath?.guids, below)) out.push(o as Readonly<Record<string, unknown>>);
     }
-    return read(own);
+    return out;
+  }
+
+  /**
+   * A field as Figma saved it for a layer: from the outermost instance
+   * override that names the layer, else from the record it is or copies.
+   * Open Pencil keeps some fields only in its own units (letter spacing in
+   * pixels), so what Figma meant is read here.
+   */
+  savedField(node: SceneNode, field: string): unknown {
+    for (const o of this.overridesOf(node)) if (o[field] !== undefined) return o[field];
+    const guid = this.sourceGuid(node);
+    const own = guid ? this.#saved?.records.get(guid) : undefined;
+    return own ? (own as unknown as Record<string, unknown>)[field] : undefined;
   }
 
   /** The graph id of the layer `node` copies, when it's inside an instance. */

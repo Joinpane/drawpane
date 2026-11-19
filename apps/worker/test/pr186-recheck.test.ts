@@ -1,9 +1,10 @@
 // biome-ignore-all lint/style/noNonNullAssertion: Complete fixtures and asserted records in review reproductions.
 import { env, runInDurableObject } from "cloudflare:test";
 import { Doc } from "@drawpane/editor";
-import { type NodeRecord, ROOT_ID, snapshotHeaderLine } from "@drawpane/model";
+import { copyId, type NodeRecord, ROOT_ID, snapshotHeaderLine } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { agentDeps, callReadTool } from "../src/agent/call";
+import type { FileRoom } from "../src/rooms/file-room";
 import { snapshotKey } from "../src/rooms/snapshots";
 import { openSocket, signedInUser } from "./helpers";
 
@@ -57,6 +58,89 @@ const gzip = (text: string) => new Response(text).body!.pipeThrough(new Compress
 // conversion and none happens. Tabs from before 0034 still can't write: an old tab would strip
 // the bindings it doesn't know from what it rewrites (B1).
 describe("PR 186 data preservation", { timeout: 60_000 }, () => {
+  it("preserves a saved tracking unit when a materialized file is copied to compact storage", async () => {
+    const source = await file();
+    const target = await file();
+    source.socket.ws.close();
+    target.socket.ws.close();
+    await runInDurableObject(source.room, (room: FileRoom) => {
+      room.compactCopiesOff = true;
+    });
+    const nodes = [
+      ...legacy(),
+      n("Track", "variable", "C", { variableType: "number", values: { m: 5 } }),
+      n("Main", "frame", "P", { isComponent: true }),
+      n("Label", "text", "Main", {
+        characters: "Label",
+        letterSpacing: { unit: "px", value: 5 },
+        bindings: { letterSpacing: "Track" },
+      }),
+      n("Instance", "frame", "P", { instanceOf: "Main" }),
+      n("InstanceLabel", "text", "Instance", {
+        mirrors: "Label",
+        characters: "Label",
+        letterSpacing: { unit: "percent", value: 5 },
+        bindings: { letterSpacing: "Track" },
+      }),
+    ];
+    const snapshot =
+      snapshotHeaderLine(source.fileId, 1, 0, "materialized") +
+      nodes.map((node) => JSON.stringify(node)).join("\n") +
+      "\n";
+    expect((await source.room.importSnapshot(source.by, source.fileId, gzip(snapshot))).ok).toBe(
+      true,
+    );
+    expect((await source.room.copiesFormat()).copies).toBe("materialized");
+    const want = { unit: "percent", value: 5 };
+    const original = doc(await source.room.allNodes());
+    expect(original.get("InstanceLabel")?.props.letterSpacing).toEqual(want);
+
+    const copied = await target.room.importSnapshot(
+      target.by,
+      target.fileId,
+      await source.room.exportSnapshot(),
+    );
+    expect(copied.ok).toBe(true);
+    expect((await target.room.copiesFormat()).copies).toBe("compact");
+    const compact = doc(await target.room.allNodes(), "compact");
+    const children = compact.childIds("Instance");
+    const id = copyId("Instance", ["Label"]);
+    expect(children).toContain(id);
+    expect(compact.get(id)?.props.letterSpacing).toEqual(want);
+  });
+
+  it("does not let a pre-0034 attachment replace a tagged binding with a bare id", async () => {
+    const f = await file();
+    const nodes = legacy();
+    const layer = nodes.find((node) => node.id === "R")!;
+    nodes[nodes.indexOf(layer)] = {
+      ...layer,
+      props: { opacity: 0.005, bindings: { opacity: { variable: "V", unit: "percent" } } },
+    };
+    await f.room.storeNodes(nodes);
+    await runInDurableObject(f.room, (_room, state) => {
+      const ws = state
+        .getWebSockets()
+        .find((ws) => ws.deserializeAttachment()?.clientId === "existing")!;
+      const old = ws.deserializeAttachment();
+      delete old.protocol;
+      ws.serializeAttachment(old);
+    });
+    f.socket.send({
+      t: "txn",
+      seq: 1,
+      ops: [{ op: "set", id: "R", prop: "bindings", value: { opacity: "V" } }],
+    });
+    const reject = await f.socket.next("reject");
+    expect(reject).toMatchObject({ seq: 1, code: "format" });
+    const stored = await f.room.allNodes();
+    expect(stored.find((node) => node.id === "R")?.props.bindings).toEqual({
+      opacity: { variable: "V", unit: "percent" },
+    });
+    expect(doc(stored).get("R")?.props.opacity).toBe(0.005);
+    f.socket.ws.close();
+  });
+
   it("B1: a hibernated main-era socket, its attachment saying no protocol, can't write", async () => {
     const f = await file();
     await f.room.storeNodes(legacy());

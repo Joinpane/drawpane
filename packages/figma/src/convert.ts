@@ -624,7 +624,10 @@ function markOverrides(
       // Differing only where both bind the same variables: no override (it shows what they give
       // where it is). The copy keeps the value Figma saved for it, what shows when they can't be
       // followed and what a reader without the resolver sees (decision 0034).
-      if (boundAlike(k, a, b, la, (against.props as Props).bindings as Bindings)) continue;
+      if (
+        boundAlike(k, a, b, la, (against.props as Props).bindings as Bindings, (id) => byId.get(id))
+      )
+        continue;
       changed.push(k);
     }
     // A nested instance swapped for another component overrides which one it is.

@@ -723,16 +723,20 @@ export type BindingKey = (typeof BINDING_KEYS)[number];
 /**
  * How a binding's variable value maps onto its property (decision 0034),
  * where 0034 reads it differently from before: `percent` (opacity, as
- * Figma's: 50 is 50%) and `text` (characters bound to a number or a boolean,
- * shown as Figma writes them). New code always writes the unit for those
- * keys; a binding without one is read as it was before 0034, so nothing
- * stored then ever changes meaning.
+ * Figma's: 50 is 50%), `text` (characters bound to a number or a boolean,
+ * shown as Figma writes them) and `bounded` (a width or height kept within
+ * the layer's min and max, as Figma keeps it). New code always writes the
+ * unit for those keys; a binding without one is read as it was before 0034
+ * (a bound width is the variable's value as it is), so nothing stored then
+ * ever changes meaning.
  */
-export const BINDING_UNITS: Readonly<Partial<Record<BindingKey, "percent" | "text">>> = {
+export const BINDING_UNITS: Readonly<Partial<Record<BindingKey, BindingUnit>>> = {
   opacity: "percent",
   characters: "text",
+  width: "bounded",
+  height: "bounded",
 };
-export type BindingUnit = "percent" | "text";
+export type BindingUnit = "percent" | "text" | "bounded";
 
 /**
  * A binding: a variable's id (read as before 0034), or the variable with the
@@ -740,7 +744,10 @@ export type BindingUnit = "percent" | "text";
  */
 export const BindingRef = z.union([
   z.string().regex(ID_PATTERN),
-  z.object({ variable: z.string().regex(ID_PATTERN), unit: z.enum(["percent", "text"]) }),
+  z.object({
+    variable: z.string().regex(ID_PATTERN),
+    unit: z.enum(["percent", "text", "bounded"]),
+  }),
 ]);
 export type BindingRef = z.infer<typeof BindingRef>;
 

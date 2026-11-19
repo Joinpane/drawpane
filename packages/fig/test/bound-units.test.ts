@@ -18,8 +18,16 @@
  * Made by adding records to a committed sample (`pattern.fig`).
  */
 import { readFileSync } from "node:fs";
+import { pinInstances } from "@drawpane/editor";
 import { convertFile, drawpaneId, type Figma } from "@drawpane/figma";
-import { getProp, MemoryStore, type NodeRecord, TokenResolver } from "@drawpane/model";
+import {
+  CopyView,
+  compactByInstance,
+  getProp,
+  MemoryStore,
+  type NodeRecord,
+  TokenResolver,
+} from "@drawpane/model";
 import { parseFigBuffer, patchFigArchive } from "@open-pencil/fig";
 import type { NodeChange } from "@open-pencil/kiwi/fig/codec";
 import { describe, expect, it } from "vitest";
@@ -47,6 +55,14 @@ const ids = {
   main: guid(30),
   label: guid(31),
   copy: guid(32),
+  oldOpacity: guid(40),
+  newOpacity: guid(41),
+  overrideOpacity: guid(42),
+  oldVariant: guid(43),
+  newVariant: guid(44),
+  host: guid(45),
+  nested: guid(46),
+  swapped: guid(47),
 };
 
 const binding = (field: string, variable: Guid) => ({
@@ -66,7 +82,7 @@ const corners = (variable: Guid) => ({
   ].map((field) => binding(field, variable)),
 });
 
-function fixture() {
+function fixture(swap = true) {
   const parsed = parseFigBuffer(bytes.slice().buffer as ArrayBuffer);
   const records = parsed.nodeChanges;
   const set = records.find((r) => r.type === "VARIABLE_SET") as NodeChange & {
@@ -85,11 +101,26 @@ function fixture() {
     variableSetID: { guid: set.guid },
     variableResolvedType: "FLOAT",
     variableDataValues: {
-      entries: modes.map((modeID) => ({
+      entries: modes.map((modeID, index) => ({
         modeID,
-        variableData: { value: { floatValue: value }, dataType: "FLOAT" },
+        variableData: {
+          value: { floatValue: id === ids.overrideOpacity && index > 0 ? 25 : value },
+          dataType: "FLOAT",
+        },
       })),
     },
+  });
+  const symbol = (id: Guid, name: string, opacity: number, bound?: Guid) => ({
+    ...base,
+    guid: id,
+    parentIndex: { guid: page, position: `~${name}` },
+    type: "SYMBOL",
+    name,
+    opacity,
+    size: { x: 40, y: 40 },
+    transform: identity(0, 4700),
+    fillPaints: [],
+    ...(bound ? { variableConsumptionMap: { entries: [binding("OPACITY", bound)] } } : {}),
   });
   const box = (id: Guid, name: string, x: number, independent: boolean) => ({
     ...base,
@@ -231,6 +262,44 @@ function fixture() {
         ],
       },
     },
+    number(ids.oldOpacity, "Original opacity", 50, "~Old"),
+    number(ids.newOpacity, "New opacity", 80, "~New"),
+    number(ids.overrideOpacity, "Override opacity", 50, "~Override"),
+    symbol(ids.oldVariant, "Original", 0.5, ids.oldOpacity),
+    symbol(ids.newVariant, "Replacement", 0.8, ids.newOpacity),
+    symbol(ids.host, "Host", 1),
+    {
+      ...base,
+      guid: ids.nested,
+      parentIndex: { guid: ids.host, position: "!" },
+      type: "INSTANCE",
+      name: "Nested",
+      opacity: 0.5,
+      size: { x: 40, y: 40 },
+      transform: identity(),
+      symbolData: { symbolID: ids.oldVariant, symbolOverrides: [] },
+      variableConsumptionMap: { entries: [binding("OPACITY", ids.oldOpacity)] },
+    },
+    {
+      ...base,
+      guid: ids.swapped,
+      parentIndex: { guid: page, position: "~Swapped" },
+      type: "INSTANCE",
+      name: "Host with explicit opacity override",
+      size: { x: 40, y: 40 },
+      transform: identity(100, 4700),
+      symbolData: {
+        symbolID: ids.host,
+        symbolOverrides: [
+          {
+            guidPath: { guids: [ids.nested] },
+            ...(swap ? { overriddenSymbolID: ids.newVariant } : {}),
+            opacity: 0.5,
+            variableConsumptionMap: { entries: [binding("OPACITY", ids.overrideOpacity)] },
+          },
+        ],
+      },
+    },
   ] as unknown as NodeChange[];
   return patchFigArchive(
     bytes.slice().buffer as ArrayBuffer,
@@ -243,8 +312,8 @@ function fixture() {
   );
 }
 
-async function converted() {
-  const fig = await readFig(fixture());
+async function converted(swap = true) {
+  const fig = await readFig(fixture(swap));
   const { nodes } = convertFile(fig.file as Figma.File);
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const resolver = new TokenResolver(new MemoryStore(nodes));
@@ -303,6 +372,35 @@ describe("bound fields read through the layer", { timeout: 60_000 }, () => {
       unit: "percent",
       value: 5,
     });
+  });
+
+  it("preserves the instance's tracking unit when the dashboard pins and compacts the import", async () => {
+    const fig = await readFig(fixture());
+    const { nodes } = convertFile(fig.file as Figma.File);
+    const instanceLabelId = drawpaneId(`I${key(ids.copy)};${key(ids.label)}`);
+    const before = nodes.find((node) => node.id === instanceLabelId);
+    expect(before?.props.letterSpacing).toEqual({ unit: "percent", value: 5 });
+
+    const compact = compactByInstance(pinInstances(nodes).nodes);
+    expect(compact.detached.size).toBe(0);
+    const view = new CopyView(new MemoryStore(compact.nodes));
+    const copy = view.get(compact.ids.get(instanceLabelId) ?? instanceLabelId);
+    if (!copy) throw new Error("The instance label is missing after compaction");
+    const resolved = new TokenResolver(view).resolve(copy);
+    expect(resolved.props.letterSpacing).toEqual({ unit: "percent", value: 5 });
+  });
+
+  it("retains an explicit variable override on a swapped instance with the original opacity", async () => {
+    const wanted = {
+      variable: drawpaneId(`VariableID:${key(ids.overrideOpacity)}`),
+      unit: "percent",
+    };
+    const unswapped = await converted(false);
+    expect(unswapped.copyOf(ids.swapped, ids.nested).props.bindings?.opacity).toEqual(wanted);
+    const { copyOf } = await converted();
+    const nested = copyOf(ids.swapped, ids.nested);
+    expect(nested.props.instanceOf).toBe(drawpaneId(key(ids.newVariant)));
+    expect(nested.props.bindings?.opacity).toEqual(wanted);
   });
 
   it("an unbound letter spacing a style gives stays as Open Pencil reads it", async () => {

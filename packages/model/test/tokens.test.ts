@@ -206,16 +206,29 @@ describe("text style bindings (F13)", () => {
 });
 
 describe("values alike where bound", () => {
+  const vars = new Map<string, NodeRecord>([
+    ["v", node("v", "variable", "c", { variableType: "color", values: { m: "#ff0000" } })],
+    ["w", node("w", "variable", "c", { variableType: "color", values: { m: "#00ff00" } })],
+    ["n", node("n", "variable", "c", { variableType: "number", values: { m: 4 } })],
+    ["m", node("m", "variable", "c", { variableType: "number", values: { m: 8 } })],
+    [
+      "broken",
+      node("broken", "variable", "c", { variableType: "number", values: { m: { alias: "gone" } } }),
+    ],
+  ]);
+  const get = (id: string) => vars.get(id);
   it("differ only in the fields both bind to the same variables", () => {
     const a = [{ type: "solid", color: "#000000", bind: { color: "v" } }];
     const b = [{ type: "solid", color: "#ffffff", bind: { color: "v" } }];
-    expect(boundAlike("fills", a, b, undefined, undefined)).toBe(true);
-    expect(boundAlike("fills", a, [{ ...b[0], bind: { color: "w" } }], undefined, undefined)).toBe(
+    expect(boundAlike("fills", a, b, undefined, undefined, get)).toBe(true);
+    expect(
+      boundAlike("fills", a, [{ ...b[0], bind: { color: "w" } }], undefined, undefined, get),
+    ).toBe(false);
+    expect(boundAlike("fills", a, [{ ...b[0], opacity: 0.5 }], undefined, undefined, get)).toBe(
       false,
     );
-    expect(boundAlike("fills", a, [{ ...b[0], opacity: 0.5 }], undefined, undefined)).toBe(false);
-    expect(boundAlike("width", 20, 40, { width: "n" }, { width: "n" })).toBe(true);
-    expect(boundAlike("width", 20, 40, { width: "n" }, { width: "m" })).toBe(false);
+    expect(boundAlike("width", 20, 40, { width: "n" }, { width: "n" }, get)).toBe(true);
+    expect(boundAlike("width", 20, 40, { width: "n" }, { width: "m" }, get)).toBe(false);
     expect(
       boundAlike(
         "cornerRadii",
@@ -223,6 +236,53 @@ describe("values alike where bound", () => {
         [9, 2, 3, 4],
         { topLeftRadius: "n" },
         { topLeftRadius: "n" },
+        get,
+      ),
+    ).toBe(true);
+  });
+
+  // A value, its binding and its fallback are one (review 3, R1 and R3).
+  it("aren't alike where a binding can't be followed: the saved value shows there", () => {
+    expect(boundAlike("opacity", 0.25, 0.5, { opacity: "gone" }, { opacity: "gone" }, get)).toBe(
+      false,
+    );
+    expect(
+      boundAlike("opacity", 0.25, 0.5, { opacity: "broken" }, { opacity: "broken" }, get),
+    ).toBe(false);
+    const paint = (color: string, id: string) => [{ type: "solid", color, bind: { color: id } }];
+    expect(
+      boundAlike("fills", paint("#000000", "gone"), paint("#ffffff", "gone"), {}, {}, get),
+    ).toBe(false);
+    // A legacy characters binding takes only text; a number shows the saved characters.
+    expect(boundAlike("characters", "a", "b", { characters: "n" }, { characters: "n" }, get)).toBe(
+      false,
+    );
+    expect(
+      boundAlike(
+        "characters",
+        "a",
+        "b",
+        { characters: { variable: "n", unit: "text" } },
+        { characters: { variable: "n", unit: "text" } },
+        get,
+      ),
+    ).toBe(true);
+  });
+
+  it("aren't alike where the part no binding gives differs: a letter spacing's unit", () => {
+    const pct = { unit: "percent", value: 5 };
+    const px = { unit: "px", value: 5 };
+    expect(
+      boundAlike("letterSpacing", pct, px, { letterSpacing: "n" }, { letterSpacing: "n" }, get),
+    ).toBe(false);
+    expect(
+      boundAlike(
+        "letterSpacing",
+        pct,
+        { unit: "percent", value: 8 },
+        { letterSpacing: "n" },
+        { letterSpacing: "n" },
+        get,
       ),
     ).toBe(true);
   });
@@ -261,7 +321,8 @@ describe("bindings say how their value maps onto the property (decision 0034)", 
 });
 
 describe("bound sizes keep within their bounds", () => {
-  it("a bound width or height is clamped by the layer's min and max, as Figma does", () => {
+  it("a width or height bound `bounded` is clamped by the layer's min and max, as Figma does", () => {
+    const bounded = { variable: "big", unit: "bounded" };
     const store = file([
       node("big", "variable", "c", { variableType: "number", values: { light: 40, dark: 40 } }),
       node("lo", "variable", "c", { variableType: "number", values: { light: 50, dark: 50 } }),
@@ -270,12 +331,21 @@ describe("bound sizes keep within their bounds", () => {
         height: 32,
         maxHeight: 32,
         minHeight: 32,
-        bindings: { height: "big", width: "big", minWidth: "lo" },
+        bindings: { height: bounded, width: bounded, minWidth: "lo" },
       } as never),
     ]);
     const p = new TokenResolver(store).resolve(store.get("r") as NodeRecord).props;
     expect(p.height).toBe(32);
     expect(p.width).toBe(50);
+  });
+
+  // Review 3, R4: before 0034 a bound width was the variable's value, whatever the max.
+  it("a size bound before 0034 (no unit) is the variable's value, as it was then", () => {
+    const store = file([
+      node("big", "variable", "c", { variableType: "number", values: { light: 40, dark: 40 } }),
+      node("r", "rect", "p", { width: 40, maxWidth: 32, bindings: { width: "big" } } as never),
+    ]);
+    expect(new TokenResolver(store).resolve(store.get("r") as NodeRecord).props.width).toBe(40);
   });
 
   it("an unbound size is left to the layout, whatever its bound min or max gives", () => {

@@ -1588,7 +1588,8 @@ export class Editor {
     const ids = new Map<string, string>();
     const ops: Op[] = [];
     const visit = (nodeId: string, parentId: string, nodeKey: string, isRoot: boolean) => {
-      const node = this.doc.get(nodeId);
+      // As stored: a value, its binding and its fallback go together (decision 0034).
+      const node = this.doc.getUnresolved(nodeId);
       if (!node) return;
       const copyId = newId();
       ids.set(nodeId, copyId);
@@ -3474,7 +3475,12 @@ export class Editor {
   // -------------------------------------------------------------------------
   // Clipboard
 
-  /** Serializes the selection for the clipboard. */
+  /**
+   * Serializes the selection for the clipboard: layers as stored, so a
+   * value, its binding and the fallback a binding can't be followed without
+   * travel together (decision 0034). What a resolver made of them isn't
+   * saved as the pasted layers' own.
+   */
   copy(): string | null {
     const ids = this.#ordered(this.#topmost(this.s.selection));
     if (ids.length === 0) return null;
@@ -3483,17 +3489,18 @@ export class Editor {
       const stack = [id];
       while (stack.length > 0) {
         const current = stack.shift() as string;
-        const node = this.doc.get(current);
+        const node = this.doc.getUnresolved(current);
         if (!node) continue;
         if (current === id) {
-          // Store roots in page coordinates so they paste in place anywhere.
+          // Store roots in page coordinates so they paste in place anywhere (placed as drawn).
           const world = this.scene.bounds(current);
+          const drawn = this.doc.get(current) ?? node;
           nodes.push({
             ...node,
             parent: "",
             props: {
               ...node.props,
-              ...(node.type !== "group" && world ? this.#pageGeometry(node) : {}),
+              ...(node.type !== "group" && world ? this.#pageGeometry(drawn) : {}),
             },
           });
         } else {
@@ -3678,7 +3685,8 @@ export class Editor {
 
   /** Remembers the first selected layer's style (⌥⌘C). */
   copyProperties(): boolean {
-    const node = this.doc.get(this.s.selection[0] ?? "");
+    // As stored: a value, its binding and its fallback go together (decision 0034).
+    const node = this.doc.getUnresolved(this.s.selection[0] ?? "");
     if (!node || node.type === "page" || node.type === "group") return false;
     const props: Record<string, unknown> = {};
     for (const prop of Editor.STYLE_PROPS) {
@@ -3698,7 +3706,7 @@ export class Editor {
     if (!copied) return false;
     const ops: Op[] = [];
     for (const id of this.s.selection) {
-      const node = this.doc.get(id);
+      const node = this.doc.getUnresolved(id);
       if (!node || node.type === "page" || node.type === "group") continue;
       for (const [prop, value] of Object.entries(copied.props) as Array<[PropName, unknown]>) {
         if (!propAllowed(node.type, prop)) continue;

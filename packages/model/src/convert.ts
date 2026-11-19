@@ -34,7 +34,7 @@ import type { NodeRecord } from "./ops";
 import { compareSiblings } from "./order-key";
 import { getProp, type Props } from "./schema";
 import { MemoryStore } from "./store";
-import { alikeWhereBound, bindingVariable } from "./tokens";
+import { alikeWhereBound, bindingVariable, type NodeLookup } from "./tokens";
 
 /** How copies are stored in a file: every copy layer, or the compact form (decision 0029). */
 export type CopiesFormat = "materialized" | "compact";
@@ -408,6 +408,8 @@ export class InstanceConverter {
   readonly #doing = new Set<string>();
   readonly #prepared = new Set<string>();
   readonly #max: number;
+  /** Where variables are read, to tell which bindings give a layer's value (`boundAlike`). */
+  readonly #lookup: NodeLookup = (id) => this.#reader.get(id);
   readonly #maxBuilt: number;
   readonly #maxBytes: number;
   readonly #layerBytes: number;
@@ -611,7 +613,12 @@ export class InstanceConverter {
     const base = view.base(root.id);
     if (!base) return "its main isn't a component";
     const putRoot = (props: Readonly<Props>) => {
-      const own = ownValues(base.props, props, true, alikeWhereBound(props, base.props));
+      const own = ownValues(
+        base.props,
+        props,
+        true,
+        alikeWhereBound(props, base.props, this.#lookup),
+      );
       overlay.put({ ...root, props: (own ?? {}) as Props });
       view.forget([root.id], [root.id]);
     };
@@ -695,7 +702,7 @@ export class InstanceConverter {
           slotBase.props,
           node.props,
           false,
-          alikeWhereBound(node.props, slotBase.props),
+          alikeWhereBound(node.props, slotBase.props, this.#lookup),
         );
         if (own) {
           const swapped = node.type === "frame" && swaps(own);
@@ -706,7 +713,12 @@ export class InstanceConverter {
             write(
               slotId,
               slot.path,
-              ownValues(swappedBase, node.props, false, alikeWhereBound(node.props, swappedBase)),
+              ownValues(
+                swappedBase,
+                node.props,
+                false,
+                alikeWhereBound(node.props, swappedBase, this.#lookup),
+              ),
               true,
             );
           }
@@ -737,7 +749,12 @@ export class InstanceConverter {
       write(
         slot.id,
         slot.path,
-        ownValues(slotBase.props, props, false, alikeWhereBound(props, slotBase.props)),
+        ownValues(
+          slotBase.props,
+          props,
+          false,
+          alikeWhereBound(props, slotBase.props, this.#lookup),
+        ),
         false,
       );
     }
@@ -746,7 +763,7 @@ export class InstanceConverter {
     view.forget([root.id], [root.id]);
     const presentedRoot = view.get(root.id);
     if (!presentedRoot) return "it can't be built";
-    const differs = differences(held(root), presentedRoot.props, true);
+    const differs = differences(held(root), presentedRoot.props, this.#lookup);
     if (differs) return `the instance's ${differs}`;
     let count = 0;
     const stack = [...view.childIds(root.id)];
@@ -765,7 +782,7 @@ export class InstanceConverter {
         return `${node.id} isn't where it was`;
       const want: Record<string, unknown> = { ...held(node) };
       if (typeof want.mirrors === "string") want.mirrors = rename(want.mirrors) ?? want.mirrors;
-      const off = differences(want as Props, built.props, true);
+      const off = differences(want as Props, built.props, this.#lookup);
       if (off) return `layer ${node.id}'s ${off}`;
     }
     return null;
@@ -776,12 +793,15 @@ export class InstanceConverter {
 function differences(
   want: Readonly<Props>,
   have: Readonly<Props>,
-  /** Values differing only where both bind the same variables are alike (`alikeWhereBound`). */
-  bound = false,
+  /**
+   * Where variables are read: values differing only where both bind the same
+   * variables are alike (`alikeWhereBound`). Without it, values must be equal.
+   */
+  lookup?: NodeLookup,
 ): string | null {
   const a = want as Record<string, unknown>;
   const b = have as Record<string, unknown>;
-  const alike = bound ? alikeWhereBound(a, b) : null;
+  const alike = lookup ? alikeWhereBound(a, b, lookup) : null;
   const pinned = new Set((a.overrides as readonly string[] | undefined) ?? []);
   for (const prop of new Set([...Object.keys(a), ...Object.keys(b)]))
     if (
