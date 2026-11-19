@@ -26,6 +26,7 @@ import {
   type RawTrackSizing,
 } from "./raw";
 import { styleFromRecord } from "./style-records";
+import { STYLE_LETTER_SPACING } from "./styles";
 import { textFields } from "./text";
 import {
   type AliasOf,
@@ -450,7 +451,10 @@ export function adaptNode(
       node,
       textFields(n, raw, notes, {
         resolve: (id) => ctx.graph.resolveNumberVariableForNode(n.id, id),
-        saved: (field) => ctx.ids.savedField(n, field),
+        // A binding its text style gives is read in the style's unit.
+        saved: (field) =>
+          (field === "letterSpacing" ? ctx.ids.savedField(n, STYLE_LETTER_SPACING) : null) ??
+          ctx.ids.savedField(n, field),
       }),
     );
     const glyphs = savedGlyphs(n, ctx.outlines ?? new Map());

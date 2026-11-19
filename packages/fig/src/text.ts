@@ -11,10 +11,13 @@
  * as the pixels Figma used.
  *
  * Letter spacing too: Open Pencil keeps pixels, so one Figma saved as a
- * percentage comes in as that percentage. A bound letter spacing or line
- * height is read in the unit the layer's own value has (decision 0034):
- * Open Pencil 0.16 applies the variable's value as pixels whatever the unit,
- * so 5 on a text set in percent became 5 px rather than 5% of its size.
+ * percentage comes in as that percentage. A bound letter spacing is read in
+ * the unit of the field that binds it (decision 0034): the text style's when
+ * the style gives the binding, else the layer's own, which a copy's override
+ * can set. Open Pencil 0.16 applies the variable's value as pixels whatever
+ * the unit, so 5 on a text set in percent became 5 px rather than 5% of its
+ * size. (A bound line height stays in pixels: every one in a 500k-layer kit
+ * is, including those whose layer saved a percentage under a style in px.)
  */
 import type { Figma } from "@drawpane/figma";
 import type { CharacterStyleOverride, FontFeature, SceneNode } from "@open-pencil/scene-graph";
@@ -86,19 +89,16 @@ function runStyle(s: CharacterStyleOverride, fontSize: number, notes: FigNotes):
   return out;
 }
 
-/** What the text fields read beyond Open Pencil's node, for bound letter spacing and line height. */
+/** What the text fields read beyond Open Pencil's node, for a bound letter spacing. */
 export interface TextLookup {
   /** A number variable's value where the layer is, when it has one. */
   readonly resolve: (variableId: string) => number | undefined;
-  /** A field as Figma saved it for the layer, its copy's override included. */
-  readonly saved: (field: "letterSpacing" | "lineHeight") => unknown;
-}
-
-function savedSpacing(lookup: TextLookup | undefined, field: "letterSpacing" | "lineHeight") {
-  const value = lookup?.saved(field) as { value?: unknown; units?: unknown } | undefined;
-  return value && typeof value.value === "number"
-    ? { value: value.value, units: value.units }
-    : undefined;
+  /**
+   * The letter spacing whose unit a binding is read in, as Figma saved it:
+   * the text style's when the style binds it, else the layer's (its copy's
+   * override included).
+   */
+  readonly saved: (field: "letterSpacing") => unknown;
 }
 
 /**
@@ -106,31 +106,14 @@ function savedSpacing(lookup: TextLookup | undefined, field: "letterSpacing" | "
  * (a bound variable's value then a percentage too), else Open Pencil's pixels.
  */
 function letterSpacing(n: SceneNode, lookup: TextLookup | undefined): Partial<Figma.TypeStyle> {
-  const saved = savedSpacing(lookup, "letterSpacing");
-  if (saved?.units !== "PERCENT") return { letterSpacing: n.letterSpacing };
+  const saved = lookup?.saved("letterSpacing") as { value?: unknown; units?: unknown } | undefined;
+  if (saved?.units !== "PERCENT" || typeof saved.value !== "number")
+    return { letterSpacing: n.letterSpacing };
   const bound = n.boundVariables.letterSpacing;
   const value = (bound !== undefined ? lookup?.resolve(bound) : undefined) ?? saved.value;
   return {
     letterSpacing: (value / 100) * n.fontSize,
     letterSpacingPercentFontSize: value,
-  };
-}
-
-/** A bound line height saved as a percentage: the variable's value is one too. */
-function boundLineHeight(
-  n: SceneNode,
-  lookup: TextLookup | undefined,
-): Partial<Figma.TypeStyle> | undefined {
-  const bound = n.boundVariables.lineHeight;
-  if (bound === undefined || savedSpacing(lookup, "lineHeight")?.units !== "PERCENT")
-    return undefined;
-  const value = lookup?.resolve(bound);
-  if (value === undefined || !Number.isFinite(value)) return undefined;
-  const percent = Math.max(0, value);
-  return {
-    lineHeightUnit: "FONT_SIZE_%",
-    lineHeightPercentFontSize: percent,
-    lineHeightPx: (percent / 100) * n.fontSize,
   };
 }
 
@@ -159,8 +142,7 @@ export function textFields(
     italic: n.italic,
     fontSize: n.fontSize,
     ...letterSpacing(n, lookup),
-    ...(boundLineHeight(n, lookup) ??
-      lineHeight(n.lineHeight, n.fontSize, raw?.fontSize === n.fontSize ? raw : undefined)),
+    ...lineHeight(n.lineHeight, n.fontSize, raw?.fontSize === n.fontSize ? raw : undefined),
     textAlignHorizontal: n.textAlignHorizontal,
     textAlignVertical: n.textAlignVertical,
     textAutoResize: n.textAutoResize,

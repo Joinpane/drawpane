@@ -106,6 +106,15 @@ function styleBindings(text: Record_ | undefined): Map<BoundTextField, Entry> {
   return out;
 }
 
+/**
+ * Where a layer's letter spacing binding comes from its text style, the
+ * style's saved letter spacing, kept on the record (or the copy's override)
+ * under this name: Figma reads the variable in the unit of the field that
+ * binds it, the style's, which can differ from the layer's (a style in
+ * pixels on a layer saved in percent). Null when the style doesn't bind it.
+ */
+export const STYLE_LETTER_SPACING = "drawpaneStyleLetterSpacing";
+
 /** The layer's own binding fields, from either map. */
 function ownFields(fields: Record_): Set<string> {
   const out = new Set<string>();
@@ -136,9 +145,12 @@ function addEntries(fields: Record_, entries: readonly Entry[]): void {
  * binding of a field wins.
  */
 function bindTextStyle(fields: Record_, style: StyleLookup): void {
-  const bindings = styleBindings(style(fields.styleIdForText));
+  const text = style(fields.styleIdForText);
+  const bindings = styleBindings(text);
   if (bindings.size === 0) return;
   const own = ownFields(fields);
+  if (bindings.has("LETTER_SPACING") && !own.has("LETTER_SPACING"))
+    fields[STYLE_LETTER_SPACING] = text?.letterSpacing ?? null;
   addEntries(
     fields,
     [...bindings].filter(([field]) => !own.has(field)).map(([, entry]) => entry),
@@ -159,16 +171,22 @@ function bindOverrideStyle(
 ) {
   if (override.styleIdForText === undefined) return;
   const own = ownFields(override);
-  const replacing = styleBindings(style(override.styleIdForText));
+  const text = style(override.styleIdForText);
+  const replacing = styleBindings(text);
   const entries: Entry[] = [];
+  // The letter spacing the copy's binding is read in: none unless set below.
+  override[STYLE_LETTER_SPACING] = null;
   for (const field of new Set([...main.keys(), ...replacing.keys()])) {
     if (own.has(field)) continue;
     const bound = replacing.get(field);
     if (bound) {
       entries.push(bound);
+      if (field === "LETTER_SPACING") override[STYLE_LETTER_SPACING] = text?.letterSpacing ?? null;
       continue;
     }
     const value = savedValue(override, field);
+    if (value !== undefined && field === "LETTER_SPACING")
+      override[STYLE_LETTER_SPACING] = { value, units: "PIXELS" };
     if (value !== undefined)
       entries.push({
         variableField: field,

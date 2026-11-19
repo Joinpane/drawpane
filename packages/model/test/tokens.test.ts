@@ -310,7 +310,7 @@ describe("text spacing is read in the layer's unit, as Figma does", () => {
     expect(ls("pct")).toEqual({ unit: "percent", value: 4 });
     expect(ls("px")).toEqual({ unit: "px", value: 4 });
   });
-  it("line height keeps a percentage, and is pixels otherwise", () => {
+  it("line height is read in pixels, as every bound one Figma saves", () => {
     const store = file([
       text("pct", { lineHeight: { unit: "percent", value: 100 }, bindings: { lineHeight: "gap" } }),
       text("px", { lineHeight: { unit: "px", value: 10 }, bindings: { lineHeight: "gap" } }),
@@ -318,7 +318,7 @@ describe("text spacing is read in the layer's unit, as Figma does", () => {
     ]);
     const resolver = new TokenResolver(store);
     const lh = (id: string) => resolver.resolve(store.get(id) as NodeRecord).props.lineHeight;
-    expect(lh("pct")).toEqual({ unit: "percent", value: 4 });
+    expect(lh("pct")).toEqual({ unit: "px", value: 4 });
     expect(lh("px")).toEqual({ unit: "px", value: 4 });
     expect(lh("auto")).toEqual({ unit: "px", value: 4 });
   });

@@ -6,10 +6,14 @@
  *   are independent, so per-corner bindings on a layer whose corners aren't
  *   don't change what it draws. An image box whose corners were bound to a
  *   14 px radius drew square in Figma and rounded here.
- * - Letter spacing and line height: a bound number is read in the unit the
- *   layer's own value has, a percentage of the font size or pixels. A link
- *   set to 0% tracking under a binding worth 1.2 drew at 0.144 px in Figma
- *   and at 1.2 px here (and on main, which took Open Pencil's value).
+ * - Letter spacing: a bound number is read in the unit of the field that
+ *   binds it, a percentage of the font size or pixels: the layer's own, or
+ *   its text style's when the style gives the binding. A link set to 0%
+ *   tracking under a binding worth 1.2 drew at 0.144 px in Figma and at
+ *   1.2 px here (and on main, which took Open Pencil's value), while titles
+ *   saved in percent under a style that tracks in pixels read it in pixels.
+ * - Line height: a bound one is in pixels, as every one in the kit, also
+ *   where the layer saved a multiple of its size under a style in pixels.
  *
  * Made by adding records to a committed sample (`pattern.fig`).
  */
@@ -36,7 +40,8 @@ const ids = {
   independent: guid(11),
   percentText: guid(20),
   pixelText: guid(21),
-  percentLeading: guid(22),
+  style: guid(22),
+  styled: guid(23),
   main: guid(30),
   label: guid(31),
   copy: guid(32),
@@ -67,6 +72,7 @@ function fixture() {
   };
   const modes = set.variableSetModes.map((m) => m.id);
   const page = records.find((r) => r.type === "CANVAS" && !r.internalOnly)?.guid as Guid;
+  const internal = set.parentIndex?.guid as Guid;
   const base = { phase: "CREATED", visible: true, opacity: 1 };
   const number = (id: Guid, name: string, value: number, pos: string) => ({
     guid: id,
@@ -124,7 +130,7 @@ function fixture() {
   const added = [
     number(ids.radius, "Radius", 14, "~u1"),
     number(ids.tracking, "Tracking", 5, "~u2"),
-    number(ids.leading, "Leading", 150, "~u3"),
+    number(ids.leading, "Leading", 24, "~u3"),
     box(ids.plain, "Square", 0, false),
     box(ids.independent, "Rounded", 100, true),
     text(
@@ -138,13 +144,37 @@ function fixture() {
     text(ids.pixelText, page, "Pixels", 5200, { letterSpacing: { value: 0, units: "PIXELS" } }, [
       { field: "LETTER_SPACING", variable: ids.tracking },
     ]),
+    // A text style that tracks and leads in pixels, both bound, and a layer using it that saved
+    // them as Figma does such layers: tracking in percent, line height as a multiple of its size.
+    {
+      ...text(
+        ids.style,
+        internal,
+        "Title",
+        0,
+        {
+          styleType: "TEXT",
+          isPublishable: true,
+          letterSpacing: { value: 5, units: "PIXELS" },
+          lineHeight: { value: 24, units: "PIXELS" },
+        },
+        [
+          { field: "LETTER_SPACING", variable: ids.tracking },
+          { field: "LINE_HEIGHT", variable: ids.leading },
+        ],
+      ),
+    },
     text(
-      ids.percentLeading,
+      ids.styled,
       page,
-      "Leading",
+      "Styled",
       5300,
-      { lineHeight: { value: 100, units: "PERCENT" } },
-      [{ field: "LINE_HEIGHT", variable: ids.leading }],
+      {
+        styleIdForText: { guid: ids.style },
+        letterSpacing: { value: 25, units: "PERCENT" },
+        lineHeight: { value: 1.2, units: "RAW" },
+      },
+      [],
     ),
     // A main whose label tracks in pixels, and a copy that sets the label's tracking in percent,
     // keeping the binding (the kit's "Learn more" link).
@@ -249,14 +279,19 @@ describe("bound fields read through the layer", { timeout: 60_000 }, () => {
     });
   });
 
-  it("a bound line height is read in the layer's unit", async () => {
+  it("a binding a text style gives is read in the style's unit", async () => {
     const { get, resolver } = await converted();
-    const leading = get(ids.percentLeading);
-    // 150% of 20 px, not 150 px.
-    expect(getProp(leading.props, "lineHeight")).toEqual({ unit: "percent", value: 150 });
-    expect(getProp(resolver.resolve(leading).props, "lineHeight")).toEqual({
-      unit: "percent",
-      value: 150,
+    const styled = get(ids.styled);
+    // The style tracks in pixels: 5 px, not 5% of 20 px.
+    expect(getProp(styled.props, "letterSpacing")).toEqual({ unit: "px", value: 5 });
+    expect(getProp(resolver.resolve(styled).props, "letterSpacing")).toEqual({
+      unit: "px",
+      value: 5,
+    });
+    // And leads in pixels: 24 px, the layer's 1.2 times its size, not 24%.
+    expect(getProp(resolver.resolve(styled).props, "lineHeight")).toEqual({
+      unit: "px",
+      value: 24,
     });
   });
 });
