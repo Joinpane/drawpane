@@ -1,4 +1,4 @@
-# 0041. Glass and background blur drawn coarse while moving, never left out
+# 0042. Glass and background blur drawn coarse while moving, never left out
 
 - Status: accepted
 - Date: 2026-11-19

@@ -507,7 +507,7 @@ export class CanvasRenderer {
   /** The screen's canvas while a frame is drawn on it: glass drawn there is kept for pans. */
   #screen: Ctx | null = null;
   /**
-   * While drawing readers coarse (decision 0041): a pass too costly to draw them exactly in
+   * While drawing readers coarse (decision 0042): a pass too costly to draw them exactly in
    * the frame, while something moves. Their glass and background blur are drawn at a
    * fraction of the resolution; each is drawn exactly once there's time.
    */
@@ -1112,7 +1112,7 @@ export class CanvasRenderer {
     dpr: number,
     rects: Rect[],
     left: number,
-    /** Draw readers coarse when they don't fit (decision 0041), rather than later. */
+    /** Draw readers coarse when they don't fit (decision 0042), rather than later. */
     coarse = true,
   ): Rect[] | null {
     const grown = this.#withReaders(rects, frame, camera, dpr);
@@ -1130,7 +1130,7 @@ export class CanvasRenderer {
       return grown.rects;
     }
     // Too costly to draw exactly in this frame: the parts again with the readers painting
-    // there drawn coarse (decision 0041), each over all it paints (and so the readers painting
+    // there drawn coarse (decision 0042), each over all it paints (and so the readers painting
     // there too), so none goes missing and none is left half redrawn. What they read past
     // that is the canvas as it was: close enough for a coarse picture, and far less to draw
     // than all they read. Each is drawn exactly once there's time (`#drawReaders`).
@@ -2306,7 +2306,7 @@ export class CanvasRenderer {
       draw(ctx);
       return;
     }
-    // A coarse pass (decision 0041) leaves out shadows that blend their own way: drawn apart,
+    // A coarse pass (decision 0042) leaves out shadows that blend their own way: drawn apart,
     // each costs a canvas of its own, and a glass board has three on every control. They're
     // drawn with the readers' exact pass.
     if (this.#coarse && apart) return;
@@ -2725,7 +2725,7 @@ export class CanvasRenderer {
   }
 
   /**
-   * A reader drawn coarse, for frames while something moves (decision 0041):
+   * A reader drawn coarse, for frames while something moves (decision 0042):
    * what's under its shape on the canvas, blurred `sigma` device pixels, in
    * place: one copy of the canvas into itself through a blur, no shader
    * passes of its own. Glass loses its rim's bend and light until it's drawn exactly;
@@ -2818,7 +2818,7 @@ export class CanvasRenderer {
     if (glass?.type !== "glass") return;
     if (this.#fresh && !this.#fresh.has(node.id)) return;
     if (this.#coarse && ctx === this.#screen && node.type !== "text") {
-      // Coarse while moving (decision 0041): the backdrop frosted, without the rim's bend.
+      // Coarse while moving (decision 0042): the backdrop frosted, without the rim's bend.
       this.#coarseFrost(ctx, node, shape, Math.max(glassParams(glass, scale).frost, 3 * scale));
       return;
     }
