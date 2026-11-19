@@ -3,7 +3,7 @@
 
 use crate::cpu::Cpu;
 use crate::error::{EngineError, ErrorCode, Result};
-use crate::exec::{self, DrawStats, Frame, IRect};
+use crate::exec::{self, DrawStats, Frame, IRect, Pass, Split};
 use crate::images;
 use crate::limits::Limits;
 use crate::masks::MaskStats;
@@ -88,6 +88,44 @@ impl Default for TiledOptions {
     }
 }
 
+/// A drag in progress (decision 0040, "Dragging"): the records the last messages only moved.
+#[derive(Clone, Debug)]
+pub struct Dragging {
+    pub ids: Vec<u32>,
+    /// Which drag (a new selection is a new drag) and how many moves it has made.
+    pub serial: u64,
+    pub moves: u64,
+    /// The selection's place in paint order, when moving its picture is exact (consecutive
+    /// siblings, no readers, no faded ancestor): the page is drawn around it in parts. None: it's
+    /// drawn at its real position every frame instead.
+    pub split: Option<Split>,
+    /// Where it was before the drag began (page units).
+    pub start: Option<Rect>,
+}
+
+/// A drag as a frame needs it: which, its moves, its split, and where the selection is now and
+/// was when it began (page units).
+#[derive(Clone, Debug)]
+pub struct DragFrame {
+    pub serial: u64,
+    pub moves: u64,
+    pub split: Option<Split>,
+    pub now: Rect,
+    pub start: Option<Rect>,
+}
+
+impl DragFrame {
+    pub fn input(&self) -> crate::tiles::DragInput {
+        crate::tiles::DragInput {
+            serial: self.serial,
+            moves: self.moves,
+            start: self.start,
+            now: self.now,
+            eligible: self.split.is_some(),
+        }
+    }
+}
+
 /// What a frame made of tiles did.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct TiledStats {
@@ -103,6 +141,8 @@ pub struct TiledStats {
     pub direct: bool,
     pub evicted: u32,
     pub held: u32,
+    /// Tiles a drag composited (the part below, its selection, the part above): a stand-in.
+    pub dragged: u32,
 }
 
 /// The CPU's tiles (decision 0040, phase 2): what the tests hold the GPU's tiles to, pixel for
@@ -154,6 +194,9 @@ pub struct Engine {
     pub image_levels: std::collections::HashMap<u32, std::rc::Rc<Vec<images::Level>>>,
     /// Tiles on the CPU, once asked for (tests; a Worker's view mode).
     pub cpu_tiles: Option<CpuTiles>,
+    /// The drag in progress, if the last messages only moved records.
+    pub dragging: Option<Dragging>,
+    drag_serial: u64,
 }
 
 impl Engine {
@@ -168,14 +211,73 @@ impl Engine {
             #[cfg(feature = "gpu")]
             image_levels: std::collections::HashMap::new(),
             cpu_tiles: None,
+            dragging: None,
+            drag_serial: 0,
         }
+    }
+
+    /// Follows drags: a message that only moves records continues the drag of exactly those
+    /// records, or starts one; anything else ends it.
+    fn follow_drag(&mut self, applied: &Applied) {
+        let Some(ids) = applied.moved.as_ref() else {
+            // An edit elsewhere (a collaborator, text re-shaped as its faces arrive) doesn't end
+            // a drag: the parts around the selection are drawn again where it changed them (see
+            // `invalidate_tiles`). One that changes the structure, or the selection itself, does.
+            let keeps = self
+                .dragging
+                .as_ref()
+                .is_some_and(|d| !applied.structural && !applied.touched.iter().any(|t| self.store.within(*t, &d.ids)));
+            if !keeps {
+                self.dragging = None;
+            }
+            return;
+        };
+        if let Some(d) = self.dragging.as_mut().filter(|d| &d.ids == ids) {
+            d.moves += 1;
+            return;
+        }
+        self.drag_serial += 1;
+        let split = self.store.selection(ids).map(|(parent, first, last, path)| Split {
+            pass: Pass::All,
+            parent,
+            first,
+            last,
+            path,
+        });
+        // Where it was: the changes hold where the moved records painted before and paint now.
+        let start = applied.changes.iter().map(|d| d.rect).reduce(|a, b| a.union(b));
+        self.dragging = Some(Dragging {
+            ids: ids.clone(),
+            serial: self.drag_serial,
+            moves: 1,
+            split,
+            start,
+        });
+    }
+
+    /// The drag as this frame needs it: where its selection is now.
+    pub fn drag_frame(&self) -> Option<DragFrame> {
+        let d = self.dragging.as_ref()?;
+        let now = d
+            .ids
+            .iter()
+            .filter_map(|id| self.store.world_extent(*id))
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(Rect::ZERO);
+        Some(DragFrame {
+            serial: d.serial,
+            moves: d.moves,
+            split: d.split.clone(),
+            now,
+            start: d.start,
+        })
     }
 
     /// Marks stale every tile, on every backend, that changes reach: each level's tiles under
     /// where the changed records painted before and paint now, grown for anti-aliasing, and
     /// every reader they reach, transitively (`Store::dirty`). A fresh list drops them all, and
     /// the last frame with them: it shows a page that's gone.
-    fn invalidate_tiles(&mut self, changes: &[Dirty], full: bool) {
+    fn invalidate_tiles(&mut self, changes: &[Dirty], full: bool, drag_parts: bool) {
         let store = &mut self.store;
         let mut each = |cache: &mut TileCache| {
             if full {
@@ -188,6 +290,10 @@ impl Engine {
             for (id, level) in cache.levels() {
                 let rects: Vec<Rect> = store.dirty(changes, level.grid(), 1.5);
                 cache.invalidate(id, &rects);
+                // An edit beside a drag: its parts around the selection are drawn again there.
+                if drag_parts {
+                    cache.drag_invalidate(id, &rects);
+                }
             }
         };
         if let Some(t) = self.cpu_tiles.as_mut() {
@@ -216,8 +322,13 @@ impl Engine {
 
     pub fn apply(&mut self, bytes: &[u8]) -> Result<Applied> {
         let applied = self.store.apply(bytes)?;
+        if applied.noop {
+            // Nothing changed: no frame needs drawing again, and a drag goes on.
+            return Ok(applied);
+        }
         self.generation += 1;
-        self.invalidate_tiles(&applied.changes, applied.full);
+        self.invalidate_tiles(&applied.changes, applied.full, applied.moved.is_none());
+        self.follow_drag(&applied);
         Ok(applied)
     }
 
@@ -225,7 +336,7 @@ impl Engine {
     fn invalidate_image(&mut self, id: u32) {
         let users = self.store.image_users(id);
         if !users.is_empty() {
-            self.invalidate_tiles(&users, false);
+            self.invalidate_tiles(&users, false, true);
         }
     }
 
@@ -425,10 +536,9 @@ impl Engine {
         self.check_supported()?;
         let view = camera.view();
         let halo = self.halo(view)?;
-        let gpu = self
-            .gpu
-            .as_mut()
-            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        if self.gpu.is_none() {
+            return Err(EngineError::new(ErrorCode::State, "no GPU attached"));
+        }
         let frame = Frame {
             width: width as u16,
             height: height as u16,
@@ -441,7 +551,20 @@ impl Engine {
                 y1: height as i32,
             },
         };
-        gpu.render(&self.store, &frame, background, self.generation, halo, options)
+        let drag = self.drag_frame();
+        let gpu = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        gpu.render(
+            &self.store,
+            &frame,
+            background,
+            self.generation,
+            halo,
+            options,
+            drag.as_ref(),
+        )
     }
 
     /// Device pixels the readers on the page may read past where they paint, summed through
@@ -522,6 +645,19 @@ impl Engine {
         detail: bool,
         background: [f32; 4],
     ) -> Result<FrameStats> {
+        self.cpu_draw_tile_split(view, tile, halo, detail, background, &Split::all())
+    }
+
+    /// `cpu_draw_tile`, drawing only the part of the page `split` names.
+    fn cpu_draw_tile_split(
+        &mut self,
+        view: Affine,
+        tile: u32,
+        halo: i32,
+        detail: bool,
+        background: [f32; 4],
+        split: &Split,
+    ) -> Result<FrameStats> {
         let side = tile as i32 + 2 * halo;
         let area = IRect {
             x0: 0,
@@ -539,12 +675,20 @@ impl Engine {
             area,
         };
         let limits = self.store.limits;
-        let draw = exec::draw(&self.store, &mut self.cpu, &frame, &limits);
+        let mut verbs = limits.frame_verbs;
+        let draw = exec::draw_split(&self.store, &mut self.cpu, &frame, &limits, &mut verbs, split);
         self.cpu.finish();
         Ok(FrameStats {
             draw: draw?,
             masks: self.cpu.masks.stats,
         })
+    }
+
+    /// One tile of the page drawn in a part (tests): premultiplied RGBA8, `tile` × `tile`.
+    #[doc(hidden)]
+    pub fn debug_tile_part(&mut self, view: Affine, tile: u32, background: [f32; 4], split: &Split) -> Result<Vec<u8>> {
+        self.cpu_draw_tile_split(view, tile, 0, false, background, split)?;
+        Ok(self.cpu.target.data_as_u8_slice().to_vec())
     }
 
     /// A frame made of tiles on the CPU (decision 0040, phase 2): premultiplied RGBA8. What the
@@ -650,6 +794,13 @@ impl Engine {
             direct: plan.direct,
             ..TiledStats::default()
         };
+        // A drag: the tiles its selection touches are composited from the page's parts below and
+        // above it with the selection drawn afresh between (when that's exact), else drawn at its
+        // real position every frame.
+        let drag = self.drag_frame();
+        let selection = tiles
+            .cache
+            .drag_prepare(&mut plan, drag.as_ref().map(DragFrame::input).as_ref());
         let bg = premultiply(background);
         let stride = width as usize * 4;
         let mut frame = std::mem::take(&mut tiles.frame);
@@ -794,6 +945,59 @@ impl Engine {
         }
         stats.exact = comp_exact && exact_direct;
         stats.direct = plan.direct || !late.is_empty();
+        if let (Some(d), Some(now), Some(level)) = (&drag, selection, tiles.cache.level(plan.level))
+            && let Some(split) = d.split.as_ref()
+        {
+            for dt in tiles.cache.drag_tiles(&plan, now) {
+                let view = level.tile_view(dt.i, dt.j, tile);
+                let fx = i64::from(dt.i) * i64::from(tile) + plan.origin.0;
+                let fy = i64::from(dt.j) * i64::from(tile) + plan.origin.1;
+                // The parts below and above, kept for the drag; the selection drawn afresh.
+                for (pseudo, pass, fill) in [
+                    (crate::tiles::DRAG_BELOW, Pass::Below, background),
+                    (crate::tiles::DRAG_ABOVE, Pass::Above, [0.0; 4]),
+                ] {
+                    let key = crate::tiles::TileKey {
+                        level: pseudo,
+                        i: dt.i,
+                        j: dt.j,
+                    };
+                    let slot = match tiles.cache.take_slot(&key) {
+                        Some(slot) => slot,
+                        None => {
+                            let Some(slot) = tiles.cache.slot_for(key) else {
+                                continue;
+                            };
+                            let part = Split { pass, ..split.clone() };
+                            self.cpu_draw_tile_split(view, tile, halo, false, fill, &part)?;
+                            let s = slot as usize;
+                            if tiles.slots.len() <= s {
+                                tiles.slots.resize_with(s + 1, Vec::new);
+                            }
+                            take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
+                            tiles.cache.drawn(key, slot, true);
+                            slot
+                        }
+                    };
+                    if pass == Pass::Below {
+                        blit(&mut frame, width, height, &tiles.slots[slot as usize], t, fx, fy);
+                        if dt.selection {
+                            let part = Split {
+                                pass: Pass::Selection,
+                                ..split.clone()
+                            };
+                            self.cpu_draw_tile_split(view, tile, halo, false, [0.0; 4], &part)?;
+                            take(self.cpu.target.data_as_u8_slice(), &mut scratch);
+                            blend(&mut frame, width, height, &scratch, t, fx, fy);
+                        }
+                    } else {
+                        blend(&mut frame, width, height, &tiles.slots[slot as usize], t, fx, fy);
+                    }
+                }
+                stats.dragged += 1;
+                stats.exact = false;
+            }
+        }
         stats.evicted = tiles.cache.stats.evicted;
         stats.held = tiles.cache.len() as u32;
         tiles.frame_last.clone_from(&frame);
@@ -895,5 +1099,31 @@ fn blit(frame: &mut [u8], width: u32, height: u32, tile: &[u8], t: usize, fx: i6
         let from = (((y - fy) * ti + (x0 - fx)) * 4) as usize;
         let to = ((y * w + x0) * 4) as usize;
         frame[to..to + cols].copy_from_slice(&tile[from..from + cols]);
+    }
+}
+
+/// Lays a `t` × `t` premultiplied tile over a frame (source over) with its top left at (`fx`,
+/// `fy`), clipped to the frame.
+fn blend(frame: &mut [u8], width: u32, height: u32, tile: &[u8], t: usize, fx: i64, fy: i64) {
+    let (w, h) = (i64::from(width), i64::from(height));
+    let ti = t as i64;
+    let (x0, y0) = (fx.max(0), fy.max(0));
+    let (x1, y1) = ((fx + ti).min(w), (fy + ti).min(h));
+    if x1 <= x0 || y1 <= y0 || tile.len() < t * t * 4 {
+        return;
+    }
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let from = (((y - fy) * ti + (x - fx)) * 4) as usize;
+            let to = ((y * w + x) * 4) as usize;
+            let a = u32::from(tile[from + 3]);
+            if a == 0 {
+                continue;
+            }
+            for c in 0..4 {
+                let d = u32::from(frame[to + c]);
+                frame[to + c] = (u32::from(tile[from + c]) + (d * (255 - a) + 127) / 255).min(255) as u8;
+            }
+        }
     }
 }

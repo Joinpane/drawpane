@@ -239,7 +239,14 @@ export class EngineView {
     supported: true,
     exact: false,
     plan: "tiles" as FrameStats["plan"],
-    tiles: { drawn: 0, pending: 0, queued: 0, held: 0, evicted: 0 } as FrameStats["tiles"],
+    tiles: {
+      drawn: 0,
+      pending: 0,
+      queued: 0,
+      held: 0,
+      evicted: 0,
+      dragged: 0,
+    } as FrameStats["tiles"],
     /** Where the frame's CPU time went: the patch, the engine's encoding, its renderer, submit. */
     breakdown: { patch: 0, encode: 0, render: 0, submit: 0, readback: 0 },
   };

@@ -643,6 +643,57 @@ export async function interactions(
     return summary;
   });
 
+  // Dragging into the next board: carried across, dropped there (the editor moves it into the
+  // frame under the pointer on drop: a removal and an insertion at its real place in paint
+  // order), then until the canvas is exact again.
+  await run("drag into the next board", async () => {
+    await select([targets.move]);
+    await page.waitForTimeout(300);
+    const at = await onScreen(page, targets.move);
+    await page.mouse.move(at.x, at.y);
+    await page.mouse.down();
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        drawpaneFrames: { reset(): void; record(c: number, o: number): void };
+        __times?: number[];
+      };
+      w.drawpaneFrames.reset();
+      const times: number[] = [];
+      w.__times = times;
+      const record = w.drawpaneFrames.record.bind(w.drawpaneFrames);
+      w.drawpaneFrames.record = (c: number, o: number) => {
+        record(c, o);
+        times.push(performance.now());
+      };
+    });
+    for (let i = 1; i <= 60; i++) {
+      await page.mouse.move(at.x + i * 8, at.y + i * 2);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+    }
+    const summary = await page.evaluate(() => {
+      const w = window as unknown as {
+        drawpaneFrames: { summary(): Summary };
+        __times: number[];
+      };
+      const gaps = w.__times
+        .slice(1)
+        .map((t, i) => t - (w.__times[i] as number))
+        .sort((a, b) => a - b);
+      const at = (q: number) =>
+        Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
+      return {
+        ...w.drawpaneFrames.summary(),
+        interval: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
+      };
+    });
+    const t = await now(page);
+    await page.mouse.up();
+    const exact = await exactAfter(page, t);
+    await settle(page);
+    await page.keyboard.press("Control+z");
+    return { ...summary, exactMs: exact };
+  });
+
   // Resizing by its bottom right handle.
   await run("resize", async () => {
     await select([targets.move]);
@@ -819,7 +870,7 @@ export function table(title: string, results: Record<string, CaseResult>): strin
   const rows = Object.entries(results).map(([name, r]) => {
     if ("answer" in r)
       return `${name.padEnd(24)} answer ${String(r.answer.p50).padStart(7)} ms (worst ${String(r.answer.max).padStart(7)}) · content ${String(r.content.p50).padStart(6)} (${r.content.max}) · overlay ${String(r.overlay.p50).padStart(5)} · exact ${String(r.exact).padStart(6)} ms · quiet ${String(r.quiet).padStart(6)} ms · long task ${r.longTask} ms · n ${r.n}`;
-    return `${name.padEnd(24)} content p50 ${String(r.content.p50).padStart(6)} · p95 ${String(r.content.p95).padStart(6)} · max ${String(r.content.max).padStart(6)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms`;
+    return `${name.padEnd(24)} content p50 ${String(r.content.p50).padStart(6)} · p95 ${String(r.content.p95).padStart(6)} · p99 ${String(r.content.p99 ?? "-").padStart(6)} · max ${String(r.content.max).padStart(6)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms${r.exactMs !== undefined ? ` · exact after drop ${r.exactMs} ms` : ""}`;
   });
   return `\n${title}\n${rows.join("\n")}`;
 }

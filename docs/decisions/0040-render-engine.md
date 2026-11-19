@@ -766,3 +766,30 @@ Exact means every tile the frame shows is up to date and drawn without level of 
 
   The zoom's settle is two frames' latency (the zoom's last frame waits for an animation frame, ~20 to 40 ms here), then six dense tiles at about 9 ms each and the rest under 1 ms, drawn in idle slices. Locally, a cold redraw of the whole page went from 316 ms to about 128 ms with the uploads, corners, rings, clips and batched masks above.
 - In `gpu` mode (the canvas renderer's real intervals, both runs canvas): frame interval p50 16.6 to 16.7 ms, p95 17.9 to 26.2 ms, p99 18.7 to 54.5 ms.
+
+### Drags (phase 2, part 2)
+
+The engine follows drags from the messages themselves: no editor API. The editor already sends a layer's move as a `transform` command.
+
+- **Following a drag.**
+  - A message that only moves records continues the drag of exactly those records, or starts one.
+  - An edit beside the drag doesn't end it: a collaborator's edit, or text re-sent while its faces load. Its parts are drawn again where the edit changed them.
+  - One that changes the structure, or touches the selection, ends it.
+  - A record set again exactly as it is, and an order that changes nothing, are no-ops: they neither continue nor end a drag, and nothing is drawn again for them. A record's hash is cleared when a `transform` moves it, so setting it back later is a change.
+- **The fast path**, when moving a picture of the selection is exact by "Dragging" above: the selection is consecutive children of one parent, there's no reader on the page, and no ancestor fades as one.
+  - The tiles the selection has touched are composited from three things, laid over each other in order:
+    - the page painted before it (kept for the drag, background included);
+    - the selection, drawn afresh at its real position each frame, with its ancestors' transforms, opacity and clips;
+    - the page painted after it (kept, over nothing).
+  - Paint order is split by a filter in the executor (`exec::Split`). Nodes on the selection's path are walked in every part. Paint order passes the selection after any of them, walked or culled: a culled board once left what follows it in the part below, which the random drags found.
+  - It's exact but for rounding: within 4 levels of a fresh frame, since source-over isn't associative in 8 bits. So drag frames are reported as stand-ins.
+  - While the selection moves, the tiles under it aren't drawn: they'd be stale by the next move. Once it rests, they're drawn exactly under the frame budget, and the composite stands in until then.
+- **Without the fast path** (selected layers apart in paint order, a faded ancestor), the selection is drawn at its real position every frame: every tile the drag touched is one nothing stands in for.
+- **Into or out of a board.** The editor reparents on drop, so the drop is a structural message: it ends the drag, and the layer is removed from one board and inserted in the other at its real place in paint order. If the editor later sends a provisional parent mid-drag, as "Dragging" above allows, the same happens there. Tiles an ended drag left showing its selection where it was are drawn again at once, never left as stand-ins.
+- **Gates** (`rust/tests/tiles.rs`):
+  - seeded drags of runs of siblings, sometimes not consecutive, sometimes with an edit mid-drag: composited frames within rounding of a fresh frame, frames without a fast path exact, and every drag bitwise exact within bounded frames at rest;
+  - drags into a board and on inside it;
+  - edits beside a drag;
+  - a record set back after a move.
+  - The builder sends a move alone, in plain and compact-copy documents (`packages/editor/test/engine-tiles.test.ts`).
+  - On the GPU (`apps/web/e2e/engine.spec.ts`): composited while moving, exact once dropped, into another board too.

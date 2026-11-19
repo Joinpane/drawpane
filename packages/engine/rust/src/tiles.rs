@@ -33,7 +33,7 @@
 //!   all, the whole frame is (`Plan::direct`): slower, still exact, never blank.
 
 use crate::exec::IRect;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use vello_common::kurbo::{Affine, Rect};
 
 /// A tile's side in device pixels, in the browser (decision 0040, "Tiles").
@@ -239,6 +239,10 @@ pub struct TileCache {
     halo: i32,
     /// The frame level and view centre (grid pixels) of the last plan: eviction keeps what's near.
     focus: Option<(u32, f64, f64)>,
+    drag: DragTiles,
+    /// Tiles an ended drag's selection was over, still stale: they show it where it was, so
+    /// they're drawn again at once.
+    ghosts: HashSet<TileKey>,
     pub stats: TileStats,
 }
 
@@ -249,6 +253,43 @@ const LEVELS: usize = 8;
 /// way. One rule for the plan (what it counts on) and the composite (what it lays).
 pub fn stands_in(scale: f64, other: f64) -> bool {
     (other / scale).log2().abs() <= 2.0
+}
+
+/// Pseudo-levels of a drag's tiles at the frame's level (decision 0040, "Dragging"): the page
+/// with everything painted before the dragged selection (background included), and everything
+/// painted after it (over nothing). Never invalidated by patches: a drag lasts only while the
+/// messages are moves of its selection, which change neither.
+pub const DRAG_BELOW: u32 = u32::MAX - 1;
+pub const DRAG_ABOVE: u32 = u32::MAX - 2;
+
+/// A drag as the tiles see it: which drag, the level its tiles are for, the moves seen, and
+/// the tiles the selection has been over (their own tiles are stale until drawn again).
+#[derive(Default, Debug)]
+struct DragTiles {
+    serial: u64,
+    level: Option<u32>,
+    seen: u64,
+    touched: HashSet<(i32, i32)>,
+}
+
+/// A drag as a frame's tiles need it: which drag, its moves, where its selection was when it
+/// began and is now (page units), and whether moving its picture is exact (the fast path).
+#[derive(Clone, Copy, Debug)]
+pub struct DragInput {
+    pub serial: u64,
+    pub moves: u64,
+    pub start: Option<Rect>,
+    pub now: Rect,
+    pub eligible: bool,
+}
+
+/// A tile a drag composites this frame: the part below, the selection (drawn afresh at its
+/// real position, when it's over the tile), and the part above.
+#[derive(Clone, Copy, Debug)]
+pub struct DragTile {
+    pub i: i32,
+    pub j: i32,
+    pub selection: bool,
 }
 
 fn overlaps(a: Rect, b: Rect) -> bool {
@@ -269,7 +310,217 @@ impl TileCache {
             background: None,
             halo: 0,
             focus: None,
+            drag: DragTiles::default(),
+            ghosts: HashSet::new(),
             stats: TileStats::default(),
+        }
+    }
+
+    /// A frame's drag bookkeeping, shared by both backends: follows drag `d` (or ends the one
+    /// held), notes the tiles its selection touched, drops jobs under a moving selection (the
+    /// drag composites them) or, without a fast path, makes every touched tile's job one
+    /// nothing stands in for, and redraws tiles an ended drag left. Answers where the selection
+    /// is now, in the plan level's grid pixels, when the drag composites this frame.
+    pub fn drag_prepare(&mut self, plan: &mut Plan, d: Option<&DragInput>) -> Option<Rect> {
+        let out = match (d, self.level(plan.level)) {
+            (Some(d), Some(level)) if !plan.direct => {
+                let grid = level.grid();
+                let moved = self.drag_frame(d.serial, d.moves, plan.level);
+                if let Some(s) = d.start {
+                    self.drag_touch(grid.transform_rect_bbox(s).inflate(2.0, 2.0));
+                }
+                let now = grid.transform_rect_bbox(d.now).inflate(2.0, 2.0);
+                self.drag_touch(now);
+                if d.eligible {
+                    if moved {
+                        self.drag_skip(plan, now);
+                    }
+                    Some(now)
+                } else {
+                    self.must_touched(plan);
+                    None
+                }
+            }
+            _ => {
+                self.drag_end();
+                None
+            }
+        };
+        self.must_ghosts(plan);
+        out
+    }
+
+    /// Drops a drag's parts (below and above its selection) that rectangles of level `id`'s grid
+    /// pixels touch, when the drag's tiles are for that level: an edit beside the drag changed
+    /// them, so they're drawn again when next needed.
+    pub fn drag_invalidate(&mut self, id: u32, rects: &[Rect]) {
+        if self.drag.level != Some(id) {
+            return;
+        }
+        let t = f64::from(self.tile);
+        let free = &mut self.free;
+        self.tiles.retain(|k, e| {
+            if k.level != DRAG_BELOW && k.level != DRAG_ABOVE {
+                return true;
+            }
+            let b = Rect::new(
+                f64::from(k.i) * t,
+                f64::from(k.j) * t,
+                f64::from(k.i + 1) * t,
+                f64::from(k.j + 1) * t,
+            );
+            let keep = !rects.iter().any(|r| overlaps(*r, b));
+            if !keep {
+                free.push(e.slot);
+            }
+            keep
+        });
+    }
+
+    /// Drops a drag's tiles (it ended, or moved to another level).
+    pub fn drag_end(&mut self) {
+        if let Some(level) = self.drag.level {
+            for &(i, j) in &self.drag.touched {
+                self.ghosts.insert(TileKey { level, i, j });
+            }
+        }
+        let free = &mut self.free;
+        self.tiles.retain(|k, t| {
+            let keep = k.level != DRAG_BELOW && k.level != DRAG_ABOVE;
+            if !keep {
+                free.push(t.slot);
+            }
+            keep
+        });
+        self.drag = DragTiles::default();
+    }
+
+    /// A frame of drag `serial`, after `moves` moves, at the plan's level: its tiles are kept
+    /// while both stay the same. Answers whether it moved since the last frame.
+    pub fn drag_frame(&mut self, serial: u64, moves: u64, level: u32) -> bool {
+        if self.drag.serial != serial || self.drag.level != Some(level) {
+            self.drag_end();
+            self.drag.serial = serial;
+            self.drag.level = Some(level);
+        }
+        let moved = self.drag.seen != moves;
+        self.drag.seen = moves;
+        moved
+    }
+
+    /// Notes the tiles of the plan's level a rectangle of its grid pixels covers as touched by
+    /// the drag's selection (it was or is there).
+    pub fn drag_touch(&mut self, r: Rect) {
+        let Some((i0, j0, i1, j1)) = self.span(r) else { return };
+        if (i64::from(i1) - i64::from(i0) + 1) * (i64::from(j1) - i64::from(j0) + 1) > 4096 {
+            return;
+        }
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                self.drag.touched.insert((i, j));
+            }
+        }
+    }
+
+    /// Whether a visible tile is one the drag composites: touched by the selection, and its own
+    /// tile not up to date.
+    fn dragged(&self, level: u32, i: i32, j: i32) -> bool {
+        self.drag.touched.contains(&(i, j))
+            && !self
+                .tiles
+                .get(&TileKey { level, i, j })
+                .is_some_and(|e| !e.stale && e.exact)
+    }
+
+    /// The tiles the drag composites this frame: visible ones it touched whose own tile isn't up
+    /// to date, and whether the selection (`selection`, grid pixels) is over each now.
+    pub fn drag_tiles(&self, plan: &Plan, selection: Rect) -> Vec<DragTile> {
+        let t = f64::from(self.tile);
+        plan.visible
+            .iter()
+            .filter(|(i, j)| self.dragged(plan.level, *i, *j))
+            .map(|&(i, j)| {
+                let b = Rect::new(
+                    f64::from(i) * t,
+                    f64::from(j) * t,
+                    f64::from(i + 1) * t,
+                    f64::from(j + 1) * t,
+                );
+                DragTile {
+                    i,
+                    j,
+                    selection: overlaps(b, selection),
+                }
+            })
+            .collect()
+    }
+
+    /// Drops jobs for tiles under the moving selection: drawn now, they'd be stale again by the
+    /// next move (the drag composites them meanwhile).
+    pub fn drag_skip(&self, plan: &mut Plan, selection: Rect) {
+        let t = f64::from(self.tile);
+        let level = plan.level;
+        plan.jobs.retain(|j| {
+            if j.key.level != level {
+                return true;
+            }
+            let b = Rect::new(
+                f64::from(j.key.i) * t,
+                f64::from(j.key.j) * t,
+                f64::from(j.key.i + 1) * t,
+                f64::from(j.key.j + 1) * t,
+            );
+            !overlaps(b, selection)
+        });
+    }
+
+    /// Marks jobs for the tiles an ended drag left showing its selection where it was as ones
+    /// nothing stands in for.
+    pub fn must_ghosts(&mut self, plan: &mut Plan) {
+        if self.ghosts.is_empty() {
+            return;
+        }
+        let tiles = &self.tiles;
+        // Ghosts drawn since (or gone) are forgotten.
+        self.ghosts
+            .retain(|k| self.levels.iter().any(|l| l.id == k.level) && tiles.get(k).is_some_and(|e| e.stale));
+        for j in plan.jobs.iter_mut() {
+            if self.ghosts.contains(&j.key) {
+                j.must = true;
+            }
+        }
+    }
+
+    /// Marks jobs for every tile the drag touched as ones nothing stands in for (a drag without
+    /// a fast path draws its selection at its real position every frame, and leaves no copy of
+    /// it where it was).
+    pub fn must_touched(&self, plan: &mut Plan) {
+        let level = plan.level;
+        for j in plan.jobs.iter_mut() {
+            if j.key.level == level && self.drag.touched.contains(&(j.key.i, j.key.j)) {
+                j.must = true;
+            }
+        }
+    }
+
+    /// Marks jobs for tiles under a rectangle of grid pixels as ones nothing stands in for (a
+    /// drag without a fast path draws its selection at its real position every frame).
+    pub fn must_under(&self, plan: &mut Plan, r: Rect) {
+        let t = f64::from(self.tile);
+        let level = plan.level;
+        for j in plan.jobs.iter_mut() {
+            if j.key.level != level {
+                continue;
+            }
+            let b = Rect::new(
+                f64::from(j.key.i) * t,
+                f64::from(j.key.j) * t,
+                f64::from(j.key.i + 1) * t,
+                f64::from(j.key.j + 1) * t,
+            );
+            if overlaps(b, r) {
+                j.must = true;
+            }
         }
     }
 
@@ -297,6 +548,8 @@ impl TileCache {
         }
         self.levels.clear();
         self.focus = None;
+        self.drag = DragTiles::default();
+        self.ghosts.clear();
     }
 
     /// Lowers or raises the slots kept; tiles in slots past a lower count are dropped.
@@ -382,6 +635,15 @@ impl TileCache {
 
     pub fn get(&self, key: &TileKey) -> Option<&TileEntry> {
         self.tiles.get(key)
+    }
+
+    /// A tile's slot, marking it used this frame (so no draw later in the frame evicts it).
+    pub fn take_slot(&mut self, key: &TileKey) -> Option<u32> {
+        let frame = self.frame;
+        self.tiles.get_mut(key).map(|e| {
+            e.used = frame;
+            e.slot
+        })
     }
 
     /// The tiles of level `id` a rectangle of its grid pixels touches.

@@ -258,3 +258,81 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's tiles", () =>
     }
   });
 });
+
+describe.skipIf(!built("worker") && !process.env.CI)("the builder's drags", () => {
+  let mod: EngineModule;
+  beforeAll(async () => {
+    mod = await loadNodeEngine("worker");
+  });
+
+  for (const compactCopies of [false, true])
+    it(`sends a layer's move as a move alone${compactCopies ? " (compact copies)" : ""}`, () => {
+      // Compact copies name a moved layer's parent among the changes: its children are as they
+      // were, so neither its order nor its record goes, and the engine sees a drag.
+      const doc = new Doc({ compactCopies });
+      doc.apply([
+        { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+        {
+          op: "create",
+          id: "card",
+          type: "frame",
+          parent: "p",
+          key: "a0",
+          props: {
+            width: 90,
+            height: 70,
+            clipContent: true,
+            fills: [{ type: "solid", color: "#ffffff" }],
+          },
+        },
+        {
+          op: "create",
+          id: "r",
+          type: "rect",
+          parent: "card",
+          key: "a0",
+          props: {
+            x: 10,
+            y: 10,
+            width: 30,
+            height: 20,
+            fills: [{ type: "solid", color: "#7048e8" }],
+          },
+        },
+      ]);
+      const builder = new DisplayListBuilder(new Scene(doc), measurer);
+      const e = new RenderEngine(mod);
+      try {
+        expect(e.apply(builder.build("p")).ok).toBe(true);
+        for (let i = 1; i <= 3; i++) {
+          doc.apply([
+            { op: "set", id: "r", prop: "x", value: 10 + i * 7 },
+            { op: "set", id: "r", prop: "y", value: 10 + i * 3 },
+          ]);
+          const patch = builder.update();
+          if (!patch) throw new Error("no patch for a move");
+          expect(e.apply(patch).ok).toBe(true);
+          expect(builder.stats.records).toBe(0);
+          expect(e.dragging).toBe("composited");
+        }
+        // A real change of children still sends the parent's order (and ends the drag).
+        doc.apply([
+          {
+            op: "create",
+            id: "s",
+            type: "rect",
+            parent: "card",
+            key: "a1",
+            props: { width: 10, height: 10, fills: [{ type: "solid", color: "#000000" }] },
+          },
+        ]);
+        const patch = builder.update();
+        if (!patch) throw new Error("no patch for a new layer");
+        expect(e.apply(patch).ok).toBe(true);
+        expect(e.dragging).toBe("none");
+        expect(e.children(1).ok).toBe(true);
+      } finally {
+        e.dispose();
+      }
+    });
+});

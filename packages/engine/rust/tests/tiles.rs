@@ -95,6 +95,7 @@ struct Counts {
     zooms: u32,
     switches: u32,
     images: u32,
+    drags: u32,
 }
 
 /// One seeded run: a page, then a random walk of edits and camera moves, frames under small
@@ -149,7 +150,7 @@ fn run(s: u64, slots: usize, counts: &mut Counts) {
     };
     for step in 0..24 {
         let what = format!("step {step}");
-        match r.below(10) {
+        match r.below(11) {
             0..=2 => {
                 let patch = model.edit(&mut r, revision, revision + 1);
                 e.apply(&patch)
@@ -208,6 +209,38 @@ fn run(s: u64, slots: usize, counts: &mut Counts) {
                     .unwrap_or_else(|err| panic!("seed {s} {what}: page switch refused: {err}"));
                 counts.switches += 1;
             }
+            9 => {
+                // A drag: a run of siblings moved over a few frames, then dropped.
+                let parents: Vec<u32> = std::iter::once(0)
+                    .chain(model.nodes.keys().copied())
+                    .filter(|p| model.children.get(p).is_some_and(|l| !l.is_empty()))
+                    .collect();
+                if let Some(&parent) = parents.get(r.below(parents.len().max(1) as u32) as usize) {
+                    let list = model.children[&parent].clone();
+                    let a = r.below(list.len() as u32) as usize;
+                    let b = (a + r.below(2) as usize).min(list.len() - 1);
+                    let ids = list[a..=b].to_vec();
+                    for _ in 0..1 + r.below(4) {
+                        let (dx, dy) = (f64::from(r.range(-30.0, 30.0)), f64::from(r.range(-20.0, 20.0)));
+                        let patch = drag_patch(&mut model, &ids, dx, dy, revision);
+                        e.apply(&patch)
+                            .unwrap_or_else(|err| panic!("seed {s} {what}: move refused: {err}"));
+                        revision += 1;
+                        check(
+                            &mut e,
+                            c,
+                            false,
+                            r.below(2) as usize,
+                            &model,
+                            revision,
+                            variant,
+                            counts,
+                            &what,
+                        );
+                    }
+                    counts.drags += 1;
+                }
+            }
             8 => {
                 // The image's pixels change under its handle.
                 variant = variant.wrapping_add(17);
@@ -245,6 +278,11 @@ fn exact_tiled_frames_equal_a_fresh_engine() {
     let mut counts = Counts::default();
     for case in 0..cases(40) {
         let s = base.wrapping_add(u64::from(case) * 0x9e37_79b9);
+        if let Some(one) = std::env::var("FUZZ_ONE").ok().and_then(|v| v.parse::<u64>().ok())
+            && one != s
+        {
+            continue;
+        }
         run(s, 64, &mut counts);
     }
     eprintln!("{counts:?}");
@@ -252,7 +290,14 @@ fn exact_tiled_frames_equal_a_fresh_engine() {
         counts.exact > 100 && counts.standins > 50,
         "the walk exercised too little: {counts:?}"
     );
-    assert!(counts.edits > 0 && counts.pans > 0 && counts.zooms > 0 && counts.switches > 0 && counts.images > 0);
+    assert!(
+        counts.edits > 0
+            && counts.pans > 0
+            && counts.zooms > 0
+            && counts.switches > 0
+            && counts.images > 0
+            && counts.drags > 0
+    );
 }
 
 #[test]
@@ -262,11 +307,19 @@ fn under_memory_pressure_frames_stay_exact_and_never_blank() {
     let mut counts = Counts::default();
     for case in 0..cases(10) {
         let s = base.wrapping_add(u64::from(case) * 0x9e37_79b9);
+        if std::env::var("FUZZ_ONE").is_ok() {
+            continue;
+        }
         run(s, 3, &mut counts);
     }
     // And slots for a frame and a bit: eviction every frame.
     for case in 0..cases(10) {
         let s = base.wrapping_add(u64::from(case) * 0x7f4a_7c15);
+        if let Some(one) = std::env::var("FUZZ_ONE").ok().and_then(|v| v.parse::<u64>().ok())
+            && one != s
+        {
+            continue;
+        }
         run(s, 14, &mut counts);
     }
     eprintln!("{counts:?}");
@@ -450,5 +503,437 @@ fn tiles_drawn_ahead_between_frames_make_the_next_frame_exact() {
         assert_eq!(stats.tiles_drawn, 0, "seed {s}: the frame drew what was drawn ahead");
         let want = fresh(&model, 1, 0, c1);
         assert!(diff(px, &want).is_none(), "seed {s}: differs from a fresh engine");
+    }
+}
+
+/// A patch moving `ids` by (`dx`, `dy`) (transforms only: a drag's move).
+fn drag_patch(model: &mut Model, ids: &[u32], dx: f64, dy: f64, base: u32) -> Vec<u8> {
+    let mut w = W::new(base, base + 1);
+    for id in ids {
+        if let Some((_, rec)) = model.nodes.get_mut(id) {
+            rec.transform[4] += dx;
+            rec.transform[5] += dy;
+            w.transform(*id, rec.transform);
+        }
+    }
+    w.finish()
+}
+
+/// The largest channel difference, and how many channels differ by more than 1.
+fn spread(a: &[u8], b: &[u8]) -> (u8, usize) {
+    let mut worst = 0;
+    let mut over = 0;
+    for (x, y) in a.iter().zip(b) {
+        let d = x.abs_diff(*y);
+        worst = worst.max(d);
+        if d > 1 {
+            over += 1;
+        }
+    }
+    (worst, over)
+}
+
+#[derive(Default, Debug)]
+struct DragCounts {
+    composited: u32,
+    eligible: u32,
+    ineligible: u32,
+    worst: u8,
+    over: usize,
+    exact: u32,
+}
+
+/// A seeded drag: a random run of siblings moved over several frames with no budget for tiles,
+/// then left at rest until exact.
+fn drag_run(s: u64, counts: &mut DragCounts) {
+    let mut r = Rng(s | 1);
+    let n = 8 + r.below(30);
+    let mut model = Model::new(&mut r, n, false);
+    let mut e = engine(0, 128);
+    let mut revision = 1;
+    e.apply(&model.fresh(revision)).expect("fresh");
+    let c = cam(
+        f64::from(r.range(0.7, 1.4)),
+        f64::from(r.range(-20.0, 20.0)).round(),
+        0.0,
+    );
+    let rest = TiledOptions::default();
+    let moving = TiledOptions {
+        moving: true,
+        max_jobs: 0,
+        ..TiledOptions::default()
+    };
+    assert!(e.render_cpu_tiled(W, H, c, BG, rest).expect("frame").1.exact);
+    // A random run of consecutive siblings; sometimes not consecutive (no fast path).
+    let parents: Vec<u32> = std::iter::once(0)
+        .chain(model.nodes.keys().copied())
+        .filter(|p| model.children.get(p).is_some_and(|l| !l.is_empty()))
+        .collect();
+    let parent = parents[r.below(parents.len() as u32) as usize];
+    let list = model.children[&parent].clone();
+    let a = r.below(list.len() as u32) as usize;
+    let b = (a + r.below(3) as usize).min(list.len() - 1);
+    let mut ids: Vec<u32> = list[a..=b].to_vec();
+    if r.chance(0.25) && list.len() > 2 && b + 1 < list.len() - 1 {
+        // A gap: the first and the one after the next.
+        ids = vec![list[a], list[(b + 2).min(list.len() - 1)]];
+    }
+    let mut edited = false;
+    for step in 0..5 {
+        if step == 2 && r.chance(0.5) {
+            edited = true;
+            // An edit mid-drag (a collaborator's, text re-shaped): beside the selection the drag
+            // goes on with its parts drawn again there; on it, or changing structure, it ends.
+            let edit = model.edit(&mut r, revision, revision + 1);
+            e.apply(&edit)
+                .unwrap_or_else(|err| panic!("seed {s}: edit refused: {err}"));
+            revision += 1;
+            ids.retain(|id| model.nodes.contains_key(id));
+            if ids.is_empty() {
+                break;
+            }
+        }
+        let (dx, dy) = (f64::from(r.range(-25.0, 25.0)), f64::from(r.range(-20.0, 20.0)));
+        let patch = drag_patch(&mut model, &ids, dx, dy, revision);
+        e.apply(&patch)
+            .unwrap_or_else(|err| panic!("seed {s} step {step}: move refused: {err}"));
+        revision += 1;
+        let eligible = e.dragging.as_ref().is_some_and(|d| d.split.is_some());
+        let (px, stats) = e
+            .render_cpu_tiled(W, H, c, BG, moving)
+            .map(|(p, s)| (p.to_vec(), s))
+            .expect("drag frame");
+        let px = px.as_slice();
+        let want = fresh(&model, revision, 0, c);
+        if stats.exact {
+            counts.exact += 1;
+            assert!(
+                diff(px, &want).is_none(),
+                "seed {s} step {step}: an exact drag frame differs from fresh"
+            );
+        } else if stats.dragged > 0 {
+            assert!(eligible, "seed {s} step {step}: composited a drag without a fast path");
+            counts.composited += 1;
+            // After an edit, tiles it touched elsewhere stand in stale (reported, never exact):
+            // only a drag with nothing else changing is held to rounding everywhere.
+            if !edited {
+                let (worst, over) = spread(px, &want);
+                counts.worst = counts.worst.max(worst);
+                counts.over += over;
+                assert!(
+                    worst <= 4,
+                    "seed {s} step {step}: the drag's composite is {worst} levels from a fresh frame"
+                );
+            }
+        }
+        if eligible {
+            counts.eligible += 1;
+        } else {
+            counts.ineligible += 1;
+            // No fast path: the selection is drawn at its real position, so the frame is exact
+            // (unless an edit left tiles elsewhere standing in stale).
+            assert!(
+                stats.exact || edited,
+                "seed {s} step {step}: a drag without a fast path wasn't exact: {stats:?}"
+            );
+        }
+    }
+    // Dropped: at rest, exact and fresh within a bounded number of frames.
+    let mut exact = false;
+    for _ in 0..100 {
+        let (px, stats) = e
+            .render_cpu_tiled(W, H, c, BG, TiledOptions { max_jobs: 1, ..rest })
+            .expect("rest frame");
+        if stats.exact {
+            assert!(
+                diff(px, &fresh(&model, revision, 0, c)).is_none(),
+                "seed {s}: rest frame differs"
+            );
+            exact = true;
+            break;
+        }
+    }
+    assert!(exact, "seed {s}: never became exact after the drag");
+}
+
+#[test]
+fn drags_composite_within_rounding_and_settle_exact() {
+    let base = seed() ^ 0xd7a9;
+    let mut counts = DragCounts::default();
+    for case in 0..cases(60) {
+        let s = base.wrapping_add(u64::from(case) * 0x9e37_79b9);
+        if let Some(one) = std::env::var("FUZZ_ONE").ok().and_then(|v| v.parse::<u64>().ok())
+            && one != s
+        {
+            continue;
+        }
+        drag_run(s, &mut counts);
+    }
+    eprintln!("{counts:?}");
+    assert!(
+        counts.composited > 20 && counts.ineligible > 0,
+        "the drags exercised too little: {counts:?}"
+    );
+}
+
+#[test]
+fn a_drag_into_a_board_is_a_removal_and_an_insertion() {
+    // Two boards side by side, a layer in the first, dragged over the second and dropped in it
+    // (reparented, as the editor does on drop, or as a provisional parent mid-drag).
+    let mut model = Model {
+        nodes: std::collections::BTreeMap::new(),
+        children: std::collections::HashMap::new(),
+        next: 1,
+        readers: false,
+    };
+    let board = |x: f64, color: [f32; 4]| {
+        let mut b = Rec::new([1.0, 0.0, 0.0, 1.0, x, 10.0], [70.0, 90.0]);
+        b.paths.push(Entry::Rect {
+            w: 70.0,
+            h: 90.0,
+            radii: [6.0; 4],
+        });
+        b.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid(color),
+        });
+        b.ops.push(Op::Clip {
+            path: 0,
+            even_odd: false,
+        });
+        b.ops.push(Op::Children);
+        b.ops.push(Op::Unclip);
+        b
+    };
+    let mut layer = Rec::new([1.0, 0.0, 0.0, 1.0, 10.0, 20.0], [30.0, 24.0]);
+    layer.paths.push(Entry::Ellipse { w: 30.0, h: 24.0 });
+    layer.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.9, 0.2, 0.1, 0.8]),
+    });
+    model.nodes.insert(1, (0, board(5.0, [1.0, 1.0, 1.0, 1.0])));
+    model.nodes.insert(2, (0, board(85.0, [0.85, 0.9, 1.0, 1.0])));
+    model.nodes.insert(3, (1, layer));
+    model.children.insert(0, vec![1, 2]);
+    model.children.insert(1, vec![3]);
+    model.next = 4;
+    let mut e = engine(0, 64);
+    e.apply(&model.fresh(1)).expect("fresh");
+    let c = cam(1.0, 0.0, 0.0);
+    let moving = TiledOptions {
+        moving: true,
+        max_jobs: 0,
+        ..TiledOptions::default()
+    };
+    assert!(
+        e.render_cpu_tiled(W, H, c, BG, TiledOptions::default())
+            .expect("frame")
+            .1
+            .exact
+    );
+    let mut revision = 1;
+    for _ in 0..4 {
+        let patch = drag_patch(&mut model, &[3], 18.0, 2.0, revision);
+        e.apply(&patch).expect("move");
+        revision += 1;
+        let (px, stats) = e.render_cpu_tiled(W, H, c, BG, moving).expect("drag frame");
+        assert!(stats.dragged > 0 || stats.exact, "{stats:?}");
+        let (worst, _) = spread(px, &fresh(&model, revision, 0, c));
+        assert!(worst <= 4, "the drag's composite is {worst} levels off");
+    }
+    // Dropped into the second board, at the same place on the page.
+    let (_, mut rec) = model.nodes[&3].clone();
+    rec.transform[4] -= 80.0;
+    model.nodes.insert(3, (2, rec.clone()));
+    model.children.insert(1, vec![]);
+    model.children.insert(2, vec![3]);
+    let mut w = W::new(revision, revision + 1);
+    w.set(3, 2, &rec);
+    w.order(2, &[3]);
+    e.apply(&w.finish()).expect("drop");
+    revision += 1;
+    assert!(e.dragging.is_none(), "a reparent ends the drag");
+    // Then dragged on inside its new board: a new drag, split at its new place in paint order.
+    for _ in 0..2 {
+        let patch = drag_patch(&mut model, &[3], -6.0, 9.0, revision);
+        e.apply(&patch).expect("move");
+        revision += 1;
+        let (px, _) = e.render_cpu_tiled(W, H, c, BG, moving).expect("drag frame");
+        let (worst, _) = spread(px, &fresh(&model, revision, 0, c));
+        assert!(
+            worst <= 4,
+            "the drag's composite in the new board is {worst} levels off"
+        );
+    }
+    let (px, stats) = e.render_cpu_tiled(W, H, c, BG, TiledOptions::default()).expect("rest");
+    assert!(stats.exact);
+    assert!(diff(px, &fresh(&model, revision, 0, c)).is_none());
+}
+
+#[test]
+fn a_record_sent_again_unchanged_changes_nothing_and_keeps_the_drag() {
+    // The builder sends text still waiting for its faces again with every patch: the same
+    // record, where it already is. It must neither end a drag nor dirty anything.
+    let mut r = Rng(0x5a3e);
+    let mut model = Model::new(&mut r, 12, false);
+    let mut e = engine(0, 64);
+    e.apply(&model.fresh(1)).expect("fresh");
+    let top = model.children[&0][0];
+    let other = *model.children[&0].last().expect("two");
+    let patch = drag_patch(&mut model, &[top], 5.0, 3.0, 1);
+    e.apply(&patch).expect("move");
+    let serial = e.dragging.as_ref().map(|d| d.serial);
+    assert!(serial.is_some());
+    // The same record again, with a move.
+    let (p, rec) = model.nodes[&other].clone();
+    let mut w = W::new(2, 3);
+    w.set(other, p, &rec);
+    let (_, moved) = model.nodes.get_mut(&top).expect("top").clone();
+    let mut t = moved.transform;
+    t[4] += 4.0;
+    model.nodes.get_mut(&top).expect("top").1.transform = t;
+    w.transform(top, t);
+    let applied = e.apply(&w.finish()).expect("move and resend");
+    assert_eq!(applied.moved.as_deref(), Some(&[top][..]));
+    assert_eq!(e.dragging.as_ref().map(|d| d.serial), serial, "the drag goes on");
+    // Only the same record again: nothing changes, nothing to draw.
+    let mut w = W::new(3, 4);
+    w.set(other, p, &rec);
+    let applied = e.apply(&w.finish()).expect("resend");
+    assert!(applied.noop && applied.changes.is_empty());
+    assert_eq!(e.dragging.as_ref().map(|d| d.serial), serial);
+    // A real change elsewhere doesn't end it either: the parts round the selection are drawn
+    // again where it changed them, and the drag's frames stay within rounding of a fresh frame.
+    let mut changed = rec.clone();
+    changed.opacity = 0.5;
+    model.nodes.insert(other, (p, changed.clone()));
+    let mut w = W::new(4, 5);
+    w.set(other, p, &changed);
+    e.apply(&w.finish()).expect("change");
+    assert_eq!(e.dragging.as_ref().map(|d| d.serial), serial);
+    let c = cam(1.0, 0.0, 0.0);
+    let moving = TiledOptions {
+        moving: true,
+        max_jobs: 0,
+        ..TiledOptions::default()
+    };
+    let (px, _) = e.render_cpu_tiled(W, H, c, BG, moving).expect("frame");
+    let (worst, _) = spread(px, &fresh(&model, 5, 0, c));
+    assert!(worst <= 4, "the drag's parts went stale: {worst} levels off");
+    // A change to the selection itself ends it.
+    let (sp, mut srec) = model.nodes[&top].clone();
+    srec.opacity = 0.4;
+    model.nodes.insert(top, (sp, srec.clone()));
+    let mut w = W::new(5, 6);
+    w.set(top, sp, &srec);
+    e.apply(&w.finish()).expect("change the selection");
+    assert!(e.dragging.is_none());
+}
+
+#[test]
+fn a_record_set_back_after_a_move_is_set_back() {
+    // A record moved by transforms, then set again with the bytes it first had (its old place):
+    // that's a change, not the same record sent again.
+    let mut r = Rng(0x6a5);
+    let mut model = Model::new(&mut r, 6, false);
+    let mut e = engine(0, 64);
+    e.apply(&model.fresh(1)).expect("fresh");
+    let id = model.children[&0][0];
+    let (p, original) = model.nodes[&id].clone();
+    e.apply(&drag_patch(&mut model, &[id], 30.0, 12.0, 1)).expect("move");
+    let mut w = W::new(2, 3);
+    w.set(id, p, &original);
+    let applied = e.apply(&w.finish()).expect("set back");
+    assert!(!applied.noop, "setting it back is a change");
+    model.nodes.insert(id, (p, original));
+    let c = cam(1.0, 0.0, 0.0);
+    let (px, stats) = e.render_cpu_tiled(W, H, c, BG, TiledOptions::default()).expect("frame");
+    assert!(stats.exact);
+    assert!(diff(px, &fresh(&model, 3, 0, c)).is_none());
+}
+
+#[test]
+fn a_dragged_layer_passes_under_what_is_painted_after_its_board() {
+    // A board (no clip) holding a layer, and a shape painted after the board, far from it. The
+    // layer is dragged out of the board's area and under the shape: the shape stays above it.
+    // (The random drags found the case where a board on the selection's path is culled from a
+    // tile, which once left what follows it in the part below; `exec::Walk::node` now moves
+    // past the selection after any node on its path, walked or not.)
+    let mut model = Model {
+        nodes: std::collections::BTreeMap::new(),
+        children: std::collections::HashMap::new(),
+        next: 4,
+        readers: false,
+    };
+    let shape = |t: [f64; 6], w: f32, h: f32, color: [f32; 4], children: bool| {
+        let mut r = Rec::new(t, [w, h]);
+        r.paths.push(Entry::Rect { w, h, radii: [0.0; 4] });
+        r.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid(color),
+        });
+        if children {
+            r.ops.push(Op::Children);
+        }
+        r
+    };
+    model.nodes.insert(
+        1,
+        (
+            0,
+            shape([1.0, 0.0, 0.0, 1.0, 5.0, 5.0], 40.0, 40.0, [1.0, 1.0, 1.0, 1.0], true),
+        ),
+    );
+    model.nodes.insert(
+        2,
+        (
+            1,
+            shape([1.0, 0.0, 0.0, 1.0, 5.0, 5.0], 20.0, 20.0, [0.1, 0.6, 0.2, 0.7], false),
+        ),
+    );
+    model.nodes.insert(
+        3,
+        (
+            0,
+            shape(
+                [1.0, 0.0, 0.0, 1.0, 100.0, 60.0],
+                50.0,
+                50.0,
+                [0.68, 0.16, 1.0, 1.0],
+                false,
+            ),
+        ),
+    );
+    model.children.insert(0, vec![1, 3]);
+    model.children.insert(1, vec![2]);
+    let mut e = engine(0, 64);
+    e.apply(&model.fresh(1)).expect("fresh");
+    let c = cam(1.0, 0.0, 0.0);
+    assert!(
+        e.render_cpu_tiled(W, H, c, BG, TiledOptions::default())
+            .expect("frame")
+            .1
+            .exact
+    );
+    let moving = TiledOptions {
+        moving: true,
+        max_jobs: 0,
+        ..TiledOptions::default()
+    };
+    let mut revision = 1;
+    for _ in 0..6 {
+        let patch = drag_patch(&mut model, &[2], 18.0, 11.0, revision);
+        e.apply(&patch).expect("move");
+        revision += 1;
+        assert!(e.dragging.as_ref().is_some_and(|d| d.split.is_some()));
+        let (px, _) = e.render_cpu_tiled(W, H, c, BG, moving).expect("drag frame");
+        let (worst, _) = spread(px, &fresh(&model, revision, 0, c));
+        assert!(
+            worst <= 4,
+            "the layer was drawn over what's painted after its board: {worst} levels off"
+        );
     }
 }

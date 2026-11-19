@@ -18,9 +18,10 @@
 //! - Backdrop readers are phase 3 here (`read` refuses), as everywhere outside the tests.
 
 use crate::atlas::{Placed, Shelves};
-use crate::engine::TiledOptions;
+use crate::engine::{DragFrame, TiledOptions};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Open, impl_draw};
+use crate::exec::{Pass, Split};
 use crate::images::{self, Level};
 use crate::masks::{self, MaskCache, MaskKey};
 use crate::store::Store;
@@ -132,17 +133,22 @@ struct Page {
 
 struct Compositor {
     pipeline: wgpu::RenderPipeline,
+    /// The same quads laid over what's there (premultiplied source over): a drag's selection
+    /// and the part above it.
+    over: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
     instances: wgpu::Buffer,
     capacity: usize,
 }
 
-/// Where a tile is drawn: a slot in a page, or the scratch tile (a frame drawn direct).
+/// Where a tile is drawn: a slot in a page, the frame (a frame drawn direct), or only the
+/// scratch tile (a drag's selection, laid over the frame next).
 #[derive(Clone, Copy)]
 enum TileTarget {
     Slot(u32),
     Scratch,
+    ScratchOnly,
 }
 
 /// Milliseconds now, for the frame's breakdown.
@@ -761,7 +767,10 @@ impl Gpu {
                 &self.device,
                 TILE,
                 TILE,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                // Sampled too: a drag's selection is laid over the frame from it.
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 "scratch tile",
             );
             let depth = self.renderer.create_depth_texture_view(&RenderSize {
@@ -788,6 +797,7 @@ impl Gpu {
         generation: u64,
         halo: i32,
         options: TiledOptions,
+        drag: Option<&DragFrame>,
     ) -> Result<DrawStats> {
         self.check()?;
         let (w, h) = (u32::from(frame.width), u32::from(frame.height));
@@ -806,12 +816,14 @@ impl Gpu {
             .tiles
             .plan(view, (w, h), zooming, last, options.prefetch)
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
+        let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
         let mut stats = DrawStats {
             direct: plan.direct,
             ..DrawStats::default()
         };
         // Nothing to draw and the frame shown is this one, exact: it stays.
         let same = plan.jobs.is_empty()
+            && selection.is_none()
             && last.is_some_and(|l| l.view == view && l.size == (w, h))
             && self.shown == Some((generation, bg_bits, true));
         if same {
@@ -853,7 +865,7 @@ impl Gpu {
             drew_any = true;
             match target {
                 TileTarget::Slot(s) => self.tiles.drawn(job.key, s, exact),
-                TileTarget::Scratch => direct_exact &= exact,
+                TileTarget::Scratch | TileTarget::ScratchOnly => direct_exact &= exact,
             }
         }
         let t1 = now();
@@ -887,6 +899,13 @@ impl Gpu {
                     &mut stats,
                     &mut verbs,
                 )?;
+            }
+            if let (Some(now), Some(split)) = (selection, drag.and_then(|d| d.split.as_ref())) {
+                let dragged = self.drag_composite(store, &plan, now, split, background, dst, &mut stats);
+                if let Err(e) = dragged {
+                    self.scene.reset();
+                    return Err(e);
+                }
             }
         }
         stats.exact = (plan.direct || stats.exact) && direct_exact;
@@ -1035,7 +1054,17 @@ impl Gpu {
     ) -> Result<bool> {
         *verbs = store.limits.frame_verbs;
         match self.draw_tile(
-            store, job.view, job.detail, background, target, plan, job.key, dst, stats, verbs,
+            store,
+            job.view,
+            job.detail,
+            background,
+            &Split::all(),
+            target,
+            plan,
+            job.key,
+            dst,
+            stats,
+            verbs,
         ) {
             Ok(exact) => {
                 stats.tiles_drawn += 1;
@@ -1096,6 +1125,7 @@ impl Gpu {
         view: Affine,
         detail: bool,
         background: [f32; 4],
+        split: &Split,
         target: TileTarget,
         plan: &crate::tiles::Plan,
         key: TileKey,
@@ -1121,7 +1151,7 @@ impl Gpu {
             },
         };
         let limits = store.limits;
-        let s = exec::draw_budgeted(store, self, &tile, &limits, verbs)?;
+        let s = exec::draw_split(store, self, &tile, &limits, verbs, split)?;
         stats.add(&s);
         let exact = !detail || s.exact();
         let t1 = now();
@@ -1132,10 +1162,11 @@ impl Gpu {
         self.ensure_scratch()?;
         let place = match target {
             TileTarget::Slot(slot) => Some(self.slot_place(slot)?),
-            TileTarget::Scratch => None,
+            TileTarget::Scratch | TileTarget::ScratchOnly => None,
         };
         // The masks this tile placed reach the atlas before it renders.
         self.flush_masks();
+        let only = matches!(target, TileTarget::ScratchOnly);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tile") });
@@ -1182,7 +1213,7 @@ impl Gpu {
                 }
             }
         };
-        if size.0 > 0 && size.1 > 0 {
+        if !only && size.0 > 0 && size.1 > 0 {
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: scratch,
@@ -1218,6 +1249,256 @@ impl Gpu {
         stats.encode_ms += t1 - t0;
         stats.render_ms += now() - t1;
         Ok(exact)
+    }
+
+    /// A drag's tiles (decision 0040, "Dragging"): each tile the selection touched whose own
+    /// tile isn't up to date shows the page's part below the selection (kept for the drag), the
+    /// selection drawn afresh at its real position, and the part above (kept), laid over each
+    /// other in order. Exact but for rounding: a stand-in until the camera and the drag rest.
+    #[allow(clippy::too_many_arguments)]
+    fn drag_composite(
+        &mut self,
+        store: &Store,
+        plan: &crate::tiles::Plan,
+        now: Rect,
+        split: &Split,
+        background: [f32; 4],
+        dst: usize,
+        stats: &mut DrawStats,
+    ) -> Result<()> {
+        let Some(level) = self.tiles.level(plan.level) else {
+            return Ok(());
+        };
+        let size: [f32; 4] = [plan.size.0 as f32, plan.size.1 as f32, 0.0, 0.0];
+        let ub: Vec<u8> = size.iter().flat_map(|v| v.to_le_bytes()).collect();
+        if let Some(c) = self.compositor.as_ref() {
+            self.queue.write_buffer(&c.uniforms, 0, &ub);
+        }
+        for dt in self.tiles.drag_tiles(plan, now) {
+            let view = level.tile_view(dt.i, dt.j, TILE);
+            let mut slots = [0u32; 2];
+            for (k, (pseudo, pass, fill)) in [
+                (crate::tiles::DRAG_BELOW, Pass::Below, background),
+                (crate::tiles::DRAG_ABOVE, Pass::Above, [0.0; 4]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let key = TileKey {
+                    level: pseudo,
+                    i: dt.i,
+                    j: dt.j,
+                };
+                slots[k] = match self.tiles.take_slot(&key) {
+                    Some(slot) => slot,
+                    None => {
+                        let Some(slot) = self.tiles.slot_for(key) else {
+                            return Ok(());
+                        };
+                        let part = Split { pass, ..split.clone() };
+                        let mut verbs = store.limits.frame_verbs;
+                        let drawn = self.draw_tile(
+                            store,
+                            view,
+                            false,
+                            fill,
+                            &part,
+                            TileTarget::Slot(slot),
+                            plan,
+                            key,
+                            dst,
+                            stats,
+                            &mut verbs,
+                        );
+                        if let Err(e) = drawn {
+                            self.tiles.release(key, slot);
+                            return Err(e);
+                        }
+                        self.tiles.drawn(key, slot, true);
+                        slot
+                    }
+                };
+            }
+            if dt.selection {
+                let part = Split {
+                    pass: Pass::Selection,
+                    ..split.clone()
+                };
+                let mut verbs = store.limits.frame_verbs;
+                let key = TileKey {
+                    level: plan.level,
+                    i: dt.i,
+                    j: dt.j,
+                };
+                self.draw_tile(
+                    store,
+                    view,
+                    false,
+                    [0.0; 4],
+                    &part,
+                    TileTarget::ScratchOnly,
+                    plan,
+                    key,
+                    dst,
+                    stats,
+                    &mut verbs,
+                )?;
+            }
+            self.lay_drag_tile(plan, dt, slots, dst)?;
+            stats.dragged += 1;
+            stats.exact = false;
+        }
+        Ok(())
+    }
+
+    /// Lays one drag tile into frame texture `dst`: the part below copied, then the selection
+    /// (in the scratch tile, when it's over the tile) and the part above laid over it.
+    fn lay_drag_tile(
+        &mut self,
+        plan: &crate::tiles::Plan,
+        dt: crate::tiles::DragTile,
+        slots: [u32; 2],
+        dst: usize,
+    ) -> Result<()> {
+        let t = i64::from(TILE);
+        let fx = i64::from(dt.i) * t + plan.origin.0;
+        let fy = i64::from(dt.j) * t + plan.origin.1;
+        let (fw, fh) = (i64::from(plan.size.0), i64::from(plan.size.1));
+        let (x0, y0) = (fx.max(0), fy.max(0));
+        let (x1, y1) = ((fx + t).min(fw), (fy + t).min(fh));
+        if x1 <= x0 || y1 <= y0 {
+            return Ok(());
+        }
+        let place = |slot: u32| {
+            let within = slot % PER_PAGE;
+            (
+                (slot / PER_PAGE) as usize,
+                (within % PER_ROW) * TILE,
+                (within / PER_ROW) * TILE,
+            )
+        };
+        let (bp, bx, by) = place(slots[0]);
+        let (ap, ax, ay) = place(slots[1]);
+        if bp >= self.pages.len() || ap >= self.pages.len() {
+            return Ok(());
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("drag") });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.pages[bp].texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: bx + (x0 - fx) as u32,
+                    y: by + (y0 - fy) as u32,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.frames[dst].texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: x0 as u32,
+                    y: y0 as u32,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: (x1 - x0) as u32,
+                height: (y1 - y0) as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+        // The tile's whole square in the frame (the viewport clips it), sampled texel for texel.
+        let d = [fx as f32, fy as f32, (fx + t) as f32, (fy + t) as f32];
+        let quad = |x: u32, y: u32, side: f64| {
+            let (x, y, ts) = (f64::from(x), f64::from(y), f64::from(TILE));
+            [
+                d[0],
+                d[1],
+                d[2],
+                d[3],
+                (x / side) as f32,
+                (y / side) as f32,
+                ((x + ts) / side) as f32,
+                ((y + ts) / side) as f32,
+                ((x + 0.5) / side) as f32,
+                ((y + 0.5) / side) as f32,
+                ((x + ts - 0.5) / side) as f32,
+                ((y + ts - 0.5) / side) as f32,
+            ]
+        };
+        let mut quads: Vec<[f32; 12]> = Vec::new();
+        if dt.selection {
+            quads.push(quad(0, 0, f64::from(TILE)));
+        }
+        quads.push(quad(ax, ay, f64::from(PAGE)));
+        let c = self
+            .compositor
+            .as_ref()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no compositor"))?;
+        let bytes: Vec<u8> = quads
+            .iter()
+            .flat_map(|q| q.iter().flat_map(|v| v.to_le_bytes()))
+            .collect();
+        self.queue.write_buffer(&c.instances, 0, &bytes);
+        let layout = c.over.get_bind_group_layout(0);
+        let group_for = |view: &wgpu::TextureView| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("drag"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&c.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: c.uniforms.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        let scratch_group = match (dt.selection, self.scratch.as_ref()) {
+            (true, Some((_, v, _))) => Some(group_for(v)),
+            _ => None,
+        };
+        let above_group = group_for(&self.pages[ap].view);
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("drag"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.frames[dst].view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&c.over);
+            pass.set_vertex_buffer(0, c.instances.slice(..));
+            let mut at = 0u32;
+            if let Some(g) = scratch_group.as_ref() {
+                pass.set_bind_group(0, g, &[]);
+                pass.draw(0..4, 0..1);
+                at = 1;
+            }
+            pass.set_bind_group(0, &above_group, &[]);
+            pass.draw(0..4, at..at + 1);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.submits += 1;
+        Ok(())
     }
 
     /// Lays a frame into frame texture `dst`: under what the frame's own tiles don't cover, the
@@ -1422,9 +1703,46 @@ impl Gpu {
             label: Some("composite"),
             source: wgpu::ShaderSource::Wgsl(QUADS.into()),
         });
+        // One bind group layout for both pipelines (a pipeline's own layout can't be shared).
+        let groups = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composite"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("composite"),
+            bind_group_layouts: &[Some(&groups)],
+            immediate_size: 0,
+        });
         let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("composite"),
-            layout: None,
+            layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &module,
                 entry_point: Some("vs"),
@@ -1454,6 +1772,39 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
+        // The same quads laid over what's there, through the same bind group layout.
+        let over = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite over"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 48,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: FORMAT,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1475,6 +1826,7 @@ impl Gpu {
         });
         self.compositor = Some(Compositor {
             pipeline,
+            over,
             sampler,
             uniforms,
             instances,
