@@ -1,0 +1,43 @@
+[package]
+name = "drawpane-engine-spike"
+version = "0.0.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+description = "Design spike for decision 0040: one engine, drawn by Vello on the GPU (WebGPU) and on the CPU (Workers)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["cpu"]
+# The Worker's build: vello_cpu and our CPU kernels, no wgpu.
+cpu = ["dep:vello_cpu"]
+# The browser's build: vello_gpu on wgpu, and our WGSL kernels, all on one wgpu device (so Vello's
+# targets and the kernels' textures are the same textures). It carries the CPU path too, so one
+# page can draw both and compare them. Pick the backends: WebGPU, WebGL2 (wgpu translates the
+# WGSL to GLSL with naga), or both.
+gpu = ["cpu", "dep:vello_gpu", "dep:wgpu", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:futures-channel"]
+webgpu = ["gpu", "wgpu/webgpu"]
+webgl = ["gpu", "wgpu/webgl"]
+# vello_cpu's float pipeline instead of its u8 one (closer to the GPU's arithmetic).
+f32 = ["vello_cpu?/f32_pipeline"]
+
+[dependencies]
+vello_common = { version = "=0.4.0", default-features = false, features = ["std"] }
+vello_cpu = { version = "=0.4.0", default-features = false, features = ["std", "u8_pipeline"], optional = true }
+vello_gpu = { version = "=0.4.0", default-features = false, features = ["wgpu"], optional = true }
+wgpu = { version = "30.0.2", default-features = false, features = ["std", "wgsl"], optional = true }
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+futures-channel = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["HtmlCanvasElement", "OffscreenCanvas", "console"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+# Keep custom sections (wasm-bindgen reads target features); wasm-bindgen strips names.
+strip = "debuginfo"

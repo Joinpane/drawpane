@@ -2,6 +2,7 @@ packages:
   - apps/*
   - packages/*
   - tools/kit-parity
+  - tools/render-engine-spike
 
 catalog:
   typescript: 7.0.2
