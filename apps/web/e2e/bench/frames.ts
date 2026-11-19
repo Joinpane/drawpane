@@ -15,6 +15,11 @@ export interface Summary {
   culled: number;
   /** Ms from the last frame of the movement until the canvas showed an exact frame. */
   exactMs?: number;
+  /**
+   * The render engine only: ms until it drew an exact frame (before a read-back shows it, in
+   * headless browsers), and its slowest frame of the movement (ms, how it was made, tiles drawn).
+   */
+  engine?: { exactMs: number; worst: { ms: number; plan: string; tiles: number } };
 }
 
 /** Pans for `frames` animation frames and returns what drawing them took. */
@@ -46,13 +51,27 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
           Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
         return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
       };
-      // Until an exact frame is on screen after the movement's last frame (at most 10 s).
+      type View = { last: { exact: boolean; ms: number; plan: string; tiles: { drawn: number } } };
+      const view = () => (window as unknown as { drawpaneEngineView?: View }).drawpaneEngineView;
+      let worst = { ms: 0, plan: "", tiles: 0 };
+      const watch = () => {
+        const l = view()?.last;
+        if (l && l.ms > worst.ms)
+          worst = { ms: Math.round(l.ms * 10) / 10, plan: l.plan, tiles: l.tiles.drawn };
+      };
+      // Until an exact frame is on screen after the movement's last frame (at most 10 s), and
+      // until the engine drew one.
       const exactAfter = async () => {
         const t = performance.now();
         const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
+        let drawn = -1;
         await nextFrame();
-        while (!f.exact && performance.now() - t < 10_000) await nextFrame();
-        return Math.round(performance.now() - t);
+        while (!f.exact && performance.now() - t < 10_000) {
+          if (drawn < 0 && view()?.last.exact) drawn = performance.now() - t;
+          await nextFrame();
+        }
+        const shown = Math.round(performance.now() - t);
+        return { shown, drawn: Math.round(drawn < 0 ? shown : drawn) };
       };
       const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
       await nextFrame();
@@ -65,9 +84,16 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
         e.state.set({ camera: e.s.camera.pan(d, d / 2) });
         await nextFrame();
         times.push(performance.now());
+        watch();
       }
       const summary = stats.summary();
-      return { ...summary, interval: intervals(times), exactMs: await exactAfter() };
+      const exact = await exactAfter();
+      return {
+        ...summary,
+        interval: intervals(times),
+        exactMs: exact.shown,
+        ...(view() ? { engine: { exactMs: exact.drawn, worst } } : {}),
+      };
     },
     { zoom, frames },
   );
@@ -97,12 +123,25 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
       return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
     };
     const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+    type View = { last: { exact: boolean; ms: number; plan: string; tiles: { drawn: number } } };
+    const view = () => (window as unknown as { drawpaneEngineView?: View }).drawpaneEngineView;
+    let worst = { ms: 0, plan: "", tiles: 0 };
+    const watch = () => {
+      const l = view()?.last;
+      if (l && l.ms > worst.ms)
+        worst = { ms: Math.round(l.ms * 10) / 10, plan: l.plan, tiles: l.tiles.drawn };
+    };
     const exactAfter = async () => {
       const t = performance.now();
       const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
+      let drawn = -1;
       await nextFrame();
-      while (!f.exact && performance.now() - t < 10_000) await nextFrame();
-      return Math.round(performance.now() - t);
+      while (!f.exact && performance.now() - t < 10_000) {
+        if (drawn < 0 && view()?.last.exact) drawn = performance.now() - t;
+        await nextFrame();
+      }
+      const shown = Math.round(performance.now() - t);
+      return { shown, drawn: Math.round(drawn < 0 ? shown : drawn) };
     };
     await nextFrame();
     await nextFrame();
@@ -115,13 +154,20 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
       e.state.set({ camera: e.s.camera.zoomAt(centre, e.s.camera.zoom * factor) });
       await nextFrame();
       times.push(performance.now());
+      watch();
     }
     const summary = w.drawpaneFrames.summary();
-    return { ...summary, interval: intervals(times), exactMs: await exactAfter() };
+    const exact = await exactAfter();
+    return {
+      ...summary,
+      interval: intervals(times),
+      exactMs: exact.shown,
+      ...(view() ? { engine: { exactMs: exact.drawn, worst } } : {}),
+    };
   }, frames);
 }
 
 /** One line of a frame summary for the console. */
 export function summaryRow(name: string, r: Summary): string {
-  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · exact after ${r.exactMs ?? "-"} ms · drawn ${r.drawn}, culled ${r.culled}`;
+  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · exact after ${r.exactMs ?? "-"} ms${r.engine ? ` (drawn exact after ${r.engine.exactMs} ms; slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles)` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
 }
