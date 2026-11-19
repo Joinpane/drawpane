@@ -1,4 +1,4 @@
-import { type EngineModule, ErrorCode, RenderEngine } from "@drawpane/engine";
+import { type EngineModule, ErrorCode, RenderEngine, unsupportedNames } from "@drawpane/engine";
 import { built, loadNodeEngine } from "@drawpane/engine/node";
 import { glyphKey, ROOT_ID } from "@drawpane/model";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -52,6 +52,23 @@ describe("Document regressions (review of PR 216)", () => {
     const node = doc.get("text");
     if (!node) throw new Error("text fixture missing");
     expect(greekLines(node, measurer).lines).toBe(1);
+  });
+
+  it("flags smoothed corners instead of drawing them plain", () => {
+    const doc = page();
+    doc.apply([
+      {
+        op: "create",
+        id: "box",
+        type: "rect",
+        parent: "p",
+        key: "a0",
+        props: { width: 40, height: 40, cornerRadius: 10, cornerSmoothing: 0.6 },
+      },
+    ]);
+    const builder = new DisplayListBuilder(new Scene(doc), measurer);
+    builder.build("p");
+    expect(unsupportedNames(builder.unsupported.get("box") ?? 0)).toContain("cornerSmoothing");
   });
 
   it("doesn't shape hidden text", () => {

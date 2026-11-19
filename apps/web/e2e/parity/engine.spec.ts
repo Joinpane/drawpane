@@ -44,8 +44,16 @@ const OUT =
   fileURLToPath(new URL("../../test-results/engine-parity", import.meta.url));
 
 /** Cells of otherwise supported suites that need what phase 1 doesn't draw, and why. */
-const EXPECTED_FALLBACKS: Record<string, RegExp> = {
-  fills: /^blend-/, // Non-normal blend modes: phase 3's blend kernels.
+/**
+ * Features a supported suite's cells may fall back for, by name: a cell falls back expectedly
+ * only when every reason it gives is listed for its suite.
+ */
+const EXPECTED_FALLBACKS: Record<string, readonly string[]> = {
+  // Non-normal blend modes: phase 3's blend kernels.
+  fills: ["blend"],
+  // Squircles wait for the engine's port of corners.ts; the effects in the suite are phase 3's.
+  corners: ["cornerSmoothing", "shadow", "layerBlur", "mask"],
+  "corners-glass": ["cornerSmoothing", "glass", "backgroundBlur"],
 };
 /** Suites whose every cell needs a phase 3 feature (effects, glass, masks, blends, grain). */
 const PHASE_3 = new Set([
@@ -212,7 +220,10 @@ test.describe("Render engine parity", () => {
           // Refused: it must be for what the builder flagged in this cell, and allowed here.
           if (cpu.code !== 5 || (reasons.length === 0 && !PHASE_3.has(suite.suite)))
             failures.push(`${cell.id}: refused without a reason it flagged (${cpu.error})`);
-          else if (!PHASE_3.has(suite.suite) && !EXPECTED_FALLBACKS[suite.suite]?.test(cell.id))
+          else if (
+            !PHASE_3.has(suite.suite) &&
+            !reasons.every((r) => EXPECTED_FALLBACKS[suite.suite]?.includes(r))
+          )
             failures.push(`${cell.id}: falls back (${reasons.join(", ")}) in a supported suite`);
           results.push({ cell: cell.id, status: "fallback", reasons });
           rows.push(

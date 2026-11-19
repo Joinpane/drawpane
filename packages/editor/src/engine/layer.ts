@@ -23,6 +23,8 @@ import {
   type WireRecord,
 } from "@drawpane/engine/wire";
 import { GLYPH_UNITS, getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import { fitCorners } from "../corner-geometry";
+import { layerCorners } from "../corners";
 import { boxOutline, ellipseOutline, fitDashes } from "../dashes";
 import { boxOf, localMatrix } from "../geometry";
 import { gradientMatrix } from "../gradients";
@@ -146,9 +148,17 @@ function shapeEntry(node: NodeRecord, w: number, h: number): PathEntry {
     }
     case "frame":
     case "rect": {
-      const r = getProp(node.props, "cornerRadius");
-      const radii = getProp(node.props, "cornerRadii") ?? [r, r, r, r];
-      return { kind: "rect", w, h, radii: [radii[0], radii[1], radii[2], radii[3]], smoothing: 0 };
+      // Radii as corners.ts fits them (Figma's rule: each corner's share of the side it's on),
+      // so the engine's own clamp (half the shorter side) never changes them.
+      const { radii } = layerCorners(node);
+      const fitted = fitCorners(w, h, radii, 0);
+      return {
+        kind: "rect",
+        w,
+        h,
+        radii: [fitted[0].radius, fitted[1].radius, fitted[2].radius, fitted[3].radius],
+        smoothing: 0,
+      };
     }
     default:
       return { kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 };
@@ -249,14 +259,27 @@ function dashedPieces(
   let outline: ReturnType<typeof boxOutline>;
   if (node.type === "ellipse") outline = ellipseOutline(w, h);
   else if (node.type === "rect" || node.type === "frame") {
-    const r = getProp(node.props, "cornerRadius");
-    outline = boxOutline(w, h, getProp(node.props, "cornerRadii") ?? [r, r, r, r]);
+    const { radii, smoothing } = layerCorners(node);
+    outline = boxOutline(w, h, radii, smoothing);
   } else return null;
   const pattern = getProp(node.props, "strokeDashes");
   return outline.map((piece) => {
     const path = new PathData();
     if (piece.kind === "line") path.moveTo(piece.x0, piece.y0).lineTo(piece.x1, piece.y1);
-    else {
+    else if (piece.kind === "cubic") {
+      // A box's corner as corners.ts draws it: its start, then six numbers a cubic.
+      const c = piece.pts;
+      path.moveTo(c[0] as number, c[1] as number);
+      for (let i = 2; i + 5 < c.length; i += 6)
+        path.cubicTo(
+          c[i] as number,
+          c[i + 1] as number,
+          c[i + 2] as number,
+          c[i + 3] as number,
+          c[i + 4] as number,
+          c[i + 5] as number,
+        );
+    } else {
       // An elliptical arc, clockwise (y down), as cubics of at most a quarter turn.
       const steps = Math.max(
         1,
@@ -296,14 +319,8 @@ function shapeStrokes(b: Builder, node: NodeRecord, shape: number, w: number, h:
   const paints = () =>
     strokes.map((p) => wirePaint(p, w, h)).filter((p): p is WirePaint => p !== null);
   if (!isUniform(sides)) {
-    const r = getProp(node.props, "cornerRadius");
-    const region = strokeRegion(
-      w,
-      h,
-      getProp(node.props, "cornerRadii") ?? [r, r, r, r],
-      sides,
-      getProp(node.props, "strokeAlign"),
-    );
+    const { radii, smoothing } = layerCorners(node);
+    const region = strokeRegion(w, h, radii, sides, getProp(node.props, "strokeAlign"), smoothing);
     const path = b.path({ kind: "path", path: svgPathData(strokeRegionPath(region)) });
     for (const paint of paints()) b.ops.push({ op: "fill", path, evenOdd: true, paint });
     return;
@@ -680,6 +697,11 @@ function unsupportedOf(node: NodeRecord, scene: Scene): number {
   if (post && post.length > 0) bits |= UNSUPPORTED.layerBlur;
   const mode = getProp(node.props, "blendMode");
   if (mode !== "normal") bits |= UNSUPPORTED.blend;
+  // Squircles wait for the engine's port of corners.ts; drawing plain corners instead is wrong.
+  if (node.type === "rect" || node.type === "frame") {
+    const { radii, smoothing } = layerCorners(node);
+    if (smoothing > 0 && radii.some((r) => r > 0)) bits |= UNSUPPORTED.cornerSmoothing;
+  }
   const id = node.id;
   const masks = isActiveMask(node);
   if (masks || scene.hasMask(id)) bits |= UNSUPPORTED.mask;
