@@ -111,6 +111,11 @@ export interface ShapedText {
   readonly width: number;
   /** Px per font unit. */
   readonly scale: number;
+  /**
+   * False when the glyphs' outlines couldn't be had (in a Worker, HarfBuzz's outline callbacks
+   * need WebAssembly compiled at run time, which a Worker forbids): measure by it, never draw it.
+   */
+  readonly outlines?: false;
 }
 
 /** A run's settings as a stable string: sorted tags, so the same settings share a cache entry. */

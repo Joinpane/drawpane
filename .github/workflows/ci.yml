@@ -13,10 +13,13 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: Lint, typecheck, test, build
+  engine:
+    # The render engine (packages/engine, decision 0040): Rust built to WebAssembly. Lints and
+    # tests the crate, fuzzes it briefly, builds both modules (failing over their size budgets)
+    # and hands them to the other jobs, which need no Rust toolchain.
+    name: Render engine (Rust, WebAssembly)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -24,6 +27,57 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: packages/engine
+          cache: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/engine/rust -> target
+      - run: pnpm install --frozen-lockfile
+      - name: Format
+        working-directory: packages/engine/rust
+        run: cargo fmt --check
+      - name: Clippy (CPU, with the test kernels)
+        working-directory: packages/engine/rust
+        run: cargo clippy --locked --all-targets --features test-kernels -- -D warnings
+      - name: Clippy (the browser build, WebAssembly)
+        working-directory: packages/engine/rust
+        run: cargo clippy --locked --features gpu --target wasm32-unknown-unknown -- -D warnings
+      - name: Tests, and a short seeded fuzz
+        working-directory: packages/engine/rust
+        run: cargo test --locked && FUZZ_CASES=300 FUZZ_SEED=random cargo test --locked --test fuzz
+      - name: Build both modules, held to their size budgets
+        run: pnpm --filter @drawpane/engine build
+      - name: The Worker build in workerd beside the agent runner's set, under its caps
+        run: pnpm --filter @drawpane/engine-workerd test:workerd
+        env:
+          WRANGLER_SEND_METRICS: "false"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-dist
+          path: packages/engine/dist
+          retention-days: 7
+
+  check:
+    name: Lint, typecheck, test, build
+    needs: engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The engine's modules come from the engine job.
+      ENGINE_SKIP_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-dist
+          path: packages/engine/dist
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
@@ -37,14 +91,17 @@ jobs:
     # split by spec file: each file brings up its own instance, so shards
     # share nothing. See apps/web/playwright.config.ts.
     name: End to end (${{ matrix.shard }}/4)
+    needs: engine
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The render engine's parity spec draws every Figma suite on the CPU and on SwiftShader.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
     env:
       WRANGLER_SEND_METRICS: "false"
+      ENGINE_SKIP_BUILD: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -52,6 +109,10 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-dist
+          path: packages/engine/dist
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Playwright's version, for the browser cache
@@ -82,11 +143,13 @@ jobs:
 
   deploy:
     name: Deploy to the dogfooding instance
-    needs: [check, e2e]
+    needs: [engine, check, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
+    env:
+      ENGINE_SKIP_BUILD: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -94,6 +157,10 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-dist
+          path: packages/engine/dist
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Apply D1 migrations

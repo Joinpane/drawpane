@@ -6,9 +6,13 @@
  */
 import type { Page } from "@playwright/test";
 
-/** Fills the current page with `cards` cards of 25 layers, straight into the local document. */
-export async function buildFile(page: Page, cards: number): Promise<number> {
-  return page.evaluate((cards) => {
+/**
+ * Fills the current page with `cards` cards of 25 layers, straight into the local document.
+ * Without `shadows` the cards have none (the render engine's phase 1 doesn't draw them, and a
+ * page with any falls back to the canvas renderer).
+ */
+export async function buildFile(page: Page, cards: number, shadows = true): Promise<number> {
+  return page.evaluate(({ cards, shadows }) => {
     type Op = {
       op: "create";
       id: string;
@@ -49,7 +53,9 @@ export async function buildFile(page: Page, cards: number): Promise<number> {
           cornerRadius: 12,
           fills: [{ type: "solid", color: "#ffffff" }],
           strokes: [{ type: "solid", color: "#e3e1dc" }],
-          effects: [{ type: "drop-shadow", color: "#0000001f", x: 0, y: 4, blur: 12, spread: 0 }],
+          effects: shadows
+            ? [{ type: "drop-shadow", color: "#0000001f", x: 0, y: 4, blur: 12, spread: 0 }]
+            : [],
         },
       });
       let k = 0;
@@ -136,5 +142,5 @@ export async function buildFile(page: Page, cards: number): Promise<number> {
     }
     e.doc.apply(ops);
     return ops.length;
-  }, cards);
+  }, { cards, shadows });
 }

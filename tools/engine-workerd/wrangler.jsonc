@@ -1,0 +1,16 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  // The engine's Worker build beside the agent runner's set, in workerd (decision 0040). Local
+  // only: `wrangler dev` from scripts/workerd.mjs, never deployed.
+  "name": "drawpane-engine-workerd-test",
+  "main": "index.ts",
+  "compatibility_date": "2026-11-01",
+  // As the agent runner: HarfBuzz's loader looks for Node's modules.
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  // HarfBuzz's Node branch makes a `require` from its own URL, which the bundle leaves unset; its
+  // WebAssembly comes through the `instantiateWasm` hook, so nothing is read from it.
+  "define": { "import.meta.url": "\"file:///engine/worker.js\"" },
+  "rules": [{ "type": "Data", "globs": ["**/*.ttf"], "fallthrough": true }],
+  "limits": { "cpu_ms": 60000 }
+}

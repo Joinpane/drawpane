@@ -1,0 +1,54 @@
+[package]
+name = "drawpane-engine"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+description = "Drawpane's render engine (decision 0040): a retained render graph drawn by Vello on the GPU (WebGPU) in the browser and on the CPU in Workers."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# The browser's build: vello_gpu on wgpu's WebGPU backend. It always carries the CPU backend too,
+# so one page can draw both and compare them.
+gpu = [
+  "dep:vello_gpu",
+  "dep:wgpu",
+  "dep:wasm-bindgen-futures",
+  "dep:web-sys",
+  "dep:js-sys",
+  "dep:futures-channel",
+]
+# Reference backdrop readers used only by the tests (render graph invalidation); see
+# src/kernels.rs. Never in a shipped build.
+test-kernels = []
+
+[dependencies]
+vello_common = { version = "=0.4.0", default-features = false, features = ["std"] }
+vello_cpu = { version = "=0.4.0", default-features = false, features = ["std", "u8_pipeline"] }
+vello_gpu = { version = "=0.4.0", default-features = false, features = ["wgpu", "full_image_support", "gradient_sweep"], optional = true }
+wgpu = { version = "30.0.2", default-features = false, features = ["std", "wgsl", "webgpu"], optional = true }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+futures-channel = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["HtmlCanvasElement", "OffscreenCanvas", "console"] }
+
+[dev-dependencies]
+drawpane-engine = { path = ".", features = ["test-kernels"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+# The fuzz and property tests render thousands of frames: keep them fast in debug builds.
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev]
+opt-level = 1

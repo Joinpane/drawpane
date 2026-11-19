@@ -56,6 +56,7 @@ import {
 import { connectFile } from "./connection";
 import { ExplainCard } from "./ExplainCard";
 import { ExportPanel } from "./ExportSection";
+import { engineDebug } from "./engine-debug";
 import { FollowOverlay, People } from "./follow";
 import { type FrameStats, frameStatsFor } from "./frame-stats";
 import { headlessDebug } from "./headless-debug";
@@ -417,10 +418,13 @@ function FileEditor({ fileId }: { fileId: string }) {
       drawpaneMeasurers?: () => Promise<typeof import("./measure-parity")>;
       /** Fonts, layout and exact renders of a layer, for kit parity (tools/kit-parity). */
       drawpaneParity?: ReturnType<typeof parityDebug>;
+      /** The render engine off screen, for its gates and benches (decision 0040). */
+      drawpaneEngine?: ReturnType<typeof engineDebug>;
     };
     w.drawpane = editor;
     w.drawpaneHeadless = headlessDebug(editor);
     w.drawpaneParity = parityDebug(editor);
+    w.drawpaneEngine = engineDebug(editor);
     w.drawpaneMeasurers = () => import("./measure-parity");
     w.drawpaneGlass = { set: setGlassTuning, get: glassTuning };
     w.drawpaneFrames = frameStatsFor(editor);
@@ -430,6 +434,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       delete w.drawpaneFrames;
       delete w.drawpaneHeadless;
       delete w.drawpaneParity;
+      delete w.drawpaneEngine;
       delete w.drawpaneVersion;
     };
   }, [editor, history.view]);

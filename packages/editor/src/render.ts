@@ -140,7 +140,7 @@ function dashedOutline(
  * stroke over it, a frame's children), fading each would show them through
  * one another.
  */
-function fadesAsOne(node: NodeRecord, children: number): boolean {
+export function fadesAsOne(node: NodeRecord, children: number): boolean {
   if (getProp(node.props, "opacity") >= 1) return false;
   if (children > 0) return true;
   const shadows = getProp(node.props, "effects").some(
@@ -428,7 +428,7 @@ const PREVIEW_MAX_SCALE = 4;
 const PREVIEW_MIN_SCALE = 0.6;
 
 /** A text layer's biggest font size, its runs' included. */
-function largestFontSize(node: NodeRecord): number {
+export function largestFontSize(node: NodeRecord): number {
   let size = getProp(node.props, "fontSize");
   for (const run of getProp(node.props, "textRuns"))
     if (run.fontSize && run.fontSize > size) size = run.fontSize;
@@ -436,7 +436,7 @@ function largestFontSize(node: NodeRecord): number {
 }
 
 /** Text smaller than this many device pixels is drawn as bars, not glyphs. */
-const GREEK_BELOW = 4;
+export const GREEK_BELOW = 4;
 
 export class CanvasRenderer {
   readonly #scene: Scene;

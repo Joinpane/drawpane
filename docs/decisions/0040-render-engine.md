@@ -432,7 +432,7 @@ Visual parity never gates 60 fps, and a frame-rate gate never shows stale glass.
   - main-thread engine and patch work ≤ 8 ms at p95;
   - glass, blur and small text exact within 250 ms of movement stopping (pan, zoom, drag), at p95, and everything else exact by then too;
   - after an edit, exact within 250 ms at p95 for edits whose dependency closure fits a frame's budget, with the stand-in share reported for larger ones;
-  - opening the kit's heaviest page: a useful first image within 1 s, exact within 3 s (proposed; to be confirmed against the first hardware runs).
+  - opening the kit's heaviest page: a useful first image within 1 s, exact within 3 s, measured on real GPU hardware (confirmed by the lead maintainer on 2026-11-19; gated in the engine's bench cases, `bench/file.spec.ts` with `BENCH_RENDERER=engine`, on hardware adapters).
 
   On WebGL2 the same suite runs and reports, gated only against regressions (criterion 1: supported, may be slower).
 - **When they fail:** if these fail on the phase 1 vertical slice, cache granularity, pass scheduling and batching are revisited before more features are built, and if that fails too, the engine choice. The trigger is a measured limit and a concrete alternative.
@@ -605,3 +605,40 @@ The independent review (head 9157d37) asked for six changes before the architect
 - The repo gains a Rust toolchain, scoped to the engine's folder through `mise`, and a WebAssembly build step in CI.
 - Every Figma rule has two homes until phase 5: the canvas renderer and the engine. New rules land in the engine first once phase 3 starts.
 - Phase 1 is a reversible experiment with a commitment point: its vertical slice on real hardware decides.
+
+## Amendment: phase 1 as built (2026-11-19)
+
+Phase 1's first part is in `packages/engine` (the crate, its two builds and their bindings), `packages/editor/src/engine` (the display-list builder) and the editor behind `?renderer=engine`. The display list is specified in [0040-display-list.md](0040-display-list.md). This records what it does, where it differs from the record above, and what phase 1 still owes.
+
+**What the engine draws:** transforms (relative to the parent, composed by the engine), opacity (isolating where the layer fades as one, multiplied down otherwise) and normal blending, clip paths, solid and gradient fills (linear, radial, angular; colours interpolated unpremultiplied, as the canvas does), image fills in every scale mode (one upload per image, halved levels shared by both backends), strokes (centre, and inside and outside by clipping; fitted dashes, caps, joins, end markers, per-side widths as regions), text from HarfBuzz's shaping and from saved outlines (decision 0037), with decorations and list markers, and corner radii. Everything else is flagged per layer by the builder and refused by the engine, so its page falls back to the canvas renderer whole: shadows, blurs, glass, noise, texture, masks, every non-normal blend, corner smoothing (until the shared squircle function lands), text strokes outside the glyphs, and text whose outlines aren't to hand. A refused record counts its box grown by its reach, so it can't be culled while it may show.
+
+**Where it differs from the record:**
+
+- **Glyph cache keys and storage.** A glyph's identity is its interned outline (saved outlines by their path data, shaped glyphs by the shaper's own glyph objects) rather than a `glyphId` or a font hash and index; the effect is the same and works for both sources. Device scale is keyed exactly (its f32 bits) rather than in quarter-pixel steps, and the subpixel phase in eighths on both axes rather than quarters horizontally, so a cached glyph lands within 1/16 px of its outline. Masks are RGBA8 (vello_gpu's alpha-mask tint reads alpha from a filterable texture), one 2,048² atlas page on the GPU (reset when full) and one pixmap per glyph on the CPU, evicted least recently used per glyph at a frame's start. Only solid fills use masks; gradient-filled text fills its outlines. Masks are used up to 160 device pixels a side. Budgets: 32 MiB on the GPU, 4 MiB in the Worker.
+- **Invalidation is resolved on the device, for a camera** (`dirtyFor`): a patch's changes in page units, grown by 1.5 device pixels, then readers in paint order. A place recorded before a structural change in the same message counts as beneath every reader. The fuzz tests found both rules necessary: readers sample whole pixels, and paint-order numbers from before a reorder aren't comparable with those after.
+- **Handles have no generation:** layer handles are never reused within a session, so a stale one can't name another layer.
+- **Coordinates:** transforms are f64 on the wire and composed in f64; paths are f32 in their layer's units. No rebasing near the camera is needed for that precision.
+- **Exports:** bands of at most 2 MiB of rows (64 rows at 8,192 px), drawn in tiles of at most 1,024 columns, with the scene kept in whole-frame coordinates so tiles are bit-identical to a whole frame. The PNG streams band by band (rows filtered by `Sub`, deflated as they come), and a Worker returns it as a stream, so neither the picture nor the compressed file is held whole. The 8,192 px limit is enforced and named. The reduced-scale fallback for oversized reach is phase 4's; phase 1 refuses reach past 512 px, summed through readers.
+- **Presentation in headless browsers.** Headless Chromium loses a WebGPU device as soon as a WebGPU canvas presents (SwiftShader here, NVIDIA on the GPU bench). The editor's e2e reads frames back through a buffer (`drawpane:engine-present` = "readback") and checks that the default presentation falls back cleanly; presenting on a real laptop is still to be checked by hand.
+- **Compatibility mode** is requested by asking `navigator.gpu.requestAdapter` for `featureLevel: "compatibility"` while the engine creates its device (wgpu 30 can't say it), and the device takes the adapter's own limits.
+- **Text in Workers.** harfbuzzjs can't give glyph outlines in a Worker: its draw callbacks need WebAssembly compiled at run time, which Workers forbid. The shaper now says so (`ShapedText.outlines: false`) instead of answering empty outlines, and the builder refuses that text. Until phase 4 brings outlines another way, a Worker draws text from saved outlines or from outlines handed to it. The workerd test hands it the runs shaped in Node, as a file's saved outlines would arrive.
+- **Readers:** the render graph orders and invalidates by them, and the tests exercise it with a reference reader (a box mean over the backdrop, clipped like any paint), but no real reader is drawn yet.
+
+**Phase 1 still owes:** the one exact effects stack (glass, blur, a separable and a linear blend, a mask in a faded frame), forced WebGL2 on it, the interaction suite on real GPUs and laptops with its gates (the bench cases are in place and gate the confirmed targets where the engine draws a page on a hardware adapter), glyph-atlas measurements on the kit's text-heavy pages, and the CJK half of the full-runner test. Those decide the commitment point.
+
+**Measured** (this VM: 4 arm64 cores, shared, no GPU; SwiftShader timings aren't representative):
+
+| | |
+| --- | --- |
+| Worker module (CPU) | 514 KB of WebAssembly, 200 KB gzipped (budget 400 KB); glue 21 KB |
+| Browser module (GPU and CPU) | 874 KB, 328 KB gzipped (budget 1 MB); glue 93 KB |
+| CPU against GPU (SwiftShader), 69 parity cells drawn | mean ≤ 0.129, p99 ≤ 1, worst 32 × 32 tile ≤ 0.35, no severe pixels (tolerance 0.25, 4, 2, 4) |
+| Worker build against browser build, CPU | bit-identical on every cell and on the package's own scenes |
+| Engine against Figma, by suite (cells drawn) | strokes 0.06 (17), fills 0.27 (10; 15 blend cells fall back), lists 1.74 (6), text 2.60 (20), text ranges 1.32 (3), vertical trim 1.47 (12), glass-context's one plain cell 0.02; every drawn cell at least 0.21 inside the canvas renderer's threshold. The phase 3 suites (shadows, blurs, glass, masks, grain, linear blends) fall back cell by cell. |
+| Engine against the canvas renderer, the editor's e2e scene | mean 0.62, p99 19, worst tile 3.7 (text: the engine fills HarfBuzz's outlines where the canvas draws plain text with the browser's rasteriser) |
+| Patched against fresh | bitwise on the CPU: 600 random sequences of 12 patches on each of four seeds in Rust (with and without readers, every changed pixel inside the dirty region), and 400 random editor sequences through the builder; on screen, bitwise on the GPU after pans, zooms and edits |
+| Worker build in workerd, an 8,192 × 8,192 export of 7,200 layers with real text, beside HarfBuzz and the headless editor | isolate peak 60 to 66 MiB over runs (JS heap 41 to 48, engine 16.9 of its 25 MiB cap, HarfBuzz 1.6); 22 s locally; 8,193 px refused with the limit named, and the isolate keeps working |
+| The display list on the scale corpus (decision 0027), 500,021 layers; its largest page, 40,401 layers | a fresh list in 1,247 ms (31 µs a layer; 11.9 MB), applied in 330 ms; a drag's patch built in 0.5 ms and applied in 0.3 ms (one transform, 80 bytes); a restyle 0.2 and 0.08 ms (one record); a hundred restyles 3.7 and 0.9 ms |
+| CPU backend frames on that page, 1,440 × 900 | the whole page at fit 902 ms (40,342 records, text as bars); 100% 41 ms, a pan there 59 ms (median; 7,132 glyph masks reused, 233 made) |
+
+The fresh list is what opening a page costs before its first frame: 1.2 s for the corpus's largest page on this VM, against the confirmed 1 s for a useful first image on the heaviest page. Building it in parts (the visible boards first, the rest over the next frames) or encoding records straight into the writer are the next steps if the hardware runs agree.

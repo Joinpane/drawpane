@@ -2,6 +2,7 @@ packages:
   - apps/*
   - packages/*
   - tools/kit-parity
+  - tools/engine-workerd
   - tools/render-engine-spike
 
 catalog:
