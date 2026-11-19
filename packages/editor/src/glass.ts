@@ -24,6 +24,7 @@
  * and a rim highlight in 2D.
  */
 import type { Glass } from "@drawpane/model";
+import { fitCorners } from "./corners";
 import {
   type AnyCanvas,
   type Bounds,
@@ -358,11 +359,13 @@ uniform float splay;
 uniform vec2 light;
 uniform float intensity;
 // A box (rect or frame): its exact distance in from the edge, region pixels to box units, its size
-// and corner radii (top-left, top-right, bottom-right, bottom-left) in units, and pixels per unit.
+// and corner radii (top-left, top-right, bottom-right, bottom-left) in units as drawn, their
+// smoothing as drawn (corners.ts), and pixels per unit.
 uniform int box;
 uniform mat3 toBox;
 uniform vec2 boxSize;
 uniform vec4 boxRadii;
+uniform vec4 boxSmoothing;
 uniform float unitPx;
 // GlassTuning: (profile, falloff, hairline px, -), (front, frontStart, back, backStart),
 // (shade, shadeReach, -, -), (-, -, -, -).
@@ -408,14 +411,54 @@ float seenAt(vec2 p, int channel) {
   return textureGrad(backdrop, uv, dFdx(uv), dFdy(uv))[channel];
 }
 
+// How far in from a corner's outline a point is, in box units (negative outside), for a corner of
+// radius R and smoothing s as corners.ts draws it, folded about the corner's diagonal: "along" is
+// the larger of the point's distances in from the corner's two edges, "off" the smaller. At s = 0
+// it's the distance from a circle.
+float cornerDistance(float along, float off, float R, float s) {
+  float p = (1.0 + s) * R;
+  if (along >= p) return off;
+  float arcAngle = 1.5707963 * (1.0 - s);
+  float arcChord = sin(arcAngle * 0.5) * R * 1.4142136;
+  float alpha = (1.5707963 - arcAngle) * 0.5;
+  float c = R * tan(alpha * 0.5) * cos(0.7853982 * s);
+  float d = c * tan(0.7853982 * s);
+  float b = (p - arcChord - c - d) / 3.0;
+  float a = 2.0 * b;
+  float x3 = p - a - b - c;
+  // On the arc's side of the line from its centre through where it starts: the circle.
+  vec2 v = vec2(along, off) - R;
+  vec2 toStart = vec2(x3, d) - R;
+  if (toStart.x * v.y - toStart.y * v.x <= 0.0) return R - length(v);
+  // On the easing curve's side: off = d t^3 as along runs from p (t = 0) to x3 (t = 1).
+  float lo = 0.0;
+  float hi = 1.0;
+  for (int i = 0; i < 12; i++) {
+    float t = 0.5 * (lo + hi);
+    float u = 1.0 - t;
+    float x = u * u * u * p + 3.0 * u * u * t * (p - a) + 3.0 * u * t * t * (p - a - b) + t * t * t * x3;
+    if (x > along) lo = t; else hi = t;
+  }
+  float t = 0.5 * (lo + hi);
+  float u = 1.0 - t;
+  float dx = -3.0 * u * u * a - 6.0 * u * t * b + 3.0 * t * t * (x3 - p + a + b);
+  float slope = 3.0 * d * t * t / min(dx, -1e-6);
+  return (off - d * t * t * t) / sqrt(1.0 + slope * slope);
+}
+
 // How far in from a box's edge a region pixel is, in pixels (negative outside): exact, square
 // corners and all, where the blurred height reads low at convex corners.
 float boxDistance(vec2 p) {
   vec2 q = (toBox * vec3(p, 1.0)).xy - boxSize * 0.5;
-  // The radius of q's corner (y runs down in the box).
+  // The radius and smoothing of q's corner (y runs down in the box).
   float r = q.x < 0.0 ? (q.y < 0.0 ? boxRadii.x : boxRadii.w) : (q.y < 0.0 ? boxRadii.y : boxRadii.z);
-  vec2 e = abs(q) - boxSize * 0.5 + r;
-  return -(min(max(e.x, e.y), 0.0) + length(max(e, 0.0)) - r) * unitPx;
+  float s = q.x < 0.0 ? (q.y < 0.0 ? boxSmoothing.x : boxSmoothing.w) : (q.y < 0.0 ? boxSmoothing.y : boxSmoothing.z);
+  if (r <= 0.0 || s <= 0.0) {
+    vec2 e = abs(q) - boxSize * 0.5 + r;
+    return -(min(max(e.x, e.y), 0.0) + length(max(e, 0.0)) - r) * unitPx;
+  }
+  vec2 e = boxSize * 0.5 - abs(q);
+  return cornerDistance(max(e.x, e.y), min(e.x, e.y), r, s) * unitPx;
 }
 
 void main() {
@@ -568,6 +611,7 @@ interface BoxUniforms {
   readonly toBox: readonly number[];
   readonly size: readonly [number, number];
   readonly radii: readonly [number, number, number, number];
+  readonly smoothing: readonly [number, number, number, number];
   readonly unitPx: number;
 }
 
@@ -583,6 +627,8 @@ export interface GlassPaintOptions {
    * from the exact edge, square corners staying square.
    */
   readonly corners?: readonly [number, number, number, number] | null;
+  /** How smooth those corners are, 0 to 1 (corners.ts); missing is 0. */
+  readonly smoothing?: number;
   /**
    * What of the canvas the backdrop may come from (the frames that clip the
    * layer, on the device): past it, the edge repeats, as past the canvas's.
@@ -679,6 +725,7 @@ export class GlassPainter {
       key = null,
       inradius = Number.POSITIVE_INFINITY,
       corners = null,
+      smoothing = 0,
       within,
       kind = "other",
     } = options;
@@ -774,12 +821,14 @@ export class GlassPainter {
       const ie = (t.c * t.f - t.d * t.e) / det;
       const jf = (t.b * t.e - t.a * t.f) / det;
       const top = y0 + rh;
-      const most = Math.min(w, h) / 2;
+      // The corners as drawn: radii and smoothing cut to the space each has.
+      const fitted = fitCorners(w, h, corners, smoothing);
       box = {
         // Column-major: device (x0 + px, y0 + rh − py) taken back through the layer's transform.
         toBox: [ia, ib, 0, -ic, -id, 0, ia * x0 + ic * top + ie, ib * x0 + id * top + jf, 1],
         size: [w, h],
-        radii: corners.map((r) => Math.max(0, Math.min(r, most))) as unknown as readonly [
+        radii: fitted.map((c) => c.radius) as unknown as readonly [number, number, number, number],
+        smoothing: fitted.map((c) => c.smoothing) as unknown as readonly [
           number,
           number,
           number,
@@ -1036,6 +1085,7 @@ export class GlassPainter {
       gl.uniformMatrix3fv(u("toBox"), false, box.toBox);
       gl.uniform2f(u("boxSize"), box.size[0], box.size[1]);
       gl.uniform4f(u("boxRadii"), ...box.radii);
+      gl.uniform4f(u("boxSmoothing"), ...box.smoothing);
       gl.uniform1f(u("unitPx"), box.unitPx);
     }
     const tune = glassTuning();

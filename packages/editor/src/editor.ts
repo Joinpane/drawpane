@@ -3445,6 +3445,7 @@ export class Editor {
     "effects",
     "cornerRadius",
     "cornerRadii",
+    "cornerSmoothing",
     "fontFamily",
     "fontWeight",
     "fontStyle",

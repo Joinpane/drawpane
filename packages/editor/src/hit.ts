@@ -1,4 +1,5 @@
 import { getProp, type NodeRecord } from "@drawpane/model";
+import { hitsBox, layerCorners } from "./corners";
 import { type Point, type Rect, rectContains, rectsIntersect } from "./geometry";
 import { maskScopes } from "./masks";
 import type { Scene } from "./scene";
@@ -30,6 +31,12 @@ export function hitsNode(scene: Scene, node: NodeRecord, p: Point, tolerance: nu
         fillRule: "nonzero",
         strokeReach: Math.max(strokes ? getProp(node.props, "strokeWeight") / 2 : 0, tolerance),
       });
+    }
+    case "rect":
+    case "frame": {
+      // Inside its corners as drawn (corners.ts): a rounded or smoothed corner's cut misses.
+      const { radii, smoothing } = layerCorners(node);
+      return hitsBox(w, h, radii, smoothing, local.x, local.y, tolerance);
     }
     case "line":
       return (

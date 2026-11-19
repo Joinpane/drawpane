@@ -25,21 +25,34 @@ describe("dashes fitted to each piece of an outline, as Figma draws them", () =>
     const pieces = boxOutline(120, 80, [12, 12, 12, 12]);
     expect(pieces.map((p) => p.kind)).toEqual([
       "line",
-      "arc",
+      "cubic",
       "line",
-      "arc",
+      "cubic",
       "line",
-      "arc",
+      "cubic",
       "line",
-      "arc",
+      "cubic",
     ]);
     expect(pieces[0]?.length).toBeCloseTo(96, 6);
     expect(pieces[2]?.length).toBeCloseTo(56, 6);
-    // A quarter circle of radius 12.
-    expect(pieces[1]?.length).toBeCloseTo((Math.PI / 2) * 12, 4);
-    // Square corners have no corner pieces; radii past half the shorter side are clamped.
+    // A quarter circle of radius 12 (as Figma draws it, one cubic).
+    expect(pieces[1]?.length).toBeCloseTo((Math.PI / 2) * 12, 2);
+    // Square corners have no corner pieces. A radius gets what its edges have to share, as in
+    // Figma: beside square corners, up to the shorter of its edges.
     expect(boxOutline(120, 80, [0, 0, 0, 0])).toHaveLength(4);
-    expect(boxOutline(120, 80, [100, 0, 0, 0])[0]?.length).toBeCloseTo(80, 6);
+    expect(boxOutline(120, 80, [100, 0, 0, 0])[0]?.length).toBeCloseTo(40, 6);
+    expect(boxOutline(120, 80, [100, 100, 100, 100])[0]?.length).toBeCloseTo(40, 6);
+  });
+
+  it("splits a smoothed corner into its three curves, reaching further along each edge", () => {
+    const pieces = boxOutline(200, 120, [30, 30, 30, 30], 0.6);
+    // Each corner's easing curves and arc are pieces of their own, as Figma dashes them.
+    expect(pieces.map((p) => p.kind)).toEqual(
+      Array.from({ length: 4 }, () => ["line", "cubic", "cubic", "cubic"]).flat(),
+    );
+    // Each corner reaches 1.6 × 30 along both edges.
+    expect(pieces[0]?.length).toBeCloseTo(200 - 2 * 48, 6);
+    expect(pieces[4]?.length).toBeCloseTo(120 - 2 * 48, 6);
   });
 
   it("splits an ellipse into quarters", () => {

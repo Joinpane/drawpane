@@ -12,6 +12,7 @@
  * canvas and in SVG alike.
  */
 import { getProp, type NodeRecord } from "@drawpane/model";
+import { cornerCubics, fitCorners } from "./corners";
 import { KAPPA } from "./vector/shapes";
 
 /** Stroke widths: top, right, bottom, left (CSS's order). */
@@ -27,6 +28,11 @@ export interface RoundBox {
   readonly width: number;
   readonly height: number;
   readonly corners: readonly [Corner, Corner, Corner, Corner];
+  /**
+   * Each corner's smoothing (corners.ts), the same order; missing is 0. A
+   * smoothed corner's curve is the layer's own, stretched to its radii.
+   */
+  readonly smoothing?: readonly [number, number, number, number];
 }
 
 /** A layer's stroke widths per side: its own where it has them, else its one width all round. */
@@ -55,10 +61,12 @@ export function strokeRegion(
   radii: readonly [number, number, number, number],
   sides: Sides,
   align: "inside" | "center" | "outside",
+  smoothing = 0,
 ): { outer: RoundBox; inner: RoundBox | null } {
-  // As the layer's own outline: no corner rounder than half the shorter side.
-  const max = Math.min(w, h) / 2;
-  const r = radii.map((v) => Math.max(0, Math.min(v, max))) as unknown as Sides;
+  // As the layer's own outline (corners.ts): each corner's radius and smoothing as drawn.
+  const fitted = fitCorners(w, h, radii, smoothing);
+  const r = fitted.map((c) => c.radius) as unknown as Sides;
+  const smooth = fitted.map((c) => c.smoothing) as unknown as Sides;
   /** The box inset by `k` of each side's width (outset where k is negative). */
   const at = (k: number): RoundBox | null => {
     // `|| 0`: a side of no width, scaled by a negative share, is 0, not −0.
@@ -80,6 +88,7 @@ export function strokeRegion(
       width,
       height,
       corners: [corner(r[0], l, t), corner(r[1], rt, t), corner(r[2], rt, b), corner(r[3], l, b)],
+      ...(smooth.some((v) => v > 0) ? { smoothing: smooth } : {}),
     };
   };
   const [outerK, innerK] = align === "inside" ? [0, 1] : align === "center" ? [-0.5, 0.5] : [-1, 0];
@@ -100,29 +109,45 @@ export function strokeRegion(
 
 const n = (v: number) => String(Math.round(v * 1000) / 1000);
 
+/**
+ * One corner's curve as SVG cubics: `at` maps the corner's own frame (x
+ * back along the edge coming in, y along the edge going out, in units of
+ * its radius) to the box. Smoothed corners use corners.ts's curve for a
+ * radius of 1, stretched; plain ones a quarter ellipse.
+ */
+function cornerPath(smoothing: number, at: (x: number, y: number) => string): string {
+  if (smoothing <= 0) {
+    const k = 1 - KAPPA;
+    return `C${at(k, 0)} ${at(0, k)} ${at(0, 1)}`;
+  }
+  const c = cornerCubics({ radius: 1, smoothing, extent: 1 + smoothing });
+  let d = "";
+  for (let i = 0; i < c.length; i += 6)
+    d += `C${at(c[i] as number, c[i + 1] as number)} ${at(c[i + 2] as number, c[i + 3] as number)} ${at(c[i + 4] as number, c[i + 5] as number)}`;
+  return d;
+}
+
 /** A rounded box as SVG path data, clockwise from its top edge. */
 export function roundBoxPath(box: RoundBox): string {
   const { x, y, width: w, height: h } = box;
   const [tl, tr, br, bl] = box.corners;
-  const k = 1 - KAPPA;
-  const parts = [`M${n(x + tl[0])} ${n(y)}`, `H${n(x + w - tr[0])}`];
-  if (tr[0] > 0 || tr[1] > 0)
-    parts.push(
-      `C${n(x + w - tr[0] * k)} ${n(y)} ${n(x + w)} ${n(y + tr[1] * k)} ${n(x + w)} ${n(y + tr[1])}`,
-    );
-  parts.push(`V${n(y + h - br[1])}`);
-  if (br[0] > 0 || br[1] > 0)
-    parts.push(
-      `C${n(x + w)} ${n(y + h - br[1] * k)} ${n(x + w - br[0] * k)} ${n(y + h)} ${n(x + w - br[0])} ${n(y + h)}`,
-    );
-  parts.push(`H${n(x + bl[0])}`);
-  if (bl[0] > 0 || bl[1] > 0)
-    parts.push(
-      `C${n(x + bl[0] * k)} ${n(y + h)} ${n(x)} ${n(y + h - bl[1] * k)} ${n(x)} ${n(y + h - bl[1])}`,
-    );
-  parts.push(`V${n(y + tl[1])}`);
-  if (tl[0] > 0 || tl[1] > 0)
-    parts.push(`C${n(x)} ${n(y + tl[1] * k)} ${n(x + tl[0] * k)} ${n(y)} ${n(x + tl[0])} ${n(y)}`);
+  const [stl = 0, str = 0, sbr = 0, sbl = 0] = box.smoothing ?? [];
+  // How far each corner reaches along x and along y.
+  const ext = (c: Corner, s: number) => [c[0] * (1 + s), c[1] * (1 + s)] as const;
+  const [etl, etr, ebr, ebl] = [ext(tl, stl), ext(tr, str), ext(br, sbr), ext(bl, sbl)];
+  const round = (c: Corner) => c[0] > 0 || c[1] > 0;
+  const parts = [`M${n(x + etl[0])} ${n(y)}`, `H${n(x + w - etr[0])}`];
+  // Each corner's frame: from its point, back along the incoming edge, along the outgoing one.
+  if (round(tr))
+    parts.push(cornerPath(str, (u, v) => `${n(x + w - u * tr[0])} ${n(y + v * tr[1])}`));
+  parts.push(`V${n(y + h - ebr[1])}`);
+  if (round(br))
+    parts.push(cornerPath(sbr, (u, v) => `${n(x + w - v * br[0])} ${n(y + h - u * br[1])}`));
+  parts.push(`H${n(x + ebl[0])}`);
+  if (round(bl))
+    parts.push(cornerPath(sbl, (u, v) => `${n(x + u * bl[0])} ${n(y + h - v * bl[1])}`));
+  parts.push(`V${n(y + etl[1])}`);
+  if (round(tl)) parts.push(cornerPath(stl, (u, v) => `${n(x + v * tl[0])} ${n(y + u * tl[1])}`));
   parts.push("Z");
   return parts.join("");
 }

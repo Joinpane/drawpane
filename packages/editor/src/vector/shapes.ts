@@ -1,8 +1,10 @@
 /**
  * Built-in shapes as vector paths in their own local box, drawn exactly as
- * the renderer draws them (rounded corners use the standard circle constant).
+ * the renderer draws them (boxes through corners.ts; other rounded corners
+ * use the standard circle constant).
  */
 import { getProp, type NodeRecord } from "@drawpane/model";
+import { boxPath, fitCorners, layerCorners } from "../corners";
 import type { Point } from "../geometry";
 import { parsePathCached } from "./cache";
 import type { Anchor, VectorPath } from "./path";
@@ -14,34 +16,38 @@ export function rectPath(
   w: number,
   h: number,
   radii: readonly [number, number, number, number] = [0, 0, 0, 0],
+  smoothing = 0,
 ): VectorPath {
-  const max = Math.min(w, h) / 2;
-  const [tl, tr, br, bl] = radii.map((r) => Math.max(0, Math.min(r, max))) as [
-    number,
-    number,
-    number,
-    number,
-  ];
+  // The outline every renderer draws (corners.ts), as anchors with handles.
+  const { ops, pts } = boxPath(w, h, radii, smoothing);
   const anchors: Anchor[] = [];
-  const corner = (r: number, at: Point, from: Point, to: Point) => {
-    // `from` and `to` are unit directions into and out of the corner.
-    if (r <= 0) {
-      anchors.push({ x: at.x, y: at.y, in: null, out: null });
-      return;
+  let k = 0;
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i];
+    if (op === "M" || op === "L") {
+      anchors.push({ x: pts[k] as number, y: pts[k + 1] as number, in: null, out: null });
+      k += 2;
+    } else if (op === "C") {
+      const prev = anchors[anchors.length - 1] as Anchor;
+      anchors[anchors.length - 1] = {
+        ...prev,
+        out: { x: pts[k] as number, y: pts[k + 1] as number },
+      };
+      anchors.push({
+        x: pts[k + 4] as number,
+        y: pts[k + 5] as number,
+        in: { x: pts[k + 2] as number, y: pts[k + 3] as number },
+        out: null,
+      });
+      k += 6;
     }
-    const a = { x: at.x - from.x * r, y: at.y - from.y * r };
-    const b = { x: at.x + to.x * r, y: at.y + to.y * r };
-    const k = KAPPA * r;
-    anchors.push({ x: a.x, y: a.y, in: null, out: { x: a.x + from.x * k, y: a.y + from.y * k } });
-    anchors.push({ x: b.x, y: b.y, in: { x: b.x - to.x * k, y: b.y - to.y * k }, out: null });
-  };
-  corner(tl, { x: 0, y: 0 }, { x: 0, y: -1 }, { x: 1, y: 0 });
-  corner(tr, { x: w, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 });
-  corner(br, { x: w, y: h }, { x: 0, y: 1 }, { x: -1, y: 0 });
-  corner(bl, { x: 0, y: h }, { x: -1, y: 0 }, { x: 0, y: -1 });
-  // The first corner starts with its arc: rotate so the path starts at the top edge.
-  if (tl > 0) anchors.push(anchors.shift() as Anchor);
-  return [{ anchors: mergeCoincident(anchors, true), closed: true }];
+  }
+  const merged = mergeCoincident(anchors, true);
+  // Start on the top edge, where the top-left corner ends, as the path always has.
+  const tl = fitCorners(w, h, radii, smoothing)[0].extent;
+  const start = merged.findIndex((a) => Math.abs(a.x - tl) < 1e-9 && Math.abs(a.y) < 1e-9);
+  const rotated = start > 0 ? [...merged.slice(start), ...merged.slice(0, start)] : merged;
+  return [{ anchors: rotated, closed: true }];
 }
 
 export function ellipsePath(w: number, h: number): VectorPath {
@@ -206,9 +212,8 @@ export function nodePath(node: NodeRecord): VectorPath | null {
   switch (node.type) {
     case "rect":
     case "frame": {
-      const radii = getProp(node.props, "cornerRadii");
-      const r = getProp(node.props, "cornerRadius");
-      return rectPath(w, h, radii ?? [r, r, r, r]);
+      const { radii, smoothing } = layerCorners(node);
+      return rectPath(w, h, radii, smoothing);
     }
     case "ellipse":
       return ellipsePath(w, h);

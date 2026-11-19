@@ -67,6 +67,7 @@ export const LAYOUT_NEUTRAL: ReadonlySet<string> = new Set([
   "maskType",
   "cornerRadius",
   "cornerRadii",
+  "cornerSmoothing",
   "reactions",
   "bindings",
   "componentDescription",

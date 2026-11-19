@@ -34,6 +34,7 @@ const ALIASES: Record<
   rotate: { props: ["rotation"], label: "Rotation", kind: "number" },
   rotation: { props: ["rotation"], label: "Rotation", kind: "number" },
   radius: { props: ["cornerRadius"], label: "Corner radius", kind: "number" },
+  smoothing: { props: ["cornerSmoothing"], label: "Corner smoothing", kind: "percent" },
   gap: { props: ["gap"], label: "Gap", kind: "number" },
   rowgap: { props: ["rowGap"], label: "Row gap", kind: "number" },
   minw: { props: ["minWidth"], label: "Min width", kind: "limit" },

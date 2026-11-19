@@ -33,6 +33,8 @@ const LOOK = [
   "topRightRadius",
   "bottomLeftRadius",
   "bottomRightRadius",
+  "independentCorners",
+  "cornerSmoothing",
   "opacity",
 ] as const;
 

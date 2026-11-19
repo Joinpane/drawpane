@@ -789,3 +789,38 @@ describe("list spacing", () => {
     expect(getProp(props, "listSpacing")).toBe(8);
   });
 });
+
+describe("corner smoothing", () => {
+  const box = (id: string, extra: Partial<Figma.Node>) =>
+    node({
+      id,
+      type: "RECTANGLE",
+      name: id,
+      size: { x: 120, y: 80 },
+      relativeTransform: at(0, 0),
+      absoluteBoundingBox: { x: 0, y: 0, width: 120, height: 80 },
+      fills: [{ type: "SOLID", color: white }],
+      ...extra,
+    });
+
+  it("keeps Figma's smoothing beside the radius, and leaves it out when there's none", () => {
+    const { nodes } = convertFile(
+      file(
+        box("ios", { cornerRadius: 16, cornerSmoothing: 0.6 }),
+        box("each", { rectangleCornerRadii: [4, 8, 12, 16], cornerSmoothing: 1 }),
+        // Square corners keep it: a radius set later is smoothed as the designer chose.
+        box("square", { cornerSmoothing: 0.6 }),
+        box("plain", { cornerRadius: 16, cornerSmoothing: 0 }),
+      ),
+    );
+    validate(nodes);
+    expect(byName(nodes, "ios").props).toMatchObject({ cornerRadius: 16, cornerSmoothing: 0.6 });
+    expect(byName(nodes, "each").props).toMatchObject({
+      cornerRadii: [4, 8, 12, 16],
+      cornerSmoothing: 1,
+    });
+    expect(byName(nodes, "square").props).toMatchObject({ cornerSmoothing: 0.6 });
+    expect(byName(nodes, "square").props.cornerRadius).toBeUndefined();
+    expect(byName(nodes, "plain").props).not.toHaveProperty("cornerSmoothing");
+  });
+});

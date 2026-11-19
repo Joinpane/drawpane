@@ -155,6 +155,7 @@ const PROP_LABEL: Record<string, string> = {
   fontWeight: "weight",
   fontSize: "size",
   cornerRadius: "radius",
+  cornerSmoothing: "corner smoothing",
   opacity: "opacity",
   width: "width",
   height: "height",
