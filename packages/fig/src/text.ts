@@ -10,11 +10,9 @@
  * of 14 px as 23, not 22.75): its saved layout says which, and those come in
  * as the pixels Figma used.
  *
- * Letter spacing too: Open Pencil keeps pixels, so one Figma saved as a
- * percentage comes in as that percentage. A bound letter spacing is read in
- * the unit of the field that binds it (decision 0034): the text style's when
- * the style gives the binding, else the layer's own, which a copy's override
- * can set. Open Pencil 0.16 applies the variable's value as pixels whatever
+ * A bound letter spacing is read in the unit of the field that binds it
+ * (decision 0034): the text style's when the style gives the binding, else
+ * the layer's own, which a copy's override can set. Open Pencil 0.16 applies the variable's value as pixels whatever
  * the unit, so 5 on a text set in percent became 5 px rather than 5% of its
  * size. (A bound line height stays in pixels: every one in a 500k-layer kit
  * is, including those whose layer saved a percentage under a style in px.)
@@ -102,15 +100,18 @@ export interface TextLookup {
 }
 
 /**
- * Letter spacing as Figma reads it: in percent when it saved a percentage
- * (a bound variable's value then a percentage too), else Open Pencil's pixels.
+ * Letter spacing as Figma reads it. A bound one whose binding field is a
+ * percentage comes in as that percentage, the variable's value; anything
+ * else as Open Pencil's pixels (which follow the text style where the
+ * layer's record doesn't say: a style's 8% on a record saying 0%).
  */
 function letterSpacing(n: SceneNode, lookup: TextLookup | undefined): Partial<Figma.TypeStyle> {
+  const bound = n.boundVariables.letterSpacing;
+  if (bound === undefined) return { letterSpacing: n.letterSpacing };
   const saved = lookup?.saved("letterSpacing") as { value?: unknown; units?: unknown } | undefined;
   if (saved?.units !== "PERCENT" || typeof saved.value !== "number")
     return { letterSpacing: n.letterSpacing };
-  const bound = n.boundVariables.letterSpacing;
-  const value = (bound !== undefined ? lookup?.resolve(bound) : undefined) ?? saved.value;
+  const value = lookup?.resolve(bound) ?? saved.value;
   return {
     letterSpacing: (value / 100) * n.fontSize,
     letterSpacingPercentFontSize: value,

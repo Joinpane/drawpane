@@ -117,6 +117,14 @@ function effect(e: Raw, aliasOf: AliasOf): Figma.Effect | null {
   return null;
 }
 
+/** Whether a style record binds its letter spacing to a variable. */
+function bindsLetterSpacing(r: Raw): boolean {
+  const entries = (
+    r.variableConsumptionMap as { entries?: { variableField?: unknown }[] } | undefined
+  )?.entries;
+  return !!entries?.some((e) => e.variableField === "LETTER_SPACING");
+}
+
 function typeStyle(r: Raw): Figma.TypeStyle {
   const font = (r.fontName as { family?: string; style?: string } | undefined) ?? {};
   const size = (r.fontSize as number | undefined) ?? 12;
@@ -143,8 +151,9 @@ function typeStyle(r: Raw): Figma.TypeStyle {
   }
   if (ls?.value !== undefined) {
     out.letterSpacing = ls.units === "PERCENT" ? (ls.value / 100) * size : ls.value;
-    // Kept a percentage, so a variable bound to it is read as one (decision 0034).
-    if (ls.units === "PERCENT") out.letterSpacingPercentFontSize = ls.value;
+    // A bound one kept a percentage, so its variable is read as one (decision 0034).
+    if (ls.units === "PERCENT" && bindsLetterSpacing(r))
+      out.letterSpacingPercentFontSize = ls.value;
   }
   if (typeof r.textCase === "string") out.textCase = r.textCase;
   if (typeof r.textDecoration === "string") out.textDecoration = r.textDecoration;

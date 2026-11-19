@@ -42,6 +42,8 @@ const ids = {
   pixelText: guid(21),
   style: guid(22),
   styled: guid(23),
+  trackedStyle: guid(24),
+  tracked: guid(25),
   main: guid(30),
   label: guid(31),
   copy: guid(32),
@@ -176,6 +178,30 @@ function fixture() {
       },
       [],
     ),
+    // An unbound text whose style tracks 8% while its record says 0%: the style's applies.
+    text(
+      ids.trackedStyle,
+      internal,
+      "Caps",
+      0,
+      {
+        styleType: "TEXT",
+        isPublishable: true,
+        letterSpacing: { value: 8, units: "PERCENT" },
+      },
+      [],
+    ),
+    text(
+      ids.tracked,
+      page,
+      "Tracked",
+      5350,
+      {
+        styleIdForText: { guid: ids.trackedStyle },
+        letterSpacing: { value: 0, units: "PERCENT" },
+      },
+      [],
+    ),
     // A main whose label tracks in pixels, and a copy that sets the label's tracking in percent,
     // keeping the binding (the kit's "Learn more" link).
     {
@@ -277,6 +303,12 @@ describe("bound fields read through the layer", { timeout: 60_000 }, () => {
       unit: "percent",
       value: 5,
     });
+  });
+
+  it("an unbound letter spacing a style gives stays as Open Pencil reads it", async () => {
+    const { get } = await converted();
+    // 8% of 20 px, from the style, not the record's 0%.
+    expect(getProp(get(ids.tracked).props, "letterSpacing")).toEqual({ unit: "px", value: 1.6 });
   });
 
   it("a binding a text style gives is read in the style's unit", async () => {
