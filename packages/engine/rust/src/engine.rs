@@ -229,6 +229,30 @@ impl Engine {
                 .is_some_and(|d| !applied.structural && !applied.touched.iter().any(|t| self.store.within(*t, &d.ids)));
             if !keeps {
                 self.dragging = None;
+                return;
+            }
+            // An edit to a record the selection is drawn inside (a board fading as one, say) may
+            // change whether moving its picture is exact: the split is decided again, as a new
+            // drag (its parts were drawn for the old one).
+            let on_path = self.dragging.as_ref().is_some_and(|d| {
+                d.split
+                    .as_ref()
+                    .is_some_and(|s| applied.touched.iter().any(|t| s.path.contains(t)))
+            });
+            if on_path && let Some(ids) = self.dragging.as_ref().map(|d| d.ids.clone()) {
+                let split = self.store.selection(&ids).map(|(parent, first, last, path)| Split {
+                    pass: Pass::All,
+                    parent,
+                    first,
+                    last,
+                    path,
+                });
+                self.drag_serial += 1;
+                let serial = self.drag_serial;
+                if let Some(d) = self.dragging.as_mut() {
+                    d.split = split;
+                    d.serial = serial;
+                }
             }
             return;
         };
@@ -953,47 +977,62 @@ impl Engine {
                 let fx = i64::from(dt.i) * i64::from(tile) + plan.origin.0;
                 let fy = i64::from(dt.j) * i64::from(tile) + plan.origin.1;
                 // The parts below and above, kept for the drag; the selection drawn afresh.
-                for (pseudo, pass, fill) in [
+                let mut parts = [None, None];
+                for (k, (pseudo, pass, fill)) in [
                     (crate::tiles::DRAG_BELOW, Pass::Below, background),
                     (crate::tiles::DRAG_ABOVE, Pass::Above, [0.0; 4]),
-                ] {
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     let key = crate::tiles::TileKey {
                         level: pseudo,
                         i: dt.i,
                         j: dt.j,
                     };
-                    let slot = match tiles.cache.take_slot(&key) {
-                        Some(slot) => slot,
-                        None => {
-                            let Some(slot) = tiles.cache.slot_for(key) else {
-                                continue;
-                            };
-                            let part = Split { pass, ..split.clone() };
-                            self.cpu_draw_tile_split(view, tile, halo, false, fill, &part)?;
-                            let s = slot as usize;
-                            if tiles.slots.len() <= s {
-                                tiles.slots.resize_with(s + 1, Vec::new);
+                    parts[k] = match tiles.cache.take_slot(&key) {
+                        Some(slot) => Some(slot),
+                        None => match tiles.cache.slot_for(key) {
+                            Some(slot) => {
+                                let part = Split { pass, ..split.clone() };
+                                if let Err(e) = self.cpu_draw_tile_split(view, tile, halo, false, fill, &part) {
+                                    tiles.cache.release(key, slot);
+                                    return Err(e);
+                                }
+                                let s = slot as usize;
+                                if tiles.slots.len() <= s {
+                                    tiles.slots.resize_with(s + 1, Vec::new);
+                                }
+                                take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
+                                tiles.cache.drawn(key, slot, true);
+                                Some(slot)
                             }
-                            take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
-                            tiles.cache.drawn(key, slot, true);
-                            slot
-                        }
+                            None => None,
+                        },
                     };
-                    if pass == Pass::Below {
-                        blit(&mut frame, width, height, &tiles.slots[slot as usize], t, fx, fy);
-                        if dt.selection {
-                            let part = Split {
-                                pass: Pass::Selection,
-                                ..split.clone()
-                            };
-                            self.cpu_draw_tile_split(view, tile, halo, false, [0.0; 4], &part)?;
-                            take(self.cpu.target.data_as_u8_slice(), &mut scratch);
-                            blend(&mut frame, width, height, &scratch, t, fx, fy);
-                        }
-                    } else {
-                        blend(&mut frame, width, height, &tiles.slots[slot as usize], t, fx, fy);
-                    }
                 }
+                let [Some(below), Some(above)] = parts else {
+                    // No room to keep the parts: the tile drawn whole and exact, straight into
+                    // the frame, never left showing the selection where it was (or nothing).
+                    let fs = self.cpu_draw_tile(view, tile, halo, false, background)?;
+                    stats.draw.add(&fs.draw);
+                    stats.tiles_drawn += 1;
+                    take(self.cpu.target.data_as_u8_slice(), &mut scratch);
+                    blit(&mut frame, width, height, &scratch, t, fx, fy);
+                    stats.direct = true;
+                    continue;
+                };
+                blit(&mut frame, width, height, &tiles.slots[below as usize], t, fx, fy);
+                if dt.selection {
+                    let part = Split {
+                        pass: Pass::Selection,
+                        ..split.clone()
+                    };
+                    self.cpu_draw_tile_split(view, tile, halo, false, [0.0; 4], &part)?;
+                    take(self.cpu.target.data_as_u8_slice(), &mut scratch);
+                    blend(&mut frame, width, height, &scratch, t, fx, fy);
+                }
+                blend(&mut frame, width, height, &tiles.slots[above as usize], t, fx, fy);
                 stats.dragged += 1;
                 stats.exact = false;
             }

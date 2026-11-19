@@ -1274,7 +1274,7 @@ impl Gpu {
         if let Some(c) = self.compositor.as_ref() {
             self.queue.write_buffer(&c.uniforms, 0, &ub);
         }
-        for dt in self.tiles.drag_tiles(plan, now) {
+        'tiles: for dt in self.tiles.drag_tiles(plan, now) {
             let view = level.tile_view(dt.i, dt.j, TILE);
             let mut slots = [0u32; 2];
             for (k, (pseudo, pass, fill)) in [
@@ -1293,7 +1293,32 @@ impl Gpu {
                     Some(slot) => slot,
                     None => {
                         let Some(slot) = self.tiles.slot_for(key) else {
-                            return Ok(());
+                            // No room to keep the parts: the tile drawn whole and exact,
+                            // straight into the frame, never left showing the selection where
+                            // it was (or nothing).
+                            self.ensure_scratch()?;
+                            let mut verbs = store.limits.frame_verbs;
+                            let tile_key = TileKey {
+                                level: plan.level,
+                                i: dt.i,
+                                j: dt.j,
+                            };
+                            self.draw_tile(
+                                store,
+                                view,
+                                false,
+                                background,
+                                &Split::all(),
+                                TileTarget::Scratch,
+                                plan,
+                                tile_key,
+                                dst,
+                                stats,
+                                &mut verbs,
+                            )?;
+                            stats.tiles_drawn += 1;
+                            stats.direct = true;
+                            continue 'tiles;
                         };
                         let part = Split { pass, ..split.clone() };
                         let mut verbs = store.limits.frame_verbs;

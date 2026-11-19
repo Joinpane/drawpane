@@ -326,11 +326,12 @@ impl TileCache {
             (Some(d), Some(level)) if !plan.direct => {
                 let grid = level.grid();
                 let moved = self.drag_frame(d.serial, d.moves, plan.level);
-                if let Some(s) = d.start {
-                    self.drag_touch(grid.transform_rect_bbox(s).inflate(2.0, 2.0));
-                }
                 let now = grid.transform_rect_bbox(d.now).inflate(2.0, 2.0);
-                self.drag_touch(now);
+                self.drag_prune(plan, now);
+                if let Some(s) = d.start {
+                    self.drag_touch(plan, grid.transform_rect_bbox(s).inflate(2.0, 2.0), false);
+                }
+                self.drag_touch(plan, now, true);
                 if d.eligible {
                     if moved {
                         self.drag_skip(plan, now);
@@ -409,17 +410,51 @@ impl TileCache {
     }
 
     /// Notes the tiles of the plan's level a rectangle of its grid pixels covers as touched by
-    /// the drag's selection (it was or is there).
-    pub fn drag_touch(&mut self, r: Rect) {
-        let Some((i0, j0, i1, j1)) = self.span(r) else { return };
-        if (i64::from(i1) - i64::from(i0) + 1) * (i64::from(j1) - i64::from(j0) + 1) > 4096 {
-            return;
-        }
-        for j in j0..=j1 {
-            for i in i0..=i1 {
-                self.drag.touched.insert((i, j));
+    /// the drag's selection (it was or is there), as far as frames need to know: tiles kept
+    /// stale (their picture may show the selection where it was) and, when `shown`, tiles on
+    /// screen. Bounded by the tiles kept and shown, however large the selection or long the drag.
+    pub fn drag_touch(&mut self, plan: &Plan, r: Rect, shown: bool) {
+        let t = f64::from(self.tile);
+        let cell = |i: i32, j: i32| {
+            Rect::new(
+                f64::from(i) * t,
+                f64::from(j) * t,
+                f64::from(i + 1) * t,
+                f64::from(j + 1) * t,
+            )
+        };
+        if shown {
+            for &(i, j) in &plan.visible {
+                if overlaps(cell(i, j), r) {
+                    self.drag.touched.insert((i, j));
+                }
             }
         }
+        for (k, e) in &self.tiles {
+            if k.level == plan.level && e.stale && overlaps(cell(k.i, k.j), r) {
+                self.drag.touched.insert((k.i, k.j));
+            }
+        }
+    }
+
+    /// Forgets the tiles the drag touched that no frame needs it to: those neither kept stale (a
+    /// picture that may show the selection where it was) nor on screen under the selection now
+    /// (`now`, grid pixels). Tiles go from the drag's record as their slots do.
+    fn drag_prune(&mut self, plan: &Plan, now: Rect) {
+        let t = f64::from(self.tile);
+        let level = plan.level;
+        let shown: HashSet<(i32, i32)> = plan.visible.iter().copied().collect();
+        let tiles = &self.tiles;
+        self.drag.touched.retain(|&(i, j)| {
+            let stale = tiles.get(&TileKey { level, i, j }).is_some_and(|e| e.stale || !e.exact);
+            let cell = Rect::new(
+                f64::from(i) * t,
+                f64::from(j) * t,
+                f64::from(i + 1) * t,
+                f64::from(j + 1) * t,
+            );
+            stale || (shown.contains(&(i, j)) && overlaps(cell, now))
+        });
     }
 
     /// Whether a visible tile is one the drag composites: touched by the selection, and its own
@@ -455,13 +490,15 @@ impl TileCache {
             .collect()
     }
 
-    /// Drops jobs for tiles under the moving selection: drawn now, they'd be stale again by the
-    /// next move (the drag composites them meanwhile).
+    /// Drops jobs for tiles under the moving selection that the drag composites: drawn now,
+    /// they'd be stale again by the next move. Only those it touched (`drag_touch`), so nothing
+    /// on screen is left without either.
     pub fn drag_skip(&self, plan: &mut Plan, selection: Rect) {
         let t = f64::from(self.tile);
         let level = plan.level;
+        let touched = &self.drag.touched;
         plan.jobs.retain(|j| {
-            if j.key.level != level {
+            if j.key.level != level || !touched.contains(&(j.key.i, j.key.j)) {
                 return true;
             }
             let b = Rect::new(

@@ -173,3 +173,22 @@ test("a spent time budget still draws what nothing stands in for", async ({ page
   );
   expect(frame?.pixel).toEqual([0, 255, 0, 255]);
 });
+
+test("a drag of a selection over more than 4,096 tiles keeps the view drawn", async ({ page }) => {
+  // A 34,000 px square moved, with no frame before at this place: the tiles under it are left to
+  // the drag's composite, which must cover every one on screen.
+  const patch = new ListWriter(1, 2);
+  patch.transform(1, [1, 0, 0, 1, 1, 0]);
+  const [, frame] = await sample(page, solid(34_000), [
+    { size: [64, 64], pixel: [32, 32], camera: [1, 6000, 0, 1], moving: false, budget: 0 },
+    {
+      size: [64, 64],
+      pixel: [32, 32],
+      camera: [1, 0, 0, 1],
+      moving: false,
+      budget: 0.000001,
+      patch: [...patch.finish()],
+    },
+  ]);
+  expect(frame?.pixel).toEqual(red);
+});

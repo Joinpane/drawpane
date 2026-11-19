@@ -775,6 +775,7 @@ The engine follows drags from the messages themselves: no editor API. The editor
   - A message that only moves records continues the drag of exactly those records, or starts one.
   - An edit beside the drag doesn't end it: a collaborator's edit, or text re-sent while its faces load. Its parts are drawn again where the edit changed them.
   - One that changes the structure, or touches the selection, ends it.
+  - One that touches a record the selection is drawn inside (a board starting to fade as one, say) decides the fast path again, as a new drag: moving a picture may not be exact any more, and the parts were drawn for the old one.
   - A record set again exactly as it is, and an order that changes nothing, are no-ops: they neither continue nor end a drag, and nothing is drawn again for them. A record's hash is cleared when a `transform` moves it, so setting it back later is a change.
 - **The fast path**, when moving a picture of the selection is exact by "Dragging" above: the selection is consecutive children of one parent, there's no reader on the page, and no ancestor fades as one.
   - The tiles the selection has touched are composited from three things, laid over each other in order:
@@ -783,7 +784,9 @@ The engine follows drags from the messages themselves: no editor API. The editor
     - the page painted after it (kept, over nothing).
   - Paint order is split by a filter in the executor (`exec::Split`). Nodes on the selection's path are walked in every part. Paint order passes the selection after any of them, walked or culled: a culled board once left what follows it in the part below, which the random drags found.
   - It's exact but for rounding: within 4 levels of a fresh frame, since source-over isn't associative in 8 bits. So drag frames are reported as stand-ins.
-  - While the selection moves, the tiles under it aren't drawn: they'd be stale by the next move. Once it rests, they're drawn exactly under the frame budget, and the composite stands in until then.
+  - While the selection moves, the tiles under it that the drag composites aren't drawn: they'd be stale by the next move. Once it rests, they're drawn exactly under the frame budget, and the composite stands in until then.
+  - **Bounded.** The drag records a tile it touched only while a frame needs it: while the tile is kept stale (its picture may show the selection where it was), or while it's on screen under the selection now. A selection's footprint is taken over the tiles shown and kept, never its whole extent, so neither a huge selection nor a long drag grows the record past the tiles the cache holds. Only tiles the drag composites lose their jobs.
+  - **Never blank.** A tile whose parts find no slot is drawn whole and exact, straight into the frame.
 - **Without the fast path** (selected layers apart in paint order, a faded ancestor), the selection is drawn at its real position every frame: every tile the drag touched is one nothing stands in for.
 - **Into or out of a board.** The editor reparents on drop, so the drop is a structural message: it ends the drag, and the layer is removed from one board and inserted in the other at its real place in paint order. If the editor later sends a provisional parent mid-drag, as "Dragging" above allows, the same happens there. Tiles an ended drag left showing its selection where it was are drawn again at once, never left as stand-ins.
 - **Gates** (`rust/tests/tiles.rs`):
@@ -791,5 +794,6 @@ The engine follows drags from the messages themselves: no editor API. The editor
   - drags into a board and on inside it;
   - edits beside a drag;
   - a record set back after a move.
+  - From the phase 2 review (`rust/tests/tile_regressions.rs`): 2,048 moves far off screen leave nothing recorded with no slot drawn; a 34,000 px selection (over more than 4,096 tiles) dragged into a view with nothing to stand in keeps the view drawn; a board fading mid-drag ends the fast path.
   - The builder sends a move alone, in plain and compact-copy documents (`packages/editor/test/engine-tiles.test.ts`).
-  - On the GPU (`apps/web/e2e/engine.spec.ts`): composited while moving, exact once dropped, into another board too.
+  - On the GPU (`apps/web/e2e/engine.spec.ts`): composited while moving, exact once dropped, into another board too. The 34,000 px drag on the GPU under a spent budget (`apps/web/e2e/engine-tiles-gpu.spec.ts`).
