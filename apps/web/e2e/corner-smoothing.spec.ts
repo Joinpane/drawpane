@@ -1,5 +1,5 @@
 /**
- * Corner smoothing in the inspector, in a real browser (decision 0040): the
+ * Corner smoothing in the inspector, in a real browser (decision 0041): the
  * iOS stop, typing and dragging (one undo step each), a selection that
  * differs (Mixed) and setting it for all of it, and the canvas drawing the
  * smoothed corner: a pixel a plain corner covers along its edge is
@@ -31,8 +31,8 @@ const props = (page: Page, id: string) =>
     id,
   );
 
-/** The canvas's red, green and blue summed at a page point. */
-const pixel = (page: Page, point: { x: number; y: number }) =>
+/** Whether the canvas is covered by the dark fill at a page point (opaque, and dark). */
+const dark = (page: Page, point: { x: number; y: number }) =>
   page.evaluate((point) => {
     const e = (window as unknown as { drawpane: Debug }).drawpane;
     const canvas = document.querySelector(".canvas canvas") as HTMLCanvasElement;
@@ -44,7 +44,7 @@ const pixel = (page: Page, point: { x: number; y: number }) =>
       1,
       1,
     ).data;
-    return (d[0] ?? 0) + (d[1] ?? 0) + (d[2] ?? 0);
+    return (d[3] ?? 0) > 230 && (d[0] ?? 0) + (d[1] ?? 0) + (d[2] ?? 0) < 200;
   }, point);
 
 const select = (page: Page, ids: string[]) =>
@@ -99,17 +99,16 @@ test.describe
       // 36 px along the top edge, just inside it: a plain 40 px corner is already dark there, a
       // smoothed one (reaching 64 px) is still curving in.
       const probe = { x: 36, y: 0.6 };
-      const plain = await pixel(page, probe);
-      expect(plain).toBeLessThan(200);
+      expect(await dark(page, probe)).toBe(true);
       await panel(page)
         .getByRole("button", { name: /^Corner smoothing: iOS/ })
         .click();
       expect(await props(page, a)).toMatchObject({ cornerSmoothing: 0.6 });
       await expect(slider).toHaveValue("60");
-      await expect.poll(() => pixel(page, probe)).toBeGreaterThan(600);
+      await expect.poll(() => dark(page, probe)).toBe(false);
       await page.keyboard.press("ControlOrMeta+z");
       await expect.poll(async () => (await props(page, a)).cornerSmoothing).toBeUndefined();
-      await expect.poll(() => pixel(page, probe)).toBeLessThan(200);
+      await expect.poll(() => dark(page, probe)).toBe(true);
     });
 
     test("types a value, and a drag is one undo step", async () => {
@@ -132,6 +131,8 @@ test.describe
       await page.mouse.up();
       const dragged = (await props(page, a)).cornerSmoothing as number;
       expect(dragged).toBeGreaterThan(0.8);
+      // Keys in a focused field are the field's (as for every slider): undo from outside it.
+      await slider.blur();
       await page.keyboard.press("ControlOrMeta+z");
       await expect.poll(async () => (await props(page, a)).cornerSmoothing).toBe(0.35);
       // Back to none: no property at all.
@@ -151,6 +152,7 @@ test.describe
       await expect(field).toHaveAttribute("placeholder", "Mixed");
       await field.fill("100");
       await field.press("Enter");
+      await field.blur();
       expect((await props(page, a)).cornerSmoothing).toBe(1);
       expect((await props(page, b)).cornerSmoothing).toBe(1);
       await page.keyboard.press("ControlOrMeta+z");

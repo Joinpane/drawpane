@@ -33,11 +33,10 @@
  */
 import { getProp, type NodeRecord, type Paint, type Props } from "@drawpane/model";
 import {
-  boxPath,
+  arcPathData,
   fitCorners,
   isSquare,
   layerCorners,
-  pathData,
   type Radii,
   spreadRadii,
 } from "./corners";
@@ -378,7 +377,8 @@ function shapeOf(node: NodeRecord, w: number, h: number): { tag: string; attrs: 
  * A box at (−offset, −offset), `w` × `h`, with these corners, as an element:
  * a plain `rect` (with `rx` for one radius, as Figma exports it) where its
  * corners are plain circles all alike, else a path of the outline every
- * renderer draws (corners.ts).
+ * renderer draws (corners.ts): arcs for plain corners, as the canvas draws
+ * them, and Figma's cubics for smoothed ones.
  */
 function boxShape(
   w: number,
@@ -397,7 +397,7 @@ function boxShape(
       attrs: `${at}${attr("width", w)}${attr("height", h)}${r > 0 ? attr("rx", r) : ""}`,
     };
   }
-  const d = pathData(boxPath(w, h, radii, smoothing), -offset, -offset, svgNumber);
+  const d = arcPathData(w, h, radii, smoothing, -offset, -offset, svgNumber);
   return { tag: "path", attrs: attr("d", d) };
 }
 

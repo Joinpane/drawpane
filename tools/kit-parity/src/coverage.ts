@@ -1206,7 +1206,7 @@ function census(records: readonly Obj[], census: Census): { pageOf: Map<string, 
         label: "Corner smoothing (squircles)",
         importance: "visual",
         code: CODE.geometry,
-        how: "cornerSmoothing on the layer (decision 0040)",
+        how: "cornerSmoothing on the layer (decision 0041)",
         check: hasProp(
           "cornerSmoothing",
           (v) => typeof v === "number" && near(v, smoothing, 0.001),

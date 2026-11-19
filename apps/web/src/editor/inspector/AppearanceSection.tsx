@@ -272,7 +272,7 @@ const IOS_SMOOTHING = 60;
 
 /**
  * Corner smoothing, 0 to 100%, as Figma's: how far each corner eases into
- * its edges (decision 0040), with iOS's 60% one click away.
+ * its edges (decision 0041), with iOS's 60% one click away.
  */
 function Smoothing({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);

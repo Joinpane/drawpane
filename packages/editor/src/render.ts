@@ -15,7 +15,8 @@
 
 import { type BlendMode, getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { Camera } from "./camera";
-import { boxPath2D, layerCorners, spreadRadii } from "./corners";
+import { layerCorners, spreadRadii } from "./corners";
+import { boxPath2D } from "./corners-canvas";
 import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
 import { exportBounds } from "./export";
 import { apply, invert, type Matrix, type Rect, rectsIntersect } from "./geometry";

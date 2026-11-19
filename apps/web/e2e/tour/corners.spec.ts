@@ -1,7 +1,7 @@
 /**
  * Screenshots of corner smoothing for design review, in both themes: plain
- * and smoothed corners side by side (app icons, a card, a button, a stroked
- * field), and the Corner smoothing control with its iOS stop. Run with
+ * and smoothed corners side by side (app icons, close up and whole, a card, a
+ * button, a stroked field), and the Corner smoothing control with its iOS stop. Run with
  * `pnpm --filter @drawpane/web tour`.
  */
 import { expect } from "@playwright/test";
@@ -78,12 +78,19 @@ test("corner smoothing tour", async ({ browser }) => {
       });
     }
     e.select([]);
-    e.zoomTo(1.5);
-    e.centerOn({ x: 328, y: 220 });
+    // Close up: the last plain icon beside the first smoothed one.
+    e.zoomTo(3);
+    e.centerOn({ x: 328, y: 44 });
     return card;
   });
+  await shot(page, "94-corner-smoothing-close-up", page.locator(".canvas"));
 
   // Plain corners (left) against smoothed ones (right).
+  await page.evaluate(() => {
+    const e = (window as unknown as { drawpane: Debug }).drawpane;
+    e.zoomTo(1.25);
+    e.centerOn({ x: 328, y: 220 });
+  });
   await shot(page, "95-corner-smoothing-canvas", page.locator(".canvas"));
 
   // The smoothed card selected: the Corner smoothing control under the radius.

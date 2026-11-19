@@ -24,7 +24,7 @@
  * and a rim highlight in 2D.
  */
 import type { Glass } from "@drawpane/model";
-import { fitCorners } from "./corners";
+import { fitCorners } from "./corner-geometry";
 import {
   type AnyCanvas,
   type Bounds,

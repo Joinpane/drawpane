@@ -1,25 +1,20 @@
 import { describe, expect, it } from "vitest";
-import {
-  boxPath,
-  boxPieces,
-  fitCorners,
-  flattenBox,
-  hitsBox,
-  pathData,
-  type Radii,
-} from "../src/corners";
+import { boxCommands, fitCorners } from "../src/corner-geometry";
+import { boxPath, boxPieces, flattenBox, hitsBox, pathData, type Radii } from "../src/corners";
 import { parsePathCached } from "../src/vector/cache";
 import { flattenPath } from "../src/vector/hit";
-import figma from "./fixtures/figma-corners.json";
+import table from "./fixtures/corner-vectors.json";
 
-type Case = {
+type Vector = {
   w: number;
   h: number;
-  r?: number;
-  radii4?: [number, number, number, number];
-  s: number;
-  d: string;
+  radii: [number, number, number, number];
+  smoothing: number;
+  corners: Array<[number, number, number]>;
+  commands: Array<[string, ...number[]]>;
+  figma: string | null;
 };
+const vectors = (table as unknown as { vectors: Vector[] }).vectors;
 
 /** A path's outline as points, from its data. */
 function polyline(d: string): Array<[number, number]> {
@@ -56,18 +51,42 @@ function hausdorff(a: string, b: string): number {
   return worst;
 }
 
-const radiiOf = (c: Case): Radii => c.radii4 ?? [c.r ?? 0, c.r ?? 0, c.r ?? 0, c.r ?? 0];
+const label = (v: Vector) => `${v.w}x${v.h} r=${v.radii.join("/")} s=${v.smoothing}`;
+const toData = (commands: Vector["commands"]) =>
+  commands.map(([op, ...n]) => `${op}${n.join(" ")}`).join("");
 
 describe("corner geometry", () => {
-  it("matches Figma's own outline for every probed box", () => {
-    const cases = (figma as { cases: Case[] }).cases;
-    expect(cases.length).toBeGreaterThan(400);
+  it("reproduces every test vector (what any port must too)", () => {
+    expect(vectors.length).toBeGreaterThan(450);
     const misses: string[] = [];
-    for (const c of cases) {
-      const mine = pathData(boxPath(c.w, c.h, radiiOf(c), c.s), 0, 0, (v) => String(v));
+    for (const v of vectors) {
+      const corners = fitCorners(v.w, v.h, v.radii, v.smoothing);
+      const commands = boxCommands(v.w, v.h, v.radii, v.smoothing);
+      const near = (a: number, b: number) => Math.abs(a - b) <= 1e-6;
+      const cornersOk = corners.every((c, i) => {
+        const [r, s, e] = v.corners[i] as [number, number, number];
+        return near(c.radius, r) && near(c.smoothing, s) && near(c.extent, e);
+      });
+      const commandsOk =
+        commands.length === v.commands.length &&
+        commands.every(
+          (c, i) =>
+            c[0] === v.commands[i]?.[0] &&
+            c.slice(1).every((n, k) => near(n as number, v.commands[i]?.[k + 1] as number)),
+        );
+      if (!cornersOk || !commandsOk) misses.push(label(v));
+    }
+    expect(misses).toEqual([]);
+  });
+
+  it("has every vector's outline within 0.02 px of Figma's own", () => {
+    const fromFigma = vectors.filter((v) => v.figma !== null);
+    expect(fromFigma.length).toBeGreaterThan(440);
+    const misses: string[] = [];
+    for (const v of fromFigma) {
       // Polylines from both flatten slightly differently: a hundredth of a pixel is nothing.
-      const off = hausdorff(mine, c.d);
-      if (off > 0.02) misses.push(`${c.w}x${c.h} r=${radiiOf(c).join("/")} s=${c.s}: ${off}`);
+      const off = hausdorff(toData(v.commands), v.figma as string);
+      if (off > 0.02) misses.push(`${label(v)}: ${off}`);
     }
     expect(misses).toEqual([]);
   });

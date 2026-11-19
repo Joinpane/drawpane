@@ -18,28 +18,14 @@ export function rectPath(
   radii: readonly [number, number, number, number] = [0, 0, 0, 0],
   smoothing = 0,
 ): VectorPath {
-  // The outline every renderer draws (corners.ts), as anchors with handles.
-  const { ops, pts } = boxPath(w, h, radii, smoothing);
+  // The outline every renderer draws (corner-geometry.ts), as anchors with handles.
   const anchors: Anchor[] = [];
-  let k = 0;
-  for (let i = 0; i < ops.length; i++) {
-    const op = ops[i];
-    if (op === "M" || op === "L") {
-      anchors.push({ x: pts[k] as number, y: pts[k + 1] as number, in: null, out: null });
-      k += 2;
-    } else if (op === "C") {
+  for (const c of boxPath(w, h, radii, smoothing)) {
+    if (c[0] === "M" || c[0] === "L") anchors.push({ x: c[1], y: c[2], in: null, out: null });
+    else if (c[0] === "C") {
       const prev = anchors[anchors.length - 1] as Anchor;
-      anchors[anchors.length - 1] = {
-        ...prev,
-        out: { x: pts[k] as number, y: pts[k + 1] as number },
-      };
-      anchors.push({
-        x: pts[k + 4] as number,
-        y: pts[k + 5] as number,
-        in: { x: pts[k + 2] as number, y: pts[k + 3] as number },
-        out: null,
-      });
-      k += 6;
+      anchors[anchors.length - 1] = { ...prev, out: { x: c[1], y: c[2] } };
+      anchors.push({ x: c[5], y: c[6], in: { x: c[3], y: c[4] }, out: null });
     }
   }
   const merged = mergeCoincident(anchors, true);

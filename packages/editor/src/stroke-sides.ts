@@ -12,7 +12,7 @@
  * canvas and in SVG alike.
  */
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { cornerCubics, fitCorners } from "./corners";
+import { cornerCubics, fitCorners } from "./corner-geometry";
 import { KAPPA } from "./vector/shapes";
 
 /** Stroke widths: top, right, bottom, left (CSS's order). */

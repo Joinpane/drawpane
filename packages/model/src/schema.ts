@@ -743,7 +743,7 @@ export const PROPS = {
   /**
    * How smooth the corners are, 0 to 1, as Figma's corner smoothing (iOS
    * uses 0.6): each corner eases into its edges instead of meeting them as a
-   * circle (decision 0040). Missing is 0, a plain circle, as before.
+   * circle (decision 0041). Missing is 0, a plain circle, as before.
    */
   cornerSmoothing: prop(unit, 0, CORNERS),
 
