@@ -490,6 +490,19 @@ def _fmt(s: dict | None) -> str:
     return f"{s['p50']} / {s['p95']}"
 
 
+def _flatten(value: dict, prefix: str = "") -> list[tuple[str, object]]:
+    """A bench annotation's measurements by name; nested groups (a page's cases) get its name first."""
+    out: list[tuple[str, object]] = []
+    for name, s in value.items():
+        label = f"{prefix}{name}"
+        if isinstance(s, dict) and s and all(isinstance(v, dict) for v in s.values()) \
+                and "content" not in s and "answer" not in s:
+            out += _flatten(s, f"{label}: ")
+        else:
+            out.append((label, s))
+    return out
+
+
 def _summary(result: dict, job: dict, wall: float, attempts: int) -> str:
     gpu = job["gpu"]
     lines = [f"# GPU bench: {gpu}", ""]
@@ -526,13 +539,27 @@ def _summary(result: dict, job: dict, wall: float, attempts: int) -> str:
                                      f"{page['exactMs']} ms")
                         tables += [(f"{name}: {k}", v) for k, v in page["canvas"].items()]
                 else:
-                    tables += list(value.items())
-                lines += ["", f"{test}", "",
-                          "| measurement | content p50 / p95 ms | overlay p95 ms | frame interval p50 / p95 ms |",
-                          "| --- | --- | --- | --- |"]
-                for name, s in tables:
-                    lines.append(f"| {name} | {_fmt(s.get('content'))} | {s.get('overlay', {}).get('p95')} | "
-                                 f"{_fmt(s.get('interval'))} |")
+                    tables += _flatten(value)
+                frames = [(n, s) for n, s in tables if isinstance(s, dict) and "answer" not in s]
+                answers = [(n, s) for n, s in tables if isinstance(s, dict) and "answer" in s]
+                numbers = [(n, s) for n, s in tables if isinstance(s, (int, float))]
+                lines += ["", f"{test}", ""]
+                lines += [f"- {name}: {s} ms" for name, s in numbers]
+                if frames:
+                    lines += ["", "| measurement | content p50 / p95 ms | overlay p95 ms | frame interval p50 / p95 ms |",
+                              "| --- | --- | --- | --- |"]
+                    for name, s in frames:
+                        lines.append(f"| {name} | {_fmt(s.get('content'))} | {(s.get('overlay') or {}).get('p95')} | "
+                                     f"{_fmt(s.get('interval'))} |")
+                if answers:
+                    # Interaction cases (bench/interactions.ts): input to the frame showing it.
+                    lines += ["", "| interaction | answer p50 / worst ms | drawing p50 ms (content + overlay) | "
+                              "exact ms | busy ms | longest task ms |", "| --- | --- | --- | --- | --- | --- |"]
+                    for name, s in answers:
+                        a = s["answer"]
+                        draw = round(s["content"]["p50"] + s["overlay"]["p50"], 1)
+                        lines.append(f"| {name} | {a['p50']} / {a['max']} | {draw} | {s.get('exact')} | "
+                                     f"{s.get('quiet', '–')} | {s.get('longTask')} |")
     return "\n".join(lines) + "\n"
 
 

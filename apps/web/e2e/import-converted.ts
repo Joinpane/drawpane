@@ -21,6 +21,37 @@ export async function importConverted(
   const meta = readJson<{ key: string; images: { sha: string; mime: string }[]; fig: string }>(
     join(cache, "meta.json"),
   );
+  const fileId = await newFile(page, name);
+  for (const image of meta.images) {
+    const response = await page.request.post(`/api/files/${fileId}/media`, {
+      data: readFileSync(join(cache, "images", image.sha)),
+      headers: { "content-type": image.mime },
+    });
+    const body = await response.json();
+    if (body.sha !== image.sha) throw new Error(`Image ${image.sha} stored as ${body.sha}`);
+  }
+  const lines = readFileSync(join(cache, "nodes.ndjson"), "utf8").split("\n").filter(Boolean);
+  await sendNodes(page, fileId, lines);
+  console.log(`Imported ${lines.length} nodes and ${meta.images.length} images.`);
+  return fileId;
+}
+
+/** Nodes (made by a generator) imported into a new file, as the dashboard saves an import. */
+export async function importNodes(
+  page: Page,
+  nodes: readonly object[],
+  name = "Generated",
+): Promise<string> {
+  const fileId = await newFile(page, name);
+  await sendNodes(
+    page,
+    fileId,
+    nodes.map((n) => JSON.stringify(n)),
+  );
+  return fileId;
+}
+
+async function newFile(page: Page, name: string): Promise<string> {
   const teams = await (await page.request.get("/api/teams")).json();
   const projects = await (
     await page.request.get(`/api/teams/${teams.teams[0].id}/projects`)
@@ -30,20 +61,15 @@ export async function importConverted(
       data: { name },
     })
   ).json();
-  const fileId = created.file.id as string;
-  for (const image of meta.images) {
-    const response = await page.request.post(`/api/files/${fileId}/media`, {
-      data: readFileSync(join(cache, "images", image.sha)),
-      headers: { "content-type": image.mime },
-    });
-    const body = await response.json();
-    if (body.sha !== image.sha) throw new Error(`Image ${image.sha} stored as ${body.sha}`);
-  }
+  return created.file.id as string;
+}
+
+/** Sends nodes (one JSON object a line) in parts and commits them. */
+async function sendNodes(page: Page, fileId: string, lines: readonly string[]): Promise<void> {
   const begun = await (
     await page.request.post(`/api/files/${fileId}/imports`, { data: {} })
   ).json();
   const imports = `/api/files/${fileId}/imports/${begun.importId}`;
-  const lines = readFileSync(join(cache, "nodes.ndjson"), "utf8").split("\n").filter(Boolean);
   let part: string[] = [];
   let bytes = 0;
   const send = async () => {
@@ -64,6 +90,4 @@ export async function importConverted(
   if (part.length > 0) await send();
   const committed = await page.request.post(`${imports}/commit`, { data: {} });
   if (!committed.ok()) throw new Error(`The import wasn't committed: ${await committed.text()}`);
-  console.log(`Imported ${lines.length} nodes and ${meta.images.length} images.`);
-  return fileId;
 }
