@@ -17,10 +17,13 @@
  * laid out again (`relayoutTargets`).
  */
 import {
+  boundaryDrivenProps,
+  constrainedValues,
   copyChildId,
   getProp,
   isMainNode,
   isPropName,
+  laidOutProps,
   type NodeRecord,
   newId,
   type Op,
@@ -32,10 +35,15 @@ import { type Doc, Doc as DocCtor } from "./doc";
 import { gridImportOps } from "./layout";
 import { layerName } from "./names";
 
-/** Never copied from a main component: they link instances or describe the main itself. */
+/**
+ * Never copied from a main component: they link instances or describe the
+ * main itself (its variant values and its properties, decision 0035).
+ */
 const LINK_PROPS: ReadonlySet<string> = new Set([
   "isComponent",
   "componentDescription",
+  "variantProps",
+  "componentProps",
   "mirrors",
   "overrides",
 ]);
@@ -55,6 +63,10 @@ const ROOT_LOCAL_PROPS: ReadonlySet<string> = new Set([
   "constraintH",
   "constraintV",
   "instanceOf",
+  // How it's used in the main around it (decision 0035): which properties drive it, and
+  // whether it shows its own on that main's instances.
+  "propRefs",
+  "exposeProps",
 ]);
 
 export function isMainComponent(node: NodeRecord | undefined): boolean {
@@ -342,12 +354,24 @@ function sameValue(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** Sizes and places closer than this are the same (Figma saves them to a few decimals). */
+const PLACE_EPSILON = 0.01;
+
 /**
  * Operations that bring one instance in line with its main component:
  * properties (except overrides and root-local ones), missing layers, removed
  * layers and order. Returns [] when the main component is gone.
+ *
+ * A layer its constraints place in a copy frame of another size takes the
+ * place they give it from its main layer's (`constrainedValues`), unless
+ * `derive` is false: then what layout decides is only left alone, which is
+ * how `pinInstances` reads a file as it was made.
  */
-export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
+export function syncInstanceOps(
+  doc: Doc,
+  instanceId: string,
+  { derive = true }: { readonly derive?: boolean } = {},
+): Op[] {
   const instance = doc.get(instanceId);
   const componentId =
     instance && instance.type === "frame" ? getProp(instance.props, "instanceOf") : null;
@@ -378,40 +402,43 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
     isRoot: boolean,
     only?: (prop: string) => boolean,
   ) => {
-    const overridden = new Set(getProp(to.props, "overrides"));
-    // Auto layout decides where its children go and how big Hug and Fill
-    // children are; the instance runs its own layout, so never copy those.
-    const parent = isRoot ? undefined : doc.get(to.parent);
-    if (
-      parent?.type === "frame" &&
-      getProp(parent.props, "layoutMode") !== "none" &&
-      getProp(to.props, "positioning") === "auto"
-    ) {
-      overridden.add("x");
-      overridden.add("y");
-      if (getProp(from.props, "sizingH") !== "fixed") overridden.add("width");
-      if (getProp(from.props, "sizingV") !== "fixed") overridden.add("height");
-    }
-    if (getProp(from.props, "sizingH") === "hug") overridden.add("width");
-    if (getProp(from.props, "sizingV") === "hug") overridden.add("height");
-    if (from.type === "text") {
-      // Auto-sized text measures itself in the instance.
-      const resize = getProp(from.props, "textAutoResize");
-      if (resize === "width") overridden.add("width");
-      if (resize !== "none") overridden.add("height");
-      // Glyphs saved with a file were laid out for each copy (decision 0037); a stale set is
-      // never drawn, so the copy's own is kept rather than replaced by its main's.
-      overridden.add("glyphLayout");
-    }
+    const overridden = new Set<string>(getProp(to.props, "overrides"));
+    // What layout decides (auto layout, hug and fill, auto-sized text, constraints in a resized
+    // frame): the instance runs its own layout, so never copy those (decision 0035).
+    const laidOut = laidOutProps(to, from, {
+      root: isRoot,
+      parent: isRoot ? undefined : doc.get(to.parent),
+      parentSource: isRoot ? undefined : doc.get(from.parent),
+    });
+    // What constraints decide is derived from the main layer's place, not left as it was.
+    const derived: Record<string, number> =
+      derive && !isRoot
+        ? constrainedValues(to, from, doc.get(to.parent), doc.get(from.parent))
+        : {};
+    for (const prop of laidOut) if (!(prop in derived)) overridden.add(prop);
+    // Glyphs saved with a file were laid out for each copy (decision 0037); a stale set is
+    // never drawn, so the copy's own is kept rather than replaced by its main's.
+    if (from.type === "text") overridden.add("glyphLayout");
     const keys = new Set([...Object.keys(from.props), ...Object.keys(to.props)]);
     for (const prop of keys) {
       if (!isPropName(prop) || LINK_PROPS.has(prop) || overridden.has(prop)) continue;
       if (isRoot && ROOT_LOCAL_PROPS.has(prop)) continue;
       if (only && !only(prop)) continue;
-      const want = from.props[prop];
       const have = to.props[prop];
+      if (prop in derived) {
+        const want = derived[prop] as number;
+        if (typeof have !== "number" || Math.abs(have - want) > PLACE_EPSILON)
+          ops.push({ op: "set", id: to.id, prop, value: want });
+        continue;
+      }
+      const want = from.props[prop];
       if (sameValue(want, have)) continue;
       ops.push({ op: "set", id: to.id, prop, value: want === undefined ? null : want });
+    }
+    // A derived axis whose value the main layer doesn't hold (its default) is derived too.
+    for (const [prop, want] of Object.entries(derived)) {
+      if (keys.has(prop) || overridden.has(prop) || (only && !only(prop))) continue;
+      ops.push({ op: "set", id: to.id, prop: prop as PropName, value: want });
     }
   };
 
@@ -457,8 +484,11 @@ export function syncInstanceOps(doc: Doc, instanceId: string): Op[] {
       }
       const swapped = swappedMain(existing, mainChild);
       if (swapped) {
-        syncProps(mainChild, existing, false, (prop) => ROOT_LOCAL_PROPS.has(prop));
-        syncProps(swapped, existing, true);
+        // Where it sits, and what the outer component's properties drive (its visibility, say),
+        // are its main layer's; the rest is the swapped-in component's (decision 0035).
+        const boundary = new Set([...ROOT_LOCAL_PROPS, ...boundaryDrivenProps(mainChild)]);
+        syncProps(mainChild, existing, false, (prop) => boundary.has(prop));
+        syncProps(swapped, existing, true, (prop) => !boundary.has(prop));
         nameAfterSet(existing, swapped.id);
       } else syncProps(mainChild, existing, false);
       visit(swapped ?? mainChild, existing);
@@ -556,6 +586,72 @@ export function propagationOps(doc: Doc, ids: Iterable<string>): Op[] {
     }
   }
   return ops;
+}
+
+const GEOMETRY: ReadonlySet<string> = new Set([
+  "x",
+  "y",
+  "width",
+  "height",
+  "constraintH",
+  "constraintV",
+  "layoutMode",
+  "positioning",
+]);
+
+/**
+ * With compact copies, the places constraints give copy layers after `ops`
+ * moved, resized or re-pinned layers in mains (decision 0035, item 7): a
+ * copy frame of another size than its main's holds its children's places as
+ * laid out values, so they're derived again from their main layers'
+ * (`constrainedValues`), as materialized sync does. Only instances that
+ * store a value a layout reads can differ in size, so only they're walked.
+ */
+export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
+  if (!doc.compactCopies) return [];
+  const touched = ops.filter((op) => op.op === "set" && GEOMETRY.has(op.prop)).map((op) => op.id);
+  if (touched.length === 0) return [];
+  const mains = affectedComponents(doc, touched);
+  if (mains.size === 0) return [];
+  const queue = [...mains];
+  for (let i = 0; i < queue.length; i++)
+    for (const root of doc.instanceRoots(queue[i] as string))
+      for (const outer of affectedComponents(doc, [root]))
+        if (!mains.has(outer)) {
+          mains.add(outer);
+          queue.push(outer);
+        }
+  const out: Op[] = [];
+  const seen = new Set<string>();
+  for (const main of mains)
+    for (const root of doc.instanceRoots(main)) {
+      if (seen.has(root) || !doc.layoutDiffers(root)) continue;
+      seen.add(root);
+      const stack = [...doc.childIds(root)];
+      while (stack.length > 0) {
+        const id = stack.pop() as string;
+        const copy = doc.get(id);
+        if (!copy) continue;
+        stack.push(...doc.childIds(id));
+        const sourceId = getProp(copy.props, "mirrors");
+        const source = sourceId ? doc.get(sourceId) : undefined;
+        if (!source) continue;
+        const derived = constrainedValues(
+          copy,
+          source,
+          doc.get(copy.parent),
+          doc.get(source.parent),
+        );
+        const overridden = getProp(copy.props, "overrides");
+        for (const [prop, want] of Object.entries(derived)) {
+          if (overridden.includes(prop as PropName)) continue;
+          const have = (copy.props as Record<string, unknown>)[prop];
+          if (typeof have !== "number" || Math.abs(have - want) > PLACE_EPSILON)
+            out.push({ op: "set", id, prop: prop as PropName, value: want });
+        }
+      }
+    }
+  return out;
 }
 
 /**
@@ -677,7 +773,7 @@ export function pinInstances(input: readonly NodeRecord[]): {
   const unlinked = new Set<string>();
   let detached = 0;
   for (const root of roots(doc)) {
-    if (!syncInstanceOps(doc, root.id).some((op) => op.op !== "set")) continue;
+    if (!syncInstanceOps(doc, root.id, { derive: false }).some((op) => op.op !== "set")) continue;
     detached++;
     const queue = [root.id];
     for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
@@ -730,7 +826,7 @@ export function pinInstances(input: readonly NodeRecord[]): {
   doc.reset(out);
   const marks = new Map<string, Set<string>>();
   for (const root of roots(doc)) {
-    for (const op of syncInstanceOps(doc, root.id)) {
+    for (const op of syncInstanceOps(doc, root.id, { derive: false })) {
       if (op.op !== "set" || LINK_PROPS.has(op.prop)) continue;
       let set = marks.get(op.id);
       if (!set) {
@@ -811,6 +907,25 @@ export function resetOverridesOps(doc: Doc, instanceId: string): Op[] {
       ops.push({ op: "set", id, prop: "overrides", value: null });
     // Nested instances keep their own overrides relative to their own main.
     if (id !== instanceId && isInstanceRoot(node)) continue;
+    stack.push(...doc.childIds(id));
+  }
+  return ops;
+}
+
+/**
+ * Clears every change in an instance, those in its nested instances
+ * included, as Figma's "Reset all changes" does. Syncing then restores its
+ * main's look.
+ */
+export function resetAllOverridesOps(doc: Doc, instanceId: string): Op[] {
+  const ops: Op[] = [];
+  const stack = [instanceId];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    const node = doc.get(id);
+    if (!node) continue;
+    if (getProp(node.props, "overrides").length > 0)
+      ops.push({ op: "set", id, prop: "overrides", value: null });
     stack.push(...doc.childIds(id));
   }
   return ops;
