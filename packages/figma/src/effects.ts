@@ -13,7 +13,33 @@ const NOISE_TYPES = { MONOTONE: "mono", DUOTONE: "duo", MULTITONE: "multi" } as 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-export function convertEffect(e: Figma.Effect, notes: Notes): Effect | null {
+/** A variable a REST alias names, as a Drawpane id, when the file brings it (tokens.ts). */
+type Lookup = (alias: unknown) => string | undefined;
+
+/** An effect's fields bound to variables, by Drawpane's names (decision 0034). */
+function binds(
+  e: Figma.Effect,
+  variables: Lookup | undefined,
+  fields: Readonly<Record<string, string>>,
+): { bind?: Record<string, string> } {
+  if (!variables || !e.boundVariables) return {};
+  const bind: Record<string, string> = {};
+  for (const [figma, ours] of Object.entries(fields)) {
+    const id = variables(e.boundVariables[figma as keyof typeof e.boundVariables]);
+    if (id) bind[ours] = id;
+  }
+  return Object.keys(bind).length > 0 ? { bind } : {};
+}
+
+const SHADOW_FIELDS = {
+  offsetX: "x",
+  offsetY: "y",
+  radius: "blur",
+  spread: "spread",
+  color: "color",
+} as const;
+
+export function convertEffect(e: Figma.Effect, notes: Notes, variables?: Lookup): Effect | null {
   const visible = e.visible === false ? { visible: false } : {};
   switch (e.type) {
     case "DROP_SHADOW":
@@ -31,6 +57,7 @@ export function convertEffect(e: Figma.Effect, notes: Notes): Effect | null {
           : {}),
         ...(blendMode(e.blendMode) ? { blendMode: blendMode(e.blendMode) } : {}),
         ...visible,
+        ...binds(e, variables, SHADOW_FIELDS),
       };
     case "LAYER_BLUR":
     case "BACKGROUND_BLUR":
@@ -39,6 +66,7 @@ export function convertEffect(e: Figma.Effect, notes: Notes): Effect | null {
         type: e.type === "LAYER_BLUR" ? "layer-blur" : "background-blur",
         radius: round2(Math.max(0, e.radius ?? 0)),
         ...visible,
+        ...binds(e, variables, { radius: "radius" }),
       };
     case "NOISE":
       return {
@@ -91,10 +119,11 @@ export function convertEffect(e: Figma.Effect, notes: Notes): Effect | null {
 export function convertEffects(
   effects: readonly Figma.Effect[] | undefined,
   notes: Notes,
+  variables?: Lookup,
 ): Effect[] {
   const out: Effect[] = [];
   for (const e of effects ?? []) {
-    const converted = convertEffect(e, notes);
+    const converted = convertEffect(e, notes, variables);
     if (converted) out.push(converted);
   }
   return out.slice(0, 32);

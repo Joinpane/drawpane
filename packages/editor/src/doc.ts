@@ -12,6 +12,7 @@ import {
   ROOT_ID,
 } from "@drawpane/model";
 import { CompactCopies } from "./compact-copies";
+import { TokenView } from "./token-view";
 
 export interface DocChange {
   /** Nodes whose record changed, appeared or disappeared. */
@@ -78,6 +79,11 @@ export function compactCopiesDefault(): boolean {
  * With compact copies on, the store holds the stored form and every read
  * presents copy layers as ordinary nodes; `apply` takes and returns
  * operations on presented nodes (see compact-copies.ts).
+ *
+ * Every read resolves variables and linked styles where the layer is
+ * (decision 0034, token-view.ts): what `get` returns shows the values bound
+ * fields resolve to, and a change to a variable, a style or a mode names the
+ * layers it affects in its change notification.
  */
 export class Doc {
   #compactCopies: boolean;
@@ -98,6 +104,7 @@ export class Doc {
   #lastStored: readonly Op[] = [];
   #lastStoredInverse: readonly Op[] = [];
   #resetIds: ReadonlyMap<string, string> = new Map();
+  readonly #tokens: TokenView;
 
   /** What's being read, while `trackReads` is on. */
   #reads: DocReads | null = null;
@@ -105,6 +112,39 @@ export class Doc {
   constructor(options: DocOptions = {}) {
     this.#compactCopies = options.compactCopies ?? compactByDefault;
     this.#compact = this.#compactCopies ? new CompactCopies() : null;
+    this.#tokens = new TokenView({
+      get: (id) => this.#raw(id),
+      builtChildIds: (id) =>
+        this.#compact ? this.#compact.view.builtChildIds(id) : this.#store.childIds(id),
+      stored: (id) => (this.#compact?.store ?? this.#store).get(id),
+      storedNodes: () => (this.#compact?.store ?? this.#store).nodes(),
+      builtFrom: (ids) => this.#compact?.view.builtFrom(ids) ?? new Set(ids),
+      meter: () => this.#meter,
+    });
+  }
+
+  /** A node as presented, before variables and styles are resolved. */
+  #raw(id: string): NodeRecord | undefined {
+    return this.#compact ? this.#compact.view.get(id) : this.#store.get(id);
+  }
+
+  /** Resolves variables and styles (decision 0034): values at a node, modes, and so on. */
+  get tokens(): TokenView {
+    return this.#tokens;
+  }
+
+  /**
+   * Layers whose resolved layout values (a bound padding, a font size) may
+   * have changed since asked last, from changes to variables, styles or
+   * modes: what the editing client lays out again. Forgets them.
+   */
+  takeTokenLayout(): Set<string> {
+    return this.#tokens.takeLayout();
+  }
+
+  /** A node as stored or presented, unresolved: what its own values are, bound fields as stored. */
+  getUnresolved(id: string): NodeRecord | undefined {
+    return this.#raw(id);
   }
 
   /** What the document counts what it keeps in (`resetStored`), if anything. */
@@ -136,9 +176,9 @@ export class Doc {
   }
 
   get(id: string): NodeRecord | undefined {
-    const node = this.#compact ? this.#compact.view.get(id) : this.#store.get(id);
+    const raw = this.#raw(id);
     if (this.#reads) this.#read(this.#reads, id);
-    return node;
+    return raw && this.#tokens.present(id, raw);
   }
 
   has(id: string): boolean {
@@ -160,7 +200,11 @@ export class Doc {
 
   nodes(): IterableIterator<NodeRecord> {
     if (this.#reads) this.#reads.all = true;
-    return this.#compact ? this.#compact.view.nodes() : this.#store.nodes();
+    const tokens = this.#tokens;
+    const raw = this.#compact ? this.#compact.view.nodes() : this.#store.nodes();
+    return (function* () {
+      for (const node of raw) yield tokens.present(node.id, node);
+    })();
   }
 
   /**
@@ -297,15 +341,26 @@ export class Doc {
       const applied = this.#compact.apply(ops, options);
       this.#lastStored = applied.stored;
       this.#lastStoredInverse = applied.storedInverse;
-      this.#record(new Set(applied.ids), new Set(applied.parents), false);
+      this.#recordTokens(new Set(applied.ids), new Set(applied.parents));
       return applied.inverse;
     }
     const touched = this.#touched(ops);
     const inverse = applyTransaction(this.#store, ops, { held: options.held ?? false });
     this.#lastStored = ops;
     this.#lastStoredInverse = inverse;
-    this.#record(touched.ids, touched.parents, false);
+    this.#recordTokens(touched.ids, touched.parents);
     return inverse;
+  }
+
+  /**
+   * Records a change, with the layers it affects through variables, styles
+   * and modes: read from the stored operations and their inverse, so a change
+   * replayed from a room or rolled back reaches what the one made here does.
+   */
+  #recordTokens(ids: Set<string>, parents: Set<string>): void {
+    for (const id of this.#tokens.changed(ids, this.#lastStored, this.#lastStoredInverse))
+      ids.add(id);
+    this.#record(ids, parents, false);
   }
 
   /** Applies operations on the stored form as they are (compact copies; the same as `apply` otherwise). */
@@ -314,7 +369,7 @@ export class Doc {
     const applied = this.#compact.applyStored(ops, options);
     this.#lastStored = applied.stored;
     this.#lastStoredInverse = applied.storedInverse;
-    this.#record(new Set(applied.ids), new Set(applied.parents), false);
+    this.#recordTokens(new Set(applied.ids), new Set(applied.parents));
     return applied.inverse;
   }
 
@@ -330,6 +385,7 @@ export class Doc {
       this.#store = new MemoryStore(nodes);
       this.#resetIds = new Map();
     }
+    this.#tokens.rebuild();
     this.#record(new Set(), new Set(), true);
   }
 
@@ -385,6 +441,7 @@ export class Doc {
       this.#store = store;
     }
     this.#resetIds = new Map();
+    this.#tokens.rebuild();
     this.#record(new Set(), new Set(), true);
   }
 

@@ -8,7 +8,7 @@ import {
   type VariableType,
   variablesIn,
 } from "@drawpane/editor";
-import { getProp, type NodeRecord, type VariableValue } from "@drawpane/model";
+import { bindingVariable, getProp, type NodeRecord, type VariableValue } from "@drawpane/model";
 import { Button, Icon, IconButton, SegmentedControl } from "@drawpane/ui";
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useDocVersion, useEditor } from "../hooks";
@@ -435,8 +435,10 @@ function useUseCounts(): Map<string, number> {
     void version;
     const counts = new Map<string, number>();
     for (const node of editor.doc.nodes()) {
-      for (const id of Object.values(node.props.bindings ?? {}))
+      for (const ref of Object.values(node.props.bindings ?? {})) {
+        const id = bindingVariable(ref);
         if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
     }
     return counts;
   }, [editor, version]);
@@ -565,7 +567,7 @@ function VariableDetail({
   useEffect(() => setDraft(description), [description]);
   const modes = getProp(collection.props, "modes");
   const usedBy = [...editor.doc.nodes()].filter((n) =>
-    Object.values(n.props.bindings ?? {}).includes(variable.id),
+    Object.values(n.props.bindings ?? {}).some((ref) => bindingVariable(ref) === variable.id),
   );
 
   const css = useMemo(() => {

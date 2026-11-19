@@ -13,11 +13,18 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
 
 /**
  * 2: the room says how the file stores copies (decision 0029), at welcome;
- * the client says which ways it can read, at hello. A client on version 1
- * (from before compact copies) is served only a file stored materialized,
- * and told to reload otherwise.
+ * the client says which ways it can read, at hello.
+ *
+ * 3: variables and styles (decision 0034): paint, stop and effect bindings,
+ * style links, boolean variables, up to 64 modes, bindings that say their
+ * unit. Old data needs nothing (a binding without a unit reads as before),
+ * but an older tab (1 or 2) can't keep what it doesn't know: it would strip
+ * bindings and links from what it rewrites. So it doesn't write: one that
+ * says hello is told to reload (1, which reconnects on most closes, is shown
+ * a page saying so), and a socket welcomed before the release, whose
+ * attachment says no protocol, has its edits refused and is told the same.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** The close code that tells a client the room needs a newer one: reload the page. */
 export const RELOAD_CLOSE_CODE = 4426;
@@ -66,8 +73,8 @@ export function latencyBucket(ms: number): number {
 export const ClientMessage = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("hello"),
-    /** 1 from clients before compact copies, which read materialized files only. */
-    protocol: z.union([z.literal(1), z.literal(PROTOCOL_VERSION)]),
+    /** Older clients (1: before compact copies, 2: before variables and styles) are told to reload. */
+    protocol: z.union([z.literal(1), z.literal(2), z.literal(PROTOCOL_VERSION)]),
     /** Stable per browser tab; used to make resent transactions idempotent. */
     clientId: Id,
     /** Last revision this client has fully applied, or null for a fresh load. */

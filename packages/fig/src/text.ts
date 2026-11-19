@@ -9,6 +9,13 @@
  * the same pixels. Some percentages Figma lays out in whole pixels (162.5%
  * of 14 px as 23, not 22.75): its saved layout says which, and those come in
  * as the pixels Figma used.
+ *
+ * A bound letter spacing is read in the unit of the field that binds it
+ * (decision 0034): the text style's when the style gives the binding, else
+ * the layer's own, which a copy's override can set. Open Pencil 0.16 applies the variable's value as pixels whatever
+ * the unit, so 5 on a text set in percent became 5 px rather than 5% of its
+ * size. (A bound line height stays in pixels: every one in a 500k-layer kit
+ * is, including those whose layer saved a percentage under a style in px.)
  */
 import type { Figma } from "@drawpane/figma";
 import type { CharacterStyleOverride, FontFeature, SceneNode } from "@open-pencil/scene-graph";
@@ -80,11 +87,43 @@ function runStyle(s: CharacterStyleOverride, fontSize: number, notes: FigNotes):
   return out;
 }
 
+/** What the text fields read beyond Open Pencil's node, for a bound letter spacing. */
+export interface TextLookup {
+  /** A number variable's value where the layer is, when it has one. */
+  readonly resolve: (variableId: string) => number | undefined;
+  /**
+   * The letter spacing whose unit a binding is read in, as Figma saved it:
+   * the text style's when the style binds it, else the layer's (its copy's
+   * override included).
+   */
+  readonly saved: (field: "letterSpacing") => unknown;
+}
+
+/**
+ * Letter spacing as Figma reads it. A bound one whose binding field is a
+ * percentage comes in as that percentage, the variable's value; anything
+ * else as Open Pencil's pixels (which follow the text style where the
+ * layer's record doesn't say: a style's 8% on a record saying 0%).
+ */
+function letterSpacing(n: SceneNode, lookup: TextLookup | undefined): Partial<Figma.TypeStyle> {
+  const bound = n.boundVariables.letterSpacing;
+  if (bound === undefined) return { letterSpacing: n.letterSpacing };
+  const saved = lookup?.saved("letterSpacing") as { value?: unknown; units?: unknown } | undefined;
+  if (saved?.units !== "PERCENT" || typeof saved.value !== "number")
+    return { letterSpacing: n.letterSpacing };
+  const value = lookup?.resolve(bound) ?? saved.value;
+  return {
+    letterSpacing: (value / 100) * n.fontSize,
+    letterSpacingPercentFontSize: value,
+  };
+}
+
 /** REST's text fields for a TEXT layer. */
 export function textFields(
   n: SceneNode,
   raw: RawRecord | undefined,
   notes: FigNotes,
+  lookup?: TextLookup,
 ): Partial<Figma.Node> {
   const sameFont = raw?.fontName?.family === n.fontFamily;
   // Small caps aren't among Open Pencil's text cases; the record has them.
@@ -103,7 +142,7 @@ export function textFields(
     fontWeight: n.fontWeight,
     italic: n.italic,
     fontSize: n.fontSize,
-    letterSpacing: n.letterSpacing,
+    ...letterSpacing(n, lookup),
     ...lineHeight(n.lineHeight, n.fontSize, raw?.fontSize === n.fontSize ? raw : undefined),
     textAlignHorizontal: n.textAlignHorizontal,
     textAlignVertical: n.textAlignVertical,

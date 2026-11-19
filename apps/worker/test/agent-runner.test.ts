@@ -8,7 +8,7 @@
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { Doc } from "@drawpane/editor";
-import { copyId, type NodeRecord, type Op } from "@drawpane/model";
+import { copyId, type NodeRecord, type Op, type Paint } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import {
   type AgentDeps,
@@ -34,7 +34,7 @@ async function join(browser: Parameters<typeof openSocket>[0], fileId: string) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 2,
+    protocol: 3,
     clientId: "person",
     revn: null,
     copies: ["materialized", "compact"],
@@ -109,6 +109,94 @@ const node = async (fileId: string, id: string) =>
   (await roomOf(fileId).allNodes()).find((n) => n.id === id);
 
 describe("a commit after the file moved on", () => {
+  it("reports failure when an invalid binding unit rejects the entire atomic agent edit", async () => {
+    const { fileId, box, by, session } = await setup();
+    const out = await callWriteTool(agentDeps(env, fileId), {
+      by,
+      session,
+      callId: "invalid-binding-unit",
+      tool: "set_props",
+      input: {
+        changes: [
+          {
+            id: box,
+            props: { name: "After", bindings: { opacity: { variable: box, unit: "text" } } },
+          },
+        ],
+      },
+    });
+    expect((await node(fileId, box))?.props.name).toBe("Box");
+    expect(out).toMatchObject({ ok: false, message: expect.stringMatching(/unit/) });
+  });
+
+  it("keeps an explicit nested paint binding written by set_props", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    await person.edit([
+      {
+        op: "create",
+        id: "Colors",
+        type: "collection",
+        parent: "root",
+        key: "a1",
+        props: { modes: [{ id: "m", name: "M" }] },
+      },
+      {
+        op: "create",
+        id: "Color",
+        type: "variable",
+        parent: "Colors",
+        key: "a0",
+        props: { variableType: "color", values: { m: "#123456" } },
+      },
+      { op: "set", id: box, prop: "fills", value: [{ type: "solid", color: "#abcdef" }] },
+    ]);
+    const fills = [{ type: "solid", color: "#aabbcc", bind: { color: "Color" } }];
+    const out = await callWriteTool(agentDeps(env, fileId), {
+      by,
+      session,
+      callId: "set-paint-binding",
+      tool: "set_props",
+      input: { changes: [{ id: box, props: { fills } }] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect((await node(fileId, box))?.props.fills).toEqual(fills);
+  });
+
+  it("reruns an edit of a linked fill when its shared paint style changed during the run", async () => {
+    const { fileId, person, box, by, session } = await setup();
+    const red: Paint[] = [{ type: "solid", color: "#ff0000" }];
+    const blue: Paint[] = [{ type: "solid", color: "#0000ff" }];
+    await person.edit([
+      {
+        op: "create",
+        id: "PaintStyle",
+        type: "paintStyle",
+        parent: "root",
+        key: "a1",
+        props: { fills: red },
+      },
+      { op: "set", id: box, prop: "fillStyle", value: "PaintStyle" },
+      { op: "set", id: box, prop: "fills", value: red },
+    ]);
+    const { deps, runs } = withPause(fileId, async (run) => {
+      if (run === 1)
+        await person.edit([{ op: "set", id: "PaintStyle", prop: "fills", value: blue }]);
+    });
+    const out = await callWriteTool(deps, {
+      by,
+      session,
+      callId: "linked-fill-changed-mid-run",
+      tool: "set_props",
+      input: { changes: [{ id: box, props: { name: "After", fills: blue } }] },
+    });
+    expect(out).toMatchObject({ ok: true });
+    expect((await node(fileId, box))?.props).toMatchObject({
+      name: "After",
+      fillStyle: "PaintStyle",
+    });
+    expect(runs).toHaveLength(2);
+  });
+
   it("is refused as stale when a person changed the same layer, and the call runs again", async () => {
     const { fileId, person, box, by, session } = await setup();
     const { deps, runs } = withPause(fileId, async (run) => {

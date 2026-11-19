@@ -1,48 +1,39 @@
 /**
  * Variables (design tokens): collections of named values with one value per
- * mode, bound to layer properties.
+ * mode, bound to layer properties, and to the fields of paints and effects.
  *
- * Bindings are materialized like components: a bound property always holds
- * the resolved value, written by the client that changed the variable, the
- * mode or the binding, in the same transaction. The renderer, layout and
- * exports only ever see plain values; `bindings` remembers where they came
- * from.
+ * Bindings are resolved where they're read (decision 0034): the document
+ * presents every bound field as what its variable resolves to in the modes
+ * around the layer (`Doc.get`, token-view.ts), and nothing writes resolved
+ * values back when a variable or a mode changes. The value a layer stores
+ * for a bound field is what shows when the binding can't be followed.
  */
 import {
+  BINDING_FIELDS,
+  BINDING_FIELDS_BY_PROP,
   type BindingKey,
+  bindingRef,
+  type Effect,
   getProp,
+  type VariableType as ModelVariableType,
   type NodeRecord,
   type Op,
   type Paint,
   type PropName,
-  ROOT_ID,
   type VariableValue,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { textStyles, typographyToken } from "./text-styles";
 
-export type VariableType = "color" | "number" | "string";
+export type VariableType = ModelVariableType;
 
 /** Which property a binding key drives, and the variable type it takes. */
 export const BINDING_TARGETS: Readonly<Record<BindingKey, { prop: PropName; type: VariableType }>> =
-  {
-    fill: { prop: "fills", type: "color" },
-    stroke: { prop: "strokes", type: "color" },
-    width: { prop: "width", type: "number" },
-    height: { prop: "height", type: "number" },
-    gap: { prop: "gap", type: "number" },
-    rowGap: { prop: "rowGap", type: "number" },
-    paddingTop: { prop: "paddingTop", type: "number" },
-    paddingRight: { prop: "paddingRight", type: "number" },
-    paddingBottom: { prop: "paddingBottom", type: "number" },
-    paddingLeft: { prop: "paddingLeft", type: "number" },
-    cornerRadius: { prop: "cornerRadius", type: "number" },
-    strokeWeight: { prop: "strokeWeight", type: "number" },
-    opacity: { prop: "opacity", type: "number" },
-    fontSize: { prop: "fontSize", type: "number" },
-    fontFamily: { prop: "fontFamily", type: "string" },
-    characters: { prop: "characters", type: "string" },
-  };
+  Object.fromEntries(
+    (
+      Object.entries(BINDING_FIELDS) as Array<[BindingKey, (typeof BINDING_FIELDS)[BindingKey]]>
+    ).map(([key, target]) => [key, { prop: target.props[0] as PropName, type: target.type }]),
+  ) as Record<BindingKey, { prop: PropName; type: VariableType }>;
 
 /** Binding keys that drive a given property (for detaching when it's edited by hand). */
 export const KEYS_BY_PROP = new Map<string, BindingKey[]>();
@@ -111,200 +102,188 @@ export function modeTag(doc: Doc, node: NodeRecord): { text: string; label: stri
  * page that sets one, else the collection's first mode.
  */
 export function activeMode(doc: Doc, nodeId: string, collectionId: string): string | null {
-  const collection = doc.get(collectionId);
-  if (collection?.type !== "collection") return null;
-  const modes = getProp(collection.props, "modes");
-  for (
-    let node = doc.get(nodeId);
-    node;
-    node = node.parent === ROOT_ID ? undefined : doc.get(node.parent)
-  ) {
-    if (node.type === "frame" || node.type === "page") {
-      const mode = getProp(node.props, "variableModes")[collectionId];
-      if (mode && modes.some((m) => m.id === mode)) return mode;
-    }
-  }
-  return modes[0]?.id ?? null;
+  return doc.tokens.resolver.modeAt(nodeId, collectionId);
 }
 
-const MAX_ALIAS_DEPTH = 16;
-
 /**
- * A variable's value at `nodeId` (or in its collection's first mode when no
- * node is given), following aliases. Undefined when unset, missing or cyclic.
+ * A variable's value at `nodeId` (or in its collections' default modes when
+ * no node is given), following aliases. Undefined when unset, missing or cyclic.
  */
 export function resolveVariable(
   doc: Doc,
   variableId: string,
   nodeId?: string,
-): string | number | undefined {
-  let current = doc.get(variableId);
-  for (let depth = 0; current && depth < MAX_ALIAS_DEPTH; depth++) {
-    if (current.type !== "variable") return undefined;
-    const collection = current.parent;
-    const mode = nodeId
-      ? activeMode(doc, nodeId, collection)
-      : (getProp(doc.get(collection)?.props ?? {}, "modes")[0]?.id ?? null);
-    const values = getProp(current.props, "values");
-    const value: VariableValue | undefined =
-      (mode ? values[mode] : undefined) ?? Object.values(values)[0];
-    if (value === undefined) return undefined;
-    if (typeof value === "object") {
-      current = doc.get(value.alias);
-      continue;
-    }
-    return value;
-  }
-  return undefined;
+): string | number | boolean | undefined {
+  return doc.tokens.resolver.value(variableId, nodeId)?.value;
 }
 
-/** Writes a resolved colour into the first visible solid paint, adding one if needed. */
-function withColor(paints: readonly Paint[], color: string): Paint[] {
-  const index = paints.findIndex((p) => p.type === "solid");
-  if (index === -1) return [{ type: "solid", color }, ...paints];
-  return paints.map((p, i) => (i === index && p.type === "solid" ? { ...p, color } : p));
-}
+type Item = Record<string, unknown> & { bind?: Record<string, string>; stops?: unknown };
+type Stop = { color: string; bind?: { color?: string } } & Record<string, unknown>;
 
-/** Operations that make a node's bound properties hold their resolved values. */
-export function resolveBindingOps(doc: Doc, node: NodeRecord): Op[] {
-  const ops: Op[] = [];
-  const bindings = getProp(node.props, "bindings");
-  for (const [key, variableId] of Object.entries(bindings) as Array<[BindingKey, string]>) {
-    const target = BINDING_TARGETS[key];
-    if (!target) continue;
-    const value = resolveVariable(doc, variableId, node.id);
-    if (value === undefined) continue;
-    if (target.type === "color") {
-      if (typeof value !== "string" || !/^#[0-9a-f]{6}([0-9a-f]{2})?$/.test(value)) continue;
-      const current = getProp(node.props, target.prop as "fills" | "strokes");
-      const next = withColor(current, value);
-      if (JSON.stringify(next) !== JSON.stringify(current))
-        ops.push({ op: "set", id: node.id, prop: target.prop, value: next });
-      continue;
-    }
-    if (target.type === "number" && typeof value !== "number") continue;
-    if (target.type === "string" && typeof value !== "string") continue;
-    let resolved: string | number = value;
-    if (key === "opacity" && typeof resolved === "number")
-      resolved = Math.min(1, Math.max(0, resolved > 1 ? resolved / 100 : resolved));
-    if (node.props[target.prop] !== resolved)
-      ops.push({ op: "set", id: node.id, prop: target.prop, value: resolved });
-  }
-  return ops;
-}
-
-const boundCache = new WeakMap<Doc, { version: number; byVariable: Map<string, string[]> }>();
-
-/** Ids of nodes bound to each variable, cached per document version. */
-function nodesBoundTo(doc: Doc, variableId: string): readonly string[] {
-  let cached = boundCache.get(doc);
-  if (!cached || cached.version !== doc.version) {
-    const byVariable = new Map<string, string[]>();
-    for (const node of doc.nodes()) {
-      const bindings = node.props.bindings;
-      if (!bindings) continue;
-      for (const id of Object.values(bindings)) {
-        if (!id) continue;
-        const list = byVariable.get(id) ?? [];
-        list.push(node.id);
-        byVariable.set(id, list);
-      }
-    }
-    cached = { version: doc.version, byVariable };
-    boundCache.set(doc, cached);
-  }
-  return cached.byVariable.get(variableId) ?? [];
-}
-
-/** Variables whose value depends (through aliases) on `variableId`, including itself. */
-function dependents(doc: Doc, variableId: string): Set<string> {
-  const out = new Set([variableId]);
-  let grew = true;
-  const variables = allVariables(doc);
-  while (grew) {
-    grew = false;
-    for (const v of variables) {
-      if (out.has(v.id)) continue;
-      const values = Object.values(getProp(v.props, "values"));
-      if (values.some((value) => typeof value === "object" && out.has(value.alias))) {
-        out.add(v.id);
-        grew = true;
-      }
-    }
-  }
-  return out;
-}
+const json = (value: unknown) => JSON.stringify(value);
+const sameBind = (a: unknown, b: unknown) => json(a ?? null) === json(b ?? null);
 
 /**
- * Re-resolution operations after `ops` applied: for nodes whose bindings,
- * mode context or bound variables changed, and for bound nodes whose bound
- * property was overwritten by a derived write (an instance sync).
+ * The item of `before` each item of `next` is, when it's one of them: the
+ * same item exactly (reordered or kept), else an unused one binding the same
+ * variables (edited, perhaps moved too), else the one at its index. So a
+ * reorder keeps every binding, and an edit is compared with the item it
+ * edits, wherever it moved.
  */
-export function variableFixupOps(doc: Doc, ops: readonly Op[]): Op[] {
-  const candidates = new Set<string>();
-  const addSubtree = (id: string) => {
-    const stack = [id];
-    while (stack.length > 0) {
-      const current = stack.pop() as string;
-      const node = doc.get(current);
-      if (!node) continue;
-      if (node.props.bindings && Object.keys(node.props.bindings).length > 0)
-        candidates.add(current);
-      stack.push(...doc.childIds(current));
-    }
+function matchItems<T>(next: readonly T[], before: readonly T[]): Array<T | undefined> {
+  const used = new Set<number>();
+  const out: Array<T | undefined> = next.map(() => undefined);
+  const take = (i: number, j: number) => {
+    used.add(j);
+    out[i] = before[j];
   };
-  const addVariable = (variableId: string) => {
-    for (const id of dependents(doc, variableId))
-      for (const nodeId of nodesBoundTo(doc, id)) candidates.add(nodeId);
-  };
-
-  for (const op of ops) {
-    const node = doc.get(op.id);
-    if (op.op === "delete") {
-      // A deleted variable leaves its bound nodes with their last value.
-      continue;
-    }
-    if (!node) continue;
-    if (node.type === "variable") {
-      addVariable(node.id);
-      continue;
-    }
-    if (node.type === "collection") {
-      for (const v of variablesIn(doc, node.id)) addVariable(v.id);
-      continue;
-    }
-    if (op.op === "move" || (op.op === "set" && op.prop === "variableModes")) {
-      addSubtree(node.id);
-      continue;
-    }
-    if (op.op === "create") {
-      addSubtree(node.id);
-      continue;
-    }
-    if (op.op === "set" && node.props.bindings && Object.keys(node.props.bindings).length > 0)
-      candidates.add(node.id);
-  }
-
-  const out: Op[] = [];
-  for (const id of candidates) {
-    const node = doc.get(id);
-    if (node) out.push(...resolveBindingOps(doc, node));
-  }
+  const keys = before.map(json);
+  next.forEach((item, i) => {
+    const key = json(item);
+    const j = keys.findIndex((k, at) => !used.has(at) && k === key);
+    if (j !== -1) take(i, j);
+  });
+  next.forEach((item, i) => {
+    if (out[i] !== undefined) return;
+    const bind = (item as { bind?: unknown }).bind;
+    if (!bind) return;
+    const j = before.findIndex(
+      (b, at) =>
+        !used.has(at) &&
+        (b as { type?: unknown }).type === (item as { type?: unknown }).type &&
+        sameBind((b as { bind?: unknown }).bind, bind),
+    );
+    if (j !== -1) take(i, j);
+  });
+  next.forEach((_, i) => {
+    if (out[i] === undefined && i < before.length && !used.has(i)) take(i, i);
+  });
   return out;
 }
 
+/** A gradient's stops with the bindings of stops whose colour was changed by hand taken off. */
+function unbindStops(stops: readonly Stop[], before: readonly Stop[] | undefined): Stop[] | null {
+  if (!stops.some((stop) => stop.bind?.color)) return null;
+  const prior = matchItems(stops, before ?? []);
+  let changed = false;
+  const out = stops.map((stop, j) => {
+    if (!stop.bind?.color) return stop;
+    if (prior[j] && prior[j].color === stop.color) return stop;
+    // A binding the edit supplies itself (none, or another variable, before) is intended: kept.
+    if (prior[j]?.bind?.color !== stop.bind.color) return stop;
+    changed = true;
+    const { bind: _gone, ...rest } = stop;
+    return rest as Stop;
+  });
+  return changed ? out : null;
+}
+
 /**
- * Detaches bindings when a person sets a bound property by hand, unless the
- * same edit also sets the node's bindings (binding a variable sets both).
+ * A list of paints or effects with the bindings of fields whose values were
+ * changed by hand taken off (decision 0034): each item compared with the one
+ * it was (`matchItems`), so reordering keeps bindings and an edit detaches
+ * only the fields it changed. A binding the edit brings itself (the item had
+ * none on that field, or another variable) is intended and kept. A paint's own opacity is its own, on top of a
+ * bound colour's alpha: setting it leaves the colour bound.
+ */
+function unbindChanged<T extends Paint | Effect>(
+  next: readonly T[],
+  before: readonly T[],
+): T[] | null {
+  let changed = false;
+  const prior = matchItems(next as readonly Item[], before as readonly Item[]);
+  const out = next.map((item, i) => {
+    const was = prior[i];
+    let result = item as unknown as Item;
+    const bind = result.bind;
+    if (bind) {
+      const kept: Record<string, string> = {};
+      // Nothing it was: a new item's bindings are as given.
+      if (!was || was.type !== result.type) Object.assign(kept, bind);
+      else
+        for (const [field, id] of Object.entries(bind)) {
+          // A binding the edit supplies itself (none, or another variable, before) is intended:
+          // kept with the value it came with. Only one carried along by a hand edit lets go.
+          const carried = (was.bind as Record<string, string> | undefined)?.[field] === id;
+          if (!carried || json(result[field]) === json(was[field])) kept[field] = id;
+        }
+      if (Object.keys(kept).length !== Object.keys(bind).length) {
+        changed = true;
+        const { bind: _gone, ...rest } = result;
+        result = Object.keys(kept).length > 0 ? { ...rest, bind: kept } : rest;
+      }
+    }
+    if (Array.isArray(result.stops)) {
+      const stops = unbindStops(
+        result.stops as Stop[],
+        Array.isArray(was?.stops) ? (was.stops as Stop[]) : undefined,
+      );
+      if (stops) {
+        changed = true;
+        result = { ...result, stops };
+      }
+    }
+    return result as unknown as T;
+  });
+  return changed ? out : null;
+}
+
+/** The style link that drives each paint or effect list, and the style's own list. */
+const STYLE_LINKS = {
+  fills: "fillStyle",
+  strokes: "strokeStyle",
+  effects: "effectStyle",
+} as const satisfies Record<string, PropName>;
+
+/**
+ * Detaches what a person's edit replaces (decision 0034), in the same
+ * change, unless the same edit sets the node's bindings or links (binding a
+ * variable, linking a style):
+ * - a paint or effect list set to anything other than what it shows lets go
+ *   of the style it links (the list written is the style's, as shown, with
+ *   the edit), so the edit sticks;
+ * - in paints, gradient stops and effects, the fields whose values changed
+ *   lose their bindings, each item compared with the one it was (a
+ *   reorder detaches nothing);
+ * - a property bound in `bindings` set by hand loses that binding.
  */
 export function unbindOps(doc: Doc, ops: readonly Op[]): Op[] {
   const settingBindings = new Set(
     ops.filter((o) => o.op === "set" && o.prop === "bindings").map((o) => o.id),
   );
+  const settingLinks = new Set(
+    ops
+      .filter(
+        (o) =>
+          o.op === "set" &&
+          (o.prop === "fillStyle" || o.prop === "strokeStyle" || o.prop === "effectStyle"),
+      )
+      .map((o) => `${o.id}/${(o as { prop: string }).prop}`),
+  );
   const removals = new Map<string, Set<BindingKey>>();
+  const out: Op[] = [];
   for (const op of ops) {
     if (op.op !== "set" || op.prop === "bindings" || settingBindings.has(op.id)) continue;
-    const keys = KEYS_BY_PROP.get(op.prop);
+    if (
+      (op.prop === "fills" || op.prop === "strokes" || op.prop === "effects") &&
+      Array.isArray(op.value)
+    ) {
+      const node = doc.get(op.id);
+      if (node) {
+        const before = getProp(node.props, op.prop) as readonly (Paint | Effect)[];
+        const next = unbindChanged(op.value as readonly (Paint | Effect)[], before);
+        if (next) out.push({ op: "set", id: op.id, prop: op.prop, value: next });
+        const link = STYLE_LINKS[op.prop];
+        const linked = doc.getUnresolved(op.id)?.props[link];
+        if (
+          typeof linked === "string" &&
+          !settingLinks.has(`${op.id}/${link}`) &&
+          json(op.value) !== json(before)
+        )
+          out.push({ op: "set", id: op.id, prop: link, value: null });
+      }
+    }
+    const keys = BINDING_FIELDS_BY_PROP.get(op.prop);
     if (!keys) continue;
     const node = doc.get(op.id);
     const bindings = node ? getProp(node.props, "bindings") : {};
@@ -315,7 +294,6 @@ export function unbindOps(doc: Doc, ops: readonly Op[]): Op[] {
       removals.set(op.id, set);
     }
   }
-  const out: Op[] = [];
   for (const [id, keys] of removals) {
     const node = doc.get(id);
     if (!node) continue;
@@ -331,6 +309,87 @@ export function unbindOps(doc: Doc, ops: readonly Op[]): Op[] {
   return out;
 }
 
+/** Paints or effects with every variable binding taken off, values as given. */
+function withoutBinds<T>(list: readonly T[]): T[] {
+  return list.map((item) => {
+    const { bind: _gone, ...rest } = item as Item;
+    if (Array.isArray(rest.stops))
+      rest.stops = (rest.stops as Stop[]).map(({ bind: _stop, ...stop }) => stop);
+    return rest as unknown as T;
+  });
+}
+
+/**
+ * Binding `key` of a node to `variableId` (decision 0034): the binding, and
+ * the fields it drives set to what it shows once bound, so what's stored
+ * (what shows when the binding can't be followed) is what was shown, not
+ * an older value. Empty when the node can't take it.
+ */
+export function variableBindOps(doc: Doc, id: string, key: BindingKey, variableId: string): Op[] {
+  const node = doc.get(id);
+  const raw = doc.getUnresolved(id);
+  if (!node || !raw) return [];
+  // With its unit where decision 0034 has one, so it reads the same wherever it goes.
+  const bindings = { ...getProp(raw.props, "bindings"), [key]: bindingRef(key, variableId) };
+  const ops: Op[] = [{ op: "set", id, prop: "bindings", value: bindings }];
+  const bound = doc.tokens.resolver.resolve({
+    ...node,
+    props: { ...node.props, bindings },
+  });
+  for (const prop of BINDING_FIELDS[key].props) {
+    const value = bound.props[prop];
+    if (value !== undefined && json(value) !== json(raw.props[prop]))
+      ops.push({ op: "set", id, prop, value: value as never });
+  }
+  return ops;
+}
+
+/**
+ * Detaching `key` from a node by choice (decision 0034): the binding goes,
+ * and the fields it drove keep what they show now, whatever mode or value
+ * gave it. For `fill` and `stroke`, the variables the paints themselves bind
+ * (their colours, opacities and gradient stops) go too, and a linked style
+ * with them: the paints are kept as shown. Empty when nothing's bound.
+ */
+export function variableDetachOps(doc: Doc, id: string, key: BindingKey): Op[] {
+  const node = doc.get(id);
+  const raw = doc.getUnresolved(id);
+  if (!node || !raw) return [];
+  const bindings = getProp(raw.props, "bindings");
+  const ops: Op[] = [];
+  const prop = key === "fill" ? "fills" : key === "stroke" ? "strokes" : null;
+  const link = key === "fill" ? "fillStyle" : key === "stroke" ? "strokeStyle" : null;
+  const shown = prop ? (getProp(node.props, prop) as readonly Paint[]) : [];
+  const paintsBound =
+    prop !== null &&
+    (shown.some((p) => (p as Item).bind || Array.isArray((p as Item).stops)) ||
+      (link !== null && typeof raw.props[link] === "string"));
+  if (!bindings[key] && !paintsBound) return [];
+  if (bindings[key]) {
+    const next = { ...bindings };
+    delete next[key];
+    ops.push({
+      op: "set",
+      id,
+      prop: "bindings",
+      value: Object.keys(next).length > 0 ? next : null,
+    });
+  }
+  if (prop) {
+    const value = withoutBinds(shown);
+    if (json(value) !== json(raw.props[prop])) ops.push({ op: "set", id, prop, value });
+    if (link && typeof raw.props[link] === "string")
+      ops.push({ op: "set", id, prop: link, value: null });
+    return ops;
+  }
+  for (const field of BINDING_FIELDS[key].props) {
+    const value = node.props[field];
+    if (value !== undefined && json(value) !== json(raw.props[field]))
+      ops.push({ op: "set", id, prop: field, value: value as never });
+  }
+  return ops;
+}
+
 /** CSS custom property name for a variable: "brand/500" → "--brand-500". */
 export function cssVariableName(name: string): string {
   return `--${name
@@ -340,7 +399,8 @@ export function cssVariableName(name: string): string {
     .replace(/^-+|-+$/g, "")}`;
 }
 
-function cssValue(value: string | number, type: VariableType): string {
+function cssValue(value: string | number | boolean, type: VariableType): string {
+  if (typeof value === "boolean") return value ? "1" : "0";
   if (type === "number") return typeof value === "number" ? `${value}px` : String(value);
   if (type === "string") return JSON.stringify(String(value));
   return String(value);
@@ -417,7 +477,14 @@ export function exportDtcg(doc: Doc): Record<string, unknown> {
         group = group[part] as Record<string, unknown>;
       }
       const token: Record<string, unknown> = {
-        $type: type === "color" ? "color" : type === "number" ? "dimension" : "string",
+        $type:
+          type === "color"
+            ? "color"
+            : type === "number"
+              ? "dimension"
+              : type === "boolean"
+                ? "boolean"
+                : "string",
         $value: toDtcg(values[modes[0]?.id ?? ""]),
       };
       const description = getProp(variable.props, "description");

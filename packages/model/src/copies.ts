@@ -313,6 +313,21 @@ export class CopyView {
     return this.#store.childIds(id);
   }
 
+  /**
+   * A node's presented children as built so far, building nothing: an
+   * instance not built yet has none (nothing of it is cached to go stale).
+   */
+  builtChildIds(id: string): readonly string[] {
+    const slot = this.#slots.get(id);
+    if (slot) return this.#built.get(slot.root)?.kids.get(id) ?? EMPTY;
+    const stored = this.#store.get(id);
+    if (!stored || stored.type === "override") return EMPTY;
+    if (this.mainOf(stored)) return this.#built.get(id)?.kids.get(id) ?? EMPTY;
+    if (stored.type === "frame" && stored.props.instanceOf)
+      return this.#store.childIds(id).filter((c) => this.#store.get(c)?.type !== "override");
+    return this.#store.childIds(id);
+  }
+
   /** What a copy layer (or an instance root) is before its own values: its main's, as copied. */
   base(id: string): { type: NodeRecord["type"]; props: Record<string, unknown> } | undefined {
     const slot = this.slot(id);
@@ -409,6 +424,23 @@ export class CopyView {
       for (const parent of built.kids.keys()) parents.add(parent);
     }
     return { ids, parents };
+  }
+
+  /**
+   * The presented ids built from these, however nested (copy layers of
+   * them, copies of those), the ids themselves included. Only what's been
+   * built: a copy built later reads what's current then.
+   */
+  builtFrom(ids: Iterable<string>): Set<string> {
+    const out = new Set<string>();
+    const queue = [...ids];
+    for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
+      if (out.has(id)) continue;
+      out.add(id);
+      const copies = this.#copiesOf.get(id);
+      if (copies) for (const copy of copies) queue.push(copy);
+    }
+    return out;
   }
 
   /**
@@ -750,6 +782,12 @@ export function ownValues(
   base: Readonly<Record<string, unknown>>,
   own: Readonly<Record<string, unknown>>,
   keepMirrors = false,
+  /**
+   * Values also taken as the base's, unless overridden: for the converter,
+   * those differing only where they're bound (`alikeWhereBound`), which a
+   * copy shows resolved where it is rather than as its own.
+   */
+  alike?: (prop: string, want: unknown, base: unknown) => boolean,
 ): Record<string, unknown> | null {
   const overridden = new Set((own.overrides as readonly string[] | undefined) ?? []);
   const out: Record<string, unknown> = {};
@@ -765,6 +803,7 @@ export function ownValues(
     // Exactly the same: a value set to its default is kept as set (the editor compares values).
     if (!pinned && (want === undefined ? base[prop] === undefined : sameValue(want, base[prop])))
       continue;
+    if (!pinned && alike?.(prop, want, base[prop])) continue;
     if (want === undefined) {
       // A pinned absence still has to be said, or the main's value would show through later.
       if (base[prop] !== undefined || pinned) unset.push(prop);

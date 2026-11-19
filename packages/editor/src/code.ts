@@ -6,6 +6,8 @@
  */
 import {
   type BindingKey,
+  bindingUnit,
+  bindingVariable,
   type GridTrack,
   getProp,
   type NodeRecord,
@@ -71,15 +73,22 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
   const out: CssDeclaration[] = [];
   const bindings = getProp(p, "bindings");
   const tokenName = (key: BindingKey) => {
-    const id = bindings[key];
+    const id = bindingVariable(bindings[key]);
     const variable = id ? doc.get(id) : undefined;
     return variable ? getProp(variable.props, "name") : undefined;
   };
   const push = (property: string, value: string, key?: BindingKey) => {
     const token = key ? tokenName(key) : undefined;
+    // A percentage binding (decision 0034) reads its variable as a percentage: 50 is 0.5.
+    const percent = key !== undefined && bindingUnit(bindings[key]) === "percent";
+    const reference = token
+      ? percent
+        ? `calc(var(${cssVariableName(token)}) / 100)`
+        : `var(${cssVariableName(token)})`
+      : undefined;
     out.push(
-      token
-        ? { property, value: `var(${cssVariableName(token)})`, resolved: value, token }
+      token && reference
+        ? { property, value: reference, resolved: value, token }
         : { property, value },
     );
   };

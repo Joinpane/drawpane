@@ -13,7 +13,14 @@
  * Changing a styled property on a layer by hand detaches the layer from its
  * style (`textStyleDetachOps`): it keeps the look, and stops following.
  */
-import { getProp, type NodeRecord, type Op, type PropName, ROOT_ID } from "@drawpane/model";
+import {
+  BINDING_FIELDS_BY_PROP,
+  getProp,
+  type NodeRecord,
+  type Op,
+  type PropName,
+  ROOT_ID,
+} from "@drawpane/model";
 import type { Doc } from "./doc";
 
 /** The properties a text style sets on the layers that follow it. */
@@ -59,10 +66,18 @@ export function textStyleUsers(doc: Doc, styleId: string): NodeRecord[] {
 
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
 
-/** The writes that make a layer look like its style (nothing when it already does). */
+/**
+ * The writes that make a layer look like its style (nothing when it already
+ * does), from both as stored: a value, its binding and the unit it's read
+ * in go together, so what a resolver made of them is never written back. A
+ * field the layer binds itself is its own (its binding wins, decision 0034):
+ * its value and unit stay, whatever the style holds.
+ */
 function followOps(node: NodeRecord, style: NodeRecord): Op[] {
   const ops: Op[] = [];
+  const bound = getProp(node.props, "bindings") as Readonly<Record<string, unknown>>;
   for (const prop of TEXT_STYLE_PROPS) {
+    if ((BINDING_FIELDS_BY_PROP.get(prop) ?? []).some((key) => bound[key] !== undefined)) continue;
     const want = getProp(style.props, prop);
     if (!same(getProp(node.props, prop), want))
       // Defaults are stored as absent, so a layer and a style compare alike.
@@ -112,15 +127,15 @@ export function textStyleFixupOps(
     seen.add(node.id);
     const styleId = getProp(node.props, "textStyle");
     if (!styleId) return;
-    const style = doc.get(styleId);
+    const style = doc.getUnresolved(styleId);
     if (style?.type !== "textStyle") {
       out.push({ op: "set", id: node.id, prop: "textStyle", value: null });
       return;
     }
-    out.push(...followOps(node, style));
+    out.push(...followOps(doc.getUnresolved(node.id) ?? node, style));
   };
   for (const id of layers) {
-    const node = doc.get(id);
+    const node = doc.getUnresolved(id);
     if (node) follow(node);
   }
   if (styles.size > 0 || deleted.size > 0) {

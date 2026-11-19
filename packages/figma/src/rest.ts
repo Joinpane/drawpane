@@ -26,9 +26,17 @@ export type Transform = readonly [
   readonly [number, number, number],
 ];
 
+/** A reference to a variable, as REST writes one in `boundVariables`. */
+export interface VariableAlias {
+  readonly type: "VARIABLE_ALIAS";
+  /** "VariableID:<id>". */
+  readonly id: string;
+}
+
 export interface ColorStop {
   readonly position: number;
   readonly color: RGBA;
+  readonly boundVariables?: { readonly color?: VariableAlias };
 }
 
 export interface Paint {
@@ -55,6 +63,7 @@ export interface Paint {
   readonly scalingFactor?: number;
   readonly rotation?: number;
   readonly filters?: Readonly<Record<string, number>>;
+  readonly boundVariables?: { readonly color?: VariableAlias };
 }
 
 export interface Effect {
@@ -80,6 +89,13 @@ export interface Effect {
   readonly secondaryColor?: RGBA;
   readonly opacity?: number;
   readonly clipToShape?: boolean;
+  readonly boundVariables?: {
+    readonly color?: VariableAlias;
+    readonly radius?: VariableAlias;
+    readonly spread?: VariableAlias;
+    readonly offsetX?: VariableAlias;
+    readonly offsetY?: VariableAlias;
+  };
   /**
    * Glass, as Figma's plugin API names its settings (the REST API leaves them out; a `.fig`
    * has them): light 0–1 and its angle in degrees, refraction 0–1, depth px, dispersion and
@@ -108,6 +124,12 @@ export interface TypeStyle {
   readonly textAlignHorizontal?: string;
   readonly textAlignVertical?: string;
   readonly letterSpacing?: number;
+  /**
+   * Drawpane's: letter spacing Figma saved as a percentage of the font size
+   * (`letterSpacing` then holds its pixels). REST gives pixels only; a .fig
+   * says which, and a bound variable's value is read in that unit.
+   */
+  readonly letterSpacingPercentFontSize?: number;
   readonly lineHeightPx?: number;
   readonly lineHeightPercentFontSize?: number;
   readonly lineHeightUnit?: "PIXELS" | "FONT_SIZE_%" | "INTRINSIC_%";
@@ -226,6 +248,71 @@ export interface Node {
   readonly overrides?: readonly { id: string; overriddenFields: readonly string[] }[];
   readonly booleanOperation?: string;
   readonly arcData?: { startingAngle: number; endingAngle: number; innerRadius: number };
+  // Variables and styles (decision 0034)
+  /**
+   * The node's own fields bound to variables, by REST's field names
+   * (`paddingLeft`, `topLeftRadius`, `itemSpacing`, `characters`...). Paints,
+   * gradient stops and effects carry theirs on themselves.
+   */
+  readonly boundVariables?: Readonly<Record<string, VariableAlias | readonly VariableAlias[]>>;
+  /** The modes the node sets, by collection id ("VariableCollectionId:<id>") to mode id. */
+  readonly explicitVariableModes?: Readonly<Record<string, string>>;
+  /** The styles it links, by kind, to style ids (keys of `File.styles`). */
+  readonly styles?: Readonly<
+    Partial<
+      Record<
+        "fill" | "fills" | "stroke" | "strokes" | "effect" | "effects" | "text" | "grid",
+        string
+      >
+    >
+  >;
+}
+
+/** A variable value in one mode: a literal, or an alias (a colour alias may be composed at an opacity). */
+export type VariableModeValue =
+  | RGBA
+  | number
+  | string
+  | boolean
+  | (VariableAlias & {
+      /** Drawpane's: Figma's `COMPOSE_COLOR`, the colour at this opacity (0 to 1). */
+      readonly opacity?: number;
+    });
+
+/** A variable, as GET /v1/files/:key/variables/local returns it. */
+export interface Variable {
+  /** "VariableID:<id>". */
+  readonly id: string;
+  readonly name: string;
+  readonly key?: string;
+  readonly variableCollectionId: string;
+  readonly resolvedType: "BOOLEAN" | "FLOAT" | "STRING" | "COLOR";
+  readonly valuesByMode: Readonly<Record<string, VariableModeValue>>;
+  readonly remote?: boolean;
+  readonly description?: string;
+  readonly hiddenFromPublishing?: boolean;
+  readonly scopes?: readonly string[];
+  readonly codeSyntax?: Readonly<Partial<Record<"WEB" | "ANDROID" | "iOS", string>>>;
+}
+
+/** A variable collection, as GET /v1/files/:key/variables/local returns it. */
+export interface VariableCollection {
+  /** "VariableCollectionId:<id>". */
+  readonly id: string;
+  readonly name: string;
+  readonly key?: string;
+  /** Modes in Figma's order. */
+  readonly modes: readonly { readonly modeId: string; readonly name: string }[];
+  readonly defaultModeId: string;
+  readonly remote?: boolean;
+  readonly hiddenFromPublishing?: boolean;
+  readonly variableIds?: readonly string[];
+}
+
+/** The `meta` of GET /v1/files/:key/variables/local. */
+export interface LocalVariables {
+  readonly variableCollections: Readonly<Record<string, VariableCollection>>;
+  readonly variables: Readonly<Record<string, Variable>>;
 }
 
 /** A component property, as `componentPropertyDefinitions` gives it. */
@@ -255,7 +342,22 @@ export interface File {
     >
   >;
   readonly componentSets?: Readonly<Record<string, { key?: string; name?: string }>>;
-  readonly styles?: Readonly<Record<string, { name?: string; styleType?: string }>>;
+  readonly styles?: Readonly<
+    Record<
+      string,
+      { name?: string; styleType?: string; description?: string; hiddenFromPublishing?: boolean }
+    >
+  >;
+  /**
+   * The file's variables (decision 0034), as GET /v1/files/:key/variables/local
+   * returns them; missing when they weren't read (a link without the scope).
+   */
+  readonly variables?: LocalVariables;
+  /**
+   * Local styles' definitions by style id: the style's node, as
+   * GET /v1/files/:key/nodes returns it (its fills, effects or text style).
+   */
+  readonly styleNodes?: Readonly<Record<string, Node>>;
   readonly version?: string;
   readonly lastModified?: string;
 }

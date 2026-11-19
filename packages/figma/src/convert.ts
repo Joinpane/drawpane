@@ -24,6 +24,7 @@ import {
   serializePath,
 } from "@drawpane/import-kit";
 import {
+  boundAlike,
   boundaryDrivenProps,
   GlyphTableBuilder,
   keysBetween,
@@ -41,6 +42,15 @@ import { blendMode, convertPaints, hexColor, type ImageLookup } from "./paint";
 import { convertDefinitions, convertReferences, type PropertyLinks } from "./properties";
 import type * as Figma from "./rest";
 import { textProps } from "./text";
+import {
+  convertStyles,
+  convertVariables,
+  layerBindings,
+  layerModes,
+  layerStyles,
+  type VariableLookup,
+  variableLookup,
+} from "./tokens";
 
 type Props = Record<string, unknown>;
 
@@ -161,6 +171,21 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
   /** The glyphs .fig text was laid out in (decision 0037), each outline once. */
   const glyphs = new GlyphTableBuilder();
 
+  // Variables and styles (decision 0034): converted first, so layers bind and link only what came.
+  const pages = (file.document.children ?? []).filter((p) => p.type === "CANVAS");
+  const pageKeys = keysBetween(null, null, pages.length);
+  const variables = variableLookup(file);
+  const tokens = convertVariables(file, notes, pageKeys.at(-1) ?? null);
+  const lastCollection = tokens.nodes.filter((n) => n.parent === ROOT_ID).at(-1)?.key;
+  const styles = convertStyles(
+    file,
+    images,
+    notes,
+    variables,
+    lastCollection ?? pageKeys.at(-1) ?? null,
+  );
+  const styleKinds = new Map(styles.map((s) => [s.id, s.type]));
+
   /**
    * Converts `node` and its children. `abs` is its parent's page affine,
    * `space` the page affine of the nearest frame (or page) it's placed in,
@@ -204,7 +229,7 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
       props.opacity = Math.round(node.opacity * 10_000) / 10_000;
     const blend = blendMode(node.blendMode);
     if (blend) props.blendMode = blend;
-    const effects = convertEffects(node.effects, notes);
+    const effects = convertEffects(node.effects, notes, variables);
     if (effects.length > 0) props.effects = effects;
     let type: NodeRecord["type"];
     const isGroup = node.type === "GROUP";
@@ -247,17 +272,24 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     }
 
     if (type !== "group" && type !== "text") {
-      const fills = convertPaints(node.fills, images, notes);
+      const fills = convertPaints(node.fills, images, notes, variables);
       if (fills.length > 0 || type === "frame") props.fills = fills;
-      Object.assign(props, strokeProps(node, type, images, notes));
+      Object.assign(props, strokeProps(node, type, images, notes, variables));
     }
     if (type === "rect" || type === "frame") Object.assign(props, corners(node));
     if (type === "text") {
-      Object.assign(props, textProps(node, images, notes));
+      Object.assign(props, textProps(node, images, notes, variables));
       if (node.drawpaneGlyphs) {
         const layout = glyphs.layout(props, node.drawpaneGlyphs);
         if (layout) props.glyphLayout = layout;
       }
+    }
+    const bindings = layerBindings(node, type, variables);
+    if (Object.keys(bindings).length > 0) props.bindings = bindings;
+    Object.assign(props, layerStyles(node, type, styleKinds));
+    if (type === "frame") {
+      const modes = layerModes(node, tokens.modes);
+      if (modes) props.variableModes = modes;
     }
     if (type === "path") Object.assign(props, pathProps(node, notes));
 
@@ -345,12 +377,12 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     });
   };
 
-  const pages = (file.document.children ?? []).filter((p) => p.type === "CANVAS");
-  const pageKeys = keysBetween(null, null, pages.length);
   pages.forEach((page, i) => {
     const id = drawpaneId(page.id);
     const props: Props = { name: page.name.slice(0, 256) || "Page" };
     if (page.backgroundColor) props.backgroundColor = hexColor(page.backgroundColor, 1);
+    const modes = layerModes(page, tokens.modes);
+    if (modes) props.variableModes = modes;
     add({ id, type: "page", parent: ROOT_ID, key: pageKeys[i] as string, props } as NodeRecord);
     const children = page.children ?? [];
     const keys = keysBetween(null, null, children.length);
@@ -359,6 +391,7 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
     });
   });
 
+  for (const node of [...tokens.nodes, ...styles]) add(node);
   inheritPropertyLinks(nodes, byId);
   markOverrides(instances, nodes, byId);
   // The glyph sets go after the pages, at the root.
@@ -412,8 +445,9 @@ function strokeProps(
   type: NodeRecord["type"],
   images: ImageLookup,
   notes: Notes,
+  variables: VariableLookup,
 ): Props {
-  const strokes = convertPaints(node.strokes, images, notes);
+  const strokes = convertPaints(node.strokes, images, notes, variables);
   if (strokes.length === 0) return {};
   const props: Props = { strokes };
   const sides = node.individualStrokeWeights;
@@ -509,6 +543,8 @@ const NOT_OVERRIDES = new Set([
   "glyphLayout",
 ]);
 
+type Bindings = Readonly<Record<string, string>> | undefined;
+
 /**
  * A copy's links to component properties are its main layer's: Figma lists
  * them on a component's layers, and may leave them off the copies. A copy
@@ -572,6 +608,7 @@ function markOverrides(
       ...Object.keys(main.props),
       ...Object.keys(swappedTo?.props ?? {}),
     ]);
+    const la = (layer.props as Props).bindings as Bindings;
     for (const k of keys) {
       if (NOT_OVERRIDES.has(k) || laidOut.has(k)) continue;
       // Where an instance sits, and how it's used in the main around it, are its own.
@@ -583,7 +620,15 @@ function markOverrides(
       }
       const a = (layer.props as Props)[k];
       const b = (against.props as Props)[k];
-      if (JSON.stringify(a) !== JSON.stringify(b)) changed.push(k);
+      if (JSON.stringify(a) === JSON.stringify(b)) continue;
+      // Differing only where both bind the same variables: no override (it shows what they give
+      // where it is). The copy keeps the value Figma saved for it, what shows when they can't be
+      // followed and what a reader without the resolver sees (decision 0034).
+      if (
+        boundAlike(k, a, b, la, (against.props as Props).bindings as Bindings, (id) => byId.get(id))
+      )
+        continue;
+      changed.push(k);
     }
     // A nested instance swapped for another component overrides which one it is.
     if (!root && of !== undefined && of !== (main.props as Props).instanceOf)

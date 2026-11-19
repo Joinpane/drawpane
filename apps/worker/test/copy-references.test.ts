@@ -66,7 +66,7 @@ async function join(browser: Parameters<typeof openSocket>[0], fileId: string, c
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 2,
+    protocol: 3,
     clientId,
     revn: null,
     copies: ["materialized", "compact"],
@@ -106,7 +106,7 @@ describe("copy references the room fixes", () => {
     const late = await openSocket(browser, fileId);
     late.send({
       t: "hello",
-      protocol: 2,
+      protocol: 3,
       clientId: "clientLate",
       revn: base,
       copies: ["materialized", "compact"],

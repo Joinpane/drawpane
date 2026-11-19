@@ -25,6 +25,7 @@ import {
   type Op,
   type Props,
   ROOT_ID,
+  renameTokenIds,
   stableJson,
   subtree,
 } from "@drawpane/model";
@@ -121,28 +122,13 @@ export function libraryUses(doc: Doc, libraryFileId: string): number {
 
 /** A node's props with every id it points at turned into its copy's. */
 function remap(node: NodeRecord, to: (id: string) => string, copied: ReadonlySet<string>): Props {
-  const props: Record<string, unknown> = { ...node.props };
+  // Tokens and what uses them (decision 0034): bindings, paint and effect binds, style links,
+  // aliases (their opacity kept), the collections modes are set for.
+  const props: Record<string, unknown> = { ...renameTokenIds(node.props, to) };
   const p = node.props as Record<string, unknown>;
-  for (const key of ["instanceOf", "mirrors", "textStyle"] as const)
+  for (const key of ["instanceOf", "mirrors"] as const)
     if (typeof p[key] === "string") props[key] = to(p[key] as string);
   if (Array.isArray(p.readingOrder)) props.readingOrder = (p.readingOrder as string[]).map(to);
-  if (p.bindings && typeof p.bindings === "object")
-    props.bindings = Object.fromEntries(
-      Object.entries(p.bindings as Record<string, string>).map(([k, v]) => [k, to(v)]),
-    );
-  if (p.variableModes && typeof p.variableModes === "object")
-    props.variableModes = Object.fromEntries(
-      Object.entries(p.variableModes as Record<string, string>).map(([k, v]) => [to(k), v]),
-    );
-  if (p.values && typeof p.values === "object")
-    props.values = Object.fromEntries(
-      Object.entries(p.values as Record<string, unknown>).map(([mode, v]) => [
-        mode,
-        v && typeof v === "object" && "alias" in v
-          ? { alias: to((v as { alias: string }).alias) }
-          : v,
-      ]),
-    );
   // An instance swap's default and preferred components (decision 0035). Property ids aren't
   // node ids: they stay.
   if (Array.isArray(p.componentProps))

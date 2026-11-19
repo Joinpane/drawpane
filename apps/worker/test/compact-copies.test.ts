@@ -40,7 +40,7 @@ async function newFile(name = "Kit") {
   );
   // The room learns its file id when someone opens it.
   const socket = await openSocket(owner.browser, file.id);
-  socket.send({ t: "hello", protocol: 2, clientId: `c-${file.id}`, revn: null, copies: BOTH });
+  socket.send({ t: "hello", protocol: 3, clientId: `c-${file.id}`, revn: null, copies: BOTH });
   await socket.next("welcome");
   socket.ws.close();
   return { ...owner, fileId: file.id };
@@ -70,7 +70,7 @@ async function open(browser: Browser, fileId: string, reads = BOTH) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 2,
+    protocol: 3,
     clientId: `o-${crypto.randomUUID()}`,
     revn: null,
     copies: reads,
@@ -150,7 +150,7 @@ describe("converting a file stored materialized", { timeout: 120_000 }, () => {
       room.convertStepWork = 0;
     });
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 2, clientId: "editor", revn: null, copies: BOTH });
+    socket.send({ t: "hello", protocol: 3, clientId: "editor", revn: null, copies: BOTH });
     expect((await socket.next<{ copies: string }>("welcome")).copies).toBe("materialized");
     // A few steps in, someone edits a main and its copies, as a materialized editor does.
     for (let i = 0; i < 5; i++) await runDurableObjectAlarm(roomOf(fileId));
@@ -209,10 +209,6 @@ describe("converting a file stored materialized", { timeout: 120_000 }, () => {
     });
     await runDurableObjectAlarm(roomOf(fileId));
     expect((await roomOf(fileId).copiesFormat()).copies).toBe("materialized");
-    // A client from before compact copies still opens it.
-    const old = await openSocket(browser, fileId);
-    old.send({ t: "hello", protocol: 1, clientId: "old", revn: null });
-    expect((await old.next<{ mode: string }>("welcome")).mode).toBe("snapshot");
 
     // Turned on, it converts; turned off again, restoring the version saved before puts the
     // file back as it was stored, materialized.
@@ -222,10 +218,6 @@ describe("converting a file stored materialized", { timeout: 120_000 }, () => {
       await state.storage.setAlarm(Date.now());
     });
     await convert(fileId);
-    // The old client can't read compact copies: it's sent the file as presented, to view.
-    const again = await openSocket(browser, fileId);
-    again.send({ t: "hello", protocol: 1, clientId: "old2", revn: null });
-    expect((await again.next<{ role: string; copies: string }>("welcome")).role).toBe("viewer");
 
     const { backup } = await roomOf(fileId).copiesFormat();
     await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
@@ -596,66 +588,6 @@ describe("what the review of the conversion found", { timeout: 120_000 }, () => 
     expect(firstDifference(compactByInstance(kit.nodes).nodes, after)).toBeNull();
   });
 
-  it("never sends compact copies to a client from before them, even when the file converts during its hello", async () => {
-    const { browser, fileId } = await materializedFile(kit.nodes);
-    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
-      room.pause = async (at) => {
-        if (at === "hello") await convertInside(room);
-      };
-    });
-    const old = await openSocket(browser, fileId);
-    old.send({ t: "hello", protocol: 1, clientId: "old-race", revn: null });
-    const welcome = await old.next<{ copies?: string; role: string }>("welcome", 30_000);
-    expect((await roomOf(fileId).copiesFormat()).copies).toBe("compact");
-    const sent: NodeRecord[] = [];
-    for (;;) {
-      const chunk = await old.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot", 30_000);
-      sent.push(...chunk.nodes);
-      if (chunk.done) break;
-    }
-    // What it's sent is the file as people see it, every copy layer stored, and it can't edit.
-    expect(sent.some((n) => n.type === "override")).toBe(false);
-    expect(welcome.role).toBe("viewer");
-    const expected = compactByInstance(kit.nodes);
-    expect(firstDifference(renameIds(kit.nodes, expected.ids), sent)).toBeNull();
-  });
-
-  it("serves a tab from before compact copies, running its own sync code, the file to view, and says to reload when it edits", async () => {
-    const { browser, fileId } = await materializedFile(kit.nodes);
-    await convert(fileId);
-    const socket = await openSocket(browser, fileId);
-    const doc = new Doc();
-    const engine = new OldSyncEngine(doc, {
-      clientId: "old-tab",
-      flushIntervalMs: 0,
-      statsIntervalMs: 3_600_000,
-    });
-    const rejected: string[] = [];
-    engine.on("rejected", (_code, message) => rejected.push(message));
-    let closed: number | null = null;
-    socket.ws.addEventListener("close", (event) => {
-      closed = event.code;
-    });
-    socket.ws.addEventListener("message", (event) => {
-      engine.receive(JSON.parse(event.data as string));
-    });
-    engine.connected((message) => socket.send(message));
-    for (let i = 0; i < 200 && engine.status !== "live" && closed === null; i++)
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(closed).toBeNull();
-    expect(engine.status).toBe("live");
-    expect(engine.role).toBe("viewer");
-    const expected = compactByInstance(kit.nodes);
-    expect(firstDifference(renameIds(kit.nodes, expected.ids), [...doc.nodes()])).toBeNull();
-    // An edit it had waiting (or makes anyway) is refused, saying why.
-    const page = kit.nodes.find((n) => n.type === "page") as NodeRecord;
-    engine.commit([{ op: "set", id: page.id, prop: "name", value: "Old tab" }]);
-    for (let i = 0; i < 100 && rejected.length === 0; i++)
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(rejected.join(" ")).toMatch(/[Rr]eload/);
-    expect(closed).toBeNull();
-  });
-
   it("takes compact copies through the one-request import when it says so", async () => {
     const { browser, fileId } = await newFile();
     // A copy's text changed: compact, it's an override record.
@@ -685,7 +617,7 @@ describe("what the review of the conversion found", { timeout: 120_000 }, () => 
     const { browser, fileId } = await materializedFile(kit.nodes);
     // A tab of this version (it reads both forms), loaded while the file was materialized.
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 2, clientId: "before", revn: null, copies: BOTH });
+    socket.send({ t: "hello", protocol: 3, clientId: "before", revn: null, copies: BOTH });
     const welcome = await socket.next<{ mode: string; copies: string }>("welcome");
     expect([welcome.mode, welcome.copies]).toEqual(["snapshot", "materialized"]);
     await convert(fileId);
@@ -1090,43 +1022,6 @@ describe("what the second review of the conversion found", { timeout: 120_000 },
       expect((await socket.next<{ code: string }>("reject")).code).toBe("format");
       expect(JSON.stringify(await stored(fileId))).not.toContain(copy.id);
     });
-  });
-
-  it("never sends compact changes to a tab from before them that was open when the file converted", async () => {
-    const { browser, fileId } = await materializedFile(kit.nodes);
-    const old = await openSocket(browser, fileId);
-    old.send({ t: "hello", protocol: 1, clientId: "old-across", revn: null });
-    expect((await old.next<{ copies?: string }>("welcome")).copies).toBe("materialized");
-    for (;;) if ((await old.next<{ done: boolean }>("snapshot")).done) break;
-    await convert(fileId);
-    // Someone with a new tab edits the file, now compact: an instance root and a copy layer.
-    const now = await open(browser, fileId);
-    const root = now.nodes.find(
-      (n) => n.type === "frame" && n.props.instanceOf && !now.nodes.some((c) => c.parent === n.id),
-    ) as NodeRecord;
-    const page = now.nodes.find((n) => n.type === "page") as NodeRecord;
-    old.inbox.length = 0;
-    now.socket.send({
-      t: "txn",
-      seq: 1,
-      ops: [
-        { op: "set", id: root.id, prop: "opacity", value: 0.5 },
-        { op: "set", id: page.id, prop: "name", value: "Edited after converting" },
-      ],
-    });
-    await now.socket.next("ack");
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(old.inbox.filter((m) => m.t === "txn" || m.t === "snapshot")).toEqual([]);
-    // Its own edit is refused, telling it to reload; then it's sent the file to view.
-    old.send({
-      t: "txn",
-      seq: 1,
-      ops: [{ op: "set", id: page.id, prop: "name", value: "From the old tab" }],
-    });
-    expect((await old.next<{ message: string }>("reject")).message).toMatch(/[Rr]eload/);
-    expect((await stored(fileId)).find((n) => n.id === page.id)?.props.name).toBe(
-      "Edited after converting",
-    );
   });
 
   it("puts pins back when a restore lands while a sweep moving them forward awaits", async () => {
@@ -1821,89 +1716,6 @@ describe("what the fifth review found", { timeout: 120_000 }, () => {
   });
 });
 
-describe("what the sixth review found", { timeout: 120_000 }, () => {
-  /** What a tab from before compact copies (protocol 1) is sent of a file, every chunk. */
-  async function oldClientSees(browser: Browser, fileId: string): Promise<NodeRecord[]> {
-    const old = await openSocket(browser, fileId);
-    old.send({ t: "hello", protocol: 1, clientId: `old-${newId()}`, revn: null });
-    await old.next("welcome");
-    const received: NodeRecord[] = [];
-    for (;;) {
-      const chunk = await old.next<{ nodes: NodeRecord[]; done: boolean }>("snapshot");
-      received.push(...chunk.nodes);
-      if (chunk.done) break;
-    }
-    old.ws.close();
-    return received;
-  }
-
-  it("sends a tab from before compact copies the document's styles and variables, not only its pages", async () => {
-    const { browser, projectId } = await signedInUser("Sixth review");
-    const { file } = await browser.json<{ file: { id: string } }>(
-      `/api/projects/${projectId}/files`,
-      { method: "POST", json: { name: "Assets" } },
-    );
-    const nodes: NodeRecord[] = [
-      { id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} },
-      { id: "Style", parent: ROOT_ID, key: "a1", type: "textStyle", props: { fontSize: 40 } },
-      { id: "Tokens", parent: ROOT_ID, key: "a2", type: "collection", props: {} },
-      {
-        id: "Token",
-        parent: "Tokens",
-        key: "a0",
-        type: "variable",
-        props: { variableType: "number", values: { m1: 42 } },
-      },
-      {
-        id: "Text",
-        parent: "P",
-        key: "a0",
-        type: "text",
-        props: { characters: "Hello", textStyle: "Style", fontSize: 40 },
-      },
-    ];
-    const imported = await roomOf(file.id).importNodes(
-      { userId: "system", name: "Review" },
-      nodes,
-      file.id,
-      "compact",
-    );
-    expect(imported.ok).toBe(true);
-    const ids = (await oldClientSees(browser, file.id)).map((n) => n.id).sort();
-    expect(ids).toEqual(["P", "Style", "Text", "Token", "Tokens"]);
-  });
-
-  it("sends a tab from before compact copies a page saying to reload when the file is too large to send it", async () => {
-    const { browser, projectId } = await signedInUser("Sixth review large");
-    const { file } = await browser.json<{ file: { id: string } }>(
-      `/api/projects/${projectId}/files`,
-      { method: "POST", json: { name: "Large" } },
-    );
-    // 45 texts of 200,000 characters: past the 8 MB a socket is sent.
-    const nodes: NodeRecord[] = [{ id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} }];
-    for (let i = 0; i < 45; i++)
-      nodes.push({
-        id: `T${i}`,
-        parent: "P",
-        key: "a0",
-        type: "text",
-        props: { characters: "x".repeat(200_000) },
-      });
-    const imported = await roomOf(file.id).importNodes(
-      { userId: "system", name: "Review" },
-      nodes,
-      file.id,
-      "compact",
-    );
-    expect(imported.ok).toBe(true);
-    const seen = await oldClientSees(browser, file.id);
-    expect(seen.map((n) => n.id)).toEqual(["drawpane-reload-page", "drawpane-reload-text"]);
-    expect(seen[1]?.props.characters).toBe(
-      "Drawpane was updated. Reload the page to see this file.",
-    );
-  });
-});
-
 describe("what the seventh review found", { timeout: 120_000 }, () => {
   /** A hello, its welcome, and every chunk of the snapshot after it. */
   async function hello(browser: Browser, fileId: string, message: Record<string, unknown>) {
@@ -1940,8 +1752,9 @@ describe("what the seventh review found", { timeout: 120_000 }, () => {
     expect((await roomOf(fileId).copiesFormat()).copies).toBe("materialized");
     const placeholder = ["drawpane-reload-page", "drawpane-reload-text"];
 
-    // A tab from before compact copies, and a client that doesn't say it can download.
-    for (const message of [{ protocol: 1 }, { protocol: 2, copies: BOTH }]) {
+    // A client that doesn't say it can download. (A tab from before compact copies is told to
+    // reload at hello since decision 0034, as any tab from before variables and styles is.)
+    for (const message of [{ protocol: 3, copies: BOTH }]) {
       const { socket, welcome, nodes: seen } = await hello(browser, fileId, message);
       expect(welcome).toMatchObject({ role: "viewer", revn: 0, mode: "snapshot" });
       expect(seen.map((n) => n.id)).toEqual(placeholder);
@@ -1961,26 +1774,54 @@ describe("what the seventh review found", { timeout: 120_000 }, () => {
       again.socket.ws.close();
     }
     // A client that can download does.
-    const current = await hello(browser, fileId, { protocol: 2, copies: BOTH, download: true });
+    const current = await hello(browser, fileId, { protocol: 3, copies: BOTH, download: true });
     expect(current.welcome).toMatchObject({ role: "owner", mode: "download" });
     current.socket.ws.close();
     expect(await stored(fileId)).toHaveLength(46);
   });
 
-  it("still sends a small file stored materialized to a tab from before compact copies, to edit", async () => {
+  it("shows a tab from before compact copies, running its own sync code, a page saying to reload, in either form (decision 0034)", async () => {
     const nodes: NodeRecord[] = [
       { id: "P", parent: ROOT_ID, key: "a0", type: "page", props: {} },
       { id: "T", parent: "P", key: "a0", type: "text", props: { characters: "Hi" } },
     ];
     const { browser, fileId } = await materializedFile(nodes);
-    await runInDurableObject(roomOf(fileId), (room: FileRoom) => {
-      room.compactCopiesOff = true;
-    });
-    const { socket, welcome, nodes: seen } = await hello(browser, fileId, { protocol: 1 });
-    expect(welcome).toMatchObject({ role: "owner", mode: "snapshot" });
-    expect(seen.map((n) => n.id).sort()).toEqual(["P", "T"]);
-    socket.send({ t: "txn", seq: 1, ops: [{ op: "set", id: "T", prop: "x", value: 5 }] });
-    expect((await socket.next<{ seq: number }>("ack")).seq).toBe(1);
-    socket.ws.close();
+    // It would strip the bindings it doesn't know from what it rewrites: it's never sent the
+    // file, stored either way, and never closed on (it would reconnect over and over).
+    for (const compact of [false, true]) {
+      if (compact) await convert(fileId);
+      const socket = await openSocket(browser, fileId);
+      const doc = new Doc();
+      const engine = new OldSyncEngine(doc, {
+        clientId: `old-tab-${compact}`,
+        flushIntervalMs: 0,
+        statsIntervalMs: 3_600_000,
+      });
+      const rejected: string[] = [];
+      engine.on("rejected", (_code, message) => rejected.push(message));
+      let closed: number | null = null;
+      socket.ws.addEventListener("close", (event) => {
+        closed = event.code;
+      });
+      socket.ws.addEventListener("message", (event) => {
+        engine.receive(JSON.parse(event.data as string));
+      });
+      engine.connected((message) => socket.send(message));
+      for (let i = 0; i < 200 && engine.status !== "live" && closed === null; i++)
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(closed).toBeNull();
+      expect(engine.role).toBe("viewer");
+      expect([...doc.nodes()].map((n) => n.id).sort()).toEqual([
+        "drawpane-reload-page",
+        "drawpane-reload-text",
+      ]);
+      engine.commit([{ op: "set", id: "drawpane-reload-page", prop: "name", value: "Old tab" }]);
+      for (let i = 0; i < 100 && rejected.length === 0; i++)
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(rejected.join(" ")).toMatch(/[Rr]eload/);
+      expect(closed).toBeNull();
+      socket.ws.close();
+    }
+    expect(await stored(fileId)).toHaveLength(2);
   });
 });

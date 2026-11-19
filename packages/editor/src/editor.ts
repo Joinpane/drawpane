@@ -15,6 +15,7 @@ import {
   keysBetween,
   type LayerType,
   type ListType,
+  MAX_MODES,
   type NodeRecord,
   type NodeType,
   newId,
@@ -128,7 +129,8 @@ import {
   BINDING_TARGETS,
   unbindOps,
   type VariableType,
-  variableFixupOps,
+  variableBindOps,
+  variableDetachOps,
   variablesIn,
 } from "./variables";
 
@@ -610,11 +612,16 @@ export class Editor {
       const pathOps = pathResizeOps(this.doc, [...ops, ...constrained]);
       const extra = [...marks, ...constrained, ...pathOps];
       const first = extra.length > 0 ? [...ops, ...extra] : ops;
+      // What changes to variables, styles and modes lay out again is this edit's, not a collaborator's.
+      this.doc.takeTokenLayout();
       let inverse = this.sync.commit(first);
       // A group whose last layer left (moved, deleted, cut) goes too, like Figma's.
       const emptied = this.#emptiedGroupOps(inverse);
       if (emptied.length > 0) inverse = [...this.sync.commit(emptied), ...inverse];
       let touched = this.#touchedBy([...ops, ...emptied], inverse);
+      // Layers whose bound layout values now resolve differently (a padding variable, a mode
+      // switch) are laid out here, by the client that made the change (decision 0034).
+      for (const id of this.doc.takeTokenLayout()) touched.add(id);
       let lastOps: readonly Op[] = first;
       // Text styles this deleted (their inverse makes them again): the only deletes whose
       // followers are looked for (an agent run's commit depends on what that reads).
@@ -636,16 +643,14 @@ export class Editor {
           roundInverse = [...this.sync.commit(placed), ...roundInverse];
           synced = [...synced, ...placed];
         }
-        const resolved = variableFixupOps(this.doc, [...lastOps, ...synced]);
-        if (resolved.length > 0) roundInverse = [...this.sync.commit(resolved), ...roundInverse];
         // Text layers follow their text style.
         const styled = textStyleFixupOps(
           this.doc,
-          [...lastOps, ...synced, ...resolved],
+          [...lastOps, ...synced],
           round === 0 ? deletedStyles : undefined,
         );
         if (styled.length > 0) roundInverse = [...this.sync.commit(styled), ...roundInverse];
-        const derivedSoFar = [...synced, ...resolved, ...styled];
+        const derivedSoFar = [...synced, ...styled];
         const text = this.#textFixups([...live, ...derivedSoFar.map((o) => o.id), ...relayout]);
         if (text.length > 0) roundInverse = [...this.sync.commit(text), ...roundInverse];
         const derived = [...derivedSoFar, ...text];
@@ -712,9 +717,12 @@ export class Editor {
       this.#measuredHere.add(id);
       const width = round2(size.width);
       const height = round2(size.height);
-      if (width !== round2(getProp(node.props, "width")))
+      // A bound size is its binding's: a measured one never becomes its saved value, which is
+      // what shows when the binding can't be followed (decision 0034).
+      const bound = getProp(node.props, "bindings");
+      if (!bound.width && width !== round2(getProp(node.props, "width")))
         ops.push({ op: "set", id, prop: "width", value: width });
-      if (height !== round2(getProp(node.props, "height")))
+      if (!bound.height && height !== round2(getProp(node.props, "height")))
         ops.push({ op: "set", id, prop: "height", value: height });
     }
     return ops;
@@ -1583,7 +1591,8 @@ export class Editor {
     const ids = new Map<string, string>();
     const ops: Op[] = [];
     const visit = (nodeId: string, parentId: string, nodeKey: string, isRoot: boolean) => {
-      const node = this.doc.get(nodeId);
+      // As stored: a value, its binding and its fallback go together (decision 0034).
+      const node = this.doc.getUnresolved(nodeId);
       if (!node) return;
       const copyId = newId();
       ids.set(nodeId, copyId);
@@ -2656,18 +2665,9 @@ export class Editor {
     for (const id of ids) {
       const node = this.doc.get(id);
       if (node?.type !== "text") continue;
+      // The layer's own bindings stay: a field it binds is its own (decision 0034), and following
+      // the style leaves it, its value and its unit as they are (`textStyleFixupOps`).
       ops.push({ op: "set", id, prop: "textStyle", value: styleId });
-      // A style sets these properties, so variables bound to them let go.
-      const bindings = getProp(node.props, "bindings");
-      if (styleId && (bindings.fontSize || bindings.fontFamily)) {
-        const { fontSize: _size, fontFamily: _family, ...rest } = bindings;
-        ops.push({
-          op: "set",
-          id,
-          prop: "bindings",
-          value: Object.keys(rest).length > 0 ? rest : null,
-        });
-      }
     }
     if (ops.length > 0) this.commit(ops, styleId ? "Apply text style" : "Detach text style");
   }
@@ -2940,8 +2940,8 @@ export class Editor {
     const collection = this.doc.get(collectionId);
     if (collection?.type !== "collection") return null;
     const modes = getProp(collection.props, "modes");
-    if (modes.length >= 16) {
-      this.notify("A collection can have up to 16 modes.");
+    if (modes.length >= MAX_MODES) {
+      this.notify(`A collection can have up to ${MAX_MODES} modes.`);
       return null;
     }
     const mode = { id: newId(8), name };
@@ -3006,32 +3006,19 @@ export class Editor {
     for (const id of ids) {
       const node = this.doc.get(id);
       if (!node || !propAllowed(node.type, BINDING_TARGETS[key].prop)) continue;
-      ops.push({
-        op: "set",
-        id,
-        prop: "bindings",
-        value: { ...getProp(node.props, "bindings"), [key]: variableId },
-      });
+      // The fields it drives take what it shows, as their fallback (decision 0034).
+      ops.push(...variableBindOps(this.doc, id, key, variableId));
     }
     if (ops.length > 0) this.commit(ops, `Use ${getProp(variable.props, "name")}`);
   }
 
-  /** Detaches a variable from a property, keeping its current value. */
+  /**
+   * Detaches a variable from a property, keeping what it shows now (in the
+   * mode it's in): every field the binding drove is set to it, in one step.
+   */
   unbindVariable(ids: readonly string[], key: BindingKey): void {
     const ops: Op[] = [];
-    for (const id of ids) {
-      const node = this.doc.get(id);
-      const bindings = node ? getProp(node.props, "bindings") : {};
-      if (!node || !bindings[key]) continue;
-      const next = { ...bindings };
-      delete next[key];
-      ops.push({
-        op: "set",
-        id,
-        prop: "bindings",
-        value: Object.keys(next).length > 0 ? next : null,
-      });
-    }
+    for (const id of ids) ops.push(...variableDetachOps(this.doc, id, key));
     if (ops.length > 0) this.commit(ops, "Detach variable");
   }
 
@@ -3482,7 +3469,12 @@ export class Editor {
   // -------------------------------------------------------------------------
   // Clipboard
 
-  /** Serializes the selection for the clipboard. */
+  /**
+   * Serializes the selection for the clipboard: layers as stored, so a
+   * value, its binding and the fallback a binding can't be followed without
+   * travel together (decision 0034). What a resolver made of them isn't
+   * saved as the pasted layers' own.
+   */
   copy(): string | null {
     const ids = this.#ordered(this.#topmost(this.s.selection));
     if (ids.length === 0) return null;
@@ -3491,17 +3483,18 @@ export class Editor {
       const stack = [id];
       while (stack.length > 0) {
         const current = stack.shift() as string;
-        const node = this.doc.get(current);
+        const node = this.doc.getUnresolved(current);
         if (!node) continue;
         if (current === id) {
-          // Store roots in page coordinates so they paste in place anywhere.
+          // Store roots in page coordinates so they paste in place anywhere (placed as drawn).
           const world = this.scene.bounds(current);
+          const drawn = this.doc.get(current) ?? node;
           nodes.push({
             ...node,
             parent: "",
             props: {
               ...node.props,
-              ...(node.type !== "group" && world ? this.#pageGeometry(node) : {}),
+              ...(node.type !== "group" && world ? this.#pageGeometry(drawn) : {}),
             },
           });
         } else {
@@ -3686,7 +3679,8 @@ export class Editor {
 
   /** Remembers the first selected layer's style (⌥⌘C). */
   copyProperties(): boolean {
-    const node = this.doc.get(this.s.selection[0] ?? "");
+    // As stored: a value, its binding and its fallback go together (decision 0034).
+    const node = this.doc.getUnresolved(this.s.selection[0] ?? "");
     if (!node || node.type === "page" || node.type === "group") return false;
     const props: Record<string, unknown> = {};
     for (const prop of Editor.STYLE_PROPS) {
@@ -3706,19 +3700,23 @@ export class Editor {
     if (!copied) return false;
     const ops: Op[] = [];
     for (const id of this.s.selection) {
-      const node = this.doc.get(id);
+      const node = this.doc.getUnresolved(id);
       if (!node || node.type === "page" || node.type === "group") continue;
       for (const [prop, value] of Object.entries(copied.props) as Array<[PropName, unknown]>) {
         if (!propAllowed(node.type, prop)) continue;
         let next = value;
         if (prop === "bindings") {
-          const bindings = value as Record<string, string>;
-          next = Object.fromEntries(
-            Object.entries(bindings).filter(([key]) => {
-              const target = BINDING_TARGETS[key as BindingKey];
-              return target && propAllowed(node.type, target.prop as PropName);
-            }),
-          );
+          // Only the bindings of the fields pasted change: each takes the copied layer's binding
+          // or none, and the rest of the layer's (its width, say) stay as they are.
+          const copiedBindings = value as Record<string, unknown>;
+          const own = { ...(getProp(node.props, "bindings") as Record<string, unknown>) };
+          for (const key of Object.keys(BINDING_TARGETS) as BindingKey[]) {
+            const target = BINDING_TARGETS[key].prop as PropName;
+            if (!Editor.STYLE_PROPS.includes(target) || !propAllowed(node.type, target)) continue;
+            if (copiedBindings[key] !== undefined) own[key] = copiedBindings[key];
+            else delete own[key];
+          }
+          next = own;
         }
         const isDefault = JSON.stringify(next) === JSON.stringify(defaultOf(prop));
         const current = node.props[prop];

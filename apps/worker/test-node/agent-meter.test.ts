@@ -176,6 +176,113 @@ function* kitLike(count: number): Generator<[string, string, string, string]> {
   }
 }
 
+/**
+ * Layers bound to variables and linked to styles (decision 0034), as an
+ * imported kit's are: what the token view indexes and caches resolved.
+ */
+function tokenNodes(): NodeRecord[] {
+  return [
+    {
+      id: "TC",
+      type: "collection",
+      parent: ROOT_ID,
+      key: "a1",
+      props: {
+        modes: [
+          { id: "light", name: "Light" },
+          { id: "dark", name: "Dark" },
+        ],
+      },
+    },
+    {
+      id: "TV",
+      type: "variable",
+      parent: "TC",
+      key: "a0",
+      props: { variableType: "color", values: { light: "#ffffff", dark: "#0a0a0a" } },
+    },
+    {
+      id: "TA",
+      type: "variable",
+      parent: "TC",
+      key: "a1",
+      props: { variableType: "color", values: { light: { alias: "TV", opacity: 0.5 } } },
+    },
+    {
+      id: "TN",
+      type: "variable",
+      parent: "TC",
+      key: "a2",
+      props: { variableType: "number", values: { light: 8, dark: 12 } },
+    },
+    {
+      id: "TS",
+      type: "effectStyle",
+      parent: ROOT_ID,
+      key: "a2",
+      props: {
+        effects: [
+          {
+            type: "drop-shadow",
+            x: 0,
+            y: 1,
+            blur: 2,
+            spread: 0,
+            color: "#00000040",
+            bind: { y: "TN", blur: "TN", color: "TA" },
+          },
+        ],
+      },
+    },
+  ];
+}
+
+/** A kit's bound frame: fill, stroke and shadow through variables and a style, padding and radius bound. */
+const boundFrame = (i: number) => ({
+  name: `Bound ${i}`,
+  width: 240,
+  height: 40,
+  layoutMode: "row",
+  fills: [{ type: "solid", color: "#ffffff", bind: { color: "TV" } }],
+  strokes: [{ type: "solid", color: "#e5e5e5", bind: { color: "TA" } }],
+  effects: [{ type: "drop-shadow", x: 0, y: 1, blur: 2, spread: 0, color: "#00000040" }],
+  effectStyle: "TS",
+  bindings: {
+    paddingTop: "TN",
+    paddingRight: "TN",
+    paddingBottom: "TN",
+    paddingLeft: "TN",
+    gap: "TN",
+    cornerRadius: "TN",
+  },
+});
+
+/** A main of `children` bound rectangles, `instances` times, some in a frame set to Dark. */
+function boundCopies(children: number, instances: number): NodeRecord[] {
+  const nodes: NodeRecord[] = [
+    ...tokenNodes(),
+    { id: "M", parent: "P", key: "a0", type: "frame", props: { isComponent: true } },
+    { id: "D", parent: "P", key: "a2", type: "frame", props: { variableModes: { TC: "dark" } } },
+  ];
+  for (let i = 0; i < children; i++)
+    nodes.push({
+      id: `C${i}`,
+      parent: "M",
+      key: "a0",
+      type: "rect",
+      props: boundFrame(i) as never,
+    });
+  for (let i = 0; i < instances; i++)
+    nodes.push({
+      id: `I${i}`,
+      parent: i % 2 ? "D" : "P",
+      key: "a1",
+      type: "frame",
+      props: { instanceOf: "M" },
+    });
+  return nodes;
+}
+
 const SHAPES: Array<{
   name: string;
   copies: "materialized" | "compact";
@@ -230,6 +337,28 @@ const SHAPES: Array<{
     name: "deep compact copies (a main 200 frames deep, 40 instances)",
     copies: "compact",
     make: () => room([], deepCopies(200, n(40))),
+  },
+  {
+    name: "bound and styled layers (15,000, through variables, aliases and an effect style)",
+    copies: "materialized",
+    make: () =>
+      room(
+        (function* () {
+          for (let i = 0; i < n(15_000); i++)
+            yield [`B${i}`, "P", "frame", JSON.stringify(boundFrame(i))] as [
+              string,
+              string,
+              string,
+              string,
+            ];
+        })(),
+        tokenNodes(),
+      ),
+  },
+  {
+    name: "bound compact copies (a main of 20 bound frames, 1,000 instances, half in Dark)",
+    copies: "compact",
+    make: () => room([], boundCopies(20, n(1_000))),
   },
   {
     name: "shallow compact copies (a main of 20 rectangles, 2,000 instances)",

@@ -142,11 +142,23 @@ const PROP_KIND: Readonly<Record<PropName, ChangeKind>> = {
   description: "tokens",
   bindings: "tokens",
   variableModes: "tokens",
+  scopes: "tokens",
+  codeSyntax: "tokens",
+  hiddenFromPublishing: "tokens",
+  fillStyle: "style",
+  strokeStyle: "style",
+  effectStyle: "style",
   libraryFile: "component",
   libraryPublish: "component",
 };
 
-const TOKEN_TYPES: ReadonlySet<NodeType> = new Set(["collection", "variable", "textStyle"]);
+const TOKEN_TYPES: ReadonlySet<NodeType> = new Set([
+  "collection",
+  "variable",
+  "textStyle",
+  "paintStyle",
+  "effectStyle",
+]);
 
 /** The kinds of change one transaction makes, each counted once. */
 export function changeKinds(ops: readonly Op[]): Set<ChangeKind> {

@@ -18,6 +18,9 @@
  * `copies` says how its copies are stored (decision 0029): `compact` for a
  * file that stores override records; missing (every snapshot saved before
  * phase 4b) means materialized.
+ *
+ * Variables and styles (decision 0034) need nothing here: a binding says how
+ * its value reads, and one saved before reads as it did then.
  */
 import type { CopiesFormat } from "./convert";
 import type { NodeRecord } from "./ops";

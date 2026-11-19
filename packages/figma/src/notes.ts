@@ -42,6 +42,14 @@ export const NOTE_TEXT = {
     "copy of a component on a page left out was detached",
     "copies of components on pages left out were detached",
   ],
+  "modes-dropped": [
+    "collection's modes past the 64th were dropped",
+    "collections' modes past the 64th were dropped",
+  ],
+  "style-unsupported": [
+    "grid style isn't brought yet (layers keep their grids)",
+    "grid styles aren't brought yet (layers keep their grids)",
+  ],
   "glyphs-dropped": [
     "text's saved glyph outlines were left out (the file keeps a bounded number)",
     "texts' saved glyph outlines were left out (the file keeps a bounded number)",

@@ -58,7 +58,12 @@ function typography(s: Figma.TypeStyle): Props {
   if (s.italic !== undefined || s.fontStyle)
     out.fontStyle = s.italic || /italic|oblique/i.test(s.fontStyle ?? "") ? "italic" : "normal";
   if (s.fontSize) out.fontSize = round2(s.fontSize);
-  if (s.letterSpacing !== undefined)
+  if (s.letterSpacingPercentFontSize !== undefined)
+    out.letterSpacing = {
+      unit: "percent",
+      value: round2(s.letterSpacingPercentFontSize),
+    } satisfies LetterSpacing;
+  else if (s.letterSpacing !== undefined)
     out.letterSpacing = { unit: "px", value: round2(s.letterSpacing) } satisfies LetterSpacing;
   if (s.textCase && CASES[s.textCase]) out.textCase = CASES[s.textCase];
   if (s.textDecoration && DECORATIONS[s.textDecoration])
@@ -75,7 +80,12 @@ const ALIGN = { LEFT: "left", CENTER: "center", RIGHT: "right", JUSTIFIED: "just
 const VALIGN = { TOP: "top", CENTER: "middle", BOTTOM: "bottom" } as const;
 
 /** A text layer's own props: the base style, its box behaviour, its fills and runs. */
-export function textProps(node: Figma.Node, images: ImageLookup, notes: Notes): Props {
+export function textProps(
+  node: Figma.Node,
+  images: ImageLookup,
+  notes: Notes,
+  variables?: (alias: unknown) => string | undefined,
+): Props {
   const s = node.style ?? {};
   const props: Props = { characters: node.characters ?? "", ...typography(s) };
   const lh = lineHeight(s);
@@ -99,7 +109,7 @@ export function textProps(node: Figma.Node, images: ImageLookup, notes: Notes): 
   if (s.paragraphSpacing) props.paragraphSpacing = Math.min(1000, round2(s.paragraphSpacing));
   if (s.listSpacing) props.listSpacing = Math.min(1000, round2(s.listSpacing));
   if (s.leadingTrim === "CAP_HEIGHT") props.leadingTrim = "cap-height";
-  props.fills = convertPaints(node.fills, images, notes);
+  props.fills = convertPaints(node.fills, images, notes, variables);
   const runs = withLists(textRuns(node, images, notes), node);
   if (runs.length > 0) props.textRuns = runs;
   return props;

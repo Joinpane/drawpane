@@ -379,7 +379,8 @@ for (const compact of [false, true])
       expect(getProp(editor.doc.get(target)?.props ?? {}, "bindings").characters).toBeUndefined();
       editor.resetInstanceProperty("f6-1", "10:2");
       const reset = editor.doc.get(target)?.props ?? {};
-      expect(getProp(reset, "bindings").characters).toBe(variable);
+      // As the main has it: a text binding written now records it reads the value as text (0034).
+      expect(getProp(reset, "bindings").characters).toEqual({ variable, unit: "text" });
       expect(getProp(reset, "overrides")).not.toContain("characters");
       expect(getProp(reset, "overrides")).not.toContain("bindings");
       const mode = getProp(editor.doc.get(collection)?.props ?? {}, "modes")[0]?.id as string;

@@ -12,6 +12,7 @@
  */
 import {
   type BindingKey,
+  type BindingRef,
   boundaryDrivenProps,
   getProp,
   isMainNode,
@@ -48,7 +49,7 @@ export function resetDependentOps(
     // What the layer follows for each binding's field, and what it follows for all of them.
     const wantedFor = (key: BindingKey) =>
       getProp(baseline(BINDING_PROP.get(key) ?? "").props, "bindings")[key];
-    const wanted: Partial<Record<BindingKey, string>> = {};
+    const wanted: Partial<Record<BindingKey, BindingRef>> = {};
     for (const key of new Set([
       ...Object.keys(getProp(source.props, "bindings")),
       ...Object.keys(getProp(baseline("").props, "bindings")),
@@ -56,7 +57,7 @@ export function resetDependentOps(
       const variable = wantedFor(key);
       if (variable) wanted[key] = variable;
     }
-    const next: Partial<Record<BindingKey, string>> = { ...current };
+    const next: Partial<Record<BindingKey, BindingRef>> = { ...current };
     for (const key of keys) {
       const variable = wantedFor(key);
       if (variable) next[key] = variable;

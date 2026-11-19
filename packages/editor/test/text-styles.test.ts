@@ -112,19 +112,23 @@ describe("text styles", () => {
     expect(getProp(props(editor, a), "textStyle")).toBe(style);
   });
 
-  it("lets go of variables bound to what a style sets", () => {
+  // Decision 0034: a field the layer binds is its own; applying a style keeps the binding.
+  it("keeps the variables a layer binds to what a style sets", () => {
     const { editor, text } = setup();
     const a = text("A");
     const collection = editor.createCollection() as string;
     const size = editor.createVariable(collection, "size/lg", "number", 24) as string;
     editor.bindVariable([a], "fontSize", size);
     expect(getProp(props(editor, a), "fontSize")).toBe(24);
+    const saved = getProp(editor.doc.getUnresolved(a)?.props ?? {}, "fontSize");
     const b = text("B", { fontSize: 18 });
     editor.select([b]);
     const style = editor.createTextStyle("body") as string;
     editor.applyTextStyle([a], style);
-    expect(getProp(props(editor, a), "bindings").fontSize).toBeUndefined();
-    expect(getProp(props(editor, a), "fontSize")).toBe(18);
+    expect(getProp(props(editor, a), "bindings").fontSize).toBe(size);
+    expect(getProp(props(editor, a), "fontSize")).toBe(24);
+    expect(getProp(editor.doc.getUnresolved(a)?.props ?? {}, "fontSize")).toBe(saved);
+    expect(getProp(props(editor, a), "textStyle")).toBe(style);
   });
 
   it("toggles bold, italic and underline on the selected text", () => {

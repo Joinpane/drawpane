@@ -34,6 +34,7 @@ import type { NodeRecord } from "./ops";
 import { compareSiblings } from "./order-key";
 import { getProp, type Props } from "./schema";
 import { MemoryStore } from "./store";
+import { alikeWhereBound, bindingVariable, type NodeLookup } from "./tokens";
 
 /** How copies are stored in a file: every copy layer, or the compact form (decision 0029). */
 export type CopiesFormat = "materialized" | "compact";
@@ -97,8 +98,9 @@ export function renameHeldIds(
  * `renameHeldIds` renames (a reading order's entries, prototype
  * destinations, flows' starting screens), which can name a copy layer;
  * `others` name mains, styles, variables and collections (`instanceOf`,
- * `mirrors`, an override record's `path`, `textStyle`, `bindings`, the
- * collections `variableModes` sets, a variable's aliases), which never name
+ * `mirrors`, an override record's `path`, `textStyle` and the other style
+ * links, `bindings` and what paints and effects bind, the collections
+ * `variableModes` sets, a variable's aliases), which never name
  * a copy layer. Ids that aren't nodes' (a reaction's or flow's own id, a
  * mode's) aren't listed. Every id-valued property in the schema is one of
  * these (checked by a test against `PROPS`).
@@ -120,12 +122,32 @@ export function heldNodeIds(props: Readonly<Props>): { layers: string[]; others:
   str(p.textStyle, others);
   if (Array.isArray(p.path)) for (const id of p.path) str(id, others);
   if (p.bindings && typeof p.bindings === "object")
-    for (const id of Object.values(p.bindings as Record<string, unknown>)) str(id, others);
+    for (const ref of Object.values(p.bindings as Record<string, unknown>))
+      str(bindingVariable(ref), others);
   if (p.variableModes && typeof p.variableModes === "object")
     for (const id of Object.keys(p.variableModes as Record<string, unknown>)) str(id, others);
   if (p.values && typeof p.values === "object")
     for (const value of Object.values(p.values as Record<string, unknown>))
       if (value && typeof value === "object") str((value as { alias?: unknown }).alias, others);
+  str(p.fillStyle, others);
+  str(p.strokeStyle, others);
+  str(p.effectStyle, others);
+  // Variables that paints, their gradient stops and effects bind (decision 0034).
+  const binds = (item: unknown) => {
+    const bind = (item as { bind?: unknown } | null)?.bind;
+    if (bind && typeof bind === "object")
+      for (const id of Object.values(bind as Record<string, unknown>)) str(id, others);
+  };
+  const runFills = Array.isArray(p.textRuns)
+    ? (p.textRuns as Array<{ fills?: unknown }>).map((run) => run?.fills)
+    : [];
+  for (const list of [p.fills, p.strokes, p.effects, ...runFills])
+    if (Array.isArray(list))
+      for (const item of list) {
+        binds(item);
+        const stops = (item as { stops?: unknown } | null)?.stops;
+        if (Array.isArray(stops)) for (const stop of stops) binds(stop);
+      }
   // An instance swap property's default and preferred components (decision 0035).
   if (Array.isArray(p.componentProps))
     for (const def of p.componentProps as Array<{
@@ -152,6 +174,13 @@ export const NODE_ID_PROPS: readonly string[] = [
   "bindings",
   "variableModes",
   "values",
+  "fills",
+  "strokes",
+  "effects",
+  "textRuns",
+  "fillStyle",
+  "strokeStyle",
+  "effectStyle",
   "componentProps",
 ];
 
@@ -379,6 +408,8 @@ export class InstanceConverter {
   readonly #doing = new Set<string>();
   readonly #prepared = new Set<string>();
   readonly #max: number;
+  /** Where variables are read, to tell which bindings give a layer's value (`boundAlike`). */
+  readonly #lookup: NodeLookup = (id) => this.#reader.get(id);
   readonly #maxBuilt: number;
   readonly #maxBytes: number;
   readonly #layerBytes: number;
@@ -582,7 +613,13 @@ export class InstanceConverter {
     const base = view.base(root.id);
     if (!base) return "its main isn't a component";
     const putRoot = (props: Readonly<Props>) => {
-      overlay.put({ ...root, props: (ownValues(base.props, props, true) ?? {}) as Props });
+      const own = ownValues(
+        base.props,
+        props,
+        true,
+        alikeWhereBound(props, base.props, this.#lookup),
+      );
+      overlay.put({ ...root, props: (own ?? {}) as Props });
       view.forget([root.id], [root.id]);
     };
     putRoot(root.props);
@@ -661,18 +698,30 @@ export class InstanceConverter {
           return `${node.id} isn't its main layer's type or place`;
         ids.set(node.id, slotId);
         slotOf.set(node.id, { id: slotId, path: slot.path });
-        const own = ownValues(slotBase.props, node.props);
+        const own = ownValues(
+          slotBase.props,
+          node.props,
+          false,
+          alikeWhereBound(node.props, slotBase.props, this.#lookup),
+        );
         if (own) {
           const swapped = node.type === "frame" && swaps(own);
           write(slotId, slot.path, own, swapped);
           // Swapped: its base is the other main's now, so what it keeps is what differs from that.
-          if (swapped)
+          if (swapped) {
+            const swappedBase = (view.base(slotId) ?? slotBase).props;
             write(
               slotId,
               slot.path,
-              ownValues((view.base(slotId) ?? slotBase).props, node.props),
+              ownValues(
+                swappedBase,
+                node.props,
+                false,
+                alikeWhereBound(node.props, swappedBase, this.#lookup),
+              ),
               true,
             );
+          }
         }
         const deeper = walk(node.id, slotId);
         if (deeper) return deeper;
@@ -696,14 +745,25 @@ export class InstanceConverter {
       const slot = slotOf.get(node.id) as { id: string; path: readonly string[] };
       const slotBase = view.base(slot.id);
       if (!slotBase) return `${node.id} has no base`;
-      write(slot.id, slot.path, ownValues(slotBase.props, held(node)), false);
+      const props = held(node);
+      write(
+        slot.id,
+        slot.path,
+        ownValues(
+          slotBase.props,
+          props,
+          false,
+          alikeWhereBound(props, slotBase.props, this.#lookup),
+        ),
+        false,
+      );
     }
 
     // The check: built again from what's written, it's the layers it was, ids renamed.
     view.forget([root.id], [root.id]);
     const presentedRoot = view.get(root.id);
     if (!presentedRoot) return "it can't be built";
-    const differs = differences(held(root), presentedRoot.props);
+    const differs = differences(held(root), presentedRoot.props, this.#lookup);
     if (differs) return `the instance's ${differs}`;
     let count = 0;
     const stack = [...view.childIds(root.id)];
@@ -722,7 +782,7 @@ export class InstanceConverter {
         return `${node.id} isn't where it was`;
       const want: Record<string, unknown> = { ...held(node) };
       if (typeof want.mirrors === "string") want.mirrors = rename(want.mirrors) ?? want.mirrors;
-      const off = differences(want as Props, built.props);
+      const off = differences(want as Props, built.props, this.#lookup);
       if (off) return `layer ${node.id}'s ${off}`;
     }
     return null;
@@ -730,11 +790,24 @@ export class InstanceConverter {
 }
 
 /** The first property two nodes' values differ in (a missing value equals its default), or null. */
-function differences(want: Readonly<Props>, have: Readonly<Props>): string | null {
+function differences(
+  want: Readonly<Props>,
+  have: Readonly<Props>,
+  /**
+   * Where variables are read: values differing only where both bind the same
+   * variables are alike (`alikeWhereBound`). Without it, values must be equal.
+   */
+  lookup?: NodeLookup,
+): string | null {
   const a = want as Record<string, unknown>;
   const b = have as Record<string, unknown>;
+  const alike = lookup ? alikeWhereBound(a, b, lookup) : null;
+  const pinned = new Set((a.overrides as readonly string[] | undefined) ?? []);
   for (const prop of new Set([...Object.keys(a), ...Object.keys(b)]))
-    if (!samePropValue(prop, a[prop], b[prop]))
+    if (
+      !samePropValue(prop, a[prop], b[prop]) &&
+      !(alike && !pinned.has(prop) && alike(prop, a[prop], b[prop]))
+    )
       return `${prop} is ${JSON.stringify(b[prop])} built, ${JSON.stringify(a[prop])} stored`;
   return null;
 }
