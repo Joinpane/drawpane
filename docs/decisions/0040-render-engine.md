@@ -722,3 +722,21 @@ Exact means every tile the frame shows is up to date and drawn without level of 
 - `apps/web/e2e/engine.spec.ts` (SwiftShader):
   - the on-screen frame, once exact, equals a fresh engine's GPU frame bitwise, and is within the CPU-GPU tolerance of the CPU's whole frame (so the GPU's tiles hold the picture, not only agree with themselves), after pans, zooms, edits and a seeded walk of them;
   - the first frame at a new scale is reported a stand-in.
+
+**Measured on the GPU bench** (`pnpm gpu-bench --modes webgpu,gpu --env BENCH_RENDERER=both --env BENCH_ENGINE_PRESENT=readback -- bench/canvas.spec.ts`: a Modal T4, the 10,000-layer file at 2,880 × 1,800, the canvas renderer and then the engine on the same file in one container). In `webgpu` mode Chromium composites in software, so frame intervals there are ~27 to 40 ms for both renderers and say little about a laptop. The engine can't run in `gpu` mode (core WebGPU is SwiftShader there, and Vello 0.4 can't run in compatibility mode), so it refuses, typed, and the canvas renderer draws.
+
+| `webgpu` mode, ms | content p50 / p95 / p99 | exact drawn after | exact shown after (read back) | slowest frame |
+| --- | --- | --- | --- | --- |
+| engine, pan whole page | 0.4 / 2.7 / 26.4 | 104 | 255 | 43.8 (17 tiles, the first after zooming to fit) |
+| engine, pan 25% | 0.4 / 6.1 / 8.8 | 12 | 97 | 10.4 |
+| engine, pan 100% | 0.3 / 4.8 / 5.8 | 12 | 96 | 7.5 |
+| engine, zoom whole page | 0.7 / 1.0 / 2.4 | 307 | 387 | 15.7 |
+| canvas, pan whole page | 0.2 / 0.4 / 4.0 | | 30 | |
+| canvas, pan 25% | 4.1 / 9.2 / 12.7 | | 30 | |
+| canvas, pan 100% | 1.2 / 1.6 / 1.8 | | 30 | |
+| canvas, zoom whole page | 0.1 / 8.2 / 12.2 | | 288 | |
+
+- Exact frames drawn back to back at the bench's last camera (whole page): cold (every tile dropped first, 83 tiles: the view, the ring round it and the coarser level) 147.5 ms of encoding, 16.7 ms of renderer preparation and 7.7 ms of GPU (p50). Warm (from the tiles kept): 0.4 ms of GPU, nothing encoded. Phase 1 drew the same view in one frame of 92.5 ms encoding and 16.6 ms of GPU.
+- Drawing every tile into a target of its own size mattered: drawn into a 2,048 px page, the same cold frame took 279 ms of GPU (Vello's work per render follows its target's size).
+- After a zoom, the exact view is about nine frames' work at 12 ms each. On this bench frames come every ~28 ms (software compositing), hence 307 ms. The canvas renderer's exact frame after the same zoom came after 288 ms.
+- In `gpu` mode (the canvas renderer's real intervals, both runs canvas): frame interval p50 16.6 to 16.7 ms, p95 17.9 to 26.2 ms, p99 18.7 to 54.5 ms.
