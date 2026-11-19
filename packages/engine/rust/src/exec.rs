@@ -186,10 +186,26 @@ pub struct DrawStats {
     /// The frame reached the canvas (GPU, presenting): false when the canvas couldn't take it
     /// now (a timeout, an occluded window), so the caller shows its last picture or another.
     pub presented: bool,
-    /// The frame was made from the last one (a pan shifted, a zoom scaled): a stand-in.
+    /// Something on screen stands in for what isn't drawn yet (a stale tile, another level
+    /// scaled, the last frame moved): not exact.
     pub standin: bool,
-    /// How it was made (GPU): 0 the whole scene, 1 a pan, 2 a zoom stand-in, 3 unchanged.
+    /// How a frame made of tiles was made (GPU): 0 from its own tiles, all there; 1 with
+    /// stand-ins under what isn't drawn yet; 2 drawn direct (its tiles don't fit the budget);
+    /// 3 unchanged.
     pub plan: u32,
+    /// A frame made of tiles: every tile shown up to date and drawn without level of detail,
+    /// so it's what a fresh engine draws.
+    pub exact: bool,
+    /// Tiles drawn this frame, tiles the frame shows still stale or missing, tiles held, and
+    /// tiles evicted to make room.
+    pub tiles_drawn: u32,
+    pub pending: u32,
+    /// Tiles round the view still to draw ahead of a pan (idle frames may draw them).
+    pub queued: u32,
+    pub held: u32,
+    pub evicted: u32,
+    /// The frame's tiles didn't fit the budget: drawn one at a time straight into the frame.
+    pub direct: bool,
     /// Where its CPU time went (GPU, milliseconds): encoding the scene (the walk and Vello's
     /// strips), the renderer's preparing and uploading, presenting and submitting, and all.
     pub encode_ms: f64,
@@ -605,10 +621,13 @@ impl<B: Backend> Walk<'_, B> {
                         alpha: opacity * alpha,
                     },
                 };
+                // Fixed to device pixels, so it reads as loading at any zoom, and anchored on the
+                // pixel the page's origin falls in, so a tile and a whole frame draw it alike.
+                let [.., e, f] = self.frame.view.as_coeffs();
+                let anchor = Affine::translate((e.floor(), f.floor()));
                 let scene = self.backend.scene();
                 scene.set_paint(img.into());
-                // Fixed to device pixels, so it reads as loading at any zoom.
-                scene.set_paint_transform(device.inverse());
+                scene.set_paint_transform(device.inverse() * anchor);
             }
         }
         Ok(true)

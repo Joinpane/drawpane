@@ -663,3 +663,62 @@ Phase 1's first part is in `packages/engine` (the crate, its two builds and thei
 Every pan frame was a shifted stand-in (0.2 ms encoding, 0.3 ms in the renderer; the GPU 8.6 ms p50). An exact whole frame, drawn back to back, breaks down as: encoding 92.5 ms p50 (the walk and Vello's strips, on the CPU), the renderer's preparing and uploading 10.9 ms, submitting 0.1 ms, the GPU 16.6 ms p50 (73 p95), and a read-back of the full frame 47.9 ms. So the exact frame after the camera rests is one long frame on a page this size: the CPU's encoding is its cost, and retained board pictures (phase 2) are what remove it. In `gpu` mode core WebGPU is SwiftShader and compatibility mode can't run Vello (above): the engine refuses and the canvas renderer draws, holding 16.7 ms.
 
 **Opening the heaviest page:** building and applying its fresh list takes about 1.05 s on this loaded VM, against the confirmed 1 s for a useful first image on real hardware. What made it faster: transforms from the layer's own box (no world matrices inverted), the list written as the page is walked (no records held, the buffer sized from the last list, no copy at the end), hidden text not shaped, and the engine reading a fresh list once. Shaping only the visible boards' text first is the next step if the hardware runs need it.
+
+## Amendment: phase 2, board textures (2026-11-19)
+
+Phase 2 keeps the page's picture between frames, so pans, zooms and the exact frame after the camera rests are made from pixels already drawn instead of a scene encoded again (Vello 0.4 can't replay scene fragments, see phase 1). The model is in `packages/engine/rust/src/tiles.rs`, decided apart from either backend and tested natively; `engine.rs` runs it on the CPU (the tests' reference), `gpu.rs` on the GPU.
+
+**What's cached: tiles of the page's own picture.** The page is a scope (see "The render graph"), so what's kept is its composited result over 512 × 512 device pixels of a grid, background included: the final picture there. That is "each board, or each tile of a large board", without drawing boards apart:
+
+- a board drawn alone and laid over the page differs from a fresh render by rounding at every translucent edge (source-over isn't associative in 8 bits), so a frame made of board pictures could never be bitwise exact;
+- a frame that doesn't isolate isn't a scope: in phase 3 its pass-through blends and readers read the page through it, so its picture alone would be wrong;
+- caching boards and the page's tiles would hold the same pixels twice (see "Retained GPU state").
+
+**Exact by construction.**
+
+- A *level* is a raster scale (device pixels per page unit) and a phase (where the page's origin falls within a device pixel). A frame at that scale and phase lies on the level's grid: frame pixel = grid pixel + a whole-pixel origin.
+- A tile is only ever drawn under its own view, a function of its level and its place. Its pixels never depend on which frame asked for it.
+- So a frame at rest is copies of tiles, and an exact frame is bitwise what an engine that never drew anything makes from the same list (on the CPU, which the tests check), and within the CPU-GPU tolerance of the CPU on the GPU.
+- Against a frame drawn whole under the camera (phase 1's `render_cpu`, still what exports draw), tiles differ by at most 2 levels: coordinates differ in their last bits. The loading checkerboard is anchored on the pixel the page's origin falls in, not on the frame's corner, so tiles and whole frames draw it alike.
+
+**Stand-ins, never reported exact.** Where the frame's own tiles aren't drawn yet, it shows, back to front:
+
+1. the last frame, moved and scaled;
+2. tiles of other levels within 4× of the scale, scaled (the nearest on top);
+3. the frame level's own tiles, stale ones included.
+
+Exact means every tile the frame shows is up to date and drawn without level of detail. A stale tile, a scaled level or the last frame anywhere on screen makes the frame a stand-in.
+
+**Levels while zooming.** While the scale changes, tiles of the passing scale would be wasted a frame later, so none are drawn. Where nothing stands in (zooming out past what was drawn), *ladder* tiles are drawn instead: scales of the form 2^(k/2) at or below the zoom, with level of detail (text too small to read as bars, specks skipped). Ladder tiles are only stand-ins. The first frame at a new scale that doesn't move draws the exact level.
+
+**Invalidation through the render graph.**
+
+- Each applied message's changes (where the touched records painted before and paint now, page units, with paint order) are turned into each held level's grid pixels by `Store::dirty`: grown by 1.5 device pixels for anti-aliasing, with every reader they reach, transitively. Every tile they touch is marked stale.
+- A fresh list (a page switch, a reload, a recovery after a refused patch) drops every tile and forgets the last frame: it shows a page that's gone.
+- An image put or dropped invalidates the records that paint it (`Store::image_users`).
+- A change of background or of the readers' reach drops everything.
+- Glyph masks are keyed by a definition's serial, which is never reused, so they can't go stale. Saved glyph sets edited and faces arriving reach the engine as patches of the text that uses them (phase 1's builder fixes), so their tiles go stale like any edit.
+
+**Scheduling: never one long frame.**
+
+- A frame draws first the tiles nothing can stand in for (a page just opened, a jump), then others in order of distance from the view's centre, while its budget lasts: 4 ms while the camera moves, 10 ms once it rests (`MOVING_BUDGET_MS`, `REST_BUDGET_MS` in `engine-view.ts`). Every frame draws at least one, so a frame at rest always makes progress.
+- The editor draws again each frame while the frame isn't exact, with no settle delay (phase 1 waited 120 ms), and then while tiles round the view are still to draw, ahead of a pan.
+- A frame asked for with no budget (`renderGpu(…, false, 0)`: tests, exports of the view) comes back exact.
+
+**GPU memory.**
+
+- Tiles live in pages of 2,048² (16 tiles, 16 MiB each), drawn by Vello into their slot with one shared 16 MiB depth buffer.
+- They take what's left of the engine's 768 MiB beside everything else it holds (images, the glyph atlas, frames, read-backs), less 32 MiB of headroom, and at most `tile_bytes` (256 MiB by default, a limit like the others). This is worked out every frame, so images arriving shrink the tiles, never the other way round. Pages past it go, with their tiles.
+- Frames are two textures (shown, being made), with no depth buffers now that they're only composited.
+- **Eviction**, when a tile needs a slot: never a tile the frame shows or drew. Other levels go first, finer ones first, then the frame level's tiles farthest from the view, then the least recently used.
+- **Degradation:** if the frame's own tiles can't all be kept, it's drawn tile by tile straight into the frame through a scratch tile, keeping none (`direct`): slower, still exact, never blank.
+
+**What phase 1's frame reuse became.** The pan-shift and zoom-scale planner (`plan.rs`) is gone. Its rule, a frame texture holds exactly the camera it was drawn for, is now the tiles' rule: a tile holds exactly its own view.
+
+**Gates added** (all in CI):
+
+- `packages/engine/rust/tests/tiles.rs`: seeded random walks of edits, whole and fractional pans, zooms about a point, page switches, image changes and memory pressure (slots for fewer tiles than a frame shows, and for a frame and a bit), frames moving under budgets of zero to two tiles. Every frame reported exact is compared with a fresh engine's, bitwise; every frame at rest becomes exact within a bounded number of frames; a stand-in reports what's pending. Tiles against whole frames: at most 2 levels apart.
+- `packages/editor/test/engine-tiles.test.ts`: no stale tile after a saved glyph set changes, faces arrive, an image loads or the page switches, each with tiles already drawn. The builder's random editor sequences (`engine-display-list.test.ts`) now also compare the patched engine's kept tiles with a fresh engine's at every step.
+- `apps/web/e2e/engine.spec.ts` (SwiftShader):
+  - the on-screen frame, once exact, equals a fresh engine's GPU frame bitwise, and is within the CPU-GPU tolerance of the CPU's whole frame (so the GPU's tiles hold the picture, not only agree with themselves), after pans, zooms, edits and a seeded walk of them;
+  - the first frame at a new scale is reported a stand-in.

@@ -125,6 +125,8 @@ pub struct Store {
     readers: Vec<u32>,
     /// Records holding features the engine doesn't draw (their `unsupported` bits).
     unsupported: HashSet<u32>,
+    /// Records that paint an image, so an image changing invalidates only what shows it.
+    image_records: HashSet<u32>,
     /// What the records hold, roughly, in bytes (`Record::heap_bytes`): held to `Limits::graph_bytes`.
     bytes: usize,
     /// Preorder index and subtree end of every record; rebuilt when the structure changes.
@@ -174,6 +176,7 @@ impl Store {
             revision: 0,
             readers: Vec::new(),
             unsupported: HashSet::new(),
+            image_records: HashSet::new(),
             bytes: 0,
             order: None,
             structure: 0,
@@ -304,6 +307,7 @@ impl Store {
         self.glyphs = staged.glyphs;
         self.readers = staged.readers;
         self.unsupported = staged.unsupported;
+        self.image_records = staged.image_records;
         self.bytes = staged.bytes;
         self.order = None;
         self.structure += 1;
@@ -396,6 +400,12 @@ impl Store {
             .filter(|(_, n)| n.record.unsupported != 0)
             .map(|(id, _)| *id)
             .collect();
+        self.image_records = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.record.images().next().is_some())
+            .map(|(id, _)| *id)
+            .collect();
         self.bytes = self
             .nodes
             .iter()
@@ -431,6 +441,7 @@ impl Store {
                 let glyphs = std::mem::take(&mut self.glyphs);
                 let readers = std::mem::take(&mut self.readers);
                 self.unsupported.clear();
+                self.image_records.clear();
                 self.bytes = 0;
                 txn.push(Undo::Everything {
                     nodes: old,
@@ -494,6 +505,7 @@ impl Store {
                 }
                 let reads = record.reads().is_some();
                 let unsupported = record.unsupported != 0;
+                let images = record.images().next().is_some();
                 let cost = record.heap_bytes();
                 self.glyphs.retain(&record);
                 let mut structural = true;
@@ -549,6 +561,11 @@ impl Store {
                 } else {
                     self.unsupported.remove(&id);
                 }
+                if images {
+                    self.image_records.insert(id);
+                } else {
+                    self.image_records.remove(&id);
+                }
                 self.dirty_up(id);
                 if structural {
                     self.order = None;
@@ -577,6 +594,7 @@ impl Store {
                         self.glyphs.release(&node.record);
                         self.bytes -= node.record.heap_bytes() + NODE_BYTES;
                         self.unsupported.remove(&at);
+                        self.image_records.remove(&at);
                         if txn.track {
                             removed.push((at, node));
                         }
@@ -911,6 +929,31 @@ impl Store {
             id = n.parent;
         }
         true
+    }
+
+    /// Where the records painting image `id` paint, as changes (an image put or dropped under a
+    /// handle they use changes their pixels). Readers they reach join through `dirty`.
+    pub fn image_users(&mut self, id: u32) -> Vec<Dirty> {
+        let mut users: Vec<u32> = self
+            .image_records
+            .iter()
+            .copied()
+            .filter(|r| self.nodes.get(r).is_some_and(|n| n.record.images().any(|i| i == id)))
+            .collect();
+        users.sort_unstable();
+        let mut out = Vec::new();
+        for r in users {
+            let (order, end) = self.order_of(r);
+            if let Some(rect) = self.world_extent(r) {
+                out.push(Dirty {
+                    rect,
+                    order,
+                    end,
+                    stale: false,
+                });
+            }
+        }
+        out
     }
 
     /// Records with backdrop readers.

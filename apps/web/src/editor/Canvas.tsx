@@ -20,7 +20,7 @@ import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { fonts } from "../fonts/fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
-import { EngineView, rendererChoice } from "./engine-view";
+import { EngineView, MOVING_BUDGET_MS, REST_BUDGET_MS, rendererChoice } from "./engine-view";
 import { FrameNameEditor } from "./FrameNameEditor";
 import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
@@ -189,6 +189,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let whole = false;
     let settle = 0;
     let fadeTimer = 0;
+    /** The camera the engine last drew: another one this frame means the camera is moving. */
+    let engineCamera: unknown = null;
     const draw = () => {
       frame = 0;
       const s = editor.s;
@@ -199,6 +201,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // redraw never hides the engine's frame, and a read-back frame shows once it lands.
       let drewEngine = false;
       if (contentDirty && s.pageId !== null && engine) {
+        // The engine keeps the page as tiles (decision 0040, phase 2). A camera that moved since
+        // its last frame is moving: tiles not drawn yet show stand-ins. One that didn't rests:
+        // each frame draws more of the missing tiles under a budget until the frame is exact,
+        // never one long frame (a test's whole redraw has no budget).
+        const moving = !whole && !exact && engineCamera !== s.camera;
         const r = engine.draw(
           s.pageId,
           s.camera,
@@ -207,8 +214,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           dpr,
           (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor,
           { hidden: renderer.hidden, whole: s.editingText },
-          exact || whole,
+          !moving,
+          whole ? 0 : moving ? MOVING_BUDGET_MS : REST_BUDGET_MS,
         );
+        engineCamera = s.camera;
         if (r.drawn) {
           drewEngine = true;
           contentDirty = false;
@@ -219,14 +228,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             showEngine(true);
             timing.exact = r.exact;
           } else timing.exact = false;
-          // A stand-in (a pan shifted, a zoom scaled, unreadable text as bars): an exact frame
-          // follows once the camera rests.
-          if (!r.exact)
-            settle = window.setTimeout(() => {
-              exact = true;
-              contentDirty = true;
-              schedule();
-            }, SETTLE_MS);
+          // Stand-ins on screen: the next frame draws more, until it's exact; then tiles round
+          // the view, ahead of a pan.
+          if (!r.exact || r.ahead) {
+            contentDirty = true;
+            schedule();
+          }
         }
       }
       if (!drewEngine && contentDirty && s.pageId) {

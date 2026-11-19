@@ -2,6 +2,8 @@
 //! generator of random scenes and edits.
 #![allow(dead_code)]
 
+pub mod model;
+
 pub const ANY: u32 = u32::MAX;
 
 #[derive(Default)]

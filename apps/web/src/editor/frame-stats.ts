@@ -8,12 +8,19 @@ import type { Editor } from "@drawpane/editor";
 
 const SIZE = 600;
 
+export interface Quantiles {
+  readonly p50: number;
+  readonly p95: number;
+  readonly p99: number;
+  readonly max: number;
+}
+
 export interface FrameSummary {
   readonly frames: number;
   /** Milliseconds drawing the document. */
-  readonly content: { readonly p50: number; readonly p95: number; readonly max: number };
+  readonly content: Quantiles;
   /** Milliseconds drawing selection, handles and guides. */
-  readonly overlay: { readonly p50: number; readonly p95: number; readonly max: number };
+  readonly overlay: Quantiles;
   /** Layers drawn and skipped (off screen) in the last content frame. */
   readonly drawn: number;
   readonly culled: number;
@@ -61,7 +68,12 @@ export class FrameStats {
       const at = (q: number) =>
         values[Math.min(values.length - 1, Math.floor(q * values.length))] ?? 0;
       const round = (n: number) => Math.round(n * 100) / 100;
-      return { p50: round(at(0.5)), p95: round(at(0.95)), max: round(values.at(-1) ?? 0) };
+      return {
+        p50: round(at(0.5)),
+        p95: round(at(0.95)),
+        p99: round(at(0.99)),
+        max: round(values.at(-1) ?? 0),
+      };
     };
     return {
       frames: this.#count,

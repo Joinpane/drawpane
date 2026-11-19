@@ -18,12 +18,13 @@
 //! - Backdrop readers are phase 3 here (`read` refuses), as everywhere outside the tests.
 
 use crate::atlas::{Placed, Shelves};
+use crate::engine::TiledOptions;
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Open, impl_draw};
 use crate::images::{self, Level};
 use crate::masks::{self, MaskCache, MaskKey};
-use crate::plan::{self, Plan, Shown};
 use crate::store::Store;
+use crate::tiles::{Composite, Last, TILE, TileCache, TileKey};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -31,7 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use vello_common::TextureId;
 use vello_common::geometry::RectU16;
-use vello_common::kurbo::{Affine, BezPath};
+use vello_common::kurbo::{Affine, BezPath, Rect};
 use vello_common::paint::{ImageSource, TextureRegion};
 use vello_gpu::{
     ClearSettings, RenderOptions, RenderSize, RenderTarget, RenderTargetConfig, Renderer, Resources, Scene, TargetInit,
@@ -67,7 +68,6 @@ pub struct Health {
 struct Main {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
-    depth: wgpu::TextureView,
     width: u32,
     height: u32,
 }
@@ -81,37 +81,66 @@ struct Atlas {
 /// Read-backs in flight at once, at most.
 const READBACKS: u32 = 2;
 
-/// Frame textures kept (see `Gpu::render`).
-const FRAMES: usize = 3;
+/// Frame textures kept: the one shown (the last frame, a stand-in under what isn't drawn yet)
+/// and the one being made.
+const FRAMES: usize = 2;
 
-/// A stand-in's scaling: each pixel of the new frame from the last full frame, bilinear, the
-/// background where it reaches past it. Frames are premultiplied, so filtering is exact.
-const SCALE: &str = r"
-struct U { m: vec4<f32>, bg: vec4<f32>, size: vec4<f32> };
+/// Tile pages: textures of `PAGE` × `PAGE` pixels, each holding `PER_PAGE` tiles.
+const PAGE: u32 = 2048;
+const PER_ROW: u32 = PAGE / TILE;
+const PER_PAGE: u32 = PER_ROW * PER_ROW;
+const PAGE_BYTES: usize = (PAGE * PAGE * 4) as usize;
+/// The depth buffer pages are drawn with (Vello's: Depth24Plus, counted as 4 bytes a pixel).
+const PAGE_DEPTH_BYTES: usize = PAGE_BYTES;
+/// Kept free under the budget for what a frame allocates on the way (read-backs, images).
+const HEADROOM: usize = 32 << 20;
+
+/// The compositor: textured quads (a stand-in scaled: the last frame, another level's tiles),
+/// bilinear, each sampled inside its own source rectangle so neighbours in a page never bleed
+/// in. Frames and tiles are premultiplied, so filtering is exact.
+const QUADS: &str = r"
+struct U { size: vec4<f32> };
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var<uniform> u: U;
-@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
-  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+struct V {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) @interpolate(flat, either) lim: vec4<f32>,
+};
+@vertex fn vs(@builtin(vertex_index) i: u32, @location(0) dst: vec4<f32>, @location(1) uvr: vec4<f32>, @location(2) lim: vec4<f32>) -> V {
+  let c = vec2<f32>(f32(i & 1u), f32((i >> 1u) & 1u));
+  let p = mix(dst.xy, dst.zw, c);
+  var o: V;
+  o.pos = vec4<f32>(p.x / u.size.x * 2.0 - 1.0, 1.0 - p.y / u.size.y * 2.0, 0.0, 1.0);
+  o.uv = mix(uvr.xy, uvr.zw, c);
+  o.lim = lim;
+  return o;
 }
-@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-  let q = p.xy * u.m.x + u.m.yz;
-  if (q.x < 0.0 || q.y < 0.0 || q.x > u.size.x || q.y > u.size.y) { return u.bg; }
-  return textureSampleLevel(src, samp, q / u.size.xy, 0.0);
+@fragment fn fs(v: V) -> @location(0) vec4<f32> {
+  return textureSampleLevel(src, samp, clamp(v.uv, v.lim.xy, v.lim.zw), 0.0);
 }
 ";
 
-/// The last full frame: which texture, and what for.
-struct Basis {
-    index: usize,
-    shown: Shown,
+/// A page of tiles.
+struct Page {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
-struct Scaler {
+struct Compositor {
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
+    instances: wgpu::Buffer,
+    capacity: usize,
+}
+
+/// Where a tile is drawn: a slot in a page, or the scratch tile (a frame drawn direct).
+#[derive(Clone, Copy)]
+enum TileTarget {
+    Slot(u32),
+    Scratch,
 }
 
 /// Milliseconds now, for the frame's breakdown.
@@ -140,14 +169,21 @@ pub struct Gpu {
     resources: Resources,
     bindings: TextureBindings,
     scene: Scene,
-    /// Frame textures: the one shown (`cur`), the last full frame a zoom scales (`basis`), and
-    /// a spare a pan shifts into.
+    /// Frame textures: the one shown (`cur`) and the one being made.
     frames: Vec<Main>,
     cur: usize,
-    basis: Option<Basis>,
-    /// What the frame shown was drawn for.
-    shown: Option<Shown>,
-    scaler: Option<Scaler>,
+    /// The board textures (decision 0040, phase 2): which tiles are held, where, and how fresh.
+    pub tiles: TileCache,
+    pages: Vec<Page>,
+    page_depth: Option<wgpu::TextureView>,
+    /// A tile drawn and copied straight into the frame (a frame whose tiles don't fit the budget).
+    scratch: Option<(wgpu::Texture, wgpu::TextureView, wgpu::TextureView)>,
+    compositor: Option<Compositor>,
+    /// The frame shown: what it was drawn for, so the next may stand on it.
+    last: Option<Last>,
+    last_scale: Option<f64>,
+    /// The engine's generation and background the frame shown was made at, and whether it's exact.
+    shown: Option<(u64, [u32; 4], bool)>,
     blit: Option<wgpu::RenderPipeline>,
     images: HashMap<u32, Vec<(TextureId, wgpu::Texture, u32, u32)>>,
     image_bytes: usize,
@@ -390,9 +426,14 @@ impl Gpu {
             scene: Scene::new(1, 1),
             frames: Vec::new(),
             cur: 0,
-            basis: None,
+            tiles: TileCache::new(TILE, 0),
+            pages: Vec::new(),
+            page_depth: None,
+            scratch: None,
+            compositor: None,
+            last: None,
+            last_scale: None,
             shown: None,
-            scaler: None,
             blit,
             images: HashMap::new(),
             image_bytes: 0,
@@ -409,7 +450,7 @@ impl Gpu {
             budget: crate::limits::Limits::default().gpu_bytes,
             readbacks: Rc::new(Flights::default()),
         };
-        gpu.ensure_scaler();
+        gpu.ensure_compositor();
         let refused = validation.pop().await;
         let refused = refused.or(oom.pop().await);
         if let Some(e) = refused {
@@ -504,11 +545,11 @@ impl Gpu {
         }
     }
 
-    /// Bytes frames of this size take on the GPU: `FRAMES` textures and their depth buffers,
-    /// and the canvas's own textures (two in flight).
+    /// Bytes frames of this size take on the GPU: `FRAMES` textures (no depth buffers: tiles are
+    /// drawn into pages, frames only composited), and the canvas's own textures (two in flight).
     fn frame_bytes(width: u32, height: u32, presents: bool) -> usize {
         let px = width as usize * height as usize * 4;
-        px * 2 * FRAMES + if presents { px * 2 } else { 0 }
+        px * FRAMES + if presents { px * 2 } else { 0 }
     }
 
     fn ensure_frames(&mut self, width: u32, height: u32) -> Result<()> {
@@ -540,21 +581,15 @@ impl Gpu {
                     | wgpu::TextureUsages::COPY_DST,
                 "frame",
             );
-            let depth = self.renderer.create_depth_texture_view(&RenderSize {
-                width: width as u16,
-                height: height as u16,
-            });
             self.frames.push(Main {
                 view: tex.create_view(&Default::default()),
                 texture: tex,
-                depth,
                 width,
                 height,
             });
         }
         self.cur = 0;
-        self.basis = None;
-        self.shown = None;
+        self.forget_last();
         if let Some((surface, config)) = self.surface.as_mut() {
             config.width = width;
             config.height = height;
@@ -604,75 +639,211 @@ impl Gpu {
         }
     }
 
-    /// Draws a frame: encodes, submits and, with a canvas, presents. The GPU may still be
-    /// drawing when this returns (`finished` waits).
-    ///
-    /// An interactive frame (`frame.detail`) with nothing changed but the camera since the last
-    /// one is a stand-in, cheap on the CPU (decision 0040, "Raster scales"): a pan by whole
-    /// device pixels shifts the last frame on the GPU and draws only the strips it uncovers; any
-    /// other camera change scales the last full frame. The caller draws an exact frame
-    /// (`detail` off) once the camera rests. Anything else draws the whole scene.
-    /// `generation` changes whenever what's drawn may have (a message, an image).
-    pub fn render(&mut self, store: &Store, frame: &Frame, background: [f32; 4], generation: u64) -> Result<DrawStats> {
+    /// Forgets the frame shown as a stand-in (after a fresh list: it shows a page that's gone).
+    pub fn forget_last(&mut self) {
+        self.last = None;
+        self.last_scale = None;
+        self.shown = None;
+    }
+
+    /// Drops every tile (benches and tests time cold frames this way).
+    pub fn clear_tiles(&mut self) {
+        self.tiles.clear();
+        self.shown = None;
+    }
+
+    /// Bytes the engine holds on the GPU outside its tile pages.
+    fn bytes_beside_tiles(&self) -> usize {
+        let pages = self.pages.len() * PAGE_BYTES + if self.page_depth.is_some() { PAGE_DEPTH_BYTES } else { 0 };
+        self.bytes.saturating_sub(pages)
+    }
+
+    /// Fits the tiles kept to the budget: what's left of it beside everything else, at most
+    /// `tile_bytes`, in whole pages. Pages past it go, with their tiles.
+    fn fit_tiles(&mut self, tile_bytes: usize) {
+        let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
+        let room = self.budget.saturating_sub(beside).saturating_sub(PAGE_DEPTH_BYTES);
+        let pages = (tile_bytes.min(room) / PAGE_BYTES).min(1024);
+        while self.pages.len() > pages {
+            if let Some(p) = self.pages.pop() {
+                p.texture.destroy();
+                self.bytes -= PAGE_BYTES;
+            }
+        }
+        if self.pages.is_empty()
+            && pages == 0
+            && let Some(_d) = self.page_depth.take()
+        {
+            self.bytes -= PAGE_DEPTH_BYTES;
+        }
+        self.tiles.set_max_slots(pages * PER_PAGE as usize);
+    }
+
+    /// The page and position of a slot, making its page (within the budget `fit_tiles` set).
+    fn slot_place(&mut self, slot: u32) -> Result<(usize, u32, u32)> {
+        let page = (slot / PER_PAGE) as usize;
+        let within = slot % PER_PAGE;
+        let (x, y) = ((within % PER_ROW) * TILE, (within / PER_ROW) * TILE);
+        if self.page_depth.is_none() {
+            self.reserve(PAGE_DEPTH_BYTES, 0, "the tiles' depth buffer")?;
+            self.page_depth = Some(self.renderer.create_depth_texture_view(&RenderSize {
+                width: PAGE as u16,
+                height: PAGE as u16,
+            }));
+            self.bytes += PAGE_DEPTH_BYTES;
+        }
+        while self.pages.len() <= page {
+            self.reserve(PAGE_BYTES, 0, "a page of tiles")?;
+            let tex = texture(
+                &self.device,
+                PAGE,
+                PAGE,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                "tiles",
+            );
+            self.pages.push(Page {
+                view: tex.create_view(&Default::default()),
+                texture: tex,
+            });
+            self.bytes += PAGE_BYTES;
+        }
+        Ok((page, x, y))
+    }
+
+    /// The scratch tile and its depth buffer, made on first use.
+    fn ensure_scratch(&mut self) -> Result<()> {
+        if self.scratch.is_none() {
+            let bytes = (TILE * TILE * 4 * 2) as usize;
+            self.reserve(bytes, 0, "the scratch tile")?;
+            let tex = texture(
+                &self.device,
+                TILE,
+                TILE,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                "scratch tile",
+            );
+            let depth = self.renderer.create_depth_texture_view(&RenderSize {
+                width: TILE as u16,
+                height: TILE as u16,
+            });
+            self.scratch = Some((tex.clone(), tex.create_view(&Default::default()), depth));
+            self.bytes += bytes;
+        }
+        Ok(())
+    }
+
+    /// Draws a frame made of tiles (decision 0040, phase 2): draws the tiles it needs, as many as
+    /// `options` allow beyond those nothing can stand in for, composites the frame from them
+    /// (stand-ins beneath what isn't drawn yet), and, with a canvas, presents it. `exact` in the
+    /// answer: every tile shown is up to date and drawn without level of detail, so the frame is
+    /// what a fresh engine draws. The GPU may still be drawing when this returns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render(
+        &mut self,
+        store: &Store,
+        frame: &Frame,
+        background: [f32; 4],
+        generation: u64,
+        halo: i32,
+        options: TiledOptions,
+    ) -> Result<DrawStats> {
         self.check()?;
         let (w, h) = (u32::from(frame.width), u32::from(frame.height));
         self.ensure_frames(w, h)?;
+        self.ensure_compositor();
         self.masks.begin_frame();
         let t0 = now();
-        let planned = plan::plan(
-            frame.view,
-            frame.detail,
-            (frame.width, frame.height),
-            background,
-            generation,
-            self.shown.as_ref(),
-            self.basis.as_ref().map(|b| &b.shown),
-        );
-        let last = self.shown;
-        let drawn = match planned {
-            Plan::Same => Ok(DrawStats {
-                standin: !last.is_some_and(|s| s.exact),
-                ..DrawStats::default()
-            }),
-            Plan::Hold => Ok(DrawStats {
-                standin: true,
-                ..DrawStats::default()
-            }),
-            Plan::Full => self.full(store, frame, background),
-            Plan::Pan(dx, dy) => {
-                // The strips are drawn for the camera the shifted frame holds, not the one asked
-                // for (they differ by under half a pixel on a fractional pan).
-                let held = plan::held_view(planned, frame.view, last.as_ref());
-                self.pan(store, &Frame { view: held, ..*frame }, background, dx, dy)
-            }
-            Plan::Zoom => self.zoom(frame, background),
+        self.tiles.begin(background, halo);
+        self.fit_tiles(store.limits.tile_bytes);
+        let view = frame.view;
+        let scale = view.as_coeffs()[0];
+        let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
+        let last = self.last;
+        let bg_bits = background.map(f32::to_bits);
+        let plan = self
+            .tiles
+            .plan(view, (w, h), zooming, last, options.prefetch)
+            .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
+        let mut stats = DrawStats {
+            direct: plan.direct,
+            ..DrawStats::default()
         };
-        let mut stats = match drawn {
-            Ok(s) => s,
-            Err(e) => {
-                self.scene.reset();
-                return Err(e);
-            }
-        };
-        stats.plan = planned.code();
-        let shown_exact = planned == Plan::Full && stats.exact() || planned == Plan::Same && !stats.standin;
-        if planned == Plan::Full {
-            self.basis = Some(Basis {
-                index: self.cur,
-                shown: Shown {
-                    view: frame.view,
-                    background,
-                    generation,
-                    exact: shown_exact,
-                },
-            });
+        // Nothing to draw and the frame shown is this one, exact: it stays.
+        let same = plan.jobs.is_empty()
+            && last.is_some_and(|l| l.view == view && l.size == (w, h))
+            && self.shown == Some((generation, bg_bits, true));
+        if same {
+            stats.exact = true;
+            stats.plan = 3;
+            return self.finish_frame(stats, t0);
         }
-        self.shown = Some(Shown {
-            view: plan::held_view(planned, frame.view, last.as_ref()),
-            background,
-            generation,
-            exact: shown_exact,
-        });
+        let dst = (self.cur + 1) % FRAMES;
+        let mut verbs = store.limits.frame_verbs;
+        let mut drew_any = false;
+        let mut direct_exact = true;
+        for (n, job) in plan.jobs.iter().enumerate() {
+            if !job.must && drew_any && options.budget_ms > 0.0 && now() - t0 >= options.budget_ms {
+                stats.queued = plan.jobs[n..].iter().filter(|j| !j.must).count() as u32;
+                break;
+            }
+            let target = if plan.direct {
+                self.ensure_scratch()?;
+                TileTarget::Scratch
+            } else {
+                match self.tiles.slot_for(job.key) {
+                    Some(s) => TileTarget::Slot(s),
+                    None => continue,
+                }
+            };
+            // One allowance of generated geometry per tile: each is its own render.
+            verbs = store.limits.frame_verbs;
+            let drawn = self.draw_tile(
+                store, job.view, job.detail, background, target, &plan, job.key, dst, &mut stats, &mut verbs,
+            );
+            let exact = match drawn {
+                Ok(e) => e,
+                Err(e) => {
+                    if let TileTarget::Slot(s) = target {
+                        self.tiles.release(job.key, s);
+                    }
+                    self.scene.reset();
+                    return Err(e);
+                }
+            };
+            drew_any = true;
+            stats.tiles_drawn += 1;
+            match target {
+                TileTarget::Slot(s) => self.tiles.drawn(job.key, s, exact),
+                TileTarget::Scratch => direct_exact &= exact,
+            }
+        }
+        let _ = verbs;
+        let t1 = now();
+        if plan.direct {
+            stats.exact = direct_exact;
+            stats.plan = 2;
+        } else {
+            let comp = self.tiles.compose(&plan, last);
+            stats.exact = comp.exact;
+            stats.pending = comp.pending;
+            stats.plan = if comp.complete { 0 } else { 1 };
+            self.composite(&comp, dst, background, w, h)?;
+        }
+        stats.render_ms += now() - t1;
+        stats.standin = !stats.exact;
+        stats.held = self.tiles.len() as u32;
+        stats.evicted = self.tiles.stats.evicted;
+        self.cur = dst;
+        self.last = Some(Last { view, size: (w, h) });
+        self.last_scale = Some(scale);
+        self.shown = Some((generation, bg_bits, stats.exact));
+        self.finish_frame(stats, t0)
+    }
+
+    /// Presents the frame shown (with a canvas) and finishes the frame's numbers.
+    fn finish_frame(&mut self, mut stats: DrawStats, t0: f64) -> Result<DrawStats> {
         let t1 = now();
         let acquired = match self.acquire() {
             Ok(t) => t,
@@ -726,342 +897,399 @@ impl Gpu {
         Ok(stats)
     }
 
-    /// Encodes the scene into `self.scene` for `frame` and renders it into frame texture `dst`,
-    /// clearing `clear` (all of it when None) to `background` first, offset by `offset`.
+    /// Draws one tile: the scene under its view, `TILE` × `TILE` pixels, into its slot (or the
+    /// scratch tile, then straight into frame texture `dst` where the frame shows it). Answers
+    /// whether it was drawn exactly (no level of detail stood in).
     #[allow(clippy::too_many_arguments)]
-    fn draw_into(
+    fn draw_tile(
         &mut self,
         store: &Store,
-        frame: &Frame,
+        view: Affine,
+        detail: bool,
         background: [f32; 4],
+        target: TileTarget,
+        plan: &crate::tiles::Plan,
+        key: TileKey,
         dst: usize,
-        clear: Option<RectU16>,
-        offset: (i32, i32),
-        before: Option<wgpu::CommandEncoder>,
         stats: &mut DrawStats,
-        budget: &mut usize,
-    ) -> Result<()> {
+        verbs: &mut usize,
+    ) -> Result<bool> {
         let t0 = now();
-        self.scene.reset_and_resize(frame.width, frame.height);
+        self.scene.reset_and_resize(TILE as u16, TILE as u16);
+        let tile = Frame {
+            width: TILE as u16,
+            height: TILE as u16,
+            view,
+            detail,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: TILE as i32,
+                y1: TILE as i32,
+            },
+        };
         let limits = store.limits;
-        let s = exec::draw_budgeted(store, self, frame, &limits, budget)?;
+        let s = exec::draw_budgeted(store, self, &tile, &limits, verbs)?;
         stats.add(&s);
+        let exact = !detail || s.exact();
         let t1 = now();
-        let mut encoder = before.unwrap_or_else(|| {
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") })
-        });
+        let (page, x, y) = match target {
+            TileTarget::Slot(slot) => {
+                let (p, x, y) = self.slot_place(slot)?;
+                (Some(p), x, y)
+            }
+            TileTarget::Scratch => (None, 0, 0),
+        };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tile") });
         let mut options = RenderOptions::default();
         let [r, g, b, a] = background;
         let color = vello_common::color::AlphaColor::new([r, g, b, a]);
-        let rects = clear.map(|c| [c]);
-        options.target_init = TargetInit::Clear(match &rects {
-            Some(rects) => ClearSettings::Rects { color, rects },
-            None => ClearSettings::Viewport { color },
-        });
-        options.offset = offset;
-        let main = self
-            .frames
-            .get(dst)
-            .ok_or_else(|| EngineError::new(ErrorCode::State, "no frame texture"))?;
+        let rects = [RectU16 {
+            x0: x as u16,
+            y0: y as u16,
+            x1: (x + TILE) as u16,
+            y1: (y + TILE) as u16,
+        }];
+        options.target_init = TargetInit::Clear(ClearSettings::Rects { color, rects: &rects });
+        options.offset = (x as i32, y as i32);
+        let (view_t, depth_t) = match page {
+            Some(p) => (
+                &self.pages[p].view,
+                self.page_depth
+                    .as_ref()
+                    .ok_or_else(|| EngineError::new(ErrorCode::State, "no depth for tiles"))?,
+            ),
+            None => {
+                let (_, v, d) = self
+                    .scratch
+                    .as_ref()
+                    .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
+                (v, d)
+            }
+        };
         self.renderer
             .render(
                 &self.scene,
                 &mut self.resources,
                 &mut encoder,
                 RenderTarget {
-                    view: &main.view,
-                    depth_view: Some(&main.depth),
+                    view: view_t,
+                    depth_view: Some(depth_t),
                 },
                 &self.bindings,
                 options,
             )
             .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+        if page.is_none() {
+            // Straight into the frame, where it shows.
+            let t = i64::from(TILE);
+            let fx = i64::from(key.i) * t + plan.origin.0;
+            let fy = i64::from(key.j) * t + plan.origin.1;
+            let (fw, fh) = (i64::from(plan.size.0), i64::from(plan.size.1));
+            let (x0, y0) = (fx.max(0), fy.max(0));
+            let (x1, y1) = ((fx + t).min(fw), (fy + t).min(fh));
+            if x1 > x0 && y1 > y0 {
+                let (scratch, _, _) = self.scratch.as_ref().expect("made above");
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: scratch,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: (x0 - fx) as u32,
+                            y: (y0 - fy) as u32,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.frames[dst].texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: x0 as u32,
+                            y: y0 as u32,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: (x1 - x0) as u32,
+                        height: (y1 - y0) as u32,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
         // One render per submission: the renderer writes its buffers through the queue, which a
         // second render in the same encoder would overwrite before the first ran.
         self.queue.submit([encoder.finish()]);
         self.submits += 1;
         stats.encode_ms += t1 - t0;
         stats.render_ms += now() - t1;
-        Ok(())
+        Ok(exact)
     }
 
-    /// The whole scene, into the frame shown.
-    fn full(&mut self, store: &Store, frame: &Frame, background: [f32; 4]) -> Result<DrawStats> {
-        let mut stats = DrawStats::default();
-        // Not into the basis a zoom scales from while it's another frame: any frame will do.
-        let dst = self.cur;
-        let mut budget = store.limits.frame_verbs;
-        self.draw_into(
-            store,
-            frame,
-            background,
-            dst,
-            None,
-            (0, 0),
-            None,
-            &mut stats,
-            &mut budget,
-        )?;
-        Ok(stats)
-    }
-
-    /// A frame texture that isn't `a` or `b`.
-    fn spare(&self, a: usize, b: Option<usize>) -> usize {
-        (0..FRAMES).find(|i| *i != a && Some(*i) != b).unwrap_or(0)
-    }
-
-    /// The last frame shifted by (`dx`, `dy`) device pixels, and the strips it uncovers drawn.
-    fn pan(&mut self, store: &Store, frame: &Frame, background: [f32; 4], dx: i32, dy: i32) -> Result<DrawStats> {
-        let (w, h) = (i32::from(frame.width), i32::from(frame.height));
-        let src = self.cur;
-        let dst = self.spare(src, self.basis.as_ref().map(|b| b.index));
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pan") });
-        {
-            let (s, d) = (&self.frames[src], &self.frames[dst]);
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &s.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: (-dx).max(0) as u32,
-                        y: (-dy).max(0) as u32,
-                        z: 0,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &d.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: dx.max(0) as u32,
-                        y: dy.max(0) as u32,
-                        z: 0,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: (w - dx.abs()) as u32,
-                    height: (h - dy.abs()) as u32,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
-        // The uncovered strips: columns at the side it moved from, then rows across the rest.
-        let mut parts: Vec<IRect> = Vec::new();
-        let (cx0, cx1) = if dx > 0 { (dx, w) } else { (0, w + dx) };
-        if dx > 0 {
-            parts.push(IRect {
-                x0: 0,
-                y0: 0,
-                x1: dx,
-                y1: h,
-            });
-        } else if dx < 0 {
-            parts.push(IRect {
-                x0: w + dx,
-                y0: 0,
-                x1: w,
-                y1: h,
-            });
-        }
-        if dy > 0 {
-            parts.push(IRect {
-                x0: cx0,
-                y0: 0,
-                x1: cx1,
-                y1: dy,
-            });
-        } else if dy < 0 {
-            parts.push(IRect {
-                x0: cx0,
-                y0: h + dy,
-                x1: cx1,
-                y1: h,
-            });
-        }
-        let mut stats = DrawStats {
-            standin: true,
-            ..DrawStats::default()
-        };
-        let mut before = Some(encoder);
-        // One frame, one allowance: the strips share it.
-        let mut budget = store.limits.frame_verbs;
-        for p in parts.iter().filter(|p| !p.is_empty()) {
-            let part = Frame {
-                width: (p.x1 - p.x0) as u16,
-                height: (p.y1 - p.y0) as u16,
-                view: Affine::translate((-f64::from(p.x0), -f64::from(p.y0))) * frame.view,
-                detail: true,
-                area: IRect {
-                    x0: 0,
-                    y0: 0,
-                    x1: p.x1 - p.x0,
-                    y1: p.y1 - p.y0,
-                },
-            };
-            let clear = RectU16 {
-                x0: p.x0 as u16,
-                y0: p.y0 as u16,
-                x1: p.x1 as u16,
-                y1: p.y1 as u16,
-            };
-            self.draw_into(
-                store,
-                &part,
-                background,
-                dst,
-                Some(clear),
-                (p.x0, p.y0),
-                before.take(),
-                &mut stats,
-                &mut budget,
-            )?;
-        }
-        if let Some(e) = before {
-            self.queue.submit([e.finish()]);
-        }
-        self.cur = dst;
-        Ok(stats)
-    }
-
-    /// The last full frame scaled and moved to the camera now, the rest the background.
-    fn zoom(&mut self, frame: &Frame, background: [f32; 4]) -> Result<DrawStats> {
-        let basis = self
-            .basis
-            .as_ref()
-            .ok_or_else(|| EngineError::new(ErrorCode::State, "no frame to scale"))?;
-        let src = basis.index;
-        let [bz, _, _, _, bx, by] = basis.shown.view.as_coeffs();
-        let [z, _, _, _, tx, ty] = frame.view.as_coeffs();
-        let dst = self.spare(src, None);
-        let scale = bz / z;
-        let (ox, oy) = (bx - tx * scale, by - ty * scale);
-        let t0 = now();
-        self.ensure_scaler();
-        let scaler = self
-            .scaler
-            .as_ref()
-            .ok_or_else(|| EngineError::new(ErrorCode::State, "no scaling pipeline"))?;
-        let a = background[3];
-        let uniforms: [f32; 12] = [
-            scale as f32,
-            ox as f32,
-            oy as f32,
-            0.0,
-            background[0] * a,
-            background[1] * a,
-            background[2] * a,
-            a,
-            f32::from(frame.width),
-            f32::from(frame.height),
-            0.0,
-            0.0,
-        ];
-        let bytes: Vec<u8> = uniforms.iter().flat_map(|v| v.to_le_bytes()).collect();
-        self.queue.write_buffer(&scaler.uniforms, 0, &bytes);
-        let (s, d) = (&self.frames[src], &self.frames[dst]);
-        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("stand-in"),
-            layout: &scaler.pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&s.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&scaler.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: scaler.uniforms.as_entire_binding(),
-                },
-            ],
-        });
+    /// Lays a frame into frame texture `dst`: under what the frame's own tiles don't cover, the
+    /// background, the last frame moved and scaled, and other levels' tiles scaled; then the
+    /// frame's tiles, pixel for pixel.
+    fn composite(&mut self, comp: &Composite, dst: usize, background: [f32; 4], w: u32, h: u32) -> Result<()> {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("stand-in"),
+            label: Some("composite"),
         });
-        {
+        if !comp.complete {
+            // Quads by source texture: the last frame first, then pages, in the order given.
+            let mut quads: Vec<(Option<usize>, [f32; 12])> = Vec::new();
+            if let Some(m) = comp.base
+                && let Some(l) = self.last
+                && self
+                    .frames
+                    .get(self.cur)
+                    .is_some_and(|f| f.width == l.size.0 && f.height == l.size.1)
+            {
+                let (lw, lh) = (f64::from(l.size.0), f64::from(l.size.1));
+                let d = m.transform_rect_bbox(Rect::new(0.0, 0.0, lw, lh));
+                quads.push((
+                    None,
+                    [
+                        d.x0 as f32,
+                        d.y0 as f32,
+                        d.x1 as f32,
+                        d.y1 as f32,
+                        0.0,
+                        0.0,
+                        1.0,
+                        1.0,
+                        (0.5 / lw) as f32,
+                        (0.5 / lh) as f32,
+                        (1.0 - 0.5 / lw) as f32,
+                        (1.0 - 0.5 / lh) as f32,
+                    ],
+                ));
+            }
+            for sc in &comp.scaled {
+                let page = (sc.slot / PER_PAGE) as usize;
+                if page >= self.pages.len() {
+                    continue;
+                }
+                let within = sc.slot % PER_PAGE;
+                let (x, y) = (
+                    f64::from((within % PER_ROW) * TILE),
+                    f64::from((within / PER_ROW) * TILE),
+                );
+                let (p, t) = (f64::from(PAGE), f64::from(TILE));
+                let d = sc.dst;
+                quads.push((
+                    Some(page),
+                    [
+                        d.x0 as f32,
+                        d.y0 as f32,
+                        d.x1 as f32,
+                        d.y1 as f32,
+                        (x / p) as f32,
+                        (y / p) as f32,
+                        ((x + t) / p) as f32,
+                        ((y + t) / p) as f32,
+                        ((x + 0.5) / p) as f32,
+                        ((y + 0.5) / p) as f32,
+                        ((x + t - 0.5) / p) as f32,
+                        ((y + t - 0.5) / p) as f32,
+                    ],
+                ));
+            }
+            let c = self
+                .compositor
+                .as_mut()
+                .ok_or_else(|| EngineError::new(ErrorCode::State, "no compositor"))?;
+            let bytes: Vec<u8> = quads
+                .iter()
+                .flat_map(|(_, q)| q.iter().flat_map(|v| v.to_le_bytes()))
+                .collect();
+            if quads.len() > c.capacity {
+                let capacity = quads.len().next_power_of_two();
+                c.instances.destroy();
+                c.instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("composite quads"),
+                    size: (capacity * 48) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                c.capacity = capacity;
+            }
+            if !bytes.is_empty() {
+                self.queue.write_buffer(&c.instances, 0, &bytes);
+            }
+            let size: [f32; 4] = [w as f32, h as f32, 0.0, 0.0];
+            let ub: Vec<u8> = size.iter().flat_map(|v| v.to_le_bytes()).collect();
+            self.queue.write_buffer(&c.uniforms, 0, &ub);
+            let layout = c.pipeline.get_bind_group_layout(0);
+            let group_for = |view: &wgpu::TextureView| {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("composite"),
+                    layout: &layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&c.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: c.uniforms.as_entire_binding(),
+                        },
+                    ],
+                })
+            };
+            // Runs of quads sharing a source, each with its bind group.
+            let mut runs: Vec<(wgpu::BindGroup, u32, u32)> = Vec::new();
+            let mut i = 0;
+            while i < quads.len() {
+                let src = quads[i].0;
+                let mut j = i + 1;
+                while j < quads.len() && quads[j].0 == src {
+                    j += 1;
+                }
+                let view = match src {
+                    None => &self.frames[self.cur].view,
+                    Some(p) => &self.pages[p].view,
+                };
+                runs.push((group_for(view), i as u32, j as u32));
+                i = j;
+            }
+            let a = background[3];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("stand-in"),
+                label: Some("composite"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &d.view,
+                    view: &self.frames[dst].view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: f64::from(background[0] * a),
+                            g: f64::from(background[1] * a),
+                            b: f64::from(background[2] * a),
+                            a: f64::from(a),
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&scaler.pipeline);
-            pass.set_bind_group(0, &group, &[]);
-            pass.draw(0..3, 0..1);
+            pass.set_pipeline(&c.pipeline);
+            pass.set_vertex_buffer(0, c.instances.slice(..));
+            for (group, from, to) in &runs {
+                pass.set_bind_group(0, group, &[]);
+                pass.draw(0..4, *from..*to);
+            }
+        }
+        for cp in &comp.copies {
+            let page = (cp.slot / PER_PAGE) as usize;
+            let Some(pg) = self.pages.get(page) else { continue };
+            let within = cp.slot % PER_PAGE;
+            let (x, y) = ((within % PER_ROW) * TILE, (within / PER_ROW) * TILE);
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &pg.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: x + cp.src.x0 as u32,
+                        y: y + cp.src.y0 as u32,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.frames[dst].texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: cp.dst.0 as u32,
+                        y: cp.dst.1 as u32,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: (cp.src.x1 - cp.src.x0) as u32,
+                    height: (cp.src.y1 - cp.src.y0) as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
         }
         self.queue.submit([encoder.finish()]);
         self.submits += 1;
-        self.cur = dst;
-        Ok(DrawStats {
-            standin: true,
-            render_ms: now() - t0,
-            ..DrawStats::default()
-        })
+        Ok(())
     }
 
-    /// Makes the pipeline that scales a frame into another, on first use.
-    fn ensure_scaler(&mut self) {
-        if self.scaler.is_none() {
-            let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("stand-in"),
-                source: wgpu::ShaderSource::Wgsl(SCALE.into()),
-            });
-            let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("stand-in"),
-                layout: None,
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
-            let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("stand-in"),
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                ..Default::default()
-            });
-            let uniforms = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("stand-in"),
-                size: 48,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.scaler = Some(Scaler {
-                pipeline,
-                sampler,
-                uniforms,
-            });
+    /// Makes the compositor's pipeline on first use.
+    fn ensure_compositor(&mut self) {
+        if self.compositor.is_some() {
+            return;
         }
+        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("composite"),
+            source: wgpu::ShaderSource::Wgsl(QUADS.into()),
+        });
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 48,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("composite"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let uniforms = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("composite"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let capacity = 64;
+        let instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("composite quads"),
+            size: (capacity * 48) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.compositor = Some(Compositor {
+            pipeline,
+            sampler,
+            uniforms,
+            instances,
+            capacity,
+        });
     }
 
     /// Starts reading the last frame back: a buffer the frame is copied into, mapped by

@@ -8,11 +8,13 @@ import type { Page } from "@playwright/test";
 export interface Summary {
   frames: number;
   /** Time between animation frames: what you'd see, painting included (16.7 ms at 60 Hz). */
-  interval?: { p50: number; p95: number };
-  content: { p50: number; p95: number; max: number };
-  overlay: { p50: number; p95: number; max: number };
+  interval?: { p50: number; p95: number; p99: number; max: number };
+  content: { p50: number; p95: number; p99?: number; max: number };
+  overlay: { p50: number; p95: number; p99?: number; max: number };
   drawn: number;
   culled: number;
+  /** Ms from the last frame of the movement until the canvas showed an exact frame. */
+  exactMs?: number;
 }
 
 /** Pans for `frames` animation frames and returns what drawing them took. */
@@ -42,7 +44,15 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
           .sort((a, b) => a - b);
         const at = (q: number) =>
           Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
-        return { p50: at(0.5), p95: at(0.95) };
+        return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
+      };
+      // Until an exact frame is on screen after the movement's last frame (at most 10 s).
+      const exactAfter = async () => {
+        const t = performance.now();
+        const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
+        await nextFrame();
+        while (!f.exact && performance.now() - t < 10_000) await nextFrame();
+        return Math.round(performance.now() - t);
       };
       const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
       await nextFrame();
@@ -56,7 +66,8 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
         await nextFrame();
         times.push(performance.now());
       }
-      return { ...stats.summary(), interval: intervals(times) };
+      const summary = stats.summary();
+      return { ...summary, interval: intervals(times), exactMs: await exactAfter() };
     },
     { zoom, frames },
   );
@@ -83,9 +94,16 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
         .sort((a, b) => a - b);
       const at = (q: number) =>
         Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
-      return { p50: at(0.5), p95: at(0.95) };
+      return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
     };
     const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+    const exactAfter = async () => {
+      const t = performance.now();
+      const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
+      await nextFrame();
+      while (!f.exact && performance.now() - t < 10_000) await nextFrame();
+      return Math.round(performance.now() - t);
+    };
     await nextFrame();
     await nextFrame();
     w.drawpaneFrames.reset();
@@ -98,11 +116,12 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
       await nextFrame();
       times.push(performance.now());
     }
-    return { ...w.drawpaneFrames.summary(), interval: intervals(times) };
+    const summary = w.drawpaneFrames.summary();
+    return { ...summary, interval: intervals(times), exactMs: await exactAfter() };
   }, frames);
 }
 
 /** One line of a frame summary for the console. */
 export function summaryRow(name: string, r: Summary): string {
-  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} ms · drawn ${r.drawn}, culled ${r.culled}`;
+  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · exact after ${r.exactMs ?? "-"} ms · drawn ${r.drawn}, culled ${r.culled}`;
 }

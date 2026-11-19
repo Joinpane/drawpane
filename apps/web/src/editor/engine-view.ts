@@ -136,11 +136,25 @@ export interface EngineDraw {
   readonly drawn: boolean;
   /** It's on screen now (presented). False while a read-back frame is on its way. */
   readonly ready: boolean;
-  /** No stand-ins and no level of detail: what an exact frame shows. */
+  /**
+   * No stand-ins and no level of detail: what an exact frame shows. While it's false, draw
+   * again next frame: each draws more of the tiles still missing (decision 0040, phase 2).
+   */
   readonly exact: boolean;
+  /** Tiles round the view are still to draw ahead of a pan: an idle frame may draw them. */
+  readonly ahead: boolean;
 }
 
-const NOT_DRAWN: EngineDraw = { drawn: false, ready: false, exact: false };
+const NOT_DRAWN: EngineDraw = { drawn: false, ready: false, exact: false, ahead: false };
+
+/**
+ * Milliseconds a frame may spend drawing tiles beyond those nothing else can stand in for
+ * (decision 0040, phase 2): little while the camera moves (tiles round the view are drawn
+ * ahead), more once it rests, so the exact picture arrives within the 250 ms the freshness gate
+ * allows without any one long frame.
+ */
+export const MOVING_BUDGET_MS = 4;
+export const REST_BUDGET_MS = 10;
 
 /** Frames in a row the canvas can't take before the engine gives up for the session. */
 const UNPRESENTED = 3;
@@ -189,7 +203,8 @@ export class EngineView {
     glyphsOutlined: 0,
     supported: true,
     exact: false,
-    plan: "whole" as FrameStats["plan"],
+    plan: "tiles" as FrameStats["plan"],
+    tiles: { drawn: 0, pending: 0, queued: 0, held: 0, evicted: 0 } as FrameStats["tiles"],
     /** Where the frame's CPU time went: the patch, the engine's encoding, its renderer, submit. */
     breakdown: { patch: 0, encode: 0, render: 0, submit: 0, readback: 0 },
   };
@@ -395,10 +410,12 @@ export class EngineView {
   }
 
   /**
-   * Draws `pageId` under `camera` into the engine's canvas (`width` × `height` device pixels).
-   * `exact` asks for an exact frame (the camera at rest); otherwise the engine may draw a
-   * stand-in (a pan shifted, a zoom scaled, unreadable text as bars), which isn't exact: draw
-   * again with `exact` once the camera rests. Not drawn when the canvas renderer must draw this
+   * Draws `pageId` under `camera` into the engine's canvas (`width` × `height` device pixels),
+   * from the tiles the engine keeps (decision 0040, phase 2). `exact` says the camera rests;
+   * otherwise it's moving, and tiles not drawn yet show stand-ins (a stale tile, another level
+   * scaled, the last frame moved). `budgetMs` bounds the tiles drawn this frame beyond those
+   * nothing can stand in for (0: none, so a frame at rest comes back exact). While the answer
+   * isn't exact, draw again next frame. Not drawn when the canvas renderer must draw this
    * frame: the page holds something the engine doesn't draw, the canvas couldn't take the
    * frame, or the engine failed (and is off for the session).
    */
@@ -411,6 +428,7 @@ export class EngineView {
     background: string,
     state: { hidden: ReadonlySet<string>; whole: string | null },
     exact = true,
+    budgetMs = 0,
   ): EngineDraw {
     if (this.#dead) return NOT_DRAWN;
     const at = this.#presenting;
@@ -419,7 +437,7 @@ export class EngineView {
       this.#presenting = { pageId, width, height };
     }
     try {
-      const r = this.#draw(pageId, camera, width, height, dpr, background, state, exact);
+      const r = this.#draw(pageId, camera, width, height, dpr, background, state, exact, budgetMs);
       // The canvas renderer draws this frame: nothing on its way from the engine may show.
       if (!r.drawn) this.#supersede();
       return r;
@@ -445,6 +463,7 @@ export class EngineView {
     background: string,
     state: { hidden: ReadonlySet<string>; whole: string | null },
     exact: boolean,
+    budgetMs: number,
   ): EngineDraw {
     const t0 = performance.now();
     this.#builder.setEditorState(state);
@@ -460,7 +479,7 @@ export class EngineView {
       this.canvas.height = height;
     }
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr };
-    const frame = this.#engine.renderGpu(width, height, cam, colour(background), !exact);
+    const frame = this.#engine.renderGpu(width, height, cam, colour(background), !exact, budgetMs);
     if (!frame.ok) {
       // A layer the builder didn't flag but the engine refuses: this page draws on the canvas.
       if (frame.code === ErrorCode.Unsupported) {
@@ -497,6 +516,7 @@ export class EngineView {
       supported: true,
       exact: f.exact,
       plan: f.plan,
+      tiles: f.tiles,
       breakdown: {
         ...this.last.breakdown,
         patch: t1 - t0,
@@ -506,7 +526,12 @@ export class EngineView {
       },
     };
     // A WebGPU canvas shows the frame once it's presented; a read-back one when it lands.
-    return { drawn: true, ready: this.#readback === null, exact: f.exact };
+    return {
+      drawn: true,
+      ready: this.#readback === null,
+      exact: f.exact,
+      ahead: f.tiles.queued > 0,
+    };
   }
 
   /**
