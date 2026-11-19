@@ -240,6 +240,8 @@ pub struct TileCache {
     /// The frame level and view centre (grid pixels) of the last plan: eviction keeps what's near.
     focus: Option<(u32, f64, f64)>,
     drag: DragTiles,
+    /// The next plan is a page's first frame (set by the backend): its stand-in is coarser.
+    pub opening: bool,
     /// Tiles an ended drag's selection was over, still stale: they show it where it was, so
     /// they're drawn again at once.
     ghosts: HashSet<TileKey>,
@@ -315,6 +317,7 @@ impl TileCache {
             halo: 0,
             focus: None,
             drag: DragTiles::default(),
+            opening: false,
             ghosts: HashSet::new(),
             stats: TileStats::default(),
         }
@@ -952,7 +955,10 @@ impl TileCache {
         });
         let grid_inv = level.grid().inverse();
         let frame_grid = Rect::new(gx0 as f64, gy0 as f64, (gx0 + w) as f64, (gy0 + h) as f64);
-        let ladder = zooming.then(|| self.level_id(Level::ladder(level.scale), true));
+        // A page just shown starts on a ladder level four times coarser: a few tiles, most of
+        // the page specks at that scale, so its first frame comes soon (see `opening`).
+        let ladder_scale = if self.opening { level.scale / 4.0 } else { level.scale };
+        let ladder = zooming.then(|| self.level_id(Level::ladder(ladder_scale), true));
         let other_levels: Vec<u32> = self
             .levels
             .iter()

@@ -416,12 +416,28 @@ export class EngineView {
     for (const ref of this.#pending) if (!used.has(ref)) this.#pending.delete(ref);
   }
 
+  /** The last fresh list (a page shown): building it and applying it, in ms (benches). */
+  opened: { pageId: string; buildMs: number; applyMs: number; records: number } | null = null;
+
   /** Applies the builder's next message, if any; false (and off for the session) if it can't. */
   #patch(pageId: string): boolean {
+    const t0 = performance.now();
+    // A page shown afresh: its text sent provisional (coarse bars), encoded whole over the next
+    // frames, so the first frame doesn't wait for every line to be shaped.
     let message =
-      this.#builder.pageId === pageId ? this.#builder.update() : this.#builder.build(pageId);
+      this.#builder.pageId === pageId
+        ? this.#builder.update()
+        : this.#builder.build(pageId, undefined, { deferText: true });
     if (!message) return true;
+    const t1 = performance.now();
     let r = this.#engine.apply(message);
+    if (this.#builder.stats.fresh)
+      this.opened = {
+        pageId,
+        buildMs: t1 - t0,
+        applyMs: performance.now() - t1,
+        records: this.#builder.stats.records,
+      };
     this.#builder.acknowledge(r.ok, this.#engine.revision);
     if (!r.ok && r.code === ErrorCode.Revision) {
       // Out of step (an earlier message was refused or lost): start the page afresh.
@@ -636,7 +652,7 @@ export class EngineView {
       drawn: true,
       ready: this.#readback === null,
       exact: f.exact,
-      ahead: f.tiles.queued > 0,
+      ahead: f.tiles.queued > 0 || this.#builder.pending > 0,
     };
   }
 

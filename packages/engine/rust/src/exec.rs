@@ -555,7 +555,8 @@ impl<B: Backend> Walk<'_, B> {
             self.backend.scene().push_opacity(opacity);
             self.open.push(Open::Layer);
         }
-        let coarse = self.frame.detail && r.coarse_below > 0.0 && scale_of(device) < f64::from(r.coarse_below);
+        let coarse = r.provisional()
+            || self.frame.detail && r.coarse_below > 0.0 && scale_of(device) < f64::from(r.coarse_below);
         if coarse {
             self.stats.coarse += 1;
         }

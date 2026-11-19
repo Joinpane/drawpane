@@ -76,6 +76,9 @@ function glyphPath(d: string): PathData {
   return svgPathData(s);
 }
 
+/** Milliseconds an update spends encoding deferred text whole (see `build`'s `deferText`). */
+const DEFER_MS = 10;
+
 export class DisplayListBuilder {
   readonly #scene: Scene;
   readonly #measurer: TextMeasurer;
@@ -103,6 +106,8 @@ export class DisplayListBuilder {
   readonly #imagesBy = new Map<string, readonly string[]>();
   readonly #texts = new Set<string>();
   readonly #pendingText = new Set<string>();
+  /** Text sent provisional (a page opening, `build`'s `deferText`): encoded whole a few at a time. */
+  readonly #deferred = new Set<string>();
   readonly #extra = new Set<string>();
   #glyphs = new Map<string, number>();
   /** Each glyph handle's path data, while it's defined. */
@@ -185,7 +190,7 @@ export class DisplayListBuilder {
     for (const id of this.#imagesOf.get(ref) ?? []) this.#extra.add(id);
   }
 
-  #context(): LayerContext {
+  #context(deferText = false): LayerContext {
     const glyph = (d: string) => {
       let g = this.#glyphs.get(d);
       if (g === undefined) {
@@ -212,6 +217,7 @@ export class DisplayListBuilder {
       },
       whole: this.#whole,
       hidden: this.#hidden,
+      deferText,
     };
   }
 
@@ -222,6 +228,8 @@ export class DisplayListBuilder {
     if (node.type === "text") this.#texts.add(node.id);
     if (e.textPending) this.#pendingText.add(node.id);
     else this.#pendingText.delete(node.id);
+    if (e.deferred) this.#deferred.add(node.id);
+    else this.#deferred.delete(node.id);
     this.#useImages(node.id, e.images);
     if (e.record.unsupported) this.unsupported.set(node.id, e.record.unsupported);
     else this.unsupported.delete(node.id);
@@ -329,7 +337,11 @@ export class DisplayListBuilder {
    * written as it's walked: each record goes into the message as it's encoded, after the glyphs
    * it brings, so the page is never held as records too.
    */
-  build(pageId: string, roots?: readonly string[]): Uint8Array {
+  build(
+    pageId: string,
+    roots?: readonly string[],
+    options: { readonly deferText?: boolean } = {},
+  ): Uint8Array {
     const t0 = performance.now();
     const doc = this.#scene.doc;
     this.#page = pageId;
@@ -344,6 +356,7 @@ export class DisplayListBuilder {
     this.#imagesBy.clear();
     this.#texts.clear();
     this.#pendingText.clear();
+    this.#deferred.clear();
     this.#extra.clear();
     this.unsupported.clear();
     this.#glyphs = new Map();
@@ -355,7 +368,7 @@ export class DisplayListBuilder {
     this.#shaped = new WeakMap();
     this.#newGlyphs = [];
     this.#nextGlyph = 1;
-    const ctx = this.#context();
+    const ctx = this.#context(options.deferText ?? false);
     const revision = this.#revision + 1;
     // Sized for the last fresh list (a page reopened, a reset), so the buffer rarely grows.
     const w = new ListWriter(
@@ -437,6 +450,7 @@ export class DisplayListBuilder {
       this.#nodes.delete(at);
       this.#texts.delete(at);
       this.#pendingText.delete(at);
+      this.#deferred.delete(at);
       this.unsupported.delete(at);
       this.#useGlyphs(at, null);
       this.#useImages(at, []);
@@ -444,6 +458,11 @@ export class DisplayListBuilder {
       if (kids) stack.push(...kids);
       this.#kids.delete(at);
     }
+  }
+
+  /** Text sent provisional and not yet encoded whole: updates go on sending it while any is left. */
+  get pending(): number {
+    return this.#deferred.size;
   }
 
   /** A patch since the last message, or null when nothing on the page changed. */
@@ -480,7 +499,7 @@ export class DisplayListBuilder {
     }
     for (const id of forced) touched.add(id);
     this.#version = doc.version;
-    if (touched.size === 0 && parents.size === 0) return null;
+    if (touched.size === 0 && parents.size === 0 && this.#deferred.size === 0) return null;
 
     const sets = new Set<string>();
     const moves = new Set<string>();
@@ -534,6 +553,19 @@ export class DisplayListBuilder {
       if (before && before.parent !== node.parent) this.#kids.get(before.parent)?.delete(id);
       records.push([this.#handleOf(id), this.#parentHandle(node), this.#encode(node, ctx)]);
       this.#kid(node.parent, id);
+    }
+    // Text sent provisional when the page opened: encoded whole, a few milliseconds' worth.
+    if (this.#deferred.size > 0) {
+      const until = performance.now() + DEFER_MS;
+      for (const id of [...this.#deferred]) {
+        if (performance.now() >= until) break;
+        const node = doc.get(id);
+        if (!node || !this.#handles.has(id) || this.#pageOf(id) !== page) {
+          this.#deferred.delete(id);
+          continue;
+        }
+        records.push([this.#handleOf(id), this.#parentHandle(node), this.#encode(node, ctx)]);
+      }
     }
     const revision = this.#revision + 1;
     const w = new ListWriter(this.#revision, revision);

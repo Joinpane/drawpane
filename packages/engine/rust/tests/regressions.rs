@@ -105,7 +105,9 @@ fn stale_wire_versions_and_patch_bases_leave_the_scene_intact() {
     let before = pixels(&mut e);
 
     let mut from_future = initial.clone();
-    from_future[6..8].copy_from_slice(&1u16.to_le_bytes());
+    // A minor version past this engine's.
+    let next = drawpane_engine::wire::MINOR + 1;
+    from_future[6..8].copy_from_slice(&next.to_le_bytes());
     assert!(matches!(e.apply(&from_future), Err(err) if err.code == ErrorCode::Version));
 
     let mut after_gap = W::new(2, 3);

@@ -245,14 +245,22 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's tiles", () =>
     const e = new RenderEngine(mod);
     try {
       expect(e.apply(builder.build("p")).ok).toBe(true);
-      tiled(e);
+      const old = tiled(e);
       expect(e.apply(builder.build("q")).ok).toBe(true);
-      // Moving, no budget: what nothing stands in for is drawn anyway, and the last page's frame
-      // doesn't stand in.
+      // Moving, no budget: the last page's frame doesn't stand in. The first frame of a page
+      // just shown is coarse tiles of it (a stand-in), then frames at rest draw it exactly.
       const r = e.renderCpuTiled(W, H, camera, BG, { ...TILES, moving: true, maxJobs: 0 });
       if (!r.ok) throw new Error(r.message);
-      expect(r.value.stats.exact).toBe(true);
-      expect(same(r.value.pixels, fresh(mod, scene, measurer, "q"))).toBe(true);
+      expect(r.value.stats.exact).toBe(false);
+      expect(same(r.value.pixels, old)).toBe(false);
+      let exact: Uint8Array | null = null;
+      for (let i = 0; i < 40 && !exact; i++) {
+        const f = e.renderCpuTiled(W, H, camera, BG, { ...TILES, maxJobs: 1 });
+        if (!f.ok) throw new Error(f.message);
+        if (f.value.stats.exact) exact = f.value.pixels;
+      }
+      if (!exact) throw new Error("never exact at rest");
+      expect(same(exact, fresh(mod, scene, measurer, "q"))).toBe(true);
     } finally {
       e.dispose();
     }
@@ -335,4 +343,53 @@ describe.skipIf(!built("worker") && !process.env.CI)("the builder's drags", () =
         e.dispose();
       }
     });
+});
+
+describe.skipIf(!built("worker") && !process.env.CI)("a page opening", () => {
+  let mod: EngineModule;
+  beforeAll(async () => {
+    mod = await loadNodeEngine("worker");
+  });
+
+  it("sends its text provisional first, then whole, ending as a full build draws it", () => {
+    const doc = page();
+    const shaping: TextMeasurer = { ...measurer, missing: () => false };
+    for (let i = 0; i < 6; i++)
+      doc.apply([
+        {
+          op: "create",
+          id: `t${i}`,
+          type: "text",
+          parent: "p",
+          key: `a${i}`,
+          props: {
+            x: 4 + (i % 3) * 30,
+            y: 4 + Math.floor(i / 3) * 36,
+            width: 28,
+            height: 30,
+            characters: "Hi",
+            fontSize: 20,
+          },
+        },
+      ]);
+    const scene = new Scene(doc);
+    const builder = new DisplayListBuilder(scene, shaping);
+    const e = new RenderEngine(mod);
+    try {
+      expect(e.apply(builder.build("p", undefined, { deferText: true })).ok).toBe(true);
+      expect(builder.pending).toBe(6);
+      // Coarse bars only, for now: a stand-in.
+      const first = e.renderCpuTiled(W, H, camera, BG, TILES);
+      if (!first.ok) throw new Error(first.message);
+      expect(first.value.stats.exact).toBe(false);
+      for (let i = 0; i < 20 && builder.pending > 0; i++) {
+        const patch = builder.update();
+        if (patch) expect(e.apply(patch).ok).toBe(true);
+      }
+      expect(builder.pending).toBe(0);
+      expect(same(tiled(e), fresh(mod, scene, shaping))).toBe(true);
+    } finally {
+      e.dispose();
+    }
+  });
 });

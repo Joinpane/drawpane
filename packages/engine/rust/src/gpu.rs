@@ -810,11 +810,16 @@ impl Gpu {
         let view = frame.view;
         let scale = view.as_coeffs()[0];
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
+        // A page just shown (opened, switched to, its list made afresh): nothing to stand on.
+        // Under a budget its first frame is coarse tiles (a ladder level, level of detail on),
+        // quick to draw; the exact tiles follow a few a frame (decision 0040, phase 2: open time).
+        let opening = self.last.is_none() && self.tiles.is_empty() && options.budget_ms > 0.0;
         let last = self.last;
         let bg_bits = background.map(f32::to_bits);
+        self.tiles.opening = opening;
         let mut plan = self
             .tiles
-            .plan(view, (w, h), zooming, last, options.prefetch)
+            .plan(view, (w, h), zooming || opening, last, options.prefetch)
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
         let mut stats = DrawStats {
@@ -1153,7 +1158,8 @@ impl Gpu {
         let limits = store.limits;
         let s = exec::draw_split(store, self, &tile, &limits, verbs, split)?;
         stats.add(&s);
-        let exact = !detail || s.exact();
+        // Exact only if nothing stood in: no level of detail, no provisional record.
+        let exact = s.exact();
         let t1 = now();
         // Every tile is drawn into the scratch tile, a target of its own size (Vello's work per
         // render follows its target's size, so a page as the target would cost a page's worth

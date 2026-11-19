@@ -440,7 +440,7 @@ fn a_page_switch_leaves_no_stale_tile() {
     let b = Model::new(&mut r, 30, false);
     let mut e = engine(0, 64);
     e.apply(&a.fresh(1)).expect("fresh");
-    let c = cam(1.0, 0.0, 0.0);
+    let c = cam(1.3, 0.0, 0.0);
     assert!(
         e.render_cpu_tiled(W, H, c, BG, TiledOptions::default())
             .expect("a")
@@ -448,16 +448,32 @@ fn a_page_switch_leaves_no_stale_tile() {
             .exact
     );
     e.apply(&b.fresh(2)).expect("switch");
-    // Even while moving with no budget, nothing of the old page may show: what's missing is
-    // drawn, and the last frame (the old page) doesn't stand in.
+    // Even while moving with no budget, nothing of the old page may show: the last frame (the
+    // old page) doesn't stand in. The first frame is coarse tiles of the new page (a stand-in),
+    // and frames at rest then draw it exactly.
     let moving = TiledOptions {
         moving: true,
         max_jobs: 0,
         ..TiledOptions::default()
     };
+    let old = fresh(&a, 1, 0, c);
     let (px, s) = e.render_cpu_tiled(W, H, c, BG, moving).expect("b");
-    assert!(s.exact, "{s:?}");
-    assert!(diff(px, &fresh(&b, 2, 0, c)).is_none());
+    assert!(!s.exact, "the first frame of a page just shown is coarse: {s:?}");
+    assert!(diff(px, &old).is_some(), "the old page shows");
+    let mut exact = false;
+    for _ in 0..50 {
+        let rest = TiledOptions {
+            max_jobs: 1,
+            ..TiledOptions::default()
+        };
+        let (px, s) = e.render_cpu_tiled(W, H, c, BG, rest).expect("b");
+        if s.exact {
+            assert!(diff(px, &fresh(&b, 2, 0, c)).is_none());
+            exact = true;
+            break;
+        }
+    }
+    assert!(exact);
 }
 
 #[test]
@@ -780,6 +796,11 @@ fn a_record_sent_again_unchanged_changes_nothing_and_keeps_the_drag() {
     let mut model = Model::new(&mut r, 12, false);
     let mut e = engine(0, 64);
     e.apply(&model.fresh(1)).expect("fresh");
+    // The page drawn once at rest, as the editor would have, before the drag.
+    let at_rest = e
+        .render_cpu_tiled(W, H, cam(1.0, 0.0, 0.0), BG, TiledOptions::default())
+        .expect("frame");
+    assert!(at_rest.1.exact);
     let top = model.children[&0][0];
     let other = *model.children[&0].last().expect("two");
     let patch = drag_patch(&mut model, &[top], 5.0, 3.0, 1);
@@ -813,20 +834,23 @@ fn a_record_sent_again_unchanged_changes_nothing_and_keeps_the_drag() {
     w.set(other, p, &changed);
     e.apply(&w.finish()).expect("change");
     assert_eq!(e.dragging.as_ref().map(|d| d.serial), serial);
+    // One more move, then a frame free to draw every tile but those under the moving
+    // selection (which the drag composites from its parts): if the edit hadn't redrawn the parts
+    // where it changed them, the composite would show it as it was.
     let c = cam(1.0, 0.0, 0.0);
+    e.apply(&drag_patch(&mut model, &[top], 3.0, 2.0, 5)).expect("move");
     let moving = TiledOptions {
         moving: true,
-        max_jobs: 0,
         ..TiledOptions::default()
     };
     let (px, _) = e.render_cpu_tiled(W, H, c, BG, moving).expect("frame");
-    let (worst, _) = spread(px, &fresh(&model, 5, 0, c));
+    let (worst, _) = spread(px, &fresh(&model, 6, 0, c));
     assert!(worst <= 4, "the drag's parts went stale: {worst} levels off");
     // A change to the selection itself ends it.
     let (sp, mut srec) = model.nodes[&top].clone();
     srec.opacity = 0.4;
     model.nodes.insert(top, (sp, srec.clone()));
-    let mut w = W::new(5, 6);
+    let mut w = W::new(6, 7);
     w.set(top, sp, &srec);
     e.apply(&w.finish()).expect("change the selection");
     assert!(e.dragging.is_none());
@@ -936,4 +960,132 @@ fn a_dragged_layer_passes_under_what_is_painted_after_its_board() {
             "the layer was drawn over what's painted after its board: {worst} levels off"
         );
     }
+}
+
+#[test]
+fn a_provisional_record_is_drawn_coarse_and_never_exact() {
+    // Text sent ahead of its shaping (a page opening): its coarse ops at every scale, a stand-in
+    // until the whole record replaces it.
+    let mut r = Rng(0x7e47);
+    let mut model = Model::new(&mut r, 4, false);
+    let mut rec = Rec::new([1.0, 0.0, 0.0, 1.0, 20.0, 20.0], [80.0, 30.0]);
+    rec.paths.push(Entry::Rect {
+        w: 80.0,
+        h: 30.0,
+        radii: [0.0; 4],
+    });
+    rec.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.1, 0.1, 0.8, 1.0]),
+    });
+    rec.paths.push(Entry::Rect {
+        w: 80.0,
+        h: 12.0,
+        radii: [0.0; 4],
+    });
+    rec.coarse.push(Op::Fill {
+        path: 1,
+        even_odd: false,
+        paint: Paint::Solid([0.2, 0.2, 0.2, 0.55]),
+    });
+    rec.coarse_below = 0.01;
+    let mut provisional = rec.clone();
+    provisional.flags |= 8;
+    let id = model.next;
+    model.next += 1;
+    model.nodes.insert(id, (0, provisional));
+    model.children.entry(0).or_default().push(id);
+    let mut e = engine(0, 64);
+    e.apply(&model.fresh(1)).expect("fresh");
+    let c = cam(1.0, 0.0, 0.0);
+    let (_, s) = e.render_cpu_tiled(W, H, c, BG, TiledOptions::default()).expect("frame");
+    assert!(
+        !s.exact && s.draw.coarse > 0,
+        "a provisional record is a stand-in: {s:?}"
+    );
+    // The whole record arrives.
+    model.nodes.insert(id, (0, rec.clone()));
+    let mut w = W::new(1, 2);
+    w.set(id, 0, &rec);
+    e.apply(&w.finish()).expect("whole");
+    let (px, s) = e.render_cpu_tiled(W, H, c, BG, TiledOptions::default()).expect("frame");
+    assert!(s.exact);
+    assert!(diff(px, &fresh(&model, 2, 0, c)).is_none());
+}
+
+#[test]
+fn an_edit_above_a_dragged_layer_redraws_the_drags_parts() {
+    // A layer dragged under a translucent shape painted after it; the shape changes colour
+    // mid-drag. The part above the selection, kept for the drag, must be drawn again there.
+    let mut model = Model {
+        nodes: std::collections::BTreeMap::new(),
+        children: std::collections::HashMap::new(),
+        next: 4,
+        readers: false,
+    };
+    let rect = |t: [f64; 6], w: f32, h: f32, color: [f32; 4]| {
+        let mut r = Rec::new(t, [w, h]);
+        r.paths.push(Entry::Rect { w, h, radii: [0.0; 4] });
+        r.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid(color),
+        });
+        r
+    };
+    model.nodes.insert(
+        1,
+        (
+            0,
+            rect([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 160.0, 120.0, [1.0, 1.0, 1.0, 1.0]),
+        ),
+    );
+    model.nodes.insert(
+        2,
+        (
+            0,
+            rect([1.0, 0.0, 0.0, 1.0, 30.0, 30.0], 40.0, 30.0, [0.1, 0.5, 0.9, 1.0]),
+        ),
+    );
+    model.nodes.insert(
+        3,
+        (
+            0,
+            rect([1.0, 0.0, 0.0, 1.0, 10.0, 10.0], 140.0, 100.0, [0.9, 0.2, 0.1, 0.5]),
+        ),
+    );
+    model.children.insert(0, vec![1, 2, 3]);
+    let mut e = engine(0, 64);
+    e.apply(&model.fresh(1)).expect("fresh");
+    let c = cam(1.0, 0.0, 0.0);
+    assert!(
+        e.render_cpu_tiled(W, H, c, BG, TiledOptions::default())
+            .expect("rest")
+            .1
+            .exact
+    );
+    let moving = TiledOptions {
+        moving: true,
+        ..TiledOptions::default()
+    };
+    e.apply(&drag_patch(&mut model, &[2], 7.0, 4.0, 1)).expect("move");
+    let _ = e.render_cpu_tiled(W, H, c, BG, moving).expect("drag frame");
+    // The shape above changes colour.
+    let (_, mut over) = model.nodes[&3].clone();
+    over.ops[0] = Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.1, 0.8, 0.2, 0.5]),
+    };
+    model.nodes.insert(3, (0, over.clone()));
+    let mut w = W::new(2, 3);
+    w.set(3, 0, &over);
+    e.apply(&w.finish()).expect("recolour");
+    assert!(e.dragging.is_some(), "an edit beside the drag keeps it");
+    e.apply(&drag_patch(&mut model, &[2], 7.0, 4.0, 3)).expect("move");
+    let (px, s) = e.render_cpu_tiled(W, H, c, BG, moving).expect("drag frame");
+    assert!(s.dragged > 0, "{s:?}");
+    let (worst, _) = spread(px, &fresh(&model, 4, 0, c));
+    assert!(worst <= 4, "the part above the drag went stale: {worst} levels off");
 }

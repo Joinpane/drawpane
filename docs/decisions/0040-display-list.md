@@ -1,6 +1,6 @@
 # The display list (decision 0040)
 
-The wire format between TypeScript and the render engine, version 1.0. TypeScript writes it (`packages/engine/src/wire.ts`, built by `packages/editor/src/engine/display-list.ts`); the engine reads it (`packages/engine/rust/src/wire.rs`, `record.rs`, `store.rs`). The two must agree number for number.
+The wire format between TypeScript and the render engine, version 1.1. TypeScript writes it (`packages/engine/src/wire.ts`, built by `packages/editor/src/engine/display-list.ts`); the engine reads it (`packages/engine/rust/src/wire.rs`, `record.rs`, `store.rs`). The two must agree number for number.
 
 ## Messages
 
@@ -9,7 +9,7 @@ A message is one `ArrayBuffer` of little-endian words: integers `u32`, coordinat
 | Field | Type | |
 | --- | --- | --- |
 | magic | u32 | `"DPDL"` |
-| major, minor | u16, u16 | 1, 0. The engine refuses another major, or a minor above its own. |
+| major, minor | u16, u16 | 1, 1. The engine refuses another major, or a minor above its own. (1.1 added the provisional flag.) |
 | base | u32 | The revision the message applies to, or `0xFFFFFFFF` for a fresh list (which must start with a reset). |
 | revision | u32 | The revision it makes: `base + 1` for a patch; for a fresh list, any revision later than the one the engine holds. Never `0xFFFFFFFF`. |
 | count | u32 | Commands that follow. |
@@ -39,7 +39,7 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 
 | Field | Type | |
 | --- | --- | --- |
-| flags | u32 | 1 hidden, 2 isolate (fades as one: an opacity group), 4 group (no paint of its own; its ops are only `children`) |
+| flags | u32 | 1 hidden, 2 isolate (fades as one: an opacity group), 4 group (no paint of its own; its ops are only `children`), 8 provisional (sent ahead of its real drawing, as text not yet shaped while a page opens: drawn as its coarse ops at every scale, never exact, and sent again whole soon after) |
 | opacity | f32 | Its own; inherited opacity multiplies down unless it isolates. |
 | transform | f64 × 6 | Its units to its parent record's (`a b c d e f`), not to the page: moving a board is one command. |
 | width, height | f32 × 2 | Its box, for the speck rule (layers under half a device pixel both ways are skipped on screen). |

@@ -797,3 +797,15 @@ The engine follows drags from the messages themselves: no editor API. The editor
   - From the phase 2 review (`rust/tests/tile_regressions.rs`): 2,048 moves far off screen leave nothing recorded with no slot drawn; a 34,000 px selection (over more than 4,096 tiles) dragged into a view with nothing to stand in keeps the view drawn; a board fading mid-drag ends the fast path. From the re-check: a selection moved out of a tile no tile was kept for is erased from it by a frame with no budget for optional tiles.
   - The builder sends a move alone, in plain and compact-copy documents (`packages/editor/test/engine-tiles.test.ts`).
   - On the GPU (`apps/web/e2e/engine.spec.ts`): composited while moving, exact once dropped, into another board too. The 34,000 px drag on the GPU under a spent budget, and the selection erased where only the last frame showed it (`apps/web/e2e/engine-tiles-gpu.spec.ts`).
+
+### Opening a page (phase 2, part 3)
+
+- **A page just shown starts coarse.** The first frame after a fresh list (a page opened or switched to) has nothing to stand on. Under a frame budget it draws ladder tiles of a level about four times coarser than the view, with level of detail on (text as bars, specks skipped): a few tiles, most of a large page specks at that scale. They're a stand-in. The exact tiles then follow a few a frame. Asked for with no budget (`renderGpu(…, false, 0)`), the first frame is exact at once, as before.
+- **Text is sent provisional first.** The fresh list made when a page is shown (`DisplayListBuilder.build(…, { deferText: true })`) doesn't shape its text. Each text record carries only its coarse bars, flagged provisional:
+  - display list 1.1 adds flag 8: drawn as its coarse ops at every scale, and never exact;
+  - the builder's next updates send the text whole, 10 ms' worth a frame (`pending` says how much is left);
+  - the editor keeps drawing while any is left.
+
+  On the scale corpus's largest page, 13,941 of its 40,401 records are text. Text whose faces are still loading has no outlines, and phase 1 refuses a page holding any of it (`textWithoutOutlines`), so the first frame fell to the canvas renderer. Provisional bars need neither shaping nor outlines.
+- **A tile is exact only if nothing stood in for any of its records:** no level of detail, no provisional record. Before, a tile drawn without level of detail counted as exact whatever it held.
+- **The scale bench.** It runs the engine (`BENCH_RENDERER=engine|both`) and can strip effects (`BENCH_NO_EFFECTS=1`): the generated kit's screens carry drop shadows, which the engine draws only from phase 3, so with them its largest page falls back whole.

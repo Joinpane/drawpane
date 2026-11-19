@@ -69,6 +69,11 @@ export interface LayerContext {
   readonly whole: string | null;
   /** Layers hidden while dragged into place. */
   readonly hidden: ReadonlySet<string>;
+  /**
+   * Text isn't shaped: it's sent as its coarse bars, flagged provisional, and encoded whole
+   * later (a page opening shows its first frame sooner; decision 0040, phase 2).
+   */
+  readonly deferText?: boolean;
 }
 
 export interface EncodedLayer {
@@ -77,6 +82,8 @@ export interface EncodedLayer {
   readonly images: readonly string[];
   /** Text it couldn't outline yet (a face still loading): encoded again when shaping can. */
   readonly textPending: boolean;
+  /** Sent provisional (`LayerContext.deferText`): to be encoded whole. */
+  readonly deferred: boolean;
 }
 
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
@@ -126,6 +133,8 @@ class Builder {
   readonly images: string[] = [];
   unsupported = 0;
   textPending = false;
+  /** Sent ahead of its real drawing (`LayerContext.deferText`). */
+  provisional = false;
   path(entry: PathEntry): number {
     this.paths.push(entry);
     return this.paths.length - 1;
@@ -610,7 +619,9 @@ function text(
   height: number,
   ctx: LayerContext,
 ): void {
-  const runs = textRuns(b, node, width, ctx);
+  // Deferred: its coarse bars only, for now (below), never its glyphs.
+  const runs = ctx.deferText ? { runs: [], bars: [] } : textRuns(b, node, width, ctx);
+  if (ctx.deferText) b.provisional = true;
   if (!runs) {
     b.unsupported |= UNSUPPORTED.textWithoutOutlines;
     return;
@@ -752,7 +763,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   const size = node.type === "text" ? largestFontSize(node) : 0;
   return {
     record: {
-      flags,
+      flags: flags | (b.provisional ? FLAG.provisional : 0),
       opacity,
       transform: localTransform(node),
       width: w,
@@ -766,5 +777,6 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     },
     images: b.images,
     textPending: b.textPending,
+    deferred: b.provisional,
   };
 }

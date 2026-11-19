@@ -21,6 +21,14 @@
  * presents the copies. Without it, as a room storing them materialized
  * sends it. The table says how much the file stores.
  *
+ * BENCH_RENDERER=engine draws with the render engine (decision 0040; BENCH_ENGINE_PRESENT=readback
+ * where WebGPU canvases don't present): the first frame of the largest page is then also broken
+ * down (the display list built and applied, the frame drawn), with who drew it.
+ *
+ * BENCH_NO_EFFECTS=1 strips every layer's effects before loading (the kit's screens carry drop
+ * shadows, which the engine draws only from phase 3: without them its largest page is one the
+ * engine draws, for its open time).
+ *
  * Prints a table and attaches the numbers as JSON. Budgets aren't enforced
  * here: this VM draws without a GPU, so compare runs on one machine
  * (see the bench notes) and hold the targets on hardware like the PRD's.
@@ -33,6 +41,13 @@ import { freshInstance, type Instance } from "../fresh-instance";
 import { pan, type Summary, summaryRow, zoom } from "./frames";
 
 const SIZES = (process.env.BENCH_SCALE ?? "100000").split(",").map(Number);
+const RENDERERS: Array<"canvas" | "engine"> =
+  process.env.BENCH_RENDERER === "both"
+    ? ["canvas", "engine"]
+    : process.env.BENCH_RENDERER === "engine"
+      ? ["engine"]
+      : ["canvas"];
+const NO_EFFECTS = process.env.BENCH_NO_EFFECTS === "1";
 const COMPACT = process.env.BENCH_COMPACT === "1";
 /** Nodes per request when the page fetches the generated file. */
 const CHUNK = 20_000;
@@ -42,6 +57,8 @@ interface Result {
   bytes: number;
   copies: number;
   load: { resetMs: number; firstFrameMs: number; exactMs: number };
+  /** The engine's first frame of the largest page: building and applying the list, drawing. */
+  engine?: Record<string, unknown>;
   heapMb: number;
   canvas: Record<string, Summary>;
   editMain: { ms: number; commitMs: number; copies: number };
@@ -97,7 +114,10 @@ async function stored(page: Page): Promise<{ nodes: number; bytes: number }> {
 }
 
 /** Shows `pageId`, whole: how long until its first frame was drawn, and until it was exact. */
-async function firstFrame(page: Page, pageId: string): Promise<{ first: number; exact: number }> {
+async function firstFrame(
+  page: Page,
+  pageId: string,
+): Promise<{ first: number; exact: number; engine: Record<string, unknown> | null }> {
   return page.evaluate(async (pageId) => {
     const w = window as unknown as {
       drawpane: { setPage(id: string): void; zoomToFit(): void };
@@ -111,8 +131,34 @@ async function firstFrame(page: Page, pageId: string): Promise<{ first: number; 
     await frame();
     await frame();
     const first = performance.now() - t;
+    const v = (
+      window as unknown as {
+        drawpaneEngineView?: {
+          last: { ms: number; patchMs: number; plan: string; tiles: object; supported: boolean };
+          engine: { records: number; gpu: { adapter: string } | null };
+          builder: { stats: object };
+          opened: object | null;
+          unsupported(): Record<string, number>;
+        };
+      }
+    ).drawpaneEngineView;
+    const engine = v
+      ? {
+          supported: v.last.supported,
+          records: v.engine.records,
+          adapter: v.engine.gpu?.adapter ?? null,
+          firstFrame: {
+            ms: v.last.ms,
+            patchMs: v.last.patchMs,
+            plan: v.last.plan,
+            tiles: v.last.tiles,
+          },
+          opened: v.opened,
+          ...(v.last.supported ? {} : { unsupported: v.unsupported() }),
+        }
+      : null;
     while (!w.drawpaneFrames.exact) await frame();
-    return { first, exact: performance.now() - t };
+    return { first, exact: performance.now() - t, engine };
   }, pageId);
 }
 
@@ -170,7 +216,14 @@ test.describe("Scale", () => {
       test.setTimeout(1_800_000);
       const kit = generateKit({ layers });
       // What the room stores and sends: compact, converted as the room converts it.
-      const sent = COMPACT ? compactByInstance(kit.nodes).nodes : kit.nodes;
+      const nodes = NO_EFFECTS
+        ? kit.nodes.map((n) => {
+            if (!("effects" in n.props)) return n;
+            const { effects: _effects, ...props } = n.props as Record<string, unknown>;
+            return { ...n, props } as NodeRecord;
+          })
+        : kit.nodes;
+      const sent = COMPACT ? compactByInstance(nodes).nodes : nodes;
       const chunks: string[] = [];
       for (let i = 0; i < sent.length; i += CHUNK)
         chunks.push(JSON.stringify(sent.slice(i, i + CHUNK)));
@@ -184,63 +237,80 @@ test.describe("Scale", () => {
       const cdp = await page.context().newCDPSession(page);
       await cdp.send("Performance.enable");
 
-      await page.goto("/");
-      await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
-      await page.getByRole("button", { name: "New file" }).first().click();
-      await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
-        timeout: 30_000,
-      });
-      const before = await heapMb(cdp);
-      const resetMs = await load(page, chunks.length, COMPACT);
-      chunks.length = 0;
-      const storedNow = await stored(page);
-      const shown = await firstFrame(page, largestPage(kit.nodes));
-      // Let fonts and the first full paint settle.
-      await page.waitForTimeout(1500);
-      const heap = (await heapMb(cdp)) - before;
-
-      const canvas: Record<string, Summary> = {};
-      for (const level of ["fit", 0.25, 1] as const)
-        canvas[level === "fit" ? "pan, whole" : `pan, ${level * 100}%`] = await pan(
-          page,
-          level,
-          120,
+      for (const renderer of RENDERERS) {
+        const engine = renderer === "engine";
+        await page.goto("/");
+        await page.evaluate(
+          ({ engine, present }) => {
+            localStorage.setItem("drawpane:debug", "1");
+            localStorage.setItem("drawpane:renderer", engine ? "engine" : "canvas");
+            localStorage.setItem("drawpane:engine-present", present);
+          },
+          {
+            engine,
+            present: process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu",
+          },
         );
-      canvas["zoom, whole"] = await zoom(page, 120);
-      const busiest = kit.busiestMains[0] as { id: string; copies: number };
-      const edit = await editMain(page, busiest.id);
+        await page.reload();
+        await page.getByRole("button", { name: "New file" }).first().click();
+        await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+          timeout: 30_000,
+        });
+        const before = await heapMb(cdp);
+        const resetMs = await load(page, chunks.length, COMPACT);
+        const storedNow = await stored(page);
+        const shown = await firstFrame(page, largestPage(kit.nodes));
+        // Let fonts and the first full paint settle.
+        await page.waitForTimeout(1500);
+        const heap = (await heapMb(cdp)) - before;
 
-      const result: Result = {
-        layers: kit.stats.layers,
-        bytes: kit.stats.bytes,
-        copies: kit.stats.instances,
-        load: {
-          resetMs: Math.round(resetMs),
-          firstFrameMs: Math.round(shown.first),
-          exactMs: Math.round(shown.exact),
-        },
-        heapMb: heap,
-        canvas,
-        editMain: {
-          ms: Math.round(edit.drawnMs),
-          commitMs: Math.round(edit.commitMs),
-          copies: busiest.copies,
-        },
-        compact: COMPACT,
-        stored: storedNow,
-      };
-      console.log(
-        [
-          `\nScale: ${result.layers.toLocaleString("en")} layers, ${(result.bytes / 1048576).toFixed(0)} MB of nodes, ${result.copies.toLocaleString("en")} copies${COMPACT ? ", compact copies" : ""}`,
-          `stored      ${result.stored.nodes.toLocaleString("en")} nodes, ${(result.stored.bytes / 1048576).toFixed(0)} MB`,
-          `load        reset ${result.load.resetMs} ms · first frame of the largest page ${result.load.firstFrameMs} ms, exact after ${result.load.exactMs} ms`,
-          `memory      ${result.heapMb} MB of JS heap for the file`,
-          ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),
-          `edit main   ${result.editMain.ms} ms to change a fill on a main with ${result.editMain.copies.toLocaleString("en")} copies, drawn (the commit ${result.editMain.commitMs} ms)`,
-          "",
-        ].join("\n"),
-      );
-      test.info().annotations.push({ type: "bench", description: JSON.stringify(result) });
+        const canvas: Record<string, Summary> = {};
+        for (const level of ["fit", 0.25, 1] as const)
+          canvas[level === "fit" ? "pan, whole" : `pan, ${level * 100}%`] = await pan(
+            page,
+            level,
+            120,
+          );
+        canvas["zoom, whole"] = await zoom(page, 120);
+        const busiest = kit.busiestMains[0] as { id: string; copies: number };
+        const edit = await editMain(page, busiest.id);
+
+        const result: Result = {
+          layers: kit.stats.layers,
+          bytes: kit.stats.bytes,
+          copies: kit.stats.instances,
+          load: {
+            resetMs: Math.round(resetMs),
+            firstFrameMs: Math.round(shown.first),
+            exactMs: Math.round(shown.exact),
+          },
+          ...(shown.engine ? { engine: shown.engine } : {}),
+          heapMb: heap,
+          canvas,
+          editMain: {
+            ms: Math.round(edit.drawnMs),
+            commitMs: Math.round(edit.commitMs),
+            copies: busiest.copies,
+          },
+          compact: COMPACT,
+          stored: storedNow,
+        };
+        console.log(
+          [
+            `\nScale: ${result.layers.toLocaleString("en")} layers, ${(result.bytes / 1048576).toFixed(0)} MB of nodes, ${result.copies.toLocaleString("en")} copies${COMPACT ? ", compact copies" : ""}${NO_EFFECTS ? ", effects stripped" : ""}, ${renderer}`,
+            `stored      ${result.stored.nodes.toLocaleString("en")} nodes, ${(result.stored.bytes / 1048576).toFixed(0)} MB`,
+            `load        reset ${result.load.resetMs} ms · first frame of the largest page ${result.load.firstFrameMs} ms, exact after ${result.load.exactMs} ms${result.engine ? ` · engine ${JSON.stringify(result.engine)}` : ""}`,
+            `memory      ${result.heapMb} MB of JS heap for the file`,
+            ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),
+            `edit main   ${result.editMain.ms} ms to change a fill on a main with ${result.editMain.copies.toLocaleString("en")} copies, drawn (the commit ${result.editMain.commitMs} ms)`,
+            "",
+          ].join("\n"),
+        );
+        test.info().annotations.push({
+          type: "bench",
+          description: JSON.stringify({ renderer, ...result }),
+        });
+      }
       await page.unroute("**/__corpus/*");
     });
 });

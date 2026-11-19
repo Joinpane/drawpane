@@ -188,7 +188,7 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
         "bandRows",
       ])
         expect(typeof proto[name], name).toBe("function");
-      expect(Array.from(m.glue.listVersion())).toEqual([1, 0]);
+      expect(Array.from(m.glue.listVersion())).toEqual([1, 1]);
       expect(typeof m.glue.__drawpaneRenew).toBe("function");
     }
     expect(browser.glue.hasGpu()).toBe(true);

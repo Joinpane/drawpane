@@ -783,7 +783,7 @@ impl Engine {
                     let from = ((y + h) * side + h) * 4;
                     out.extend_from_slice(&target[from..from + t * 4]);
                 }
-                tiles.cache.drawn(job.key, slot, !job.detail || fs.draw.exact());
+                tiles.cache.drawn(job.key, slot, fs.draw.exact());
             }
             let (pending, _) = tiles.cache.left(&plan);
             stats.pending = pending;
@@ -809,10 +809,13 @@ impl Engine {
         tiles.cache.begin(background, halo);
         let scale = view.as_coeffs()[0];
         let zooming = options.moving && tiles.last_scale.is_some_and(|s| s != scale);
+        // A page just shown: under a budget, coarse tiles first (see `Gpu::render`).
+        let opening = tiles.last.is_none() && tiles.cache.is_empty() && options.max_jobs != usize::MAX;
         let last = tiles.last;
+        tiles.cache.opening = opening;
         let mut plan = tiles
             .cache
-            .plan(view, (width, height), zooming, last, options.prefetch)
+            .plan(view, (width, height), zooming || opening, last, options.prefetch)
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
         let mut stats = TiledStats {
             direct: plan.direct,
@@ -876,7 +879,8 @@ impl Engine {
             };
             stats.draw.add(&fs.draw);
             stats.tiles_drawn += 1;
-            let exact = !job.detail || fs.draw.exact();
+            // Exact only if nothing stood in: no level of detail, no provisional record.
+            let exact = fs.draw.exact();
             let s = slot as usize;
             if tiles.slots.len() <= s {
                 tiles.slots.resize_with(s + 1, Vec::new);
@@ -961,7 +965,7 @@ impl Engine {
             let fs = self.cpu_draw_tile(job.view, tile, halo, job.detail, background)?;
             stats.draw.add(&fs.draw);
             stats.tiles_drawn += 1;
-            exact_direct &= !job.detail || fs.draw.exact();
+            exact_direct &= fs.draw.exact();
             take(self.cpu.target.data_as_u8_slice(), &mut scratch);
             let fx = i64::from(job.key.i) * i64::from(tile) + plan.origin.0;
             let fy = i64::from(job.key.j) * i64::from(tile) + plan.origin.1;
