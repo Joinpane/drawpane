@@ -594,6 +594,8 @@ export class InstanceConverter {
     };
 
     const slotOf = new Map<string, { id: string; path: readonly string[] }>();
+    // Layers kept as the copy at their place, their reference that copy's (see `walk`).
+    const repointed = new Map<string, NodeRecord>();
     const walk = (dParent: string, presented: string): string | null => {
       const dKids = children.get(dParent) ?? [];
       const kids = view.childIds(presented);
@@ -605,13 +607,41 @@ export class InstanceConverter {
         if (!slot) return `${id} isn't a copy`;
         bySource.set(slot.source, id);
       }
-      for (const node of dKids) {
+      // A layer whose reference matches no copy here (one copying a main its instance no longer
+      // follows, or one since deleted) is the copy of its type at its place, which is where its
+      // main has the layer it was made from: kept as that copy, its values its own, rather than
+      // its instance unlinked from its component.
+      const unmatched = dKids.filter((node) => {
         const mirrors = node.props.mirrors;
+        return typeof mirrors === "string" && !bySource.has(rename(mirrors) ?? mirrors);
+      });
+      const byPlace = new Map<string, string>();
+      if (unmatched.length > 0) {
+        const claimed = new Set(
+          dKids.map((n) => rename(n.props.mirrors as string) ?? n.props.mirrors).filter(Boolean),
+        );
+        for (const [source, id] of bySource)
+          if (!claimed.has(source)) {
+            const base = view.base(id);
+            const slot = view.slot(id);
+            if (base && slot) byPlace.set(`${base.type}\u0000${slot.key}`, source);
+          }
+      }
+      for (const stored of dKids) {
+        const mirrors = stored.props.mirrors;
         // (Matched by what they copy; their order is checked below.)
-        if (!mirrors) return `${node.id} copies nothing`;
-        const source = rename(mirrors) ?? mirrors;
-        const slotId = bySource.get(source);
-        if (!slotId) return `no copy of ${mirrors} under ${presented}`;
+        if (!mirrors) return `${stored.id} copies nothing`;
+        let source = rename(mirrors) ?? mirrors;
+        let node = stored;
+        if (!bySource.has(source)) {
+          const placed = byPlace.get(`${stored.type}\u0000${stored.key}`);
+          if (!placed) return `no copy of ${mirrors} under ${presented}`;
+          byPlace.delete(`${stored.type}\u0000${stored.key}`);
+          source = placed;
+          node = { ...stored, props: { ...stored.props, mirrors: placed } as Props };
+          repointed.set(stored.id, node);
+        }
+        const slotId = bySource.get(source) as string;
         bySource.delete(source);
         const slot = view.slot(slotId);
         const slotBase = view.base(slotId);
@@ -648,7 +678,8 @@ export class InstanceConverter {
     // Ids the layers hold, renamed now that every copy's id is known.
     const held = (node: NodeRecord) => renameHeldIds(node.props, rename) ?? node.props;
     if (holdsIds(root.props)) putRoot(held(root));
-    for (const node of layers) {
+    for (const layer of layers) {
+      const node = repointed.get(layer.id) ?? layer;
       if (!holdsIds(node.props)) continue;
       const slot = slotOf.get(node.id) as { id: string; path: readonly string[] };
       const slotBase = view.base(slot.id);
@@ -669,7 +700,8 @@ export class InstanceConverter {
       for (const child of view.childIds(id)) stack.push(child);
     }
     if (count !== layers.length) return `${count} layers built, ${layers.length} stored`;
-    for (const node of layers) {
+    for (const layer of layers) {
+      const node = repointed.get(layer.id) ?? layer;
       const id = ids.get(node.id) as string;
       const built = view.get(id);
       if (!built) return `${node.id} isn't built`;
