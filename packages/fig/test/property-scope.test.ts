@@ -311,3 +311,121 @@ for (const form of FORMS)
       ]);
     });
   });
+
+/**
+ * Review 9 of #187 (R9-B1): Outer and Leaf are mains in one component set;
+ * Outer holds an exposed instance of Leaf. Their "label" definitions are
+ * each main's own (`shared` false), or one definition on the set both use
+ * (`shared` true). Either way the nested Leaf is another occurrence of the
+ * property: the outer instance's edit doesn't reach it.
+ */
+function sameSet(shared: boolean): NodeRecord[] {
+  const own = (name: string) =>
+    shared ? {} : { componentProps: [{ id: "label", name, type: "text" }] };
+  const nodes = [
+    node("p", "page", ROOT_ID, "a0", {}),
+    node("set", "frame", "p", "a0", {
+      isComponentSet: true,
+      ...(shared ? { componentProps: [{ id: "label", name: "Label", type: "text" }] } : {}),
+    }),
+    node("leaf", "frame", "set", "a0", {
+      isComponent: true,
+      variantProps: { State: "Leaf" },
+      width: 100,
+      height: 30,
+      ...own("Leaf label"),
+    }),
+    node("lt", "text", "leaf", "a0", {
+      name: "Leaf text",
+      characters: "Leaf base",
+      propRefs: { characters: "label" },
+    }),
+    node("a", "frame", "set", "a1", {
+      isComponent: true,
+      variantProps: { State: "Outer" },
+      width: 100,
+      height: 60,
+      ...own("Outer label"),
+    }),
+    node("at", "text", "a", "a0", {
+      name: "Outer text",
+      characters: "Outer base",
+      propRefs: { characters: "label" },
+    }),
+    node("na", "frame", "a", "a1", {
+      name: "Nested",
+      instanceOf: "leaf",
+      width: 100,
+      height: 30,
+      exposeProps: true,
+    }),
+    node("nat", "text", "na", "a0", {
+      mirrors: "lt",
+      name: "Leaf text",
+      characters: "Leaf base",
+      propRefs: { characters: "label" },
+    }),
+    node("i", "frame", "p", "a2", { instanceOf: "a", width: 100, height: 60 }),
+    node("it", "text", "i", "a0", {
+      mirrors: "at",
+      name: "Outer text",
+      characters: "Outer base",
+      propRefs: { characters: "label" },
+    }),
+    node("ni", "frame", "i", "a1", {
+      mirrors: "na",
+      name: "Nested",
+      instanceOf: "leaf",
+      width: 100,
+      height: 30,
+      exposeProps: true,
+    }),
+    node("nit", "text", "ni", "a0", {
+      mirrors: "nat",
+      name: "Leaf text",
+      characters: "Leaf base",
+      propRefs: { characters: "label" },
+    }),
+  ];
+  for (const n of nodes) NodeRecordSchema.parse(n);
+  return nodes;
+}
+
+for (const shared of [false, true])
+  for (const form of FORMS)
+    describe(`a nested main from the same set is another occurrence (${form}, ${shared ? "a definition on the set" : "each main's own"})`, () => {
+      it("keeps the nested instance's accepted value when the outer one's is set (R9-B1)", () => {
+        const room = new Room(sameSet(shared), form);
+        const a = room.join("a");
+        room.join("b");
+        const doc = a.editor.doc;
+        const nested = named(doc, "i", "Nested");
+        expect(instanceProperties(doc, "i")?.rows.find((r) => r.id === "label")?.targets).toEqual([
+          named(doc, "i", "Outer text"),
+        ]);
+        a.editor.setInstanceProperty(nested, "label", "Nested accepted");
+        room.settle();
+        a.editor.setInstanceProperty("i", "label", "Outer accepted");
+        room.settle();
+        expect(room.rejected).toEqual([]);
+        const leafText = (d: Doc) => named(d, named(d, "i", "Nested"), "Leaf text");
+        expect(textsEverywhere(room, leafText)).toEqual([
+          "Nested accepted",
+          "Nested accepted",
+          "Nested accepted",
+        ]);
+        expect(textsEverywhere(room, (d) => named(d, "i", "Outer text"))).toEqual([
+          "Outer accepted",
+          "Outer accepted",
+          "Outer accepted",
+        ]);
+        // A reset of the outer one leaves the nested one's too.
+        a.editor.resetInstanceProperty("i", "label");
+        room.settle();
+        expect(textsEverywhere(room, leafText)).toEqual([
+          "Nested accepted",
+          "Nested accepted",
+          "Nested accepted",
+        ]);
+      });
+    });

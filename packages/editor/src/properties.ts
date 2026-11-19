@@ -99,17 +99,17 @@ export function referenceOwner(doc: Doc, id: string): string | undefined {
 
 /**
  * The layers under `rootId` (at any depth) that reference each of the
- * properties of `mainId` (or its set), by field. Property ids are unique
- * only within one component's definitions, so a reference counts only when
- * it belongs to that component (`referenceOwner`): a nested instance's
- * layers reference its own component's properties, reached through it,
- * unless the outer main bound them to one of its own.
+ * properties of `mainId`, by field. Property ids are unique only within one
+ * component's definitions, so a reference counts only when it was set in
+ * `mainId` itself (`referenceOwner`): the instance's own layers, and a
+ * layer inside a nested instance that `mainId` bound to one of its own
+ * properties. A nested instance's layers reference its own component's
+ * properties, reached through it: another main of the same set too, whose
+ * properties (a definition on the set they share included) are another
+ * occurrence (review 9 of #187, R9-B1). Which definitions there are is the
+ * set's and the main's (`definitionsOf`); this is only where they apply.
  */
 function referencesUnder(doc: Doc, rootId: string, mainId: string): Map<string, string[]> {
-  const set = componentSetOf(doc, mainId)?.id;
-  const ours = (owner: string | undefined) =>
-    owner !== undefined &&
-    (owner === mainId || (set !== undefined && componentSetOf(doc, owner)?.id === set));
   const out = new Map<string, string[]>();
   const stack = [...doc.childIds(rootId)].reverse();
   while (stack.length > 0) {
@@ -117,7 +117,7 @@ function referencesUnder(doc: Doc, rootId: string, mainId: string): Map<string, 
     const node = doc.get(id);
     if (!node) continue;
     const refs = Object.entries(getProp(node.props, "propRefs")).filter(([, p]) => !!p);
-    if (refs.length > 0 && ours(referenceOwner(doc, id)))
+    if (refs.length > 0 && referenceOwner(doc, id) === mainId)
       for (const [field, propertyId] of refs) {
         const key = `${propertyId}\u0000${field}`;
         const list = out.get(key);
