@@ -192,6 +192,8 @@ pub struct Gpu {
     last_scale: Option<f64>,
     /// The engine's generation and background the frame shown was made at, and whether it's exact.
     shown: Option<(u64, [u32; 4], bool)>,
+    /// Milliseconds a tile has lately taken to draw (a running average).
+    tile_ms: f64,
     blit: Option<wgpu::RenderPipeline>,
     images: HashMap<u32, Vec<(TextureId, wgpu::Texture, u32, u32)>>,
     image_bytes: usize,
@@ -496,6 +498,7 @@ impl Gpu {
             last: None,
             last_scale: None,
             shown: None,
+            tile_ms: 0.0,
             blit,
             images: HashMap::new(),
             image_bytes: 0,
@@ -843,9 +846,19 @@ impl Gpu {
         // Drawn straight into the frame after it's laid: what no slot could be kept for.
         let mut late: Vec<crate::tiles::Job> = Vec::new();
         for job in &plan.jobs {
-            // Past the budget, what something stands in for waits for a later frame; what
-            // nothing stands in for is drawn regardless (the plan puts it first).
-            if !job.must && drew_any && options.budget_ms > 0.0 && now() - t0 >= options.budget_ms {
+            // Within the budget. Past it, what something stands in for waits for a later frame;
+            // what nothing stands in for is drawn regardless (the plan puts it first). At rest a
+            // frame always draws one tile, so it makes progress; while the camera moves each is
+            // drawn only if a tile, at what tiles have lately cost, fits what's left, so a dense
+            // tile never makes a long moving frame.
+            let elapsed = now() - t0;
+            let over = options.budget_ms > 0.0
+                && if options.moving {
+                    elapsed + self.tile_ms > options.budget_ms
+                } else {
+                    drew_any && elapsed >= options.budget_ms
+                };
+            if !job.must && over {
                 stats.queued += 1;
                 continue;
             }
@@ -868,6 +881,9 @@ impl Gpu {
             };
             let exact = self.draw_job(store, job, background, target, &plan, dst, &mut stats, &mut verbs)?;
             drew_any = true;
+            // What a tile costs lately (a running average), for moving frames' budget.
+            let took = now() - t0 - elapsed;
+            self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
             match target {
                 TileTarget::Slot(s) => self.tiles.drawn(job.key, s, exact),
                 TileTarget::Scratch | TileTarget::ScratchOnly => direct_exact &= exact,
