@@ -408,8 +408,15 @@ export function ImportDialog({
         <ul className="import-rows" aria-live="polite">
           {rows.length === 0 ? (
             <li className="import-row">
+              <span className="import-row__icon" aria-hidden="true">
+                <Icon name="board" size={16} />
+              </span>
               <span className="import-row__name">Reading the file…</span>
-              <span className="import-bar import-bar--busy" />
+              <span
+                className="import-bar import-bar--busy"
+                role="progressbar"
+                aria-label="Reading the file"
+              />
             </li>
           ) : (
             rows.map((row) => (

@@ -626,6 +626,20 @@ export class LayoutEngine {
   }
 
   /**
+   * How thick a line makes a frame that hugs across. Layers that stretch
+   * across follow the frame, so they don't size it (counting them would hold
+   * it open after what does size it shrinks). But when every layer in the
+   * line stretches, nothing else can: Figma then treats them as their own
+   * size (it won't let a frame hug only layers that fill it), so the line is
+   * as thick as they are, not their minimum. Imported kits have such frames.
+   */
+  #hugLineCross(frame: NodeRecord, line: NodeRecord[], cross: Axis): number {
+    const free = line.length > 0 && line.every((c) => stretches(c, cross, crossAlign(frame, c)));
+    if (!free) return this.#lineCross(frame, line, cross);
+    return line.reduce((m, c) => Math.max(m, this.#get(c.id, cross)), 0);
+  }
+
+  /**
    * Each line's thickness across, once placed. A single unwrapped line spans
    * the frame. Wrapped lines are as thick as their content; a line whose
    * layers all stretch has nothing to size it, so those lines share the
@@ -635,8 +649,9 @@ export class LayoutEngine {
   #thicknesses(frame: NodeRecord, lines: NodeRecord[][], axes: FlexAxes): number[] {
     if (!axes.wraps) return [axes.innerCross];
     const { cross } = axes;
+    if (sizing(frame, cross) === "hug")
+      return lines.map((line) => this.#hugLineCross(frame, line, cross));
     const thickness = lines.map((line) => this.#lineCross(frame, line, cross));
-    if (sizing(frame, cross) === "hug") return thickness;
     const unsized = lines.map((line) =>
       line.every((c) => stretches(c, cross, crossAlign(frame, c))),
     );
@@ -672,10 +687,8 @@ export class LayoutEngine {
       this.#hug(frame, main, total(sizes, axes.gap));
     }
     if (sizing(frame, cross) === "hug") {
-      // Layers that stretch across follow the frame, so they don't size it
-      // (counting them would hold it open after what does size it shrinks).
       const lines = this.#lines(children, axes);
-      const thickness = lines.map((line) => this.#lineCross(frame, line, cross));
+      const thickness = lines.map((line) => this.#hugLineCross(frame, line, cross));
       this.#hug(frame, cross, total(thickness, axes.lineGap));
     }
   }
