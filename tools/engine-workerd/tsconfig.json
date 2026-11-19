@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024"],
+    "types": ["@cloudflare/workers-types", "node"],
+    "allowImportingTsExtensions": true
+  },
+  // As the agent runner's: the editor's modules with the ambient types they're written against.
+  "include": [
+    ".",
+    "../../apps/worker/src/editor-globals.d.ts",
+    "../../apps/worker/src/node-zlib.d.ts"
+  ]
+}

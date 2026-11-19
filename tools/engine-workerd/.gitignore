@@ -1,0 +1,3 @@
+# The capped modules scripts/workerd.mjs writes, and its reports.
+wasm/
+out/

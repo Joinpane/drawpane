@@ -37,6 +37,14 @@
         "@drawpane/web#build"
       ],
       "outputs": ["dist/**", "server/**"]
+    },
+    "@drawpane/engine#build": {
+      "outputs": ["dist/**"],
+      "env": ["ENGINE_SKIP_BUILD", "ENGINE_ONLY"]
+    },
+    "@drawpane/engine#test": {
+      "dependsOn": ["build"],
+      "outputs": []
     }
   }
 }

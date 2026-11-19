@@ -1,0 +1,4 @@
+# Build output (decision 0040): Rust targets and the WebAssembly modules with their glue. Built in
+# CI, never committed.
+rust/target/
+dist/

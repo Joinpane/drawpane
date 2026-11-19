@@ -120,6 +120,9 @@ export function axisSettings(
   return out;
 }
 
+/** Set once HarfBuzz's outline callbacks failed to be made (in a Worker): see `#shape`. */
+let outlinesUnavailable = false;
+
 /** Shaped runs kept, at most: a file's labels repeat, so most frames are all hits. */
 const MAX_RUNS = 5000;
 
@@ -371,14 +374,24 @@ export class Shaper {
       if (!p) continue;
       const id = info.codepoint;
       let outline = paths.get(id);
-      if (!outline) {
-        const d = font.glyphToPath(id);
-        outline = { d, path: d ? this.#makePath(d) : null };
-        paths.set(id, outline);
+      if (!outline && !outlinesUnavailable) {
+        let d = "";
+        try {
+          d = font.glyphToPath(id);
+        } catch {
+          // HarfBuzz's draw callbacks are made with `addFunction`, which compiles WebAssembly at
+          // run time: a Worker forbids it. The callbacks it half made then draw nothing, so from
+          // here on no outline from this HarfBuzz can be trusted.
+          outlinesUnavailable = true;
+        }
+        if (!outlinesUnavailable) {
+          outline = { d, path: d ? this.#makePath(d) : null };
+          paths.set(id, outline);
+        }
       }
       glyphs.push({
-        path: outline.path,
-        d: outline.d,
+        path: outline?.path ?? null,
+        d: outline?.d ?? "",
         x: (pen + p.xOffset) * scale,
         y: (rise + p.yOffset) * scale,
         cluster: info.cluster,
@@ -388,7 +401,9 @@ export class Shaper {
     }
     // A character the font lacks shapes to glyph 0 (a box).
     if (infos.some((info) => info.codepoint === 0)) return null;
-    return { glyphs, width: pen * scale, scale };
+    return outlinesUnavailable
+      ? { glyphs, width: pen * scale, scale, outlines: false }
+      : { glyphs, width: pen * scale, scale };
   }
 }
 

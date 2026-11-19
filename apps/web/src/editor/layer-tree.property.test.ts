@@ -9,7 +9,15 @@ import { Doc } from "@drawpane/editor";
 import { keyBetween, type Op, ROOT_ID } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { aimDrop, dropPlacement, layerRows, type Row } from "./layer-tree";
+import {
+  aimDrop,
+  dropPlacement,
+  type ListedRows,
+  layerRows,
+  patchRows,
+  type Row,
+  rowPositions,
+} from "./layer-tree";
 
 /** More runs when fuzzing (FUZZ_RUNS); the seed is set for every property test in vitest.setup.ts. */
 const runs = (normally: number) => ({ numRuns: Number(process.env.FUZZ_RUNS) || normally });
@@ -152,4 +160,141 @@ describe("dragging in the layers panel", () => {
       runs(300),
     );
   }, 60_000);
+});
+
+/**
+ * Edits patch the rows instead of walking the page (`patchRows`): after any
+ * edits, patched rows must be the rows a fresh walk gives, whenever the
+ * patch says it can tell. Edits move, rename, recolour, hide and show
+ * layers, make them masks, clip frames, and add or delete layers.
+ */
+describe("patched rows", () => {
+  type Edit =
+    | {
+        kind: "set";
+        at: number;
+        prop: "x" | "name" | "visible" | "isMask" | "clipContent" | "fills";
+        value: number;
+      }
+    | { kind: "delete"; at: number }
+    | { kind: "add"; at: number };
+  const edit: fc.Arbitrary<Edit> = fc.oneof(
+    fc.record({
+      kind: fc.constant("set" as const),
+      at: fc.nat(),
+      prop: fc.constantFrom(
+        "x",
+        "name",
+        "visible",
+        "isMask",
+        "clipContent",
+        "fills",
+      ) as fc.Arbitrary<"x" | "name" | "visible" | "isMask" | "clipContent" | "fills">,
+      value: fc.nat(3),
+    }),
+    fc.record({ kind: fc.constant("delete" as const), at: fc.nat() }),
+    fc.record({ kind: fc.constant("add" as const), at: fc.nat() }),
+  );
+  const shown = (rows: readonly Row[]) => rows.map((r) => ({ ...r, node: r.node, id: r.node.id }));
+
+  it("are what a walk gives, whenever they can be patched", () => {
+    fc.assert(
+      fc.property(
+        page,
+        fc.array(fc.array(edit, { minLength: 1, maxLength: 3 }), { minLength: 1, maxLength: 6 }),
+        fc.boolean(),
+        (specs, rounds, fold) => {
+          const doc = build(specs);
+          const all = () => {
+            const out: string[] = [];
+            const visit = (id: string) => {
+              for (const c of doc.childIds(id)) {
+                out.push(c);
+                visit(c);
+              }
+            };
+            visit("p");
+            return out;
+          };
+          // Sometimes with a container folded shut, so some layers have no row.
+          const firstContainer = all().find((id) => doc.childIds(id).length > 0);
+          const collapsed = new Set(fold && firstContainer ? [firstContainer] : []);
+          let rows: readonly Row[] = layerRows(doc, "p", { collapsed }).rows;
+          let listed: ListedRows = { rows, version: doc.version, at: rowPositions(rows) };
+          let n = 0;
+          for (const round of rounds) {
+            const ops: Op[] = [];
+            for (const e of round) {
+              const ids = all();
+              if (ids.length === 0) break;
+              const id = ids[e.at % ids.length] as string;
+              const node = doc.get(id);
+              if (!node) continue;
+              if (e.kind === "delete") ops.push({ op: "delete", id });
+              else if (e.kind === "add")
+                ops.push({
+                  op: "create",
+                  id: `new${n++}`,
+                  type: "rect",
+                  parent: node.type === "rect" ? node.parent : id,
+                  key: keyBetween(
+                    null,
+                    doc.get(doc.childIds(node.type === "rect" ? node.parent : id)[0] ?? "")?.key ??
+                      null,
+                  ),
+                  props: { name: "new" },
+                } as Op);
+              else {
+                const value =
+                  e.prop === "x"
+                    ? e.value * 10
+                    : e.prop === "name"
+                      ? `n${e.value}`
+                      : e.prop === "fills"
+                        ? [
+                            {
+                              type: "solid",
+                              color: ["#ff0000", "#00ff00", "#0000ff", "#000000"][e.value],
+                            },
+                          ]
+                        : e.prop === "isMask" && node.type === "group"
+                          ? null
+                          : e.value % 2 === 0;
+                if (value === null) continue;
+                if (e.prop === "clipContent" && node.type !== "frame") continue;
+                ops.push({ op: "set", id, prop: e.prop, value } as Op);
+              }
+              // One op at a time keeps each valid against the document as it is.
+              try {
+                doc.apply(ops.splice(0));
+              } catch {
+                // An edit that doesn't apply here (e.g. deleting what's gone) is skipped.
+              }
+            }
+            const walked = layerRows(doc, "p", { collapsed }).rows;
+            const patched = patchRows(doc, listed);
+            if (patched) expect(shown(patched)).toEqual(shown(walked));
+            rows = patched ?? walked;
+            listed = patched
+              ? { ...listed, rows: patched, version: doc.version }
+              : { rows, version: doc.version, at: rowPositions(rows) };
+          }
+        },
+      ),
+      runs(200),
+    );
+  });
+
+  it("patch a moved or recoloured layer without walking", () => {
+    const doc = build([{ kind: "frame", children: [{ kind: "rect", children: [] }] }]);
+    const rows = layerRows(doc, "p", { collapsed: new Set() }).rows;
+    const listed = { rows, version: doc.version, at: rowPositions(rows) };
+    doc.apply([{ op: "set", id: "rect1", prop: "x", value: 40 }]);
+    const patched = patchRows(doc, listed);
+    expect(patched?.find((r) => r.node.id === "rect1")?.node).toBe(doc.get("rect1"));
+    doc.apply([{ op: "set", id: "rect1", prop: "visible", value: false }]);
+    expect(
+      patchRows(doc, { ...listed, rows: patched ?? rows, version: doc.version - 1 }),
+    ).toBeNull();
+  });
 });

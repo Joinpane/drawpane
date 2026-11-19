@@ -17,18 +17,28 @@
  * (a `.cpuprofile` per page and measurement, which Chrome's performance
  * panel opens) and the functions taking the most time are printed.
  *
+ * With BENCH_RENDERER=engine the render engine draws (decision 0040, behind its switch; set
+ * BENCH_ENGINE_PRESENT=readback where WebGPU canvases don't present, as on the GPU bench's
+ * driver), and each page also records which renderer drew it (a page with what phase 1
+ * doesn't draw falls back to the canvas renderer, with its features named), the adapter, and
+ * the GPU's time per frame (`onSubmittedWorkDone`). On a hardware adapter, the heaviest page
+ * the engine draws is held to 0040's confirmed targets: a useful image within 1 s of opening it,
+ * the exact picture within 3 s. On a software adapter (SwiftShader) nothing is gated and the
+ * GPU timings are labelled not representative.
+ *
  * Opt-in (skipped without BENCH_FILE), never in CI. Prints a table and
  * attaches the numbers as JSON, and writes them to BENCH_OUT when set, so
  * a change can be compared with its base commit on the same machine (see
  * the bench notes: this VM has no GPU). Run with
  * `BENCH_FILE=<folder> pnpm --filter @drawpane/web bench -- bench/file`.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { type CDPSession, expect, type Page, test } from "@playwright/test";
+import { writeFileSync } from "node:fs";
+import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { importConverted } from "../import-converted";
 import { pan, type Summary, summaryRow, zoom } from "./frames";
+import { type PageInfo, pagesOf } from "./kit-pages";
+import { profiled } from "./profile";
 
 const FILE = process.env.BENCH_FILE;
 const PAGE_COUNT = Number(process.env.BENCH_PAGE_COUNT ?? 3);
@@ -38,19 +48,21 @@ const NAMED = process.env.BENCH_PAGES
   : null;
 /** A folder for a CPU profile of each measurement (`.cpuprofile`, for Chrome's performance panel). */
 const PROFILE = process.env.BENCH_PROFILE;
+/** Which renderer draws: "canvas" (default) or "engine" (decision 0040's switch). */
+const RENDERER = process.env.BENCH_RENDERER === "engine" ? "engine" : "canvas";
+/** Decision 0040's confirmed targets on the heaviest page, on real GPU hardware. */
+const USEFUL_IMAGE_MS = 1000;
+const EXACT_MS = 3000;
 
-interface Effects {
-  layers: number;
-  readers: number;
-  shadows: number;
-  blurs: number;
-}
-
-interface PageInfo extends Effects {
-  id: string;
-  name: string;
-  /** The top-level layer with the most effects under it: where the close-up pans are. */
-  busiest: string | null;
+interface EngineFacts {
+  /** Who drew the page: the engine, or the canvas renderer (the page holds what phase 1 doesn't draw). */
+  renderer: "engine" | "canvas";
+  unsupported: Record<string, number>;
+  adapter: string | null;
+  software: boolean;
+  /** GPU time per frame while panning, from submit to `onSubmittedWorkDone` (ms). */
+  gpuMs: { p50: number; p95: number; max: number } | null;
+  note?: string;
 }
 
 interface PageResult {
@@ -58,69 +70,65 @@ interface PageResult {
   firstFrameMs: number;
   exactMs: number;
   canvas: Record<string, Summary>;
+  engine?: EngineFacts;
 }
 
-/** Each page's layers and effects, from the converted nodes, heaviest first. */
-function pagesOf(folder: string): PageInfo[] {
-  type Node = {
-    id: string;
-    type: string;
-    parent: string;
-    props?: { name?: string; effects?: Array<{ type: string; visible?: boolean }> };
-  };
-  const nodes: Node[] = [];
-  // Split on "\n" only: text may hold "\r".
-  for (const line of readFileSync(join(folder, "nodes.ndjson"), "utf8").split("\n"))
-    if (line) nodes.push(JSON.parse(line) as Node);
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  const pages = new Map<string, PageInfo>();
-  const tops = new Map<string, number>();
-  for (const n of nodes)
-    if (n.type === "page")
-      pages.set(n.id, {
-        id: n.id,
-        name: n.props?.name ?? n.id,
-        layers: 0,
-        readers: 0,
-        shadows: 0,
-        blurs: 0,
-        busiest: null,
-      });
-  for (const n of nodes) {
-    if (n.type === "page") continue;
-    let top = n;
-    let at = byId.get(n.parent);
-    while (at && at.type !== "page") {
-      top = at;
-      at = byId.get(at.parent);
+/** What the engine did on the page shown, and its GPU's time per frame over a pan. */
+async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
+  return page.evaluate(async (frames) => {
+    type View = {
+      last: { supported: boolean };
+      unsupported(): Record<string, number>;
+      engine: { gpu: { adapter: string; fallback: boolean } | null; gpuFinished(): Promise<void> };
+    };
+    const w = window as unknown as {
+      drawpaneEngineView?: View;
+      drawpane: {
+        s: { camera: { pan(x: number, y: number): unknown } };
+        state: { set(p: object): void };
+      };
+    };
+    const view = w.drawpaneEngineView;
+    if (!view)
+      return {
+        renderer: "canvas" as const,
+        unsupported: {},
+        adapter: null,
+        software: false,
+        gpuMs: null,
+        note: "the engine didn't start (see the console)",
+      };
+    const gpu = view.engine.gpu;
+    const unsupported = view.unsupported();
+    if (!view.last.supported)
+      return {
+        renderer: "canvas" as const,
+        unsupported,
+        adapter: gpu?.adapter ?? null,
+        software: !!gpu?.fallback,
+        gpuMs: null,
+      };
+    const times: number[] = [];
+    const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+    for (let i = 0; i < frames; i++) {
+      w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(i % 60 < 30 ? 6 : -6, 3) });
+      await frame();
+      const t = performance.now();
+      await view.engine.gpuFinished();
+      times.push(performance.now() - t);
     }
-    const page = at && pages.get(at.id);
-    if (!page) continue;
-    page.layers++;
-    let weight = 0;
-    for (const e of n.props?.effects ?? []) {
-      if (e.visible === false) continue;
-      if (e.type === "glass" || e.type === "background-blur") {
-        page.readers++;
-        weight += 4;
-      } else if (e.type === "drop-shadow" || e.type === "inner-shadow") {
-        page.shadows++;
-        weight += 1;
-      } else if (e.type === "layer-blur") {
-        page.blurs++;
-        weight += 2;
-      }
-    }
-    if (weight > 0) tops.set(top.id, (tops.get(top.id) ?? 0) + weight);
-  }
-  for (const [id, weight] of tops) {
-    const page = pages.get(byId.get(id)?.parent ?? "");
-    if (page && (page.busiest === null || weight > (tops.get(page.busiest) ?? 0)))
-      page.busiest = id;
-  }
-  return [...pages.values()].sort(
-    (a, b) => b.readers - a.readers || b.shadows - a.shadows || b.layers - a.layers,
-  );
+    times.sort((a, b) => a - b);
+    const at = (q: number) =>
+      Math.round((times[Math.floor(q * (times.length - 1))] ?? 0) * 10) / 10;
+    return {
+      renderer: "engine" as const,
+      unsupported,
+      adapter: gpu?.adapter ?? null,
+      software: !!gpu?.fallback,
+      gpuMs: { p50: at(0.5), p95: at(0.95), max: at(1) },
+      ...(gpu?.fallback ? { note: "software adapter: GPU timings not representative" } : {}),
+    };
+  }, frames);
 }
 
 /** Shows `pageId`, whole: how long until its first frame was drawn, and until it was exact. */
@@ -161,62 +169,6 @@ async function focus(page: Page, id: string): Promise<void> {
     await frame();
     while (!w.drawpaneFrames.exact) await frame();
   }, id);
-}
-
-interface ProfileNode {
-  id: number;
-  callFrame: { functionName: string; url: string; lineNumber: number; columnNumber: number };
-  children?: number[];
-}
-
-/** Runs `work` under the CPU profiler when BENCH_PROFILE is set; saves the profile and prints where the time went. */
-async function profiled<T>(cdp: CDPSession, name: string, work: () => Promise<T>): Promise<T> {
-  if (!PROFILE) return work();
-  await cdp.send("Profiler.start");
-  const result = await work();
-  const { profile } = (await cdp.send("Profiler.stop")) as {
-    profile: { nodes: ProfileNode[]; samples: number[]; timeDeltas: number[] };
-  };
-  mkdirSync(PROFILE, { recursive: true });
-  writeFileSync(
-    join(PROFILE, `${name.replace(/[^\w.-]+/g, "_")}.cpuprofile`),
-    JSON.stringify(profile),
-  );
-  // Self time by function, and time with callees (each function counted once per sample).
-  const parent = new Map<number, number>();
-  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
-  for (const n of profile.nodes) for (const c of n.children ?? []) parent.set(c, n.id);
-  const label = (n: ProfileNode) =>
-    `${n.callFrame.functionName || "(anonymous)"} ${n.callFrame.url.split("/").pop()}:${n.callFrame.lineNumber + 1}:${n.callFrame.columnNumber + 1}`;
-  const self = new Map<string, number>();
-  const total = new Map<string, number>();
-  let all = 0;
-  profile.samples.forEach((id, i) => {
-    const dt = (profile.timeDeltas[i + 1] ?? 0) / 1000;
-    all += dt;
-    const leaf = byId.get(id);
-    if (!leaf) return;
-    self.set(label(leaf), (self.get(label(leaf)) ?? 0) + dt);
-    const seen = new Set<string>();
-    for (let at: number | undefined = id; at !== undefined; at = parent.get(at)) {
-      const n = byId.get(at);
-      if (!n) break;
-      const l = label(n);
-      if (seen.has(l)) continue;
-      seen.add(l);
-      total.set(l, (total.get(l) ?? 0) + dt);
-    }
-  });
-  const top = (m: Map<string, number>, k: number) =>
-    [...m]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, k)
-      .map(([l, ms]) => `    ${String(Math.round(ms)).padStart(7)} ms  ${l}`)
-      .join("\n");
-  console.log(
-    `Profile ${name}: ${Math.round(all)} ms\n  self:\n${top(self, 20)}\n  with callees:\n${top(total, 40)}`,
-  );
-  return result;
 }
 
 /** Waits for the canvas to be exact (a zoom settles a moment after it stops). */
@@ -265,7 +217,17 @@ test.describe("A real file", () => {
       await cdp.send("Profiler.setSamplingInterval", { interval: 500 });
     }
     page.on("pageerror", (error) => console.log(`page error: ${error.message}`));
-    await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
+    await page.evaluate(
+      ({ renderer, present }) => {
+        localStorage.setItem("drawpane:debug", "1");
+        localStorage.setItem("drawpane:renderer", renderer);
+        localStorage.setItem("drawpane:engine-present", present);
+      },
+      {
+        renderer: RENDERER,
+        present: process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu",
+      },
+    );
     const started = Date.now();
     const fileId = await importConverted(page, folder, "Bench");
     const importSeconds = Math.round((Date.now() - started) / 1000);
@@ -286,35 +248,48 @@ test.describe("A real file", () => {
     const results: PageResult[] = [];
     for (const info of pages) {
       const at = (what: string) => `${info.name} ${what}`;
-      const shown = await profiled(cdp, at("first frame"), async () => {
+      const shown = await profiled(cdp, PROFILE, at("first frame"), async () => {
         const shown = await firstFrame(page, info.id);
         await settle(page);
         return shown;
       });
       const canvas: Record<string, Summary> = {};
-      canvas["pan, whole"] = await profiled(cdp, at("pan whole"), () => pan(page, "fit", FRAMES));
+      canvas["pan, whole"] = await profiled(cdp, PROFILE, at("pan whole"), () =>
+        pan(page, "fit", FRAMES),
+      );
       await settle(page);
-      canvas["zoom, whole"] = await profiled(cdp, at("zoom whole"), () => zoom(page, FRAMES));
+      canvas["zoom, whole"] = await profiled(cdp, PROFILE, at("zoom whole"), () =>
+        zoom(page, FRAMES),
+      );
       await settle(page);
       if (info.busiest)
         for (const level of [0.5, 1]) {
           await focus(page, info.busiest);
-          canvas[`pan, ${level * 100}%`] = await profiled(cdp, at(`pan ${level * 100}`), () =>
-            pan(page, level, FRAMES),
+          canvas[`pan, ${level * 100}%`] = await profiled(
+            cdp,
+            PROFILE,
+            at(`pan ${level * 100}`),
+            () => pan(page, level, FRAMES),
           );
           await settle(page);
         }
-      const result = {
+      const result: PageResult = {
         page: info,
         firstFrameMs: Math.round(shown.first),
         exactMs: Math.round(shown.exact),
         canvas,
+        ...(RENDERER === "engine" ? { engine: await engineFacts(page, Math.min(FRAMES, 60)) } : {}),
       };
       results.push(result);
       console.log(
         [
           `\n${info.name}: ${info.layers} layers, ${info.readers} reading the backdrop, ${info.shadows} shadows`,
           `first frame ${result.firstFrameMs} ms, exact after ${result.exactMs} ms`,
+          ...(result.engine
+            ? [
+                `drawn by ${result.engine.renderer}${result.engine.renderer === "canvas" ? ` (${JSON.stringify(result.engine.unsupported)})` : ""} on ${result.engine.adapter}${result.engine.gpuMs ? `, GPU ${result.engine.gpuMs.p50} / ${result.engine.gpuMs.p95} ms per frame` : ""}${result.engine.note ? ` (${result.engine.note})` : ""}`,
+              ]
+            : []),
           ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),
         ].join("\n"),
       );
@@ -324,5 +299,22 @@ test.describe("A real file", () => {
     if (process.env.BENCH_OUT)
       writeFileSync(process.env.BENCH_OUT, `${JSON.stringify(report, null, 1)}\n`);
     expect(results.length).toBeGreaterThan(0);
+    // Decision 0040's confirmed targets, on the heaviest page the engine draws, on real hardware.
+    const gated = results.find((r) => r.engine?.renderer === "engine");
+    if (RENDERER === "engine" && gated?.engine && !gated.engine.software) {
+      expect(
+        gated.firstFrameMs,
+        `${gated.page.name}: a useful image within ${USEFUL_IMAGE_MS} ms`,
+      ).toBeLessThanOrEqual(USEFUL_IMAGE_MS);
+      expect(gated.exactMs, `${gated.page.name}: exact within ${EXACT_MS} ms`).toBeLessThanOrEqual(
+        EXACT_MS,
+      );
+    } else if (RENDERER === "engine")
+      test.info().annotations.push({
+        type: "engine-gate",
+        description: gated
+          ? "not gated: software adapter"
+          : "not gated: every page measured falls back to the canvas renderer (phase 3 features)",
+      });
   });
 });

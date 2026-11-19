@@ -1311,7 +1311,8 @@ export function exportSvg(
       for (const line of layout.lines)
         for (const frag of line.fragments) {
           const shaped = frag.run ? measurer.shape(frag.text, frag.run) : null;
-          if (shaped) outlined.set(frag, shaped);
+          // Without outlines (a Worker's HarfBuzz can't draw them) it stays text.
+          if (shaped && shaped.outlines !== false) outlined.set(frag, shaped);
         }
 
     const spans = textSpans(node);

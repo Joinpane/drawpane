@@ -25,6 +25,15 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      # The render engine's Rust (packages/engine): its fuzz tests, and its build, which the
+      # other packages' tests use.
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: packages/engine
+          cache: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/engine/rust -> target
       - run: pnpm install --frozen-lockfile
       - run: pnpm fuzz
         env:

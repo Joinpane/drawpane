@@ -29,12 +29,15 @@ import {
   kindOf,
   LAYER_FILTERS,
   type LayerFilter,
+  type ListedRows,
   layerName,
   layerRows,
+  patchRows,
   pinnedRows,
   type Row,
   type RowIndex,
   revealLeft,
+  rowPositions,
   rowWidthFor,
 } from "./layer-tree";
 import { openMenu, uiFor, useUi } from "./ui-state";
@@ -123,13 +126,45 @@ export function LayersPanel() {
   }, [selectionKey, editor]);
 
   const active = searching && (query.trim() !== "" || filter !== "all");
-  const { rows, found } = useMemo(() => {
-    void version;
-    if (!pageId) return { rows: [] as Row[], found: [] as string[] };
-    return layerRows(editor.doc, pageId, active ? { collapsed, query, filter } : { collapsed });
+  // The rows last walked, and what for: an edit that changes only layers' own records patches
+  // their rows instead of walking the whole page again (see `patchRows`).
+  const walked = useRef<{
+    listed: ListedRows;
+    pageId: string;
+    collapsed: ReadonlySet<string>;
+    found: string[];
+    /** Changes whenever the list's shape does (not when a row only got a new record). */
+    shape: number;
+  } | null>(null);
+  const { rows, found, shape } = useMemo(() => {
+    if (!pageId) return { rows: [] as readonly Row[], found: [] as string[], shape: -1 };
+    const last = walked.current;
+    if (!active && last && last.pageId === pageId && last.collapsed === collapsed) {
+      const patched = patchRows(editor.doc, last.listed);
+      if (patched) {
+        last.listed = { ...last.listed, rows: patched, version };
+        return { rows: patched, found: last.found, shape: last.shape };
+      }
+    }
+    const result = layerRows(
+      editor.doc,
+      pageId,
+      active ? { collapsed, query, filter } : { collapsed },
+    );
+    walked.current = active
+      ? null
+      : {
+          listed: { rows: result.rows, version, at: rowPositions(result.rows) },
+          pageId,
+          collapsed,
+          found: result.found,
+          shape: (last?.shape ?? 0) + 1,
+        };
+    return { ...result, shape: active ? -2 - version : (walked.current?.shape ?? 0) };
   }, [editor, pageId, version, collapsed, active, query, filter]);
 
-  const rowIndex = useMemo(() => indexRows(rows), [rows]);
+  // Where each row sits in the tree depends on the list's shape alone.
+  const rowIndex = useMemo(() => indexRows(rows), [shape]);
 
   // As wide as the deepest open row needs: a deep tree scrolls sideways. All
   // the open rows, not just the drawn ones, so the width holds while scrolling down.
@@ -137,7 +172,7 @@ export function LayersPanel() {
     let deepest = 0;
     for (const row of rows) if (row.depth > deepest) deepest = row.depth;
     return rowWidthFor(deepest);
-  }, [rows]);
+  }, [shape]);
 
   const presenceBy = useMemo(() => {
     const map = new Map<string, { slot: PresenceSlot; name: string }>();

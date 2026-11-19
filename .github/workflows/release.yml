@@ -30,6 +30,14 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
           registry-url: https://registry.npmjs.org
+      # The render engine's Rust (packages/engine), built to WebAssembly for the web app.
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: packages/engine
+          cache: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/engine/rust -> target
       - run: pnpm install --frozen-lockfile
 
       - name: The tag matches the package's version

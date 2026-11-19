@@ -348,6 +348,8 @@ export function keepUsedCopies(doc: Doc, ops: readonly Op[]): Op[] {
   const deleted = new Set<string>();
   for (const op of ops)
     if (op.op === "delete") for (const node of subtree(doc, op.id)) deleted.add(node.id);
+  // Nothing deleted, nothing to keep: most undos, which needn't look at every copy in the file.
+  if (deleted.size === 0) return [...ops];
   const used = usedCopies(doc, deleted);
   if (used.size === 0) return [...ops];
   const holdsUsed = (id: string) => subtree(doc, id).some((node) => used.has(node.id));
