@@ -10,7 +10,9 @@
  *
  * The spike draws what the chosen board uses and counts the rest in `unsupported` rather than
  * guessing: gradients, images, masks, background blur, glass on anything but a box, text
- * without saved outlines, vectors.
+ * without saved outlines, vectors, non-separable blends. A list with anything unsupported is
+ * refused by the measurements (and would fall back to the canvas renderer in the product): it
+ * is never drawn wrong.
  */
 import {
   Doc,
@@ -46,6 +48,8 @@ export interface BoardList {
 }
 
 const KAPPA = 0.5522847498;
+/** The blends the engine's kernel draws (exec.rs, `blend_pixel`). */
+const KERNEL_BLENDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 100, 101]);
 const FAR = 1e4;
 
 const mul = (m: Matrix, n: Matrix): Matrix => [
@@ -207,7 +211,9 @@ export function buildBoard(
   const blended = (mode: string, bounds: Bounds, body: () => void) => {
     if (mode === "normal") return body();
     const code = BLENDS[mode];
-    if (code === undefined) {
+    // Hue, saturation, colour and luminosity have no kernel yet: reported, so the list is
+    // refused rather than drawn wrong.
+    if (code === undefined || !KERNEL_BLENDS.has(code)) {
       skip(`blend ${mode}`);
       return body();
     }
@@ -473,6 +479,7 @@ export function buildBoard(
           ])
         : clampBounds([0, 0, width, height]);
       const code = BLENDS[blend] ?? 0;
+      if (blend !== "normal" && !KERNEL_BLENDS.has(code)) skip(`blend ${blend}`);
       if (code !== 0 && !omit.has("apart")) out.pushIsolate(code, alpha * opacity, bounds);
       else out.pushGroup(alpha * opacity, 0);
       for (const effect of post) {

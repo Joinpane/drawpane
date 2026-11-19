@@ -24,6 +24,8 @@ const port = Number(process.env.SPIKE_WORKER_PORT ?? 8869);
 const runs = Number(process.env.SPIKE_RUNS ?? 9);
 
 const list = buildBoard(readNodes(input.folder), input.boardId);
+if (Object.keys(list.unsupported).length > 0)
+  throw new Error(`The board uses what the spike can't draw: ${JSON.stringify(list.unsupported)}`);
 writeFileSync(join(out, "board.dl"), list.bytes);
 
 /** Resident and peak resident memory of a process, in bytes (Linux). */

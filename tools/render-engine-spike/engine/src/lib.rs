@@ -87,6 +87,26 @@ pub fn memory_bytes() -> usize {
 pub struct GpuEngine {
     gpu: std::rc::Rc<std::cell::RefCell<gpu::Gpu>>,
     adapter: String,
+    /// WebGL2's context lives with its canvas surface; kept for the device's lifetime.
+    _surface: Option<wgpu::Surface<'static>>,
+}
+
+/// Logs a step of creating the engine (for finding where a backend stalls).
+#[cfg(feature = "gpu")]
+pub(crate) fn step(what: &str) {
+    web_sys::console::log_1(&format!("engine: {what}").into());
+}
+
+/// The web's display handle, which wgpu's GL backend asks for.
+#[cfg(feature = "gpu")]
+#[derive(Debug)]
+struct WebDisplay;
+
+#[cfg(feature = "gpu")]
+impl wgpu::rwh::HasDisplayHandle for WebDisplay {
+    fn display_handle(&self) -> Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
+        Ok(wgpu::rwh::DisplayHandle::web())
+    }
 }
 
 /// What a GPU render did: counts, and how many command buffers it submitted.
@@ -103,37 +123,68 @@ pub struct GpuFrame {
 #[cfg(feature = "gpu")]
 #[wasm_bindgen]
 impl GpuEngine {
-    /// A WebGPU device through wgpu, and targets `width` × `height`.
-    pub async fn create(width: u16, height: u16) -> Result<GpuEngine, JsError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            display: None,
-            backends: wgpu::Backends::BROWSER_WEBGPU,
-            flags: wgpu::InstanceFlags::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            backend_options: wgpu::BackendOptions::default(),
-        });
+    /// A device through wgpu on `backend` ("webgpu" or "webgl"), and targets `width` × `height`.
+    /// WebGL2 needs `canvas`: wgpu's GL backend takes its context from a canvas surface.
+    pub async fn create(
+        width: u16,
+        height: u16,
+        backend: String,
+        canvas: Option<web_sys::HtmlCanvasElement>,
+    ) -> Result<GpuEngine, JsError> {
+        let gl = backend == "webgl";
+        let backends = if gl { wgpu::Backends::GL } else { wgpu::Backends::BROWSER_WEBGPU };
+        let mut descriptor = if gl {
+            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WebDisplay))
+        } else {
+            wgpu::InstanceDescriptor::new_without_display_handle()
+        };
+        descriptor.backends = backends;
+        let instance = wgpu::Instance::new(descriptor);
+        step("instance");
+        let surface = match (gl, canvas) {
+            (true, Some(canvas)) => Some(
+                instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                    .map_err(|e| JsError::new(&format!("no WebGL2 surface: {e}")))?,
+            ),
+            (true, None) => return Err(JsError::new("WebGL2 needs a canvas")),
+            _ => None,
+        };
+        step("surface");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
-                compatible_surface: None,
+                compatible_surface: surface.as_ref(),
                 ..Default::default()
             })
             .await
-            .map_err(|e| JsError::new(&format!("no WebGPU adapter: {e}")))?;
+            .map_err(|e| JsError::new(&format!("no {backend} adapter: {e}")))?;
         let info = adapter.get_info();
+        step("adapter");
+        let required_limits = if gl {
+            wgpu::Limits {
+                max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+                max_buffer_size: adapter.limits().max_buffer_size,
+                ..wgpu::Limits::downlevel_webgl2_defaults()
+            }
+        } else {
+            wgpu::Limits::default()
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits,
                 ..Default::default()
             })
             .await
-            .map_err(|e| JsError::new(&format!("no WebGPU device: {e}")))?;
+            .map_err(|e| JsError::new(&format!("no {backend} device: {e}")))?;
+        step("device");
         Ok(GpuEngine {
             gpu: std::rc::Rc::new(std::cell::RefCell::new(gpu::Gpu::new(device, queue, width, height))),
             adapter: format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend),
+            _surface: surface,
         })
     }
 

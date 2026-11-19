@@ -266,6 +266,11 @@ pub fn run<B: Backend>(backend: &mut B, list: &DisplayList) -> Result<Stats, Str
                 stack.push(Open::Isolating { pad: f64::from(*sigma) * 3.0 });
             }
             Op::PushIsolate { blend, opacity, bounds } => {
+                if !matches!(*blend, 0..=11 | BLEND_LINEAR_DODGE | BLEND_LINEAR_BURN) {
+                    // Refused, never drawn as something else (hue, saturation, colour and
+                    // luminosity have no kernel in the spike).
+                    return Err(format!("unsupported blend {blend}"));
+                }
                 if apart.is_some() {
                     return Err("spike: a layer apart inside another".into());
                 }

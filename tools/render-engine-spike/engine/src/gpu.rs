@@ -10,7 +10,14 @@ use crate::dl::GlassOp;
 use crate::exec::{Backend, impl_draw};
 use vello_common::kurbo::Point;
 use vello_gpu::{ClearSettings, RenderOptions, RenderSize, RenderTarget, RenderTargetConfig, Renderer, Resources, Scene, TargetInit, TextureBindings};
+use wasm_bindgen::prelude::wasm_bindgen;
 use wgpu::util::DeviceExt;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = setTimeout)]
+    fn set_timeout(callback: &js_sys::Function, ms: i32) -> wasm_bindgen::JsValue;
+}
 
 impl_draw!(Scene);
 
@@ -91,6 +98,7 @@ fn pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, entry: &str) -> 
 impl Gpu {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, width: u16, height: u16) -> Self {
         let (renderer, resources) = Renderer::new(&device, &queue, &RenderTargetConfig { format: FORMAT, width, height });
+        crate::step("vello renderer");
         let depth = renderer.create_depth_texture_view(&RenderSize { width, height });
         let main = target(&device, width, height, "page");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -102,10 +110,16 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        crate::step("kernels module");
+        let composite = pipeline(&device, &module, "fs_composite");
+        crate::step("composite pipeline");
+        let blur = pipeline(&device, &module, "fs_blur");
+        let glass = pipeline(&device, &module, "fs_glass");
+        crate::step("kernel pipelines");
         Self {
-            composite: pipeline(&device, &module, "fs_composite"),
-            blur: pipeline(&device, &module, "fs_blur"),
-            glass: pipeline(&device, &module, "fs_glass"),
+            composite,
+            blur,
+            glass,
             scratch: target(&device, width, height, "apart"),
             under: target(&device, width, height, "under"),
             temp: target(&device, width, height, "frost-x"),
@@ -362,7 +376,7 @@ pub async fn read_back(gpu: &Gpu) -> Result<Vec<u8>, String> {
     buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    rx.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    pump(gpu, rx).await.ok_or("read back cancelled")?.map_err(|e| e.to_string())?;
     let mapped = buffer.slice(..).get_mapped_range().map_err(|e| format!("{e:?}"))?;
     let mut out = Vec::with_capacity((w * h * 4) as usize);
     for chunk in mapped.chunks_exact(row as usize) {
@@ -379,5 +393,23 @@ pub async fn finished(gpu: &Gpu) {
     gpu.queue.on_submitted_work_done(move || {
         let _ = tx.send(());
     });
-    let _ = rx.await;
+    let _ = pump(gpu, rx).await;
+}
+
+/// Waits for a wgpu callback. WebGPU in a browser runs callbacks by itself; wgpu's WebGL2
+/// backend only when polled, and a blocking poll would spin the page's only thread (WebGL can't
+/// wait on a fence), so this polls without blocking and yields to the browser between tries.
+async fn pump<T>(gpu: &Gpu, mut rx: futures_channel::oneshot::Receiver<T>) -> Option<T> {
+    loop {
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        match rx.try_recv() {
+            Ok(Some(v)) => return Some(v),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        let tick = js_sys::Promise::new(&mut |resolve, _| {
+            set_timeout(&resolve, 1);
+        });
+        let _ = wasm_bindgen_futures::JsFuture::from(tick).await;
+    }
 }

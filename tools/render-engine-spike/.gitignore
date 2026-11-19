@@ -4,3 +4,5 @@ target/
 dist/
 wasm/
 out/
+out-*/
+*.log

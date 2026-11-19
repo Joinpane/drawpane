@@ -27,21 +27,43 @@ function base64(bytes) {
   return btoa(s);
 }
 
+function webglRenderer(canvas) {
+  const gl = canvas.getContext("webgl2");
+  if (!gl) return null;
+  const ext = gl.getExtension("WEBGL_debug_renderer_info");
+  return {
+    vendor: ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+    renderer: ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+  };
+}
+
 async function run() {
+  const backend = params.get("backend") ?? "webgpu";
+  const t0 = performance.now();
   await init();
+  const initMs = performance.now() - t0;
   const list = new Uint8Array(await (await fetch("./board.dl")).arrayBuffer());
   const view = new DataView(list.buffer);
   const width = view.getUint32(8, true);
   const height = view.getUint32(12, true);
-  const adapter = await adapterInfo();
+  // The adapter as the browser reports it. The engine's own adapter (wgpu's view) is recorded
+  // beside it, and the label below goes by both.
+  let adapter;
+  let glCanvas;
+  if (backend === "webgl") {
+    // wgpu's GL backend takes its WebGL2 context from this canvas; probe it in a spare one.
+    adapter = webglRenderer(document.createElement("canvas"));
+    glCanvas = document.createElement("canvas");
+  } else adapter = await adapterInfo();
+  status.textContent = "Creating the GPU engine…";
+  const t1 = performance.now();
+  const engine = await GpuEngine.create(width, height, backend, glCanvas);
+  const createMs = performance.now() - t1;
+  const described = JSON.stringify(adapter ?? {}) + engine.adapter;
   const software =
     !adapter ||
     adapter.isFallbackAdapter === true ||
-    /swiftshader|llvmpipe|software/i.test(
-      `${adapter.vendor} ${adapter.architecture} ${adapter.description}`,
-    );
-  status.textContent = "Creating the GPU engine…";
-  const engine = await GpuEngine.create(width, height);
+    /swiftshader|llvmpipe|software|\(Cpu,/i.test(described);
   if (params.get("vello-src-over") === "0") engine.setVelloSrcOver(false);
   const times = [];
   const encode = [];
@@ -79,8 +101,11 @@ async function run() {
   window.spike = {
     width,
     height,
+    backend,
     adapter,
     wgpuAdapter: engine.adapter,
+    initMs: Math.round(initMs),
+    createMs: Math.round(createMs),
     software,
     note: software ? "software adapter, not representative" : "hardware adapter",
     frame: {
