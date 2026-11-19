@@ -171,12 +171,19 @@ impl Backend for Cpu {
         if let Some(e) = self.masks.get(&key) {
             return Some((ImageSource::Pixmap(e.value.clone()), e.origin, e.size));
         }
-        let (mask, origin) = masks::rasterise(&mut self.resources, path, scale.0, scale.1, phase, self.mask_side)?;
-        let size = (mask.width(), mask.height());
-        if !self.masks.fits(usize::from(size.0) * usize::from(size.1) * 4) {
+        // Full: drawn as its outline, without rasterising a mask that can't be kept.
+        if !self.masks.fits(masks::bytes(masks::mask_size(
+            path,
+            scale.0,
+            scale.1,
+            phase,
+            self.mask_side,
+        )?)) {
             self.masks.stats.outlines += 1;
             return None;
         }
+        let (mask, origin) = masks::rasterise(&mut self.resources, path, scale.0, scale.1, phase, self.mask_side)?;
+        let size = (mask.width(), mask.height());
         let mask = Arc::new(mask);
         let e = self.masks.insert(key, mask, origin, size);
         Some((ImageSource::Pixmap(e.value.clone()), e.origin, e.size))

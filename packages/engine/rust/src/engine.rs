@@ -390,6 +390,26 @@ impl Engine {
         Ok(())
     }
 
+    /// Draws tiles on the GPU for the next frame of the view last drawn, for at most
+    /// `budget_ms` (`Gpu::ahead`): what a browser runs between frames at rest.
+    #[cfg(feature = "gpu")]
+    pub fn render_gpu_ahead(&mut self, background: [f32; 4], budget_ms: f64) -> Result<DrawStats> {
+        self.check_supported()?;
+        let gpu = self
+            .gpu
+            .as_ref()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        let Some(last) = gpu.last() else {
+            return Ok(DrawStats::default());
+        };
+        let halo = self.halo(last.view)?;
+        let gpu = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        gpu.ahead(&self.store, background, halo, budget_ms)
+    }
+
     /// Draws a frame on the GPU, made of tiles (into its canvas, when it has one).
     #[cfg(feature = "gpu")]
     pub fn render_gpu(
@@ -552,6 +572,60 @@ impl Engine {
         Ok((self.cpu_tiles.as_ref().map_or(&[][..], |t| t.frame.as_slice()), stats))
     }
 
+    /// Draws tiles on the CPU for the next frame of the view last drawn (`Gpu::ahead`'s twin,
+    /// at most `max_jobs` tiles): what the tests hold the GPU's idle drawing to.
+    pub fn render_cpu_ahead(&mut self, background: [f32; 4], max_jobs: usize) -> Result<TiledStats> {
+        self.check_supported()?;
+        let Some(mut tiles) = self.cpu_tiles.take() else {
+            return Ok(TiledStats::default());
+        };
+        let result = (|| {
+            let mut stats = TiledStats::default();
+            let Some(last) = tiles.last else { return Ok(stats) };
+            let halo = self.halo(last.view)?;
+            let tile = tiles.cache.tile;
+            tiles.cache.begin(background, halo);
+            let Some(plan) = tiles.cache.plan(last.view, last.size, false, Some(last), true) else {
+                return Ok(stats);
+            };
+            let t = tile as usize;
+            let side = t + 2 * halo.max(0) as usize;
+            let h = halo.max(0) as usize;
+            for job in plan.jobs.iter().filter(|j| !plan.direct && !j.direct).take(max_jobs) {
+                let Some(slot) = tiles.cache.slot_for(job.key) else {
+                    continue;
+                };
+                let fs = match self.cpu_draw_tile(job.view, tile, halo, job.detail, background) {
+                    Ok(fs) => fs,
+                    Err(e) => {
+                        tiles.cache.release(job.key, slot);
+                        return Err(e);
+                    }
+                };
+                stats.draw.add(&fs.draw);
+                stats.tiles_drawn += 1;
+                let s = slot as usize;
+                if tiles.slots.len() <= s {
+                    tiles.slots.resize_with(s + 1, Vec::new);
+                }
+                let out = &mut tiles.slots[s];
+                out.clear();
+                let target = self.cpu.target.data_as_u8_slice();
+                for y in 0..t {
+                    let from = ((y + h) * side + h) * 4;
+                    out.extend_from_slice(&target[from..from + t * 4]);
+                }
+                tiles.cache.drawn(job.key, slot, !job.detail || fs.draw.exact());
+            }
+            let (pending, _) = tiles.cache.left(&plan);
+            stats.pending = pending;
+            stats.held = tiles.cache.len() as u32;
+            Ok(stats)
+        })();
+        self.cpu_tiles = Some(tiles);
+        result
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn cpu_tiled_frame(
         &mut self,
@@ -599,6 +673,8 @@ impl Engine {
         let mut optional = 0usize;
         let mut exact_direct = true;
         let mut scratch = Vec::new();
+        // Drawn straight into the frame after it's laid: what no slot could be kept for.
+        let mut late: Vec<crate::tiles::Job> = Vec::new();
         for job in &plan.jobs {
             if !job.must {
                 if optional >= options.max_jobs {
@@ -606,21 +682,26 @@ impl Engine {
                 }
                 optional += 1;
             }
-            let fs = self.cpu_draw_tile(job.view, tile, halo, job.detail, background)?;
-            stats.draw.add(&fs.draw);
-            stats.tiles_drawn += 1;
-            let exact = !job.detail || fs.draw.exact();
-            if plan.direct {
-                exact_direct &= exact;
-                take(self.cpu.target.data_as_u8_slice(), &mut scratch);
-                let fx = i64::from(job.key.i) * i64::from(tile) + plan.origin.0;
-                let fy = i64::from(job.key.j) * i64::from(tile) + plan.origin.1;
-                blit(&mut frame, width, height, &scratch, t, fx, fy);
+            if plan.direct || job.direct {
+                late.push(*job);
                 continue;
             }
             let Some(slot) = tiles.cache.slot_for(job.key) else {
+                if job.must {
+                    late.push(*job);
+                }
                 continue;
             };
+            let fs = match self.cpu_draw_tile(job.view, tile, halo, job.detail, background) {
+                Ok(fs) => fs,
+                Err(e) => {
+                    tiles.cache.release(job.key, slot);
+                    return Err(e);
+                }
+            };
+            stats.draw.add(&fs.draw);
+            stats.tiles_drawn += 1;
+            let exact = !job.detail || fs.draw.exact();
             let s = slot as usize;
             if tiles.slots.len() <= s {
                 tiles.slots.resize_with(s + 1, Vec::new);
@@ -628,11 +709,10 @@ impl Engine {
             take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
             tiles.cache.drawn(job.key, slot, exact);
         }
-        if plan.direct {
-            stats.exact = exact_direct;
-        } else {
+        let mut comp_exact = true;
+        if !plan.direct {
             let comp = tiles.cache.compose(&plan, last);
-            stats.exact = comp.exact;
+            comp_exact = comp.exact;
             stats.pending = comp.pending;
             if !comp.complete {
                 if let (Some(m), Some(l)) = (comp.base, last) {
@@ -695,6 +775,18 @@ impl Engine {
                 }
             }
         }
+        for job in &late {
+            let fs = self.cpu_draw_tile(job.view, tile, halo, job.detail, background)?;
+            stats.draw.add(&fs.draw);
+            stats.tiles_drawn += 1;
+            exact_direct &= !job.detail || fs.draw.exact();
+            take(self.cpu.target.data_as_u8_slice(), &mut scratch);
+            let fx = i64::from(job.key.i) * i64::from(tile) + plan.origin.0;
+            let fy = i64::from(job.key.j) * i64::from(tile) + plan.origin.1;
+            blit(&mut frame, width, height, &scratch, t, fx, fy);
+        }
+        stats.exact = comp_exact && exact_direct;
+        stats.direct = plan.direct || !late.is_empty();
         stats.evicted = tiles.cache.stats.evicted;
         stats.held = tiles.cache.len() as u32;
         tiles.frame_last.clone_from(&frame);

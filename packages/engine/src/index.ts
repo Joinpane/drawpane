@@ -169,6 +169,22 @@ function stats(o: Glue.Outcome, gpu = false): FrameStats {
 
 const bg = (c: readonly [number, number, number, number]) => new Float32Array(c);
 
+/** What drawing ahead between frames did (`RenderEngine.renderGpuAhead`). */
+export interface AheadStats {
+  readonly drawn: number;
+  /** Tiles the last frame shows still to draw. */
+  readonly pending: number;
+  /** Tiles round it still to draw. */
+  readonly queued: number;
+  readonly ms: number;
+  readonly encodeMs: number;
+  readonly renderMs: number;
+  readonly maskMisses: number;
+  readonly records: number;
+  readonly glyphsMasked: number;
+  readonly glyphsOutlined: number;
+}
+
 export interface EngineOptions {
   /** Bytes of rasterised glyph masks to keep per backend (default 4 MiB). */
   readonly glyphMaskBytes?: number;
@@ -754,6 +770,36 @@ export class RenderEngine {
       const r = outcome(o);
       return r.ok ? { ok: true as const, value: s } : r;
     }) as Result<FrameStats>;
+  }
+
+  /**
+   * Draws tiles for the next frame of the view last drawn, for at most `budgetMs` (at least one
+   * tile; 0: no limit), compositing and presenting nothing (decision 0040, phase 2): what a page
+   * runs between frames at rest, so the exact frame comes sooner without any one long frame.
+   * `pending`: tiles the last frame shows still to draw; `queued`: tiles round it still to draw.
+   */
+  renderGpuAhead(
+    background: readonly [number, number, number, number],
+    budgetMs: number,
+  ): Result<AheadStats> {
+    return this.#call((e) => {
+      if (!e.renderGpuAhead) return fail(ErrorCode.NotAvailable, "no GPU backend");
+      const o = e.renderGpuAhead(bg(background), budgetMs);
+      const value: AheadStats = {
+        drawn: o.tiles_drawn,
+        pending: o.pending,
+        queued: o.queued,
+        ms: o.cpu_ms,
+        encodeMs: o.encode_ms,
+        renderMs: o.render_ms,
+        maskMisses: o.mask_misses,
+        records: o.records,
+        glyphsMasked: o.glyphs_masked,
+        glyphsOutlined: o.glyphs_outlined,
+      };
+      const r = outcome(o);
+      return r.ok ? { ok: true as const, value } : r;
+    }) as Result<AheadStats>;
   }
 
   /** Drops every GPU tile (benches time cold frames this way). */

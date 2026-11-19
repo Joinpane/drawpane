@@ -134,6 +134,7 @@ export class Engine {
     moving: boolean,
     budgetMs: number,
   ): Outcome;
+  renderGpuAhead?(background: Float32Array, budgetMs: number): Outcome;
   clearTiles?(): void;
   gpuCheck?(): Outcome;
   gpuDestroy?(): void;

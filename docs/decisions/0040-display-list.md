@@ -65,7 +65,7 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 | Op | | Body |
 | --- | --- | --- |
 | 1 | fill | path, `u32` even-odd, paint |
-| 2 | stroke | path, width, join (0 miter, 1 round, 2 bevel), cap (0 butt, 1 round, 2 square), miter limit, dash count and dashes, dash offset, paint. A dash pattern that would cut its path into more pieces than a frame may generate is refused (`Limit`): at decode for shapes whose length is known, when drawn for glyph runs. |
+| 2 | stroke | path, width, join (0 miter, 1 round, 2 bevel), cap (0 butt, 1 round, 2 square), miter limit (above 1,000 it is taken as 1,000), dash count and dashes, dash offset, paint. A dash pattern that would cut its path into more pieces than a frame may generate is refused (`Limit`): at decode for shapes whose length is known, when drawn for glyph runs. |
 | 3 | clip | path, `u32` even-odd. A clip path, which doesn't isolate. |
 | 4 | unclip | Clips and unclips balance within a list. |
 | 5 | children | Its children are drawn here, inside the clips open at this point. At most once. |
@@ -91,7 +91,7 @@ Images aren't in messages. `putImage(handle, width, height, rgba)` uploads one (
 
 The records are a tree in paint order: a record's ops, with its children drawn where its `children` op is. The engine derives what retained drawing needs:
 
-- **Bounds,** per record in its own units: what its ops paint (stroke widths grown generously, glyph outlines' own bounds), its children's bounds kept to the clip they're drawn in, its box for a reader and, for a refused record, its box grown by its reach. Cached and dropped up the parent chain on change. Culling uses them.
+- **Bounds,** per record in its own units: what its ops paint (each stroke grown by how far its outline can reach: half its width times its miter limit for mitered joins, √2 for square caps, plus a unit; glyph outlines' own bounds), its children's bounds kept to the clip they're drawn in, its box for a reader and, for a refused record, its box grown by its reach. Cached and dropped up the parent chain on change. Culling uses them.
 - **Paint order:** a preorder index and subtree end per record, rebuilt only when the structure changes and only while readers exist.
 - **Invalidation.** Applying a message answers where each touched record's subtree painted before and paints now (page units, with its place in paint order). `dirtyFor(camera)` turns that into device rectangles, grown by a pixel and a half for anti-aliasing, and adds, in paint order, every reader whose read region takes in a change beneath it (an earlier subtree, or an ancestor), with that reader's own box joining the dirty set for the readers above it. Places from before a structural change in the same message count as beneath every reader. The property tests hold every changed pixel to lie inside the answer.
 

@@ -43,6 +43,8 @@ impl_draw!(Scene);
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const ATLAS_SIDE: u32 = 2048;
+/// The glyph atlas's bytes: the masks a GPU keeps by default.
+pub const ATLAS_BYTES: usize = (ATLAS_SIDE * ATLAS_SIDE * 4) as usize;
 const ATLAS_ID: TextureId = TextureId(1 << 48);
 const CHECKER_ID: TextureId = TextureId((1 << 48) + 1);
 
@@ -763,46 +765,41 @@ impl Gpu {
         let mut verbs = store.limits.frame_verbs;
         let mut drew_any = false;
         let mut direct_exact = true;
-        for (n, job) in plan.jobs.iter().enumerate() {
+        // Drawn straight into the frame after it's laid: what no slot could be kept for.
+        let mut late: Vec<crate::tiles::Job> = Vec::new();
+        for job in &plan.jobs {
+            // Past the budget, what something stands in for waits for a later frame; what
+            // nothing stands in for is drawn regardless (the plan puts it first).
             if !job.must && drew_any && options.budget_ms > 0.0 && now() - t0 >= options.budget_ms {
-                stats.queued = plan.jobs[n..].iter().filter(|j| !j.must).count() as u32;
-                break;
+                stats.queued += 1;
+                continue;
             }
             let target = if plan.direct {
                 self.ensure_scratch()?;
                 TileTarget::Scratch
+            } else if job.direct {
+                late.push(*job);
+                continue;
             } else {
                 match self.tiles.slot_for(job.key) {
                     Some(s) => TileTarget::Slot(s),
-                    None => continue,
-                }
-            };
-            // One allowance of generated geometry per tile: each is its own render.
-            verbs = store.limits.frame_verbs;
-            let drawn = self.draw_tile(
-                store, job.view, job.detail, background, target, &plan, job.key, dst, &mut stats, &mut verbs,
-            );
-            let exact = match drawn {
-                Ok(e) => e,
-                Err(e) => {
-                    if let TileTarget::Slot(s) = target {
-                        self.tiles.release(job.key, s);
+                    None => {
+                        if job.must {
+                            late.push(*job);
+                        }
+                        continue;
                     }
-                    self.scene.reset();
-                    return Err(e);
                 }
             };
+            let exact = self.draw_job(store, job, background, target, &plan, dst, &mut stats, &mut verbs)?;
             drew_any = true;
-            stats.tiles_drawn += 1;
             match target {
                 TileTarget::Slot(s) => self.tiles.drawn(job.key, s, exact),
                 TileTarget::Scratch => direct_exact &= exact,
             }
         }
-        let _ = verbs;
         let t1 = now();
         if plan.direct {
-            stats.exact = direct_exact;
             stats.plan = 2;
         } else {
             let comp = self.tiles.compose(&plan, last);
@@ -810,8 +807,25 @@ impl Gpu {
             stats.pending = comp.pending;
             stats.plan = if comp.complete { 0 } else { 1 };
             self.composite(&comp, dst, background, w, h)?;
+            stats.render_ms += now() - t1;
+            if !late.is_empty() {
+                self.ensure_scratch()?;
+            }
+            for job in &late {
+                direct_exact &= self.draw_job(
+                    store,
+                    job,
+                    background,
+                    TileTarget::Scratch,
+                    &plan,
+                    dst,
+                    &mut stats,
+                    &mut verbs,
+                )?;
+            }
         }
-        stats.render_ms += now() - t1;
+        stats.exact = (plan.direct || stats.exact) && direct_exact;
+        stats.direct = plan.direct || !late.is_empty();
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
@@ -820,6 +834,69 @@ impl Gpu {
         self.last_scale = Some(scale);
         self.shown = Some((generation, bg_bits, stats.exact));
         self.finish_frame(stats, t0)
+    }
+
+    /// The frame last shown: the view it was drawn under and its size.
+    pub fn last(&self) -> Option<Last> {
+        self.last
+    }
+
+    /// Whether the frame shown was drawn over an opaque background (so every pixel is opaque).
+    pub fn opaque(&self) -> bool {
+        self.shown.is_some_and(|(_, bg, _)| f32::from_bits(bg[3]) >= 1.0)
+    }
+
+    /// Draws tiles the next frame will want, for the frame last shown (its view and size): the
+    /// ones it shows that aren't up to date (nearest the view's centre first), then those round
+    /// it, for at most `budget_ms` (at least one tile; zero or less: no limit), compositing and
+    /// presenting nothing. What a browser runs between frames at rest, so the exact frame comes
+    /// sooner without any one long frame. In the answer, `pending`: tiles the frame shows still
+    /// to draw; `queued`: tiles round it still to draw.
+    pub fn ahead(&mut self, store: &Store, background: [f32; 4], halo: i32, budget_ms: f64) -> Result<DrawStats> {
+        self.check()?;
+        let mut stats = DrawStats::default();
+        let Some(last) = self.last else { return Ok(stats) };
+        let t0 = now();
+        self.masks.begin_frame();
+        self.tiles.begin(background, halo);
+        self.fit_tiles(store.limits.tile_bytes);
+        let Some(plan) = self.tiles.plan(last.view, last.size, false, Some(last), true) else {
+            return Ok(stats);
+        };
+        let mut verbs = store.limits.frame_verbs;
+        let dst = self.cur;
+        for job in &plan.jobs {
+            // A tile with no slot to keep it in is drawn by the frame itself.
+            if plan.direct || job.direct {
+                continue;
+            }
+            if stats.tiles_drawn > 0 && budget_ms > 0.0 && now() - t0 >= budget_ms {
+                break;
+            }
+            let Some(slot) = self.tiles.slot_for(job.key) else {
+                continue;
+            };
+            let exact = self.draw_job(
+                store,
+                job,
+                background,
+                TileTarget::Slot(slot),
+                &plan,
+                dst,
+                &mut stats,
+                &mut verbs,
+            )?;
+            self.tiles.drawn(job.key, slot, exact);
+        }
+        let (pending, queued) = self.tiles.left(&plan);
+        stats.pending = pending;
+        stats.queued = queued;
+        stats.held = self.tiles.len() as u32;
+        stats.evicted = self.tiles.stats.evicted;
+        stats.cpu_ms = now() - t0;
+        self.scene.reset();
+        self.check()?;
+        Ok(stats)
     }
 
     /// Presents the frame shown (with a canvas) and finishes the frame's numbers.
@@ -877,6 +954,38 @@ impl Gpu {
         Ok(stats)
     }
 
+    /// Draws a job's tile into `target`, with a fresh allowance of generated geometry (each tile
+    /// is its own render); a slot handed out for it goes back if the draw fails.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_job(
+        &mut self,
+        store: &Store,
+        job: &crate::tiles::Job,
+        background: [f32; 4],
+        target: TileTarget,
+        plan: &crate::tiles::Plan,
+        dst: usize,
+        stats: &mut DrawStats,
+        verbs: &mut usize,
+    ) -> Result<bool> {
+        *verbs = store.limits.frame_verbs;
+        match self.draw_tile(
+            store, job.view, job.detail, background, target, plan, job.key, dst, stats, verbs,
+        ) {
+            Ok(exact) => {
+                stats.tiles_drawn += 1;
+                Ok(exact)
+            }
+            Err(e) => {
+                if let TileTarget::Slot(s) = target {
+                    self.tiles.release(job.key, s);
+                }
+                self.scene.reset();
+                Err(e)
+            }
+        }
+    }
+
     /// Draws one tile: the scene under its view, `TILE` × `TILE` pixels, into its slot (or the
     /// scratch tile, then straight into frame texture `dst` where the frame shows it). Answers
     /// whether it was drawn exactly (no level of detail stood in).
@@ -895,6 +1004,9 @@ impl Gpu {
         verbs: &mut usize,
     ) -> Result<bool> {
         let t0 = now();
+        // Each tile is its own render and submission: masks and atlas shelves the tiles before
+        // it drew from may go now (their draws run before any upload made after them).
+        self.masks.begin_frame();
         self.scene.reset_and_resize(TILE as u16, TILE as u16);
         let tile = Frame {
             width: TILE as u16,
@@ -1349,7 +1461,19 @@ impl Drop for InFlight {
 
 /// The frame's pixels, premultiplied RGBA8, from a buffer `read_back_start` filled. A failed
 /// copy or map is an error, never empty pixels.
-pub async fn read_back(buffer: wgpu::Buffer, w: u32, h: u32, row: u32, flight: InFlight) -> Result<Vec<u8>> {
+/// Reads a frame back (`read_back_start`'s buffer) straight into a JS array, unpremultiplied (as
+/// a canvas takes pixels) unless the frame is `opaque` (drawn over an opaque background, every
+/// pixel is): one copy out of the mapping, for a frame read back at every presentation
+/// (headless browsers).
+#[cfg(target_arch = "wasm32")]
+pub async fn read_back_straight(
+    buffer: wgpu::Buffer,
+    w: u32,
+    h: u32,
+    row: u32,
+    flight: InFlight,
+    opaque: bool,
+) -> Result<js_sys::Uint8Array> {
     let _flight = flight;
     let (tx, rx) = futures_channel::oneshot::channel();
     buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -1362,16 +1486,31 @@ pub async fn read_back(buffer: wgpu::Buffer, w: u32, h: u32, row: u32, flight: I
         .slice(..)
         .get_mapped_range()
         .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
-    let mut out = Vec::with_capacity((w * h * 4) as usize);
-    for chunk in mapped.chunks_exact(row as usize) {
-        out.extend_from_slice(&chunk[..(w * 4) as usize]);
+    let line = (w * 4) as usize;
+    if mapped.len() < row as usize * h as usize || line > row as usize {
+        return Err(EngineError::new(ErrorCode::Gpu, "a read-back came back short"));
+    }
+    let out = js_sys::Uint8Array::new_with_length(w * h * 4);
+    if opaque && row as usize == line {
+        out.copy_from(&mapped[..line * h as usize]);
+    } else {
+        let mut scratch = Vec::with_capacity(line);
+        for (y, chunk) in mapped.chunks_exact(row as usize).take(h as usize).enumerate() {
+            let at = (y * line) as u32;
+            let dst = out.subarray(at, at + line as u32);
+            if opaque {
+                dst.copy_from(&chunk[..line]);
+            } else {
+                scratch.clear();
+                scratch.extend_from_slice(&chunk[..line]);
+                crate::engine::unpremultiply(&mut scratch);
+                dst.copy_from(&scratch);
+            }
+        }
     }
     drop(mapped);
     buffer.unmap();
     buffer.destroy();
-    if out.len() != (w * h * 4) as usize {
-        return Err(EngineError::new(ErrorCode::Gpu, "a read-back came back short"));
-    }
     Ok(out)
 }
 
@@ -1414,9 +1553,10 @@ impl Backend for Gpu {
             self.atlas.shelves.touch(u32::from(rect.y0), frame);
             return Some((source(rect), origin, size));
         }
-        let (mask, origin) = masks::rasterise(&mut self.cpu_resources, path, scale.0, scale.1, phase, self.mask_side)?;
-        let (w, h) = (mask.width(), mask.height());
-        if !self.masks.fits(usize::from(w) * usize::from(h) * 4) {
+        // Room first (in the budget, then the atlas), so a mask that can't be kept isn't
+        // rasterised: that glyph is drawn as its outline.
+        let (w, h) = masks::mask_size(path, scale.0, scale.1, phase, self.mask_side)?;
+        if !self.masks.fits(masks::bytes((w, h))) {
             self.masks.stats.outlines += 1;
             return None;
         }
@@ -1433,6 +1573,10 @@ impl Backend for Gpu {
                 return None;
             }
         };
+        let (mask, origin) = masks::rasterise(&mut self.cpu_resources, path, scale.0, scale.1, phase, self.mask_side)?;
+        if (mask.width(), mask.height()) != (w, h) {
+            return None;
+        }
         write(
             &self.queue,
             &self.atlas.texture,

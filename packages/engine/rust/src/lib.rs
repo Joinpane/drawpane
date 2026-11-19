@@ -627,10 +627,12 @@ pub async fn create_gpu(canvas: JsValue, glyph_mask_bytes: u32) -> GpuInit {
     } else {
         gpu::Target::None
     };
+    // By default, what the glyph atlas holds: it's allocated whole either way, and a mask that
+    // doesn't fit is drawn as its outline, at many times the cost.
     let bytes = if glyph_mask_bytes > 0 {
         glyph_mask_bytes as usize
     } else {
-        limits.glyph_mask_bytes
+        gpu::ATLAS_BYTES
     };
     match gpu::Gpu::create(target, bytes, limits.glyph_mask_side).await {
         Ok(g) => GpuInit {
@@ -722,6 +724,32 @@ impl Engine {
         }
     }
 
+    /// Draws tiles for the next frame of the view last drawn, for at most `budget_ms` (at least
+    /// one tile), compositing and presenting nothing: what a browser runs between frames at rest
+    /// (decision 0040, phase 2). In the answer, `tiles_drawn`; `pending`: tiles the last frame
+    /// shows still to draw; `queued`: tiles round it still to draw.
+    #[wasm_bindgen(js_name = renderGpuAhead)]
+    pub fn render_gpu_ahead(&mut self, background: Vec<f32>, budget_ms: f64) -> Outcome {
+        let bg = rgba(&background);
+        let budget = if budget_ms.is_finite() { budget_ms } else { 0.0 };
+        match self.core.render_gpu_ahead(bg, budget) {
+            Ok(draw) => {
+                let masks = self.core.gpu.as_ref().map(|g| g.masks.stats).unwrap_or_default();
+                let mut o = Outcome::stats(engine::FrameStats { draw, masks });
+                o.tiles_drawn = draw.tiles_drawn;
+                o.pending = draw.pending;
+                o.queued = draw.queued;
+                o.held = draw.held;
+                o.evicted = draw.evicted;
+                o.encode_ms = draw.encode_ms;
+                o.render_ms = draw.render_ms;
+                o.cpu_ms = draw.cpu_ms;
+                o
+            }
+            Err(e) => Outcome::err(e),
+        }
+    }
+
     /// Whether the GPU is healthy now: an error recorded since, or its loss, comes back here.
     #[wasm_bindgen(js_name = gpuCheck)]
     pub fn gpu_check(&self) -> Outcome {
@@ -764,6 +792,7 @@ impl Engine {
     #[wasm_bindgen(js_name = gpuPixels)]
     pub fn gpu_pixels(&self) -> js_sys::Promise {
         let start = self.core.gpu.as_ref().map(|g| g.read_back_start());
+        let opaque = self.core.gpu.as_ref().is_some_and(|g| g.opaque());
         wasm_bindgen_futures::future_to_promise(async move {
             let (buffer, w, h, row, flight) = match start {
                 Some(Ok(s)) => s,
@@ -772,11 +801,8 @@ impl Engine {
                     return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
                 }
             };
-            match gpu::read_back(buffer, w, h, row, flight).await {
-                Ok(mut px) => {
-                    engine::unpremultiply(&mut px);
-                    Ok(js_sys::Uint8Array::from(px.as_slice()).into())
-                }
+            match gpu::read_back_straight(buffer, w, h, row, flight, opaque).await {
+                Ok(px) => Ok(px.into()),
                 Err(e) => Ok(failure(e)),
             }
         })

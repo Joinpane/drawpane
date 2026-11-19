@@ -406,3 +406,49 @@ fn a_page_switch_leaves_no_stale_tile() {
     assert!(s.exact, "{s:?}");
     assert!(diff(px, &fresh(&b, 2, 0, c)).is_none());
 }
+
+#[test]
+fn tiles_drawn_ahead_between_frames_make_the_next_frame_exact() {
+    // After a zoom, a frame at rest shows stand-ins; tiles drawn between frames (a few at a
+    // time, nearest the view first) leave nothing for the next frame to draw: it's exact, and a
+    // fresh engine's frame, without drawing a tile.
+    let base = seed() ^ 0x99;
+    for case in 0..cases(12) {
+        let s = base.wrapping_add(u64::from(case) * 0x9e37_79b9);
+        let mut r = Rng(s | 1);
+        let n = 6 + r.below(30);
+        let model = Model::new(&mut r, n, false);
+        let mut e = engine(0, 256);
+        e.apply(&model.fresh(1)).expect("fresh list");
+        let c0 = cam(1.0, 0.0, 0.0);
+        let still = TiledOptions {
+            max_jobs: 0,
+            ..TiledOptions::default()
+        };
+        e.render_cpu_tiled(W, H, c0, BG, TiledOptions::default())
+            .expect("frame");
+        let c1 = cam(f64::from(r.range(0.4, 2.5)), f64::from(r.range(-40.0, 40.0)), 3.5);
+        let moving = TiledOptions {
+            moving: true,
+            max_jobs: 0,
+            ..TiledOptions::default()
+        };
+        e.render_cpu_tiled(W, H, c1, BG, moving).expect("zoom frame");
+        let (_, rest) = e.render_cpu_tiled(W, H, c1, BG, still).expect("rest frame");
+        let mut passes = 0;
+        loop {
+            let a = e.render_cpu_ahead(BG, 2).expect("ahead");
+            passes += 1;
+            if a.pending == 0 {
+                break;
+            }
+            assert!(a.tiles_drawn > 0, "seed {s}: drawing ahead made no progress");
+            assert!(passes < 200, "seed {s}: drawing ahead never finished");
+        }
+        let (px, stats) = e.render_cpu_tiled(W, H, c1, BG, still).expect("next frame");
+        assert!(stats.exact, "seed {s}: {stats:?} (after {rest:?})");
+        assert_eq!(stats.tiles_drawn, 0, "seed {s}: the frame drew what was drawn ahead");
+        let want = fresh(&model, 1, 0, c1);
+        assert!(diff(px, &want).is_none(), "seed {s}: differs from a fresh engine");
+    }
+}

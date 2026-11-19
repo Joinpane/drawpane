@@ -18,6 +18,7 @@ import {
   type TextMeasurer,
 } from "@drawpane/editor";
 import {
+  type AheadStats,
   type Camera,
   ErrorCode,
   type FrameStats,
@@ -155,6 +156,12 @@ const NOT_DRAWN: EngineDraw = { drawn: false, ready: false, exact: false, ahead:
  */
 export const MOVING_BUDGET_MS = 4;
 export const REST_BUDGET_MS = 12;
+/**
+ * Between frames at rest, the engine draws the tiles the next frame wants in slices this long
+ * (`EngineView.ahead`): the time a page has between animation frames goes to the exact frame
+ * too, not only each frame's budget, and no slice holds the next frame back for long.
+ */
+export const IDLE_SLICE_MS = 6;
 
 /** Frames in a row the canvas can't take before the engine gives up for the session. */
 const UNPRESENTED = 3;
@@ -193,6 +200,22 @@ export class EngineView {
   onFallback: (e: FallbackEvent) => void = () => {};
   /** Called when a read-back frame reaches the screen, with whether it was exact. */
   onPresented: (exact: boolean) => void = () => {};
+  /** What drawing between frames did, summed (`ahead`), for the bench and the debug handle. */
+  idle = { slices: 0, tiles: 0, ms: 0 };
+  /** Set to a list by the bench: each frame and slice between frames, as it happens. */
+  trace: Array<{
+    t: number;
+    k: "frame" | "idle" | "present";
+    ms: number;
+    tiles: number;
+    pending: number;
+    encode: number;
+    render: number;
+    misses: number;
+    records: number;
+    masked: number;
+    outlined: number;
+  }> | null = null;
   /** The last frame's numbers, for the bench and the debug handle. */
   last = {
     ms: 0,
@@ -448,6 +471,47 @@ export class EngineView {
     }
   }
 
+  /**
+   * Between frames at rest: draws tiles the next frame will want, for the frame last drawn, for
+   * at most `budgetMs` (at least one tile), compositing and showing nothing (decision 0040,
+   * phase 2). Answers what's left (`pending`: tiles the frame shows; `queued`: tiles round it)
+   * and whether it drew any, or null when there's nothing to draw ahead for (the engine isn't
+   * drawing, or failed: the next frame finds out).
+   */
+  ahead(background: string, budgetMs: number): AheadStats | null {
+    if (this.#dead || !this.#presenting) return null;
+    try {
+      const r = this.#engine.renderGpuAhead(colour(background), budgetMs);
+      if (!r.ok) {
+        // A layer the engine refuses: the next frame draws this page on the canvas.
+        if (r.code !== ErrorCode.Unsupported) this.#fail(r);
+        return null;
+      }
+      this.idle = {
+        slices: this.idle.slices + 1,
+        tiles: this.idle.tiles + r.value.drawn,
+        ms: this.idle.ms + r.value.ms,
+      };
+      this.trace?.push({
+        t: performance.now(),
+        k: "idle",
+        ms: r.value.ms,
+        tiles: r.value.drawn,
+        pending: r.value.pending,
+        encode: r.value.encodeMs,
+        render: r.value.renderMs,
+        misses: r.value.maskMisses,
+        records: r.value.records,
+        masked: r.value.glyphsMasked,
+        outlined: r.value.glyphsOutlined,
+      });
+      return r.value;
+    } catch (err) {
+      this.#fail({ message: String(err), code: null });
+      return null;
+    }
+  }
+
   /** Drops every read-back on its way: a newer content frame decided otherwise. */
   #supersede(): void {
     this.#epoch++;
@@ -525,6 +589,19 @@ export class EngineView {
         submit: f.ms.submit,
       },
     };
+    this.trace?.push({
+      t: performance.now(),
+      k: "frame",
+      ms: this.last.ms,
+      tiles: f.tiles.drawn,
+      pending: f.tiles.pending,
+      encode: f.ms.encode,
+      render: f.ms.render,
+      misses: f.maskMisses,
+      records: f.records,
+      masked: f.glyphsMasked,
+      outlined: f.glyphsOutlined,
+    });
     // A WebGPU canvas shows the frame once it's presented; a read-back one when it lands.
     return {
       drawn: true,
@@ -564,6 +641,7 @@ export class EngineView {
         this.#readNext();
         return;
       }
+      const p0 = performance.now();
       ctx.putImageData(
         new ImageData(
           new Uint8ClampedArray(
@@ -577,6 +655,19 @@ export class EngineView {
         0,
         0,
       );
+      this.trace?.push({
+        t: performance.now(),
+        k: "present",
+        ms: performance.now() - p0,
+        tiles: 0,
+        pending: 0,
+        encode: 0,
+        render: 0,
+        misses: 0,
+        records: 0,
+        masked: 0,
+        outlined: 0,
+      });
       this.last = {
         ...this.last,
         breakdown: { ...this.last.breakdown, readback: performance.now() - t },

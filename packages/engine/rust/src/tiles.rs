@@ -25,9 +25,12 @@
 //!   reach drops everything.
 //! - **Budget.** Tiles live in slots (`max_slots`, set from the engine's GPU budget). Over it, the
 //!   tile least worth keeping goes: other levels before the frame's (finer first), then the
-//!   frame level's farthest from the view, then the least recently used; tiles the frame shows
-//!   are never evicted. If the frame's own tiles can't fit, it's drawn tile by tile without
-//!   keeping them (`Plan::direct`): slower, still exact, never blank.
+//!   frame level's farthest from the view, then the least recently used. A frame pins what it
+//!   shows and what it counts on to stand in, and plans its jobs within the slots left: what
+//!   nothing stands in for first (whatever the time budget), then what waits. Coverage is
+//!   planned over the part of each tile on screen. What can't be given a slot is drawn straight
+//!   into the frame without being kept (`Job::direct`); if the frame's own tiles can't fit at
+//!   all, the whole frame is (`Plan::direct`): slower, still exact, never blank.
 
 use crate::exec::IRect;
 use std::collections::HashMap;
@@ -148,6 +151,9 @@ pub struct Job {
     pub detail: bool,
     /// Nothing else can stand in for it on screen: drawn even past the frame's time budget.
     pub must: bool,
+    /// No slot can be kept for it this frame (the budget): drawn straight into the frame, over
+    /// what the frame composites, and kept nowhere. Always `must`, never `detail`.
+    pub direct: bool,
 }
 
 /// How a frame is made.
@@ -238,6 +244,12 @@ pub struct TileCache {
 
 /// Levels kept at once: more are dropped least recently used first.
 const LEVELS: usize = 8;
+
+/// Whether tiles of a level at scale `other` may stand in for a frame at `scale`: within 4× either
+/// way. One rule for the plan (what it counts on) and the composite (what it lays).
+pub fn stands_in(scale: f64, other: f64) -> bool {
+    (other / scale).log2().abs() <= 2.0
+}
 
 fn overlaps(a: Rect, b: Rect) -> bool {
     a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
@@ -500,16 +512,40 @@ impl TileCache {
         }
     }
 
-    /// Whether tiles of level `id` (any state) cover a rectangle of page units.
-    fn covers(&self, id: u32, page: Rect) -> bool {
-        let Some(level) = self.level(id) else { return false };
-        let Some((i0, j0, i1, j1)) = self.span(level.grid().transform_rect_bbox(page)) else {
-            return false;
-        };
+    /// The tiles of level `id` (any state) covering a rectangle of page units, if they do.
+    fn cover(&self, id: u32, page: Rect) -> Option<Vec<TileKey>> {
+        let level = self.level(id)?;
+        let (i0, j0, i1, j1) = self.span(level.grid().transform_rect_bbox(page))?;
         if (i64::from(i1) - i64::from(i0) + 1) * (i64::from(j1) - i64::from(j0) + 1) > 64 {
-            return false;
+            return None;
         }
-        (j0..=j1).all(|j| (i0..=i1).all(|i| self.tiles.contains_key(&TileKey { level: id, i, j })))
+        let mut keys = Vec::new();
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                let key = TileKey { level: id, i, j };
+                if !self.tiles.contains_key(&key) {
+                    return None;
+                }
+                keys.push(key);
+            }
+        }
+        Some(keys)
+    }
+
+    /// Tiles pinned for the frame: shown, drawn or counted on by it, so never evicted by it.
+    fn pinned(&self) -> usize {
+        self.tiles.values().filter(|e| e.used == self.frame).count()
+    }
+
+    /// Pins a held tile, taking it from the frame's `room` if it wasn't pinned yet.
+    fn pin(&mut self, key: &TileKey, room: &mut usize) {
+        let frame = self.frame;
+        if let Some(e) = self.tiles.get_mut(key)
+            && e.used != frame
+        {
+            e.used = frame;
+            *room = room.saturating_sub(1);
+        }
     }
 
     /// Plans a `size` frame under `view`. `zooming`: the scale changed since the last frame.
@@ -576,6 +612,7 @@ impl TileCache {
                     view: level.tile_view(i, j, self.tile),
                     detail: false,
                     must: true,
+                    direct: true,
                 })
                 .collect();
             return Some(plan);
@@ -591,76 +628,181 @@ impl TileCache {
             r.is_finite().then_some(r)
         });
         let grid_inv = level.grid().inverse();
+        let frame_grid = Rect::new(gx0 as f64, gy0 as f64, (gx0 + w) as f64, (gy0 + h) as f64);
         let ladder = zooming.then(|| self.level_id(Level::ladder(level.scale), true));
-        let mut ladder_jobs: Vec<TileKey> = Vec::new();
         let other_levels: Vec<u32> = self
             .levels
             .iter()
-            .filter(|e| e.id != id)
-            .filter(|e| {
-                let r = e.level.scale / level.scale;
-                (0.25..=4.0).contains(&r)
-            })
+            .filter(|e| e.id != id && stands_in(level.scale, e.level.scale))
             .map(|e| e.id)
             .collect();
+        // What stands in for each visible tile not up to date, over the part of it on screen:
+        // itself (stale), the last frame, or another level's tiles (`deps`).
+        struct Need {
+            key: TileKey,
+            held: bool,
+            covered: bool,
+            page: Rect,
+            deps: Vec<TileKey>,
+        }
+        let mut needs: Vec<Need> = Vec::new();
         for &(i, j) in &visible {
             let key = TileKey { level: id, i, j };
             let held = self.tiles.get(&key).copied();
-            let up_to_date = held.is_some_and(|e| !e.stale && e.exact);
-            if up_to_date {
+            if held.is_some_and(|e| !e.stale && e.exact) {
                 continue;
             }
-            // What could stand in for it: itself (stale), the last frame, another level.
-            let page = grid_inv.transform_rect_bbox(Rect::new(
+            let shown = Rect::new(
                 f64::from(i) * tf,
                 f64::from(j) * tf,
                 f64::from(i + 1) * tf,
                 f64::from(j + 1) * tf,
-            ));
+            )
+            .intersect(frame_grid);
+            let page = grid_inv.transform_rect_bbox(shown);
+            let mut deps = Vec::new();
             let covered = held.is_some()
                 || last_page.is_some_and(|l| l.contains_rect(page))
-                || other_levels.iter().any(|o| self.covers(*o, page));
+                || other_levels.iter().any(|o| match self.cover(*o, page) {
+                    Some(keys) => {
+                        deps = keys;
+                        true
+                    }
+                    None => false,
+                });
+            needs.push(Need {
+                key,
+                held: held.is_some(),
+                covered,
+                page,
+                deps,
+            });
+        }
+        // Slots the frame may fill: every one but those it pins (what it shows, and the other
+        // levels' tiles it counts on, so its draws can't evict them). What nothing stands in
+        // for gets one first. A tile that only another level's tiles stand in for, when no slot
+        // is left, is drawn this frame instead (whatever the budget), so the tiles it counted on
+        // are free again once nothing else counts on them: a frame at rest always progresses.
+        // What still finds no slot is drawn straight into the frame (`direct`), never blank.
+        let mut room = self.max_slots.saturating_sub(self.pinned());
+        let frame = self.frame;
+        let mut uses: HashMap<TileKey, (u32, u64)> = HashMap::new();
+        for n in &needs {
+            for k in &n.deps {
+                if let Some(e) = self.tiles.get(k) {
+                    uses.entry(*k).or_insert((0, e.used)).0 += 1;
+                }
+            }
+        }
+        // Tiles pinned before (shown) stay pinned whatever the count.
+        uses.retain(|_, (_, used)| *used != frame);
+        for k in uses.keys().copied().collect::<Vec<_>>() {
+            self.pin(&k, &mut room);
+        }
+        let mut must = Vec::new();
+        let mut optional = Vec::new();
+        let mut covered_new = Vec::new();
+        let tile = self.tile;
+        let frame_job = |key: TileKey, must: bool, direct: bool| Job {
+            key,
+            view: level.tile_view(key.i, key.j, tile),
+            detail: false,
+            must,
+            direct,
+        };
+        let mut ladder_keys: Vec<TileKey> = Vec::new();
+        for n in needs {
             if let Some(lid) = ladder {
                 // Zooming: tiles of this scale would be gone next frame. Where nothing stands
-                // in, the ladder level is drawn (coarse, with level of detail), never blank.
-                if !covered
-                    && let Some(l) = self.level(lid)
-                    && let Some((a0, b0, a1, b1)) = self.span(l.grid().transform_rect_bbox(page))
-                {
+                // in, the ladder level is drawn (coarse, with level of detail) over the part on
+                // screen, if its tiles fit; else this tile, direct.
+                if n.covered {
+                    continue;
+                }
+                let span = self
+                    .level(lid)
+                    .and_then(|l| self.span(l.grid().transform_rect_bbox(n.page)));
+                let mut fresh = Vec::new();
+                let mut kept = Vec::new();
+                if let Some((a0, b0, a1, b1)) = span {
                     for b in b0..=b1 {
                         for a in a0..=a1 {
                             let k = TileKey { level: lid, i: a, j: b };
-                            if !self.tiles.contains_key(&k) && !ladder_jobs.contains(&k) {
-                                ladder_jobs.push(k);
+                            if self.tiles.contains_key(&k) {
+                                kept.push(k);
+                            } else if !ladder_keys.contains(&k) {
+                                fresh.push(k);
                             }
                         }
                     }
                 }
+                let unpinned = kept
+                    .iter()
+                    .filter(|k| self.tiles.get(k).is_some_and(|e| e.used != frame))
+                    .count();
+                if span.is_some() && fresh.len() + unpinned <= room {
+                    for k in &kept {
+                        self.pin(k, &mut room);
+                    }
+                    room -= fresh.len();
+                    ladder_keys.extend(fresh);
+                } else {
+                    must.push(frame_job(n.key, true, true));
+                }
                 continue;
             }
-            plan.jobs.push(Job {
-                key,
-                view: level.tile_view(i, j, self.tile),
-                detail: false,
-                must: !covered,
-            });
+            if n.held {
+                // A stale tile stands in for itself and is drawn again in its own slot.
+                optional.push(frame_job(n.key, false, false));
+            } else if !n.covered {
+                let direct = room == 0;
+                room = room.saturating_sub(1);
+                must.push(frame_job(n.key, true, direct));
+            } else {
+                covered_new.push(n);
+            }
         }
+        for n in covered_new {
+            if room > 0 {
+                room -= 1;
+                optional.push(frame_job(n.key, false, false));
+                continue;
+            }
+            if n.deps.is_empty() {
+                // The last frame stands in for it: it waits for a slot.
+                continue;
+            }
+            // Drawn now: the tiles it counted on are free once nothing else counts on them.
+            for k in &n.deps {
+                if let Some((count, used)) = uses.get_mut(k) {
+                    *count -= 1;
+                    if *count == 0
+                        && let Some(e) = self.tiles.get_mut(k)
+                    {
+                        e.used = *used;
+                        room += 1;
+                    }
+                }
+            }
+            let direct = room == 0;
+            room = room.saturating_sub(1);
+            must.push(frame_job(n.key, true, direct));
+        }
+        plan.jobs = must;
         if let Some(lid) = ladder
             && let Some(l) = self.level(lid)
         {
-            // Bounded: a ladder level is never finer than the view, so a view's worth of tiles.
-            for k in ladder_jobs
-                .into_iter()
-                .take(self.max_slots.saturating_sub(visible.len()).max(1))
-            {
+            for k in ladder_keys {
                 plan.jobs.push(Job {
                     key: k,
                     view: l.tile_view(k.i, k.j, self.tile),
                     detail: true,
                     must: true,
+                    direct: false,
                 });
             }
         }
+        plan.jobs.extend(optional);
         // Not zooming: tiles round the view, for the pan to come, while slots allow.
         if prefetch && !zooming && visible.len() * 2 <= self.max_slots {
             let mut ring = Vec::new();
@@ -673,19 +815,20 @@ impl TileCache {
                 }
             }
             ring.sort_by_key(dist);
-            let room = self.max_slots - visible.len();
-            for (i, j) in ring.into_iter().take(room) {
+            for (i, j) in ring {
                 let key = TileKey { level: id, i, j };
-                if self.tiles.get(&key).is_some_and(|e| !e.stale && e.exact) {
-                    self.touch(&key);
-                    continue;
+                match self.tiles.get(&key).copied() {
+                    Some(e) if !e.stale && e.exact => self.pin(&key, &mut room),
+                    Some(_) => {
+                        self.pin(&key, &mut room);
+                        plan.jobs.push(frame_job(key, false, false));
+                    }
+                    None if room > 0 => {
+                        room -= 1;
+                        plan.jobs.push(frame_job(key, false, false));
+                    }
+                    None => {}
                 }
-                plan.jobs.push(Job {
-                    key,
-                    view: level.tile_view(i, j, self.tile),
-                    detail: false,
-                    must: false,
-                });
             }
             // Last, a coarser level (a ladder level at about half the scale, with level of
             // detail) over the view grown by half of it each way: what a zoom out stands on, so
@@ -693,8 +836,7 @@ impl TileCache {
             let coarse = Level::ladder(level.scale / 2.0);
             if coarse != level && visible.len() * 3 <= self.max_slots {
                 let cid = self.level_id(coarse, true);
-                let frame =
-                    grid_inv.transform_rect_bbox(Rect::new(gx0 as f64, gy0 as f64, (gx0 + w) as f64, (gy0 + h) as f64));
+                let frame = grid_inv.transform_rect_bbox(frame_grid);
                 let grown = frame.inflate(frame.width() / 2.0, frame.height() / 2.0);
                 if let Some((a0, b0, a1, b1)) = self.span(coarse.grid().transform_rect_bbox(grown))
                     && ((i64::from(a1) - i64::from(a0) + 1) * (i64::from(b1) - i64::from(b0) + 1)) as usize
@@ -703,16 +845,30 @@ impl TileCache {
                     for b in b0..=b1 {
                         for a in a0..=a1 {
                             let key = TileKey { level: cid, i: a, j: b };
-                            if self.tiles.get(&key).is_some_and(|e| !e.stale) {
-                                self.touch(&key);
-                                continue;
+                            match self.tiles.get(&key).copied() {
+                                Some(e) if !e.stale => self.pin(&key, &mut room),
+                                Some(_) => {
+                                    self.pin(&key, &mut room);
+                                    plan.jobs.push(Job {
+                                        key,
+                                        view: coarse.tile_view(a, b, self.tile),
+                                        detail: true,
+                                        must: false,
+                                        direct: false,
+                                    });
+                                }
+                                None if room > 0 => {
+                                    room -= 1;
+                                    plan.jobs.push(Job {
+                                        key,
+                                        view: coarse.tile_view(a, b, self.tile),
+                                        detail: true,
+                                        must: false,
+                                        direct: false,
+                                    });
+                                }
+                                None => {}
                             }
-                            plan.jobs.push(Job {
-                                key,
-                                view: coarse.tile_view(a, b, self.tile),
-                                detail: true,
-                                must: false,
-                            });
                         }
                     }
                 }
@@ -721,7 +877,37 @@ impl TileCache {
         Some(plan)
     }
 
-    /// What the frame planned shows, after its jobs were drawn (or some of them).
+    /// What's left of a plan's work: tiles the frame shows that aren't up to date (stale,
+    /// missing, or drawn with level of detail), and jobs round it not drawn yet.
+    pub fn left(&self, plan: &Plan) -> (u32, u32) {
+        let done = |key: &TileKey| self.tiles.get(key).is_some_and(|e| !e.stale && e.exact);
+        let pending = plan
+            .visible
+            .iter()
+            .filter(|&&(i, j)| {
+                !done(&TileKey {
+                    level: plan.level,
+                    i,
+                    j,
+                })
+            })
+            .count();
+        let queued = plan
+            .jobs
+            .iter()
+            .filter(|j| !j.direct && (j.key.level != plan.level || !plan.visible.contains(&(j.key.i, j.key.j))))
+            .filter(|j| {
+                self.tiles
+                    .get(&j.key)
+                    .is_none_or(|e| e.stale || (!j.detail && !e.exact))
+            })
+            .count();
+        (pending as u32, queued as u32)
+    }
+
+    /// What the frame planned shows, after its jobs were drawn (or some of them). Its `direct`
+    /// jobs are drawn straight into the frame after it, over what it lays: they count as there
+    /// (and exact; the caller adds whether they were).
     pub fn compose(&mut self, plan: &Plan, last: Option<Last>) -> Composite {
         let Some(level) = self.level(plan.level) else {
             return Composite::default();
@@ -740,9 +926,11 @@ impl TileCache {
                 j,
             };
             let Some(e) = self.tiles.get(&key).copied() else {
-                out.exact = false;
-                out.complete = false;
-                out.pending += 1;
+                if !plan.jobs.iter().any(|j| j.direct && j.key == key) {
+                    out.exact = false;
+                    out.complete = false;
+                    out.pending += 1;
+                }
                 continue;
             };
             if e.stale || !e.exact {
@@ -796,8 +984,8 @@ impl TileCache {
             .levels
             .iter()
             .filter(|e| e.id != plan.level)
+            .filter(|e| stands_in(level.scale, e.level.scale))
             .map(|e| ((e.level.scale / level.scale).log2().abs(), e.id, e.level))
-            .filter(|(d, _, _)| *d <= 2.0)
             .collect();
         others.sort_by(|a, b| b.0.total_cmp(&a.0));
         let tf = f64::from(self.tile);
@@ -1057,6 +1245,61 @@ mod tests {
         assert!(p.direct);
         assert_eq!(p.jobs.len(), 16);
         assert!(p.jobs.iter().all(|j| j.must && !j.detail));
+    }
+
+    #[test]
+    fn what_nothing_stands_in_for_comes_before_what_waits() {
+        let mut c = TileCache::new(64, 64);
+        c.begin([1.0; 4], 0);
+        let p = c.plan(cam(1.0, 0.0, 0.0), (192, 64), false, None, false).expect("plan");
+        draw_all(&mut c, &p);
+        let last = Last {
+            view: cam(1.0, 0.0, 0.0),
+            size: (192, 64),
+        };
+        // Everything stale, then a pan: the centre tiles stand in for themselves, the one
+        // entering on the right has nothing. It's first, whatever its distance.
+        c.begin([1.0; 4], 0);
+        c.invalidate_all();
+        let q = c
+            .plan(cam(1.0, -64.0, 0.0), (192, 64), false, Some(last), false)
+            .expect("plan");
+        let first_optional = q.jobs.iter().position(|j| !j.must).expect("stale tiles wait");
+        assert!(q.jobs[..first_optional].iter().any(|j| j.key.i == 3), "{:?}", q.jobs);
+        assert!(q.jobs[first_optional..].iter().all(|j| !j.must), "{:?}", q.jobs);
+    }
+
+    #[test]
+    fn stand_ins_never_starve_a_frame_at_rest() {
+        // Slots for the frame's tiles and two more; a finer level's tiles stand in for one of
+        // them and hold slots. Drawing what must be drawn and one tile more a frame (the GPU's
+        // least at rest), the frame becomes exact, never asking for a slot it can't have.
+        let mut c = TileCache::new(64, 6);
+        c.begin([1.0; 4], 0);
+        let a = c.plan(cam(2.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+        draw_all(&mut c, &a);
+        for _ in 0..8 {
+            c.begin([1.0; 4], 0);
+            let b = c.plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+            let mut extra = 1;
+            for j in &b.jobs {
+                if j.direct {
+                    continue;
+                }
+                if !j.must {
+                    if extra == 0 {
+                        continue;
+                    }
+                    extra -= 1;
+                }
+                let s = c.slot_for(j.key).expect("the plan counted a slot for it");
+                c.drawn(j.key, s, true);
+            }
+            if c.compose(&b, None).exact {
+                return;
+            }
+        }
+        panic!("never became exact at rest");
     }
 
     #[test]

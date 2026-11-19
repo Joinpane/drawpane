@@ -881,42 +881,64 @@ impl Store {
                 })
                 .collect();
             readers.sort_unstable();
-            for (order, end, id) in readers {
-                let Some(node) = self.nodes.get(&id) else { continue };
-                if !self.drawn(id) {
-                    continue;
+            // In paint order, then again until no reader joins: a reader that reads after its
+            // children reads what readers inside it paint, and those come later in paint order
+            // (a fixed point, conservative; each pass adds a reader or ends, so at most one pass
+            // per reader).
+            let mut joined = vec![false; readers.len()];
+            loop {
+                let mut grew = false;
+                for (n, &(order, end, id)) in readers.iter().enumerate() {
+                    if joined[n] {
+                        continue;
+                    }
+                    if self.reader_affected(id, order, end, view, slop, &items)
+                        && let Some(node) = self.nodes.get(&id)
+                    {
+                        joined[n] = true;
+                        grew = true;
+                        let b = Rect::new(0.0, 0.0, f64::from(node.record.size[0]), f64::from(node.record.size[1]));
+                        let paints = (view * self.world(id)).transform_rect_bbox(b).inflate(slop, slop);
+                        items.push(Dirty {
+                            rect: paints,
+                            order,
+                            end: order,
+                            stale: false,
+                        });
+                    }
                 }
-                let halo = f64::from(node.record.reads().unwrap_or(0.0));
-                let b = Rect::new(0.0, 0.0, f64::from(node.record.size[0]), f64::from(node.record.size[1]));
-                let device = view * self.world(id);
-                let paints = device.transform_rect_bbox(b).inflate(slop, slop);
-                let reads = device.transform_rect_bbox(b.inflate(halo, halo)).inflate(slop, slop);
-                // What it reads changed if a change beneath it (earlier in paint order: an
-                // earlier subtree or an ancestor) touches its read region. Its own subtree's
-                // changes are above it, unless it reads after its children are drawn.
-                let reads_after_children = node
-                    .record
-                    .ops
-                    .iter()
-                    .position(|op| matches!(op, Op::Children))
-                    .zip(node.record.ops.iter().position(|op| matches!(op, Op::Read { .. })))
-                    .is_some_and(|(c, r)| r > c);
-                let affected = items.iter().any(|d| {
-                    let beneath =
-                        d.stale || d.order < order || (reads_after_children && d.order <= end && d.order > order);
-                    beneath && overlaps(d.rect, reads)
-                });
-                if affected {
-                    items.push(Dirty {
-                        rect: paints,
-                        order,
-                        end: order,
-                        stale: false,
-                    });
+                if !grew {
+                    break;
                 }
             }
         }
         items.into_iter().map(|d| d.rect).collect()
+    }
+
+    /// Whether what reader `id` (paint order `order`, its subtree through `end`) reads changed:
+    /// a change beneath it (earlier in paint order: an earlier subtree or an ancestor), or in its
+    /// own subtree if it reads after its children, touches its read region.
+    fn reader_affected(&self, id: u32, order: u32, end: u32, view: Affine, slop: f64, items: &[Dirty]) -> bool {
+        let Some(node) = self.nodes.get(&id) else { return false };
+        if !self.drawn(id) {
+            return false;
+        }
+        let halo = f64::from(node.record.reads().unwrap_or(0.0));
+        let b = Rect::new(0.0, 0.0, f64::from(node.record.size[0]), f64::from(node.record.size[1]));
+        let device = view * self.world(id);
+        let reads = device.transform_rect_bbox(b.inflate(halo, halo)).inflate(slop, slop);
+        // Its own subtree's changes are above it, unless it reads (any of its reads) after its
+        // children are drawn.
+        let reads_after_children = node
+            .record
+            .ops
+            .iter()
+            .skip_while(|op| !matches!(op, Op::Children))
+            .any(|op| matches!(op, Op::Read { .. }));
+        items.iter().any(|d| {
+            let beneath = d.stale || d.order < order || (reads_after_children && d.order <= end && d.order > order);
+            beneath && overlaps(d.rect, reads)
+        })
     }
 
     /// Whether a record and every ancestor are shown.

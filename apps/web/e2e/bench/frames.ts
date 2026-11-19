@@ -19,7 +19,22 @@ export interface Summary {
    * The render engine only: ms until it drew an exact frame (before a read-back shows it, in
    * headless browsers), and its slowest frame of the movement (ms, how it was made, tiles drawn).
    */
-  engine?: { exactMs: number; worst: { ms: number; plan: string; tiles: number } };
+  engine?: { exactMs: number; worst: { ms: number; plan: string; tiles: number }; settle?: Settle };
+}
+
+/**
+ * The engine only: how it got from the movement's last frame to an exact one. Frames drawn (their
+ * tiles and ms), and what it drew between frames (slices, tiles, ms).
+ */
+export interface Settle {
+  frames: number;
+  frameTiles: number;
+  frameMs: number;
+  idleSlices: number;
+  idleTiles: number;
+  idleMs: number;
+  /** Each frame (f) and slice between frames (i): ms after the movement, its ms, tiles, pending. */
+  trace?: string;
 }
 
 /** Pans for `frames` animation frames and returns what drawing them took. */
@@ -51,7 +66,23 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
           Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
         return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
       };
-      type View = { last: { exact: boolean; ms: number; plan: string; tiles: { drawn: number } } };
+      type View = {
+        last: { exact: boolean; ms: number; plan: string; tiles: { drawn: number } };
+        idle: { slices: number; tiles: number; ms: number };
+        trace: Array<{
+          t: number;
+          k: string;
+          ms: number;
+          tiles: number;
+          pending: number;
+          encode: number;
+          render: number;
+          misses: number;
+          records: number;
+          masked: number;
+          outlined: number;
+        }> | null;
+      };
       const view = () => (window as unknown as { drawpaneEngineView?: View }).drawpaneEngineView;
       let worst = { ms: 0, plan: "", tiles: 0 };
       const watch = () => {
@@ -65,13 +96,54 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
         const t = performance.now();
         const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
         let drawn = -1;
+        const idle0 = view()?.idle;
+        const traced = view();
+        if (traced) traced.trace = [];
+        let seen = view()?.last;
+        const settle = {
+          frames: 0,
+          frameTiles: 0,
+          frameMs: 0,
+          idleSlices: 0,
+          idleTiles: 0,
+          idleMs: 0,
+        };
+        const tally = () => {
+          const v = view();
+          if (!v || drawn >= 0) return;
+          if (v.last !== seen) {
+            seen = v.last;
+            settle.frames++;
+            settle.frameTiles += v.last.tiles.drawn;
+            settle.frameMs += v.last.ms;
+          }
+          if (idle0) {
+            settle.idleSlices = v.idle.slices - idle0.slices;
+            settle.idleTiles = v.idle.tiles - idle0.tiles;
+            settle.idleMs = Math.round((v.idle.ms - idle0.ms) * 10) / 10;
+          }
+          if (v.last.exact) drawn = performance.now() - t;
+        };
         await nextFrame();
         while (!f.exact && performance.now() - t < 10_000) {
-          if (drawn < 0 && view()?.last.exact) drawn = performance.now() - t;
+          tally();
           await nextFrame();
         }
+        tally();
+        settle.frameMs = Math.round(settle.frameMs * 10) / 10;
         const shown = Math.round(performance.now() - t);
-        return { shown, drawn: Math.round(drawn < 0 ? shown : drawn) };
+        const trace = (traced?.trace ?? [])
+          .map(
+            (e) =>
+              `${e.k === "frame" ? "f" : e.k === "present" ? "p" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
+          )
+          .join(" ");
+        if (traced) traced.trace = null;
+        return {
+          shown,
+          drawn: Math.round(drawn < 0 ? shown : drawn),
+          settle: { ...settle, trace },
+        };
       };
       const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
       await nextFrame();
@@ -92,7 +164,7 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
         ...summary,
         interval: intervals(times),
         exactMs: exact.shown,
-        ...(view() ? { engine: { exactMs: exact.drawn, worst } } : {}),
+        ...(view() ? { engine: { exactMs: exact.drawn, worst, settle: exact.settle } } : {}),
       };
     },
     { zoom, frames },
@@ -123,7 +195,23 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
       return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
     };
     const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-    type View = { last: { exact: boolean; ms: number; plan: string; tiles: { drawn: number } } };
+    type View = {
+      last: { exact: boolean; ms: number; plan: string; tiles: { drawn: number } };
+      idle: { slices: number; tiles: number; ms: number };
+      trace: Array<{
+        t: number;
+        k: string;
+        ms: number;
+        tiles: number;
+        pending: number;
+        encode: number;
+        render: number;
+        misses: number;
+        records: number;
+        masked: number;
+        outlined: number;
+      }> | null;
+    };
     const view = () => (window as unknown as { drawpaneEngineView?: View }).drawpaneEngineView;
     let worst = { ms: 0, plan: "", tiles: 0 };
     const watch = () => {
@@ -135,13 +223,50 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
       const t = performance.now();
       const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
       let drawn = -1;
+      const idle0 = view()?.idle;
+      const traced = view();
+      if (traced) traced.trace = [];
+      let seen = view()?.last;
+      const settle = {
+        frames: 0,
+        frameTiles: 0,
+        frameMs: 0,
+        idleSlices: 0,
+        idleTiles: 0,
+        idleMs: 0,
+      };
+      const tally = () => {
+        const v = view();
+        if (!v || drawn >= 0) return;
+        if (v.last !== seen) {
+          seen = v.last;
+          settle.frames++;
+          settle.frameTiles += v.last.tiles.drawn;
+          settle.frameMs += v.last.ms;
+        }
+        if (idle0) {
+          settle.idleSlices = v.idle.slices - idle0.slices;
+          settle.idleTiles = v.idle.tiles - idle0.tiles;
+          settle.idleMs = Math.round((v.idle.ms - idle0.ms) * 10) / 10;
+        }
+        if (v.last.exact) drawn = performance.now() - t;
+      };
       await nextFrame();
       while (!f.exact && performance.now() - t < 10_000) {
-        if (drawn < 0 && view()?.last.exact) drawn = performance.now() - t;
+        tally();
         await nextFrame();
       }
+      tally();
+      settle.frameMs = Math.round(settle.frameMs * 10) / 10;
       const shown = Math.round(performance.now() - t);
-      return { shown, drawn: Math.round(drawn < 0 ? shown : drawn) };
+      const trace = (traced?.trace ?? [])
+        .map(
+          (e) =>
+            `${e.k === "frame" ? "f" : e.k === "present" ? "p" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
+        )
+        .join(" ");
+      if (traced) traced.trace = null;
+      return { shown, drawn: Math.round(drawn < 0 ? shown : drawn), settle: { ...settle, trace } };
     };
     await nextFrame();
     await nextFrame();
@@ -162,12 +287,17 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
       ...summary,
       interval: intervals(times),
       exactMs: exact.shown,
-      ...(view() ? { engine: { exactMs: exact.drawn, worst } } : {}),
+      ...(view() ? { engine: { exactMs: exact.drawn, worst, settle: exact.settle } } : {}),
     };
   }, frames);
 }
 
+function settleText(s: Settle | undefined): string {
+  if (!s) return "";
+  return `; settling: ${s.frames} frames drew ${s.frameTiles} tiles in ${s.frameMs} ms, ${s.idleSlices} idle slices ${s.idleTiles} tiles in ${s.idleMs} ms${s.trace ? `; trace (end at: ms (encode+render) / tiles / pending / mask misses / records / glyphs masked+outlined) ${s.trace}` : ""}`;
+}
+
 /** One line of a frame summary for the console. */
 export function summaryRow(name: string, r: Summary): string {
-  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · exact after ${r.exactMs ?? "-"} ms${r.engine ? ` (drawn exact after ${r.engine.exactMs} ms; slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles)` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
+  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · exact after ${r.exactMs ?? "-"} ms${r.engine ? ` (drawn exact after ${r.engine.exactMs} ms; slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles${settleText(r.engine.settle)})` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
 }

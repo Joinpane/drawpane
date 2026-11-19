@@ -694,6 +694,8 @@ Exact means every tile the frame shows is up to date and drawn without level of 
 **Invalidation through the render graph.**
 
 - Each applied message's changes (where the touched records painted before and paint now, page units, with paint order) are turned into each held level's grid pixels by `Store::dirty`: grown by 1.5 device pixels for anti-aliasing, with every reader they reach, transitively. Every tile they touch is marked stale.
+- Readers join in paint order, then again until none joins (a fixed point, at most one pass per reader): a reader that reads after its children reads what readers inside it paint, and those come later in paint order. A record reading both before and after its children counts as reading after them.
+- Where a record paints is its ops' bounds, each stroke grown by how far its outline can reach: half its width times its miter limit for mitered joins, √2 for square caps, plus a unit. The wire's miter limit is taken as at most 1,000, for drawing and bounds alike, so bounds stay finite and true (`0040-display-list.md`).
 - A fresh list (a page switch, a reload, a recovery after a refused patch) drops every tile and forgets the last frame: it shows a page that's gone.
 - An image put or dropped invalidates the records that paint it (`Store::image_users`).
 - A change of background or of the readers' reach drops everything.
@@ -701,23 +703,27 @@ Exact means every tile the frame shows is up to date and drawn without level of 
 
 **Scheduling: never one long frame.**
 
-- A frame draws first the tiles nothing can stand in for (a page just opened, a jump), then others in order of distance from the view's centre, while its budget lasts: 4 ms while the camera moves, 12 ms once it rests (`MOVING_BUDGET_MS`, `REST_BUDGET_MS` in `engine-view.ts`). Every frame draws at least one, so a frame at rest always makes progress.
-- The editor draws again each frame while the frame isn't exact, with no settle delay (phase 1 waited 120 ms). Then, while tiles are still to draw ahead, it keeps going: tiles round the view, ahead of a pan, and a coarser level (a ladder level at about half the scale, with level of detail) over the view grown by half of it each way, which a zoom out stands on.
-- A frame asked for with no budget (`renderGpu(…, false, 0)`: tests, exports of the view) comes back exact.
+- A frame plans its tiles over the part of each on screen. It draws first every tile nothing can stand in for (a page just opened, a jump), whatever its budget, then the others in order of distance from the view's centre while its budget lasts: 4 ms while the camera moves, 12 ms once it rests (`MOVING_BUDGET_MS`, `REST_BUDGET_MS` in `engine-view.ts`). A tile past the budget waits for a later frame; the frame goes on to the next, so nothing that must be drawn is ever left behind one that can wait. Every frame draws at least one tile.
+- **Between frames at rest**, the engine draws what the next frame wants (`renderGpuAhead`, `EngineView.ahead`): the tiles the last frame shows that aren't up to date, nearest the centre first, then the tiles round the view, in slices of 6 ms (`IDLE_SLICE_MS`; at least one tile each), compositing and presenting nothing. When the camera comes to rest where the last moving frame was drawn, that frame stays on screen and the slices start at once; when the tiles it shows are all drawn, the exact frame is drawn from the slice that finished them, not a frame later. Tiles round the view (ahead of a pan, and a coarser level a zoom out stands on) are drawn the same way, with no frame for them.
+- While the camera moves, the editor draws a frame each animation frame while it isn't exact. A frame asked for with no budget (`renderGpu(…, false, 0)`: tests, exports of the view) comes back exact.
 
 **GPU memory.**
 
 - Tiles live in pages of 2,048² (16 tiles, 16 MiB each), drawn by Vello into their slot with one shared 16 MiB depth buffer.
 - They take what's left of the engine's 768 MiB beside everything else it holds (images, the glyph atlas, frames, read-backs), less 32 MiB of headroom, and at most `tile_bytes` (256 MiB by default, a limit like the others). This is worked out every frame, so images arriving shrink the tiles, never the other way round. Pages past it go, with their tiles.
 - Frames are two textures (shown, being made), with no depth buffers now that they're only composited.
-- **Eviction**, when a tile needs a slot: never a tile the frame shows or drew. Other levels go first, finer ones first, then the frame level's tiles farthest from the view, then the least recently used.
-- **Degradation:** if the frame's own tiles can't all be kept, it's drawn tile by tile straight into the frame through a scratch tile, keeping none (`direct`): slower, still exact, never blank.
+- **Eviction**, when a tile needs a slot: never a tile the frame shows, drew or counts on to stand in. Other levels go first, finer ones first, then the frame level's tiles farthest from the view, then the least recently used.
+- **Planned within the slots.** A frame pins what it shows and the other levels' tiles it counts on to stand in, and plans its jobs within the slots left. A zoom's ladder tiles for a part of the view are planned only if they all fit. Where a tile that only another level stands in for finds no slot, it's drawn this frame instead, freeing what it counted on, so a frame at rest always progresses.
+- **Degradation:** a tile the frame needs and no slot can hold is drawn straight into the frame, over the composite, through a scratch tile, and kept nowhere (`Job::direct`). If the frame's own tiles can't all be kept, the whole frame is drawn that way (`Plan::direct`). Slower, still exact, never blank.
+- **The glyph atlas** (2,048², 16 MiB, allocated whole) holds the GPU's masks, and by default the masks it keeps are what it holds. When it's full and no shelf suits a mask's height (a zoom changed the scale), neighbouring shelves no tile is drawing from are merged into one that does, so masks of a new size are never refused for good. Each tile starts its own mask frame (each is its own submission, so what earlier tiles drew from may go), and room is found before a mask is rasterised: a glyph whose mask can't be kept is drawn as its outline without wasted work.
 
 **What phase 1's frame reuse became.** The pan-shift and zoom-scale planner (`plan.rs`) is gone. Its rule, a frame texture holds exactly the camera it was drawn for, is now the tiles' rule: a tile holds exactly its own view.
 
 **Gates added** (all in CI):
 
-- `packages/engine/rust/tests/tiles.rs`: seeded random walks of edits, whole and fractional pans, zooms about a point, page switches, image changes and memory pressure (slots for fewer tiles than a frame shows, and for a frame and a bit), frames moving under budgets of zero to two tiles. Every frame reported exact is compared with a fresh engine's, bitwise; every frame at rest becomes exact within a bounded number of frames; a stand-in reports what's pending. Tiles against whole frames: at most 2 levels apart.
+- `packages/engine/rust/tests/tiles.rs`: seeded random walks of edits, whole and fractional pans, zooms about a point, page switches, image changes and memory pressure (slots for fewer tiles than a frame shows, and for a frame and a bit), frames moving under budgets of zero to two tiles. Every frame reported exact is compared with a fresh engine's, bitwise; every frame at rest becomes exact within a bounded number of frames; a stand-in reports what's pending. Tiles against whole frames: at most 2 levels apart. Tiles drawn ahead between frames leave the next frame exact, a fresh engine's, with nothing to draw.
+- `packages/engine/rust/tests/tile_regressions.rs`, each a frame that went wrong before its fix (the phase 2 review): a zoom under a one-slot budget and under one GPU page of slots never shows background where the page has content; a change beneath a reader inside a reader that reads after its children leaves no stale exact tile, and reaches readers three deep; a stroke with a miter limit of 40 isn't culled from the tile its miter reaches.
+- `apps/web/e2e/engine-tiles-gpu.spec.ts` (SwiftShader, through the browser glue alone): the same zoom at one GPU page of slots, and a spent time budget still drawing the tile nothing stands in for.
 - `packages/editor/test/engine-tiles.test.ts`: no stale tile after a saved glyph set changes, faces arrive, an image loads or the page switches, each with tiles already drawn. The builder's random editor sequences (`engine-display-list.test.ts`) now also compare the patched engine's kept tiles with a fresh engine's at every step.
 - `apps/web/e2e/engine.spec.ts` (SwiftShader):
   - the on-screen frame, once exact, equals a fresh engine's GPU frame bitwise, and is within the CPU-GPU tolerance of the CPU's whole frame (so the GPU's tiles hold the picture, not only agree with themselves), after pans, zooms, edits and a seeded walk of them;
@@ -727,16 +733,17 @@ Exact means every tile the frame shows is up to date and drawn without level of 
 
 | `webgpu` mode, ms | content p50 / p95 / p99 | exact drawn after | exact shown after (read back) | slowest frame |
 | --- | --- | --- | --- | --- |
-| engine, pan whole page | 0.4 / 2.7 / 26.4 | 104 | 255 | 43.8 (17 tiles, the first after zooming to fit) |
-| engine, pan 25% | 0.4 / 6.1 / 8.8 | 12 | 97 | 10.4 |
-| engine, pan 100% | 0.3 / 4.8 / 5.8 | 12 | 96 | 7.5 |
-| engine, zoom whole page | 0.7 / 1.0 / 2.4 | 307 | 387 | 15.7 |
-| canvas, pan whole page | 0.2 / 0.4 / 4.0 | | 30 | |
-| canvas, pan 25% | 4.1 / 9.2 / 12.7 | | 30 | |
-| canvas, pan 100% | 1.2 / 1.6 / 1.8 | | 30 | |
-| canvas, zoom whole page | 0.1 / 8.2 / 12.2 | | 288 | |
+| engine, pan whole page | 0.4 / 5.9 / 33.1 | 31 | 84 | 62.3 (tiles entering the view with nothing to stand in for them) |
+| engine, pan 25% | 0.4 / 6.3 / 9.7 | 31 | 83 | 11.0 |
+| engine, pan 100% | 0.4 / 5.2 / 5.8 | 31 | 84 | 10.0 |
+| engine, zoom whole page | 0.7 / 1.0 / 1.1 | 246 (226 and 233 in two more runs) | 292 | 8.5 |
+| canvas, pan whole page | 0.2 / 0.4 / 3.8 | | 33 | |
+| canvas, pan 25% | 3.8 / 9.6 / 13.5 | | 37 | |
+| canvas, pan 100% | 1.2 / 1.5 / 2.0 | | 31 | |
+| canvas, zoom whole page | 0.1 / 7.1 / 9.0 | | 274 | |
 
-- Exact frames drawn back to back at the bench's last camera (whole page): cold (every tile dropped first, 83 tiles: the view, the ring round it and the coarser level) 147.5 ms of encoding, 16.7 ms of renderer preparation and 7.7 ms of GPU (p50). Warm (from the tiles kept): 0.4 ms of GPU, nothing encoded. Phase 1 drew the same view in one frame of 92.5 ms encoding and 16.6 ms of GPU.
+- Exact frames drawn back to back at the bench's last camera (whole page): cold (every tile dropped first, 83 tiles: the view, the ring round it and the coarser level) 155 ms of encoding, 18 ms of renderer preparation and 8 ms of GPU (p50). Warm (from the tiles kept): 0.3 ms of GPU, nothing encoded. Phase 1 drew the same view in one frame of 92.5 ms encoding and 16.6 ms of GPU.
 - Drawing every tile into a target of its own size mattered: drawn into a 2,048 px page, the same cold frame took 279 ms of GPU (Vello's work per render follows its target's size).
-- After a zoom, the exact view is about nine frames' work at 12 ms each. On this bench frames come every ~28 ms (software compositing), hence 307 ms. The canvas renderer's exact frame after the same zoom came after 288 ms.
+- **Settling after a zoom** (traced by the bench, `Settle` in `bench/frames.ts`): the zoom ends near the whole page, where each of the six central tiles holds about 1,600 records and 6,000 glyphs (about 17 ms each to encode, every mask from the cache), and the other 22 cost under 1 ms. Drawn in slices between frames, the exact frame came 226 to 246 ms after the zoom's last frame, against 307 to 345 ms when only frames drew them (12 ms each, a frame every ~28 to 40 ms here). What's left besides encoding is the first animation frame after the zoom (~30 ms) and the main thread's share of reading frames back (about 15 ms each, headless only).
+- Pans settle within a frame now (31 ms): the tiles round the view are drawn between frames at rest, before the next pan, instead of a frame at a time. The pan of the whole page has a slower worst frame than before (62 ms against 44): a frame now draws every tile entering the view that nothing stands in for, where it used to stop at its budget and leave them blank (the review's B3).
 - In `gpu` mode (the canvas renderer's real intervals, both runs canvas): frame interval p50 16.6 to 16.7 ms, p95 17.9 to 26.2 ms, p99 18.7 to 54.5 ms.

@@ -733,12 +733,15 @@ impl<B: Backend> Walk<'_, B> {
                 (Some(a), Some(b)) => !overlaps(a, b),
                 _ => true,
             });
+        // Masks are laid in device pixels, tinted: set once for the run, on its first mask.
+        let mut tinted = false;
         for g in glyphs {
-            let glyph = self
-                .store
-                .glyphs
-                .get(g.glyph)
-                .ok_or_else(|| EngineError::unknown(format!("glyph {}", g.glyph)))?;
+            let Some(glyph) = self.store.glyphs.get(g.glyph) else {
+                if tinted {
+                    self.backend.scene().set_tint(None);
+                }
+                return Err(EngineError::unknown(format!("glyph {}", g.glyph)));
+            };
             let Some(gb) = glyph.bounds else { continue };
             let m = device * Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]);
             if !overlaps(m.transform_rect_bbox(gb), self.viewport) {
@@ -773,7 +776,6 @@ impl<B: Backend> Walk<'_, B> {
                     let x = ix + f64::from(origin.0);
                     let y = iy + f64::from(origin.1);
                     let scene = self.backend.scene();
-                    scene.set_transform(Affine::IDENTITY);
                     scene.set_paint(
                         Image {
                             image: source,
@@ -786,22 +788,33 @@ impl<B: Backend> Walk<'_, B> {
                         }
                         .into(),
                     );
+                    if !tinted {
+                        scene.set_transform(Affine::IDENTITY);
+                        scene.set_tint(Some(Tint {
+                            color: tint,
+                            mode: TintMode::AlphaMask,
+                        }));
+                        tinted = true;
+                    }
                     scene.set_paint_transform(Affine::translate((x, y)));
-                    scene.set_tint(Some(Tint {
-                        color: tint,
-                        mode: TintMode::AlphaMask,
-                    }));
                     scene.fill_rect(&Rect::new(x, y, x + f64::from(size.0), y + f64::from(size.1)));
-                    scene.set_tint(None);
                     self.stats.glyphs_masked += 1;
                     continue;
                 }
             }
-            self.spend(glyph.path.elements().len())?;
+            if let Err(e) = self.spend(glyph.path.elements().len()) {
+                if tinted {
+                    self.backend.scene().set_tint(None);
+                }
+                return Err(e);
+            }
             let mut p = glyph.path.clone();
             p.apply_affine(Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]));
             outlines.extend(p);
             self.stats.glyphs_outlined += 1;
+        }
+        if tinted {
+            self.backend.scene().set_tint(None);
         }
         if !outlines.is_empty() {
             let scene = self.backend.scene();
