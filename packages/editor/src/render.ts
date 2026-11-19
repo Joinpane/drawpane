@@ -208,13 +208,14 @@ function blendsAsOne(
   return effects + fills + strokes > 1;
 }
 
+const NO_READERS: ReadonlySet<string> = new Set();
+
 export interface CanvasRendererOptions {
   /** Shared decoded images. Pass the same cache to every renderer of one file. */
   readonly images?: ImageCache;
 }
 
 /** No layer reading the backdrop is drawn afresh (see `#redraw`). */
-const NO_READERS: ReadonlySet<string> = new Set();
 
 /**
  * Where a layer that reads around it paints (its box and its effects'
@@ -505,6 +506,12 @@ export class CanvasRenderer {
   #generation = 0;
   /** The screen's canvas while a frame is drawn on it: glass drawn there is kept for pans. */
   #screen: Ctx | null = null;
+  /**
+   * While drawing readers coarse (decision 0041): a pass too costly to draw them exactly in
+   * the frame, while something moves. Their glass and background blur are drawn at a
+   * fraction of the resolution; each is drawn exactly once there's time.
+   */
+  #coarse = false;
   /** While redrawing parts of a frame: those parts, in page coordinates; layers touching none are skipped. */
   #parts: Rect[] | null = null;
   /**
@@ -786,7 +793,18 @@ export class CanvasRenderer {
       // With the readers painting in it, and all they read, when that fits what's left of the
       // budget (what it drew past the tile is exact then: tiles it covers are done); else
       // without them, to draw once the tiles are (`#drawReaders`).
-      const grown = this.#drawFresh(ctx, frame, camera, dpr, [rect], budget - (t - start));
+      // Coarse readers only where something moved or changed: tiles of a whole frame (a page
+      // shown, a zoom settling) leave them to their exact pass, as before, rather than
+      // redrawing each reader whole for every tile it touches.
+      const grown = this.#drawFresh(
+        ctx,
+        frame,
+        camera,
+        dpr,
+        [rect],
+        budget - (t - start),
+        !this.#workWhole,
+      );
       this.#workArea += area.width * area.height;
       if (grown)
         for (const r of grown)
@@ -1094,6 +1112,8 @@ export class CanvasRenderer {
     dpr: number,
     rects: Rect[],
     left: number,
+    /** Draw readers coarse when they don't fit (decision 0041), rather than later. */
+    coarse = true,
   ): Rect[] | null {
     const grown = this.#withReaders(rects, frame, camera, dpr);
     if (grown.readers.size === 0) {
@@ -1109,9 +1129,25 @@ export class CanvasRenderer {
       this.#drewReaders(grown.readers, performance.now() - t);
       return grown.rects;
     }
-    // Too costly for this frame: the parts now, the readers in them once there's time.
-    for (const rect of rects) this.#redraw(ctx, frame, camera, dpr, [rect], NO_READERS);
-    this.#defer(frame, camera, dpr, rects);
+    // Too costly to draw exactly in this frame: the parts again with the readers painting
+    // there drawn coarse (decision 0041), each over all it paints (and so the readers painting
+    // there too), so none goes missing and none is left half redrawn. What they read past
+    // that is the canvas as it was: close enough for a coarse picture, and far less to draw
+    // than all they read. Each is drawn exactly once there's time (`#drawReaders`).
+    if (!coarse) {
+      // The parts now, the readers in them once there's time.
+      for (const rect of rects) this.#redraw(ctx, frame, camera, dpr, [rect], NO_READERS);
+      this.#defer(frame, camera, dpr, rects);
+      return null;
+    }
+    const painted = this.#withReaders(rects, frame, camera, dpr, true);
+    this.#coarse = true;
+    try {
+      this.#redraw(ctx, frame, camera, dpr, painted.rects, painted.readers);
+    } finally {
+      this.#coarse = false;
+    }
+    for (const id of painted.readers) this.#pendingReaders.add(id);
     return null;
   }
 
@@ -1276,6 +1312,8 @@ export class CanvasRenderer {
     frame: LastFrame,
     camera: Camera,
     dpr: number,
+    /** Grown by where readers paint only, not by what they read (for a coarse pass). */
+    paintsOnly = false,
   ): { rects: Rect[]; readers: Set<string> } {
     // Glass and background blur. (Layer blur and texture spread only the layer, which is drawn
     // whole into a canvas of its own.)
@@ -1294,7 +1332,7 @@ export class CanvasRenderer {
       for (const area of areas) {
         if (taken.has(area.id) || !dirty.some((d) => rectsIntersect(d, area.paints))) continue;
         taken.add(area.id);
-        dirty.push(area.reads);
+        dirty.push(paintsOnly ? area.paints : area.reads);
         grew = true;
       }
     }
@@ -2240,6 +2278,10 @@ export class CanvasRenderer {
       draw(ctx);
       return;
     }
+    // A coarse pass (decision 0041) leaves out shadows that blend their own way: drawn apart,
+    // each costs a canvas of its own, and a glass board has three on every control. They're
+    // drawn with the readers' exact pass.
+    if (this.#coarse && apart) return;
     const opaque = this.#opaque.has(ctx.canvas);
     if (mode === "linear-burn" || (mode === "linear-dodge" && (apart || !opaque))) {
       this.#burn.blend(ctx, box, mode, draw, opaque);
@@ -2585,6 +2627,10 @@ export class CanvasRenderer {
     // As in Figma, it shows where the layer paints: a layer with nothing visible blurs nothing.
     if (!paintsSomething(node)) return;
     const sigma = blurSigma(blur.radius) * scale;
+    if (this.#coarse && ctx === this.#screen && node.type !== "text") {
+      this.#coarseFrost(ctx, node, shape, sigma);
+      return;
+    }
     // The layer's box on the device, and as far around it as the blur reads.
     const t = ctx.getTransform();
     const w = getProp(node.props, "width");
@@ -2651,6 +2697,36 @@ export class CanvasRenderer {
   }
 
   /**
+   * A reader drawn coarse, for frames while something moves (decision 0041):
+   * what's under its shape on the canvas, blurred `sigma` device pixels, in
+   * place: one copy of the canvas into itself through a blur, no shader
+   * passes of its own. Glass loses its rim's bend and light until it's drawn exactly;
+   * background blur is what it is, a little coarser at the edge of what's
+   * redrawn.
+   */
+  #coarseFrost(ctx: Ctx, node: NodeRecord, shape: Path2D, sigma: number): void {
+    const t = ctx.getTransform();
+    const w = getProp(node.props, "width");
+    const h = getProp(node.props, "height");
+    const xs = [t.e, t.a * w + t.e, t.c * h + t.e, t.a * w + t.c * h + t.e];
+    const ys = [t.f, t.b * w + t.f, t.d * h + t.f, t.b * w + t.d * h + t.f];
+    const reach = Math.ceil(sigma * 3) + 1;
+    const { width, height } = ctx.canvas;
+    const x0 = Math.max(0, Math.floor(Math.min(...xs)) - reach);
+    const y0 = Math.max(0, Math.floor(Math.min(...ys)) - reach);
+    const x1 = Math.min(width, Math.ceil(Math.max(...xs)) + reach);
+    const y1 = Math.min(height, Math.ceil(Math.max(...ys)) + reach);
+    ctx.save();
+    ctx.clip(shape);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.filter = sigma > 0.5 ? `blur(${sigma}px)` : "none";
+    ctx.drawImage(ctx.canvas, x0, y0, x1 - x0, y1 - y0, x0, y0, x1 - x0, y1 - y0);
+    ctx.restore();
+  }
+
+  /**
    * The device box of the frames that clip `node` (their boxes intersected),
    * in `ctx`'s current transform, which is set for `node`: what its glass or
    * background blur may see, as in Figma, which doesn't show them what's
@@ -2713,6 +2789,11 @@ export class CanvasRenderer {
     );
     if (glass?.type !== "glass") return;
     if (this.#fresh && !this.#fresh.has(node.id)) return;
+    if (this.#coarse && ctx === this.#screen && node.type !== "text") {
+      // Coarse while moving (decision 0041): the backdrop frosted, without the rim's bend.
+      this.#coarseFrost(ctx, node, shape, Math.max(glassParams(glass, scale).frost, 3 * scale));
+      return;
+    }
     const key = ctx === this.#screen ? { id: node.id, generation: this.#generation } : null;
     const outline =
       node.type === "text" ? (mask: Ctx) => this.#text(mask, node, w, "#ffffff", scale) : shape;

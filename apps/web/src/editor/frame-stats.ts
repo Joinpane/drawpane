@@ -28,6 +28,11 @@ export class FrameStats {
   culled = 0;
   /** Whether the last content frame was exact (not a stand-in, nor drawn in part). */
   exact = true;
+  /**
+   * The canvas's drawing budget per frame in ms, when set (for checks: a tiny budget makes
+   * every frame one that costs more than it, as a heavy file does on a slow machine).
+   */
+  budget: number | null = null;
   /** Draws the next frame in full, from nothing (set by the canvas; for checks and debugging). */
   redraw: () => void = () => {};
   /**
