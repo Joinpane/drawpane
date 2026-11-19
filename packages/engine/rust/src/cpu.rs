@@ -81,6 +81,13 @@ impl Cpu {
         self.image_bytes
     }
 
+    /// Bytes an image held under `id` takes (0: none).
+    pub fn held_image(&self, id: u32) -> usize {
+        self.images
+            .get(&id)
+            .map_or(0, |l| l.iter().map(|p| p.data_as_u8_slice().len()).sum())
+    }
+
     pub fn put_image(&mut self, id: u32, levels: &[Level], budget: usize) -> Result<()> {
         let bytes = images::bytes(levels);
         let freed = self

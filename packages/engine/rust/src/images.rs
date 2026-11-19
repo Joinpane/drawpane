@@ -64,6 +64,21 @@ pub fn levels(width: u32, height: u32, rgba: &[u8], premultiplied: bool, max_sid
     Ok(out)
 }
 
+/// Bytes the levels of a `width` × `height` image take, worked out before any is made (so an
+/// upload past the budget is refused before it's copied).
+pub fn levels_bytes(width: u32, height: u32) -> usize {
+    let (mut w, mut h) = (width as usize, height as usize);
+    let mut total = 0usize;
+    loop {
+        total = total.saturating_add(w * h * 4);
+        if (w.max(h) / 2) < MIN_LEVEL as usize || w < 2 || h < 2 {
+            return total;
+        }
+        w /= 2;
+        h /= 2;
+    }
+}
+
 pub fn bytes(levels: &[Level]) -> usize {
     levels.iter().map(|l| l.pixels.len()).sum()
 }

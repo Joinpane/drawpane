@@ -17,6 +17,16 @@ pub const FLAG_ISOLATE: u32 = 2;
 pub const FLAG_GROUP: u32 = 4;
 const KNOWN_FLAGS: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP;
 
+/// Bits of `Record::unsupported` (`UNSUPPORTED` in wire.ts) the engine sets itself, from what it
+/// decodes, so anything it would refuse while drawing refuses its page before any drawing, on
+/// screen or not, in an export's crop or not, whatever the builder flagged.
+pub mod derived {
+    pub const BLEND: u32 = 1 << 7;
+    pub const CORNER_SMOOTHING: u32 = 1 << 9;
+    pub const DIAMOND_GRADIENT: u32 = 1 << 12;
+    pub const BACKDROP_READER: u32 = 1 << 13;
+}
+
 #[derive(Clone, Debug)]
 pub struct GlyphInstance {
     pub glyph: u32,
@@ -426,11 +436,14 @@ impl Record {
     }
 }
 
-fn paint(r: &mut Reader, limits: &Limits) -> Result<Paint> {
+fn paint(r: &mut Reader, limits: &Limits, derived: &mut u32) -> Result<Paint> {
     let kind = r.u32()?;
     let blend = r.u32()?;
     if blend != 0 {
-        return Err(EngineError::unsupported(format!("blend mode {blend} on a paint")));
+        *derived |= derived::BLEND;
+    }
+    if kind == 5 {
+        *derived |= derived::DIAMOND_GRADIENT;
     }
     Ok(match kind {
         1 => Paint::Solid(r.rgba()?),
@@ -501,7 +514,7 @@ fn stroke_style(r: &mut Reader, limits: &Limits) -> Result<StrokeStyle> {
     })
 }
 
-fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool) -> Result<Vec<Op>> {
+fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool, derived: &mut u32) -> Result<Vec<Op>> {
     let n = r.count(limits.record_items, "ops", 4)?;
     let mut out = Vec::with_capacity(n);
     let mut clips = 0usize;
@@ -521,7 +534,7 @@ fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool) -> R
                 Op::Fill {
                     path,
                     even_odd,
-                    paint: paint(r, limits)?,
+                    paint: paint(r, limits, derived)?,
                 }
             }
             2 => {
@@ -530,7 +543,7 @@ fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool) -> R
                 Op::Stroke {
                     path,
                     style,
-                    paint: paint(r, limits)?,
+                    paint: paint(r, limits, derived)?,
                 }
             }
             3 => {
@@ -563,6 +576,11 @@ fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool) -> R
                 if halo > limits.halo as f32 {
                     return Err(EngineError::limit("a backdrop reader reads too far"));
                 }
+                // Phase 1 draws no backdrop reader outside the tests (glass and background blur
+                // are phase 3's): a reader refuses its page.
+                if !cfg!(feature = "test-kernels") {
+                    *derived |= derived::BACKDROP_READER;
+                }
                 Op::Read { kernel, halo }
             }
             k => return Err(EngineError::malformed(format!("unknown op {k}"))),
@@ -585,6 +603,7 @@ pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
     let size = [r.f32()?, r.f32()?];
     let coarse_below = r.f32_nonneg()?;
     let reach = r.f32_nonneg()?;
+    let mut derived = 0u32;
     let unsupported = r.u32()?;
     let n = r.count(limits.record_items, "paths", 8)?;
     let mut paths = Vec::with_capacity(n);
@@ -592,17 +611,19 @@ pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
         paths.push(match r.u32()? {
             1 => PathEntry::Path(CompactPath::from_bez(&r.path(limits.path_verbs)?)),
             2 => {
-                let entry = PathEntry::Rect {
-                    w: r.f32()?,
-                    h: r.f32()?,
-                    radii: [r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?],
-                    smoothing: r.f32()?.clamp(0.0, 1.0),
-                };
-                if matches!(entry, PathEntry::Rect { smoothing, .. } if smoothing > 0.0) {
+                let (w, h) = (r.f32()?, r.f32()?);
+                let radii = [r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?];
+                let smoothing = r.f32()?.clamp(0.0, 1.0);
+                if smoothing > 0.0 && radii.iter().any(|r| *r > 0.0) {
                     // Squircles come with the shared geometry function (see geometry.rs).
-                    return Err(EngineError::unsupported("corner smoothing"));
+                    derived |= derived::CORNER_SMOOTHING;
                 }
-                entry
+                PathEntry::Rect {
+                    w,
+                    h,
+                    radii,
+                    smoothing: 0.0,
+                }
             }
             3 => PathEntry::Ellipse {
                 w: r.f32()?,
@@ -631,8 +652,8 @@ pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
             k => return Err(EngineError::malformed(format!("unknown path kind {k}"))),
         });
     }
-    let ops_list = ops(r, limits, paths.len(), true)?;
-    let coarse = ops(r, limits, paths.len(), false)?;
+    let ops_list = ops(r, limits, paths.len(), true, &mut derived)?;
+    let coarse = ops(r, limits, paths.len(), false, &mut derived)?;
     let record = Record {
         flags,
         opacity,
@@ -643,7 +664,7 @@ pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
         paths,
         ops: ops_list,
         coarse,
-        unsupported,
+        unsupported: unsupported | derived,
     };
     if !record.coarse.is_empty() && record.ops.iter().any(|op| matches!(op, Op::Children)) {
         return Err(EngineError::malformed("coarse ops on a record with children"));

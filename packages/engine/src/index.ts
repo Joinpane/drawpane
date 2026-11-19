@@ -191,6 +191,33 @@ export interface EngineModule {
   memoryBytes(): number;
   /** An instance trapped: engines made from here on get a new one (see `RenderEngine`). */
   trapped?: boolean;
+  /**
+   * Which instance is current: bumped when one traps. An engine made on an earlier one is dead
+   * (its memory went with the instance), and never calls into or frees in a later one.
+   */
+  epoch?: number;
+}
+
+/** Bytes an image's levels take (`rust/src/images.rs`, `levels_bytes`), worked out up front. */
+export function imageLevelsBytes(width: number, height: number): number {
+  let [w, h, total] = [Math.floor(width), Math.floor(height), 0];
+  for (;;) {
+    total += w * h * 4;
+    if (Math.floor(Math.max(w, h) / 2) < 32 || w < 2 || h < 2) return total;
+    w = Math.floor(w / 2);
+    h = Math.floor(h / 2);
+  }
+}
+
+/**
+ * Lets a glue object go from wasm-bindgen's finalizer without freeing it: the facade frees what
+ * it makes itself (`dispose`), so a finalizer can never free an old instance's pointer into a
+ * renewed one after a trap.
+ */
+function unfinalized<T extends { __destroy_into_raw(): number }>(o: T): T {
+  const ptr = o.__destroy_into_raw();
+  (o as unknown as { __wbg_ptr: number }).__wbg_ptr = ptr;
+  return o;
 }
 
 /** An engine: a render graph patched by display lists, drawn on the CPU or the GPU. */
@@ -199,6 +226,8 @@ export class RenderEngine {
   #engine: Glue.Engine | null = null;
   #gpu: GpuInfo | null = null;
   #dead: Failure | null = null;
+  /** The module's instance this engine lives in (`EngineModule.epoch`). */
+  #epoch: number;
 
   /**
    * An engine on `module`. If an engine on it trapped, the module's instance is renewed first
@@ -206,12 +235,13 @@ export class RenderEngine {
    */
   constructor(module: EngineModule, options: EngineOptions = {}) {
     this.#module = module;
+    this.#epoch = module.epoch ?? 0;
     try {
       if (module.trapped) {
         module.glue.__drawpaneRenew();
         module.trapped = false;
       }
-      const engine = new module.glue.Engine(0, 0);
+      const engine = unfinalized(new module.glue.Engine(0, 0));
       this.#engine = engine;
       const limits: EngineOptions = {
         ...(module.build === "worker" ? WORKER_LIMITS : {}),
@@ -237,25 +267,45 @@ export class RenderEngine {
 
   /** The revision the engine holds: a patch must be made for it. */
   get revision(): number {
-    return this.#engine?.revision ?? 0;
+    return this.#live()?.revision ?? 0;
   }
 
   get records(): number {
-    return this.#engine?.records ?? 0;
+    return this.#live()?.records ?? 0;
   }
 
   get glyphs(): { count: number; bytes: number } {
-    return { count: this.#engine?.glyphs ?? 0, bytes: this.#engine?.glyphBytes ?? 0 };
+    const e = this.#live();
+    return { count: e?.glyphs ?? 0, bytes: e?.glyphBytes ?? 0 };
   }
 
   /** Bytes the engine holds, roughly: its graph, images and glyph masks. */
   get heldBytes(): number {
-    return this.#engine?.heldBytes ?? 0;
+    return this.#live()?.heldBytes ?? 0;
   }
 
   /** Whether the instance trapped (or was disposed): every call fails from then on. */
   get dead(): boolean {
+    this.#live();
     return this.#dead !== null;
+  }
+
+  /**
+   * The engine's object, if it's alive: not disposed, not trapped, and in the module's current
+   * instance. One whose instance went (another engine on the module trapped) is marked dead and
+   * let go without a call into the instance that replaced it.
+   */
+  #live(): Glue.Engine | null {
+    if (this.#dead) return null;
+    if (this.#epoch !== (this.#module.epoch ?? 0)) {
+      this.#engine = null;
+      this.#dead = fail(
+        ErrorCode.Trap,
+        "another engine on this module trapped: the instance this engine lived in is gone",
+      );
+      return null;
+    }
+    return this.#engine;
   }
 
   /** Why the engine is dead, if it is. */
@@ -265,19 +315,21 @@ export class RenderEngine {
 
   #trapped(err: unknown): Failure {
     // A trap (`RuntimeError: unreachable`, or memory that can't grow) leaves the instance
-    // unusable. Its objects are let go without calling into it, never freed into a new one.
-    try {
-      this.#engine?.__destroy_into_raw();
-    } catch {}
+    // unusable, and every engine in it with it: the module's epoch moves on, so they all find
+    // themselves dead (`#live`). Objects are let go without calling into it (they have no
+    // finalizers: `unfinalized`), never freed into a new instance.
     this.#engine = null;
-    this.#module.trapped = true;
+    if (this.#epoch === (this.#module.epoch ?? 0)) {
+      this.#module.trapped = true;
+      this.#module.epoch = this.#epoch + 1;
+    }
     this.#dead = fail(ErrorCode.Trap, `the engine trapped: ${String(err)}`);
     return this.#dead;
   }
 
   #call<T>(fn: (e: Glue.Engine) => T): T | Failure {
+    const e = this.#live();
     if (this.#dead) return this.#dead;
-    const e = this.#engine;
     if (!e) return fail(ErrorCode.State, "the engine was disposed");
     try {
       return fn(e);
@@ -335,7 +387,30 @@ export class RenderEngine {
     rgba: Uint8Array,
     premultiplied = false,
   ): Result {
-    return this.#call((e) => outcome(e.putImage(id, width, height, rgba, premultiplied))) as Result;
+    return this.#call((e) => {
+      // Refused before the bytes are copied into the engine's memory (in a Worker, an upload
+      // past the budget would otherwise exhaust it while being copied).
+      if (
+        !Number.isInteger(width) ||
+        !Number.isInteger(height) ||
+        width <= 0 ||
+        height <= 0 ||
+        rgba.length !== width * height * 4
+      )
+        return fail(ErrorCode.Image, "image bytes don't match its size");
+      if (width > e.textureSide || height > e.textureSide)
+        return fail(
+          ErrorCode.Limit,
+          `an image ${width} × ${height}; the longest side allowed is ${e.textureSide}`,
+        );
+      const need = imageLevelsBytes(width, height);
+      if (e.imageBytes - e.imageHeld(id) + need > e.imageBudget)
+        return fail(
+          ErrorCode.Limit,
+          `an image ${width} × ${height} takes ${Math.ceil(need / 2 ** 20)} MiB with its levels; images may hold ${Math.floor(e.imageBudget / 2 ** 20)} MiB`,
+        );
+      return outcome(e.putImage(id, width, height, rgba, premultiplied));
+    }) as Result;
   }
 
   /** Lets an image's pixels go (refused while an export streams). */
@@ -636,13 +711,21 @@ export class RenderEngine {
     } catch (err) {
       return this.#trapped(err);
     }
+    // The instance may have gone while it was on its way (another engine trapped): an object
+    // it answered belongs to the old instance, so it's let go without freeing into the new one.
+    if (!this.#live()) {
+      if (!(v instanceof Uint8Array)) unfinalized(v);
+      return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
+    }
     if (v instanceof Uint8Array) return { ok: true, value: v };
     return outcome(v) as Result<Uint8Array>;
   }
 
+  /** Frees the engine's memory (nothing, if its instance is gone). */
   dispose(): void {
+    const e = this.#live();
     try {
-      this.#engine?.free();
+      e?.free();
     } catch (err) {
       this.#trapped(err);
     }

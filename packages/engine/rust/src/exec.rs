@@ -219,6 +219,19 @@ impl DrawStats {
 }
 
 pub fn draw<B: Backend>(store: &Store, backend: &mut B, frame: &Frame, limits: &Limits) -> Result<DrawStats> {
+    let mut budget = limits.frame_verbs;
+    draw_budgeted(store, backend, frame, limits, &mut budget)
+}
+
+/// `draw`, charging what it generates to `budget` (path elements left), which several passes of
+/// one frame share (a pan's strips): what's left is written back.
+pub fn draw_budgeted<B: Backend>(
+    store: &Store,
+    backend: &mut B,
+    frame: &Frame,
+    limits: &Limits,
+    budget: &mut usize,
+) -> Result<DrawStats> {
     let mut walk = Walk {
         store,
         backend,
@@ -232,7 +245,7 @@ pub fn draw<B: Backend>(store: &Store, backend: &mut B, frame: &Frame, limits: &
         open: Vec::new(),
         stats: DrawStats::default(),
         glyph_mask_side: f64::from(limits.glyph_mask_side),
-        verbs_left: limits.frame_verbs,
+        verbs_left: *budget,
         open_scopes: limits.open_scopes,
     };
     let root = store
@@ -245,6 +258,7 @@ pub fn draw<B: Backend>(store: &Store, backend: &mut B, frame: &Frame, limits: &
         }
         Ok(())
     })();
+    *budget = walk.verbs_left;
     // Whatever failed part way, close what's open so the scene stays usable.
     while let Some(o) = walk.open.pop() {
         match o {
@@ -467,11 +481,15 @@ impl<B: Backend> Walk<'_, B> {
                 Ok(out)
             }
             Some(PathEntry::Outside(of)) => {
+                // The shape cut out is charged like any path (a glyph run's by `path`).
                 let inner = if matches!(r.paths.get(*of as usize), Some(PathEntry::Glyphs { .. })) {
                     self.path(r, *of, device, 0.0)?
                 } else {
-                    r.entry_path(*of)
-                        .ok_or_else(|| EngineError::malformed(format!("no path {of}")))?
+                    let p = r
+                        .entry_path(*of)
+                        .ok_or_else(|| EngineError::malformed(format!("no path {of}")))?;
+                    self.spend(p.elements().len())?;
+                    p
                 };
                 use vello_common::kurbo::Shape;
                 let shape = if inner.is_empty() {

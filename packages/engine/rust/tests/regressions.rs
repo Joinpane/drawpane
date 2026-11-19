@@ -487,3 +487,127 @@ fn a_transparent_placeholder_paints_nothing() {
     e.apply(&w.finish()).unwrap();
     assert!((126..=129).contains(&pixels(&mut e)[3]));
 }
+
+/// A record with a paint the engine refuses when it draws it, placed far off screen.
+fn far_with(paint: Paint) -> Rec {
+    let mut r = rect(10.0, 10.0, [0.0; 4]);
+    r.transform = [1.0, 0.0, 0.0, 1.0, 5000.0, 5000.0];
+    r.ops = vec![Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint,
+    }];
+    r
+}
+
+#[test]
+fn an_operation_the_engine_refuses_refuses_its_page_wherever_it_is() {
+    // A diamond gradient is valid on the wire, and the executor refuses it only when it walks
+    // it: off screen (or outside an export's crop) nothing walks it. It's found at decode.
+    let mut e = Engine::new(Limits::default());
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    w.set(1, 0, &rect(20.0, 20.0, [1.0; 4]));
+    w.set(
+        2,
+        0,
+        &far_with(Paint::Gradient {
+            kind: 5,
+            m: [10.0, 0.0, 0.0, 10.0, 0.0, 0.0],
+            stops: vec![(0.0, [1.0, 0.0, 0.0, 1.0]), (1.0, [0.0, 0.0, 1.0, 1.0])],
+        }),
+    );
+    e.apply(&w.finish()).unwrap();
+    assert!(matches!(e.render_cpu(64, 64, camera(), [0.0; 4], true), Err(err) if err.code == ErrorCode::Unsupported));
+    assert!(matches!(e.render_band(64, 64, camera(), [0.0; 4], 0, 16), Err(err) if err.code == ErrorCode::Unsupported));
+    assert!(matches!(e.admit_export(64, 64, camera()), Err(err) if err.code == ErrorCode::Unsupported));
+}
+
+#[test]
+fn a_blend_or_smoothed_corner_on_the_wire_refuses_the_page_not_the_message() {
+    // Applying succeeds (the message is valid); drawing the page is refused, so the editor falls
+    // back for the page, not for the session.
+    let mut e = Engine::new(Limits::default());
+    let mut blended = far_with(Paint::Solid([1.0; 4]));
+    blended.blend = 3;
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    w.set(1, 0, &blended);
+    e.apply(&w.finish()).unwrap();
+    assert!(matches!(e.render_cpu(64, 64, camera(), [0.0; 4], true), Err(err) if err.code == ErrorCode::Unsupported));
+    let mut smooth = rect(20.0, 20.0, [1.0; 4]);
+    smooth.paths = vec![Entry::Rect {
+        w: 20.0,
+        h: 20.0,
+        radii: [5.0; 4],
+    }];
+    smooth.smoothing = 0.6;
+    let mut w = W::new(ANY, 2);
+    w.reset();
+    w.set(1, 0, &smooth);
+    e.apply(&w.finish()).unwrap();
+    assert!(matches!(e.render_cpu(64, 64, camera(), [0.0; 4], true), Err(err) if err.code == ErrorCode::Unsupported));
+}
+
+#[test]
+fn opacity_multiplies_into_a_placeholder() {
+    // A 50% placeholder in a 50% record: a quarter, as the canvas multiplies globalAlpha.
+    let mut e = Engine::new(Limits::default());
+    let mut r = rect(32.0, 32.0, [0.0; 4]);
+    r.opacity = 0.5;
+    r.ops = vec![Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::PlaceholderAt(0.5),
+    }];
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    w.set(1, 0, &r);
+    e.apply(&w.finish()).unwrap();
+    let a = pixels(&mut e)[(16 * 64 + 16) * 4 + 3];
+    assert!((63..=65).contains(&a), "alpha {a}");
+}
+
+#[test]
+fn an_outside_clips_shape_is_charged_to_the_budget() {
+    // An outside stroke's clip is a box with the shape cut out: the shape's elements count.
+    let mut rec = rect(40.0, 40.0, [0.0; 4]);
+    rec.paths = vec![
+        Entry::Path(
+            (0..40)
+                .map(|i| (if i == 0 { 0 } else { 1 }, vec![i as f32, (i % 7) as f32]))
+                .collect(),
+        ),
+        Entry::Outside(0),
+    ];
+    rec.ops = vec![
+        Op::Clip {
+            path: 1,
+            even_odd: true,
+        },
+        Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([1.0; 4]),
+        },
+        Op::Unclip,
+    ];
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    w.set(1, 0, &rec);
+    let list = w.finish();
+    // The fill's 40 elements and the clip's box fit 60; with the clip's 40 cut-out elements
+    // counted too they don't.
+    let mut e = Engine::new(Limits {
+        frame_verbs: 60,
+        ..Limits::default()
+    });
+    e.apply(&list).unwrap();
+    assert!(matches!(e.render_cpu(64, 64, camera(), [0.0; 4], true), Err(err) if err.code == ErrorCode::Limit));
+    let mut roomy = Engine::new(Limits {
+        frame_verbs: 100,
+        ..Limits::default()
+    });
+    roomy.apply(&list).unwrap();
+    roomy.render_cpu(64, 64, camera(), [0.0; 4], true).unwrap();
+}

@@ -51,6 +51,7 @@ type W = {
     unsupported(): Record<string, number>;
   };
   drawpaneEngine: {
+    readbackPair(w: number, h: number): Promise<Array<{ ok: boolean; code?: number }>>;
     render(o: object): Promise<{ ok: boolean; rgba?: string; error?: string }>;
     canvasRender(o: object): Promise<string>;
   };
@@ -383,6 +384,54 @@ test.describe
       await frames(page);
     });
 
+    test("never lets a delayed read-back undo a fallback to the canvas", async () => {
+      // A frame's read-back is held back; meanwhile the page gains a layer the engine doesn't
+      // draw, so the canvas renderer draws it. Released late, the old frame must not show.
+      await page.evaluate(() => {
+        const w = window as unknown as W & { held: Array<() => void> };
+        const engine = w.drawpaneEngineView?.engine as unknown as {
+          gpuPixels(): Promise<unknown>;
+        };
+        const original = engine.gpuPixels.bind(engine);
+        w.held = [];
+        engine.gpuPixels = () =>
+          new Promise((resolve) => {
+            const p = original();
+            w.held.push(() => void p.then(resolve));
+          });
+        w.drawpaneFrames.redraw();
+      });
+      await frames(page, 4);
+      const shadow = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        return e.createLayer("rect", { x: 40, y: 420, width: 100, height: 60 }, e.s.pageId, {
+          fills: [{ type: "solid", color: "#ffffff" }],
+          effects: [{ type: "drop-shadow", x: 0, y: 4, blur: 12, spread: 0, color: "#00000040" }],
+        });
+      });
+      await expect
+        .poll(() => showing(page), { timeout: 10_000 })
+        .toEqual({ engine: false, content: true });
+      await page.evaluate(() => {
+        const w = window as unknown as W & { held: Array<() => void> };
+        for (const release of w.held) release();
+      });
+      await frames(page, 8);
+      expect(await showing(page)).toEqual({ engine: false, content: true });
+      // Put things back: the read-back as it was, the page drawable again.
+      await page.evaluate((id) => {
+        const w = window as unknown as W;
+        const engine = w.drawpaneEngineView?.engine as unknown as
+          | { gpuPixels?: unknown }
+          | undefined;
+        if (engine) delete engine.gpuPixels;
+        w.drawpane.commit([{ op: "delete", id }]);
+      }, shadow);
+      await expect
+        .poll(() => showing(page), { timeout: 15_000 })
+        .toEqual({ engine: true, content: false });
+    });
+
     test("leaves a page it can't draw to the canvas renderer, and takes it back", async () => {
       const shadow = await page.evaluate(() => {
         const e = (window as unknown as W).drawpane;
@@ -505,6 +554,14 @@ test.describe
         /lost/,
       );
       await context.close();
+    });
+
+    test("counts read-backs in flight against the GPU budget", async () => {
+      const r = await page.evaluate(() =>
+        (window as unknown as W).drawpaneEngine.readbackPair(640, 480),
+      );
+      // The first is admitted; the second, beside it, is past the budget (Limit, 4).
+      expect(r).toEqual([{ ok: true }, { ok: false, code: 4 }]);
     });
 
     test("falls back without WebGPU", async ({ browser }) => {

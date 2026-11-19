@@ -168,6 +168,9 @@ pub struct Rec {
     pub paths: Vec<Entry>,
     pub ops: Vec<Op>,
     pub coarse: Vec<Op>,
+    /// The blend mode written on every paint (0 normal), and every rect entry's smoothing.
+    pub blend: u32,
+    pub smoothing: f32,
 }
 
 impl Rec {
@@ -182,6 +185,8 @@ impl Rec {
             paths: vec![],
             ops: vec![],
             coarse: vec![],
+            blend: 0,
+            smoothing: 0.0,
         }
     }
     pub fn group() -> Self {
@@ -191,18 +196,18 @@ impl Rec {
             ..Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 0.0])
         }
     }
-    fn paint(w: &mut W, p: &Paint) {
+    fn paint(w: &mut W, p: &Paint, blend: u32) {
         match p {
             Paint::Solid(c) => {
                 w.u32(1);
-                w.u32(0);
+                w.u32(blend);
                 for v in c {
                     w.f32(*v);
                 }
             }
             Paint::Gradient { kind, m, stops } => {
                 w.u32(*kind);
-                w.u32(0);
+                w.u32(blend);
                 w.m(*m);
                 w.u32(stops.len() as u32);
                 for (p, c) in stops {
@@ -232,7 +237,7 @@ impl Rec {
             }
         }
     }
-    fn ops(w: &mut W, ops: &[Op]) {
+    fn ops(w: &mut W, ops: &[Op], blend: u32) {
         w.u32(ops.len() as u32);
         for op in ops {
             match op {
@@ -240,7 +245,7 @@ impl Rec {
                     w.u32(1);
                     w.u32(*path);
                     w.u32(u32::from(*even_odd));
-                    Self::paint(w, paint);
+                    Self::paint(w, paint, blend);
                 }
                 Op::Stroke {
                     path,
@@ -262,7 +267,7 @@ impl Rec {
                         w.f32(*d);
                     }
                     w.f32(*offset);
-                    Self::paint(w, paint);
+                    Self::paint(w, paint, blend);
                 }
                 Op::Clip { path, even_odd } => {
                     w.u32(3);
@@ -302,7 +307,7 @@ impl Rec {
                     for r in radii {
                         w.f32(*r);
                     }
-                    w.f32(0.0);
+                    w.f32(self.smoothing);
                 }
                 Entry::Ellipse { w: ew, h } => {
                     w.u32(3);
@@ -325,8 +330,8 @@ impl Rec {
                 }
             }
         }
-        Self::ops(w, &self.ops);
-        Self::ops(w, &self.coarse);
+        Self::ops(w, &self.ops, self.blend);
+        Self::ops(w, &self.coarse, self.blend);
     }
 }
 

@@ -455,25 +455,30 @@ export class DisplayListBuilder {
     const changes = doc.changesSince(this.#version);
     if (this.#stale || !changes || changes.some((c) => c.reset) || !doc.get(page))
       return this.build(page);
-    const touched = new Set<string>(this.#extra);
+    const touched = new Set<string>();
     const parents = new Set<string>();
     for (const c of changes) {
       for (const id of c.ids) touched.add(id);
       for (const p of c.parents) parents.add(p);
     }
+    // Layers whose records change for reasons outside their own props (editor state, an image
+    // arriving, faces, saved outlines): encoded again whatever else changed, never patched as a
+    // move even when their place changed too.
+    const forced = new Set<string>(this.#extra);
     this.#extra.clear();
     const generation = this.#measurer.generation ?? 0;
     if (generation !== this.#generation) {
       // Fonts or faces arrived: every text's layout may have moved.
-      for (const id of this.#texts) touched.add(id);
+      for (const id of this.#texts) forced.add(id);
       this.#generation = generation;
-    } else for (const id of this.#pendingText) touched.add(id);
+    } else for (const id of this.#pendingText) forced.add(id);
     // A glyph set changed (a file's saved outlines): text drawn from them may draw differently.
     const table = glyphTable(doc).version;
     if (table !== this.#glyphTable) {
-      for (const id of this.#texts) touched.add(id);
+      for (const id of this.#texts) forced.add(id);
       this.#glyphTable = table;
     }
+    for (const id of forced) touched.add(id);
     this.#version = doc.version;
     if (touched.size === 0 && parents.size === 0) return null;
 
@@ -506,7 +511,7 @@ export class DisplayListBuilder {
       if (old.parent !== node.parent) orders.add(node.parent);
       // A layer becoming a mask (or no longer one) changes what its parent draws.
       if (isActiveMask(old) !== isActiveMask(node) && node.parent !== page) sets.add(node.parent);
-      if (old !== node && onlyMoved(old, node)) moves.add(id);
+      if (old !== node && !forced.has(id) && onlyMoved(old, node)) moves.add(id);
       else sets.add(id);
     }
     for (const p of parents) {

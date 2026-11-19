@@ -22,6 +22,7 @@ use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Open, impl_draw};
 use crate::images::{self, Level};
 use crate::masks::{self, MaskCache, MaskKey};
+use crate::plan::{self, Plan, Shown};
 use crate::store::Store;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -101,40 +102,6 @@ struct U { m: vec4<f32>, bg: vec4<f32>, size: vec4<f32> };
 }
 ";
 
-/// How a frame is made (`Gpu::plan`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Plan {
-    /// The whole scene drawn.
-    Full,
-    /// The last frame shifted, the uncovered strips drawn.
-    Pan(i32, i32),
-    /// The last full frame scaled.
-    Zoom,
-    /// Nothing changed: the frame shown stays.
-    Same,
-}
-
-impl Plan {
-    fn code(self) -> u32 {
-        match self {
-            Plan::Full => 0,
-            Plan::Pan(..) => 1,
-            Plan::Zoom => 2,
-            Plan::Same => 3,
-        }
-    }
-}
-
-/// What a frame texture was drawn for.
-#[derive(Clone, Copy)]
-struct Shown {
-    view: vello_common::kurbo::Affine,
-    background: [f32; 4],
-    generation: u64,
-    /// Drawn exactly (no stand-ins, no level-of-detail).
-    exact: bool,
-}
-
 /// The last full frame: which texture, and what for.
 struct Basis {
     index: usize,
@@ -154,7 +121,14 @@ fn now() -> f64 {
 
 /// A read-back begun: the buffer the frame is copied into, its width, height and row stride, and
 /// the in-flight count it holds a place in.
-pub type ReadBack = (wgpu::Buffer, u32, u32, u32, Rc<Cell<u32>>);
+pub type ReadBack = (wgpu::Buffer, u32, u32, u32, InFlight);
+
+/// Read-backs in flight: how many, and the bytes of their buffers (held against the budget).
+#[derive(Default)]
+pub struct Flights {
+    count: Cell<u32>,
+    bytes: Cell<usize>,
+}
 
 pub struct Gpu {
     /// Held for the device's lifetime: on the web, dropping the instance loses the device.
@@ -190,7 +164,7 @@ pub struct Gpu {
     bytes: usize,
     pub budget: usize,
     /// Read-backs in flight.
-    readbacks: Rc<Cell<u32>>,
+    readbacks: Rc<Flights>,
 }
 
 fn texture(device: &wgpu::Device, w: u32, h: u32, usage: wgpu::TextureUsages, label: &str) -> wgpu::Texture {
@@ -433,7 +407,7 @@ impl Gpu {
             submits: 0,
             bytes: (ATLAS_SIDE * ATLAS_SIDE * 4 + 16 * 16 * 4) as usize,
             budget: crate::limits::Limits::default().gpu_bytes,
-            readbacks: Rc::new(Cell::new(0)),
+            readbacks: Rc::new(Flights::default()),
         };
         gpu.ensure_scaler();
         let refused = validation.pop().await;
@@ -457,10 +431,12 @@ impl Gpu {
 
     /// Refuses an allocation of `bytes` (beside `freed`, about to go) past the budget.
     fn reserve(&self, bytes: usize, freed: usize, what: &str) -> Result<()> {
-        if self.bytes - freed + bytes > self.budget {
+        // Read-back buffers in flight count until they land.
+        let held = self.bytes + self.readbacks.bytes.get();
+        if held - freed + bytes > self.budget {
             return Err(EngineError::limit(format!(
                 "{what} would take the engine's GPU memory to {} MiB; the most is {} MiB",
-                (self.bytes - freed + bytes) >> 20,
+                (held - freed + bytes) >> 20,
                 self.budget >> 20
             )));
         }
@@ -628,33 +604,6 @@ impl Gpu {
         }
     }
 
-    /// What this frame can be made from (see `render`).
-    fn plan(&self, frame: &Frame, background: [f32; 4], generation: u64) -> Plan {
-        let same = |v: &Shown| v.generation == generation && v.background == background;
-        if !frame.detail {
-            return Plan::Full;
-        }
-        let [z, _, _, _, tx, ty] = frame.view.as_coeffs();
-        if let Some(last) = self.shown.as_ref().filter(|v| same(v)) {
-            let [lz, _, _, _, lx, ly] = last.view.as_coeffs();
-            let (dx, dy) = (tx - lx, ty - ly);
-            let whole = |v: f64| (v - v.round()).abs() < 1e-6;
-            if z == lz && whole(dx) && whole(dy) {
-                let (dx, dy) = (dx.round() as i32, dy.round() as i32);
-                if dx == 0 && dy == 0 {
-                    return Plan::Same;
-                }
-                if dx.unsigned_abs() < u32::from(frame.width) && dy.unsigned_abs() < u32::from(frame.height) {
-                    return Plan::Pan(dx, dy);
-                }
-            }
-        }
-        if self.basis.as_ref().is_some_and(|b| same(&b.shown)) {
-            return Plan::Zoom;
-        }
-        Plan::Full
-    }
-
     /// Draws a frame: encodes, submits and, with a canvas, presents. The GPU may still be
     /// drawing when this returns (`finished` waits).
     ///
@@ -670,14 +619,32 @@ impl Gpu {
         self.ensure_frames(w, h)?;
         self.masks.begin_frame();
         let t0 = now();
-        let plan = self.plan(frame, background, generation);
-        let drawn = match plan {
+        let planned = plan::plan(
+            frame.view,
+            frame.detail,
+            (frame.width, frame.height),
+            background,
+            generation,
+            self.shown.as_ref(),
+            self.basis.as_ref().map(|b| &b.shown),
+        );
+        let last = self.shown;
+        let drawn = match planned {
             Plan::Same => Ok(DrawStats {
-                standin: !self.shown.as_ref().is_some_and(|s| s.exact),
+                standin: !last.is_some_and(|s| s.exact),
+                ..DrawStats::default()
+            }),
+            Plan::Hold => Ok(DrawStats {
+                standin: true,
                 ..DrawStats::default()
             }),
             Plan::Full => self.full(store, frame, background),
-            Plan::Pan(dx, dy) => self.pan(store, frame, background, dx, dy),
+            Plan::Pan(dx, dy) => {
+                // The strips are drawn for the camera the shifted frame holds, not the one asked
+                // for (they differ by under half a pixel on a fractional pan).
+                let held = plan::held_view(planned, frame.view, last.as_ref());
+                self.pan(store, &Frame { view: held, ..*frame }, background, dx, dy)
+            }
             Plan::Zoom => self.zoom(frame, background),
         };
         let mut stats = match drawn {
@@ -687,9 +654,9 @@ impl Gpu {
                 return Err(e);
             }
         };
-        stats.plan = plan.code();
-        let shown_exact = !stats.standin && stats.exact();
-        if plan == Plan::Full {
+        stats.plan = planned.code();
+        let shown_exact = planned == Plan::Full && stats.exact() || planned == Plan::Same && !stats.standin;
+        if planned == Plan::Full {
             self.basis = Some(Basis {
                 index: self.cur,
                 shown: Shown {
@@ -701,7 +668,7 @@ impl Gpu {
             });
         }
         self.shown = Some(Shown {
-            view: frame.view,
+            view: plan::held_view(planned, frame.view, last.as_ref()),
             background,
             generation,
             exact: shown_exact,
@@ -772,11 +739,12 @@ impl Gpu {
         offset: (i32, i32),
         before: Option<wgpu::CommandEncoder>,
         stats: &mut DrawStats,
+        budget: &mut usize,
     ) -> Result<()> {
         let t0 = now();
         self.scene.reset_and_resize(frame.width, frame.height);
         let limits = store.limits;
-        let s = exec::draw(store, self, frame, &limits)?;
+        let s = exec::draw_budgeted(store, self, frame, &limits, budget)?;
         stats.add(&s);
         let t1 = now();
         let mut encoder = before.unwrap_or_else(|| {
@@ -823,7 +791,18 @@ impl Gpu {
         let mut stats = DrawStats::default();
         // Not into the basis a zoom scales from while it's another frame: any frame will do.
         let dst = self.cur;
-        self.draw_into(store, frame, background, dst, None, (0, 0), None, &mut stats)?;
+        let mut budget = store.limits.frame_verbs;
+        self.draw_into(
+            store,
+            frame,
+            background,
+            dst,
+            None,
+            (0, 0),
+            None,
+            &mut stats,
+            &mut budget,
+        )?;
         Ok(stats)
     }
 
@@ -908,6 +887,8 @@ impl Gpu {
             ..DrawStats::default()
         };
         let mut before = Some(encoder);
+        // One frame, one allowance: the strips share it.
+        let mut budget = store.limits.frame_verbs;
         for p in parts.iter().filter(|p| !p.is_empty()) {
             let part = Frame {
                 width: (p.x1 - p.x0) as u16,
@@ -936,6 +917,7 @@ impl Gpu {
                 (p.x0, p.y0),
                 before.take(),
                 &mut stats,
+                &mut budget,
             )?;
         }
         if let Some(e) = before {
@@ -1087,7 +1069,7 @@ impl Gpu {
     pub fn read_back_start(&self) -> Result<ReadBack> {
         self.check()?;
         let main = self.current()?;
-        if self.readbacks.get() >= READBACKS {
+        if self.readbacks.count.get() >= READBACKS {
             return Err(EngineError::new(
                 ErrorCode::State,
                 "read-backs already in flight: wait for one to land",
@@ -1128,24 +1110,43 @@ impl Gpu {
         );
         self.queue.submit([encoder.finish()]);
         self.check()?;
-        self.readbacks.set(self.readbacks.get() + 1);
-        Ok((buffer, w, h, row, self.readbacks.clone()))
+        Ok((
+            buffer,
+            w,
+            h,
+            row,
+            InFlight::new(self.readbacks.clone(), row as usize * h as usize),
+        ))
     }
 }
 
-/// Counts a read-back out of flight when it lands or fails.
-struct InFlight(Rc<Cell<u32>>);
+/// A read-back's place in flight, and its buffer's bytes: given back when it lands or fails.
+pub struct InFlight {
+    flights: Rc<Flights>,
+    bytes: usize,
+}
+
+impl InFlight {
+    fn new(flights: Rc<Flights>, bytes: usize) -> Self {
+        flights.count.set(flights.count.get() + 1);
+        flights.bytes.set(flights.bytes.get() + bytes);
+        Self { flights, bytes }
+    }
+}
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        self.0.set(self.0.get().saturating_sub(1));
+        self.flights.count.set(self.flights.count.get().saturating_sub(1));
+        self.flights
+            .bytes
+            .set(self.flights.bytes.get().saturating_sub(self.bytes));
     }
 }
 
 /// The frame's pixels, premultiplied RGBA8, from a buffer `read_back_start` filled. A failed
 /// copy or map is an error, never empty pixels.
-pub async fn read_back(buffer: wgpu::Buffer, w: u32, h: u32, row: u32, flight: Rc<Cell<u32>>) -> Result<Vec<u8>> {
-    let _flight = InFlight(flight);
+pub async fn read_back(buffer: wgpu::Buffer, w: u32, h: u32, row: u32, flight: InFlight) -> Result<Vec<u8>> {
+    let _flight = flight;
     let (tx, rx) = futures_channel::oneshot::channel();
     buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);

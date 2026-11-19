@@ -102,8 +102,26 @@ impl Engine {
     }
 
     pub fn put_image(&mut self, id: u32, width: u32, height: u32, rgba: &[u8], premultiplied: bool) -> Result<()> {
-        self.generation += 1;
         let limits = self.store.limits;
+        // Refused before anything is copied or levels are made: its size, and the budget.
+        if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
+            return Err(EngineError::new(ErrorCode::Image, "image bytes don't match its size"));
+        }
+        if width > limits.texture_side || height > limits.texture_side {
+            return Err(EngineError::limit(format!(
+                "an image {width} × {height}; the longest side allowed is {}",
+                limits.texture_side
+            )));
+        }
+        let held = self.cpu.image_bytes() - self.cpu.held_image(id);
+        if held + images::levels_bytes(width, height) > limits.image_bytes {
+            return Err(EngineError::limit(format!(
+                "an image {width} × {height} takes {} MiB with its levels; images may hold {} MiB",
+                images::levels_bytes(width, height).div_ceil(1 << 20),
+                limits.image_bytes >> 20
+            )));
+        }
+        self.generation += 1;
         let levels = images::levels(width, height, rgba, premultiplied, limits.texture_side)?;
         self.cpu.put_image(id, &levels, limits.image_bytes)?;
         #[cfg(feature = "gpu")]

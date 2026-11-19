@@ -60,6 +60,10 @@ export const UNSUPPORTED = {
   cornerSmoothing: 1 << 9,
   progressiveBlur: 1 << 10,
   textStrokeOutside: 1 << 11,
+  /** Set by the engine itself (`record.rs`, `derived`): a diamond gradient, which it doesn't draw. */
+  diamondGradient: 1 << 12,
+  /** Set by the engine itself: a backdrop reader, outside the tests (phase 3). */
+  backdropReader: 1 << 13,
 } as const;
 export type UnsupportedFeature = keyof typeof UNSUPPORTED;
 

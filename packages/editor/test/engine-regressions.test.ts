@@ -290,4 +290,97 @@ describe.skipIf(!built())("Saved glyphs, images and revisions (review of PR 216)
       engine.dispose();
     }
   });
+
+  it("re-encodes text whose glyph set changed even when it also moved", () => {
+    const doc = page();
+    const glyph = "fedcba9876543210";
+    doc.apply([
+      {
+        op: "create",
+        id: "outlines",
+        type: "glyphSet",
+        parent: ROOT_ID,
+        key: "a1",
+        props: { glyphOutlines: { [glyph]: "M0 0L300 0L300 800L0 800Z" } },
+      },
+    ]);
+    addText(doc, {});
+    const node = doc.get("text");
+    if (!node) throw new Error("text fixture missing");
+    doc.apply([
+      {
+        op: "set",
+        id: "text",
+        prop: "glyphLayout",
+        value: { key: glyphKey(node.props), w: 40, h: 40, refs: [glyph], g: [0, 0, 24], size: 20 },
+      },
+    ]);
+    const scene = new Scene(doc);
+    const builder = new DisplayListBuilder(scene, measurer);
+    const retained = new RenderEngine(module);
+    const fresh = new RenderEngine(module);
+    try {
+      expect(retained.apply(builder.build("p")).ok).toBe(true);
+      // The outline and the layer's place change before the next update.
+      doc.apply([
+        {
+          op: "set",
+          id: "outlines",
+          prop: "glyphOutlines",
+          value: { [glyph]: "M0 0L900 0L900 800L0 800Z" },
+        },
+        { op: "set", id: "text", prop: "x", value: 9 },
+      ]);
+      const patch = builder.update();
+      if (patch) expect(retained.apply(patch).ok).toBe(true);
+      expect(fresh.apply(new DisplayListBuilder(scene, measurer).build("p")).ok).toBe(true);
+      const actual = retained.renderCpu(64, 64, camera, [0, 0, 0, 0], false);
+      const expected = fresh.renderCpu(64, 64, camera, [0, 0, 0, 0], false);
+      if (!actual.ok || !expected.ok) throw new Error("fixture did not render");
+      expect(Buffer.from(actual.value.pixels).equals(expected.value.pixels)).toBe(true);
+    } finally {
+      retained.dispose();
+      fresh.dispose();
+    }
+  });
+
+  it("re-encodes text when faces arrive even when it also moved", () => {
+    const doc = page();
+    addText(doc, {});
+    let generation = 0;
+    let width = 300;
+    const changing: TextMeasurer = {
+      ...measurer,
+      missing: () => false,
+      get generation() {
+        return generation;
+      },
+      shape: () => ({
+        glyphs: [{ path: null, d: `M0 0H${width}V800H0Z`, x: 0, y: 0, cluster: 0 }],
+        width: 16,
+        scale: 0.02,
+      }),
+    };
+    const scene = new Scene(doc);
+    const builder = new DisplayListBuilder(scene, changing);
+    const retained = new RenderEngine(module);
+    const fresh = new RenderEngine(module);
+    try {
+      expect(retained.apply(builder.build("p")).ok).toBe(true);
+      // A face arrives (the glyph is wider) and the layer moves, before the next update.
+      generation = 1;
+      width = 900;
+      doc.apply([{ op: "set", id: "text", prop: "x", value: 9 }]);
+      const patch = builder.update();
+      if (patch) expect(retained.apply(patch).ok).toBe(true);
+      expect(fresh.apply(new DisplayListBuilder(scene, changing).build("p")).ok).toBe(true);
+      const actual = retained.renderCpu(64, 64, camera, [0, 0, 0, 0], false);
+      const expected = fresh.renderCpu(64, 64, camera, [0, 0, 0, 0], false);
+      if (!actual.ok || !expected.ok) throw new Error("fixture did not render");
+      expect(Buffer.from(actual.value.pixels).equals(expected.value.pixels)).toBe(true);
+    } finally {
+      retained.dispose();
+      fresh.dispose();
+    }
+  });
 });

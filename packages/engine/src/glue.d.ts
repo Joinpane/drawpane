@@ -6,6 +6,7 @@
 
 export class Outcome {
   free(): void;
+  __destroy_into_raw(): number;
   readonly ok: boolean;
   readonly code: number;
   readonly message: string;
@@ -50,6 +51,10 @@ export class Engine {
   /** Detaches the object from its finalizer without freeing it (after a trap). */
   __destroy_into_raw(): number;
   setLimit(name: string, value: number): Outcome;
+  readonly imageBytes: number;
+  readonly imageBudget: number;
+  readonly textureSide: number;
+  imageHeld(id: number): number;
   bandRows(width: number): number;
   apply(bytes: Uint8Array): Outcome;
   dirtyFor(zoom: number, x: number, y: number, dpr: number): Float64Array;

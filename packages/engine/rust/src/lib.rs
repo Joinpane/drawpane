@@ -19,6 +19,7 @@ pub mod images;
 pub mod kernels;
 pub mod limits;
 pub mod masks;
+pub mod plan;
 pub mod png;
 pub mod record;
 pub mod store;
@@ -247,6 +248,25 @@ impl Engine {
     #[wasm_bindgen(getter, js_name = heldBytes)]
     pub fn held_bytes(&self) -> f64 {
         self.core.held_bytes() as f64
+    }
+
+    /// Bytes of images held, and the most that may be: the facade refuses an upload past it before
+    /// its bytes are copied into the engine's memory.
+    #[wasm_bindgen(getter, js_name = imageBytes)]
+    pub fn image_bytes(&self) -> f64 {
+        self.core.cpu.image_bytes() as f64
+    }
+    #[wasm_bindgen(js_name = imageHeld)]
+    pub fn image_held(&self, id: u32) -> f64 {
+        self.core.cpu.held_image(id) as f64
+    }
+    #[wasm_bindgen(getter, js_name = imageBudget)]
+    pub fn image_budget(&self) -> f64 {
+        self.core.store.limits.image_bytes as f64
+    }
+    #[wasm_bindgen(getter, js_name = textureSide)]
+    pub fn texture_side(&self) -> u32 {
+        self.core.store.limits.texture_side
     }
 
     /// Rows a band of a frame `width` wide may have.

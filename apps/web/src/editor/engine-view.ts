@@ -158,7 +158,15 @@ export class EngineView {
   /** The latest frame drawn, the one being read back, and whether one is on its way. */
   #frame = 0;
   #reading = false;
-  #want: { n: number; width: number; height: number; exact: boolean } | null = null;
+  #want: { n: number; width: number; height: number; exact: boolean; epoch: number } | null = null;
+  /**
+   * Which presentation is current: moves on whenever a content frame isn't the engine's (the
+   * canvas renderer draws it), the page changes or the size does. A read-back from an earlier
+   * one is dropped when it lands: its pixels aren't written, its canvas isn't shown, and it's
+   * never reported exact.
+   */
+  #epoch = 0;
+  #presenting: { pageId: string; width: number; height: number } | null = null;
   #nextImage = 1;
   #offImages: () => void;
   #dead = false;
@@ -405,13 +413,27 @@ export class EngineView {
     exact = true,
   ): EngineDraw {
     if (this.#dead) return NOT_DRAWN;
+    const at = this.#presenting;
+    if (!at || at.pageId !== pageId || at.width !== width || at.height !== height) {
+      this.#supersede();
+      this.#presenting = { pageId, width, height };
+    }
     try {
-      return this.#draw(pageId, camera, width, height, dpr, background, state, exact);
+      const r = this.#draw(pageId, camera, width, height, dpr, background, state, exact);
+      // The canvas renderer draws this frame: nothing on its way from the engine may show.
+      if (!r.drawn) this.#supersede();
+      return r;
     } catch (err) {
       // Anything thrown on the way (the builder, a canvas call) is the engine's failure: the
       // canvas renderer takes over, never a blank or stale canvas.
       return this.#fail({ message: String(err), code: null });
     }
+  }
+
+  /** Drops every read-back on its way: a newer content frame decided otherwise. */
+  #supersede(): void {
+    this.#epoch++;
+    this.#want = null;
   }
 
   #draw(
@@ -462,7 +484,7 @@ export class EngineView {
     this.#unpresented = 0;
     const n = ++this.#frame;
     if (this.#readback) {
-      this.#want = { n, width, height, exact: f.exact };
+      this.#want = { n, width, height, exact: f.exact, epoch: this.#epoch };
       this.#readNext();
     }
     this.last = {
@@ -511,8 +533,9 @@ export class EngineView {
         }, 300);
         return;
       }
-      if (px.value.length !== want.width * want.height * 4) {
-        // The canvas was resized since: the next read-back has the new size.
+      if (want.epoch !== this.#epoch || px.value.length !== want.width * want.height * 4) {
+        // Superseded on its way (the canvas renderer drew a frame since, the page or the size
+        // changed): dropped. The next read-back, if any, is of a frame drawn since.
         this.#readNext();
         return;
       }
@@ -533,7 +556,8 @@ export class EngineView {
         ...this.last,
         breakdown: { ...this.last.breakdown, readback: performance.now() - t },
       };
-      this.onPresented(want.exact && this.#want === null);
+      // Exact only if it's still the newest frame drawn.
+      this.onPresented(want.exact && want.n === this.#frame);
       this.#readNext();
     });
   }

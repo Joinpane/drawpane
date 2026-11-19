@@ -185,3 +185,110 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
     engine.dispose();
   });
 });
+
+describe.skipIf(!built())(
+  "Operations the engine refuses, from the wire (re-check of PR 216)",
+  () => {
+    it("refuses a page holding a diamond gradient before any PNG byte, even outside the crop", async () => {
+      const w = new ListWriter(0xffffffff, 1);
+      w.reset();
+      const record = (x: number, paint: WirePaintForTest) => ({
+        flags: 0,
+        opacity: 1,
+        transform: [1, 0, 0, 1, x, 0] as const,
+        width: 16,
+        height: 16,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [
+          { kind: "rect" as const, w: 16, h: 16, radii: [0, 0, 0, 0] as const, smoothing: 0 },
+        ],
+        ops: [{ op: "fill" as const, path: 0, evenOdd: false, paint }],
+        coarse: [],
+      });
+      w.set(1, ROOT, record(0, { kind: "solid", color: [1, 0, 0, 1] }));
+      w.set(
+        2,
+        ROOT,
+        record(5000, {
+          kind: "diamond",
+          matrix: [16, 0, 0, 16, 0, 0],
+          stops: [
+            { position: 0, color: [1, 0, 0, 1] },
+            { position: 1, color: [0, 0, 1, 1] },
+          ],
+        }),
+      );
+      const engine = new RenderEngine(await loadNodeEngine());
+      try {
+        expect(engine.apply(w.finish()).ok).toBe(true);
+        expect(
+          engine.renderPngStream(32, 32, { zoom: 1, x: 0, y: 0, dpr: 1 }, [0, 0, 0, 0]),
+        ).toMatchObject({ ok: false, code: ErrorCode.Unsupported });
+        expect(engine.unsupported()).toMatchObject({ ok: true, value: [[2, 1 << 12]] });
+      } finally {
+        engine.dispose();
+      }
+    });
+  },
+);
+
+type WirePaintForTest = Parameters<ListWriter["set"]>[2]["ops"][number] extends infer O
+  ? O extends { paint: infer P }
+    ? P
+    : never
+  : never;
+
+describe.skipIf(!built())("Engines sharing a module (re-check of PR 216)", () => {
+  const fresh = (revision: number) => {
+    const w = new ListWriter(0xffffffff, revision);
+    w.reset();
+    return w.finish();
+  };
+
+  it("refuses an image past the Worker's budget before copying it, and the other engine lives", async () => {
+    const module = await loadNodeEngine("worker", { fresh: true });
+    const a = new RenderEngine(module);
+    const b = new RenderEngine(module);
+    expect(a.apply(fresh(7)).ok).toBe(true);
+    // 2,048² RGBA is 16 MiB, past the Worker's 6 MiB of images: refused, not a trap.
+    const big = new Uint8Array(2048 * 2048 * 4);
+    expect(b.putImage(1, 2048, 2048, big)).toMatchObject({ ok: false, code: ErrorCode.Limit });
+    expect(b.dead).toBe(false);
+    expect(a.dead).toBe(false);
+    expect(a.revision).toBe(7);
+    // Bytes that don't match the size are refused too, before any copy.
+    expect(b.putImage(2, 4, 4, new Uint8Array(10))).toMatchObject({
+      ok: false,
+      code: ErrorCode.Image,
+    });
+    a.dispose();
+    b.dispose();
+  });
+
+  it("kills every engine on a module that trapped, so none sees the renewed instance", async () => {
+    const module = await loadNodeEngine("worker", { fresh: true });
+    const a = new RenderEngine(module);
+    expect(a.apply(fresh(7)).ok).toBe(true);
+    const greedy = new RenderEngine(module, { messageBytes: 64 << 20 });
+    expect(greedy.apply(new Uint8Array(32 << 20))).toMatchObject({
+      ok: false,
+      code: ErrorCode.Trap,
+    });
+    // The first engine's memory went with the instance: it's dead, not pointing into the next.
+    expect(a.dead).toBe(true);
+    const c = new RenderEngine(module);
+    expect(c.apply(fresh(42)).ok).toBe(true);
+    expect(c.revision).toBe(42);
+    expect(a.revision).toBe(0);
+    expect(a.apply(fresh(43))).toMatchObject({ ok: false, code: ErrorCode.Trap });
+    expect(c.revision).toBe(42);
+    // Disposing the dead engines frees nothing in the new instance.
+    a.dispose();
+    greedy.dispose();
+    expect(c.revision).toBe(42);
+    expect(c.apply(fresh(43)).ok).toBe(true);
+    c.dispose();
+  });
+});

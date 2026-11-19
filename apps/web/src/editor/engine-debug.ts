@@ -222,6 +222,35 @@ export function engineDebug(editor: Editor) {
       return { list: toBase64(list), unsupported: unsupportedOf(b), records: b.stats.records };
     },
 
+    /**
+     * Two read-backs of one `width` × `height` GPU frame at once, with a GPU budget that has
+     * room for the frames and one read-back's buffer: what each answers (the second must be
+     * refused by the budget, not admitted beside the first).
+     */
+    async readbackPair(
+      width: number,
+      height: number,
+    ): Promise<Array<{ ok: boolean; code?: number }>> {
+      module ??= await loadBrowserEngine();
+      const px = width * height * 4;
+      const row = Math.ceil((width * 4) / 256) * 256;
+      // The atlas (2,048² RGBA8) and checker, three frames with their depth buffers, and one
+      // read-back buffer and a half.
+      const budget = 2048 * 2048 * 4 + 16 * 16 * 4 + 6 * px + Math.floor(row * height * 1.5);
+      const e = new RenderEngine(module, { gpuBytes: budget });
+      try {
+        const g = await e.attachGpu(null);
+        if (!g.ok) return [{ ok: false, code: g.code }];
+        const camera = { zoom: 1, x: 0, y: 0, dpr: 1 };
+        const r = e.renderGpu(width, height, camera, [1, 1, 1, 1], false);
+        if (!r.ok) return [{ ok: false, code: r.code }];
+        const both = await Promise.all([e.gpuPixels(), e.gpuPixels()]);
+        return both.map((b) => (b.ok ? { ok: true } : { ok: false, code: b.code }));
+      } finally {
+        e.dispose();
+      }
+    },
+
     /** The GPU the engine gets here, or why it gets none. */
     async gpu(compatibility = false): Promise<GpuInfo | { error: string }> {
       const e = await engineFor("gpu", compatibility);
