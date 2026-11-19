@@ -154,7 +154,7 @@ const NOT_DRAWN: EngineDraw = { drawn: false, ready: false, exact: false, ahead:
  * allows without any one long frame.
  */
 export const MOVING_BUDGET_MS = 4;
-export const REST_BUDGET_MS = 10;
+export const REST_BUDGET_MS = 12;
 
 /** Frames in a row the canvas can't take before the engine gives up for the session. */
 const UNPRESENTED = 3;

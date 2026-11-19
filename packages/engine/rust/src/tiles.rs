@@ -687,6 +687,36 @@ impl TileCache {
                     must: false,
                 });
             }
+            // Last, a coarser level (a ladder level at about half the scale, with level of
+            // detail) over the view grown by half of it each way: what a zoom out stands on, so
+            // it never has to draw what nothing covers at once.
+            let coarse = Level::ladder(level.scale / 2.0);
+            if coarse != level && visible.len() * 3 <= self.max_slots {
+                let cid = self.level_id(coarse, true);
+                let frame =
+                    grid_inv.transform_rect_bbox(Rect::new(gx0 as f64, gy0 as f64, (gx0 + w) as f64, (gy0 + h) as f64));
+                let grown = frame.inflate(frame.width() / 2.0, frame.height() / 2.0);
+                if let Some((a0, b0, a1, b1)) = self.span(coarse.grid().transform_rect_bbox(grown))
+                    && ((i64::from(a1) - i64::from(a0) + 1) * (i64::from(b1) - i64::from(b0) + 1)) as usize
+                        <= self.max_slots / 4
+                {
+                    for b in b0..=b1 {
+                        for a in a0..=a1 {
+                            let key = TileKey { level: cid, i: a, j: b };
+                            if self.tiles.get(&key).is_some_and(|e| !e.stale) {
+                                self.touch(&key);
+                                continue;
+                            }
+                            plan.jobs.push(Job {
+                                key,
+                                view: coarse.tile_view(a, b, self.tile),
+                                detail: true,
+                                must: false,
+                            });
+                        }
+                    }
+                }
+            }
         }
         Some(plan)
     }
@@ -997,6 +1027,26 @@ mod tests {
         assert!(c.level(z.level).is_some(), "the frame's level survived its ladder");
         let comp = c.compose(&z, last);
         assert!(!comp.exact && comp.pending > 0, "{comp:?}");
+    }
+
+    #[test]
+    fn a_frame_at_rest_draws_a_coarser_level_ahead_for_a_zoom_out() {
+        let mut c = TileCache::new(64, 256);
+        c.begin([1.0; 4], 0);
+        let p = c.plan(cam(1.0, 0.0, 0.0), (128, 128), false, None, true).expect("plan");
+        let coarse: Vec<_> = p.jobs.iter().filter(|j| j.detail).collect();
+        assert!(!coarse.is_empty(), "a coarser level is drawn ahead");
+        draw_all(&mut c, &p);
+        let last = Last {
+            view: cam(1.0, 0.0, 0.0),
+            size: (128, 128),
+        };
+        // Zoomed out to 60%: the coarse level stands in, nothing has to be drawn now.
+        c.begin([1.0; 4], 0);
+        let z = c
+            .plan(cam(0.6, 25.0, 25.0), (128, 128), true, Some(last), true)
+            .expect("plan");
+        assert!(z.jobs.iter().all(|j| !j.must), "{:?}", z.jobs);
     }
 
     #[test]

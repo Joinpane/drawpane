@@ -411,16 +411,15 @@ test.describe
 
     test("never reports a stand-in exact", async () => {
       // A zoom to a scale never drawn: the first frame stands on the last one scaled.
-      await page.evaluate(() => {
+      // Read in the frame that drew it: idle frames go on drawing what's missing right after.
+      const first = await page.evaluate(async () => {
         const e = (window as unknown as W).drawpane;
         e.zoomTo(e.s.camera.zoom * 1.2345);
-      });
-      await frames(page, 1);
-      const first = await page.evaluate(() => {
+        await new Promise((r) => requestAnimationFrame(() => r(null)));
         const v = (window as unknown as W).drawpaneEngineView;
         return v ? { exact: v.last.exact, plan: v.last.plan } : null;
       });
-      expect(first?.exact).toBe(false);
+      expect(first?.exact, JSON.stringify(first)).toBe(false);
       await settled(page);
       expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
     });

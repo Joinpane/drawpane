@@ -701,8 +701,8 @@ Exact means every tile the frame shows is up to date and drawn without level of 
 
 **Scheduling: never one long frame.**
 
-- A frame draws first the tiles nothing can stand in for (a page just opened, a jump), then others in order of distance from the view's centre, while its budget lasts: 4 ms while the camera moves, 10 ms once it rests (`MOVING_BUDGET_MS`, `REST_BUDGET_MS` in `engine-view.ts`). Every frame draws at least one, so a frame at rest always makes progress.
-- The editor draws again each frame while the frame isn't exact, with no settle delay (phase 1 waited 120 ms), and then while tiles round the view are still to draw, ahead of a pan.
+- A frame draws first the tiles nothing can stand in for (a page just opened, a jump), then others in order of distance from the view's centre, while its budget lasts: 4 ms while the camera moves, 12 ms once it rests (`MOVING_BUDGET_MS`, `REST_BUDGET_MS` in `engine-view.ts`). Every frame draws at least one, so a frame at rest always makes progress.
+- The editor draws again each frame while the frame isn't exact, with no settle delay (phase 1 waited 120 ms). Then, while tiles are still to draw ahead, it keeps going: tiles round the view, ahead of a pan, and a coarser level (a ladder level at about half the scale, with level of detail) over the view grown by half of it each way, which a zoom out stands on.
 - A frame asked for with no budget (`renderGpu(…, false, 0)`: tests, exports of the view) comes back exact.
 
 **GPU memory.**
