@@ -172,6 +172,64 @@ export function layerRows(
   return { rows, found };
 }
 
+/** The panel's rows as of a document version, with where each layer's row is. */
+export interface ListedRows {
+  readonly rows: readonly Row[];
+  readonly version: number;
+  /** Each listed layer's row. */
+  readonly at: ReadonlyMap<string, number>;
+}
+
+/** Where each layer's row is. */
+export function rowPositions(rows: readonly Row[]): Map<string, number> {
+  const at = new Map<string, number>();
+  rows.forEach((row, i) => {
+    at.set(row.node.id, i);
+  });
+  return at;
+}
+
+/** What a row's place, depth and notes depend on in a layer's own record. */
+const shapeOf = (node: NodeRecord) =>
+  `${node.type}|${node.props.visible !== false}|${getProp(node.props, "isMask") === true}|${
+    getProp(node.props, "clipContent") === true
+  }`;
+
+/**
+ * The rows `listed` showed, brought up to the document as it is when only
+ * layers' own records changed since (a move, a colour, a name): the rows
+ * for those layers get their new records, and nothing else is walked, so an
+ * edit costs what it changed, not the size of the page. Null when the list
+ * itself may differ (a child list changed, a layer appeared, went or became
+ * hidden or a mask, or the change log is out of reach): walk again with
+ * `layerRows`. Not for searching: a rename can change what's found.
+ *
+ * A layer without a row can't change any row: every listed layer's
+ * ancestors and siblings are listed too, and those are all a row's hiding
+ * and mask notes depend on.
+ */
+export function patchRows(doc: Doc, listed: ListedRows): readonly Row[] | null {
+  const changes = doc.changesSince(listed.version);
+  if (!changes) return null;
+  let rows = listed.rows;
+  let copied: Row[] | null = null;
+  for (const change of changes) {
+    if (change.reset || change.parents.size > 0) return null;
+    for (const id of change.ids) {
+      const i = listed.at.get(id);
+      if (i === undefined) continue;
+      const node = doc.get(id);
+      const row = rows[i] as Row;
+      if (!node || shapeOf(node) !== shapeOf(row.node)) return null;
+      if (node === row.node) continue;
+      copied ??= [...rows];
+      rows = copied;
+      copied[i] = { ...row, node };
+    }
+  }
+  return rows;
+}
+
 /** A container and every container inside it: what an Alt-click on its caret folds or opens. */
 export function containersWithin(doc: Doc, id: string): string[] {
   const out: string[] = [];
