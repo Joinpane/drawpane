@@ -58,7 +58,12 @@ function typography(s: Figma.TypeStyle): Props {
   if (s.italic !== undefined || s.fontStyle)
     out.fontStyle = s.italic || /italic|oblique/i.test(s.fontStyle ?? "") ? "italic" : "normal";
   if (s.fontSize) out.fontSize = round2(s.fontSize);
-  if (s.letterSpacing !== undefined)
+  if (s.letterSpacingPercentFontSize !== undefined)
+    out.letterSpacing = {
+      unit: "percent",
+      value: round2(s.letterSpacingPercentFontSize),
+    } satisfies LetterSpacing;
+  else if (s.letterSpacing !== undefined)
     out.letterSpacing = { unit: "px", value: round2(s.letterSpacing) } satisfies LetterSpacing;
   if (s.textCase && CASES[s.textCase]) out.textCase = CASES[s.textCase];
   if (s.textDecoration && DECORATIONS[s.textDecoration])

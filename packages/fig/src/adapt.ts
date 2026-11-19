@@ -446,7 +446,13 @@ export function adaptNode(
   if (grids.length > 0) node.layoutGrids = grids;
 
   if (type === "TEXT") {
-    Object.assign(node, textFields(n, raw, notes));
+    Object.assign(
+      node,
+      textFields(n, raw, notes, {
+        resolve: (id) => ctx.graph.resolveNumberVariableForNode(n.id, id),
+        saved: (field) => ctx.ids.savedField(n, field),
+      }),
+    );
     const glyphs = savedGlyphs(n, ctx.outlines ?? new Map());
     if (glyphs) node.drawpaneGlyphs = glyphs;
   }

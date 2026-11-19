@@ -770,11 +770,19 @@ export class TokenResolver {
       case "fontSize":
         if (typeof value === "number" && value > 0) out.fontSize = Math.min(4096, value);
         return;
+      // Read in the unit the layer's own value has, as Figma does: a percentage of the font size
+      // or pixels (an automatic line height takes pixels). Unbound before 0034, so nothing older
+      // reads these otherwise.
       case "lineHeight":
-        if (typeof value === "number") out.lineHeight = { unit: "px", value: Math.max(0, value) };
+        if (typeof value === "number")
+          out.lineHeight = {
+            unit: current("lineHeight").unit === "percent" ? "percent" : "px",
+            value: Math.max(0, value),
+          };
         return;
       case "letterSpacing":
-        if (typeof value === "number") out.letterSpacing = { unit: "px", value };
+        if (typeof value === "number")
+          out.letterSpacing = { unit: current("letterSpacing").unit, value };
         return;
       case "paragraphSpacing":
         if (typeof value === "number") out.paragraphSpacing = Math.max(0, Math.min(1000, value));

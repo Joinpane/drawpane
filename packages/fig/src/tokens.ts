@@ -118,6 +118,17 @@ const FIELD_NAMES: Readonly<Record<string, string>> = {
 };
 /** Bound fields that aren't brought: where the layer is is decided by layout and the file. */
 const NOT_BROUGHT = new Set(["x", "y", "rotation"]);
+/**
+ * Per-corner fields: Figma draws a layer's uniform radius unless its corners
+ * are independent, so bindings on these don't change a layer whose corners
+ * aren't (an image box with them bound to 14 draws square in Figma).
+ */
+const CORNER_FIELDS = new Set([
+  "topLeftRadius",
+  "topRightRadius",
+  "bottomLeftRadius",
+  "bottomRightRadius",
+]);
 /** The units Open Pencil keeps a binding in when it's as Figma wrote it (a percentage for opacity). */
 const UNIT: Readonly<Record<string, number>> = { opacity: 0.01 };
 
@@ -133,6 +144,7 @@ export function layerBoundVariables(
   const out: Record<string, Figma.VariableAlias> = {};
   for (const [field, id] of Object.entries(n.boundVariables)) {
     if (field.includes("/") || NOT_BROUGHT.has(field)) continue;
+    if (CORNER_FIELDS.has(field) && !n.independentCorners) continue;
     const scale = n.variableBindingScales?.[field];
     if (scale !== undefined && Math.abs(scale - (UNIT[field] ?? 1)) > 1e-9) continue;
     const alias = aliasOf(id);

@@ -293,3 +293,33 @@ describe("bound sizes keep within their bounds", () => {
     expect(p.height).toBe(28);
   });
 });
+
+describe("text spacing is read in the layer's unit, as Figma does", () => {
+  const text = (id: string, props: Record<string, unknown>) =>
+    node(id, "text", "p", { characters: "a", fontSize: 20, ...props });
+  it("letter spacing keeps the layer's unit", () => {
+    const store = file([
+      text("pct", {
+        letterSpacing: { unit: "percent", value: 0 },
+        bindings: { letterSpacing: "gap" },
+      }),
+      text("px", { letterSpacing: { unit: "px", value: 0 }, bindings: { letterSpacing: "gap" } }),
+    ]);
+    const resolver = new TokenResolver(store);
+    const ls = (id: string) => resolver.resolve(store.get(id) as NodeRecord).props.letterSpacing;
+    expect(ls("pct")).toEqual({ unit: "percent", value: 4 });
+    expect(ls("px")).toEqual({ unit: "px", value: 4 });
+  });
+  it("line height keeps a percentage, and is pixels otherwise", () => {
+    const store = file([
+      text("pct", { lineHeight: { unit: "percent", value: 100 }, bindings: { lineHeight: "gap" } }),
+      text("px", { lineHeight: { unit: "px", value: 10 }, bindings: { lineHeight: "gap" } }),
+      text("auto", { lineHeight: { unit: "auto" }, bindings: { lineHeight: "gap" } }),
+    ]);
+    const resolver = new TokenResolver(store);
+    const lh = (id: string) => resolver.resolve(store.get(id) as NodeRecord).props.lineHeight;
+    expect(lh("pct")).toEqual({ unit: "percent", value: 4 });
+    expect(lh("px")).toEqual({ unit: "px", value: 4 });
+    expect(lh("auto")).toEqual({ unit: "px", value: 4 });
+  });
+});

@@ -9,6 +9,12 @@
  * the same pixels. Some percentages Figma lays out in whole pixels (162.5%
  * of 14 px as 23, not 22.75): its saved layout says which, and those come in
  * as the pixels Figma used.
+ *
+ * Letter spacing too: Open Pencil keeps pixels, so one Figma saved as a
+ * percentage comes in as that percentage. A bound letter spacing or line
+ * height is read in the unit the layer's own value has (decision 0034):
+ * Open Pencil 0.16 applies the variable's value as pixels whatever the unit,
+ * so 5 on a text set in percent became 5 px rather than 5% of its size.
  */
 import type { Figma } from "@drawpane/figma";
 import type { CharacterStyleOverride, FontFeature, SceneNode } from "@open-pencil/scene-graph";
@@ -80,11 +86,60 @@ function runStyle(s: CharacterStyleOverride, fontSize: number, notes: FigNotes):
   return out;
 }
 
+/** What the text fields read beyond Open Pencil's node, for bound letter spacing and line height. */
+export interface TextLookup {
+  /** A number variable's value where the layer is, when it has one. */
+  readonly resolve: (variableId: string) => number | undefined;
+  /** A field as Figma saved it for the layer, its copy's override included. */
+  readonly saved: (field: "letterSpacing" | "lineHeight") => unknown;
+}
+
+function savedSpacing(lookup: TextLookup | undefined, field: "letterSpacing" | "lineHeight") {
+  const value = lookup?.saved(field) as { value?: unknown; units?: unknown } | undefined;
+  return value && typeof value.value === "number"
+    ? { value: value.value, units: value.units }
+    : undefined;
+}
+
+/**
+ * Letter spacing as Figma reads it: in percent when it saved a percentage
+ * (a bound variable's value then a percentage too), else Open Pencil's pixels.
+ */
+function letterSpacing(n: SceneNode, lookup: TextLookup | undefined): Partial<Figma.TypeStyle> {
+  const saved = savedSpacing(lookup, "letterSpacing");
+  if (saved?.units !== "PERCENT") return { letterSpacing: n.letterSpacing };
+  const bound = n.boundVariables.letterSpacing;
+  const value = (bound !== undefined ? lookup?.resolve(bound) : undefined) ?? saved.value;
+  return {
+    letterSpacing: (value / 100) * n.fontSize,
+    letterSpacingPercentFontSize: value,
+  };
+}
+
+/** A bound line height saved as a percentage: the variable's value is one too. */
+function boundLineHeight(
+  n: SceneNode,
+  lookup: TextLookup | undefined,
+): Partial<Figma.TypeStyle> | undefined {
+  const bound = n.boundVariables.lineHeight;
+  if (bound === undefined || savedSpacing(lookup, "lineHeight")?.units !== "PERCENT")
+    return undefined;
+  const value = lookup?.resolve(bound);
+  if (value === undefined || !Number.isFinite(value)) return undefined;
+  const percent = Math.max(0, value);
+  return {
+    lineHeightUnit: "FONT_SIZE_%",
+    lineHeightPercentFontSize: percent,
+    lineHeightPx: (percent / 100) * n.fontSize,
+  };
+}
+
 /** REST's text fields for a TEXT layer. */
 export function textFields(
   n: SceneNode,
   raw: RawRecord | undefined,
   notes: FigNotes,
+  lookup?: TextLookup,
 ): Partial<Figma.Node> {
   const sameFont = raw?.fontName?.family === n.fontFamily;
   // Small caps aren't among Open Pencil's text cases; the record has them.
@@ -103,8 +158,9 @@ export function textFields(
     fontWeight: n.fontWeight,
     italic: n.italic,
     fontSize: n.fontSize,
-    letterSpacing: n.letterSpacing,
-    ...lineHeight(n.lineHeight, n.fontSize, raw?.fontSize === n.fontSize ? raw : undefined),
+    ...letterSpacing(n, lookup),
+    ...(boundLineHeight(n, lookup) ??
+      lineHeight(n.lineHeight, n.fontSize, raw?.fontSize === n.fontSize ? raw : undefined)),
     textAlignHorizontal: n.textAlignHorizontal,
     textAlignVertical: n.textAlignVertical,
     textAutoResize: n.textAutoResize,

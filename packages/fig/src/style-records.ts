@@ -141,8 +141,11 @@ function typeStyle(r: Raw): Figma.TypeStyle {
         lineHeightPercentFontSize: lh.value * 100,
       });
   }
-  if (ls?.value !== undefined)
+  if (ls?.value !== undefined) {
     out.letterSpacing = ls.units === "PERCENT" ? (ls.value / 100) * size : ls.value;
+    // Kept a percentage, so a variable bound to it is read as one (decision 0034).
+    if (ls.units === "PERCENT") out.letterSpacingPercentFontSize = ls.value;
+  }
   if (typeof r.textCase === "string") out.textCase = r.textCase;
   if (typeof r.textDecoration === "string") out.textDecoration = r.textDecoration;
   if (typeof r.paragraphSpacing === "number") out.paragraphSpacing = r.paragraphSpacing;

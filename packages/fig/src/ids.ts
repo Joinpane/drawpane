@@ -9,7 +9,7 @@
  */
 import type { SceneGraph, SceneNode } from "@open-pencil/scene-graph";
 import type { RawRecord } from "./raw";
-import { type ChildIndex, slotContent, slotProperty } from "./slots";
+import { type ChildIndex, pathNames, slotContent, slotProperty } from "./slots";
 
 const core = (id: string) => (id.startsWith("I") ? id.slice(1) : id);
 
@@ -58,6 +58,39 @@ export class RestIds {
     const guid = this.#record.get(node.id) ?? this.#copiedGuid(node);
     this.#sources.set(node.id, guid);
     return guid;
+  }
+
+  /**
+   * A field as Figma saved it for a layer: from the outermost instance
+   * override that names the layer, else from the record it is or copies.
+   * Open Pencil keeps some fields only in its own units (letter spacing in
+   * pixels), so what Figma meant is read here.
+   */
+  savedField(node: SceneNode, field: string): unknown {
+    const records = this.#saved?.records;
+    if (!records) return undefined;
+    const guid = this.sourceGuid(node);
+    const own = guid ? records.get(guid) : undefined;
+    if (!own) return undefined;
+    const read = (fields: object) => (fields as Record<string, unknown>)[field];
+    if (this.#record.has(node.id)) return read(own);
+    // The instances around the layer, outermost first, and the record it copies last.
+    const chain: RawRecord[] = [own];
+    for (let at = this.#instanceAbove(node); at; at = this.#instanceAbove(at)) {
+      const g = this.sourceGuid(at);
+      const record = g ? records.get(g) : undefined;
+      if (!record) break;
+      chain.unshift(record);
+    }
+    for (let i = 0; i < chain.length - 1; i++) {
+      const below = chain.slice(i + 1);
+      for (const o of (chain[i] as RawRecord).symbolData?.symbolOverrides ?? []) {
+        if (!pathNames(o.guidPath?.guids, below)) continue;
+        const value = read(o);
+        if (value !== undefined) return value;
+      }
+    }
+    return read(own);
   }
 
   /** The graph id of the layer `node` copies, when it's inside an instance. */

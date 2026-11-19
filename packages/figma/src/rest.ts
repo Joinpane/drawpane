@@ -124,6 +124,12 @@ export interface TypeStyle {
   readonly textAlignHorizontal?: string;
   readonly textAlignVertical?: string;
   readonly letterSpacing?: number;
+  /**
+   * Drawpane's: letter spacing Figma saved as a percentage of the font size
+   * (`letterSpacing` then holds its pixels). REST gives pixels only; a .fig
+   * says which, and a bound variable's value is read in that unit.
+   */
+  readonly letterSpacingPercentFontSize?: number;
   readonly lineHeightPx?: number;
   readonly lineHeightPercentFontSize?: number;
   readonly lineHeightUnit?: "PIXELS" | "FONT_SIZE_%" | "INTRINSIC_%";
