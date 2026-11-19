@@ -43,6 +43,9 @@ HERE = Path(__file__).resolve().parent
 NODE_VERSION = "26.13.0"
 PNPM_VERSION = "12.18.0"
 PLAYWRIGHT_VERSION = "1.65.0"
+# The engine's toolchain (packages/engine/mise.toml).
+RUST_VERSION = "1.99.1"
+WASM_BINDGEN_VERSION = "0.2.130"
 
 APP_NAME = "drawpane-gpu-bench"
 DATA_VOLUME = "drawpane-gpu-bench-data"
@@ -104,6 +107,16 @@ image = (
     .run_commands(
         f"npm install -g pnpm@{PNPM_VERSION} playwright@{PLAYWRIGHT_VERSION}",
         "playwright install --with-deps chromium",
+    )
+    # The render engine (packages/engine, decision 0040) is Rust built to WebAssembly with its
+    # folder's mise.toml; apps/web's build needs it. The toolchain is baked in so a run only
+    # compiles the crate.
+    .apt_install("build-essential", "pkg-config")
+    .env({"MISE_DATA_DIR": "/opt/mise", "MISE_YES": "1", "PATH": "/opt/mise/shims:/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"})
+    .run_commands(
+        "curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh",
+        f"mise use -g rust@{RUST_VERSION} && mise exec rust@{RUST_VERSION} -- rustup target add wasm32-unknown-unknown",
+        f"mise use -g cargo:wasm-bindgen-cli@{WASM_BINDGEN_VERSION}",
     )
     .add_local_file(HERE / "gate.mjs", "/opt/gpu-bench/gate.mjs")
 )
@@ -356,7 +369,8 @@ def bench(job: dict, sources: list[dict]) -> dict:
             run["toolchain"] = _toolchain(src, env)
             if _run(["pnpm", "install", "--frozen-lockfile"], cwd=str(src), env=env, log=log) != 0:
                 raise RuntimeError(f"{label}: pnpm install failed (see {label}/build.log).")
-            if _run(["pnpm", "--filter", "@drawpane/web", "build"], cwd=str(src), env=env,
+            # With its workspace dependencies: the engine's WebAssembly is one (decision 0040).
+            if _run(["pnpm", "--filter", "@drawpane/web...", "build"], cwd=str(src), env=env,
                     log=log) != 0:
                 raise RuntimeError(f"{label}: building apps/web failed (see {label}/build.log).")
             chrome, version = _chromium(src, env)

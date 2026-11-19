@@ -15,6 +15,7 @@
     "fuzz": "vitest run --testTimeout=1800000 && DRAWPANE_COMPACT_COPIES=1 vitest run --testTimeout=1800000"
   },
   "dependencies": {
+    "@drawpane/engine": "workspace:*",
     "@drawpane/model": "workspace:*",
     "@drawpane/raster": "workspace:*",
     "harfbuzzjs": "1.6.4",

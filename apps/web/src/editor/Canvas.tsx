@@ -20,6 +20,7 @@ import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { fonts } from "../fonts/fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
+import { EngineView, rendererChoice } from "./engine-view";
 import { FrameNameEditor } from "./FrameNameEditor";
 import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
@@ -73,6 +74,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const host = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLCanvasElement>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
+  /** The render engine's WebGPU canvas, under the overlay; shown only while it draws the page. */
+  const gpuCanvas = useRef<HTMLCanvasElement>(null);
   const editingText = useEditorState((s) => s.editingText);
   // The editor's measurer re-measures after web fonts load (EditorPage gives it one that does).
   const measurer = editor.measurer as TextMeasurer & { invalidate(): void };
@@ -86,8 +89,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   useEffect(() => {
     const contentCanvas = content.current;
     const overlayCanvas = overlay.current;
+    const engineCanvas = gpuCanvas.current;
     const hostEl = host.current;
-    if (!contentCanvas || !overlayCanvas || !hostEl) return;
+    if (!contentCanvas || !overlayCanvas || !hostEl || !engineCanvas) return;
     const cctx = contentCanvas.getContext("2d", { alpha: false });
     const octx = overlayCanvas.getContext("2d");
     if (!cctx || !octx) return;
@@ -98,6 +102,50 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       getComputedStyle(document.documentElement).getPropertyValue("--canvas").trim() || "#ebeae6";
     let theme = readTheme();
     renderer.canvasColor = canvasToken();
+    // The render engine, behind its switch (decision 0040): it draws the page when it can, and
+    // the canvas renderer draws whatever it can't, never a blank canvas.
+    let engine: EngineView | null = null;
+    let engineShowing = false;
+    let disposed = false;
+    const choice = rendererChoice();
+    const showEngine = (on: boolean) => {
+      if (on === engineShowing) return;
+      engineShowing = on;
+      engineCanvas.style.visibility = on ? "visible" : "hidden";
+      contentCanvas.style.visibility = on ? "hidden" : "visible";
+      // The canvas renderer drew nothing meanwhile: its last frame can't be reused.
+      if (!on) renderer.invalidate();
+    };
+    if (choice !== "canvas")
+      void EngineView.create(engineCanvas, editor, measurer, imagesFor(editor), choice).then(
+        (view) => {
+          if (disposed) {
+            view?.dispose();
+            return;
+          }
+          engine = view;
+          if (!view) return;
+          view.onChange = () => {
+            contentDirty = true;
+            schedule();
+          };
+          view.onFallback = () => {
+            engine = null;
+            showEngine(false);
+            contentDirty = true;
+            schedule();
+          };
+          // A read-back frame (headless) is on screen once it lands: show it then.
+          view.onPresented = (frameExact) => {
+            if (engine !== view) return;
+            showEngine(true);
+            timing.exact = frameExact;
+          };
+          (window as unknown as { drawpaneEngineView?: EngineView }).drawpaneEngineView = view;
+          contentDirty = true;
+          schedule();
+        },
+      );
     let dpr = window.devicePixelRatio || 1;
     let contentDirty = true;
     let overlayDirty = true;
@@ -145,7 +193,44 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       frame = 0;
       const s = editor.s;
       const t0 = performance.now();
-      if (contentDirty && s.pageId) {
+      const page = s.pageId ? editor.doc.get(s.pageId) : undefined;
+      // The engine draws the page when it can (decision 0040). Which canvas shows changes only
+      // when a content frame is drawn, and only to one whose frame is on screen: an overlay-only
+      // redraw never hides the engine's frame, and a read-back frame shows once it lands.
+      let drewEngine = false;
+      if (contentDirty && s.pageId !== null && engine) {
+        const r = engine.draw(
+          s.pageId,
+          s.camera,
+          contentCanvas.width,
+          contentCanvas.height,
+          dpr,
+          (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor,
+          { hidden: renderer.hidden, whole: s.editingText },
+          exact || whole,
+        );
+        if (r.drawn) {
+          drewEngine = true;
+          contentDirty = false;
+          exact = false;
+          whole = false;
+          clearTimeout(settle);
+          if (r.ready) {
+            showEngine(true);
+            timing.exact = r.exact;
+          } else timing.exact = false;
+          // A stand-in (a pan shifted, a zoom scaled, unreadable text as bars): an exact frame
+          // follows once the camera rests.
+          if (!r.exact)
+            settle = window.setTimeout(() => {
+              exact = true;
+              contentDirty = true;
+              schedule();
+            }, SETTLE_MS);
+        }
+      }
+      if (!drewEngine && contentDirty && s.pageId) {
+        if (engine) showEngine(false);
         // Truncated text shows all its lines while it's being edited.
         renderer.whole = s.editingText;
         const done = renderer.render(
@@ -206,6 +291,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         canvas.style.width = `${width}px`;
         canvas.style.height = `${height}px`;
       }
+      // The engine's canvas sizes its buffer when it draws (resizing a configured WebGPU canvas
+      // reconfigures it); here it only takes the host's size on the page.
+      engineCanvas.style.width = `${width}px`;
+      engineCanvas.style.height = `${height}px`;
       // Sizing a canvas clears it, even to the same size: the last frame is
       // gone, so the renderer mustn't reuse it (a pan would move black).
       renderer.invalidate();
@@ -282,6 +371,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     });
 
     return () => {
+      disposed = true;
+      engine?.dispose();
       observer.disconnect();
       themeObserver.disconnect();
       offDoc();
@@ -592,6 +683,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       }}
     >
       <canvas ref={content} className="canvas__layer" />
+      {/* After the content canvas, so it's the first canvas wherever a canvas is looked for. */}
+      <canvas ref={gpuCanvas} className="canvas__layer" style={{ visibility: "hidden" }} />
       <canvas ref={overlay} className="canvas__layer canvas__overlay" />
       {/* Keyed: editing another layer starts afresh, never with the last one's text. */}
       {editingNode && getProp(editingNode.props, "visible") ? (

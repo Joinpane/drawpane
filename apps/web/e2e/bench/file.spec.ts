@@ -17,6 +17,15 @@
  * (a `.cpuprofile` per page and measurement, which Chrome's performance
  * panel opens) and the functions taking the most time are printed.
  *
+ * With BENCH_RENDERER=engine the render engine draws (decision 0040, behind its switch; set
+ * BENCH_ENGINE_PRESENT=readback where WebGPU canvases don't present, as on the GPU bench's
+ * driver), and each page also records which renderer drew it (a page with what phase 1
+ * doesn't draw falls back to the canvas renderer, with its features named), the adapter, and
+ * the GPU's time per frame (`onSubmittedWorkDone`). On a hardware adapter, the heaviest page
+ * the engine draws is held to 0040's confirmed targets: a useful image within 1 s of opening it,
+ * the exact picture within 3 s. On a software adapter (SwiftShader) nothing is gated and the
+ * GPU timings are labelled not representative.
+ *
  * Opt-in (skipped without BENCH_FILE), never in CI. Prints a table and
  * attaches the numbers as JSON, and writes them to BENCH_OUT when set, so
  * a change can be compared with its base commit on the same machine (see
@@ -39,12 +48,87 @@ const NAMED = process.env.BENCH_PAGES
   : null;
 /** A folder for a CPU profile of each measurement (`.cpuprofile`, for Chrome's performance panel). */
 const PROFILE = process.env.BENCH_PROFILE;
+/** Which renderer draws: "canvas" (default) or "engine" (decision 0040's switch). */
+const RENDERER = process.env.BENCH_RENDERER === "engine" ? "engine" : "canvas";
+/** Decision 0040's confirmed targets on the heaviest page, on real GPU hardware. */
+const USEFUL_IMAGE_MS = 1000;
+const EXACT_MS = 3000;
+
+interface EngineFacts {
+  /** Who drew the page: the engine, or the canvas renderer (the page holds what phase 1 doesn't draw). */
+  renderer: "engine" | "canvas";
+  unsupported: Record<string, number>;
+  adapter: string | null;
+  software: boolean;
+  /** GPU time per frame while panning, from submit to `onSubmittedWorkDone` (ms). */
+  gpuMs: { p50: number; p95: number; max: number } | null;
+  note?: string;
+}
 
 interface PageResult {
   page: PageInfo;
   firstFrameMs: number;
   exactMs: number;
   canvas: Record<string, Summary>;
+  engine?: EngineFacts;
+}
+
+/** What the engine did on the page shown, and its GPU's time per frame over a pan. */
+async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
+  return page.evaluate(async (frames) => {
+    type View = {
+      last: { supported: boolean };
+      unsupported(): Record<string, number>;
+      engine: { gpu: { adapter: string; fallback: boolean } | null; gpuFinished(): Promise<void> };
+    };
+    const w = window as unknown as {
+      drawpaneEngineView?: View;
+      drawpane: {
+        s: { camera: { pan(x: number, y: number): unknown } };
+        state: { set(p: object): void };
+      };
+    };
+    const view = w.drawpaneEngineView;
+    if (!view)
+      return {
+        renderer: "canvas" as const,
+        unsupported: {},
+        adapter: null,
+        software: false,
+        gpuMs: null,
+        note: "the engine didn't start (see the console)",
+      };
+    const gpu = view.engine.gpu;
+    const unsupported = view.unsupported();
+    if (!view.last.supported)
+      return {
+        renderer: "canvas" as const,
+        unsupported,
+        adapter: gpu?.adapter ?? null,
+        software: !!gpu?.fallback,
+        gpuMs: null,
+      };
+    const times: number[] = [];
+    const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+    for (let i = 0; i < frames; i++) {
+      w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(i % 60 < 30 ? 6 : -6, 3) });
+      await frame();
+      const t = performance.now();
+      await view.engine.gpuFinished();
+      times.push(performance.now() - t);
+    }
+    times.sort((a, b) => a - b);
+    const at = (q: number) =>
+      Math.round((times[Math.floor(q * (times.length - 1))] ?? 0) * 10) / 10;
+    return {
+      renderer: "engine" as const,
+      unsupported,
+      adapter: gpu?.adapter ?? null,
+      software: !!gpu?.fallback,
+      gpuMs: { p50: at(0.5), p95: at(0.95), max: at(1) },
+      ...(gpu?.fallback ? { note: "software adapter: GPU timings not representative" } : {}),
+    };
+  }, frames);
 }
 
 /** Shows `pageId`, whole: how long until its first frame was drawn, and until it was exact. */
@@ -133,7 +217,17 @@ test.describe("A real file", () => {
       await cdp.send("Profiler.setSamplingInterval", { interval: 500 });
     }
     page.on("pageerror", (error) => console.log(`page error: ${error.message}`));
-    await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
+    await page.evaluate(
+      ({ renderer, present }) => {
+        localStorage.setItem("drawpane:debug", "1");
+        localStorage.setItem("drawpane:renderer", renderer);
+        localStorage.setItem("drawpane:engine-present", present);
+      },
+      {
+        renderer: RENDERER,
+        present: process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu",
+      },
+    );
     const started = Date.now();
     const fileId = await importConverted(page, folder, "Bench");
     const importSeconds = Math.round((Date.now() - started) / 1000);
@@ -179,17 +273,23 @@ test.describe("A real file", () => {
           );
           await settle(page);
         }
-      const result = {
+      const result: PageResult = {
         page: info,
         firstFrameMs: Math.round(shown.first),
         exactMs: Math.round(shown.exact),
         canvas,
+        ...(RENDERER === "engine" ? { engine: await engineFacts(page, Math.min(FRAMES, 60)) } : {}),
       };
       results.push(result);
       console.log(
         [
           `\n${info.name}: ${info.layers} layers, ${info.readers} reading the backdrop, ${info.shadows} shadows`,
           `first frame ${result.firstFrameMs} ms, exact after ${result.exactMs} ms`,
+          ...(result.engine
+            ? [
+                `drawn by ${result.engine.renderer}${result.engine.renderer === "canvas" ? ` (${JSON.stringify(result.engine.unsupported)})` : ""} on ${result.engine.adapter}${result.engine.gpuMs ? `, GPU ${result.engine.gpuMs.p50} / ${result.engine.gpuMs.p95} ms per frame` : ""}${result.engine.note ? ` (${result.engine.note})` : ""}`,
+              ]
+            : []),
           ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),
         ].join("\n"),
       );
@@ -199,5 +299,22 @@ test.describe("A real file", () => {
     if (process.env.BENCH_OUT)
       writeFileSync(process.env.BENCH_OUT, `${JSON.stringify(report, null, 1)}\n`);
     expect(results.length).toBeGreaterThan(0);
+    // Decision 0040's confirmed targets, on the heaviest page the engine draws, on real hardware.
+    const gated = results.find((r) => r.engine?.renderer === "engine");
+    if (RENDERER === "engine" && gated?.engine && !gated.engine.software) {
+      expect(
+        gated.firstFrameMs,
+        `${gated.page.name}: a useful image within ${USEFUL_IMAGE_MS} ms`,
+      ).toBeLessThanOrEqual(USEFUL_IMAGE_MS);
+      expect(gated.exactMs, `${gated.page.name}: exact within ${EXACT_MS} ms`).toBeLessThanOrEqual(
+        EXACT_MS,
+      );
+    } else if (RENDERER === "engine")
+      test.info().annotations.push({
+        type: "engine-gate",
+        description: gated
+          ? "not gated: software adapter"
+          : "not gated: every page measured falls back to the canvas renderer (phase 3 features)",
+      });
   });
 });

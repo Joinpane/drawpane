@@ -1,0 +1,24 @@
+{
+  "name": "@drawpane/engine-workerd",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "The render engine's Worker build in workerd beside the agent runner's set (the headless editor, HarfBuzz), under decision 0033's caps: a large export, streamed, its isolate's memory measured (decision 0040). Local only, never deployed.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test:workerd": "node scripts/workerd.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261113.1",
+    "@drawpane/editor": "workspace:*",
+    "@drawpane/engine": "workspace:*",
+    "@drawpane/model": "workspace:*",
+    "@drawpane/raster": "workspace:*",
+    "@types/node": "26.6.6",
+    "harfbuzzjs": "1.6.4",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

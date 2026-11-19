@@ -6,6 +6,7 @@ Thanks for helping. This file covers how to run the project, how the code is lai
 
 ```sh
 mise install          # Node 26 and pnpm 12 (or install them yourself)
+(cd packages/engine && mise install)   # Rust for the render engine (decision 0040)
 pnpm install
 cp apps/worker/.dev.vars.example apps/worker/.dev.vars
 pnpm --filter @drawpane/worker run db:migrate:local
@@ -20,6 +21,7 @@ Open http://localhost:5173. A fresh local database sends you to setup; the token
 | --- | --- |
 | `packages/model` | The document model: nodes, typed operations, validation and apply. Pure TypeScript, runs everywhere. |
 | `packages/editor` | The editor engine: sync client, history, geometry, auto layout, renderer, interaction. No React. |
+| `packages/engine` | The render engine (decision 0040): Rust built to WebAssembly, drawn by Vello on WebGPU and on the CPU, behind `?renderer=engine`. |
 | `packages/ui` | The design system in React: tokens (generated from `design-system/tokens.json`), components, icons. |
 | `apps/worker` | The Cloudflare Worker: auth, REST API, static assets and the FileRoom Durable Object. |
 | `apps/web` | The browser app: sign-in, dashboard and the editor shell. |

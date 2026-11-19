@@ -140,7 +140,7 @@ function dashedOutline(
  * stroke over it, a frame's children), fading each would show them through
  * one another.
  */
-function fadesAsOne(node: NodeRecord, children: number): boolean {
+export function fadesAsOne(node: NodeRecord, children: number): boolean {
   if (getProp(node.props, "opacity") >= 1) return false;
   if (children > 0) return true;
   const shadows = getProp(node.props, "effects").some(
@@ -429,7 +429,7 @@ const PREVIEW_MAX_SCALE = 4;
 const PREVIEW_MIN_SCALE = 0.6;
 
 /** A text layer's biggest font size, its runs' included. */
-function largestFontSize(node: NodeRecord): number {
+export function largestFontSize(node: NodeRecord): number {
   let size = getProp(node.props, "fontSize");
   for (const run of getProp(node.props, "textRuns"))
     if (run.fontSize && run.fontSize > size) size = run.fontSize;
@@ -437,7 +437,24 @@ function largestFontSize(node: NodeRecord): number {
 }
 
 /** Text smaller than this many device pixels is drawn as bars, not glyphs. */
-const GREEK_BELOW = 4;
+export const GREEK_BELOW = 4;
+
+/**
+ * How many bars stand in for text too small to read, and their line height: as many lines as
+ * its box holds, but never more than it has characters (each line holds one at least), so a
+ * tall box with little text makes a few bars, not one per line of its height.
+ */
+export function greekLines(
+  node: NodeRecord,
+  measurer: TextMeasurer,
+): { readonly lines: number; readonly lh: number } {
+  const props = node.props;
+  const lh = Math.max(1, lineHeightPx(props, measurer));
+  const height = getProp(props, "height");
+  const fit = Number.isFinite(height / lh) ? Math.round(height / lh) : 1;
+  const chars = Math.max(1, getProp(props, "characters").length);
+  return { lines: Math.max(1, Math.min(fit, chars)), lh: Number.isFinite(lh) ? lh : 1 };
+}
 
 export class CanvasRenderer {
   readonly #scene: Scene;
@@ -2862,9 +2879,8 @@ export class CanvasRenderer {
   #greek(ctx: Ctx, node: NodeRecord, width: number, override?: string): void {
     const props = node.props;
     const size = getProp(props, "fontSize");
-    const lh = lineHeightPx(props, this.#measurer);
+    const { lines, lh } = greekLines(node, this.#measurer);
     const height = getProp(props, "height");
-    const lines = Math.max(1, Math.round(height / Math.max(1, lh)));
     const fills = getProp(props, "fills");
     const paint = override ? null : ([...fills].reverse().find((f) => f.visible !== false) ?? null);
     const style = override ?? (paint ? this.#paintStyle(ctx, paint, width, height) : "#000000");

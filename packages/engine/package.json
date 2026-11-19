@@ -1,0 +1,37 @@
+{
+  "name": "@drawpane/engine",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "description": "The render engine (decision 0040): a Rust render graph drawn by Vello on WebGPU in the browser and on the CPU in Workers, compiled to WebAssembly, with its display list's wire format.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./wire": "./src/wire.ts",
+    "./compare": "./src/compare.ts",
+    "./node": "./src/node.ts",
+    "./browser-glue": {
+      "types": "./src/glue.d.ts",
+      "default": "./dist/browser/engine.js"
+    },
+    "./worker-glue": {
+      "types": "./src/glue.d.ts",
+      "default": "./dist/worker/engine.js"
+    },
+    "./worker.wasm": "./dist/worker/engine_bg.wasm",
+    "./browser.wasm": "./dist/browser/engine_bg.wasm"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p .",
+    "test": "vitest run",
+    "test:rust": "cd rust && mise exec -- cargo test",
+    "fuzz": "cd rust && FUZZ_CASES=$(( ${FUZZ_RUNS:-2000} / 10 )) FUZZ_SEED=${FUZZ_SEED:-random} mise exec -- cargo test --release --test fuzz"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

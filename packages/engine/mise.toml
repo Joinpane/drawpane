@@ -1,0 +1,6 @@
+# The render engine (decision 0040) builds Rust to WebAssembly. Scoped to this folder, so the
+# rest of the repo needs no Rust toolchain to edit; building the engine (and so the web app)
+# runs `mise install` here once.
+[tools]
+rust = { version = "1.99.1", targets = "wasm32-unknown-unknown", profile = "minimal", components = "rustfmt,clippy" }
+"cargo:wasm-bindgen-cli" = "0.2.130"

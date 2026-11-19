@@ -18,6 +18,7 @@
     "@drawpane/model": "workspace:*"
   },
   "devDependencies": {
+    "@drawpane/engine": "workspace:*",
     "@drawpane/fig": "workspace:*",
     "@drawpane/figma": "workspace:*",
     "@drawpane/penpot": "workspace:*",
