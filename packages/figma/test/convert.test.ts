@@ -388,6 +388,64 @@ describe("auto layout and components", () => {
     });
   });
 
+  it("lets parent layoutGrow and STRETCH override own AUTO sizing, except horizontal auto-width text", () => {
+    const { nodes } = convertFile(
+      file(
+        node({
+          id: "4:0",
+          type: "FRAME",
+          name: "Field",
+          size: { x: 300, y: 120 },
+          relativeTransform: at(0, 0),
+          layoutMode: "VERTICAL",
+          children: [
+            node({
+              id: "4:1",
+              type: "FRAME",
+              name: "Textarea",
+              size: { x: 300, y: 60 },
+              relativeTransform: at(0, 0),
+              layoutMode: "VERTICAL",
+              primaryAxisSizingMode: "AUTO",
+              counterAxisSizingMode: "AUTO",
+              layoutAlign: "STRETCH",
+            }),
+            node({
+              id: "4:2",
+              type: "TEXT",
+              name: "AutoWidth",
+              size: { x: 94, y: 20 },
+              relativeTransform: at(0, 60),
+              layoutAlign: "STRETCH",
+              characters: "Menu Item",
+              style: { textAutoResize: "WIDTH_AND_HEIGHT" },
+            }),
+            node({
+              id: "4:3",
+              type: "GROUP",
+              name: "AbsGroup",
+              size: { x: 20, y: 20 },
+              relativeTransform: at(10, 10),
+              layoutPositioning: "ABSOLUTE",
+              children: [
+                node({
+                  id: "4:4",
+                  type: "RECTANGLE",
+                  name: "Dot",
+                  size: { x: 20, y: 20 },
+                  relativeTransform: at(10, 10),
+                }),
+              ],
+            }),
+          ],
+        }),
+      ),
+    );
+    expect(byName(nodes, "Textarea").props).toMatchObject({ sizingH: "fill", sizingV: "hug" });
+    expect(byName(nodes, "AutoWidth").props.sizingH).toBeUndefined();
+    expect(byName(nodes, "AbsGroup").props.positioning).toBe("absolute");
+  });
+
   it("links a copy's nested instance to the variant a variable mode chose", () => {
     // A set with Light and Dark variants; a main whose material is the Light one, its Mode
     // property bound to a variable; a copy in a frame set to Dark. Figma's API gives the

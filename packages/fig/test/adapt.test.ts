@@ -284,7 +284,7 @@ describe("layers", () => {
   });
 
   it("reads a grid's tracks, gaps and items from its records, which Open Pencil's graph drops", () => {
-    const { page, add, adapt } = scene();
+    const { graph, page, add, adapt } = scene();
     const grid = add("FRAME", page.id, "5:1", {
       name: "Grid",
       width: 300,
@@ -409,6 +409,34 @@ describe("layers", () => {
     const badge = adapt(grid, reflowing).children?.[1];
     expect(badge?.gridRowAnchorIndex).toBeUndefined();
     expect(badge?.gridChildHorizontalAlign).toBe("CENTER");
+
+    // A grid binding STACK_SPACING resolves its column gap onto itemSpacing only when
+    // the variable resolves to a finite number; missing or non-numeric variables keep raw gaps.
+    const col = graph.createCollection("Space");
+    const numVar = graph.createVariable("Gap", "FLOAT", col.id, 12);
+    const strVar = graph.createVariable("Label", "STRING", col.id, "auto");
+    const boundGrid = add("FRAME", page.id, "5:9", {
+      name: "BoundGrid",
+      width: 300,
+      height: 100,
+      itemSpacing: 12,
+      counterAxisSpacing: 0,
+      boundVariables: { itemSpacing: numVar.id, counterAxisSpacing: strVar.id },
+    });
+    const missingGrid = add("FRAME", page.id, "5:10", {
+      name: "MissingBoundGrid",
+      width: 300,
+      height: 100,
+      itemSpacing: 0,
+      counterAxisSpacing: 0,
+      boundVariables: { itemSpacing: "missing-var", counterAxisSpacing: "missing-row-var" },
+    });
+    const boundRaw = new Map<string, RawRecord>([
+      ["5:9", { stackMode: "GRID", gridColumnGap: 16, gridRowGap: 18 }],
+      ["5:10", { stackMode: "GRID", gridColumnGap: 18, gridRowGap: 14 }],
+    ]);
+    expect(adapt(boundGrid, boundRaw)).toMatchObject({ gridColumnGap: 12, gridRowGap: 18 });
+    expect(adapt(missingGrid, boundRaw)).toMatchObject({ gridColumnGap: 18, gridRowGap: 14 });
   });
 
   it("places layers by their transform, rotation and flips included", () => {

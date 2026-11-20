@@ -136,6 +136,10 @@ const ids = {
   sheetInDark: guid(32),
   darkenedCopy: guid(33),
   placedInDark: guid(34),
+  popoverDarkDefault: guid(35),
+  popoverDarkMaterial: guid(36),
+  clearedCopy: guid(37),
+  keptDarkCopy: guid(38),
 };
 
 /** The sample with the set, the mains, their copies, and the variables they bind. */
@@ -308,6 +312,30 @@ function fixture() {
       ...nested(ids.placedInDark, s.darkFrame.guid as Guid, true),
       parentIndex: { guid: s.darkFrame.guid, position: "~c" },
     },
+    // A popover whose nested material sets Theme=Dark by default; an outer override that
+    // clears Theme (omits variableModeID) inside the Light frame must pick Light and clear the mode.
+    main(ids.popoverDarkDefault, "PopoverDarkDefault", 3400),
+    {
+      ...nested(ids.popoverDarkMaterial, ids.popoverDarkDefault, true),
+      variableModeBySetMap: {
+        entries: [{ variableSetID: { guid: s.set }, variableModeID: s.dark }],
+      },
+    },
+    copy(ids.keptDarkCopy, ids.popoverDarkDefault, s.lightFrame, [], "d"),
+    copy(
+      ids.clearedCopy,
+      ids.popoverDarkDefault,
+      s.lightFrame,
+      [
+        {
+          guidPath: { guids: [ids.popoverDarkMaterial] },
+          variableModeBySetMap: {
+            entries: [{ variableSetID: { guid: s.set } }],
+          },
+        },
+      ],
+      "e",
+    ),
   ] as unknown as NodeChange[];
 
   return patchFigArchive(
@@ -357,6 +385,14 @@ describe("variant properties bound to a variable", { timeout: 60_000 }, () => {
       expect(material(ids.sheetInDark, ids.sheetMaterial)).toEqual(dark);
       // A copy's override that sets the mode on the material itself.
       expect(material(ids.darkenedCopy, ids.popoverMaterial)).toEqual(dark);
+      // Nested material setting Dark by default stays Dark without a clear, and switches to Light
+      // with no explicit mode when an outer override clears the collection inside a Light frame.
+      expect(material(ids.keptDarkCopy, ids.popoverDarkMaterial)).toEqual(dark);
+      expect(material(ids.clearedCopy, ids.popoverDarkMaterial)).toEqual(light);
+      expect(
+        nodes.get(`I${key(ids.clearedCopy)};${key(ids.popoverDarkMaterial)}`)
+          ?.explicitVariableModes,
+      ).toBeUndefined();
       // The main shows as it's placed (Light, the collection's first mode), as saved.
       expect(nodes.get(key(ids.popoverMaterial))?.componentId).toBe(key(ids.lightVariant));
       expect(nodes.get(key(ids.placedInDark))?.componentId).toBe(key(ids.lightVariant));

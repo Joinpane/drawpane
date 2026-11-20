@@ -1,17 +1,24 @@
 diff --git a/dist/dependencies.js b/dist/dependencies.js
-index a29c539958f911dd244a52f3438f40420a2f5408..d6db3b38317d6c2be6e4df366cee4ab63bac4459 100644
+index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a05f86faa6 100644
 --- a/dist/dependencies.js
 +++ b/dist/dependencies.js
-@@ -257,6 +257,8 @@ function applyDerivedEntry(target, entry) {
- 	if (entry.size) {
- 		props.size = structuredClone(entry.size);
- 		target.derivedSize = structuredClone(entry.size);
+@@ -254,9 +254,12 @@ function applyDerivedEntry(target, entry) {
+ 	if (entry.fontSize !== void 0) props.fontSize = entry.fontSize;
+ 	if (entry.lineHeight !== void 0) props.lineHeight = structuredClone(entry.lineHeight);
+ 	if (entry.letterSpacing !== void 0) props.letterSpacing = structuredClone(entry.letterSpacing);
+-	if (entry.size) {
+-		props.size = structuredClone(entry.size);
+-		target.derivedSize = structuredClone(entry.size);
++	const size = entry.size ?? entry.derivedTextData?.layoutSize;
++	if (size) {
++		props.size = structuredClone(size);
++		target.derivedSize = structuredClone(size);
 +		// Drawpane patch: a size Figma saved for this copy, not the main's.
 +		target.derivedSizeSaved = true;
  	}
  	if (entry.transform) props.transform = structuredClone(entry.transform);
  	const { fillGeometry, strokeGeometry, vectorData } = entry;
-@@ -271,16 +273,21 @@ function ownLayers(source, owner) {
+@@ -271,16 +274,21 @@ function ownLayers(source, owner) {
  	const structural = [];
  	const claims = [];
  	for (const override of symbolOverridesOf(source)) {
@@ -36,7 +43,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..d6db3b38317d6c2be6e4df366cee4ab6
  		});
  		if (Object.keys(props).length) claims.push({
  			path,
-@@ -582,6 +589,12 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -582,6 +590,12 @@ function interpretRoot(index, rootId, expectedType, options) {
  	const assignedFields = /* @__PURE__ */ new WeakMap();
  	/** Components an occurrence expanded before an outer decision replaced them. */
  	const replacedComponents = /* @__PURE__ */ new WeakMap();
@@ -49,7 +56,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..d6db3b38317d6c2be6e4df366cee4ab6
  	const defaultInstanceName = (occurrence) => {
  		const source = sources.get(occurrence.sourceId);
  		if (source?.type === "INSTANCE") return occurrence.properties.name;
-@@ -604,6 +617,9 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -604,6 +618,9 @@ function interpretRoot(index, rootId, expectedType, options) {
  	*/
  	const unresolvedStructural = (layer, cause) => {
  		if (cause.count === 0 && isStaleLayer(layer)) return;
@@ -59,7 +66,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..d6db3b38317d6c2be6e4df366cee4ab6
  		const error = pathError(layer.owner.id, layer.owner.mainComponentId, layer.declaredPath, cause);
  		if (cause.count !== 0 || !options.onUnresolvedAssignment) throw error;
  		layer.owner.unresolved.push({
-@@ -645,6 +661,8 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -645,6 +662,8 @@ function interpretRoot(index, rootId, expectedType, options) {
  	*/
  	const resolveRoot = (raw, source, superseded, structural, rank) => {
  		let effective = source.symbolData?.symbolID;
@@ -68,7 +75,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..d6db3b38317d6c2be6e4df366cee4ab6
  		const replaced = bindingHistory(raw, effective, superseded);
  		const keys = [...componentKeys(raw.symbolData?.symbolID), ...componentKeys(effective)];
  		const isKey = (guid) => keys.some((key) => sameGuid(key, guid));
-@@ -673,6 +691,21 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -673,6 +692,21 @@ function interpretRoot(index, rootId, expectedType, options) {
  				assignments: layer.assignments,
  				rank: layer.owner.rank
  			});
@@ -90,7 +97,40 @@ index a29c539958f911dd244a52f3438f40420a2f5408..d6db3b38317d6c2be6e4df366cee4ab6
  		}
  		return {
  			effective,
-@@ -785,6 +818,10 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -681,6 +715,23 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 			descendant
+ 		};
+ 	};
++	const mergeVariableModeBySetMaps = (base, patch) => {
++		const incoming = patch.variableModeBySetMap?.entries;
++		if (!incoming) return {};
++		const entries = [];
++		for (const entry of [...base.variableModeBySetMap?.entries ?? [], ...incoming]) {
++			const setGuid = entry.variableSetID?.guid;
++			const index = setGuid ? entries.findIndex((previous) => sameGuid(previous.variableSetID?.guid, setGuid)) : -1;
++			if (!entry.variableModeID) {
++				if (index >= 0) entries.splice(index, 1);
++			} else if (index < 0) {
++				entries.push(cloneRecord(entry));
++			} else {
++				entries[index] = cloneRecord(entry);
++			}
++		}
++		return { variableModeBySetMap: { entries } };
++	};
+ 	const applyPropertyClaim = (owner, ownerRank, target, layer) => {
+ 		const bound = assignedFields.get(target);
+ 		const retained = Object.fromEntries(Object.entries(layer.props).filter(([field]) => {
+@@ -690,7 +741,7 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 		if (Object.keys(retained).length === 0) return;
+ 		declareVariableBindingUnits(target, retained);
+ 		invalidateInheritedTextData(target.properties, retained);
+-		Object.assign(target.properties, cloneRecord(retained), mergeVariableConsumptionMaps(target.properties, retained));
++		Object.assign(target.properties, cloneRecord(retained), mergeVariableConsumptionMaps(target.properties, retained), mergeVariableModeBySetMaps(target.properties, retained));
+ 		if ("name" in retained) target.hasOwnName = true;
+ 		owner.propertyClaims.push({
+ 			declaredBy: owner.sourceId,
+@@ -785,6 +836,10 @@ function interpretRoot(index, rootId, expectedType, options) {
  		const record = bindRecord(raw, bindings);
  		const { source } = record;
  		expanding.add(id);
@@ -101,7 +141,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..d6db3b38317d6c2be6e4df366cee4ab6
  		try {
  			const owner = {
  				id,
-@@ -816,6 +853,7 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -816,6 +871,7 @@ function interpretRoot(index, rootId, expectedType, options) {
  			return occurrence;
  		} finally {
  			expanding.delete(id);
@@ -109,7 +149,37 @@ index a29c539958f911dd244a52f3438f40420a2f5408..d6db3b38317d6c2be6e4df366cee4ab6
  		}
  	};
  	/**
-@@ -1303,6 +1341,8 @@ function componentDependencies(node, resolveReference, reportExternalPreferred)
+@@ -919,13 +975,27 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 			bindingClaims,
+ 			overrideKey: readOverrideKey(source.overrideKey),
+ 			properties: {
+-				...base && omit(base.properties, COMPONENT_IDENTITY_FIELDS),
++				...base && omit(base.properties, [
++					...COMPONENT_IDENTITY_FIELDS,
++					"stackChildPrimaryGrow",
++					"stackChildAlignSelf",
++					"stackPositioning",
++					"horizontalConstraint",
++					"verticalConstraint",
++					"gridRowAnchor",
++					"gridColumnAnchor",
++					"gridRowSpan",
++					"gridColumnSpan",
++					"gridChildHorizontalAlign",
++					"gridChildVerticalAlign"
++				]),
+ 				...source,
+ 				...effective && source.symbolData ? { symbolData: {
+ 					...source.symbolData,
+ 					symbolID: effective
+ 				} } : {},
+-				...mergeVariableConsumptionMaps(base?.properties ?? {}, source)
++				...mergeVariableConsumptionMaps(base?.properties ?? {}, source),
++				...mergeVariableModeBySetMaps(base?.properties ?? {}, source)
+ 			},
+ 			children: expanded
+ 		};
+@@ -1303,6 +1373,8 @@ function componentDependencies(node, resolveReference, reportExternalPreferred)
  	forEachOverrideRecord(node, (source, override) => {
  		add(symbolDataOf(source)?.symbolID);
  		add(override?.overriddenSymbolID);

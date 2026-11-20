@@ -143,25 +143,32 @@ export function variantResolver(records: ReadonlyMap<string, RawRecord>): Varian
     return found?.type === type ? found : undefined;
   };
 
-  /** The mode a map sets for a collection, if it sets one. */
-  const modeIn = (map: unknown, collection: RawRecord): string | undefined => {
-    for (const e of (map as ModeMap | undefined)?.entries ?? [])
-      if (e.variableModeID && find("VARIABLE_SET", e.variableSetID) === collection)
-        return guidString(e.variableModeID);
-    return undefined;
+  /**
+   * Mode set for a collection in a map: the mode id, `null` when an entry
+   * explicitly clears the collection (omits `variableModeID`), or `undefined`
+   * when the map does not mention the collection.
+   */
+  const modeIn = (map: unknown, collection: RawRecord): string | null | undefined => {
+    let result: string | null | undefined;
+    for (const e of (map as ModeMap | undefined)?.entries ?? []) {
+      if (find("VARIABLE_SET", e.variableSetID) !== collection) continue;
+      result = e.variableModeID ? guidString(e.variableModeID) : null;
+    }
+    return result;
   };
 
   /**
    * The collection's mode where the chain ends: the nearest record that
    * sets one (an instance before the component it expands, as its own
-   * setting wins over its main's), then the layers around the outermost
+   * setting wins over its main's, honoring per-collection clears just like
+   * `mergeVariableModeBySetMaps`), then the layers around the outermost
    * record in the file, then the collection's first mode.
    */
   const modeAt = (chain: VariantContext["chain"], collection: RawRecord): string | undefined => {
-    const set = (entry: VariantContext["chain"][number]) => {
+    const set = (entry: VariantContext["chain"][number]): string | null | undefined => {
       for (const map of entry.modes) {
         const mode = modeIn(map, collection);
-        if (mode) return mode;
+        if (mode !== undefined) return mode;
       }
       return undefined;
     };
@@ -169,13 +176,19 @@ export function variantResolver(records: ReadonlyMap<string, RawRecord>): Varian
       const entry = chain[i] as VariantContext["chain"][number];
       const outer = chain[i - 1];
       if (outer && isBase(entry.id, outer.id)) {
-        const mode = set(outer) ?? set(entry);
-        if (mode) return mode;
+        const outerMode = set(outer);
+        if (outerMode !== undefined) {
+          if (outerMode !== null) return outerMode;
+          i--;
+          continue;
+        }
+        const baseMode = set(entry);
+        if (typeof baseMode === "string") return baseMode;
         i--;
         continue;
       }
       const mode = set(entry);
-      if (mode) return mode;
+      if (typeof mode === "string") return mode;
     }
     const first = chain[0];
     let parent = first ? records.get(first.id)?.parentIndex?.guid : undefined;
@@ -186,7 +199,7 @@ export function variantResolver(records: ReadonlyMap<string, RawRecord>): Varian
         (record as { variableModeBySetMap?: unknown }).variableModeBySetMap,
         collection,
       );
-      if (mode) return mode;
+      if (typeof mode === "string") return mode;
       parent = record.parentIndex?.guid;
     }
     const modes = (collection as Collection).variableSetModes;

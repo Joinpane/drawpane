@@ -269,6 +269,9 @@ export function convertFile(file: Figma.File, options: ConvertOptions = {}): Con
         ...(box.flipX ? { flipX: true } : {}),
       });
       Object.assign(props, childLayout(node, parent));
+    } else {
+      for (const [k, v] of Object.entries(childLayout(node, parent)))
+        if (propAllowed("group", k as never)) props[k] = v;
     }
 
     if (type !== "group" && type !== "text") {

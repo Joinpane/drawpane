@@ -253,14 +253,35 @@ function gridTracks(
 }
 
 /** A grid frame's tracks and gaps; Open Pencil's graph doesn't keep them, so they're read from its record. */
-function gridFields(raw: RawRecord | undefined): Partial<RestNode> {
+function gridFields(
+  n: SceneNode,
+  raw: RawRecord | undefined,
+  graph: SceneGraph,
+): Partial<RestNode> {
   const rows = gridTracks(raw?.gridRows, raw?.gridRowsSizing);
   const columns = gridTracks(raw?.gridColumns, raw?.gridColumnsSizing);
+  // A grid that binds STACK_SPACING / STACK_COUNTER_SPACING resolves its variable onto
+  // n.itemSpacing / n.counterAxisSpacing while raw.gridColumnGap / gridRowGap keeps the fallback.
+  // Confirm the variable actually resolves to a finite number in this node's mode so a missing
+  // or non-numeric alias does not replace the saved grid gap with Open Pencil's 0 default.
+  const resolvesNumber = (variableId: string | undefined) => {
+    if (!variableId) return false;
+    const resolved = graph.resolveNumberVariableForNode(n.id, variableId);
+    return typeof resolved === "number" && Number.isFinite(resolved);
+  };
+  const boundColumnGap =
+    !n.boundVariables?.gridColumnGap && resolvesNumber(n.boundVariables?.itemSpacing);
+  const boundRowGap =
+    !n.boundVariables?.gridRowGap && resolvesNumber(n.boundVariables?.counterAxisSpacing);
   return {
     ...(rows.list ? { gridRowsSizing: rows.list } : {}),
     ...(columns.list ? { gridColumnsSizing: columns.list } : {}),
-    gridRowGap: raw?.gridRowGap ?? 0,
-    gridColumnGap: raw?.gridColumnGap ?? 0,
+    gridRowGap:
+      boundRowGap && Number.isFinite(n.counterAxisSpacing)
+        ? n.counterAxisSpacing
+        : (raw?.gridRowGap ?? 0),
+    gridColumnGap:
+      boundColumnGap && Number.isFinite(n.itemSpacing) ? n.itemSpacing : (raw?.gridColumnGap ?? 0),
   };
 }
 
@@ -305,6 +326,7 @@ function layoutFields(
   parent: SceneNode,
   raw: RawRecord | undefined,
   parentRaw: RawRecord | undefined,
+  graph: SceneGraph,
 ): Partial<RestNode> {
   const out: Partial<RestNode> = {
     constraints: {
@@ -322,7 +344,7 @@ function layoutFields(
       paddingRight: n.paddingRight,
       paddingBottom: n.paddingBottom,
       paddingLeft: n.paddingLeft,
-      ...gridFields(raw),
+      ...gridFields(n, raw, graph),
     } satisfies Partial<RestNode>);
   }
   if (isGrid(parent, parentRaw)) {
@@ -444,7 +466,7 @@ export function adaptNode(
   if (n.clipsContent) node.clipsContent = true;
   const parentGuid = ids.sourceGuid(parent);
   const parentRaw = parentGuid ? ctx.records.get(parentGuid) : undefined;
-  Object.assign(node, layoutFields(n, parent, raw, parentRaw));
+  Object.assign(node, layoutFields(n, parent, raw, parentRaw, ctx.graph));
   const grids = n.layoutGrids.map((g) => layoutGrid(g, n)).filter((g) => g !== null);
   if (grids.length > 0) node.layoutGrids = grids;
 
