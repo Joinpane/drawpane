@@ -655,3 +655,55 @@ it("shrinks a hugging frame when an edit removes its last flow child while prese
   fixedEmpty.editor.setProp(["emptyFixed"], "sizingH", "hug");
   expect(fixedEmpty.props("emptyFixed")).toMatchObject({ width: 20, height: 60 });
 });
+
+it("preserves a hug copy's visible literal width across compaction when its box width binding is inactive", () => {
+  const nodes: NodeRecord[] = [
+    page,
+    {
+      id: "c",
+      type: "collection",
+      parent: ROOT_ID,
+      key: "a1",
+      props: { modes: [{ id: "m1", name: "Default" }] },
+    },
+    {
+      id: "v40",
+      type: "variable",
+      parent: "c",
+      key: "a0",
+      props: { variableType: "number", values: { m1: 40 } },
+    },
+    {
+      id: "main",
+      type: "frame",
+      parent: "page",
+      key: "a0",
+      props: {
+        isComponent: true,
+        layoutMode: "row",
+        sizingH: "hug",
+        width: 120,
+        height: 40,
+        bindings: { width: { variable: "v40", unit: "box" } },
+      },
+    },
+    {
+      id: "copy",
+      type: "frame",
+      parent: "page",
+      key: "a1",
+      props: {
+        instanceOf: "main",
+        layoutMode: "row",
+        sizingH: "hug",
+        width: 80,
+        height: 40,
+        bindings: { width: { variable: "v40", unit: "box" } },
+      },
+    },
+  ];
+  const materialized = open(nodes, false);
+  const compact = open(nodes, true);
+  expect(materialized.props("copy").width).toBe(80);
+  expect(compact.props("copy").width).toBe(80);
+});

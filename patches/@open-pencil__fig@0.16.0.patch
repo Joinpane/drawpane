@@ -1,8 +1,15 @@
 diff --git a/dist/dependencies.js b/dist/dependencies.js
-index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a05f86faa6 100644
+index a29c539958f911dd244a52f3438f40420a2f5408..40034649dd6197bab082301a0332e693175bd2ca 100644
 --- a/dist/dependencies.js
 +++ b/dist/dependencies.js
-@@ -254,9 +254,12 @@ function applyDerivedEntry(target, entry) {
+@@ -248,15 +248,20 @@ function bindSourceProperties(source, bindings, record) {
+ //#endregion
+ //#region src/instance-overrides/derived-symbol-data.ts
+ /** Copy one saved occurrence-derived record onto its target; a cache, not a claim. */
+-function applyDerivedEntry(target, entry) {
++function applyDerivedEntry(target, entry, derivedOwnerId, derivedKey) {
+ 	const props = target.properties;
+ 	if (entry.derivedTextData) props.derivedTextData = structuredClone(entry.derivedTextData);
  	if (entry.fontSize !== void 0) props.fontSize = entry.fontSize;
  	if (entry.lineHeight !== void 0) props.lineHeight = structuredClone(entry.lineHeight);
  	if (entry.letterSpacing !== void 0) props.letterSpacing = structuredClone(entry.letterSpacing);
@@ -13,12 +20,14 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
 +	if (size) {
 +		props.size = structuredClone(size);
 +		target.derivedSize = structuredClone(size);
-+		// Drawpane patch: a size Figma saved for this copy, not the main's.
-+		target.derivedSizeSaved = true;
++		// Drawpane patch: record which instance supplied this derivedSymbolData size so
++		// nested saved sizes stay authoritative unless their effective binding or mode changes.
++		if (derivedOwnerId !== void 0) target.derivedSizeSource = derivedOwnerId;
++		if (derivedKey !== void 0) target.derivedSizeKey = derivedKey;
  	}
  	if (entry.transform) props.transform = structuredClone(entry.transform);
  	const { fillGeometry, strokeGeometry, vectorData } = entry;
-@@ -271,16 +274,21 @@ function ownLayers(source, owner) {
+@@ -271,16 +276,21 @@ function ownLayers(source, owner) {
  	const structural = [];
  	const claims = [];
  	for (const override of symbolOverridesOf(source)) {
@@ -43,7 +52,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  		});
  		if (Object.keys(props).length) claims.push({
  			path,
-@@ -582,6 +590,12 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -582,6 +592,12 @@ function interpretRoot(index, rootId, expectedType, options) {
  	const assignedFields = /* @__PURE__ */ new WeakMap();
  	/** Components an occurrence expanded before an outer decision replaced them. */
  	const replacedComponents = /* @__PURE__ */ new WeakMap();
@@ -56,7 +65,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  	const defaultInstanceName = (occurrence) => {
  		const source = sources.get(occurrence.sourceId);
  		if (source?.type === "INSTANCE") return occurrence.properties.name;
-@@ -604,6 +618,9 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -604,6 +620,9 @@ function interpretRoot(index, rootId, expectedType, options) {
  	*/
  	const unresolvedStructural = (layer, cause) => {
  		if (cause.count === 0 && isStaleLayer(layer)) return;
@@ -66,7 +75,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  		const error = pathError(layer.owner.id, layer.owner.mainComponentId, layer.declaredPath, cause);
  		if (cause.count !== 0 || !options.onUnresolvedAssignment) throw error;
  		layer.owner.unresolved.push({
-@@ -645,6 +662,8 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -645,6 +664,8 @@ function interpretRoot(index, rootId, expectedType, options) {
  	*/
  	const resolveRoot = (raw, source, superseded, structural, rank) => {
  		let effective = source.symbolData?.symbolID;
@@ -75,7 +84,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  		const replaced = bindingHistory(raw, effective, superseded);
  		const keys = [...componentKeys(raw.symbolData?.symbolID), ...componentKeys(effective)];
  		const isKey = (guid) => keys.some((key) => sameGuid(key, guid));
-@@ -673,6 +692,21 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -673,6 +694,21 @@ function interpretRoot(index, rootId, expectedType, options) {
  				assignments: layer.assignments,
  				rank: layer.owner.rank
  			});
@@ -97,7 +106,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  		}
  		return {
  			effective,
-@@ -681,6 +715,23 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -681,6 +717,23 @@ function interpretRoot(index, rootId, expectedType, options) {
  			descendant
  		};
  	};
@@ -121,7 +130,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  	const applyPropertyClaim = (owner, ownerRank, target, layer) => {
  		const bound = assignedFields.get(target);
  		const retained = Object.fromEntries(Object.entries(layer.props).filter(([field]) => {
-@@ -690,7 +741,7 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -690,7 +743,7 @@ function interpretRoot(index, rootId, expectedType, options) {
  		if (Object.keys(retained).length === 0) return;
  		declareVariableBindingUnits(target, retained);
  		invalidateInheritedTextData(target.properties, retained);
@@ -130,7 +139,17 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  		if ("name" in retained) target.hasOwnName = true;
  		owner.propertyClaims.push({
  			declaredBy: owner.sourceId,
-@@ -785,6 +836,10 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -738,7 +791,8 @@ function interpretRoot(index, rootId, expectedType, options) {
+ 			if (!path?.length) continue;
+ 			const target = resolveClaimTarget(owner, path);
+ 			if (!target || target === owner) continue;
+-			applyDerivedEntry(target, entry);
++			const key = `${owner.sourceId}:${path.map(guidToString).join("/")}`;
++			applyDerivedEntry(target, entry, owner.sourceId, key);
+ 		}
+ 	};
+ 	/** Bind the record's fields from the enclosing component scope, recording provenance. */
+@@ -785,6 +839,10 @@ function interpretRoot(index, rootId, expectedType, options) {
  		const record = bindRecord(raw, bindings);
  		const { source } = record;
  		expanding.add(id);
@@ -141,7 +160,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  		try {
  			const owner = {
  				id,
-@@ -816,6 +871,7 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -816,6 +874,7 @@ function interpretRoot(index, rootId, expectedType, options) {
  			return occurrence;
  		} finally {
  			expanding.delete(id);
@@ -149,7 +168,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  		}
  	};
  	/**
-@@ -919,13 +975,27 @@ function interpretRoot(index, rootId, expectedType, options) {
+@@ -919,13 +978,27 @@ function interpretRoot(index, rootId, expectedType, options) {
  			bindingClaims,
  			overrideKey: readOverrideKey(source.overrideKey),
  			properties: {
@@ -179,7 +198,7 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  			},
  			children: expanded
  		};
-@@ -1303,6 +1373,8 @@ function componentDependencies(node, resolveReference, reportExternalPreferred)
+@@ -1303,6 +1376,8 @@ function componentDependencies(node, resolveReference, reportExternalPreferred)
  	forEachOverrideRecord(node, (source, override) => {
  		add(symbolDataOf(source)?.symbolID);
  		add(override?.overriddenSymbolID);
@@ -189,10 +208,47 @@ index a29c539958f911dd244a52f3438f40420a2f5408..f7988904a7cce965fc327b41512786a0
  			if (definition.type === "INSTANCE_SWAP") assignment({
  				value: definition.initialValue,
 diff --git a/dist/index.js b/dist/index.js
-index ac85b19ac446dad507de42ff629970d7a3ca7cfb..0c3d31d2959c7bc0e0e9206b1f6b5ebf8def1c33 100644
+index ac85b19ac446dad507de42ff629970d7a3ca7cfb..4729707b6cf0fbef4b4e737e7fff5277d294bcd5 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -722,8 +722,9 @@ function applyDocumentLayoutBindings(graph, savedSizeNodes, materialized, layout
+@@ -701,31 +701,66 @@ function figArchiveComponentUsePages(bytes, componentIds) {
+ //#endregion
+ //#region src/document/bindings/layout.ts
+ /** Apply resolved scalar layout values after hierarchy and explicit modes exist. */
+-function applyDocumentLayoutBindings(graph, savedSizeNodes, materialized, layoutScales = /* @__PURE__ */ new Map()) {
++function applyDocumentLayoutBindings(graph, savedSizeNodes, materialized, layoutScales = /* @__PURE__ */ new Map(), derivedOrigins = /* @__PURE__ */ new Map(), nestedSavedSizes = /* @__PURE__ */ new Map()) {
+ 	const sizesOverridden = /* @__PURE__ */ new Map();
++	const sizeBindingsOverridden = /* @__PURE__ */ new Map();
+ 	for (const owner of materialized) {
+ 		if (owner.type !== "INSTANCE") continue;
+ 		forEachInstanceOverride(owner.instanceOverrides, (id, field) => {
+-			if (field !== "width" && field !== "height") return;
+-			const target = id || owner.id;
+-			const fields = sizesOverridden.get(target) ?? /* @__PURE__ */ new Set();
+-			fields.add(field);
+-			sizesOverridden.set(target, fields);
++			if (field === "width" || field === "height") {
++				const target = id || owner.id;
++				const fields = sizesOverridden.get(target) ?? /* @__PURE__ */ new Set();
++				fields.add(field);
++				sizesOverridden.set(target, fields);
++			} else if (field === "boundVariables/width" || field === "boundVariables/height") {
++				const target = id || owner.id;
++				const fields = sizeBindingsOverridden.get(target) ?? /* @__PURE__ */ new Set();
++				fields.add(field.slice("boundVariables/".length));
++				sizeBindingsOverridden.set(target, fields);
++			}
+ 		});
+ 	}
+ 	for (const node of materialized) {
+ 		const scales = numericVariableBindingScales(node.boundVariables, layoutScales.get(node.id) ?? 1, node.variableBindingScales);
+ 		graph.updateNode(node.id, { variableBindingScales: scales });
++		const originKey = nestedSavedSizes.get(node.id);
++		const originId = originKey ? derivedOrigins.get(originKey) : void 0;
++		const originNode = originId ? graph.getNode(originId) : void 0;
+ 		for (const field in node.boundVariables) {
+-			if ((field === "width" || field === "height") && savedSizeNodes.has(node.id)) continue;
+-			if (sizesOverridden.get(node.id)?.has(field)) continue;
  			const variableId = node.boundVariables[field];
  			const variable = graph.variables.get(variableId);
  			if (!variable) continue;
@@ -203,8 +259,52 @@ index ac85b19ac446dad507de42ff629970d7a3ca7cfb..0c3d31d2959c7bc0e0e9206b1f6b5ebf
 +			const value = graph.resolveVariableForNode(node.id, variableId);
  			if (typeof value !== "number") continue;
  			const effectiveValue = field === "opacity" ? value : value * (scales[field] ?? 1);
++			if (field === "width" || field === "height") {
++				if (savedSizeNodes.has(node.id)) continue;
++				if (sizesOverridden.get(node.id)?.has(field) && !sizeBindingsOverridden.get(node.id)?.has(field)) continue;
++				// Drawpane patch: keep a nested instance's derivedSymbolData size when neither
++				// the effective binding nor the variable's resolved value changed from its origin.
++				if (
++					originNode &&
++					!sizeBindingsOverridden.get(node.id)?.has(field) &&
++					originNode.boundVariables?.[field] === variableId &&
++					graph.resolveVariableForNode(originNode.id, variableId) === value
++				) continue;
++				const current = graph.getNode(node.id) ?? node;
++				const parent = current.parentId ? graph.getNode(current.parentId) : void 0;
++				const parentMode = parent?.layoutMode === "HORIZONTAL" || parent?.layoutMode === "VERTICAL" ? parent.layoutMode : parent?.source?.fig?.layout?.stackMode === "GRID" ? "GRID" : "NONE";
++				const ownMode = current.layoutMode === "HORIZONTAL" || current.layoutMode === "VERTICAL" ? current.layoutMode : current.source?.fig?.layout?.stackMode === "GRID" ? "GRID" : "NONE";
++				const autoWidthText = current.type === "TEXT" && current.textAutoResize === "WIDTH_AND_HEIGHT";
++				if (field === "width") {
++					const fillH = current.layoutPositioning !== "ABSOLUTE" && !autoWidthText && ((parentMode === "HORIZONTAL" || parentMode === "GRID") && current.layoutGrow === 1 || parentMode === "VERTICAL" && current.layoutAlignSelf === "STRETCH");
++					const hugH = (ownMode === "HORIZONTAL" || ownMode === "GRID") && current.primaryAxisSizing === "HUG" || ownMode === "VERTICAL" && current.counterAxisSizing === "HUG";
++					if (fillH || hugH) continue;
++				} else {
++					const fillV = current.layoutPositioning !== "ABSOLUTE" && (parentMode === "VERTICAL" && current.layoutGrow === 1 || (parentMode === "HORIZONTAL" || parentMode === "GRID") && current.layoutAlignSelf === "STRETCH");
++					const hugV = ownMode === "VERTICAL" && current.primaryAxisSizing === "HUG" || (ownMode === "HORIZONTAL" || ownMode === "GRID") && current.counterAxisSizing === "HUG";
++					if (fillV || hugV) continue;
++				}
++			}
  			const updates = resolvedNumericBindingUpdate(field, effectiveValue);
-@@ -1449,11 +1450,35 @@ function valueOf(entry, resolve) {
+ 			if (updates) graph.updateNode(node.id, updates);
+ 		}
+@@ -843,6 +878,7 @@ function loadPageTransaction(state, closure, action) {
+ 	const components = new Map(state.components);
+ 	const componentIds = new Map(state.componentIds);
+ 	const sizes = new Set(state.savedSizeNodes);
++	const derivedOrigins = new Map(state.derivedOrigins);
+ 	const nextImportedId = state.nextImportedId;
+ 	graph.withBufferedEvents(() => {
+ 		try {
+@@ -866,6 +902,7 @@ function loadPageTransaction(state, closure, action) {
+ 			state.components = components;
+ 			state.componentIds = componentIds;
+ 			state.savedSizeNodes = sizes;
++			state.derivedOrigins = derivedOrigins;
+ 			state.nextImportedId = nextImportedId;
+ 			for (const [id, entries] of graph.instanceIndex) if (!entries.size) graph.instanceIndex.delete(id);
+ 			graph.clearAbsPosCache();
+@@ -1449,11 +1486,35 @@ function valueOf(entry, resolve) {
  		return { aliasId };
  	}
  	if (type === "COLOR" && value.colorValue) return structuredClone(value.colorValue);
@@ -240,8 +340,43 @@ index ac85b19ac446dad507de42ff629970d7a3ca7cfb..0c3d31d2959c7bc0e0e9206b1f6b5ebf
  function modeValues(resource, modes, resolve) {
  	const entries = resource.variableDataValues?.entries ?? [];
  	if (!entries.length) throw new Error("Missing mode values");
-@@ -1701,10 +1726,13 @@ function materializeReaderInto(pages, plan, blobs, state, resumed) {
+@@ -1575,7 +1636,8 @@ function restoreAssemblyState(resume, reader, options) {
+ 		components,
+ 		sources: new Map(checkpoint.sources),
+ 		componentIds: new Map(checkpoint.componentIds),
+-		savedSizeNodes: new Set(checkpoint.savedSizeNodeIds)
++		savedSizeNodes: new Set(checkpoint.savedSizeNodeIds),
++		derivedOrigins: new Map(checkpoint.derivedOrigins ?? [])
+ 	};
+ }
+ function createFigDocumentSession(bytes, options = {}, resume) {
+@@ -1596,6 +1658,7 @@ function createFigDocumentSession(bytes, options = {}, resume) {
+ 				sources: [...state.sources],
+ 				componentIds: [...state.componentIds],
+ 				savedSizeNodeIds: [...state.savedSizeNodes],
++				derivedOrigins: [...state.derivedOrigins],
+ 				loadedPageIds: [...loaded],
+ 				components: [...state.components].map(([id, component]) => [id, checkpointComponent(component)])
+ 			});
+@@ -1648,7 +1711,8 @@ function createAssemblyState(reader, options) {
+ 		sources: /* @__PURE__ */ new Map(),
+ 		components: /* @__PURE__ */ new Map(),
+ 		componentIds: /* @__PURE__ */ new Map(),
+-		savedSizeNodes: /* @__PURE__ */ new Set()
++		savedSizeNodes: /* @__PURE__ */ new Set(),
++		derivedOrigins: /* @__PURE__ */ new Map()
+ 	};
+ }
+ /** Compatibility with checkpoints saved before they carried the import counter. */
+@@ -1696,15 +1760,27 @@ function materializeReader(reader, blobs, options, previous) {
+ 	return state.graph.applyImportedStateDuring(() => materializeReaderInto(pages, plan, blobs, state, previous !== void 0), () => `0:${state.nextImportedId++}`);
+ }
+ function materializeReaderInto(pages, plan, blobs, state, resumed) {
+-	const { graph, sources, components, savedSizeNodes, componentIds } = state;
++	const { graph, sources, components, savedSizeNodes, componentIds, derivedOrigins } = state;
+ 	const existingNodeIds = new Set(graph.nodes.keys());
  	const layoutScales = /* @__PURE__ */ new Map();
++	const nestedSavedSizes = /* @__PURE__ */ new Map();
  	/** The sizes Figma derived for this pass's instance layers, as materialized. */
  	const derivedSizes = /* @__PURE__ */ new Map();
 -	const rememberDerivedSizes = (nodes) => {
@@ -250,13 +385,21 @@ index ac85b19ac446dad507de42ff629970d7a3ca7cfb..0c3d31d2959c7bc0e0e9206b1f6b5ebf
  			if (occurrence.derivedSize) {
 -				savedSizeNodes.add(node.id);
 +				// Drawpane patch: in a copy, a nested instance's own size is its main's, saved in the
-+				// main's modes; only the copy's root and the sizes Figma saved for the copy hold
-+				// against a size bound to a variable, which resolves in the copy's mode.
-+				if (!copy || occurrence === copy || occurrence.derivedSizeSaved) savedSizeNodes.add(node.id);
++				// main's modes; the copy's root and sizes saved by the copy itself hold unconditionally,
++				// while nested derivedSymbolData sizes hold unless their effective binding or mode changes.
++				if (!copy) {
++					savedSizeNodes.add(node.id);
++					if (occurrence.derivedSizeKey && !derivedOrigins.has(occurrence.derivedSizeKey))
++						derivedOrigins.set(occurrence.derivedSizeKey, node.id);
++				} else if (occurrence === copy || occurrence.derivedSizeSource === copy.sourceId) {
++					savedSizeNodes.add(node.id);
++				} else if (occurrence.derivedSizeKey) {
++					nestedSavedSizes.set(node.id, occurrence.derivedSizeKey);
++				}
  				derivedSizes.set(node.id, {
  					width: node.width,
  					height: node.height
-@@ -1772,7 +1800,7 @@ function materializeReaderInto(pages, plan, blobs, state, resumed) {
+@@ -1772,7 +1848,7 @@ function materializeReaderInto(pages, plan, blobs, state, resumed) {
  					blobs,
  					sourceChildren: mapInstanceSourceChildren(child, components)
  				});
@@ -265,3 +408,12 @@ index ac85b19ac446dad507de42ff629970d7a3ca7cfb..0c3d31d2959c7bc0e0e9206b1f6b5ebf
  				linkInstanceSourceChildren(child, materialized, components);
  				if (resumed) {
  					reconcileLiveComponentEdits(graph, materialized);
+@@ -1803,7 +1879,7 @@ function materializeReaderInto(pages, plan, blobs, state, resumed) {
+ 	linkComponentPropertyValues(graph, sources, materialized, state.definitionTypes);
+ 	graph.preserveSourceMetadataDuring(() => {
+ 		resolveVariantPropertyValues(graph, materialized);
+-		applyDocumentLayoutBindings(graph, savedSizeNodes, materialized, layoutScales);
++		applyDocumentLayoutBindings(graph, savedSizeNodes, materialized, layoutScales, derivedOrigins, nestedSavedSizes);
+ 		applyDocumentPaintBindings(graph, materialized);
+ 		applyDocumentTextBindings(graph, materialized);
+ 	});
