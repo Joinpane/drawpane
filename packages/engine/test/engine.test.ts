@@ -162,13 +162,15 @@ const BG: [number, number, number, number] = [1, 1, 1, 1];
 describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () => {
   let worker: EngineModule;
   let browser: EngineModule;
+  let webgl: EngineModule;
   beforeAll(async () => {
     worker = await loadNodeEngine("worker");
     browser = await loadNodeEngine("browser");
+    webgl = await loadNodeEngine("webgl");
   });
 
   it("have the glue glue.d.ts declares", () => {
-    for (const m of [worker, browser]) {
+    for (const m of [worker, browser, webgl]) {
       const proto = m.glue.Engine.prototype as unknown as Record<string, unknown>;
       for (const name of [
         "apply",
@@ -192,20 +194,29 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
       expect(typeof m.glue.__drawpaneRenew).toBe("function");
     }
     expect(browser.glue.hasGpu()).toBe(true);
+    expect(browser.glue.gpuBackend()).toBe("webgpu");
+    expect(webgl.glue.hasGpu()).toBe(true);
+    expect(webgl.glue.gpuBackend()).toBe("webgl2");
     expect(worker.glue.hasGpu()).toBe(false);
-    const proto = browser.glue.Engine.prototype as unknown as Record<string, unknown>;
-    for (const name of ["attachGpu", "renderGpu", "gpuCheck", "gpuPixels", "gpuFinished"])
-      expect(typeof proto[name], name).toBe("function");
+    expect(worker.glue.gpuBackend()).toBe("");
+    for (const m of [browser, webgl]) {
+      const proto = m.glue.Engine.prototype as unknown as Record<string, unknown>;
+      for (const name of ["attachGpu", "renderGpu", "gpuCheck", "gpuPixels", "gpuFinished"])
+        expect(typeof proto[name], name).toBe("function");
+    }
   });
 
-  it("draw the same bits in the Worker build and the browser build's CPU path", () => {
+  it("draw the same bits in the Worker, WebGPU and WebGL2 builds' CPU paths", () => {
     const a = new RenderEngine(worker);
     const b = new RenderEngine(browser);
-    for (const e of [a, b]) expect(e.apply(scene()).ok).toBe(true);
+    const c = new RenderEngine(webgl);
+    for (const e of [a, b, c]) expect(e.apply(scene()).ok).toBe(true);
     const ra = a.renderCpu(480, 360, cam, BG);
     const rb = b.renderCpu(480, 360, cam, BG);
-    if (!ra.ok || !rb.ok) throw new Error("render failed");
+    const rc = c.renderCpu(480, 360, cam, BG);
+    if (!ra.ok || !rb.ok || !rc.ok) throw new Error("render failed");
     expect(Buffer.from(ra.value.pixels).equals(Buffer.from(rb.value.pixels))).toBe(true);
+    expect(Buffer.from(ra.value.pixels).equals(Buffer.from(rc.value.pixels))).toBe(true);
     // And it drew something: the gradient box and the glyphs.
     const s = score(ra.value.pixels, new Uint8Array(480 * 360 * 4).fill(255), 480, 360);
     expect(s.mean).toBeGreaterThan(10);

@@ -30,6 +30,8 @@ pub enum ErrorCode {
     Image = 10,
     /// A call made in the wrong state (rendering on a backend that isn't attached).
     State = 11,
+    /// A bounded GPU wait (startup probe, read-back, or work-done fence) expired on a live context.
+    Timeout = 12,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

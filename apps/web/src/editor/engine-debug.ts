@@ -18,6 +18,7 @@ import {
   type FrameStats,
   type GpuInfo,
   loadBrowserEngine,
+  loadWebglEngine,
   RenderEngine,
   unsupportedNames,
 } from "@drawpane/engine";
@@ -45,29 +46,47 @@ export interface EngineRender {
 }
 
 export function engineDebug(editor: Editor) {
-  let module: EngineModule | null = null;
-  const engines: Partial<Record<"cpu" | "gpu", RenderEngine>> = {};
-  const uploaded = new Map<string, { handle: number; width: number; height: number }>();
+  let browserModule: EngineModule | null = null;
+  let webglModule: EngineModule | null = null;
+  const engines: Partial<Record<"cpu" | "gpu" | "webgl", RenderEngine>> = {};
+  const uploadedByEngine = new WeakMap<
+    RenderEngine,
+    Map<string, { handle: number; width: number; height: number }>
+  >();
+
+  async function moduleFor(backend: "cpu" | "gpu" | "webgl"): Promise<EngineModule> {
+    if (backend === "webgl") {
+      if (!webglModule) webglModule = await loadWebglEngine();
+      return webglModule;
+    }
+    if (!browserModule) browserModule = await loadBrowserEngine();
+    return browserModule;
+  }
 
   async function engineFor(
-    backend: "cpu" | "gpu",
+    backend: "cpu" | "gpu" | "webgl",
     compatibility: boolean,
   ): Promise<RenderEngine | string> {
-    module ??= await loadBrowserEngine();
+    const mod = await moduleFor(backend);
     const have = engines[backend];
     if (have && !have.dead) return have;
-    const e = new RenderEngine(module, { glyphMaskBytes: 32 << 20 });
-    if (backend === "gpu") {
-      const r = await e.attachGpu(null, { compatibility });
-      if (!r.ok) return `${r.message} (${r.code})`;
+    const e = new RenderEngine(mod, { glyphMaskBytes: 32 << 20 });
+    if (backend === "gpu" || backend === "webgl") {
+      const r = await e.attachGpu(null, { compatibility: backend === "gpu" && compatibility });
+      if (!r.ok) {
+        e.dispose();
+        return `${r.message} (${r.code})`;
+      }
     }
     engines[backend] = e;
-    uploaded.clear();
+    uploadedByEngine.set(e, new Map());
     return e;
   }
 
   /** Uploads every image the page's layers paint, once loaded, so the list can place them. */
   async function images(e: RenderEngine, pageId: string): Promise<void> {
+    const uploaded = uploadedByEngine.get(e) ?? new Map();
+    uploadedByEngine.set(e, uploaded);
     const cache = imagesFor(editor);
     const refs = imageRefs(editor.doc, [pageId]);
     await cache.ready(refs, 30_000);
@@ -88,7 +107,10 @@ export function engineDebug(editor: Editor) {
 
   let canvas: CanvasRenderer | null = null;
 
-  function builder(_pageId: string): DisplayListBuilder {
+  function builder(
+    _pageId: string,
+    uploaded: Map<string, { handle: number; width: number; height: number }>,
+  ): DisplayListBuilder {
     return new DisplayListBuilder(editor.scene, editor.measurer, {
       image: (ref) => uploaded.get(ref) ?? null,
     });
@@ -118,18 +140,19 @@ export function engineDebug(editor: Editor) {
       scale: number;
       width: number;
       height: number;
-      backend: "cpu" | "gpu";
+      backend: "cpu" | "gpu" | "webgl";
       background?: [number, number, number, number];
       compatibility?: boolean;
     }): Promise<EngineRender> {
       const e = await engineFor(options.backend, options.compatibility ?? false);
       if (typeof e === "string") return { ok: false, error: e, unsupported: {} };
       await images(e, options.pageId);
+      const uploaded = uploadedByEngine.get(e) ?? new Map();
       // Text whose face is still loading can't be outlined yet: the shaper starts loading it on
       // the first try, and the list sends it provisional (bars) meanwhile. Wait for it (as the
       // canvas's parity spec waits for fonts), up to 20 s: what's drawn is the text itself.
       const make = () => {
-        const b = builder(options.pageId);
+        const b = builder(options.pageId, uploaded);
         return { b, list: options.ids ? b.buildLayers(options.ids) : b.build(options.pageId) };
       };
       const loading = (b: DisplayListBuilder) =>
@@ -142,7 +165,7 @@ export function engineDebug(editor: Editor) {
       const t0 = performance.now();
       // A fresh list replaces whatever the engine held: made for a revision past the engine's
       // (fresh lists only move the revision forward).
-      const b = builder(options.pageId);
+      const b = builder(options.pageId, uploaded);
       b.acknowledge(false, e.revision);
       const list = options.ids ? b.buildLayers(options.ids) : b.build(options.pageId);
       const t1 = performance.now();
@@ -172,7 +195,9 @@ export function engineDebug(editor: Editor) {
       }
       const r = e.renderGpu(options.width, options.height, camera, bg, false);
       if (!r.ok) return { ok: false, error: r.message, code: r.code, unsupported, gpu: e.gpu };
-      await e.gpuFinished();
+      const fin = await e.gpuFinished();
+      if (!fin.ok)
+        return { ok: false, error: fin.message, code: fin.code, unsupported, gpu: e.gpu };
       const t3 = performance.now();
       const px = await e.gpuPixels();
       if (!px.ok) return { ok: false, error: px.message, code: px.code, unsupported, gpu: e.gpu };
@@ -184,6 +209,110 @@ export function engineDebug(editor: Editor) {
         ms: { build: t1 - t0, apply: t2 - t1, render: t3 - t2 },
         gpu: e.gpu,
       };
+    },
+
+    /**
+     * Renders an asymmetric test scene onto a visible on-screen `<canvas>` and compares its
+     * composited screen pixels against `gpuPixels()` to catch orientation, alpha, or presentation
+     * bugs that offscreen readback alone misses.
+     */
+    async presentCheck(options: {
+      backend: "gpu" | "webgl";
+      compatibility?: boolean;
+      width: number;
+      height: number;
+      backgrounds: Array<[number, number, number, number]>;
+    }): Promise<{
+      ok: boolean;
+      error?: string;
+      gpu?: GpuInfo | null;
+      samples?: Array<{
+        presented: boolean;
+        topLeftScreen: number[];
+        topLeftReadback: number[];
+        bottomRightScreen: number[];
+        bottomRightReadback: number[];
+        bytes: number;
+      }>;
+    }> {
+      const mod = await moduleFor(options.backend);
+      const canvas = document.createElement("canvas");
+      canvas.width = options.width;
+      canvas.height = options.height;
+      canvas.style.position = "fixed";
+      canvas.style.left = "0";
+      canvas.style.top = "0";
+      canvas.style.width = `${options.width}px`;
+      canvas.style.height = `${options.height}px`;
+      canvas.style.pointerEvents = "none";
+      document.body.append(canvas);
+      const e = new RenderEngine(mod);
+      try {
+        const g = await e.attachGpu(canvas, {
+          compatibility: options.backend === "gpu" && (options.compatibility ?? false),
+        });
+        if (!g.ok) return { ok: false, error: `${g.message} (${g.code})` };
+        const { ListWriter, ROOT } = await import("@drawpane/engine");
+        const w = new ListWriter(0xffffffff, 1);
+        w.reset();
+        const halfW = Math.floor(options.width / 2);
+        const halfH = Math.floor(options.height / 2);
+        w.set(1, ROOT, {
+          flags: 0,
+          opacity: 1,
+          transform: [1, 0, 0, 1, 0, 0],
+          width: halfW,
+          height: halfH,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: halfW, h: halfH, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops: [
+            { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [1, 0, 0, 1] } },
+          ],
+          coarse: [],
+        });
+        const applied = e.apply(w.finish());
+        if (!applied.ok) return { ok: false, error: applied.message, gpu: g.value };
+        const scratch = document.createElement("canvas");
+        scratch.width = options.width;
+        scratch.height = options.height;
+        const ctx = scratch.getContext("2d");
+        if (!ctx) return { ok: false, error: "no 2D context", gpu: g.value };
+        const samples = [];
+        for (const background of options.backgrounds) {
+          const r = e.renderGpu(
+            options.width,
+            options.height,
+            { zoom: 1, x: 0, y: 0, dpr: 1 },
+            background,
+            false,
+          );
+          if (!r.ok) return { ok: false, error: r.message, gpu: g.value };
+          ctx.clearRect(0, 0, options.width, options.height);
+          ctx.drawImage(canvas, 0, 0);
+          const tl = Array.from(ctx.getImageData(2, 2, 1, 1).data);
+          const br = Array.from(ctx.getImageData(options.width - 1, options.height - 1, 1, 1).data);
+          const fin = await e.gpuFinished();
+          if (!fin.ok) return { ok: false, error: fin.message, gpu: g.value };
+          const px = await e.gpuPixels();
+          if (!px.ok) return { ok: false, error: px.message, gpu: g.value };
+          const tlIdx = (2 * options.width + 2) * 4;
+          const brIdx = (options.height * options.width - 1) * 4;
+          samples.push({
+            presented: r.value.presented,
+            topLeftScreen: tl,
+            topLeftReadback: Array.from(px.value.slice(tlIdx, tlIdx + 4)),
+            bottomRightScreen: br,
+            bottomRightReadback: Array.from(px.value.slice(brIdx, brIdx + 4)),
+            bytes: px.value.length,
+          });
+        }
+        return { ok: true, gpu: g.value, samples };
+      } finally {
+        e.dispose();
+        canvas.remove();
+      }
     },
 
     /** The canvas renderer's drawing of the same rect (every layer on the page, over `background`). */
@@ -219,7 +348,9 @@ export function engineDebug(editor: Editor) {
       pageId: string,
       ids?: string[],
     ): { list: string; unsupported: Record<string, string[]>; records: number } {
-      const b = builder(pageId);
+      const cpu = engines.cpu;
+      const uploaded = (cpu && uploadedByEngine.get(cpu)) || new Map();
+      const b = builder(pageId, uploaded);
       const list = ids ? b.buildLayers(ids) : b.build(pageId);
       return { list: toBase64(list), unsupported: unsupportedOf(b), records: b.stats.records };
     },
@@ -232,8 +363,9 @@ export function engineDebug(editor: Editor) {
     async readbackPair(
       width: number,
       height: number,
+      backend: "gpu" | "webgl" = "gpu",
     ): Promise<Array<{ ok: boolean; code?: number }>> {
-      module ??= await loadBrowserEngine();
+      const mod = await moduleFor(backend);
       const px = width * height * 4;
       const row = Math.ceil((width * 4) / 256) * 256;
       // The atlas (2,048² RGBA8) and checker, two frames, the scratch tile with its depth buffer
@@ -242,7 +374,7 @@ export function engineDebug(editor: Editor) {
       const scratch = 512 * 512 * 4 * 2;
       const budget =
         2048 * 2048 * 4 + 16 * 16 * 4 + 2 * px + scratch + Math.floor(row * height * 1.5);
-      const e = new RenderEngine(module, { gpuBytes: budget });
+      const e = new RenderEngine(mod, { gpuBytes: budget });
       try {
         const g = await e.attachGpu(null);
         if (!g.ok) return [{ ok: false, code: g.code }];
@@ -257,14 +389,17 @@ export function engineDebug(editor: Editor) {
     },
 
     /** The GPU the engine gets here, or why it gets none. */
-    async gpu(compatibility = false): Promise<GpuInfo | { error: string }> {
-      const e = await engineFor("gpu", compatibility);
+    async gpu(
+      compatibility = false,
+      backend: "gpu" | "webgl" = "gpu",
+    ): Promise<GpuInfo | { error: string }> {
+      const e = await engineFor(backend, compatibility);
       return typeof e === "string" ? { error: e } : (e.gpu ?? { error: "no GPU" });
     },
 
     /** Builds the page's list and times a patch from a one-layer change (the bench's numbers). */
     timeBuild(pageId: string): { buildMs: number; records: number; bytes: number } {
-      const b = builder(pageId);
+      const b = builder(pageId, new Map());
       const t0 = performance.now();
       const list = b.build(pageId);
       return { buildMs: performance.now() - t0, records: b.stats.records, bytes: list.length };

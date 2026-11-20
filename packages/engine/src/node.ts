@@ -6,17 +6,17 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type * as Glue from "./glue";
-import { type EngineModule, loadEngineSync } from "./index";
+import { type EngineBuild, type EngineModule, loadEngineSync } from "./index";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 
-export function built(build: "browser" | "worker" = "worker"): boolean {
+export function built(build: EngineBuild = "worker"): boolean {
   return (
     existsSync(join(DIST, build, "engine_bg.wasm")) && existsSync(join(DIST, build, "engine.js"))
   );
 }
 
-export function wasmPath(build: "browser" | "worker"): string {
+export function wasmPath(build: EngineBuild): string {
   return join(DIST, build, "engine_bg.wasm");
 }
 
@@ -27,7 +27,7 @@ let fresh = 0;
  * every caller; `fresh` loads another, of its own (a test that traps it on purpose).
  */
 export async function loadNodeEngine(
-  build: "browser" | "worker" = "worker",
+  build: EngineBuild = "worker",
   options: { fresh?: boolean } = {},
 ): Promise<EngineModule> {
   if (!built(build))

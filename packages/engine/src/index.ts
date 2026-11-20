@@ -26,7 +26,10 @@ export enum ErrorCode {
   DeviceLost = 8,
   NoAdapter = 9,
   Image = 10,
+  /** A call made in the wrong state (rendering on a backend that isn't attached). */
   State = 11,
+  /** A bounded GPU wait (startup probe, read-back, or fence) expired on a live context. */
+  Timeout = 12,
   /** The WebAssembly instance trapped: it's gone. */
   Trap = 100,
   /** This build or browser can't do it (no WebGPU, or the worker build asked for a GPU). */
@@ -121,6 +124,10 @@ export interface Applied {
 
 export interface GpuInfo {
   readonly adapter: string;
+  /** Which GPU backend this device runs on ("webgpu" or "webgl2"). */
+  readonly backend: "webgpu" | "webgl2";
+  /** JSON adapter metadata (vendor, device, driver, features, limits) for diagnostics. */
+  readonly details: string;
   /** A software adapter (SwiftShader, llvmpipe): timings say nothing about a GPU. */
   readonly fallback: boolean;
 }
@@ -236,10 +243,12 @@ const LIMIT_NAMES: Record<keyof EngineOptions, string> = {
   tileBytes: "tile_bytes",
 };
 
+export type EngineBuild = "browser" | "webgl" | "worker";
+
 /** One loaded build of the engine's module. */
 export interface EngineModule {
   readonly glue: typeof Glue;
-  readonly build: "browser" | "worker";
+  readonly build: EngineBuild;
   /** Bytes of WebAssembly memory now: it only grows, so after a render it's the peak. */
   memoryBytes(): number;
   /** An instance trapped: engines made from here on get a new one (see `RenderEngine`). */
@@ -262,20 +271,93 @@ export function imageLevelsBytes(width: number, height: number): number {
   }
 }
 
+interface GlueState {
+  epoch: number;
+  trapped: boolean;
+  /** Immutable glue instance for the current generation (never overwritten in place on renewal). */
+  activeGlue: typeof Glue;
+  /** Compiled WebAssembly.Module cached from initial load for Worker-safe renewal. */
+  compiledModule?: WebAssembly.Module;
+  /** Resolves immediately when the current generation traps so pending async waits settle as Trap. */
+  trapNotice: Promise<void>;
+  fireTrap: () => void;
+}
+
+function makeTrapSignal(): { trapNotice: Promise<void>; fireTrap: () => void } {
+  let fireTrap!: () => void;
+  const trapNotice = new Promise<void>((resolve) => {
+    fireTrap = resolve;
+  });
+  return { trapNotice, fireTrap };
+}
+
+/**
+ * Shared WASM instance state keyed by the underlying wasm-bindgen glue module.
+ * Multiple `EngineModule` wrappers around the same glue share one instance and one linear memory,
+ * so a trap or renewal on any wrapper advances the epoch for every sibling engine. Each renewed
+ * generation gets its own isolated glue closure (`__drawpaneCreateGlue`) so stale async callbacks
+ * from an older generation can never mutate or enter the new generation's Wasm memory.
+ */
+const GLUE_STATE = new WeakMap<object, GlueState>();
+
+function glueState(glue: typeof Glue): GlueState {
+  let state = GLUE_STATE.get(glue);
+  if (!state) {
+    const signal = makeTrapSignal();
+    state = {
+      epoch: 0,
+      trapped: false,
+      activeGlue: glue,
+      trapNotice: signal.trapNotice,
+      fireTrap: signal.fireTrap,
+    };
+    GLUE_STATE.set(glue, state);
+  }
+  return state;
+}
+
+function makeModule(glue: typeof Glue, build: EngineBuild): EngineModule {
+  const state = glueState(glue);
+  const compiled = glue.__drawpaneModule?.();
+  if (compiled) state.compiledModule = compiled;
+  return {
+    glue,
+    build,
+    memoryBytes: () => (state.trapped ? 0 : state.activeGlue.memoryBytes()),
+    get epoch(): number {
+      return state.epoch;
+    },
+    set epoch(value: number) {
+      state.epoch = value;
+    },
+    get trapped(): boolean {
+      return state.trapped;
+    },
+    set trapped(value: boolean) {
+      state.trapped = value;
+    },
+  };
+}
+
 /**
  * Lets a glue object go from wasm-bindgen's finalizer without freeing it: the facade frees what
  * it makes itself (`dispose`), so a finalizer can never free an old instance's pointer into a
  * renewed one after a trap.
  */
-function unfinalized<T extends { __destroy_into_raw(): number }>(o: T): T {
-  const ptr = o.__destroy_into_raw();
-  (o as unknown as { __wbg_ptr: number }).__wbg_ptr = ptr;
+function unfinalized<T extends { __destroy_into_raw?: () => number }>(o: T): T {
+  if (typeof o.__destroy_into_raw === "function") {
+    const ptr = o.__destroy_into_raw();
+    (o as unknown as { __wbg_ptr: number }).__wbg_ptr = ptr;
+  }
   return o;
 }
 
 /** An engine: a render graph patched by display lists, drawn on the CPU or the GPU. */
 export class RenderEngine {
   readonly #module: EngineModule;
+  /** Immutable glue instance owning this engine's generation. */
+  #glue: typeof Glue;
+  #genTrapNotice: Promise<void>;
   #engine: Glue.Engine | null = null;
   #gpu: GpuInfo | null = null;
   #dead: Failure | null = null;
@@ -285,18 +367,35 @@ export class RenderEngine {
   #cpuTiles = false;
 
   /**
-   * An engine on `module`. If an engine on it trapped, the module's instance is renewed first
-   * (its memory is gone with it: every engine on the old instance is dead).
+   * An engine on `module`. If an engine on it trapped, a fresh isolated Wasm instance is created
+   * first (every engine on the old generation is dead and quiesced).
    */
   constructor(module: EngineModule, options: EngineOptions = {}) {
     this.#module = module;
-    this.#epoch = module.epoch ?? 0;
+    const state = glueState(module.glue);
+    this.#glue = state.activeGlue;
+    this.#genTrapNotice = state.trapNotice;
+    this.#epoch = state.epoch;
     try {
-      if (module.trapped) {
-        module.glue.__drawpaneRenew();
-        module.trapped = false;
+      if (state.trapped) {
+        if (typeof module.glue.__drawpaneCreateGlue === "function") {
+          const compiled = state.compiledModule ?? state.activeGlue.__drawpaneModule?.();
+          if (!compiled) throw new Error("the engine was never instantiated");
+          const nextGlue = module.glue.__drawpaneCreateGlue();
+          nextGlue.initSync({ module: compiled });
+          state.compiledModule = compiled;
+          state.activeGlue = nextGlue;
+        } else {
+          module.glue.__drawpaneRenew();
+        }
+        const nextSignal = makeTrapSignal();
+        state.trapNotice = nextSignal.trapNotice;
+        state.fireTrap = nextSignal.fireTrap;
+        state.trapped = false;
+        this.#glue = state.activeGlue;
+        this.#genTrapNotice = state.trapNotice;
       }
-      const engine = unfinalized(new module.glue.Engine(0, 0));
+      const engine = unfinalized(new this.#glue.Engine(0, 0));
       this.#engine = engine;
       const limits: EngineOptions = {
         ...(module.build === "worker" ? WORKER_LIMITS : {}),
@@ -312,7 +411,7 @@ export class RenderEngine {
     }
   }
 
-  get build(): "browser" | "worker" {
+  get build(): EngineBuild {
     return this.#module.build;
   }
 
@@ -361,8 +460,9 @@ export class RenderEngine {
    */
   #live(): Glue.Engine | null {
     if (this.#dead) return null;
-    if (this.#epoch !== (this.#module.epoch ?? 0)) {
+    if (this.#epoch !== glueState(this.#module.glue).epoch) {
       this.#engine = null;
+      this.#gpu = null;
       this.#dead = fail(
         ErrorCode.Trap,
         "another engine on this module trapped: the instance this engine lived in is gone",
@@ -374,18 +474,22 @@ export class RenderEngine {
 
   /** Why the engine is dead, if it is. */
   get failure(): Failure | null {
+    this.#live();
     return this.#dead;
   }
 
   #trapped(err: unknown): Failure {
     // A trap (`RuntimeError: unreachable`, or memory that can't grow) leaves the instance
-    // unusable, and every engine in it with it: the module's epoch moves on, so they all find
-    // themselves dead (`#live`). Objects are let go without calling into it (they have no
-    // finalizers: `unfinalized`), never freed into a new instance.
+    // unusable, and every engine in it with it: quiesce this generation's timers and closures,
+    // advance the epoch, and wake pending async waits so none can enter Wasm again.
     this.#engine = null;
-    if (this.#epoch === (this.#module.epoch ?? 0)) {
-      this.#module.trapped = true;
-      this.#module.epoch = this.#epoch + 1;
+    this.#gpu = null;
+    const state = glueState(this.#module.glue);
+    if (this.#epoch === state.epoch) {
+      this.#glue.__drawpaneQuiesce?.();
+      state.trapped = true;
+      state.epoch = this.#epoch + 1;
+      state.fireTrap();
     }
     this.#dead = fail(ErrorCode.Trap, `the engine trapped: ${String(err)}`);
     return this.#dead;
@@ -705,39 +809,124 @@ export class RenderEngine {
   }
 
   /**
-   * Attaches a WebGPU device drawing into `canvas` (or into nothing: frames are only read
-   * back). In compatibility mode the adapter is asked for WebGPU's compatibility feature level
-   * (`featureLevel: "compatibility"`), which drivers without core WebGPU still offer.
+   * Attaches a GPU device (WebGPU on the `browser` build, WebGL2 on the `webgl` build) drawing
+   * into `canvas` (or into nothing: frames are only read back). In WebGPU compatibility mode the
+   * adapter is asked for `featureLevel: "compatibility"`, which drivers without core WebGPU still
+   * offer.
    */
   async attachGpu(
     canvas: HTMLCanvasElement | OffscreenCanvas | null,
     options: { compatibility?: boolean; glyphMaskBytes?: number } = {},
   ): Promise<Result<GpuInfo>> {
-    if (this.#module.build !== "browser" || !this.#module.glue.hasGpu())
+    const liveBefore = this.#live();
+    if (this.#dead) return this.#dead;
+    if (!liveBefore) return fail(ErrorCode.State, "the engine was disposed");
+    const glue = this.#glue;
+    if ((this.#module.build !== "browser" && this.#module.build !== "webgl") || !glue.hasGpu())
       return fail(ErrorCode.NotAvailable, "this build of the engine has no GPU backend");
-    const gpu =
-      typeof navigator !== "undefined"
-        ? (navigator as Navigator & { gpu?: GPULike }).gpu
-        : undefined;
-    if (!gpu) return fail(ErrorCode.NotAvailable, "this browser has no WebGPU");
-    let init: Glue.GpuInit;
-    try {
-      init = await withFeatureLevel(gpu, options.compatibility ? "compatibility" : null, () =>
-        this.#module.glue.createGpu(canvas, options.glyphMaskBytes ?? 0),
+    const state = glueState(this.#module.glue);
+    const startEpoch = this.#epoch;
+    const genTrap = this.#genTrapNotice;
+    const isWebgl = this.#module.build === "webgl" || glue.gpuBackend() === "webgl2";
+    const awaitOrTrap = async (raw: Promise<Glue.GpuInit>): Promise<Glue.GpuInit | null> => {
+      // Ensure any late-resolving stale GpuInit from a trapped generation is detached from its
+      // FinalizationRegistry even if we already returned Trap via `genTrap`.
+      raw.then(
+        (stale) => {
+          if (state.epoch !== startEpoch) unfinalized(stale);
+        },
+        () => {},
       );
+      const settled = await Promise.race([
+        raw.then((value) => ({ kind: "value" as const, value })),
+        genTrap.then(() => ({ kind: "trapped" as const })),
+      ]);
+      return settled.kind === "value" ? settled.value : null;
+    };
+    let init: Glue.GpuInit | null;
+    if (isWebgl) {
+      if (typeof WebGL2RenderingContext === "undefined")
+        return fail(ErrorCode.NotAvailable, "this browser has no WebGL2");
+      try {
+        init = await awaitOrTrap(glue.createGpu(canvas, options.glyphMaskBytes ?? 0));
+      } catch (err) {
+        if (err instanceof WebAssembly.RuntimeError || state.epoch !== startEpoch) {
+          return this.#trapped(err);
+        }
+        return fail(ErrorCode.NoAdapter, String(err));
+      }
+    } else {
+      const gpu =
+        typeof navigator !== "undefined"
+          ? (navigator as Navigator & { gpu?: GPULike }).gpu
+          : undefined;
+      if (!gpu) return fail(ErrorCode.NotAvailable, "this browser has no WebGPU");
+      try {
+        init = await withFeatureLevel(gpu, options.compatibility ? "compatibility" : null, () =>
+          awaitOrTrap(glue.createGpu(canvas, options.glyphMaskBytes ?? 0)),
+        );
+      } catch (err) {
+        if (err instanceof WebAssembly.RuntimeError || state.epoch !== startEpoch) {
+          return this.#trapped(err);
+        }
+        return fail(ErrorCode.NoAdapter, String(err));
+      }
+    }
+    // The instance may have trapped or renewed while `createGpu` was awaiting: `init` belongs to
+    // the old instance, so detach its finalizer without reading or freeing it in the new one.
+    if (state.epoch !== startEpoch || init === null) {
+      if (init !== null) unfinalized(init);
+      this.#live();
+      return this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during GPU init");
+    }
+    if (!this.#live()) {
+      try {
+        init.free();
+      } catch (err) {
+        return this.#trapped(err);
+      }
+      return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
+    }
+    let ok: boolean;
+    let code: number;
+    let message: string;
+    let info: GpuInfo | null = null;
+    try {
+      ok = init.ok;
+      code = init.code;
+      message = init.message;
+      if (ok) {
+        info = {
+          adapter: init.adapter,
+          backend: init.backend === "webgl2" ? "webgl2" : "webgpu",
+          details: init.details,
+          fallback: init.fallback,
+        };
+      }
     } catch (err) {
-      return fail(ErrorCode.NoAdapter, String(err));
+      unfinalized(init);
+      return this.#trapped(err);
     }
-    if (!init.ok) {
-      const r = fail(init.code as ErrorCode, init.message);
-      init.free();
-      return r;
+    if (!ok || !info) {
+      try {
+        init.free();
+      } catch (err) {
+        return this.#trapped(err);
+      }
+      return fail(code as ErrorCode, message);
     }
-    const info = { adapter: init.adapter, fallback: init.fallback };
     const attached = this.#call((e) =>
       e.attachGpu ? outcome(e.attachGpu(init)) : fail(ErrorCode.NotAvailable, "no GPU backend"),
     ) as Result;
-    init.free();
+    if (state.epoch === startEpoch) {
+      try {
+        init.free();
+      } catch (err) {
+        return this.#trapped(err);
+      }
+    } else {
+      unfinalized(init);
+    }
     if (!attached.ok) return attached;
     this.#gpu = info;
     return { ok: true, value: info };
@@ -836,32 +1025,97 @@ export class RenderEngine {
 
   /** Resolves when the GPU has finished what it was given (how the bench times GPU work). */
   async gpuFinished(): Promise<Result> {
+    const startEpoch = this.#epoch;
+    const state = glueState(this.#module.glue);
+    const genTrap = this.#genTrapNotice;
     const p = this.#call((e) => e.gpuFinished?.());
     if (isFailure(p)) return p;
     if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no GPU");
+    p.then(
+      (stale) => {
+        if (state.epoch !== startEpoch && stale !== undefined) unfinalized(stale);
+      },
+      () => {},
+    );
+    let v: Glue.Outcome | undefined;
     try {
-      await p;
-      return { ok: true };
+      const settled = await Promise.race([
+        p.then((value) => ({ kind: "value" as const, value })),
+        genTrap.then(() => ({ kind: "trapped" as const })),
+      ]);
+      if (settled.kind === "trapped") {
+        this.#live();
+        return this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during gpuFinished");
+      }
+      v = settled.value;
     } catch (err) {
+      if (err instanceof WebAssembly.RuntimeError || state.epoch !== startEpoch) {
+        return this.#trapped(err);
+      }
       return fail(ErrorCode.Gpu, String(err));
     }
+    if (state.epoch !== startEpoch) {
+      if (v !== undefined) unfinalized(v);
+      this.#live();
+      return this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during gpuFinished");
+    }
+    if (!this.#live()) {
+      if (v !== undefined) {
+        try {
+          v.free();
+        } catch (err) {
+          return this.#trapped(err);
+        }
+      }
+      return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
+    }
+    if (v !== undefined) return outcome(v);
+    return { ok: true };
   }
 
   /** The last GPU frame, straight RGBA8, read back through a buffer (not the canvas). */
   async gpuPixels(): Promise<Result<Uint8Array>> {
+    const startEpoch = this.#epoch;
+    const state = glueState(this.#module.glue);
+    const genTrap = this.#genTrapNotice;
     const p = this.#call((e) => e.gpuPixels?.());
     if (isFailure(p)) return p;
     if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no GPU");
+    p.then(
+      (stale) => {
+        if (state.epoch !== startEpoch && !(stale instanceof Uint8Array)) unfinalized(stale);
+      },
+      () => {},
+    );
     let v: Uint8Array | Glue.Outcome;
     try {
-      v = await p;
+      const settled = await Promise.race([
+        p.then((value) => ({ kind: "value" as const, value })),
+        genTrap.then(() => ({ kind: "trapped" as const })),
+      ]);
+      if (settled.kind === "trapped") {
+        this.#live();
+        return this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during gpuPixels");
+      }
+      v = settled.value;
     } catch (err) {
       return this.#trapped(err);
     }
     // The instance may have gone while it was on its way (another engine trapped): an object
     // it answered belongs to the old instance, so it's let go without freeing into the new one.
-    if (!this.#live()) {
+    if (state.epoch !== startEpoch) {
       if (!(v instanceof Uint8Array)) unfinalized(v);
+      this.#live();
+      return this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during gpuPixels");
+    }
+    if (!this.#live()) {
+      if (!(v instanceof Uint8Array)) {
+        try {
+          v.free();
+        } catch (err) {
+          return this.#trapped(err);
+        }
+      }
       return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
     }
     if (v instanceof Uint8Array) return { ok: true, value: v };
@@ -894,39 +1148,73 @@ interface GPULike {
   requestAdapter(options?: Record<string, unknown>): Promise<unknown>;
 }
 
+const GPU_ADAPTER_QUEUE = new WeakMap<GPULike, Promise<void>>();
+
 /**
- * Runs `fn` with `navigator.gpu.requestAdapter` asking for `level` (wgpu 30 can't say
- * `featureLevel` itself), then puts it back.
+ * Serializes only the brief `navigator.gpu.requestAdapter` call window per `GPU` object so
+ * `featureLevel: "compatibility"` never leaks to concurrent core attaches or later callers,
+ * and restores `requestAdapter` immediately once invoked (never waiting for device/probe).
  */
 async function withFeatureLevel<T>(
   gpu: GPULike,
   level: string | null,
   fn: () => Promise<T>,
 ): Promise<T> {
-  if (!level) return fn();
+  const prev = GPU_ADAPTER_QUEUE.get(gpu) ?? Promise.resolve();
+  let releaseSlot!: () => void;
+  let released = false;
+  const slot = new Promise<void>((resolve) => {
+    releaseSlot = () => {
+      if (released) return;
+      released = true;
+      resolve();
+    };
+  });
+  GPU_ADAPTER_QUEUE.set(gpu, slot);
+  await prev;
+
   const original = gpu.requestAdapter;
-  gpu.requestAdapter = (options?: Record<string, unknown>) =>
-    original.call(gpu, { ...options, featureLevel: level });
+  const wrapped = (options?: Record<string, unknown>) => {
+    if (gpu.requestAdapter === wrapped) gpu.requestAdapter = original;
+    releaseSlot();
+    return original.call(gpu, level ? { ...options, featureLevel: level } : options);
+  };
+  gpu.requestAdapter = wrapped;
   try {
     return await fn();
   } finally {
-    gpu.requestAdapter = original;
+    if (gpu.requestAdapter === wrapped) gpu.requestAdapter = original;
+    releaseSlot();
+    if (GPU_ADAPTER_QUEUE.get(gpu) === slot) GPU_ADAPTER_QUEUE.delete(gpu);
   }
 }
 
-/** Loads the browser build (GPU and CPU). Vite bundles its glue and WebAssembly. */
+/** Loads the browser WebGPU build (WebGPU and CPU). Vite bundles its glue and WebAssembly. */
 export async function loadBrowserEngine(): Promise<EngineModule> {
   const glue = (await import("@drawpane/engine/browser-glue")) as typeof Glue;
-  await glue.default();
-  return { glue, build: "browser", memoryBytes: () => glue.memoryBytes() };
+  const state = glueState(glue);
+  if (state.epoch === 0) await glue.default();
+  return makeModule(glue, "browser");
+}
+
+/**
+ * Loads the WebGL2 fallback build (wgpu GL + naga + CPU). Kept in its own module so browsers
+ * with working WebGPU never download it (decision 0040, "Fallbacks").
+ */
+export async function loadWebglEngine(): Promise<EngineModule> {
+  const glue = (await import("@drawpane/engine/webgl-glue")) as typeof Glue;
+  const state = glueState(glue);
+  if (state.epoch === 0) await glue.default();
+  return makeModule(glue, "webgl");
 }
 
 /** Loads a build from its glue and WebAssembly bytes or module (Node, Workers, tests). */
 export function loadEngineSync(
   glue: typeof Glue,
   wasm: BufferSource | WebAssembly.Module,
-  build: "browser" | "worker",
+  build: EngineBuild,
 ): EngineModule {
-  glue.initSync({ module: wasm });
-  return { glue, build, memoryBytes: () => glue.memoryBytes() };
+  const state = glueState(glue);
+  if (state.epoch === 0) glue.initSync({ module: wasm });
+  return makeModule(glue, build);
 }

@@ -15,12 +15,17 @@
       "types": "./src/glue.d.ts",
       "default": "./dist/browser/engine.js"
     },
+    "./webgl-glue": {
+      "types": "./src/glue.d.ts",
+      "default": "./dist/webgl/engine.js"
+    },
     "./worker-glue": {
       "types": "./src/glue.d.ts",
       "default": "./dist/worker/engine.js"
     },
     "./worker.wasm": "./dist/worker/engine_bg.wasm",
-    "./browser.wasm": "./dist/browser/engine_bg.wasm"
+    "./browser.wasm": "./dist/browser/engine_bg.wasm",
+    "./webgl.wasm": "./dist/webgl/engine_bg.wasm"
   },
   "scripts": {
     "build": "node scripts/build.mjs",

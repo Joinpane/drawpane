@@ -186,11 +186,11 @@ pub struct Engine {
     pub cpu: Cpu,
     /// The band being exported.
     band: Vec<u8>,
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "gpu-common")]
     pub gpu: Option<crate::gpu::Gpu>,
     /// Image uploads kept as levels, so a GPU attached later (or rebuilt after a device loss)
     /// gets them without asking TypeScript again.
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "gpu-common")]
     pub image_levels: std::collections::HashMap<u32, std::rc::Rc<Vec<images::Level>>>,
     /// Tiles on the CPU, once asked for (tests; a Worker's view mode).
     pub cpu_tiles: Option<CpuTiles>,
@@ -206,9 +206,9 @@ impl Engine {
             band: Vec::new(),
             cpu: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side),
             store: Store::new(limits),
-            #[cfg(feature = "gpu")]
+            #[cfg(feature = "gpu-common")]
             gpu: None,
-            #[cfg(feature = "gpu")]
+            #[cfg(feature = "gpu-common")]
             image_levels: std::collections::HashMap::new(),
             cpu_tiles: None,
             dragging: None,
@@ -326,7 +326,7 @@ impl Engine {
                 t.forget();
             }
         }
-        #[cfg(feature = "gpu")]
+        #[cfg(feature = "gpu-common")]
         if let Some(g) = self.gpu.as_mut() {
             each(&mut g.tiles);
             if full {
@@ -384,11 +384,15 @@ impl Engine {
                 limits.image_bytes >> 20
             )));
         }
+        #[cfg(feature = "gpu-common")]
+        if let Some(gpu) = self.gpu.as_ref() {
+            gpu.check_texture_size(width, height, "an image")?;
+        }
         self.generation += 1;
         self.invalidate_image(id);
         let levels = images::levels(width, height, rgba, premultiplied, limits.texture_side)?;
         self.cpu.put_image(id, &levels, limits.image_bytes)?;
-        #[cfg(feature = "gpu")]
+        #[cfg(feature = "gpu-common")]
         {
             let levels = std::rc::Rc::new(levels);
             if let Some(gpu) = self.gpu.as_mut() {
@@ -403,7 +407,7 @@ impl Engine {
         self.generation += 1;
         self.invalidate_image(id);
         self.cpu.drop_image(id);
-        #[cfg(feature = "gpu")]
+        #[cfg(feature = "gpu-common")]
         {
             self.image_levels.remove(&id);
             if let Some(gpu) = self.gpu.as_mut() {
@@ -529,7 +533,7 @@ impl Engine {
     }
 
     /// Attaches a GPU, uploading the images already held so it can draw everything at once.
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "gpu-common")]
     pub fn attach_gpu(&mut self, mut gpu: crate::gpu::Gpu) -> Result<()> {
         let budget = self.store.limits.image_bytes;
         gpu.budget = self.store.limits.gpu_bytes;
@@ -542,7 +546,7 @@ impl Engine {
 
     /// Draws tiles on the GPU for the next frame of the view last drawn, for at most
     /// `budget_ms` (`Gpu::ahead`): what a browser runs between frames at rest.
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "gpu-common")]
     pub fn render_gpu_ahead(&mut self, background: [f32; 4], budget_ms: f64) -> Result<DrawStats> {
         self.check_supported()?;
         let gpu = self
@@ -561,7 +565,7 @@ impl Engine {
     }
 
     /// Draws a frame on the GPU, made of tiles (into its canvas, when it has one).
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "gpu-common")]
     pub fn render_gpu(
         &mut self,
         width: u32,

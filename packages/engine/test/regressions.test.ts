@@ -2,7 +2,15 @@ import { readFileSync } from "node:fs";
 import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { memoryLimits } from "../../raster/src/wasm-limits";
-import { ErrorCode, ListWriter, RenderEngine, ROOT } from "../src/index";
+import {
+  type EngineBuild,
+  type EngineModule,
+  ErrorCode,
+  ListWriter,
+  loadEngineSync,
+  RenderEngine,
+  ROOT,
+} from "../src/index";
 import { built, loadNodeEngine, wasmPath } from "../src/node";
 
 describe.skipIf(!built())("The Worker artifact and exports (review of PR 216)", () => {
@@ -290,5 +298,266 @@ describe.skipIf(!built())("Engines sharing a module (re-check of PR 216)", () =>
     expect(c.revision).toBe(42);
     expect(c.apply(fresh(43)).ok).toBe(true);
     c.dispose();
+  });
+
+  for (const build of ["worker", "browser", "webgl"] as const satisfies readonly EngineBuild[]) {
+    it(`shares WASM epoch across separate loadEngineSync wrappers on real ${build} glue`, async () => {
+      if (!built(build)) return;
+      const m1 = await loadNodeEngine(build, { fresh: true });
+      const m2 = loadEngineSync(m1.glue, readFileSync(wasmPath(build)), build);
+      expect(m1.glue).toBe(m2.glue);
+      const a = new RenderEngine(m1);
+      const b = new RenderEngine(m2);
+      const bytes = fresh(1);
+      expect(a.apply(bytes).ok).toBe(true);
+      expect(b.apply(bytes).ok).toBe(true);
+
+      const originalApply = m1.glue.Engine.prototype.apply;
+      m1.glue.Engine.prototype.apply = () => {
+        throw new WebAssembly.RuntimeError("injected unreachable");
+      };
+      try {
+        expect(a.apply(bytes)).toMatchObject({ ok: false, code: ErrorCode.Trap });
+      } finally {
+        m1.glue.Engine.prototype.apply = originalApply;
+      }
+
+      // Sibling from second wrapper must immediately see the shared epoch bump and mark itself dead.
+      expect(m1.epoch).toBe(1);
+      expect(m2.epoch).toBe(1);
+      expect(m2.trapped).toBe(true);
+      expect(b.dead).toBe(true);
+
+      const renewed = new RenderEngine(m1);
+      expect(renewed.dead).toBe(false);
+      expect(renewed.apply(fresh(2)).ok).toBe(true);
+      expect(b.apply(fresh(3))).toMatchObject({ ok: false, code: ErrorCode.Trap });
+      // Disposing the dead sibling must not touch the renewed instance.
+      b.dispose();
+      expect(renewed.revision).toBe(2);
+      renewed.dispose();
+    });
+
+    it(`releases the dead Wasm heap and cached views on ${build} default glue after renewal`, async () => {
+      if (!built(build)) return;
+      const url = new URL(`../dist/${build}/engine.js`, import.meta.url).href;
+      const freshGlue = (await import(
+        /* @vite-ignore */ `${url}?quiesce-release=${build}-${Date.now()}`
+      )) as typeof import("../src/glue");
+      const bytes = readFileSync(wasmPath(build));
+      const exports = freshGlue.initSync({ module: bytes }) as { memory: WebAssembly.Memory };
+      // Grow memory past 64 MiB (Worker caps at 25 MiB, so grow 12 MiB there).
+      const growPages = build === "worker" ? 192 : 1024;
+      exports.memory.grow(growPages);
+      const grownBytes = exports.memory.buffer.byteLength;
+      expect(grownBytes).toBeGreaterThanOrEqual(growPages * 65536);
+      const renewed = freshGlue.__drawpaneRenew() as typeof import("../src/glue");
+      // Default glue keeps the compiled WebAssembly.Module for future renewals,
+      // but releases the dead Wasm instance, exports, init promise, and memory views.
+      expect(freshGlue.__drawpaneModule()).toBeInstanceOf(WebAssembly.Module);
+      expect(() => freshGlue.initSync()).toThrow(/quiesced/);
+      expect(() => freshGlue.initSync({ module: bytes })).toThrow(/quiesced/);
+      await expect(freshGlue.default()).rejects.toThrow(/quiesced/);
+      const freshExports = renewed.initSync() as { memory: WebAssembly.Memory };
+      expect(freshExports.memory).not.toBe(exports.memory);
+      expect(freshExports.memory.buffer.byteLength).toBeLessThan(grownBytes);
+    });
+  }
+
+  it("handles traps and epoch changes across async attachGpu without touching stale GpuInit", async () => {
+    let initFreed = 0;
+    let initRead = 0;
+    let initUnfinalized = 0;
+    const gate = Promise.withResolvers<void>();
+    class FakeEngine {
+      __destroy_into_raw() {
+        return 1;
+      }
+      free() {}
+      apply() {
+        throw new WebAssembly.RuntimeError("trap during inflight attach");
+      }
+      attachGpu() {
+        throw new Error("attachGpu must not run after epoch change");
+      }
+    }
+    const fakeGlue = {
+      Engine: FakeEngine,
+      hasGpu: () => true,
+      gpuBackend: () => "webgl2",
+      __drawpaneRenew() {},
+      memoryBytes: () => 0,
+      async createGpu() {
+        await gate.promise;
+        return {
+          get ok() {
+            initRead++;
+            return true;
+          },
+          get code() {
+            initRead++;
+            return 0;
+          },
+          get message() {
+            initRead++;
+            return "";
+          },
+          get adapter() {
+            initRead++;
+            return "fake";
+          },
+          get backend() {
+            initRead++;
+            return "webgl2";
+          },
+          get details() {
+            initRead++;
+            return "{}";
+          },
+          get fallback() {
+            initRead++;
+            return false;
+          },
+          __destroy_into_raw() {
+            initUnfinalized++;
+            return 2;
+          },
+          free() {
+            initFreed++;
+          },
+        };
+      },
+    };
+    const origWebGL2 = (globalThis as { WebGL2RenderingContext?: unknown }).WebGL2RenderingContext;
+    Object.defineProperty(globalThis, "WebGL2RenderingContext", {
+      configurable: true,
+      value: function WebGL2RenderingContext() {},
+    });
+    try {
+      const m1 = {
+        build: "webgl",
+        glue: fakeGlue,
+        memoryBytes: () => 0,
+      } as unknown as EngineModule;
+      const m2 = {
+        build: "webgl",
+        glue: fakeGlue,
+        memoryBytes: () => 0,
+      } as unknown as EngineModule;
+      const pending = new RenderEngine(m1);
+      const sibling = new RenderEngine(m2);
+      const attachPromise = pending.attachGpu(null);
+      // Sibling traps while attachGpu is awaiting createGpu.
+      expect(sibling.apply(new Uint8Array())).toMatchObject({ ok: false, code: ErrorCode.Trap });
+      gate.resolve();
+      const res = await attachPromise;
+      expect(res).toMatchObject({ ok: false, code: ErrorCode.Trap });
+      expect(initRead).toBe(0);
+      expect(initFreed).toBe(0);
+      expect(initUnfinalized).toBe(1);
+
+      // A RuntimeError thrown from async createGpu itself must map to Trap, not NoAdapter.
+      const trapGlue = {
+        ...fakeGlue,
+        async createGpu() {
+          throw new WebAssembly.RuntimeError("unreachable in createGpu");
+        },
+      };
+      const trapMod = {
+        build: "webgl",
+        glue: trapGlue,
+        memoryBytes: () => 0,
+      } as unknown as EngineModule;
+      const trapped = new RenderEngine(trapMod);
+      expect(await trapped.attachGpu(null)).toMatchObject({ ok: false, code: ErrorCode.Trap });
+      expect(trapped.dead).toBe(true);
+    } finally {
+      if (origWebGL2 === undefined) {
+        delete (globalThis as { WebGL2RenderingContext?: unknown }).WebGL2RenderingContext;
+      } else {
+        Object.defineProperty(globalThis, "WebGL2RenderingContext", {
+          configurable: true,
+          value: origWebGL2,
+        });
+      }
+    }
+  });
+
+  it("isolates overlapping compatibility attaches from concurrent core and later adapter requests", async () => {
+    class FakeEngine {
+      __destroy_into_raw() {
+        return 1;
+      }
+      free() {}
+    }
+    const first = Promise.withResolvers<void>();
+    const second = Promise.withResolvers<void>();
+    let calls = 0;
+    const optionsSeen: Array<Record<string, unknown> | undefined> = [];
+    const original = async (options?: Record<string, unknown>) => {
+      optionsSeen.push(options);
+      return {};
+    };
+    const origNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { gpu: { requestAdapter: original } },
+    });
+    try {
+      const gpu = (
+        navigator as Navigator & {
+          gpu: { requestAdapter: (o?: Record<string, unknown>) => Promise<unknown> };
+        }
+      ).gpu;
+      const fakeGlue = {
+        Engine: FakeEngine,
+        hasGpu: () => true,
+        gpuBackend: () => "webgpu",
+        async createGpu() {
+          const gate = [first, second][calls++];
+          await gpu.requestAdapter({});
+          await gate?.promise;
+          return { ok: false, code: ErrorCode.NoAdapter, message: "fixture", free() {} };
+        },
+      };
+      const fakeModule = {
+        build: "browser",
+        glue: fakeGlue,
+        memoryBytes: () => 0,
+      } as unknown as EngineModule;
+      const p = new RenderEngine(fakeModule).attachGpu(null, { compatibility: true });
+      const q = new RenderEngine(fakeModule).attachGpu(null, { compatibility: true });
+      let thirdOptions: Record<string, unknown> | undefined;
+      const coreModule = {
+        build: "browser",
+        glue: {
+          ...fakeGlue,
+          async createGpu() {
+            await gpu.requestAdapter({});
+            thirdOptions = optionsSeen.at(-1);
+            return { ok: false, code: ErrorCode.NoAdapter, message: "fixture", free() {} };
+          },
+        },
+        memoryBytes: () => 0,
+      } as unknown as EngineModule;
+      // Core attach must complete without waiting on compatibility attaches and without receiving
+      // featureLevel: "compatibility".
+      await new RenderEngine(coreModule).attachGpu(null);
+      first.resolve();
+      await p;
+      second.resolve();
+      await q;
+      await gpu.requestAdapter({});
+      expect(thirdOptions?.featureLevel).toBeUndefined();
+      expect(optionsSeen.at(-1)?.featureLevel).toBeUndefined();
+      expect(gpu.requestAdapter).toBe(original);
+      expect(optionsSeen.filter((o) => o?.featureLevel === "compatibility")).toHaveLength(2);
+    } finally {
+      if (origNavigator) {
+        Object.defineProperty(globalThis, "navigator", origNavigator);
+      } else {
+        delete (globalThis as { navigator?: unknown }).navigator;
+      }
+    }
   });
 });
