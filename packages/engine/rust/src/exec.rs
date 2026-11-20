@@ -239,6 +239,10 @@ pub trait Backend {
         scene_origin_hint: Option<(i32, i32)>,
         open: &[Open],
     ) -> Result<bool>;
+    /// Pushes an offscreen target covering `area` (device pixels), initialized with a copy of the
+    /// parent target's pixels over that area (for faded pass-through frames, decision 0038).
+    /// Returns `false` if the resulting target is empty.
+    fn push_isolated_backdrop(&mut self, area: IRect, open: &[Open]) -> Result<bool>;
     /// Flushes the active offscreen target (if pending), applies a chain of reference Gaussian
     /// blurs (`EdgeMode::Zero`) for `(out_area, sigma)` in sequence, and replaces the top of the
     /// offscreen stack with the final blurred result.
@@ -246,6 +250,10 @@ pub trait Backend {
     /// Flushes (if pending) and pops the active offscreen target, reopens parent `open` clips,
     /// and draws it onto the parent scene with `SrcOver` at `opacity`.
     fn pop_isolated(&mut self, opacity: f32, open: &[Open]) -> Result<()>;
+    /// Flushes (if pending) and pops the active offscreen target, blends it onto the parent target
+    /// using blend mode `blend` (`1..=17` or `crate::blend::BLEND_LERP`) at `opacity` masked by
+    /// parent `open` clips, and reopens parent `open` clips.
+    fn pop_blended(&mut self, blend: u32, opacity: f32, open: &[Open]) -> Result<()>;
     /// Discards the active offscreen target on error unwind without compositing.
     fn abort_isolated(&mut self);
     /// Renders a Gaussian-blurred shadow mask over `dirty` (device pixels) and draws it into the
@@ -420,6 +428,7 @@ pub fn draw_split<B: Backend>(
         y1: i32::from(frame.height),
     };
     let tiled = frame.area != full_frame;
+    let full_viewport = Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0);
     let mut walk = Walk {
         split,
         phase: Phase::Before,
@@ -432,9 +441,9 @@ pub fn draw_split<B: Backend>(
             f64::from(frame.area.x1) + 1.0,
             f64::from(frame.area.y1) + 1.0,
         ),
-        full_frame,
-        full_viewport: Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0),
         tiled,
+        full_frame,
+        full_viewport,
         open: Vec::new(),
         stats: DrawStats::default(),
         glyph_mask_side: f64::from(limits.glyph_mask_side),
@@ -464,9 +473,9 @@ struct Walk<'a, B: Backend> {
     backend: &'a mut B,
     frame: Frame,
     viewport: Rect,
+    tiled: bool,
     full_frame: IRect,
     full_viewport: Rect,
-    tiled: bool,
     open: Vec<Open>,
     stats: DrawStats,
     glyph_mask_side: f64,
@@ -536,115 +545,6 @@ fn sampleable(device: Affine, texel: Affine, region: Option<Rect>, repeat: bool)
         p.x.is_finite() && p.y.is_finite() && p.x.abs() <= REPEAT_POSITIONS && p.y.abs() <= REPEAT_POSITIONS
     })
 }
-
-/// True when a subtree culled from the current tile would have flushed the root scene on a
-/// whole-frame render (so tiled `f32_pipeline` renders emit a matching `flush_barrier`).
-fn subtree_would_flush(
-    store: &Store,
-    frame: &Frame,
-    full_frame: IRect,
-    full_viewport: Rect,
-    id: u32,
-    parent: Affine,
-    alpha: f32,
-) -> bool {
-    let Some(node) = store.nodes.get(&id) else {
-        return false;
-    };
-    let r = &node.record;
-    if r.hidden() {
-        return false;
-    }
-    let world = parent * r.transform;
-    let device = frame.view * world;
-    if !finite(device) {
-        return false;
-    }
-    let (Some(bounds), page_pad) = store.bounds_and_pad(id) else {
-        return false;
-    };
-    let view_scale = scale_of(frame.view);
-    let pad_dev = if page_pad > 0.0 {
-        page_pad * view_scale + 2.0
-    } else {
-        0.0
-    };
-    let dev_bbox = device.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
-    if !overlaps(dev_bbox, full_viewport) {
-        return false;
-    }
-    let opacity = alpha * r.opacity;
-    if opacity <= 0.0 {
-        return false;
-    }
-    let has_post = r.post_effects.iter().any(|pe| match *pe {
-        PostEffect::LayerBlur { radius } => {
-            (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32 >= 1e-4
-        }
-    });
-    let isolate = has_post || (r.isolate() && r.opacity < 1.0);
-    if has_post {
-        let raw_out = IRect::around(dev_bbox.inflate(1.0, 1.0));
-        let out_area = IRect {
-            x0: raw_out.x0.div_euclid(4) * 4 - 4,
-            y0: raw_out.y0.div_euclid(4) * 4 - 4,
-            x1: (raw_out.x1 + 3).div_euclid(4) * 4 + 4,
-            y1: (raw_out.y1 + 3).div_euclid(4) * 4 + 4,
-        }
-        .intersect(full_frame);
-        if !out_area.is_empty() {
-            let inner_pad = (page_pad - r.post_pad()).max(0.0);
-            let inner_pad_dev = if inner_pad > 0.0 {
-                inner_pad * view_scale + 2.0
-            } else {
-                0.0
-            };
-            let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
-            let content_rect = IRect::around(content_bbox).inflate(2, 2);
-            let mut total_blur_pad = 0i32;
-            for pe in &r.post_effects {
-                match *pe {
-                    PostEffect::LayerBlur { radius } => {
-                        let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
-                        if sigma >= 1e-4 {
-                            total_blur_pad = total_blur_pad.saturating_add(crate::shadow::blur_support_pad(sigma));
-                        }
-                    }
-                }
-            }
-            if !content_rect
-                .intersect(out_area.inflate(total_blur_pad, total_blur_pad))
-                .is_empty()
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-    if isolate && store.subtree_has_pass(id) {
-        let iso_area = IRect::around(dev_bbox.inflate(1.0, 1.0)).intersect(full_frame);
-        if !iso_area.is_empty() {
-            return true;
-        }
-        return false;
-    }
-    let inner = if isolate { 1.0 } else { opacity };
-    for op in &r.ops {
-        match op {
-            Op::Read { .. } => return true,
-            Op::Children => {
-                for &c in &node.children {
-                    if subtree_would_flush(store, frame, full_frame, full_viewport, c, world, inner) {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
 fn finite(m: Affine) -> bool {
     m.as_coeffs().iter().all(|v| v.is_finite())
 }
@@ -727,6 +627,205 @@ struct PostIsoState {
     blurs: Vec<f32>,
     max_step: i32,
     phase: (i32, i32),
+    blend: u32,
+}
+
+fn paint_visible(paint: &Paint, alpha: f32) -> bool {
+    match paint {
+        Paint::Solid(c) => c[3] * alpha > 0.0,
+        Paint::Gradient(g) => g.matrix.determinant().abs() >= 1e-12 && !g.stops.is_empty(),
+        Paint::Image(img) => img.opacity * alpha > 0.0,
+        Paint::Placeholder(o) => *o * alpha > 0.0,
+    }
+}
+
+/// Whether `id` (culled from a tile) would flush the active CPU scene on a full-frame render.
+fn subtree_flushes_in_full_frame(
+    store: &Store,
+    frame: &Frame,
+    full_frame: IRect,
+    full_viewport: Rect,
+    id: u32,
+    parent: Affine,
+    alpha: f32,
+) -> bool {
+    let Some(node) = store.nodes.get(&id) else {
+        return false;
+    };
+    let r = &node.record;
+    if r.hidden() || !store.subtree_has_pass(id) {
+        return false;
+    }
+    let world = parent * r.transform;
+    let device = frame.view * world;
+    if !finite(device) {
+        return false;
+    }
+    let (Some(bounds), page_pad) = store.bounds_and_pad(id) else {
+        return false;
+    };
+    let view_scale = scale_of(frame.view);
+    let pad_dev = if page_pad > 0.0 {
+        page_pad * view_scale + 2.0
+    } else {
+        0.0
+    };
+    let dev_bbox = device.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
+    if !overlaps(dev_bbox, full_viewport) {
+        return false;
+    }
+    if frame.detail && !r.group() {
+        let b = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])));
+        if b.width() < 0.5 && b.height() < 0.5 {
+            return false;
+        }
+    }
+    let opacity = alpha * r.opacity;
+    if opacity <= 0.0 {
+        return false;
+    }
+    let active_blurs: Vec<f32> = r
+        .post_effects
+        .iter()
+        .filter_map(|pe| match *pe {
+            PostEffect::LayerBlur { radius } => {
+                let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
+                (sigma >= 1e-4).then_some(sigma)
+            }
+        })
+        .collect();
+    let has_post = !active_blurs.is_empty();
+    let through = !has_post && r.blend == 0 && r.isolate() && r.opacity < 1.0 && store.subtree_has_blend(id);
+    let isolate = has_post || r.blend != 0 || (r.isolate() && r.opacity < 1.0);
+    if has_post {
+        let raw_out = IRect::around(dev_bbox.inflate(1.0, 1.0));
+        let full_out = if raw_out.intersect(full_frame).is_empty() {
+            IRect {
+                x0: 0,
+                y0: 0,
+                x1: 0,
+                y1: 0,
+            }
+        } else {
+            IRect {
+                x0: raw_out.x0.div_euclid(4) * 4 - 4,
+                y0: raw_out.y0.div_euclid(4) * 4 - 4,
+                x1: (raw_out.x1 + 3).div_euclid(4) * 4 + 4,
+                y1: (raw_out.y1 + 3).div_euclid(4) * 4 + 4,
+            }
+            .intersect(full_frame)
+        };
+        if !full_out.is_empty() {
+            let inner_pad = (page_pad - r.post_pad()).max(0.0);
+            let inner_pad_dev = if inner_pad > 0.0 {
+                inner_pad * view_scale + 2.0
+            } else {
+                0.0
+            };
+            let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
+            let content_rect = IRect::around(content_bbox).inflate(2, 2);
+            let total_blur_pad: i32 = active_blurs
+                .iter()
+                .map(|&sigma| crate::shadow::blur_support_pad(sigma))
+                .sum();
+            if !content_rect
+                .intersect(full_out.inflate(total_blur_pad, total_blur_pad))
+                .is_empty()
+            {
+                return true;
+            }
+        }
+    } else if r.blend != 0 || through || isolate {
+        let raw = IRect::around(dev_bbox.inflate(1.0, 1.0));
+        if !raw.intersect(full_frame).is_empty() {
+            return true;
+        }
+    }
+    let inner = if isolate { 1.0 } else { opacity };
+    let coarse =
+        r.provisional() || frame.detail && r.coarse_below > 0.0 && scale_of(device) < f64::from(r.coarse_below);
+    let ops = if coarse { &r.coarse } else { &r.ops };
+    for op in ops {
+        match op {
+            Op::Read { .. } => return true,
+            Op::Fill { path, paint, blend, .. } if *blend != 0 && paint_visible(paint, inner) => {
+                if let Some(local_b) = r.entry_bounds(*path, &|g| store.glyphs.bounds(g)) {
+                    let raw = IRect::around(device.transform_rect_bbox(local_b).inflate(2.0, 2.0));
+                    if !raw.intersect(full_frame).is_empty() {
+                        return true;
+                    }
+                }
+            }
+            Op::Stroke {
+                path,
+                style,
+                paint,
+                blend,
+            } if *blend != 0 && style.width > 0.0 && paint_visible(paint, inner) => {
+                if let Some(local_b) = r.entry_bounds(*path, &|g| store.glyphs.bounds(g)) {
+                    let grow =
+                        f64::from(style.width) * f64::from(style.miter.max(1.0)) * 0.5 + f64::from(style.width) + 1.0;
+                    let raw = IRect::around(
+                        device
+                            .transform_rect_bbox(local_b.inflate(grow, grow))
+                            .inflate(2.0, 2.0),
+                    );
+                    if !raw.intersect(full_frame).is_empty() {
+                        return true;
+                    }
+                }
+            }
+            Op::DropShadow {
+                paths,
+                dx,
+                dy,
+                blur,
+                color: c,
+                blend,
+                stroke,
+                ..
+            } if *blend != 0 && c[3] * inner > 0.0 && stroke.as_ref().is_none_or(|st| st.width > 0.0) => {
+                let shifted = Affine::translate((f64::from(*dx) * view_scale, f64::from(*dy) * view_scale)) * device;
+                let sigma_dev = crate::blur::sigma_from_radius(*blur) * view_scale as f32;
+                let stroke_grow = stroke.as_deref().map_or(0.0, |st| {
+                    f64::from(st.width) * f64::from(st.miter.max(1.0)) * 0.5 + f64::from(st.width) + 1.0
+                });
+                let reach = f64::from(crate::blur::kernel_radius(sigma_dev)) + 2.0;
+                for &pi in paths {
+                    if let Some(b) = r.entry_bounds(pi, &|g| store.glyphs.bounds(g)) {
+                        let lb = if stroke_grow > 0.0 {
+                            b.inflate(stroke_grow, stroke_grow)
+                        } else {
+                            b
+                        };
+                        let raw = IRect::around(shifted.transform_rect_bbox(lb).inflate(reach, reach));
+                        if !raw.intersect(full_frame).is_empty() {
+                            return true;
+                        }
+                    }
+                }
+            }
+            Op::InnerShadow {
+                shape, color: c, blend, ..
+            } if *blend != 0 && c[3] * inner > 0.0 => {
+                if let Some(b) = r.entry_bounds(*shape, &|g| store.glyphs.bounds(g)) {
+                    let raw = IRect::around(device.transform_rect_bbox(b).inflate(2.0, 2.0));
+                    if !raw.intersect(full_frame).is_empty() {
+                        return true;
+                    }
+                }
+            }
+            Op::Children
+                if node.children.iter().any(|&c| {
+                    subtree_flushes_in_full_frame(store, frame, full_frame, full_viewport, c, world, inner)
+                }) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 impl<B: Backend> Walk<'_, B> {
@@ -762,6 +861,11 @@ impl<B: Backend> Walk<'_, B> {
         Ok(())
     }
 
+    fn flush_if_tiled_overlap(&mut self, raw: IRect) {
+        if self.tiled && !raw.intersect(self.full_frame).is_empty() {
+            self.backend.flush_barrier(&self.open);
+        }
+    }
     fn scene_device(&self, device: Affine) -> Affine {
         let (sox, soy) = self.backend.scene_offset();
         if sox == 0 && soy == 0 {
@@ -815,7 +919,9 @@ impl<B: Backend> Walk<'_, B> {
         let dev_bbox = device.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
         if !overlaps(dev_bbox, self.viewport) {
             if self.tiled
-                && subtree_would_flush(
+                && overlaps(dev_bbox, self.full_viewport)
+                && store.subtree_has_pass(id)
+                && subtree_flushes_in_full_frame(
                     store,
                     &self.frame,
                     self.full_frame,
@@ -860,8 +966,10 @@ impl<B: Backend> Walk<'_, B> {
             })
             .collect();
         let has_post = !active_blurs.is_empty();
-        let isolate = has_post || (r.isolate() && r.opacity < 1.0);
-        let use_offscreen = has_post || (isolate && store.subtree_has_pass(id));
+        let layer_blend = r.blend;
+        let isolate = has_post || layer_blend != 0 || (r.isolate() && r.opacity < 1.0);
+        let through = !has_post && layer_blend == 0 && r.isolate() && r.opacity < 1.0 && store.subtree_has_blend(id);
+        let use_offscreen = has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id));
         let inner = if isolate { 1.0 } else { opacity };
         let mut post_state: Option<PostIsoState> = None;
         let saved_open = if has_post {
@@ -964,7 +1072,7 @@ impl<B: Backend> Walk<'_, B> {
                 f64::from(src_area.x1) + 1.0,
                 f64::from(src_area.y1) + 1.0,
             );
-            let whole_src = if whole_raw_src.is_empty() {
+            let whole_src = if !self.tiled || whole_raw_src.is_empty() {
                 src_area
             } else {
                 align_area_checked(whole_raw_src, max_step, phase, max_side).unwrap_or(src_area)
@@ -986,6 +1094,7 @@ impl<B: Backend> Walk<'_, B> {
                 blurs: active_blurs,
                 max_step,
                 phase,
+                blend: layer_blend,
             });
             None
         } else if use_offscreen {
@@ -1012,7 +1121,12 @@ impl<B: Backend> Walk<'_, B> {
                 }
                 return Ok(());
             }
-            if !self.backend.push_isolated(iso_area, true, None, &self.open)? {
+            let pushed = if through {
+                self.backend.push_isolated_backdrop(iso_area, &self.open)?
+            } else {
+                self.backend.push_isolated(iso_area, true, None, &self.open)?
+            };
+            if !pushed {
                 if self.tiled && !whole_iso.is_empty() {
                     self.backend.flush_barrier(&self.open);
                 }
@@ -1051,10 +1165,27 @@ impl<B: Backend> Walk<'_, B> {
                     | Op::DropShadow { .. }
                     | Op::InnerShadow { .. }
                         if !self.paints() => {}
-                    Op::Fill { path, even_odd, paint } => {
-                        self.fill(r, *path, device, *even_odd, paint, active_alpha, mask_depth == 0)?
-                    }
-                    Op::Stroke { path, style, paint } => self.stroke(r, *path, device, style, paint, active_alpha)?,
+                    Op::Fill {
+                        path,
+                        even_odd,
+                        paint,
+                        blend,
+                    } => self.fill(
+                        r,
+                        *path,
+                        device,
+                        *even_odd,
+                        paint,
+                        *blend,
+                        active_alpha,
+                        mask_depth == 0,
+                    )?,
+                    Op::Stroke {
+                        path,
+                        style,
+                        paint,
+                        blend,
+                    } => self.stroke(r, *path, device, style, paint, *blend, active_alpha)?,
                     Op::Clip { path, .. } if self.clip_changes_nothing(id, r, &ops[at + 1..], *path, device) => {
                         // Left out: the same pixels (see `clip_changes_nothing`), and what's drawn
                         // under no clip takes the renderers' fast paths.
@@ -1226,7 +1357,11 @@ impl<B: Backend> Walk<'_, B> {
                     self.backend.abort_isolated();
                     return Err(e);
                 }
-                self.backend.pop_isolated(opacity, &self.open)?;
+                if post.blend != 0 {
+                    self.backend.pop_blended(post.blend, opacity, &self.open)?;
+                } else {
+                    self.backend.pop_isolated(opacity, &self.open)?;
+                }
             } else {
                 self.backend.abort_isolated();
             }
@@ -1242,7 +1377,14 @@ impl<B: Backend> Walk<'_, B> {
             }
             self.open = prev_open;
             if res.is_ok() {
-                self.backend.pop_isolated(opacity, &self.open)?;
+                if through {
+                    self.backend
+                        .pop_blended(crate::blend::BLEND_LERP, opacity, &self.open)?;
+                } else if layer_blend != 0 {
+                    self.backend.pop_blended(layer_blend, opacity, &self.open)?;
+                } else {
+                    self.backend.pop_isolated(opacity, &self.open)?;
+                }
             } else {
                 self.backend.abort_isolated();
             }
@@ -1455,12 +1597,48 @@ impl<B: Backend> Walk<'_, B> {
                 g.extend = Extend::Pad;
                 // The canvas interpolates gradient colours unpremultiplied.
                 g.interpolation_alpha_space = InterpolationAlphaSpace::Unpremultiplied;
-                g.stops = ColorStops(
+                // Vello sizes its gradient LUT from the stop count (256 for 2 stops, 512 for 3,
+                // 1024 for 4+) and truncates the LUT index. Inserting exact unpremultiplied
+                // linear midpoints on 2- and 3-stop ramps is mathematically identical while
+                // upgrading the LUT to 1024 entries (avoiding 1-2 LSB bias on linear-dodge
+                // transparent fades).
+                let expanded_stops: Vec<ColorStop> = if stops.len() >= 2 && stops.len() < 4 {
+                    let mut out = Vec::with_capacity(5);
+                    for pair in stops.windows(2) {
+                        let (t0, c0) = pair[0];
+                        let (t1, c1) = pair[1];
+                        out.push(ColorStop::from((t0, color(c0, alpha))));
+                        let dt = t1 - t0;
+                        let subdivs: usize = if dt <= 0.0 {
+                            1
+                        } else if stops.len() == 2 {
+                            4
+                        } else {
+                            2
+                        };
+                        for k in 1..subdivs {
+                            let f = k as f32 / subdivs as f32;
+                            let tm = t0 + dt * f;
+                            let cm = [
+                                c0[0] + (c1[0] - c0[0]) * f,
+                                c0[1] + (c1[1] - c0[1]) * f,
+                                c0[2] + (c1[2] - c0[2]) * f,
+                                c0[3] + (c1[3] - c0[3]) * f,
+                            ];
+                            out.push(ColorStop::from((tm, color(cm, alpha))));
+                        }
+                    }
+                    if let Some(&(tl, cl)) = stops.last() {
+                        out.push(ColorStop::from((tl, color(cl, alpha))));
+                    }
+                    out
+                } else {
                     stops
                         .iter()
                         .map(|(offset, c)| ColorStop::from((*offset, color(*c, alpha))))
-                        .collect(),
-                );
+                        .collect()
+                };
+                g.stops = ColorStops(expanded_stops.into_iter().collect());
                 let scene = self.backend.scene();
                 scene.set_paint(g.into());
                 scene.set_paint_transform(*matrix);
@@ -1550,9 +1728,37 @@ impl<B: Backend> Walk<'_, B> {
         device: Affine,
         even_odd: bool,
         paint: &Paint,
+        blend: u8,
         alpha: f32,
         allow_glyph_masks: bool,
     ) -> Result<()> {
+        if blend != 0 {
+            if !paint_visible(paint, alpha) {
+                return Ok(());
+            }
+            let Some(local_b) = r.entry_bounds(i, &|g| self.store.glyphs.bounds(g)) else {
+                return Ok(());
+            };
+            let raw = IRect::around(device.transform_rect_bbox(local_b).inflate(2.0, 2.0));
+            let area = raw.intersect(self.backend.target_bounds());
+            if area.is_empty() {
+                self.flush_if_tiled_overlap(raw);
+                return Ok(());
+            }
+            self.scope()?;
+            if !self.backend.push_isolated(area, true, None, &self.open)? {
+                return Ok(());
+            }
+            let prev_open = std::mem::take(&mut self.open);
+            let res = self.fill(r, i, device, even_odd, paint, 0, alpha, allow_glyph_masks);
+            self.open = prev_open;
+            if res.is_ok() {
+                self.backend.pop_blended(u32::from(blend), 1.0, &self.open)?;
+            } else {
+                self.backend.abort_isolated();
+            }
+            return res;
+        }
         if allow_glyph_masks
             && let (Some(PathEntry::Glyphs { scale, glyphs }), Paint::Solid(c), false) =
                 (r.paths.get(i as usize), paint, even_odd)
@@ -1574,6 +1780,7 @@ impl<B: Backend> Walk<'_, B> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stroke(
         &mut self,
         r: &Record,
@@ -1581,10 +1788,43 @@ impl<B: Backend> Walk<'_, B> {
         device: Affine,
         style: &StrokeStyle,
         paint: &Paint,
+        blend: u8,
         alpha: f32,
     ) -> Result<()> {
         if style.width <= 0.0 {
             return Ok(());
+        }
+        if blend != 0 {
+            if !paint_visible(paint, alpha) {
+                return Ok(());
+            }
+            let Some(local_b) = r.entry_bounds(i, &|g| self.store.glyphs.bounds(g)) else {
+                return Ok(());
+            };
+            let grow = f64::from(style.width) * f64::from(style.miter.max(1.0)) * 0.5 + f64::from(style.width) + 1.0;
+            let raw = IRect::around(
+                device
+                    .transform_rect_bbox(local_b.inflate(grow, grow))
+                    .inflate(2.0, 2.0),
+            );
+            let area = raw.intersect(self.backend.target_bounds());
+            if area.is_empty() {
+                self.flush_if_tiled_overlap(raw);
+                return Ok(());
+            }
+            self.scope()?;
+            if !self.backend.push_isolated(area, true, None, &self.open)? {
+                return Ok(());
+            }
+            let prev_open = std::mem::take(&mut self.open);
+            let res = self.stroke(r, i, device, style, paint, 0, alpha);
+            self.open = prev_open;
+            if res.is_ok() {
+                self.backend.pop_blended(u32::from(blend), 1.0, &self.open)?;
+            } else {
+                self.backend.abort_isolated();
+            }
+            return res;
         }
         if let Some(ring) = stroke_ring(r, i, style) {
             self.spend(ring.elements().len())?;
@@ -1708,9 +1948,6 @@ impl<B: Backend> Walk<'_, B> {
         if eff_alpha <= 0.0 || paths.is_empty() {
             return Ok(());
         }
-        if blend != 0 {
-            return Err(EngineError::unsupported("blended drop shadow"));
-        }
         if let Some(st) = stroke_style
             && st.width <= 0.0
         {
@@ -1721,6 +1958,65 @@ impl<B: Backend> Walk<'_, B> {
         let dy_dev = f64::from(dy) * view_scale;
         let sigma_dev = crate::blur::sigma_from_radius(blur) * view_scale as f32;
         let shifted_device = Affine::translate((dx_dev, dy_dev)) * device;
+        if blend != 0 {
+            let stroke_grow = stroke_style.map_or(0.0, |st| {
+                f64::from(st.width) * f64::from(st.miter.max(1.0)) * 0.5 + f64::from(st.width) + 1.0
+            });
+            let mut bbox: Option<Rect> = None;
+            for &pi in paths {
+                if let Some(b) = r.entry_bounds(pi, &|g| self.store.glyphs.bounds(g)) {
+                    let lb = if stroke_grow > 0.0 {
+                        b.inflate(stroke_grow, stroke_grow)
+                    } else {
+                        b
+                    };
+                    let db = shifted_device.transform_rect_bbox(lb);
+                    bbox = Some(bbox.map_or(db, |o| o.union(db)));
+                }
+            }
+            let Some(bbox) = bbox else {
+                return Ok(());
+            };
+            let reach = f64::from(crate::blur::kernel_radius(sigma_dev)) + 2.0;
+            let raw = IRect::around(bbox.inflate(reach, reach));
+            let dirty = raw.intersect(self.backend.target_bounds());
+            if dirty.is_empty() {
+                self.flush_if_tiled_overlap(raw);
+                return Ok(());
+            }
+            self.scope()?;
+            if !self.backend.push_isolated(dirty, true, None, &self.open)? {
+                return Ok(());
+            }
+            let prev_open = std::mem::take(&mut self.open);
+            let res = self.drop_shadow(
+                r,
+                paths,
+                even_odd,
+                dx,
+                dy,
+                blur,
+                shadow_color,
+                0,
+                stroke_style,
+                device,
+                alpha,
+                layered,
+            );
+            while let Some(o) = self.open.pop() {
+                match o {
+                    Open::Clip { .. } => self.backend.scene().pop_clip(),
+                    Open::Layer => self.backend.scene().pop_layer(),
+                }
+            }
+            self.open = prev_open;
+            if res.is_ok() {
+                self.backend.pop_blended(blend, 1.0, &self.open)?;
+            } else {
+                self.backend.abort_isolated();
+            }
+            return res;
+        }
         let tint = color(shadow_color, alpha);
 
         // Zero blur: draw shadow geometry directly with no offscreen pass.
@@ -1903,7 +2199,34 @@ impl<B: Backend> Walk<'_, B> {
             return Ok(());
         }
         if blend != 0 {
-            return Err(EngineError::unsupported("blended inner shadow"));
+            let Some(local_b) = r.entry_bounds(shape, &|g| self.store.glyphs.bounds(g)) else {
+                return Ok(());
+            };
+            let raw = IRect::around(device.transform_rect_bbox(local_b).inflate(2.0, 2.0));
+            let dirty = raw.intersect(self.backend.target_bounds());
+            if dirty.is_empty() {
+                self.flush_if_tiled_overlap(raw);
+                return Ok(());
+            }
+            self.scope()?;
+            if !self.backend.push_isolated(dirty, true, None, &self.open)? {
+                return Ok(());
+            }
+            let prev_open = std::mem::take(&mut self.open);
+            let res = self.inner_shadow(r, shape, hole, even_odd, dx, dy, blur, shadow_color, 0, device, alpha);
+            while let Some(o) = self.open.pop() {
+                match o {
+                    Open::Clip { .. } => self.backend.scene().pop_clip(),
+                    Open::Layer => self.backend.scene().pop_layer(),
+                }
+            }
+            self.open = prev_open;
+            if res.is_ok() {
+                self.backend.pop_blended(blend, 1.0, &self.open)?;
+            } else {
+                self.backend.abort_isolated();
+            }
+            return res;
         }
         let shape_local = self.path(r, shape, device, 0.0)?;
         if shape_local.is_empty() {

@@ -120,8 +120,27 @@ const LOOKS: Array<[PropName, unknown]> = [
   ["characters", "Hello"],
   ["characters", "Wide text here"],
   ["effects", [{ type: "drop-shadow", x: 2, y: 2, blur: 4, spread: 0, color: "#00000040" }]],
+  [
+    "effects",
+    [
+      {
+        type: "drop-shadow",
+        x: 2,
+        y: 2,
+        blur: 4,
+        spread: 0,
+        color: "#00000040",
+        blendMode: "linear-burn",
+      },
+    ],
+  ],
   ["effects", [{ type: "layer-blur", radius: 8 }]],
   ["effects", []],
+  ["blendMode", "multiply"],
+  ["blendMode", "linear-dodge"],
+  ["blendMode", "linear-burn"],
+  ["blendMode", "luminosity"],
+  ["blendMode", "normal"],
 ];
 
 type Action =
@@ -271,7 +290,8 @@ function opsFor(doc: Doc, a: Action): Op[] {
       if (prop === "clipContent" && n.type !== "frame") return [];
       if (prop === "characters" && n.type !== "text") return [];
       if (prop === "cornerRadius" && n.type !== "rect" && n.type !== "frame") return [];
-      if (n.type === "group" && prop !== "opacity" && prop !== "visible") return [];
+      if (n.type === "group" && prop !== "opacity" && prop !== "visible" && prop !== "blendMode")
+        return [];
       return [{ op: "set", id: n.id, prop, value } as Op];
     }
     case "reparent": {

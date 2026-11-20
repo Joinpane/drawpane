@@ -200,8 +200,9 @@ function blendsAsOne(
   opaque: boolean,
 ): boolean {
   if (mode === "linear-burn") return true;
-  if (mode !== "linear-dodge") return false;
-  if (children > 0 || !opaque) return true;
+  if (mode === "normal") return false;
+  if (children > 0) return true;
+  if (mode === "linear-dodge" && !opaque) return true;
   const effects = getProp(node.props, "effects").filter((e) => e.visible !== false).length;
   const fills = getProp(node.props, "fills").filter((p) => p.visible !== false).length;
   const strokes = getProp(node.props, "strokes").filter((p) => p.visible !== false).length;

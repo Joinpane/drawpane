@@ -37,11 +37,14 @@ type W = {
   drawpane: {
     s: {
       pageId: string;
+      selection: readonly string[];
       camera: { x: number; y: number; zoom: number; pan(dx: number, dy: number): unknown };
     };
     state: { set(patch: object): void };
     createLayer(t: string, r: object, p: string, props?: object): string;
     commit(ops: object[]): boolean;
+    select(ids: readonly string[]): void;
+    group(): void;
     setProp(ids: string[], prop: string, value: unknown, label: string): void;
     zoomTo(z: number): void;
     centerOn(p: { x: number; y: number }): void;
@@ -1196,7 +1199,7 @@ test.describe
       );
     });
 
-    test("shadow edge cases (open stroke, evenodd inner, rotated cutout, mixed text, blend refusal)", async () => {
+    test("shadow edge cases (open stroke, evenodd inner, rotated cutout, mixed text, multiplied shadow)", async () => {
       const scenes = await page.evaluate(() => {
         const e = (window as unknown as W).drawpane;
         const ox = 1800;
@@ -1301,11 +1304,6 @@ test.describe
             const canvas = await w.drawpaneEngine.canvasRender({ ...opts, background: "#ffffff" });
             return { cpu, gpu, canvas };
           }, item);
-          if (item.name === "multiplied-shadow") {
-            expect(res.cpu.ok).toBe(false);
-            expect(res.cpu.code).toBe(5);
-            continue;
-          }
           expect(res.cpu.ok, `${item.name} cpu: ${res.cpu.error}`).toBe(true);
           expect(res.gpu.ok, `${item.name} gpu: ${res.gpu.error}`).toBe(true);
           const cpuPx = Buffer.from(res.cpu.rgba ?? "", "base64");
@@ -1345,6 +1343,82 @@ test.describe
           (ids) =>
             (window as unknown as W).drawpane.commit(ids.map((id) => ({ op: "delete", id }))),
           scenes.map((s) => s.frame),
+        );
+      }
+    });
+
+    test("isolates non-normal blended groups across CPU, GPU, and canvas (Figma parity)", async () => {
+      // Two overlapping opaque #808080 rects inside a group with blendMode=multiply over #808080
+      // backdrop: isolated group multiplies once -> ~64 (not 32).
+      const scene = await page.evaluate(() => {
+        const w = window as unknown as W;
+        const e = w.drawpane;
+        const ox = 8800;
+        const root = e.createLayer("frame", { x: ox, y: 0, width: 80, height: 80 }, e.s.pageId, {
+          fills: [{ type: "solid", color: "#808080" }],
+          clipContent: true,
+        });
+        const left = e.createLayer("rect", { x: ox + 10, y: 10, width: 45, height: 60 }, root, {
+          fills: [{ type: "solid", color: "#808080" }],
+        });
+        const right = e.createLayer("rect", { x: ox + 25, y: 10, width: 45, height: 60 }, root, {
+          fills: [{ type: "solid", color: "#808080" }],
+        });
+        e.select([left, right]);
+        e.group();
+        const group = e.s.selection[0];
+        if (!group || group === left || group === right)
+          throw new Error("Could not group the rectangles");
+        e.setProp([group], "blendMode", "multiply", "Set multiply blend");
+        return { root, ox };
+      });
+      await frames(page, 4);
+      try {
+        const res = await page.evaluate(async ({ root, ox }) => {
+          const w = window as unknown as W;
+          const opts = {
+            pageId: w.drawpane.s.pageId,
+            rect: { x: ox, y: 0, width: 80, height: 80 },
+            scale: 1,
+            width: 80,
+            height: 80,
+          };
+          const cpu = await w.drawpaneEngine.render({
+            ...opts,
+            backend: "cpu",
+            background: [1, 1, 1, 1],
+            ids: [root],
+          });
+          const gpu = await w.drawpaneEngine.render({
+            ...opts,
+            backend: "gpu",
+            background: [1, 1, 1, 1],
+            ids: [root],
+          });
+          const canvas = await w.drawpaneEngine.canvasRender({ ...opts, background: "#ffffff" });
+          return { cpu, gpu, canvas };
+        }, scene);
+        expect(res.cpu.ok, res.cpu.error).toBe(true);
+        expect(res.gpu.ok, res.gpu.error).toBe(true);
+        const cpuPx = Buffer.from(res.cpu.rgba ?? "", "base64");
+        const gpuPx = Buffer.from(res.gpu.rgba ?? "", "base64");
+        const canPx = Buffer.from(res.canvas, "base64");
+        // Overlap center at (40, 40) must be ~64 on all three renderers.
+        const idx = (40 * 80 + 40) * 4;
+        for (const [label, px] of [
+          ["cpu", cpuPx],
+          ["gpu", gpuPx],
+          ["canvas", canPx],
+        ] as const) {
+          expect(px[(5 * 80 + 5) * 4], `${label} untouched backdrop`).toBe(128);
+          expect(px[(40 * 80 + 15) * 4], `${label} single child`).toBe(64);
+          expect(px[idx], `${label} isolated multiply overlap`).toBeGreaterThanOrEqual(62);
+          expect(px[idx], `${label} isolated multiply overlap`).toBeLessThanOrEqual(66);
+        }
+      } finally {
+        await page.evaluate(
+          (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
+          scene.root,
         );
       }
     });

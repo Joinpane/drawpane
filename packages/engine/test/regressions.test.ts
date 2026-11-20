@@ -354,19 +354,41 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
     const w = 1157;
     const h = 305;
     const cam = { zoom: 1, x: 13.42, y: -7.57, dpr: 1.35 };
-    const cases: Array<{ name: string; shadow?: number; blurs?: number[] }> = [
+    const cases: Array<{ name: string; shadow?: number; blurs?: number[]; blend?: number }> = [
       { name: "shadow only", shadow: 35 },
       { name: "blur only odd", blurs: [24] },
       { name: "blur plus shadow", blurs: [32], shadow: 68 },
       { name: "two successive blurs", blurs: [17, 43] },
       { name: "large blur plus shadow", blurs: [280], shadow: 89 },
+      { name: "blended multiply plus shadow", shadow: 35, blend: 1 },
+      { name: "blended linear-dodge plus blur", blurs: [24], blend: 16 },
     ];
     for (const c of cases) {
       const e = new RenderEngine(module);
       const list = new ListWriter(0xffffffff, 1);
       list.reset();
+      list.set(10, ROOT, {
+        flags: 0,
+        opacity: 1,
+        transform: [1, 0, 0, 1, 0, 0],
+        width: w,
+        height: h,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.35, 0.55, 0.75, 1] },
+          },
+        ],
+        coarse: [],
+      });
       list.set(1, ROOT, {
-        flags: c.blurs ? FLAG.post : 0,
+        flags: (c.blurs ? FLAG.post : 0) | (c.blend ? FLAG.blend : 0),
         opacity: 1,
         transform: [1.19, 0.22, -0.26, 0.91, 650.37, 79.53],
         width: 312,
@@ -401,7 +423,9 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
         ...(c.blurs
           ? { postEffects: c.blurs.map((radius) => ({ kind: "layerBlur" as const, radius })) }
           : {}),
+        ...(c.blend ? { blend: c.blend } : {}),
       });
+      list.order(ROOT, [10, 1]);
       expect(e.apply(list.finish()).ok, c.name).toBe(true);
       const full = e.renderCpu(w, h, cam, clear, false);
       if (!full.ok) throw new Error(`${c.name}: ${full.message}`);

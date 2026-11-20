@@ -30,7 +30,14 @@ export const COMMAND = {
  * opens), drawn as its coarse ops at every scale and never exact; sent again whole soon after.
  * Bit 16 is reserved for phase 3B's `context` flag.
  */
-export const FLAG = { hidden: 1, isolate: 2, group: 4, provisional: 8, post: 32 } as const;
+export const FLAG = {
+  hidden: 1,
+  isolate: 2,
+  group: 4,
+  provisional: 8,
+  post: 32,
+  blend: 64,
+} as const;
 export const POST = { layerBlur: 1 } as const;
 
 export const PATH = {
@@ -197,12 +204,13 @@ export interface GradientStop {
 }
 
 export type WirePaint =
-  | { readonly kind: "solid"; readonly color: Rgba }
+  | { readonly kind: "solid"; readonly color: Rgba; readonly blend?: number }
   | {
       readonly kind: "linear" | "radial" | "angular" | "diamond";
       /** The unit gradient into the layer's units. */
       readonly matrix: Matrix;
       readonly stops: readonly GradientStop[];
+      readonly blend?: number;
     }
   | {
       readonly kind: "image";
@@ -211,9 +219,10 @@ export type WirePaint =
       readonly matrix: Matrix;
       readonly tile: boolean;
       readonly opacity: number;
+      readonly blend?: number;
     }
   /** The loading checkerboard, at the image paint's opacity. */
-  | { readonly kind: "placeholder"; readonly opacity: number };
+  | { readonly kind: "placeholder"; readonly opacity: number; readonly blend?: number };
 
 export interface StrokeStyle {
   readonly width: number;
@@ -285,6 +294,7 @@ export interface WireRecord {
   readonly ops: readonly WireOp[];
   readonly coarse: readonly WireOp[];
   readonly postEffects?: readonly WirePostEffect[];
+  readonly blend?: number;
 }
 
 const PAINT_KIND = PAINT;
@@ -432,6 +442,9 @@ export class ListWriter {
           }
         }
       }
+      if (r.flags & FLAG.blend) {
+        this.u32(r.blend ?? 0);
+      }
     });
   }
 
@@ -568,7 +581,7 @@ export class ListWriter {
 
   #paint(p: WirePaint): void {
     this.u32(PAINT_KIND[p.kind]);
-    this.u32(0); // Blend: normal. Others are flagged unsupported, never written.
+    this.u32(p.blend ?? 0);
     switch (p.kind) {
       case "solid":
         this.rgba(p.color);

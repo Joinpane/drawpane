@@ -504,15 +504,14 @@ fn far_with(paint: Paint) -> Rec {
 
 #[test]
 fn an_operation_the_engine_refuses_refuses_its_page_wherever_it_is() {
-    // A non-normal paint blend is valid on the wire, and the executor refuses it only when it
-    // walks it: off screen (or outside an export's crop) nothing walks it. It's found at decode.
+    // Backdrop readers outside the reference kernel are recognized before drawing, even offscreen.
     let mut e = Engine::new(Limits::default());
     let mut w = W::new(ANY, 1);
     w.reset();
     w.set(1, 0, &rect(20.0, 20.0, [1.0; 4]));
-    let mut blended = far_with(Paint::Solid([1.0, 0.0, 0.0, 1.0]));
-    blended.blend = 3;
-    w.set(2, 0, &blended);
+    let mut reader = far_with(Paint::Solid([1.0, 0.0, 0.0, 1.0]));
+    reader.ops.push(Op::Read { kernel: 99, halo: 1.0 });
+    w.set(2, 0, &reader);
     e.apply(&w.finish()).unwrap();
     assert!(matches!(e.render_cpu(64, 64, camera(), [0.0; 4], true), Err(err) if err.code == ErrorCode::Unsupported));
     assert!(matches!(e.render_band(64, 64, camera(), [0.0; 4], 0, 16), Err(err) if err.code == ErrorCode::Unsupported));
@@ -520,9 +519,7 @@ fn an_operation_the_engine_refuses_refuses_its_page_wherever_it_is() {
 }
 
 #[test]
-fn a_blend_on_the_wire_refuses_the_page_not_the_message() {
-    // Applying succeeds (the message is valid); drawing the page is refused, so the editor falls
-    // back for the page, not for the session. Smoothed corners are now drawn natively.
+fn blended_paints_and_smoothed_corners_draw() {
     let mut e = Engine::new(Limits::default());
     let mut blended = far_with(Paint::Solid([1.0; 4]));
     blended.blend = 3;
@@ -530,21 +527,30 @@ fn a_blend_on_the_wire_refuses_the_page_not_the_message() {
     w.reset();
     w.set(1, 0, &blended);
     e.apply(&w.finish()).unwrap();
-    assert!(matches!(e.render_cpu(64, 64, camera(), [0.0; 4], true), Err(err) if err.code == ErrorCode::Unsupported));
-    let mut smooth = rect(40.0, 40.0, [1.0, 0.0, 0.0, 1.0]);
+    e.render_cpu(64, 64, camera(), [0.0; 4], true).unwrap();
+
+    // Unknown blend mode (> 17) is malformed on the wire.
+    let mut bad_blend = rect(20.0, 20.0, [1.0; 4]);
+    bad_blend.layer_blend = 18;
+    let mut w = W::new(ANY, 2);
+    w.reset();
+    w.set(1, 0, &bad_blend);
+    assert!(matches!(e.apply(&w.finish()), Err(err) if err.code == ErrorCode::Malformed));
+
+    let mut smooth = rect(20.0, 20.0, [1.0; 4]);
     smooth.paths = vec![Entry::Rect {
         w: 40.0,
         h: 40.0,
         radii: [12.0; 4],
     }];
     smooth.smoothing = 0.6;
-    let mut w = W::new(ANY, 2);
+    let mut w = W::new(ANY, 3);
     w.reset();
     w.set(1, 0, &smooth);
     e.apply(&w.finish()).unwrap();
     let smooth_px = pixels(&mut e);
     smooth.smoothing = 0.0;
-    let mut w = W::new(ANY, 3);
+    let mut w = W::new(ANY, 4);
     w.reset();
     w.set(1, 0, &smooth);
     e.apply(&w.finish()).unwrap();

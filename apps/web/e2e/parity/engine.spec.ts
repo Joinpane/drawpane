@@ -49,25 +49,6 @@ const OUT =
  * exact feature reasons so a spurious fallback bit on a drawable cell fails immediately.
  */
 const EXPECTED_CELL_FALLBACKS: Record<string, Record<string, readonly string[]>> = {
-  fills: Object.fromEntries(
-    [
-      "blend-multiply",
-      "blend-screen",
-      "blend-overlay",
-      "blend-darken",
-      "blend-lighten",
-      "blend-color-dodge",
-      "blend-color-burn",
-      "blend-hard-light",
-      "blend-soft-light",
-      "blend-difference",
-      "blend-exclusion",
-      "blend-hue",
-      "blend-saturation",
-      "blend-color",
-      "blend-luminosity",
-    ].map((id) => [id, ["blend"]]),
-  ),
   blurs: {
     "background-4": ["backgroundBlur"],
     "background-12": ["backgroundBlur"],
@@ -84,25 +65,55 @@ const EXPECTED_CELL_FALLBACKS: Record<string, Record<string, readonly string[]>>
     "background-blur": ["backgroundBlur"],
     "glass-plain": ["glass"],
   },
+  "glass-context": {
+    blur: ["backgroundBlur"],
+    "blur-no-fill": ["backgroundBlur"],
+    glass: ["glass"],
+    "glass-fill": ["glass"],
+    "glass-over-inside": ["glass"],
+    knob: ["glass"],
+    button: ["glass"],
+    "blur-text": ["backgroundBlur"],
+    "blur-text-dodge": ["backgroundBlur"],
+    "blur-text-faint": ["backgroundBlur"],
+  },
+  "glass-alpha": {
+    "glass-none": ["glass"],
+    "glass-fill": ["glass"],
+    "glass-half": ["glass"],
+    "glass-half-fill": ["glass"],
+    "glass-faint": ["glass"],
+    "glass-faint-multiply": ["glass"],
+    "glass-light-none": ["glass"],
+    "glass-frost-half": ["glass"],
+    "glass-bend-half": ["glass"],
+    "glass-near-black": ["glass"],
+    button: ["glass"],
+    "button-no-shadows": ["glass"],
+    knob: ["glass"],
+    "knob-no-specular": ["glass"],
+    "blur-dark-material": ["backgroundBlur"],
+    "blur-light-material": ["backgroundBlur"],
+    "blur-no-fill-half": ["backgroundBlur"],
+    "blur-dark-half": ["backgroundBlur"],
+    "blur-burn-material": ["backgroundBlur"],
+  },
 };
-/** Suites whose every cell needs a phase 3 feature (effects, glass, masks, blends, grain). */
+/** Suites whose every cell needs a phase 3 feature (glass, masks, grain). */
 const PHASE_3 = new Set([
   "glass",
-  "glass-alpha",
-  "glass-context",
   "glass-dark",
   "glass-ellipses",
   "glass-probe",
   "glass-probe-2",
   "masks",
   "grain",
-  "linear-blends",
 ]);
 /**
  * Suites gated against the live current canvas renderer baseline (decision 0040 replacement gate:
  * mean not worse by more than 0.01, worst 32 x 32 tile not worse by more than 1, alpha not worse).
  */
-const REPLACEMENT_SUITES = new Set(["shadows", "blurs"]);
+const REPLACEMENT_SUITES = new Set(["shadows", "blurs", "linear-blends"]);
 
 /**
  * Minimum drawn-cell count per supported suite so a regression or accidental fallback cannot turn
@@ -119,6 +130,9 @@ const MIN_DRAWN: Record<string, number> = {
   "text-ranges": 3,
   lists: 6,
   "vertical-trim": 12,
+  shadows: 15,
+  blurs: 4,
+  "linear-blends": 19,
 };
 
 const WANT_BACKENDS = (process.env.ENGINE_PARITY_BACKENDS ?? "gpu,webgl")

@@ -138,6 +138,7 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
     }
     if readers && r.chance(0.15) {
         rec.ops.push(Op::Read {
+            kernel: 1,
             halo: r.range(0.0, 3.0).round(),
         });
     }
@@ -188,6 +189,9 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
     if !readers && r.chance(0.10) {
         rec.post
             .push(Post::LayerBlur(if r.chance(0.2) { 0.0 } else { r.range(2.0, 14.0) }));
+    }
+    if !readers && r.chance(0.08) {
+        rec.layer_blend = 1 + r.below(17);
     }
     if !text && r.chance(0.6) {
         if r.chance(0.5) {

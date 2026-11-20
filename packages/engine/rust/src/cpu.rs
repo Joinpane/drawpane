@@ -600,6 +600,81 @@ impl Backend for Cpu {
         Ok(true)
     }
 
+    fn push_isolated_backdrop(&mut self, area: IRect, open: &[Open]) -> Result<bool> {
+        if open.iter().any(|o| matches!(o, Open::Layer)) {
+            return Err(EngineError::unsupported(
+                "offscreen isolation inside a Vello opacity layer",
+            ));
+        }
+        let area = align4_padded(area).intersect(self.target_bounds());
+        if area.is_empty() {
+            return Ok(false);
+        }
+        let w = (area.x1 - area.x0) as u16;
+        let h = (area.y1 - area.y0) as u16;
+        let bytes = usize::from(w) * usize::from(h) * 4;
+        let (scene_origin, scene_size) = if let Some(parent) = self.offscreen_stack.last()
+            && area.x0 >= parent.scene_origin.0
+            && area.y0 >= parent.scene_origin.1
+            && area.x1 <= parent.scene_origin.0 + i32::from(parent.scene_size.0)
+            && area.y1 <= parent.scene_origin.1 + i32::from(parent.scene_size.1)
+        {
+            (parent.scene_origin, parent.scene_size)
+        } else if area.x0 >= 0
+            && area.y0 >= 0
+            && area.x1 <= i32::from(self.frame_size.0)
+            && area.y1 <= i32::from(self.frame_size.1)
+        {
+            ((0, 0), self.frame_size)
+        } else {
+            let sox = area.x0.div_euclid(4) * 4;
+            let soy = area.y0.div_euclid(4) * 4;
+            let sw = (area.x1 - sox).clamp(1, 8192) as u16;
+            let sh = (area.y1 - soy).clamp(1, 8192) as u16;
+            ((sox, soy), (sw, sh))
+        };
+        self.check_memory(
+            bytes.saturating_add(scene_estimate_bytes(u32::from(scene_size.0), u32::from(scene_size.1))),
+            "a pass-through isolated layer",
+        )?;
+        for _ in open {
+            self.scene.pop_clip();
+        }
+        self.flush_current();
+        let mut pm = Pixmap::new(w, h);
+        {
+            let (parent_origin, parent_pm) = if let Some(parent) = self.offscreen_stack.last() {
+                (parent.origin, &parent.pixmap)
+            } else {
+                (self.origin, &self.target)
+            };
+            let pw = usize::from(parent_pm.width());
+            let sx0 = (area.x0 - parent_origin.0) as usize;
+            let sy0 = (area.y0 - parent_origin.1) as usize;
+            let row_bytes = usize::from(w) * 4;
+            let src = parent_pm.data_as_u8_slice();
+            let dst = pm.data_as_u8_slice_mut();
+            for row in 0..usize::from(h) {
+                let s_off = ((sy0 + row) * pw + sx0) * 4;
+                let d_off = row * row_bytes;
+                dst[d_off..d_off + row_bytes].copy_from_slice(&src[s_off..s_off + row_bytes]);
+            }
+        }
+        self.offscreen_stack.push(CpuTarget {
+            pixmap: pm,
+            origin: (area.x0, area.y0),
+            scene_origin,
+            scene_size,
+            scene_pending: true,
+        });
+        if self.scene.width() != scene_size.0 || self.scene.height() != scene_size.1 {
+            self.scene.reset_and_resize(scene_size.0, scene_size.1);
+        } else {
+            self.scene.reset();
+        }
+        Ok(true)
+    }
+
     fn blur_isolated(&mut self, steps: &[(IRect, f32)]) -> Result<()> {
         if steps.is_empty() {
             return Ok(());
@@ -733,6 +808,92 @@ impl Backend for Cpu {
             self.scene.reset();
             self.reopen_clips(open);
         }
+        Ok(())
+    }
+
+    fn pop_blended(&mut self, blend: u32, opacity: f32, open: &[Open]) -> Result<()> {
+        if self.offscreen_stack.last().is_some_and(|t| t.scene_pending) {
+            self.flush_current();
+        }
+        let Some(top) = self.offscreen_stack.pop() else {
+            return Ok(());
+        };
+        let (pw, ph) = self.active_scene_size();
+        if self.scene.width() != pw || self.scene.height() != ph {
+            self.scene.reset_and_resize(pw, ph);
+        } else {
+            self.scene.reset();
+        }
+        let alpha = opacity.clamp(0.0, 1.0);
+        if alpha > 0.0 {
+            let tw = top.pixmap.width();
+            let th = top.pixmap.height();
+            let has_clips = open.iter().any(|o| matches!(o, Open::Clip { .. }));
+            let clip_pm = if has_clips {
+                let clip_bytes = usize::from(tw) * usize::from(th) * 4;
+                self.check_memory(
+                    clip_bytes.saturating_add(scene_estimate_bytes(u32::from(pw), u32::from(ph))),
+                    "a blended clip mask",
+                )?;
+                let parent_so = self.scene_offset();
+                let mut clip = RenderContext::new(pw, ph);
+                for o in open {
+                    if let Open::Clip {
+                        transform,
+                        path,
+                        even_odd,
+                    } = o
+                    {
+                        clip.set_transform(*transform);
+                        clip.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                        clip.push_clip_path(path);
+                    }
+                }
+                clip.set_transform(Affine::IDENTITY);
+                clip.set_paint(vello_common::color::palette::css::WHITE);
+                clip.set_fill_rule(Fill::NonZero);
+                clip.fill_rect(&Rect::new(
+                    f64::from(top.origin.0 - parent_so.0) - 4.0,
+                    f64::from(top.origin.1 - parent_so.1) - 4.0,
+                    f64::from(top.origin.0 + i32::from(tw) - parent_so.0) + 4.0,
+                    f64::from(top.origin.1 + i32::from(th) - parent_so.1) + 4.0,
+                ));
+                for o in open {
+                    if matches!(o, Open::Clip { .. }) {
+                        clip.pop_clip();
+                    }
+                }
+                clip.flush();
+                let mut mask = Pixmap::new(tw, th);
+                let settings = RasterizerSettings {
+                    render_mode: RenderMode::OptimizeQuality,
+                    offset: (parent_so.0 - top.origin.0, parent_so.1 - top.origin.1),
+                    ..Default::default()
+                };
+                clip.render_with(&mut mask, &mut self.resources, settings);
+                Some(mask)
+            } else {
+                None
+            };
+            let (dst_origin, dst_pm) = if let Some(parent) = self.offscreen_stack.last_mut() {
+                (parent.origin, &mut parent.pixmap)
+            } else {
+                (self.origin, &mut self.target)
+            };
+            let dst_size = (u32::from(dst_pm.width()), u32::from(dst_pm.height()));
+            let offset = (top.origin.0 - dst_origin.0, top.origin.1 - dst_origin.1);
+            crate::blend::blend_cpu(
+                top.pixmap.data_as_u8_slice(),
+                dst_pm.data_as_u8_slice_mut(),
+                dst_size,
+                (u32::from(tw), u32::from(th)),
+                offset,
+                blend,
+                alpha,
+                clip_pm.as_ref().map(|p| p.data_as_u8_slice()),
+            );
+        }
+        self.reopen_clips(open);
         Ok(())
     }
 
