@@ -38,6 +38,7 @@ export * from "./missing-glyph-font";
 export * from "./names";
 export * from "./noise";
 export * from "./overlay";
+export * from "./overlay-renderer";
 export * from "./post-effects";
 export * from "./presets";
 export * from "./properties";

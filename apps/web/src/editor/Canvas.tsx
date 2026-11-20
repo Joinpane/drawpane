@@ -1,12 +1,13 @@
 import {
   CanvasRenderer,
-  drawOverlay,
   fontString,
   frameLabelAt,
   guideAt,
   type Interaction,
   isArtboard,
+  OverlayRenderer,
   type OverlayTheme,
+  overlayStateChanged,
   type PointerInput,
   placedGuides,
   selectionTarget,
@@ -51,6 +52,10 @@ const SETTLE_MS = 120;
  * the frame.
  */
 const CONTENT_BUDGET = 8;
+/** Overscan margin (CSS px) on each side of the retained artboard labels canvas for zero-copy CSS pan translation. */
+const LABEL_OVERSCAN_CSS = 144;
+/** Maximum device-pixel dimension per axis for the overscanned labels canvas. */
+const MAX_LABEL_CANVAS_PX = 4096;
 
 function readTheme(): OverlayTheme {
   const css = getComputedStyle(document.documentElement);
@@ -84,6 +89,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const editor = useEditor();
   const host = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLCanvasElement>(null);
+  /** Retained artboard labels layer under the transient overlay, translated on same-zoom pan. */
+  const labels = useRef<HTMLCanvasElement>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
   /** Durable React-owned container slot for the render engine's active canvas, under the overlay. */
   const engineSlot = useRef<HTMLDivElement>(null);
@@ -104,13 +111,17 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   // repaint the overlay on any state change. Never more than once per frame.
   useEffect(() => {
     const contentCanvas = content.current;
+    const labelsCanvas = labels.current;
     const overlayCanvas = overlay.current;
     const engineSlotEl = engineSlot.current;
     const hostEl = host.current;
-    if (!contentCanvas || !overlayCanvas || !hostEl || !engineSlotEl) return;
+    if (!contentCanvas || !labelsCanvas || !overlayCanvas || !hostEl || !engineSlotEl) return;
     const cctx = contentCanvas.getContext("2d", { alpha: false });
+    const lctx = labelsCanvas.getContext("2d");
     const octx = overlayCanvas.getContext("2d");
-    if (!cctx || !octx) return;
+    if (!cctx || !lctx || !octx) return;
+    const overlayRenderer = new OverlayRenderer();
+    let labelsEnabled = true;
 
     // Cropping starts from what a fill shows, which needs each image's own size.
     editor.imageSize = (ref) => imagesFor(editor).natural(ref);
@@ -468,6 +479,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const draw = () => {
       frame = 0;
       idleOn = false;
+      const liveDpr = window.devicePixelRatio || 1;
+      if (liveDpr !== dpr) applySize();
       const s = editor.s;
       const t0 = performance.now();
       const page = s.pageId ? editor.doc.get(s.pageId) : undefined;
@@ -584,7 +597,15 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       }
       const t1 = performance.now();
       if (overlayDirty) {
-        drawOverlay(octx, editor, interaction, theme, dpr, imagesFor(editor));
+        overlayRenderer.draw(
+          labelsEnabled ? lctx : null,
+          octx,
+          editor,
+          interaction,
+          theme,
+          dpr,
+          imagesFor(editor),
+        );
         overlayDirty = false;
         // Idle cursors fade: draw every frame while one is fading, else wake when the next starts.
         clearTimeout(fadeTimer);
@@ -605,14 +626,83 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       if (!frame) frame = requestAnimationFrame(draw);
     };
 
-    const resize = () => {
+    let dprQuery: MediaQueryList | null = null;
+    const onDprChange = () => resize();
+    const watchDpr = () => {
+      if (dprQuery) {
+        dprQuery.removeEventListener("change", onDprChange);
+        dprQuery = null;
+      }
+      if (typeof window.matchMedia === "function") {
+        dprQuery = window.matchMedia(`(resolution: ${dpr}dppx)`);
+        dprQuery.addEventListener("change", onDprChange);
+      }
+    };
+    // Chromium CDP `Emulation.setDeviceMetricsOverride` (and some browser DPR-only updates)
+    // mutate `devicePixelRatio` and `MediaQueryList.matches` without firing `change` or `resize`
+    // events. Check cheaply while mounted and visible so idle editors still refresh backing stores.
+    const syncDpr = () => {
+      if (disposed || document.hidden) return;
+      const live = window.devicePixelRatio || 1;
+      if (live !== dpr || (dprQuery && !dprQuery.matches)) {
+        resize();
+      }
+    };
+    const dprPoll = window.setInterval(syncDpr, 150);
+    window.addEventListener("focus", syncDpr);
+    document.addEventListener("visibilitychange", syncDpr);
+
+    const applySize = () => {
       dpr = window.devicePixelRatio || 1;
+      watchDpr();
       const { width, height } = hostEl.getBoundingClientRect();
+      const devW = Math.max(1, Math.round(width * dpr));
+      const devH = Math.max(1, Math.round(height * dpr));
       for (const canvas of [contentCanvas, overlayCanvas]) {
-        canvas.width = Math.max(1, Math.round(width * dpr));
-        canvas.height = Math.max(1, Math.round(height * dpr));
+        canvas.width = devW;
+        canvas.height = devH;
         canvas.style.width = `${width}px`;
         canvas.style.height = `${height}px`;
+      }
+      const retainedAllowed = devW <= MAX_LABEL_CANVAS_PX && devH <= MAX_LABEL_CANVAS_PX;
+      labelsEnabled = retainedAllowed;
+      if (retainedAllowed) {
+        const maxCss = Math.floor(MAX_LABEL_CANVAS_PX / dpr);
+        const pad = Math.max(
+          0,
+          Math.min(
+            LABEL_OVERSCAN_CSS,
+            Math.floor((maxCss - width) / 2),
+            Math.floor((maxCss - height) / 2),
+          ),
+        );
+        const labelW = width + pad * 2;
+        const labelH = height + pad * 2;
+        labelsCanvas.width = Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(labelW * dpr)));
+        labelsCanvas.height = Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(labelH * dpr)));
+        labelsCanvas.style.display = "";
+        labelsCanvas.style.width = `${labelW}px`;
+        labelsCanvas.style.height = `${labelH}px`;
+        labelsCanvas.style.left = `${-pad}px`;
+        labelsCanvas.style.top = `${-pad}px`;
+        labelsCanvas.style.transform = "";
+        labelsCanvas.dataset.overscan = String(pad);
+        labelsCanvas.dataset.retainedLabels = "enabled";
+        overlayRenderer.setOverscan(pad);
+      } else {
+        // Strictly cap the extra retained labels surface at MAX_LABEL_CANVAS_PX per axis; fall back
+        // to single-canvas overlay rendering on `octx` rather than allocating an oversized surface.
+        labelsCanvas.width = 1;
+        labelsCanvas.height = 1;
+        labelsCanvas.style.display = "none";
+        labelsCanvas.style.width = "0px";
+        labelsCanvas.style.height = "0px";
+        labelsCanvas.style.left = "0px";
+        labelsCanvas.style.top = "0px";
+        labelsCanvas.style.transform = "";
+        labelsCanvas.dataset.overscan = "0";
+        labelsCanvas.dataset.retainedLabels = "disabled";
+        overlayRenderer.setOverscan(0);
       }
       // The engine's canvas sizes its buffer when it draws (resizing a configured WebGPU canvas
       // reconfigures it); here the slot and active canvas only take the host's size on the page.
@@ -625,8 +715,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // Sizing a canvas clears it, even to the same size: the last frame is
       // gone, so the renderer mustn't reuse it (a pan would move black).
       renderer.invalidate();
+      overlayRenderer.invalidate();
       editor.setViewport(width, height);
       contentDirty = overlayDirty = changed = true;
+    };
+    const resize = () => {
+      applySize();
       schedule();
     };
     const observer = new ResizeObserver(resize);
@@ -644,6 +738,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     });
     const offState = editor.state.subscribe(() => {
       const s = editor.s;
+      let dirty = false;
       if (
         s.camera !== last.camera ||
         s.pageId !== last.pageId ||
@@ -653,10 +748,14 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         contentDirty = true;
         // What's drawn ahead is for the frame before: the next one decides again.
         idleOn = false;
+        dirty = true;
+      }
+      if (overlayStateChanged(last, s)) {
+        overlayDirty = true;
+        dirty = true;
       }
       last = s;
-      overlayDirty = true;
-      schedule();
+      if (dirty) schedule();
     });
 
     // Web fonts arrive after first paint: re-measure and repaint when they do,
@@ -664,6 +763,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const offFonts = watchDocumentFonts(editor.doc);
     const onFonts = (event?: FontFaceSetLoadEvent) => {
       measurer.invalidate();
+      overlayRenderer.invalidate(true);
       if (event) {
         const families = loadedFamilies(event.fontfaces);
         // Text named by an alias ("SF Pro") is drawn in what just loaded ("SF Pro Text") too.
@@ -678,12 +778,14 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     // A face for OpenType features became ready: its text is shaped now, so measure and draw it again.
     const offShaper = shaper.subscribe((family) => {
       editor.refitText(new Set([family]));
+      overlayRenderer.invalidate(true);
       contentDirty = overlayDirty = changed = true;
       schedule();
     });
     void document.fonts.load(fontString({})).then(() => onFonts());
     // The team's fonts, aliases or the catalog arrived: a run may be drawn in another family now.
     const offRegistry = fonts.subscribe(() => {
+      overlayRenderer.invalidate(true);
       contentDirty = overlayDirty = changed = true;
       schedule();
     });
@@ -691,6 +793,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const themeObserver = new MutationObserver(() => {
       theme = readTheme();
       renderer.canvasColor = canvasToken();
+      overlayRenderer.invalidate(true);
       contentDirty = overlayDirty = changed = true;
       schedule();
     });
@@ -717,8 +820,16 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       hostEl.dataset.rendererPresentation = "2d";
       hostEl.dataset.rendererSubmittedFrames = "0";
       hostEl.dataset.rendererFrames = "0";
+      hostEl.dataset.rendererConfirmedFrame = "0";
       hostEl.dataset.rendererFallbackFrames = "0";
       setCpuMode(false);
+      window.clearInterval(dprPoll);
+      window.removeEventListener("focus", syncDpr);
+      document.removeEventListener("visibilitychange", syncDpr);
+      if (dprQuery) {
+        dprQuery.removeEventListener("change", onDprChange);
+        dprQuery = null;
+      }
       observer.disconnect();
       themeObserver.disconnect();
       offDoc();
@@ -1037,6 +1148,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         data-canvas-role="engine-slot"
         style={{ visibility: "hidden" }}
       />
+      <canvas ref={labels} className="canvas__labels" data-canvas-role="labels" />
       <canvas ref={overlay} className="canvas__layer canvas__overlay" data-canvas-role="overlay" />
       {cpuMode ? (
         <div className="canvas__mode-badge" role="status" data-renderer-mode="cpu-worker">

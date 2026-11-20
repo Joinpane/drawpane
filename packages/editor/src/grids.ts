@@ -181,14 +181,40 @@ function straight(m: Matrix): boolean {
   return Math.abs(m[1]) < 1e-9 && Math.abs(m[2]) < 1e-9;
 }
 
+interface PlacedGuidesCache {
+  version: number;
+  readonly pageId: string;
+  readonly topIds: ReadonlySet<string>;
+  readonly guides: readonly PlacedGuide[];
+}
+const placedGuidesCache = new WeakMap<Doc, PlacedGuidesCache>();
+
 /**
  * Every guide on a page: the page's own, and those of its top-level frames
  * (frame guides are in the frame's coordinates and span the frame).
+ * Cached by document version so pan frames and edits inside frames stay O(1).
  */
-export function placedGuides(scene: Scene, pageId: string): PlacedGuide[] {
+export function placedGuides(scene: Scene, pageId: string): readonly PlacedGuide[] {
   const doc: Doc = scene.doc;
+  const last = placedGuidesCache.get(doc);
+  if (last && last.pageId === pageId) {
+    if (last.version === doc.version) return last.guides;
+    const changes = doc.changesSince(last.version);
+    const same =
+      changes?.every(
+        (change) =>
+          !change.reset &&
+          !change.parents.has(pageId) &&
+          [...change.ids].every((id) => id !== pageId && !last.topIds.has(id)),
+      ) ?? false;
+    if (same) {
+      last.version = doc.version;
+      return last.guides;
+    }
+  }
   const page = doc.get(pageId);
   if (!page) return [];
+  const topIds = new Set<string>();
   const out: PlacedGuide[] = getProp(page.props, "rulerGuides").map((g, index) => ({
     owner: pageId,
     index,
@@ -197,6 +223,7 @@ export function placedGuides(scene: Scene, pageId: string): PlacedGuide[] {
     span: null,
   }));
   for (const id of doc.childIds(pageId)) {
+    topIds.add(id);
     const node = doc.get(id);
     if (node?.type !== "frame" || node.props.visible === false) continue;
     const guides = getProp(node.props, "rulerGuides");
@@ -221,6 +248,7 @@ export function placedGuides(scene: Scene, pageId: string): PlacedGuide[] {
       });
     });
   }
+  placedGuidesCache.set(doc, { version: doc.version, pageId, topIds, guides: out });
   return out;
 }
 

@@ -180,13 +180,14 @@ export async function installFallbackRecorder(page: Page): Promise<void> {
 
 /**
  * Samples ONLY the visible engine `<canvas>` while transient overlays (`.canvas__overlay`,
- * `.canvas__mode-badge`) are hidden so overlay ink can never satisfy the non-blank check.
+ * `.canvas__labels`, `.canvas__mode-badge`) are hidden so overlay ink can never satisfy the
+ * non-blank check.
  */
 export async function sampleEngineSurface(page: Page): Promise<EngineSurfaceSample> {
   const hiddenCount = await page.evaluate(async () => {
     const els = [
       ...document.querySelectorAll<HTMLElement>(
-        ".canvas .canvas__overlay, .canvas .canvas__mode-badge",
+        ".canvas .canvas__overlay, .canvas .canvas__labels, .canvas .canvas__mode-badge",
       ),
     ];
     for (const el of els) {
@@ -241,7 +242,7 @@ export async function sampleEngineSurface(page: Page): Promise<EngineSurfaceSamp
       await page.evaluate(async () => {
         const els = [
           ...document.querySelectorAll<HTMLElement>(
-            ".canvas .canvas__overlay, .canvas .canvas__mode-badge",
+            ".canvas .canvas__overlay, .canvas .canvas__labels, .canvas .canvas__mode-badge",
           ),
         ];
         for (const el of els) {
