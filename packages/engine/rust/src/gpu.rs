@@ -2029,6 +2029,10 @@ impl Backend for Gpu {
         )
     }
 
+    fn runs(&self) -> bool {
+        true
+    }
+
     fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource> {
         let (x, y) = self.atlas.place(u32::from(w), u32::from(h))?;
         // Uploaded with the tile's other run images, a write per row (`flush_masks`).

@@ -155,8 +155,13 @@ pub trait Backend {
     /// A glyph's coverage mask, made if it isn't held and fits (`masks::coverage`).
     fn glyph_mask(&mut self, key: MaskKey, path: &BezPath, scale: (f64, f64), phase: (f64, f64)) -> Option<GlyphMask>;
     /// A run's image for the frame being drawn (`w` × `h` premultiplied pixels, `masks::compose_run`),
-    /// to paint from; None when it can't be had (the GPU's atlas is full for this tile).
+    /// to paint from; None when it can't be had (the GPU's atlas is full for this tile), or the
+    /// backend draws a run's masks one by one (`None` from `runs`).
     fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource>;
+    /// Whether a run's masks are drawn as one image (the GPU) or one by one, each its own image
+    /// (the CPU: vello_cpu rounds an image's pixels a level differently by its size, and a band
+    /// of an export must be bitwise the whole frame's, so a run is never cut to a band).
+    fn runs(&self) -> bool;
 
     /// Runs a backdrop reader over what's drawn so far (`open` is open in the scene).
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()>;
@@ -929,10 +934,12 @@ impl<B: Backend> Walk<'_, B> {
         // Zoomed out, vello strokes to a tolerance of a quarter of the path's own units, finer on
         // the device the further out (a fortieth of a pixel at 10%), where most of a dense tile's
         // time went offsetting curves. Under a uniform scale (with any rotation or flip), the
-        // stroke of the path placed on the device, as wide as it is there, is the same outline:
-        // stroked there, it's to the quarter pixel everything else is flattened to. A solid paint
-        // only (another's place follows the transform).
-        let [a, b, c, d, _, _] = device.as_coeffs();
+        // stroke of the path scaled to its device size, as wide as it is there, is the same
+        // outline: stroked so, it's to the quarter pixel everything else is flattened to. Only the
+        // scale is applied first, the translation after, as before: a band or tile of the frame,
+        // drawn under another translation, strokes the same outline. A solid paint only (another's
+        // place follows the transform).
+        let [a, b, c, d, e, f] = device.as_coeffs();
         let (sx, sy) = (a.hypot(b), c.hypot(d));
         let uniform = sx > 0.0
             && sx < 1.0
@@ -941,8 +948,8 @@ impl<B: Backend> Walk<'_, B> {
             && matches!(paint, Paint::Solid(_));
         let (p, k, transform) = if uniform {
             let mut q = p;
-            q.apply_affine(device);
-            (q, sx, Affine::IDENTITY)
+            q.apply_affine(Affine::new([a, b, c, d, 0.0, 0.0]));
+            (q, sx, Affine::translate((e, f)))
         } else {
             (p, 1.0, device)
         };
@@ -1081,8 +1088,37 @@ impl<B: Backend> Walk<'_, B> {
     }
 
     /// Draws a run's masks, laid into one image (cut to the viewport), tinted: answers false when
-    /// the backend has no room for the image (nothing drawn).
+    /// the backend has no room for the image (nothing drawn). A backend that doesn't draw runs
+    /// gets each mask as its own image.
     fn draw_run(&mut self, placed: &[(std::sync::Arc<vello_cpu::Pixmap>, i32, i32)], tint: AlphaColor<Srgb>) -> bool {
+        if !self.backend.runs() {
+            let scene = self.backend.scene();
+            scene.set_transform(Affine::IDENTITY);
+            scene.set_tint(Some(Tint {
+                color: tint,
+                mode: TintMode::AlphaMask,
+            }));
+            for (m, x, y) in placed {
+                let (x, y) = (f64::from(*x), f64::from(*y));
+                scene.set_paint(
+                    Image {
+                        image: ImageSource::Pixmap(m.clone()),
+                        sampler: ImageSampler {
+                            x_extend: Extend::Pad,
+                            y_extend: Extend::Pad,
+                            quality: ImageQuality::Low,
+                            alpha: 1.0,
+                        },
+                    }
+                    .into(),
+                );
+                scene.set_paint_transform(Affine::translate((x, y)));
+                scene.fill_rect(&Rect::new(x, y, x + f64::from(m.width()), y + f64::from(m.height())));
+            }
+            scene.set_tint(None);
+            self.stats.glyphs_masked += placed.len() as u32;
+            return true;
+        }
         let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         for (m, x, y) in placed {
             x0 = x0.min(*x);
