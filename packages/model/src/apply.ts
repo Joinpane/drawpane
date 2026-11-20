@@ -3,8 +3,9 @@ import { isValidId, ROOT_ID } from "./ids";
 import type { CreateOp, DeleteOp, MoveOp, NodeRecord, Op, SetOp } from "./ops";
 import { isValidOrderKey } from "./order-key";
 import {
-  BINDING_UNITS,
+  ALLOWED_BINDING_UNITS,
   type BindingKey,
+  type BindingUnit,
   CHILD_TYPES,
   isPropName,
   NODE_TYPES,
@@ -109,7 +110,8 @@ function checkValue(type: NodeType, prop: string, value: unknown): asserts prop 
       if (type === "textStyle" && !TEXT_STYLE_BINDING_KEYS.has(key as BindingKey))
         throw new ModelError("invalid_value", `A text style can't bind "${key}".`);
       const unit = typeof ref === "object" && ref ? (ref as { unit?: unknown }).unit : undefined;
-      if (unit !== undefined && BINDING_UNITS[key as BindingKey] !== unit)
+      const allowed = ALLOWED_BINDING_UNITS[key as BindingKey];
+      if (unit !== undefined && !allowed?.includes(unit as BindingUnit))
         throw new ModelError("invalid_value", `"${key}" isn't read in the unit "${String(unit)}".`);
     }
 }

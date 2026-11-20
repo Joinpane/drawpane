@@ -105,7 +105,9 @@ export function bindingVariable(ref: unknown): string | undefined {
 /** The unit a binding reads its value in, or undefined: as before decision 0034. */
 export function bindingUnit(ref: unknown): BindingUnit | undefined {
   const unit = (ref as { unit?: unknown } | null)?.unit;
-  return unit === "percent" || unit === "text" || unit === "bounded" ? unit : undefined;
+  return unit === "percent" || unit === "text" || unit === "bounded" || unit === "box"
+    ? unit
+    : undefined;
 }
 
 /** A binding of `key` to `variableId` as new code writes it: with its unit where 0034 has one. */
@@ -462,6 +464,18 @@ const ownPart = (prop: string, value: unknown): unknown =>
  * it can't, the saved value shows and is the layer's own), and the part of
  * the value no binding gives (a letter spacing's unit) must agree.
  */
+/** Whether a binding for `key` actually drives that property on a layer with `props`. */
+function bindingDrivesAxis(
+  key: string,
+  ref: unknown,
+  props: Readonly<Record<string, unknown>> | undefined,
+): boolean {
+  if (bindingUnit(ref) !== "box" || !props) return true;
+  if (key === "width") return getProp(props as Props, "sizingH") === "fixed";
+  if (key === "height") return getProp(props as Props, "sizingV") === "fixed";
+  return true;
+}
+
 export function boundAlike(
   prop: string,
   a: unknown,
@@ -469,6 +483,8 @@ export function boundAlike(
   aBindings: BindingMap,
   bBindings: BindingMap,
   get: NodeLookup,
+  aProps?: Readonly<Record<string, unknown>>,
+  bProps?: Readonly<Record<string, unknown>>,
 ): boolean {
   if (a === undefined || b === undefined) return false;
   if (prop === "fills" || prop === "strokes" || prop === "effects")
@@ -478,6 +494,8 @@ export function boundAlike(
     return (
       !!ref &&
       JSON.stringify(ref) === JSON.stringify(bBindings?.[key]) &&
+      bindingDrivesAxis(key, ref, aProps) &&
+      bindingDrivesAxis(key, ref, bProps) &&
       bindingFollowed(key as BindingKey, ref, get)
     );
   };
@@ -499,7 +517,7 @@ export function alikeWhereBound(
   const ownBindings = own.bindings as BindingMap;
   const baseBindings = base.bindings as BindingMap;
   if (!usesTokens(own as Props) && !usesTokens(base as Props)) return () => false;
-  return (prop, a, b) => boundAlike(prop, a, b, ownBindings, baseBindings, get);
+  return (prop, a, b) => boundAlike(prop, a, b, ownBindings, baseBindings, get, own, base);
 }
 
 // ---------------------------------------------------------------------------
@@ -771,22 +789,28 @@ export class TokenResolver {
       if (resolved !== p.effects) out.effects = resolved;
     }
     const bindings = p.bindings;
+    const boxW = bindingUnit(bindings?.width) === "box";
+    const boxH = bindingUnit(bindings?.height) === "box";
     if (bindings)
       for (const [key, ref] of Object.entries(bindings) as Array<[BindingKey, unknown]>) {
         const variableId = bindingVariable(ref);
         if (!BINDING_FIELDS[key] || !variableId) continue;
+        // `box` bindings ignore hug/fill axes; legacy `bounded` and unitless bindings keep their contract.
+        if (key === "width" && boxW && getProp(p, "sizingH") !== "fixed") continue;
+        if (key === "height" && boxH && getProp(p, "sizingV") !== "fixed") continue;
         const resolved = this.value(variableId, node);
         if (resolved) this.#apply(key, resolved.value, p, out, bindingUnit(ref));
       }
-    // A size bound `bounded` is kept within the layer's min and max (bound or not), as Figma
-    // keeps it. One bound before 0034 (no unit) is the variable's value as it is, as it was
-    // then. An unbound size is the layout's: it's laid out again when what it reads changes.
+    // `bounded` (legacy 0034) clamps the bound axis within min/max on any sizing mode.
+    // `box` ignores hug/fill axes and clamps fixed axes within min/max.
+    // One bound before 0034 (no unit) is the variable's value as it is.
     for (const [size, min, max] of [
       ["width", "minWidth", "maxWidth"],
       ["height", "minHeight", "maxHeight"],
     ] as const) {
       const value = out[size] as number | undefined;
-      if (value === undefined || bindingUnit(bindings?.[size]) !== "bounded") continue;
+      const unit = bindingUnit(bindings?.[size]);
+      if (value === undefined || (unit !== "bounded" && unit !== "box")) continue;
       const lo = (out[min] as number | null | undefined) ?? getProp(p, min);
       const hi = (out[max] as number | null | undefined) ?? getProp(p, max);
       let clamped = value;

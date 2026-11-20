@@ -108,7 +108,7 @@ it("R3 variant: compaction retains an occurrence fallback when a number cannot d
   expect(after.doc.get(id)?.props.fontSize).toBe(24);
 });
 
-it("bind_token writes the bounded unit and the new height's fallback", async () => {
+it("bind_token writes the box unit and the new height's fallback", async () => {
   const design = setup([
     page,
     collection,
@@ -118,7 +118,7 @@ it("bind_token writes the bounded unit and the new height's fallback", async () 
   await runTool(design, "bind_token", { ids: ["box"], key: "height", variableId: "size" });
   expect(design.doc.getUnresolved("box")?.props).toMatchObject({
     height: 32,
-    bindings: { height: bounded },
+    bindings: { height: { variable: "size", unit: "box" } },
   });
   design.setVariableValue("size", "a", 12);
   expect(design.doc.get("box")?.props.height).toBe(12);

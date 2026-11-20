@@ -628,7 +628,16 @@ function markOverrides(
       // where it is). The copy keeps the value Figma saved for it, what shows when they can't be
       // followed and what a reader without the resolver sees (decision 0034).
       if (
-        boundAlike(k, a, b, la, (against.props as Props).bindings as Bindings, (id) => byId.get(id))
+        boundAlike(
+          k,
+          a,
+          b,
+          la,
+          (against.props as Props).bindings as Bindings,
+          (id) => byId.get(id),
+          layer.props as Props,
+          against.props as Props,
+        )
       )
         continue;
       changed.push(k);

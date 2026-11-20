@@ -6,7 +6,8 @@
  */
 import { readFileSync } from "node:fs";
 import { convertFile, drawpaneId, type Figma } from "@drawpane/figma";
-import { parseFigBuffer, patchFigArchive } from "@open-pencil/fig";
+import { MemoryStore, TokenResolver } from "@drawpane/model";
+import { createFigDocumentSession, parseFigBuffer, patchFigArchive } from "@open-pencil/fig";
 import type { NodeChange } from "@open-pencil/kiwi/fig/codec";
 import { describe, expect, it } from "vitest";
 import { readFig } from "../src";
@@ -56,6 +57,21 @@ function buildArchive() {
 
   const gridMissing = guid(40);
   const gridResolved = guid(41);
+
+  const varIconSize = guid(50);
+  const symIcon = guid(51);
+  const symButton = guid(52);
+  const iconInButton = guid(53);
+  const buttonInTablet = guid(54);
+  const tabletFrame = guid(55);
+  const buttonOverriddenWidth = guid(56);
+
+  const symInnerBox = guid(60);
+  const innerBoxRect = guid(61);
+  const symOuterWrap = guid(62);
+  const innerScaledInst = guid(63);
+  const outerSameModeCopy = guid(64);
+  const outerTabletCopy = guid(65);
 
   const added = [
     {
@@ -353,6 +369,181 @@ function buildArchive() {
         ],
       },
     },
+    // 4. Nested icon with 1:1 targetAspectRatio and HEIGHT bound to a mode variable (16 -> 24).
+    {
+      guid: varIconSize,
+      phase: "CREATED",
+      parentIndex: { guid: internal, position: "~varI" },
+      type: "VARIABLE",
+      name: "IconSize",
+      variableSetID: { guid: setB },
+      variableResolvedType: "FLOAT",
+      variableDataValues: {
+        entries: [
+          { modeID: modeB1, variableData: { value: { floatValue: 16 }, dataType: "FLOAT" } },
+          { modeID: modeB2, variableData: { value: { floatValue: 24 }, dataType: "FLOAT" } },
+        ],
+      },
+    },
+    {
+      ...base,
+      guid: symIcon,
+      parentIndex: { guid: page, position: "~symI" },
+      type: "SYMBOL",
+      name: "IconPlaceholder",
+      size: { x: 16, y: 16 },
+      transform: identity(0, 6400),
+    },
+    {
+      ...base,
+      guid: symButton,
+      parentIndex: { guid: page, position: "~symB" },
+      type: "SYMBOL",
+      name: "IconButton",
+      size: { x: 32, y: 32 },
+      transform: identity(0, 6450),
+    },
+    {
+      ...base,
+      guid: iconInButton,
+      parentIndex: { guid: symButton, position: "!" },
+      type: "INSTANCE",
+      name: "Icon",
+      size: { x: 16, y: 16 },
+      transform: identity(8, 8),
+      targetAspectRatio: { value: { x: 24, y: 24 } },
+      symbolData: { symbolID: symIcon, symbolOverrides: [] },
+      variableConsumptionMap: {
+        entries: [
+          {
+            variableField: "HEIGHT",
+            variableData: {
+              value: { alias: { guid: varIconSize } },
+              dataType: "ALIAS",
+              resolvedDataType: "FLOAT",
+            },
+          },
+        ],
+      },
+    },
+    {
+      ...base,
+      guid: tabletFrame,
+      parentIndex: { guid: page, position: "~tabF" },
+      type: "FRAME",
+      name: "TabletFrame",
+      size: { x: 80, y: 80 },
+      transform: identity(0, 6500),
+      variableModeBySetMap: {
+        entries: [{ variableSetID: { guid: setB }, variableModeID: modeB2 }],
+      },
+    },
+    {
+      ...base,
+      guid: buttonInTablet,
+      parentIndex: { guid: tabletFrame, position: "!" },
+      type: "INSTANCE",
+      name: "IconButtonTablet",
+      size: { x: 40, y: 40 },
+      transform: identity(0, 0),
+      symbolData: { symbolID: symButton, symbolOverrides: [] },
+    },
+    // 5. Outer instance explicitly overrides nested locked icon size to 30x24 while HEIGHT is bound to 24.
+    {
+      ...base,
+      guid: buttonOverriddenWidth,
+      parentIndex: { guid: tabletFrame, position: "#" },
+      type: "INSTANCE",
+      name: "IconButtonWide",
+      size: { x: 40, y: 40 },
+      transform: identity(50, 0),
+      symbolData: {
+        symbolID: symButton,
+        symbolOverrides: [
+          {
+            guidPath: { guids: [iconInButton] },
+            size: { x: 30, y: 24 },
+          },
+        ],
+      },
+    },
+    // 6. Nested 2x instance saves a 20px descendant width in derivedSymbolData (token 16 in Phone, 24 in Tablet).
+    // Outer copy in the same mode keeps 20px; outer copy in Tablet mode re-resolves (24 * 2 = 48).
+    {
+      ...base,
+      guid: symInnerBox,
+      parentIndex: { guid: page, position: "~symIn" },
+      type: "SYMBOL",
+      name: "InnerBox",
+      size: { x: 16, y: 16 },
+      transform: identity(0, 6600),
+    },
+    {
+      ...base,
+      guid: innerBoxRect,
+      parentIndex: { guid: symInnerBox, position: "!" },
+      type: "RECTANGLE",
+      name: "BoundLeaf",
+      size: { x: 16, y: 16 },
+      transform: identity(0, 0),
+      variableConsumptionMap: {
+        entries: [
+          {
+            variableField: "WIDTH",
+            variableData: {
+              value: { alias: { guid: varIconSize } },
+              dataType: "ALIAS",
+              resolvedDataType: "FLOAT",
+            },
+          },
+        ],
+      },
+    },
+    {
+      ...base,
+      guid: symOuterWrap,
+      parentIndex: { guid: page, position: "~symOut" },
+      type: "SYMBOL",
+      name: "OuterWrap",
+      size: { x: 40, y: 40 },
+      transform: identity(0, 6650),
+    },
+    {
+      ...base,
+      guid: innerScaledInst,
+      parentIndex: { guid: symOuterWrap, position: "!" },
+      type: "INSTANCE",
+      name: "ScaledInner",
+      size: { x: 32, y: 32 },
+      transform: identity(0, 0),
+      symbolData: { symbolID: symInnerBox, uniformScaleFactor: 2, symbolOverrides: [] },
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [innerBoxRect] },
+          size: { x: 20, y: 32 },
+        },
+      ],
+    },
+    {
+      ...base,
+      guid: outerSameModeCopy,
+      parentIndex: { guid: page, position: "~outSame" },
+      type: "INSTANCE",
+      name: "OuterWrapSameMode",
+      size: { x: 40, y: 40 },
+      transform: identity(0, 6720),
+      symbolData: { symbolID: symOuterWrap, symbolOverrides: [] },
+    },
+    {
+      ...base,
+      guid: outerTabletCopy,
+      parentIndex: { guid: tabletFrame, position: "$" },
+      type: "INSTANCE",
+      name: "OuterWrapTablet",
+      size: { x: 40, y: 40 },
+      transform: identity(100, 0),
+      symbolData: { symbolID: symOuterWrap, symbolOverrides: [] },
+    },
   ] as unknown as NodeChange[];
 
   const archive = patchFigArchive(
@@ -377,6 +568,14 @@ function buildArchive() {
       modeB2,
       gridMissing,
       gridResolved,
+      tabletFrame,
+      buttonInTablet,
+      iconInButton,
+      buttonOverriddenWidth,
+      outerSameModeCopy,
+      outerTabletCopy,
+      innerScaledInst,
+      innerBoxRect,
     },
   };
 }
@@ -422,5 +621,59 @@ describe(".fig importer fidelity", { timeout: 60_000 }, () => {
     // Resolvable numeric aliases resolve onto the grid gaps.
     const resolvedGrid = byId.get(drawpaneId(key(ids.gridResolved)));
     expect(resolvedGrid?.props).toMatchObject({ gap: 24, rowGap: 24 });
+
+    const icon = byId.get(drawpaneId(`I${key(ids.buttonInTablet)};${key(ids.iconInButton)}`));
+    expect([icon?.props.width, icon?.props.height]).toEqual([16, 24]);
+
+    // Explicit opposite-axis override (30x24) is preserved on import and across mode changes.
+    const wideIcon = byId.get(
+      drawpaneId(`I${key(ids.buttonOverriddenWidth)};${key(ids.iconInButton)}`),
+    );
+    expect([wideIcon?.props.width, wideIcon?.props.height]).toEqual([30, 24]);
+    const tabletId = drawpaneId(key(ids.tabletFrame));
+    const store = new MemoryStore(
+      nodes.map((n) =>
+        n.id === tabletId ? { ...n, props: { ...n.props, variableModes: {} } } : n,
+      ),
+    );
+    const resolvedWide = new TokenResolver(store).resolve(
+      store.get(wideIcon?.id as string) as never,
+    );
+    expect([resolvedWide.props.width, resolvedWide.props.height]).toEqual([30, 16]);
+
+    // Nested 2x derivedSymbolData width (20) holds in the same mode and re-resolves (48) in Tablet mode.
+    const sameModeLeaf = byId.get(
+      drawpaneId(
+        `I${key(ids.outerSameModeCopy)};${key(ids.innerScaledInst)};${key(ids.innerBoxRect)}`,
+      ),
+    );
+    expect(sameModeLeaf?.props.width).toBe(20);
+    const tabletLeaf = byId.get(
+      drawpaneId(
+        `I${key(ids.outerTabletCopy)};${key(ids.innerScaledInst)};${key(ids.innerBoxRect)}`,
+      ),
+    );
+    expect(tabletLeaf?.props.width).toBe(48);
+  });
+
+  it("preserves nested derivedOrigins across checkpoint and resume before loading pages", () => {
+    const { archive } = buildArchive();
+    const buf = archive.slice().buffer as ArrayBuffer;
+    const session = createFigDocumentSession(buf, { derivedBounds: true });
+    const checkpoint = session.checkpoint();
+    const resumed = createFigDocumentSession(
+      buf,
+      { derivedBounds: true },
+      { graph: session.graph, checkpoint },
+    );
+    for (const page of resumed.pages) resumed.loadPage(page.id);
+    const afterCheckpoint = resumed.checkpoint() as { derivedOrigins?: unknown[] };
+    expect(Array.isArray(afterCheckpoint.derivedOrigins)).toBe(true);
+    expect((afterCheckpoint.derivedOrigins ?? []).length).toBeGreaterThan(0);
+
+    const leaves = [...resumed.graph.getAllNodes()].filter((n) => n.name === "BoundLeaf");
+    const widths = leaves.map((n) => n.width).sort((a, b) => a - b);
+    expect(widths).toContain(20);
+    expect(widths).toContain(48);
   });
 });

@@ -383,6 +383,59 @@ describe("bound sizes keep within their bounds", () => {
     expect(p.minHeight).toBe(32);
     expect(p.height).toBe(28);
   });
+
+  it("preserves legacy bounded bindings on hug/fill while box bindings ignore hug/fill and keep fixed min/max", () => {
+    const store = file([
+      node("v4", "variable", "c", { variableType: "number", values: { light: 4, dark: 4 } }),
+      node("v24", "variable", "c", { variableType: "number", values: { light: 24, dark: 24 } }),
+      node("v40", "variable", "c", { variableType: "number", values: { light: 40, dark: 40 } }),
+      // Stored legacy `bounded` on hug frame keeps reading the bound value (4) on open.
+      node("legacyHug", "frame", "p", {
+        width: 120,
+        height: 36,
+        sizingH: "hug",
+        bindings: { width: { variable: "v4", unit: "bounded" } },
+      } as never),
+      // New `box` bindings ignore hug/fill axes.
+      node("btn", "frame", "p", {
+        width: 120,
+        height: 36,
+        sizingH: "hug",
+        sizingV: "fill",
+        bindings: {
+          width: { variable: "v40", unit: "box" },
+          height: { variable: "v40", unit: "box" },
+        },
+      } as never),
+      // Fixed `box` binding resolves and clamps to its own min/max without driving the opposite axis.
+      node("fixedBox", "frame", "p", {
+        width: 16,
+        height: 16,
+        maxHeight: 20,
+        lockAspect: true,
+        bindings: { height: { variable: "v24", unit: "box" } },
+      } as never),
+    ]);
+    const resolver = new TokenResolver(store);
+    expect(resolver.resolve(store.get("legacyHug") as NodeRecord).props.width).toBe(4);
+    const btn = resolver.resolve(store.get("btn") as NodeRecord).props;
+    expect(btn.width).toBe(120);
+    expect(btn.height).toBe(36);
+    const fixedBox = resolver.resolve(store.get("fixedBox") as NodeRecord).props;
+    expect([fixedBox.width, fixedBox.height]).toEqual([16, 20]);
+  });
+
+  it("keeps literal fallback overrides in boundAlike when a box binding does not drive a hug axis", () => {
+    const store = file([
+      node("v40", "variable", "c", { variableType: "number", values: { light: 40, dark: 40 } }),
+    ]);
+    const get = (id: string) => store.get(id);
+    const boxRef = { width: { variable: "v40", unit: "box" } };
+    const hug = { sizingH: "hug", bindings: boxRef };
+    const fixed = { sizingH: "fixed", bindings: boxRef };
+    expect(boundAlike("width", 80, 120, boxRef, boxRef, get, hug, hug)).toBe(false);
+    expect(boundAlike("width", 80, 120, boxRef, boxRef, get, fixed, fixed)).toBe(true);
+  });
 });
 
 describe("text spacing is read in the layer's unit, as Figma does", () => {
