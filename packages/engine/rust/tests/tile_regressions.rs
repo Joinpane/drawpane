@@ -1,12 +1,15 @@
 //! Regressions in the engine's tiles (decision 0040, phase 2), each one a frame that went wrong
 //! before its fix: holes in zoom frames under tight slot budgets, a reader inside a reader left
-//! stale, a mitered stroke culled from a tile.
+//! stale, a mitered stroke culled from a tile; prefetch pinning the slots a missing tile was
+//! promised, a reader chain rechecking every change on every pass, an atlas refusing a mask its
+//! free rows would hold.
 
 mod common;
 
 use common::*;
 use drawpane_engine::engine::{Camera, Engine, TiledOptions};
 use drawpane_engine::limits::Limits;
+use drawpane_engine::tiles::{Last, TileCache, TileKey};
 use vello_common::kurbo::Affine;
 
 fn camera(zoom: f64, x: f64, y: f64) -> Camera {
@@ -225,4 +228,245 @@ fn wire_stroke_miter_can_reach_across_a_tile_boundary() {
     );
     assert!(stats.exact);
     assert_eq!(tiles[at], whole[at], "the tile culled a visible miter");
+}
+
+#[test]
+fn prefetch_cannot_pin_the_slots_promised_to_a_missing_visible_tile() {
+    let mut cache = TileCache::new(512, 16);
+    let view = Affine::IDENTITY;
+    cache.begin([0.0; 4], 0);
+    let level = cache.plan(view, (2048, 1024), false, None, false).unwrap().level;
+    let warm = (0..2)
+        .flat_map(|j| (0..4).map(move |i| (i, j)))
+        .filter(|&cell| cell != (0, 0))
+        .chain((-1..=4).map(|i| (i, -1)))
+        .chain([(-1, 0), (-1, 1), (-1, 2)]);
+    for (i, j) in warm {
+        let key = TileKey { level, i, j };
+        let slot = cache.slot_for(key).unwrap();
+        cache.drawn(key, slot, true);
+    }
+
+    // Seven visible tiles and nine neighbors are still held. A prior stand-in covered the view.
+    // The eighth visible coordinate has no tile.
+    let last = Some(Last {
+        view,
+        size: (2048, 1024),
+    });
+    for _ in 0..3 {
+        cache.begin([0.0; 4], 0);
+        let plan = cache.plan(view, (2048, 1024), false, last, true).unwrap();
+        let job = plan
+            .jobs
+            .iter()
+            .find(|j| j.key == (TileKey { level, i: 0, j: 0 }))
+            .unwrap();
+        let slot = cache.slot_for(job.key);
+        if let Some(slot) = slot {
+            cache.drawn(job.key, slot, true);
+            break;
+        }
+    }
+    let key = TileKey { level, i: 0, j: 0 };
+    assert!(
+        cache.get(&key).is_some(),
+        "prefetch pinned all 16 slots on every rest frame"
+    );
+}
+
+#[test]
+fn a_reader_chain_against_preorder_checks_each_change_once() {
+    use drawpane_engine::engine::Engine;
+    use drawpane_engine::limits::Limits;
+    use drawpane_engine::store::Dirty;
+    use vello_common::kurbo::Rect;
+
+    const NESTED: u32 = 128;
+    const UNRELATED: usize = 16_384;
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    for id in 1..=NESTED {
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, -4.0, 0.0], [1.0, 8.0]);
+        r.ops = vec![Op::Children, Op::Read { halo: 2.0 }];
+        list.set(id, id - 1, &r);
+    }
+    let mut engine = Engine::new(Limits::default());
+    engine.apply(&list.finish()).unwrap();
+    assert_eq!(engine.halo(Affine::IDENTITY).unwrap(), 512);
+    let mut dirty = vec![
+        Dirty {
+            rect: Rect::new(1000.0, 0.0, 1001.0, 8.0),
+            order: 0,
+            end: 0,
+            stale: true,
+        };
+        UNRELATED
+    ];
+    let x = -4.0 * f64::from(NESTED);
+    dirty.push(Dirty {
+        rect: Rect::new(x, 0.0, x + 1.0, 8.0),
+        order: 0,
+        end: 0,
+        stale: true,
+    });
+    let result = engine.store.dirty(&dirty, Affine::IDENTITY, 1.5);
+    assert_eq!(result.len(), dirty.len() + NESTED as usize);
+    // Each reader is checked against each change at most once: readers × (changes + readers).
+    let bound = u64::from(NESTED) * (dirty.len() as u64 + u64::from(NESTED));
+    assert!(
+        engine.store.dirty_checks() <= bound,
+        "{} checks for {NESTED} readers and {} changes",
+        engine.store.dirty_checks(),
+        dirty.len()
+    );
+}
+
+#[test]
+fn atlas_eviction_can_combine_the_last_shelf_and_free_tail() {
+    use drawpane_engine::atlas::{Placed, Shelves};
+    let mut atlas = Shelves::new(64);
+    assert!(matches!(atlas.place(63, 50, 1), Some(Placed::At { y: 0, .. })));
+    // The preceding submission alone used this shelf. The whole texture is now reusable.
+    assert!(
+        atlas.place(30, 60, 2).is_some(),
+        "eviction ignored the unused rows below the last shelf"
+    );
+}
+
+/// A card: a rounded box filled and stroked, then a clip to it round its children (a box and a
+/// circle, inset by `inset`), as the editor sends a frame that clips its content.
+fn card(inset: f32, radius: f32) -> Vec<u8> {
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    let mut frame = Rec::new([1.0, 0.0, 0.0, 1.0, 10.3, 7.7], [120.0, 90.0]);
+    frame.paths.push(Entry::Rect {
+        w: 120.0,
+        h: 90.0,
+        radii: [radius; 4],
+    });
+    frame.ops = vec![
+        Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.9, 0.9, 0.85, 1.0]),
+        },
+        Op::Clip {
+            path: 0,
+            even_odd: false,
+        },
+        Op::Children,
+        Op::Unclip,
+    ];
+    msg.set(1, 0, &frame);
+    let mut inner = solid(f64::from(inset) + 0.37, 120.0 - 2.0 * inset, 30.0, 0.8);
+    inner.transform[5] = f64::from(inset) + 0.61;
+    msg.set(2, 1, &inner);
+    let mut dot = Rec::new([1.0, 0.0, 0.0, 1.0, f64::from(inset) + 3.3, 55.2], [21.7, 21.7]);
+    dot.paths.push(Entry::Ellipse { w: 21.7, h: 21.7 });
+    dot.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.1, 0.4, 0.9, 0.7]),
+    });
+    msg.set(3, 1, &dot);
+    msg.finish()
+}
+
+#[test]
+fn a_clip_that_changes_nothing_draws_the_same_pixels_left_out() {
+    // Content clear of the corners: the clip is left out. The same card with corners round
+    // enough to reach the content keeps its clip; where the content is, both draw alike.
+    let c = Camera {
+        zoom: 0.73,
+        x: 3.3,
+        y: -1.6,
+        dpr: 1.25,
+    };
+    let draw = |bytes: &[u8]| {
+        let mut e = Engine::new(Limits::default());
+        e.apply(bytes).unwrap();
+        e.render_cpu(160, 120, c, [1.0; 4], false).unwrap().0.to_vec()
+    };
+    let left_out = draw(&card(16.0, 12.0));
+    let kept = draw(&card(16.0, 40.0));
+    let s = 0.73 * 1.25;
+    let px = |v: f64, o: f64| (v * s + o * 1.25) as usize;
+    let (x0, y0) = (px(10.3 + 16.0, 3.3) + 1, px(7.7 + 16.0, -1.6) + 1);
+    let (x1, y1) = (px(10.3 + 104.0, 3.3) - 1, px(7.7 + 77.0, -1.6) - 1);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let at = (y * 160 + x) * 4;
+            assert_eq!(left_out[at..at + 4], kept[at..at + 4], "pixel ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn a_box_stroke_as_a_ring_matches_the_stroker() {
+    // A box's stroke is drawn as the ring it paints (rounded corners, or square ones under a miter
+    // or round join); the same outline sent as a path goes to the stroker. Within anti-aliasing.
+    use vello_common::kurbo::PathEl;
+    let draw = |entry: Entry, width: f32, join: u32| {
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 12.3, 9.6], [70.0, 44.0]);
+        r.paths.push(entry);
+        r.ops.push(Op::Stroke {
+            path: 0,
+            width,
+            join,
+            cap: 0,
+            dashes: vec![],
+            offset: 0.0,
+            paint: Paint::Solid([0.1, 0.2, 0.8, 1.0]),
+        });
+        let mut msg = W::new(ANY, 1);
+        msg.reset();
+        msg.set(1, 0, &r);
+        let mut e = Engine::new(Limits::default());
+        e.apply(&msg.finish()).unwrap();
+        e.render_cpu(100, 70, camera(1.3, 0.4, 0.2), [1.0; 4], false)
+            .unwrap()
+            .0
+            .to_vec()
+    };
+    for (radius, width, join) in [(12.0, 4.0, 0), (9.0, 7.5, 1), (0.0, 3.0, 0), (0.0, 3.0, 1)] {
+        let outline = drawpane_engine::geometry::rounded_rect(70.0, 44.0, [radius; 4], 0.0);
+        let path = outline
+            .elements()
+            .iter()
+            .map(|el| match *el {
+                PathEl::MoveTo(p) => (0, vec![p.x as f32, p.y as f32]),
+                PathEl::LineTo(p) => (1, vec![p.x as f32, p.y as f32]),
+                PathEl::QuadTo(a, p) => (2, vec![a.x as f32, a.y as f32, p.x as f32, p.y as f32]),
+                PathEl::CurveTo(a, b, p) => (
+                    3,
+                    vec![a.x as f32, a.y as f32, b.x as f32, b.y as f32, p.x as f32, p.y as f32],
+                ),
+                PathEl::ClosePath => (4, vec![]),
+            })
+            .collect();
+        let ring = draw(
+            Entry::Rect {
+                w: 70.0,
+                h: 44.0,
+                radii: [radius; 4],
+            },
+            width,
+            join,
+        );
+        let stroked = draw(Entry::Path(path), width, join);
+        let worst = ring
+            .iter()
+            .zip(&stroked)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        let off = ring.iter().zip(&stroked).filter(|(a, b)| a.abs_diff(**b) > 2).count();
+        assert!(ring.iter().any(|v| *v != 255), "drew nothing");
+        // A square corner may differ in a pixel or two where the stroker closes its outline.
+        let most = if radius > 0.0 { 24 } else { 64 };
+        assert!(
+            worst <= most && off <= 40,
+            "radius {radius}, width {width}, join {join}: worst {worst}, {off} channels off"
+        );
+    }
 }

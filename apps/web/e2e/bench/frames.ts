@@ -13,13 +13,17 @@ export interface Summary {
   overlay: { p50: number; p95: number; p99?: number; max: number };
   drawn: number;
   culled: number;
-  /** Ms from the last frame of the movement until the canvas showed an exact frame. */
-  exactMs?: number;
+  /** Ms from the last frame of the movement until the canvas showed an exact frame (null: never, within 10 s). */
+  exactMs?: number | null;
   /**
    * The render engine only: ms until it drew an exact frame (before a read-back shows it, in
    * headless browsers), and its slowest frame of the movement (ms, how it was made, tiles drawn).
    */
-  engine?: { exactMs: number; worst: { ms: number; plan: string; tiles: number }; settle?: Settle };
+  engine?: {
+    exactMs: number | null;
+    worst: { ms: number; plan: string; tiles: number };
+    settle?: Settle;
+  };
 }
 
 /**
@@ -139,9 +143,11 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
           )
           .join(" ");
         if (traced) traced.trace = null;
+        // A wait that ran out is reported as such, never as the time it waited.
+        const timedOut = !f.exact;
         return {
-          shown,
-          drawn: Math.round(drawn < 0 ? shown : drawn),
+          shown: timedOut ? null : shown,
+          drawn: drawn < 0 ? null : Math.round(drawn),
           settle: { ...settle, trace },
         };
       };
@@ -266,7 +272,13 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
         )
         .join(" ");
       if (traced) traced.trace = null;
-      return { shown, drawn: Math.round(drawn < 0 ? shown : drawn), settle: { ...settle, trace } };
+      // A wait that ran out is reported as such, never as the time it waited.
+      const timedOut = !f.exact;
+      return {
+        shown: timedOut ? null : shown,
+        drawn: drawn < 0 ? null : Math.round(drawn),
+        settle: { ...settle, trace },
+      };
     };
     await nextFrame();
     await nextFrame();
@@ -300,4 +312,135 @@ function settleText(s: Settle | undefined): string {
 /** One line of a frame summary for the console. */
 export function summaryRow(name: string, r: Summary): string {
   return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · exact after ${r.exactMs ?? "-"} ms${r.engine ? ` (drawn exact after ${r.engine.exactMs} ms; slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles${settleText(r.engine.settle)})` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
+}
+
+/** p50, p95 and the worst of some samples, in ms (empty: nulls). */
+export interface Spread {
+  p50: number | null;
+  p95: number | null;
+  max: number | null;
+}
+
+/**
+ * Settling after movements, repeated: each gesture timed from its latest input (the last camera
+ * or layer change it made, not the frame after it) to the engine's exact frame drawn, the GPU's
+ * having finished it (no read-back in it), and its being shown (a read-back painted, headless).
+ * Gestures that don't settle within 5 s count as timeouts, never as times. Stamped with what drew
+ * them: the renderer, the page and the engine's revision.
+ */
+export interface Settles {
+  kind: "zoom" | "pan" | "drag";
+  gestures: number;
+  timeouts: number;
+  drawn: Spread;
+  gpu: Spread;
+  shown: Spread;
+  stamp: { renderer: string; pageId: string; revision: number | null };
+}
+
+/** `count` gestures of `kind` (20 frames each, alternating direction), each settled before the next. */
+export async function settles(
+  page: Page,
+  kind: "zoom" | "pan" | "drag",
+  count: number,
+  layer?: string,
+): Promise<Settles> {
+  return page.evaluate(
+    async ({ kind, count, layer }) => {
+      type Camera = {
+        zoom: number;
+        pan(dx: number, dy: number): Camera;
+        zoomAt(screen: { x: number; y: number }, zoom: number): Camera;
+      };
+      type Stamp = { n: number; at: number };
+      type View = {
+        stamps: { drawn?: Stamp; gpu?: Stamp; shown?: Stamp } | null;
+        last: { pageId?: string; supported: boolean };
+        engine: { revision: number };
+      };
+      const w = window as unknown as {
+        drawpane: {
+          s: { camera: Camera; pageId: string; viewport: { width: number; height: number } };
+          state: { set(patch: { camera: Camera }): void };
+          doc: { get(id: string): { props: Record<string, unknown> } | undefined };
+          setProp(ids: string[], prop: string, value: unknown): void;
+        };
+        drawpaneFrames: { exact: boolean };
+        drawpaneEngineView?: View;
+      };
+      const e = w.drawpane;
+      const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+      const view = () => w.drawpaneEngineView;
+      const drawn: number[] = [];
+      const gpu: number[] = [];
+      const shown: number[] = [];
+      let timeouts = 0;
+      const centre = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
+      for (let g = 0; g < count; g++) {
+        const sign = g % 2 === 0 ? 1 : -1;
+        let input = 0;
+        for (let i = 0; i < 20; i++) {
+          if (kind === "zoom")
+            e.state.set({
+              camera: e.s.camera.zoomAt(centre, e.s.camera.zoom * (sign > 0 ? 1.03 : 1 / 1.03)),
+            });
+          else if (kind === "pan") e.state.set({ camera: e.s.camera.pan(6 * sign, 3 * sign) });
+          else if (layer) {
+            const x = Number(e.doc.get(layer)?.props.x ?? 0);
+            e.setProp([layer], "x", x + 4 * sign);
+          }
+          input = performance.now();
+          // From the latest input on: what an exact frame of the gesture's end is stamped with.
+          const v = view();
+          if (v && i === 19) v.stamps = {};
+          await frame();
+        }
+        const v = view();
+        const t = performance.now();
+        while (performance.now() - t < 5000) {
+          const st = v?.stamps;
+          const engineDone = st?.drawn && st.shown && st.gpu;
+          if (v ? engineDone : w.drawpaneFrames.exact) break;
+          await frame();
+        }
+        const st = v?.stamps;
+        if (v ? !(st?.drawn && st.shown) : !w.drawpaneFrames.exact) {
+          timeouts++;
+          continue;
+        }
+        if (st?.drawn) drawn.push(st.drawn.at - input);
+        if (st?.gpu) gpu.push(st.gpu.at - input);
+        if (st?.shown) shown.push(st.shown.at - input);
+        else shown.push(performance.now() - input);
+        if (v) v.stamps = null;
+      }
+      const spread = (xs: number[]) => {
+        const s = [...xs].sort((a, b) => a - b);
+        const at = (q: number) =>
+          s.length ? Math.round(s[Math.ceil(q * (s.length - 1))] as number) : null;
+        return { p50: at(0.5), p95: at(0.95), max: at(1) };
+      };
+      const v = view();
+      return {
+        kind,
+        gestures: count,
+        timeouts,
+        drawn: spread(drawn),
+        gpu: spread(gpu),
+        shown: spread(shown),
+        stamp: {
+          renderer: v?.last.supported ? "engine" : "canvas",
+          pageId: e.s.pageId,
+          revision: v ? v.engine.revision : null,
+        },
+      };
+    },
+    { kind, count, layer },
+  );
+}
+
+/** One line of settling results for the console. */
+export function settlesRow(r: Settles): string {
+  const s = (x: Spread) => `p50 ${x.p50 ?? "-"} / p95 ${x.p95 ?? "-"} / max ${x.max ?? "-"}`;
+  return `settle, ${r.kind.padEnd(5)} ${r.gestures} gestures, ${r.timeouts} timed out · drawn ${s(r.drawn)} · gpu done ${s(r.gpu)} · shown ${s(r.shown)} ms · ${r.stamp.renderer} on ${r.stamp.pageId}, revision ${r.stamp.revision}`;
 }

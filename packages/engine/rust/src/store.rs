@@ -35,6 +35,8 @@ pub struct Node {
     pub children: Vec<u32>,
     /// Subtree bounds in the record's own units: unknown (None) until computed.
     bounds: Cell<Option<Option<Rect>>>,
+    /// Its shown children's bounds in its units, before any clip: computed with `bounds`.
+    kids: Cell<Option<Option<Rect>>>,
 }
 
 impl Node {
@@ -44,6 +46,7 @@ impl Node {
             parent,
             children: Vec::new(),
             bounds: Cell::new(None),
+            kids: Cell::new(None),
         }
     }
 }
@@ -123,6 +126,8 @@ pub struct Store {
     pub revision: u32,
     /// Records with backdrop readers, for invalidation.
     readers: Vec<u32>,
+    /// How many change-against-reader checks the last `dirty` made (its cost, for the tests).
+    dirty_checks: Cell<u64>,
     /// Records holding features the engine doesn't draw (their `unsupported` bits).
     unsupported: HashSet<u32>,
     /// Records that paint an image, so an image changing invalidates only what shows it.
@@ -175,6 +180,7 @@ impl Store {
             glyphs: GlyphStore::default(),
             revision: 0,
             readers: Vec::new(),
+            dirty_checks: Cell::new(0),
             unsupported: HashSet::new(),
             image_records: HashSet::new(),
             bytes: 0,
@@ -416,6 +422,7 @@ impl Store {
         self.structure += 1;
         for n in self.nodes.values() {
             n.bounds.set(None);
+            n.kids.set(None);
         }
     }
 
@@ -515,6 +522,7 @@ impl Store {
                     let old = std::mem::replace(&mut node.record, record);
                     node.parent = parent;
                     node.bounds.set(None);
+                    node.kids.set(None);
                     self.bytes = self.bytes + cost - old.heap_bytes();
                     self.glyphs.release(&old);
                     if structural {
@@ -683,6 +691,7 @@ impl Store {
         loop {
             let Some(n) = self.nodes.get(&id) else { return };
             n.bounds.set(None);
+            n.kids.set(None);
             if id == ROOT {
                 return;
             }
@@ -789,6 +798,7 @@ impl Store {
                     children = Some(children.map_or(t, |o| o.union(t)));
                 }
             }
+            node.kids.set(Some(children));
             if let (Some(mut ch), Some(clip)) = (children, self.children_clip(r)) {
                 ch = ch.intersect(clip);
                 children = (ch.width() >= 0.0 && ch.height() >= 0.0).then_some(ch);
@@ -827,6 +837,12 @@ impl Store {
             out = Some(out.map_or(b, |o| o.intersect(b)));
         }
         out
+    }
+
+    /// Where a record's shown children paint, in its units, before any clip it draws them in.
+    pub fn children_extent(&self, id: u32) -> Option<Rect> {
+        self.bounds(id);
+        self.nodes.get(&id)?.kids.get().flatten()
     }
 
     /// Where a record's subtree paints, in page units.
@@ -871,38 +887,72 @@ impl Store {
             })
             .collect();
         if !self.readers.is_empty() && !items.is_empty() {
-            let mut readers: Vec<(u32, u32, u32)> = self
-                .readers
-                .clone()
-                .into_iter()
-                .map(|id| {
-                    let (o, e) = self.order_of(id);
-                    (o, e, id)
-                })
-                .collect();
-            readers.sort_unstable();
+            // Each reader's paint order, subtree end, read and paint regions on the device, and
+            // whether it reads after its children: worked out once.
+            struct Reader {
+                order: u32,
+                end: u32,
+                reads: Rect,
+                paints: Rect,
+                after_children: bool,
+                /// Changes before this index are known not to reach it.
+                seen: usize,
+                joined: bool,
+            }
+            let mut readers: Vec<Reader> = Vec::with_capacity(self.readers.len());
+            for id in self.readers.clone() {
+                if !self.drawn(id) {
+                    continue;
+                }
+                let (order, end) = self.order_of(id);
+                let Some(node) = self.nodes.get(&id) else { continue };
+                let r = &node.record;
+                let halo = f64::from(r.reads().unwrap_or(0.0));
+                let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
+                let device = view * self.world(id);
+                readers.push(Reader {
+                    order,
+                    end,
+                    reads: device.transform_rect_bbox(b.inflate(halo, halo)).inflate(slop, slop),
+                    paints: device.transform_rect_bbox(b).inflate(slop, slop),
+                    // Its own subtree's changes are above it, unless it reads (any of its reads)
+                    // after its children are drawn.
+                    after_children: r
+                        .ops
+                        .iter()
+                        .skip_while(|op| !matches!(op, Op::Children))
+                        .any(|op| matches!(op, Op::Read { .. })),
+                    seen: 0,
+                    joined: false,
+                });
+            }
+            readers.sort_unstable_by_key(|r| r.order);
             // In paint order, then again until no reader joins: a reader that reads after its
             // children reads what readers inside it paint, and those come later in paint order
-            // (a fixed point, conservative; each pass adds a reader or ends, so at most one pass
-            // per reader).
-            let mut joined = vec![false; readers.len()];
+            // (a fixed point, conservative). Each reader is checked only against the changes it
+            // hasn't seen, so the closure costs readers × changes at most, however the passes go.
+            let mut checks = 0u64;
             loop {
                 let mut grew = false;
-                for (n, &(order, end, id)) in readers.iter().enumerate() {
-                    if joined[n] {
+                for r in readers.iter_mut() {
+                    if r.joined {
                         continue;
                     }
-                    if self.reader_affected(id, order, end, view, slop, &items)
-                        && let Some(node) = self.nodes.get(&id)
-                    {
-                        joined[n] = true;
+                    let from = r.seen;
+                    checks += (items.len() - from) as u64;
+                    let hit = items[from..].iter().any(|d| {
+                        let beneath =
+                            d.stale || d.order < r.order || (r.after_children && d.order <= r.end && d.order > r.order);
+                        beneath && overlaps(d.rect, r.reads)
+                    });
+                    r.seen = items.len();
+                    if hit {
+                        r.joined = true;
                         grew = true;
-                        let b = Rect::new(0.0, 0.0, f64::from(node.record.size[0]), f64::from(node.record.size[1]));
-                        let paints = (view * self.world(id)).transform_rect_bbox(b).inflate(slop, slop);
                         items.push(Dirty {
-                            rect: paints,
-                            order,
-                            end: order,
+                            rect: r.paints,
+                            order: r.order,
+                            end: r.order,
                             stale: false,
                         });
                     }
@@ -911,34 +961,15 @@ impl Store {
                     break;
                 }
             }
+            self.dirty_checks.set(checks);
         }
         items.into_iter().map(|d| d.rect).collect()
     }
 
-    /// Whether what reader `id` (paint order `order`, its subtree through `end`) reads changed:
-    /// a change beneath it (earlier in paint order: an earlier subtree or an ancestor), or in its
-    /// own subtree if it reads after its children, touches its read region.
-    fn reader_affected(&self, id: u32, order: u32, end: u32, view: Affine, slop: f64, items: &[Dirty]) -> bool {
-        let Some(node) = self.nodes.get(&id) else { return false };
-        if !self.drawn(id) {
-            return false;
-        }
-        let halo = f64::from(node.record.reads().unwrap_or(0.0));
-        let b = Rect::new(0.0, 0.0, f64::from(node.record.size[0]), f64::from(node.record.size[1]));
-        let device = view * self.world(id);
-        let reads = device.transform_rect_bbox(b.inflate(halo, halo)).inflate(slop, slop);
-        // Its own subtree's changes are above it, unless it reads (any of its reads) after its
-        // children are drawn.
-        let reads_after_children = node
-            .record
-            .ops
-            .iter()
-            .skip_while(|op| !matches!(op, Op::Children))
-            .any(|op| matches!(op, Op::Read { .. }));
-        items.iter().any(|d| {
-            let beneath = d.stale || d.order < order || (reads_after_children && d.order <= end && d.order > order);
-            beneath && overlaps(d.rect, reads)
-        })
+    /// How many change-against-reader checks the last `dirty` made: its cost, bounded by readers
+    /// times the changes and the readers that join.
+    pub fn dirty_checks(&self) -> u64 {
+        self.dirty_checks.get()
     }
 
     /// Whether a record and every ancestor are shown.

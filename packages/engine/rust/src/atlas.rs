@@ -95,6 +95,9 @@ impl Shelves {
     /// Empties the run of neighbouring shelves, none drawn from in `frame`, that's tall enough for
     /// a `w` × `h` mask and least recently used, and puts a shelf `h` tall at its top.
     fn merge(&mut self, w: u32, h: u32, frame: u64) -> Option<Placed> {
+        // A run reaching the last shelf may also take the free rows below it.
+        let last = self.shelves.len().checked_sub(1)?;
+        let reach = |j: usize, s: &Shelf| if j == last { self.side } else { s.y + s.h };
         let mut best: Option<(u64, usize, usize)> = None;
         for i in 0..self.shelves.len() {
             let top = self.shelves[i].y;
@@ -105,7 +108,7 @@ impl Shelves {
                     break;
                 }
                 newest = newest.max(s.used);
-                if s.y + s.h - top >= h {
+                if reach(j, &s) - top >= h {
                     if best.is_none_or(|(n, _, _)| newest < n) {
                         best = Some((newest, i, j));
                     }
@@ -115,6 +118,7 @@ impl Shelves {
         }
         let (_, i, j) = best?;
         let top = self.shelves[i].y;
+        // The rows masks were on (their masks are evicted); past them, free rows.
         let end = self.shelves[j].y + self.shelves[j].h;
         let mut fresh = vec![Shelf {
             y: top,
@@ -122,7 +126,10 @@ impl Shelves {
             x: w + 1,
             used: frame,
         }];
-        if end > top + h + 1 {
+        if j == last {
+            // The tail below is free again from the new shelf's end.
+            self.next_y = top + h + 1;
+        } else if end > top + h + 1 {
             fresh.push(Shelf {
                 y: top + h + 1,
                 h: end - (top + h + 1),

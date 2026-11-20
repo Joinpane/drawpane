@@ -548,6 +548,14 @@ impl TileCache {
         }
     }
 
+    /// Pins a held tile only while slots are spare (tiles round the view, kept ahead of a pan):
+    /// never one the frame's own tiles were promised.
+    fn pin_spare(&mut self, key: &TileKey, room: &mut usize) {
+        if *room > 0 {
+            self.pin(key, room);
+        }
+    }
+
     /// Plans a `size` frame under `view`. `zooming`: the scale changed since the last frame.
     /// `last`: the frame shown before, which may stand in under what isn't drawn yet.
     /// `prefetch`: tiles round the view may be drawn too, when the budget allows.
@@ -818,9 +826,9 @@ impl TileCache {
             for (i, j) in ring {
                 let key = TileKey { level: id, i, j };
                 match self.tiles.get(&key).copied() {
-                    Some(e) if !e.stale && e.exact => self.pin(&key, &mut room),
+                    Some(e) if !e.stale && e.exact => self.pin_spare(&key, &mut room),
                     Some(_) => {
-                        self.pin(&key, &mut room);
+                        self.pin_spare(&key, &mut room);
                         plan.jobs.push(frame_job(key, false, false));
                     }
                     None if room > 0 => {
@@ -846,9 +854,9 @@ impl TileCache {
                         for a in a0..=a1 {
                             let key = TileKey { level: cid, i: a, j: b };
                             match self.tiles.get(&key).copied() {
-                                Some(e) if !e.stale => self.pin(&key, &mut room),
+                                Some(e) if !e.stale => self.pin_spare(&key, &mut room),
                                 Some(_) => {
-                                    self.pin(&key, &mut room);
+                                    self.pin_spare(&key, &mut room);
                                     plan.jobs.push(Job {
                                         key,
                                         view: coarse.tile_view(a, b, self.tile),

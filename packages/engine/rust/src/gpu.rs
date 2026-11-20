@@ -78,6 +78,8 @@ struct Main {
 struct Atlas {
     texture: wgpu::Texture,
     shelves: Shelves,
+    /// Masks placed and not uploaded yet: x, y, width, height, pixels (`flush_masks`).
+    pending: Vec<(u32, u32, u32, u32, Vec<u8>)>,
 }
 
 /// Read-backs in flight at once, at most.
@@ -251,6 +253,61 @@ pub enum Target {
 }
 
 impl Gpu {
+    /// A coverage mask for `key` (a glyph's or a run's), made if it isn't held and fits within
+    /// `side` device pixels a side.
+    fn mask_with(
+        &mut self,
+        key: MaskKey,
+        path: &BezPath,
+        scale: (f64, f64),
+        phase: (f64, f64),
+        side: u32,
+    ) -> Option<GlyphMask> {
+        let source = |r: RectU16| ImageSource::external_texture(ATLAS_ID, TextureRegion::Rect(r), true);
+        let frame = self.masks.frame();
+        if let Some(e) = self.masks.get(&key) {
+            let (rect, origin, size) = (e.value, e.origin, e.size);
+            self.atlas.shelves.touch(u32::from(rect.y0), frame);
+            return Some((source(rect), origin, size));
+        }
+        // Room first (in the budget, then the atlas), so a mask that can't be kept isn't
+        // rasterised: that glyph is drawn as its outline.
+        let (w, h) = masks::mask_size(path, scale.0, scale.1, phase, side)?;
+        if !self.masks.fits(masks::bytes((w, h))) {
+            self.masks.stats.outlines += 1;
+            return None;
+        }
+        let (x, y) = match self.atlas.shelves.place(u32::from(w), u32::from(h), frame) {
+            Some(Placed::At { x, y }) => (x, y),
+            Some(Placed::Reused { x, y, shelf_y, shelf_h }) => {
+                let (y0, y1) = (shelf_y, shelf_y + shelf_h);
+                self.masks
+                    .evict_where(|r: &RectU16| u32::from(r.y0) >= y0 && u32::from(r.y0) < y1);
+                (x, y)
+            }
+            None => {
+                self.masks.stats.outlines += 1;
+                return None;
+            }
+        };
+        let (mask, origin) = masks::rasterise(&mut self.cpu_resources, path, scale.0, scale.1, phase, side)?;
+        if (mask.width(), mask.height()) != (w, h) {
+            return None;
+        }
+        // Uploaded with the tile's other new masks, a write per shelf (`flush_masks`).
+        self.atlas
+            .pending
+            .push((x, y, u32::from(w), u32::from(h), mask.data_as_u8_slice().to_vec()));
+        let rect = RectU16 {
+            x0: x as u16,
+            y0: y as u16,
+            x1: (x + u32::from(w)) as u16,
+            y1: (y + u32::from(h)) as u16,
+        };
+        let e = self.masks.insert(key, rect, origin, (w, h));
+        Some((source(e.value), e.origin, e.size))
+    }
+
     /// A WebGPU device and, given a canvas, a surface on it. In compatibility mode the caller
     /// has made `navigator.gpu.requestAdapter` ask for a compatibility adapter; the device is
     /// requested with the adapter's own limits either way, so a compatibility adapter takes it.
@@ -439,6 +496,7 @@ impl Gpu {
             atlas: Atlas {
                 texture: atlas_tex,
                 shelves: Shelves::new(ATLAS_SIDE),
+                pending: Vec::new(),
             },
             masks: MaskCache::new(mask_bytes),
             mask_side,
@@ -744,7 +802,7 @@ impl Gpu {
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
         let last = self.last;
         let bg_bits = background.map(f32::to_bits);
-        let plan = self
+        let mut plan = self
             .tiles
             .plan(view, (w, h), zooming, last, options.prefetch)
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
@@ -802,6 +860,13 @@ impl Gpu {
         if plan.direct {
             stats.plan = 2;
         } else {
+            // What's drawn straight into the frame after it covers its tile there: the composite
+            // counts it so (what no slot could be found for included).
+            for job in plan.jobs.iter_mut() {
+                if late.iter().any(|l| l.key == job.key) {
+                    job.direct = true;
+                }
+            }
             let comp = self.tiles.compose(&plan, last);
             stats.exact = comp.exact;
             stats.pending = comp.pending;
@@ -986,6 +1051,41 @@ impl Gpu {
         }
     }
 
+    /// Uploads the masks placed since the last flush: one write per atlas shelf they're on (a
+    /// shelf's new masks lie side by side, so the box round them holds nothing else), not one per
+    /// mask. A page shown at a new scale places thousands, and each write is a call into the
+    /// browser.
+    fn flush_masks(&mut self) {
+        let mut pending = std::mem::take(&mut self.atlas.pending);
+        if pending.is_empty() {
+            return;
+        }
+        pending.sort_unstable_by_key(|m| (m.1, m.0));
+        let mut i = 0;
+        while i < pending.len() {
+            let y = pending[i].1;
+            let mut j = i;
+            while j < pending.len() && pending[j].1 == y {
+                j += 1;
+            }
+            let shelf = &pending[i..j];
+            let x0 = shelf.iter().map(|m| m.0).min().unwrap_or(0);
+            let x1 = shelf.iter().map(|m| m.0 + m.2).max().unwrap_or(0);
+            let h = shelf.iter().map(|m| m.3).max().unwrap_or(0);
+            let row = (x1 - x0) as usize * 4;
+            let mut buf = vec![0u8; row * h as usize];
+            for (x, _, w, mh, data) in shelf {
+                let line = *w as usize * 4;
+                for r in 0..*mh as usize {
+                    let to = r * row + (*x - x0) as usize * 4;
+                    buf[to..to + line].copy_from_slice(&data[r * line..r * line + line]);
+                }
+            }
+            write(&self.queue, &self.atlas.texture, x0, y, x1 - x0, h, &buf);
+            i = j;
+        }
+    }
+
     /// Draws one tile: the scene under its view, `TILE` × `TILE` pixels, into its slot (or the
     /// scratch tile, then straight into frame texture `dst` where the frame shows it). Answers
     /// whether it was drawn exactly (no level of detail stood in).
@@ -1034,6 +1134,8 @@ impl Gpu {
             TileTarget::Slot(slot) => Some(self.slot_place(slot)?),
             TileTarget::Scratch => None,
         };
+        // The masks this tile placed reach the atlas before it renders.
+        self.flush_masks();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tile") });
@@ -1546,54 +1648,8 @@ impl Backend for Gpu {
     }
 
     fn glyph_mask(&mut self, key: MaskKey, path: &BezPath, scale: (f64, f64), phase: (f64, f64)) -> Option<GlyphMask> {
-        let source = |r: RectU16| ImageSource::external_texture(ATLAS_ID, TextureRegion::Rect(r), true);
-        let frame = self.masks.frame();
-        if let Some(e) = self.masks.get(&key) {
-            let (rect, origin, size) = (e.value, e.origin, e.size);
-            self.atlas.shelves.touch(u32::from(rect.y0), frame);
-            return Some((source(rect), origin, size));
-        }
-        // Room first (in the budget, then the atlas), so a mask that can't be kept isn't
-        // rasterised: that glyph is drawn as its outline.
-        let (w, h) = masks::mask_size(path, scale.0, scale.1, phase, self.mask_side)?;
-        if !self.masks.fits(masks::bytes((w, h))) {
-            self.masks.stats.outlines += 1;
-            return None;
-        }
-        let (x, y) = match self.atlas.shelves.place(u32::from(w), u32::from(h), frame) {
-            Some(Placed::At { x, y }) => (x, y),
-            Some(Placed::Reused { x, y, shelf_y, shelf_h }) => {
-                let (y0, y1) = (shelf_y, shelf_y + shelf_h);
-                self.masks
-                    .evict_where(|r: &RectU16| u32::from(r.y0) >= y0 && u32::from(r.y0) < y1);
-                (x, y)
-            }
-            None => {
-                self.masks.stats.outlines += 1;
-                return None;
-            }
-        };
-        let (mask, origin) = masks::rasterise(&mut self.cpu_resources, path, scale.0, scale.1, phase, self.mask_side)?;
-        if (mask.width(), mask.height()) != (w, h) {
-            return None;
-        }
-        write(
-            &self.queue,
-            &self.atlas.texture,
-            x,
-            y,
-            u32::from(w),
-            u32::from(h),
-            mask.data_as_u8_slice(),
-        );
-        let rect = RectU16 {
-            x0: x as u16,
-            y0: y as u16,
-            x1: (x + u32::from(w)) as u16,
-            y1: (y + u32::from(h)) as u16,
-        };
-        let e = self.masks.insert(key, rect, origin, (w, h));
-        Some((source(e.value), e.origin, e.size))
+        let side = self.mask_side;
+        self.mask_with(key, path, scale, phase, side)
     }
 
     fn read(&mut self, kernel: u32, _paints: IRect, _reads: IRect, _open: &[Open]) -> Result<()> {

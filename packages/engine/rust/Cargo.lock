@@ -1176,8 +1176,6 @@ dependencies = [
 [[package]]
 name = "vello_gpu"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a1f838f79b2ef62a4acc61057eca19ffadf496c36317093e2d6961836d6c92f"
 dependencies = [
  "bytemuck",
  "hashbrown",

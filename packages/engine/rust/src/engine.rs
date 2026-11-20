@@ -642,7 +642,7 @@ impl Engine {
         let scale = view.as_coeffs()[0];
         let zooming = options.moving && tiles.last_scale.is_some_and(|s| s != scale);
         let last = tiles.last;
-        let plan = tiles
+        let mut plan = tiles
             .cache
             .plan(view, (width, height), zooming, last, options.prefetch)
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
@@ -711,6 +711,13 @@ impl Engine {
         }
         let mut comp_exact = true;
         if !plan.direct {
+            // What's drawn straight into the frame after it covers its tile there: the composite
+            // counts it so (what no slot could be found for included).
+            for job in plan.jobs.iter_mut() {
+                if late.iter().any(|l| l.key == job.key) {
+                    job.direct = true;
+                }
+            }
             let comp = tiles.cache.compose(&plan, last);
             comp_exact = comp.exact;
             stats.pending = comp.pending;

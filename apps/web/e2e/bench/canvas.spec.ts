@@ -18,7 +18,7 @@
 import { expect, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { buildFile } from "./cards";
-import { pan, type Summary, summaryRow, zoom } from "./frames";
+import { pan, type Settles, type Summary, settles, settlesRow, summaryRow, zoom } from "./frames";
 
 const BUDGET_MS = Number(process.env.BENCH_BUDGET_MS ?? 16);
 const ENFORCE = process.env.BENCH_ENFORCE === "1";
@@ -98,6 +98,51 @@ test.describe("Canvas performance", () => {
     results["zoom, whole"] = await zoom(page, 240);
 
     const rows = Object.entries(results).map(([name, r]) => summaryRow(name, r));
+    // Settling, gesture after gesture: from each one's latest input to the exact frame drawn,
+    // finished on the GPU and shown (p50, p95, worst; timeouts counted apart).
+    const settled: Record<string, Settles> = {};
+    const card = await page.evaluate(() => {
+      const e = (
+        window as unknown as {
+          drawpane: { s: { pageId: string }; doc: { childIds(id: string): string[] } };
+        }
+      ).drawpane;
+      return e.doc.childIds(e.s.pageId)[0] as string;
+    });
+    for (const [name, kind, level] of [
+      ["zoom at fit", "zoom", "fit"],
+      ["pan at fit", "pan", "fit"],
+      ["pan at 100%", "pan", 1],
+      ["drag at 100%", "drag", 1],
+    ] as const) {
+      await page.evaluate(
+        async ({ level, card }) => {
+          const e = (
+            window as unknown as {
+              drawpane: {
+                zoomToFit(): void;
+                zoomTo(z: number): void;
+                centerOn(p: { x: number; y: number }): void;
+                doc: { get(id: string): { props: Record<string, unknown> } | undefined };
+              };
+            }
+          ).drawpane;
+          if (level === "fit") e.zoomToFit();
+          else {
+            e.zoomTo(level);
+            const p = e.doc.get(card)?.props ?? {};
+            e.centerOn({ x: Number(p.x ?? 0) + 160, y: Number(p.y ?? 0) + 110 });
+          }
+          const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
+          const t = performance.now();
+          while (!f.exact && performance.now() - t < 10_000)
+            await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        },
+        { level, card },
+      );
+      settled[name] = await settles(page, kind, 10, card);
+      rows.push(settlesRow(settled[name]));
+    }
     // With the engine: who drew, on what adapter, and where a frame's time goes. Over a pan:
     // how each frame was made (from its tiles, with stand-ins, direct or unchanged), the tiles
     // drawn, its CPU breakdown and the GPU's time. Then exact frames drawn back to back, cold
@@ -242,7 +287,12 @@ test.describe("Canvas performance", () => {
     );
     test.info().annotations.push({
       type: "bench",
-      description: JSON.stringify({ renderer, ...results, ...(engine ? { engine } : {}) }),
+      description: JSON.stringify({
+        renderer,
+        ...results,
+        settled,
+        ...(engine ? { engine } : {}),
+      }),
     });
     if (ENFORCE)
       for (const [name, r] of Object.entries(results))

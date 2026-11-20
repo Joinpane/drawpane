@@ -153,6 +153,7 @@ pub trait Backend {
     /// A glyph's coverage mask, made if it isn't held and fits: its source, its top left from
     /// the glyph's whole-pixel anchor, and its size.
     fn glyph_mask(&mut self, key: MaskKey, path: &BezPath, scale: (f64, f64), phase: (f64, f64)) -> Option<GlyphMask>;
+
     /// Runs a backdrop reader over what's drawn so far (`open` is open in the scene).
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()>;
 }
@@ -395,11 +396,15 @@ impl<B: Backend> Walk<'_, B> {
         }
         let ops = if coarse { &r.coarse } else { &r.ops };
         let depth = self.open.len();
-        for op in ops {
+        for (at, op) in ops.iter().enumerate() {
             self.stats.ops += 1;
             match op {
                 Op::Fill { path, even_odd, paint } => self.fill(r, *path, device, *even_odd, paint, inner)?,
                 Op::Stroke { path, style, paint } => self.stroke(r, *path, device, style, paint, inner)?,
+                Op::Clip { path, .. } if self.clip_changes_nothing(id, r, &ops[at + 1..], *path, device) => {
+                    // Left out: the same pixels (see `clip_changes_nothing`), and what's drawn
+                    // under no clip takes the renderers' fast paths.
+                }
                 Op::Clip { path, even_odd } => {
                     self.scope()?;
                     let p = self.path(r, *path, device, 0.0)?;
@@ -440,6 +445,52 @@ impl<B: Backend> Walk<'_, B> {
             self.backend.scene().pop_layer();
         }
         Ok(())
+    }
+
+    /// Whether a clip changes nothing it encloses: a box (its corners rounded or not), axis
+    /// aligned on the device, enclosing only the record's children (`after`: the ops after the
+    /// clip), every one of which lies inside the box, clear of its corners, with a device pixel
+    /// to spare for anti-aliasing. Then the clip's coverage is whole wherever they paint: leaving
+    /// it out draws the same pictures, and what's drawn under no clip takes the renderers' fast
+    /// paths (a card's text and boxes cost far less without its rounded clip).
+    fn clip_changes_nothing(&self, id: u32, r: &Record, after: &[Op], path: u32, device: Affine) -> bool {
+        let Some(PathEntry::Rect { w, h, radii, smoothing }) = r.paths.get(path as usize) else {
+            return false;
+        };
+        let [a, b, c, d, _, _] = device.as_coeffs();
+        if b != 0.0 || c != 0.0 || a == 0.0 || d == 0.0 || *smoothing != 0.0 {
+            return false;
+        }
+        // Only children until the clip closes.
+        if !after
+            .iter()
+            .take_while(|op| !matches!(op, Op::Unclip))
+            .all(|op| matches!(op, Op::Children))
+        {
+            return false;
+        }
+        let Some(e) = self.store.children_extent(id) else {
+            return true;
+        };
+        // A device pixel and a half to spare: anti-aliasing, and the flattened arc lying inside
+        // the true one by up to a quarter pixel.
+        let (px, py) = (1.5 / a.abs(), 1.5 / d.abs());
+        let (w, h) = (f64::from(*w), f64::from(*h));
+        if !(e.is_finite() && e.x0 >= px && e.y0 >= py && e.x1 <= w - px && e.y1 <= h - py) {
+            return false;
+        }
+        // In a corner's square, the content's nearest point to the box's corner must lie inside
+        // the corner's arc by as much.
+        let pad = px.max(py);
+        let k = geometry::fit_radii(w, h, radii.map(f64::from));
+        let inside = |k: f64, corner: (f64, f64), centre: (f64, f64)| {
+            k <= 0.0 || (corner.0 - centre.0).hypot(corner.1 - centre.1) <= k - pad
+        };
+        let tl = !(e.x0 < k[0] && e.y0 < k[0]) || inside(k[0], (e.x0, e.y0), (k[0], k[0]));
+        let tr = !(e.x1 > w - k[1] && e.y0 < k[1]) || inside(k[1], (e.x1, e.y0), (w - k[1], k[1]));
+        let br = !(e.x1 > w - k[2] && e.y1 > h - k[2]) || inside(k[2], (e.x1, e.y1), (w - k[2], h - k[2]));
+        let bl = !(e.x0 < k[3] && e.y1 > h - k[3]) || inside(k[3], (e.x0, e.y1), (k[3], h - k[3]));
+        tl && tr && br && bl
     }
 
     /// Opens a clip or layer, within `Limits::open_scopes`.
@@ -662,6 +713,17 @@ impl<B: Backend> Walk<'_, B> {
         if style.width <= 0.0 {
             return Ok(());
         }
+        if let Some(ring) = stroke_ring(r, i, style) {
+            self.spend(ring.elements().len())?;
+            if !self.set_paint(paint, device, alpha)? {
+                return Ok(());
+            }
+            let scene = self.backend.scene();
+            scene.set_transform(device);
+            scene.set_fill_rule(Fill::EvenOdd);
+            scene.fill_path(&ring);
+            return Ok(());
+        }
         // A glyph off the viewport by less than the stroke's reach still shows its stroke.
         let reach = f64::from(style.width) * f64::from(style.miter.max(1.0)) + 1.0;
         let p = self.path(r, i, device, reach)?;
@@ -826,6 +888,46 @@ impl<B: Backend> Walk<'_, B> {
         }
         Ok(())
     }
+}
+
+/// A stroke of a box (its corners round or not) as the ring it paints: the box grown by half the
+/// width, less the box shrunk by it, filled even-odd. The same outline the stroker makes, without
+/// offsetting curves for every tile it's drawn into (a tenth of a cold tile's time on pages of
+/// cards). Only where the join can't matter: every corner rounder than half the width (the
+/// outline is smooth there), or every corner square under a miter join that holds at a right
+/// angle (the outer corner is the box's) or a round one (rounded by half the width). Not for
+/// dashes. None where the stroker is needed.
+fn stroke_ring(r: &Record, i: u32, style: &StrokeStyle) -> Option<BezPath> {
+    let Some(PathEntry::Rect { w, h, radii, smoothing }) = r.paths.get(i as usize) else {
+        return None;
+    };
+    let (w, h) = (f64::from(*w), f64::from(*h));
+    if *smoothing != 0.0 || !style.dashes.is_empty() || !(w > 0.0 && h > 0.0) {
+        return None;
+    }
+    let half = f64::from(style.width) / 2.0;
+    let fitted = geometry::fit_radii(w, h, radii.map(f64::from));
+    let square = fitted.iter().all(|r| *r == 0.0);
+    let outer_round = if fitted.iter().all(|r| *r >= half) {
+        fitted.map(|r| r + half)
+    } else if square && style.join == 0 && style.miter.max(1.0) >= core::f32::consts::SQRT_2 {
+        [0.0; 4]
+    } else if square && style.join == 1 {
+        [half; 4]
+    } else {
+        return None;
+    };
+    let mut ring = geometry::rounded_rect_at((-half, -half), w + 2.0 * half, h + 2.0 * half, outer_round);
+    if w > 2.0 * half && h > 2.0 * half {
+        let inner = fitted.map(|r| (r - half).max(0.0));
+        ring.extend(geometry::rounded_rect_at(
+            (half, half),
+            w - 2.0 * half,
+            h - 2.0 * half,
+            inner,
+        ));
+    }
+    Some(ring)
 }
 
 /// Normal blending, for the record of what the engine composites by itself.

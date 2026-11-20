@@ -108,7 +108,8 @@ if (!skip) {
       "wasm-bindgen",
       "--target",
       "web",
-      "--remove-name-section",
+      // ENGINE_KEEP_NAMES=1 keeps function names, for profiles (larger modules; never shipped).
+      ...(process.env.ENGINE_KEEP_NAMES === "1" ? [] : ["--remove-name-section"]),
       "--remove-producers-section",
       "--out-dir",
       join(here, "dist", b.name),

@@ -159,9 +159,11 @@ export const REST_BUDGET_MS = 12;
 /**
  * Between frames at rest, the engine draws the tiles the next frame wants in slices this long
  * (`EngineView.ahead`): the time a page has between animation frames goes to the exact frame
- * too, not only each frame's budget, and no slice holds the next frame back for long.
+ * too, not only each frame's budget. A frame's length at 60 Hz: the browser renders between
+ * slices (on the T4 bench, ~8 ms each time), so fewer, longer slices settle sooner, and none
+ * holds input back for more than a frame.
  */
-export const IDLE_SLICE_MS = 6;
+export const IDLE_SLICE_MS = 16;
 
 /** Frames in a row the canvas can't take before the engine gives up for the session. */
 const UNPRESENTED = 3;
@@ -202,6 +204,16 @@ export class EngineView {
   onPresented: (exact: boolean) => void = () => {};
   /** What drawing between frames did, summed (`ahead`), for the bench and the debug handle. */
   idle = { slices: 0, tiles: 0, ms: 0 };
+  /**
+   * Set to an object by the bench: when the latest exact frame was drawn (submitted), when the
+   * GPU finished it (no read-back involved), and when it was shown (a read-back painted; with a
+   * WebGPU canvas, when it was drawn). Frame numbers tell them apart.
+   */
+  stamps: {
+    drawn?: { n: number; at: number };
+    gpu?: { n: number; at: number };
+    shown?: { n: number; at: number };
+  } | null = null;
   /** Set to a list by the bench: each frame and slice between frames, as it happens. */
   trace: Array<{
     t: number;
@@ -566,6 +578,16 @@ export class EngineView {
     }
     this.#unpresented = 0;
     const n = ++this.#frame;
+    const stamps = this.stamps;
+    if (stamps && f.exact) {
+      const at = performance.now();
+      stamps.drawn = { n, at };
+      if (!this.#readback) stamps.shown = { n, at };
+      void this.#engine.gpuFinished().then(() => {
+        if (this.stamps === stamps && stamps.drawn?.n === n)
+          stamps.gpu = { n, at: performance.now() };
+      });
+    }
     if (this.#readback) {
       this.#want = { n, width, height, exact: f.exact, epoch: this.#epoch };
       this.#readNext();
@@ -673,6 +695,8 @@ export class EngineView {
         breakdown: { ...this.last.breakdown, readback: performance.now() - t },
       };
       // Exact only if it's still the newest frame drawn.
+      if (this.stamps && want.exact && want.n === this.#frame)
+        this.stamps.shown = { n: want.n, at: performance.now() };
       this.onPresented(want.exact && want.n === this.#frame);
       this.#readNext();
     });
