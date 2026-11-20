@@ -433,7 +433,7 @@ impl Record {
         out
     }
 
-    fn entry_bounds(&self, i: u32, glyph_bounds: &dyn Fn(u32) -> Option<Rect>) -> Option<Rect> {
+    pub fn entry_bounds(&self, i: u32, glyph_bounds: &dyn Fn(u32) -> Option<Rect>) -> Option<Rect> {
         match self.paths.get(i as usize)? {
             PathEntry::Path(p) => p.bounds(),
             PathEntry::Rect { w, h, .. } | PathEntry::Ellipse { w, h } => {

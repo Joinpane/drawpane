@@ -299,15 +299,63 @@ struct Walk<'a, B: Backend> {
     open_scopes: usize,
 }
 
-/// Whether an image placed on the device by `t` (its unit square to device pixels) can be
-/// sampled: `t` and its inverse finite and of bounded size. vello_cpu turns a sample's position
-/// into a pixel index by a float-to-integer conversion that on x86 makes NaN or infinity an index
-/// past the image (a panic; elsewhere it reads the first pixel across the shape). A transform
-/// that shrinks the image to nothing, or blows it up past any device, paints nothing.
-fn sampleable(t: Affine) -> bool {
+/// The linear part of a transform (its translation dropped).
+fn linear(t: Affine) -> Affine {
+    let [a, b, c, d, _, _] = t.as_coeffs();
+    Affine::new([a, b, c, d, 0.0, 0.0])
+}
+
+/// Whether a transform's linear part and its inverse are finite and within `most` on every
+/// coefficient: neither collapses nor blows up space past what a float holds with room to spare.
+fn bounded(t: Affine, most: f64) -> bool {
+    let ok = |m: Affine| m.as_coeffs().iter().all(|c| c.is_finite() && c.abs() <= most);
+    let l = linear(t);
+    ok(l) && ok(l.inverse())
+}
+
+/// Sample positions a repeated image keeps exact: vello_cpu wraps them with a float remainder
+/// (`euclid_mod`), exact for whole numbers below 2^24 and off past the image beyond.
+const REPEAT_POSITIONS: f64 = (1u32 << 22) as f64;
+
+/// Whether an image can be sampled where it's painted, decided from the record alone, never
+/// from where the frame or tile sits, so a tile and the whole frame decide alike.
+///
+/// vello_cpu turns a sample's position into a pixel index with float arithmetic that, past what
+/// a float holds, indexes past the image (a panic) or reads the wrong pixel: NaN and infinity
+/// convert to an index past the end on x86, and a repeat's remainder loses whole pixels once
+/// positions pass 2^24. So: the record's transform to the device and the image's placement
+/// (`texel`, texel units to the record's) each neither collapse nor blow up space; and, repeated,
+/// the image's positions over the region painted (`region`, the record's units, unknown: None)
+/// stay within `REPEAT_POSITIONS`. A padded image's positions are clamped, so any finite one
+/// does. Otherwise the paint draws nothing.
+fn sampleable(device: Affine, texel: Affine, region: Option<Rect>, repeat: bool) -> bool {
     const MOST: f64 = 1e12;
-    let bounded = |m: Affine| m.as_coeffs().iter().all(|c| c.is_finite() && c.abs() <= MOST);
-    bounded(t) && bounded(t.inverse())
+    if !bounded(device, MOST) || !bounded(texel, MOST) || !finite(texel) {
+        return false;
+    }
+    if !repeat {
+        return true;
+    }
+    let Some(region) = region else { return false };
+    // What the device's anti-aliasing reaches past the region: two device pixels.
+    let pad = 2.0
+        * linear(device).inverse().as_coeffs()[..4]
+            .iter()
+            .map(|c| c.abs())
+            .sum::<f64>();
+    let region = region.inflate(pad, pad);
+    let inv = texel.inverse();
+    [
+        (region.x0, region.y0),
+        (region.x1, region.y0),
+        (region.x0, region.y1),
+        (region.x1, region.y1),
+    ]
+    .into_iter()
+    .all(|corner| {
+        let p = inv * vello_common::kurbo::Point::from(corner);
+        p.x.is_finite() && p.y.is_finite() && p.x.abs() <= REPEAT_POSITIONS && p.y.abs() <= REPEAT_POSITIONS
+    })
 }
 
 fn finite(m: Affine) -> bool {
@@ -594,7 +642,9 @@ impl<B: Backend> Walk<'_, B> {
     }
 
     /// Sets the scene's paint for `paint` drawn under `device`. False when it paints nothing.
-    fn set_paint(&mut self, paint: &Paint, device: Affine, alpha: f32) -> Result<bool> {
+    /// Sets `paint` up for what's drawn next under `device`, over `region` (the record's units,
+    /// where known): answers whether it paints at all.
+    fn set_paint(&mut self, paint: &Paint, device: Affine, alpha: f32, region: Option<Rect>) -> Result<bool> {
         match paint {
             Paint::Solid(c) => {
                 if c[3] * alpha <= 0.0 {
@@ -638,7 +688,7 @@ impl<B: Backend> Walk<'_, B> {
                     tile,
                     opacity,
                 } = &**img;
-                if opacity * alpha <= 0.0 || !sampleable(device * *matrix) {
+                if opacity * alpha <= 0.0 || !bounded(*matrix, 1e12) || !finite(*matrix) {
                     return Ok(false);
                 }
                 // Device pixels the image's width spans: pick a level at least that wide.
@@ -648,6 +698,11 @@ impl<B: Backend> Walk<'_, B> {
                     .backend
                     .image(*image, px)
                     .ok_or_else(|| EngineError::unknown(format!("image {image} isn't held")))?;
+                let texel =
+                    *matrix * Affine::scale_non_uniform(1.0 / f64::from(view.width), 1.0 / f64::from(view.height));
+                if !sampleable(device, texel, region, *tile) {
+                    return Ok(false);
+                }
                 let quality = if px > f64::from(view.width) {
                     ImageQuality::High
                 } else {
@@ -665,12 +720,10 @@ impl<B: Backend> Walk<'_, B> {
                 };
                 let scene = self.backend.scene();
                 scene.set_paint(img.into());
-                scene.set_paint_transform(
-                    *matrix * Affine::scale_non_uniform(1.0 / f64::from(view.width), 1.0 / f64::from(view.height)),
-                );
+                scene.set_paint_transform(texel);
             }
             Paint::Placeholder(opacity) => {
-                if opacity * alpha <= 0.0 || !sampleable(device) {
+                if opacity * alpha <= 0.0 || !bounded(device, 1e12) {
                     return Ok(false);
                 }
                 let source = self.backend.checker();
@@ -684,15 +737,25 @@ impl<B: Backend> Walk<'_, B> {
                     },
                 };
                 // Fixed to device pixels, so it reads as loading at any zoom, and anchored on the
-                // pixel the page's origin falls in, so a tile and a whole frame draw it alike.
+                // pixel the page's origin falls in, so a tile and a whole frame draw it alike:
+                // within one period of it (16 pixels, as tiles are placed), so its positions stay
+                // small however far the view is from the page's origin (a repeat's remainder is
+                // exact only for small ones).
                 let [.., e, f] = self.frame.view.as_coeffs();
-                let anchor = Affine::translate((e.floor(), f.floor()));
+                let anchor = Affine::translate((e.floor().rem_euclid(16.0), f.floor().rem_euclid(16.0)));
                 let scene = self.backend.scene();
                 scene.set_paint(img.into());
                 scene.set_paint_transform(device.inverse() * anchor);
             }
         }
         Ok(true)
+    }
+
+    /// Where a record's entry `i` paints, its own units, grown by `grow`: all of it, wherever the
+    /// frame or tile is (glyphs included, not only those near the viewport).
+    fn region(&self, r: &Record, i: u32, grow: f64) -> Option<Rect> {
+        r.entry_bounds(i, &|g| self.store.glyphs.bounds(g))
+            .map(|b| b.inflate(grow, grow))
     }
 
     fn fill(&mut self, r: &Record, i: u32, device: Affine, even_odd: bool, paint: &Paint, alpha: f32) -> Result<()> {
@@ -702,7 +765,7 @@ impl<B: Backend> Walk<'_, B> {
             return self.glyphs(device, f64::from(*scale), glyphs, *c, alpha);
         }
         let p = self.path(r, i, device, 0.0)?;
-        if !self.set_paint(paint, device, alpha)? {
+        if !self.set_paint(paint, device, alpha, self.region(r, i, 0.0))? {
             return Ok(());
         }
         let scene = self.backend.scene();
@@ -726,7 +789,7 @@ impl<B: Backend> Walk<'_, B> {
         }
         if let Some(ring) = stroke_ring(r, i, style) {
             self.spend(ring.elements().len())?;
-            if !self.set_paint(paint, device, alpha)? {
+            if !self.set_paint(paint, device, alpha, self.region(r, i, style.reach()))? {
                 return Ok(());
             }
             let scene = self.backend.scene();
@@ -752,7 +815,7 @@ impl<B: Backend> Walk<'_, B> {
             let period: f64 = style.dashes.iter().map(|d| f64::from(*d)).sum();
             self.spend((length / period * style.dashes.len() as f64).ceil() as usize)?;
         }
-        if !self.set_paint(paint, device, alpha)? {
+        if !self.set_paint(paint, device, alpha, self.region(r, i, style.reach()))? {
             return Ok(());
         }
         let mut s = Stroke::new(f64::from(style.width))

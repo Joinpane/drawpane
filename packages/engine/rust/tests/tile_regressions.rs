@@ -502,3 +502,137 @@ fn an_image_shrunk_to_nothing_paints_nothing() {
     let (frame, _) = e.render_cpu(64, 48, camera(1.0, 0.0, 0.0), [1.0; 4], false).unwrap();
     assert!(frame.iter().all(|v| *v == 255), "the image painted");
 }
+
+/// A 640-unit square filled with a `side` × `side` image of one colour placed by `matrix`
+/// (repeated when `tile`), under the record transform `at`.
+fn image_fill(matrix: [f64; 6], tile: bool, side: u32, at: [f64; 6], colour: [u8; 4]) -> Engine {
+    let mut shape = Rec::new(at, [640.0, 640.0]);
+    shape.paths.push(Entry::Rect {
+        w: 640.0,
+        h: 640.0,
+        radii: [0.0; 4],
+    });
+    shape.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Image {
+            id: 7,
+            m: matrix,
+            tile,
+            opacity: 1.0,
+        },
+    });
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.set(1, 0, &shape);
+    let mut e = Engine::new(Limits::default());
+    e.apply(&list.finish()).unwrap();
+    let pixels: Vec<u8> = (0..side * side).flat_map(|_| colour).collect();
+    e.put_image(7, side, side, &pixels, true).unwrap();
+    e
+}
+
+#[test]
+fn a_finite_but_lopsided_repeat_never_indexes_past_the_image() {
+    // The re-check's case: a 3×3 image repeated every 1e-8 units down and 25 across. Its
+    // positions down pass what a float's remainder keeps exact, and the repeat indexed past the
+    // nine pixels (a panic on any CPU). Such a repeat paints nothing.
+    for side in [3, 5, 7, 11, 17] {
+        for exponent in [4, 6, 8, 9, 10, 11] {
+            for offset in [0.0, 0.124, 19.25, -19.25, 80.75, -80.75] {
+                let m = [25.0, 0.0, 0.0, 10f64.powi(-exponent), 0.3, offset];
+                let mut e = image_fill(m, true, side, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [160; 4]);
+                e.render_cpu(48, 40, camera(1.0, 0.0, 0.0), [0.0; 4], false)
+                    .unwrap_or_else(|err| panic!("{m:?}: {err}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn an_image_is_painted_alike_in_a_tile_and_the_whole_frame() {
+    // The re-check's case: a padded image 1e-10 units tall at y = 520. The old guard bounded the
+    // inverse's translation, which differs between the whole frame and the tile at y = 512: the
+    // whole frame left it out, the tile painted it. The decision is the record's now.
+    let mut e = image_fill(
+        [20.0, 0.0, 0.0, 1e-10, 0.0, 520.0],
+        false,
+        3,
+        [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        [160; 4],
+    );
+    let c = camera(1.0, 0.0, 0.0);
+    let at = (550 * 64 + 24) * 4;
+    let whole = e.render_cpu(64, 576, c, [0.0; 4], false).unwrap().0[at..at + 4].to_vec();
+    let (tiled, stats) = e
+        .render_cpu_tiled(64, 576, c, [0.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats.exact, "{stats:?}");
+    assert_eq!(&tiled[at..at + 4], whole.as_slice());
+}
+
+#[test]
+fn degenerate_image_placements_never_panic_and_tiles_match_the_whole_frame() {
+    // Images placed every way that strains sampling: repeated or padded, scaled from 1e-12 to
+    // 1e12 on each axis, skewed, rotated, nearly singular, far from the shape, under records
+    // scaled and turned, at three zooms. None may panic, and the exact tiles must be the whole
+    // frame's (one colour an image: only whether and where it paints shows).
+    let mut r = Rng(0x1_3a6e_0040);
+    let pow = |r: &mut Rng, lo: f32, hi: f32| 10f64.powf(f64::from(r.range(lo, hi)));
+    for case in 0..400 {
+        let side = 1 + r.below(17);
+        let tile = r.chance(0.6);
+        let (sx, sy) = (pow(&mut r, -12.0, 12.0), pow(&mut r, -12.0, 12.0));
+        let skew = if r.chance(0.4) {
+            f64::from(r.range(-50.0, 50.0))
+        } else {
+            0.0
+        };
+        let turn = if r.chance(0.4) {
+            f64::from(r.range(0.0, 6.3))
+        } else {
+            0.0
+        };
+        let (cs, sn) = (turn.cos(), turn.sin());
+        // Rotation × skew × scale, then nudged towards singular now and then.
+        let (mut a, b, c0, d0) = (cs * sx, sn * sx, (cs * skew - sn) * sy, (sn * skew + cs) * sy);
+        if r.chance(0.2) {
+            // Columns nearly parallel: the determinant a tiny part of what it would be.
+            let k = if d0.abs() > 1e-20 { c0 / d0 } else { 1.0 };
+            a = k * b + a * pow(&mut r, -14.0, -6.0);
+        }
+        let shift = if r.chance(0.5) { pow(&mut r, -2.0, 9.0) } else { 0.0 };
+        // As the wire carries it: f32s, none past what one holds.
+        let f = |v: f64| f64::from(v.clamp(-1e30, 1e30) as f32);
+        let m = [
+            f(a),
+            f(b),
+            f(c0),
+            f(d0),
+            f(f64::from(r.range(-1.0, 1.0)) * shift),
+            f(f64::from(r.range(-1.0, 1.0)) * shift),
+        ];
+        let k = pow(&mut r, -1.5, 1.5);
+        let t = f64::from(r.range(0.0, 6.3));
+        let at = [k * t.cos(), k * t.sin(), -k * t.sin(), k * t.cos(), 20.0, 10.0];
+        let colour = [(r.below(200) + 40) as u8, 90, 30, 255];
+        let zoom = [0.25, 1.0, 3.0][r.below(3) as usize];
+        let c = camera(zoom, 3.5, -2.25);
+        let mut e = image_fill(m, tile, side, at, colour);
+        e.use_cpu_tiles(32, 256);
+        let whole = e
+            .render_cpu(96, 80, c, [0.0; 4], false)
+            .unwrap_or_else(|err| panic!("case {case} {m:?}: {err}"))
+            .0
+            .to_vec();
+        let (tiled, stats) = e
+            .render_cpu_tiled(96, 80, c, [0.0; 4], TiledOptions::default())
+            .unwrap_or_else(|err| panic!("case {case} {m:?}: {err}"));
+        assert!(stats.exact, "case {case}: {stats:?}");
+        let worst = whole.iter().zip(tiled).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(
+            worst <= 2,
+            "case {case} {m:?} tile {tile} at {at:?} zoom {zoom}: worst {worst}"
+        );
+    }
+}
