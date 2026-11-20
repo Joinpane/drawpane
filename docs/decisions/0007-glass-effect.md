@@ -110,3 +110,69 @@ The probe suite went from 1.78 to 0.63, its bend fields from 4.61 to 2.65 px off
 ## Revision: what's behind it, as Figma exports it (2026-11-18)
 
 Glass keeps its backdrop's alpha (over nothing it shows nothing, light included) and, in an export, sees what's under the exported layers on the page. Measured and decided in decision 0039.
+
+## Measured: stacked and overlapping glass (2026-11-20)
+
+When two glass layers overlap, Figma does not render nested glass. To pin down the exact rule rather than guess, a 15-cell parity suite (`tools/figma-parity/scenes/glass-stack.json`) places stacked, nested, adjacent, faded, blended, and blur-paired glass layers over a high-contrast striped gradient with bold text (`AaBb01`). Every cell was built and measured in Figma in a single session, capturing both Figma's 2x `exportAsync` PNGs (`tools/figma-parity/goldens/glass-stack/`) and 100%-zoom live canvas screenshots.
+
+### Live canvas vs `exportAsync`
+
+Downsampling Figma's 2x `exportAsync` renders to 1x and aligning them against Figma's 100%-zoom canvas screenshots gives a mean RGB channel difference of **0.53** across all 15 cells (range 0.37 to 0.68, p99 2 to 6). Both paths obey the same stacked-glass rule.
+
+### The exact rule
+
+**A glass effect writes only to the visible output, never to the backdrop that later backdrop readers (`glass` or `background-blur`) sample.** Every other part of the layer tree writes to both the visible output and the backdrop in normal paint order.
+
+Specifically:
+
+1. **What a reader's backdrop contains.** When a `glass` or `background-blur` layer samples the prefix beneath it in paint order, every earlier layer is present *except* earlier `glass` effects. Earlier `glass` layers keep their own fills, strokes, and children in the backdrop, any non-glass layers drawn between them are kept, ancestor opacity groups apply their opacity to the non-glass backdrop as well, and earlier `background-blur` effects are kept.
+2. **Per-layer (backdrop-level), not per-region.** Suppressing earlier glass happens in the backdrop read by the upper layer, not by erasing or turning off the lower glass in the overlapping pixels of the output. When the upper glass has `opacity < 1` (`opacity-half`) or a non-normal blend mode (`blend-multiply`), it computes its lens over the glass-free backdrop and composites normally onto the visible canvas where the lower glass remains visible underneath. Even when two glass layers touch without overlapping (`adjacent-frost`), the second layer's frost does not pull in the first layer's glass highlight or blur across the seam.
+3. **Children, fills, strokes, and layers between.** Removing the lower glass's fills or strokes (`lower-fill-stroke`, `full-containment`, `nested-glass`), hiding its children (`nested-with-child`), or capturing one shared backdrop before the first glass layer (`between-sibling`) all fail badly. Only the earlier `glass` effect pass itself is absent from the backdrop.
+4. **Interaction with `background-blur`.** The asymmetry is exact:
+   - `glass` over `background-blur` (`over-bg-blur`): the upper glass **does** read the lower layer's background blur (mean 3.45 keeping it vs 8.99 stripping it).
+   - `background-blur` over `glass` (`bg-blur-over-glass`): the upper background blur does **not** read the lower layer's glass effect, while keeping the lower layer's fill (overlap ROI mean 2.68 without lower glass vs 6.25 with lower glass vs 10.67 omitting the lower layer).
+5. **Faded groups (`lower-faded-group`).** A glass layer inside a frame with `opacity < 1` still samples the backdrop behind that frame, composites its glass and fills inside the group, and the group fades onto the output; a later glass sibling sees the lower layer's fills faded by the group's opacity, without the lower glass effect.
+
+### Candidate model fit
+
+All models were rendered through the same single-layer glass shader, fills, strokes, and text shaping so only the stacking rule varies. Values are **mean (p99)** RGB channel error (0 to 255) against Figma's 2x `exportAsync` goldens:
+
+- **(a) Faithful nested glass:** every reader samples the full visible output so far (what Drawpane's 2D canvas renderer does today).
+- **(b) Glass skips earlier glass:** `glass` reads a backdrop with earlier `glass` effects removed (fills, strokes, children, intermediate layers, and earlier `background-blur` kept); `background-blur` reads the full output.
+- **(b*) Unified no-glass backdrop (chosen rule):** every backdrop reader (`glass` and `background-blur`) reads a backdrop with earlier `glass` effects removed, while earlier `background-blur`, fills, strokes, children, and intermediate layers are kept; glass writes only to the visible output.
+- **(b2) Per-region suppression:** like (b), except pixels covered by an upper glass also suppress the lower glass effect underneath it (tested on `opacity-half`, `blend-multiply`, and non-overlapping `adjacent-frost`).
+- **(c1) Lower glass layers omitted:** earlier glass layers (including their fills, strokes, and non-ancestor children) are omitted from upper glass's backdrop.
+- **(c2) Lower glass own paint omitted, children kept:** earlier glass layers' glass, fills, and strokes are omitted, while their children remain.
+- **(d) Shared pre-glass backdrop:** every glass layer samples a single snapshot captured before the first glass layer in the frame.
+
+| Cell | (a) Nested | (b) Glass-only | (b*) Unified | (b2) Per-region | (c1) Omit layer | (c2) Omit own | (d) Pre-glass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `partial-overlap` | 8.40 (90) | 2.98 (65) | **2.98 (65)** | 2.98 (65) | 4.85 (69) | 4.85 (69) | 4.85 (69) |
+| `partial-clear` | 11.33 (123) | 3.44 (59) | **3.44 (59)** | 3.44 (59) | 3.44 (59) | 3.44 (59) | 3.45 (59) |
+| `full-containment` | 11.11 (91) | 2.82 (51) | **2.82 (51)** | 2.82 (51) | 6.46 (62) | 6.45 (62) | 6.46 (62) |
+| `nested-glass` | 11.07 (91) | 2.81 (51) | **2.81 (51)** | 2.81 (51) | 6.43 (62) | 6.42 (62) | 6.43 (62) |
+| `nested-with-child` | 6.20 (68) | 2.72 (50) | **2.72 (50)** | 2.72 (50) | 14.29 (196) | 4.51 (58) | 14.29 (196) |
+| `between-sibling` | 7.17 (96) | 3.51 (81) | **3.51 (81)** | 3.51 (81) | 5.03 (94) | 4.74 (82) | 12.79 (182) |
+| `lower-fill-stroke` | 6.27 (70) | 2.74 (60) | **2.74 (60)** | 2.74 (60) | 9.88 (213) | 9.88 (213) | 9.88 (213) |
+| `diff-params` | 6.09 (121) | 3.69 (121) | **3.69 (121)** | 3.69 (121) | 3.69 (121) | 3.69 (121) | 3.69 (121) |
+| `three-stacked` | 7.12 (62) | 2.52 (43) | **2.52 (43)** | 2.52 (43) | 6.43 (65) | 6.43 (65) | 6.43 (65) |
+| `over-bg-blur` | 3.45 (42) | 3.45 (42) | **3.45 (42)** | 3.45 (42) | 3.45 (42) | 3.45 (42) | 3.45 (42) |
+| `opacity-half` | 3.95 (34) | 2.23 (35) | **2.23 (35)** | 4.66 (49) | 3.52 (44) | 3.52 (44) | 3.52 (44) |
+| `blend-multiply` | 6.53 (39) | 1.71 (32) | **1.71 (32)** | 6.73 (56) | 2.94 (47) | 2.94 (47) | 2.94 (47) |
+| `adjacent-frost` | 2.02 (24) | 1.85 (24) | **1.85 (24)** | 2.02 (24) | 1.85 (24) | 1.85 (24) | 1.85 (24) |
+| `bg-blur-over-glass` | 4.20 (88) | 4.20 (88) | **3.26 (88)** | 4.20 (88) | 4.20 (88) | 4.20 (88) | 4.20 (88) |
+| `lower-faded-group` (*) | 7.72 (77) | 3.25 (58) | **3.25 (58)** | 3.25 (58) | 6.17 (74) | 6.17 (74) | 6.17 (74) |
+| **Average** | **6.84 (74)** | **2.93 (58)** | **2.86 (58)** | **3.43 (60)** | **5.51 (84)** | **4.83 (75)** | **6.02 (89)** |
+
+(*) On `lower-faded-group`, Drawpane's 2D canvas renderer currently drops the lower glass entirely because isolating the `opacity: 0.8` parent clears its offscreen canvas before the child reads it (giving 8.45 (78) raw). The row above applies the parent's `opacity: 0.8` directly to its single glass child so the backdrop reaches the child glass as in Figma, isolating the stacking rule cleanly.
+
+Additional targeted controls:
+
+- Stripping earlier `background-blur` from upper glass's backdrop raises `over-bg-blur` from **3.45 (42)** to **8.99 (99)**.
+- In the overlap ROI (`x = 90..150, y = 20..140`) of `bg-blur-over-glass`, reading the glass-free backdrop (`b*`) scores **2.68 (p99 20)** vs **6.25 (p99 31)** when reading the lower glass and **10.67 (p99 32)** when omitting the lower layer.
+- In the seam ROI (`x = 120..160, y = 20..140`) of `adjacent-frost`, `b*` scores **1.86 (p99 19)** vs **2.85 (p99 19)** when the right card's frost reads the left card's glass.
+- In the overlap ROI of `lower-faded-group`, `b*` scores **4.27 (p99 63)** vs **22.14 (p99 78)** for nested glass `(a)` and **15.92 (p99 82)** for omitting the lower card `(c1)`.
+
+### Consequences for the render engine
+
+Because a glass effect never writes to the backdrop read by subsequent readers, there is no glass-to-glass backdrop dependency. Editing a glass layer's glass parameters (or a glass layer without fills, strokes, or children) never invalidates a later reader's backdrop, and consecutive glass layers without intervening non-glass writes share one backdrop snapshot and mipmap chain.

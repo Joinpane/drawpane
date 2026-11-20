@@ -1,0 +1,1040 @@
+{
+  "suite": "glass-stack",
+  "about": "Overlapping and nested glass layers over a high-contrast striped and text backdrop: partial overlap, containment, nesting, layers between, lower fills and strokes, differing settings, three stacked, over background blur, opacity and blend modes.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 5
+  },
+  "background": "#f4f3ef",
+  "backdrop": "stripes",
+  "cells": [
+    {
+      "id": "partial-overlap",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "lower",
+          "x": 20,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [{ "type": "solid", "color": "#ffffff26" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 28,
+              "dispersion": 50,
+              "frost": 35,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper",
+          "x": 90,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [{ "type": "solid", "color": "#ffffff26" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 28,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "partial-clear",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "lower",
+          "x": 20,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 100,
+              "depth": 30,
+              "dispersion": 50,
+              "frost": 40,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper",
+          "x": 90,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 24,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "full-containment",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "lower",
+          "x": 16,
+          "y": 14,
+          "width": 208,
+          "height": 132,
+          "cornerRadius": 28,
+          "fills": [{ "type": "solid", "color": "#ffffff26" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 95,
+              "depth": 32,
+              "dispersion": 50,
+              "frost": 35,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper",
+          "x": 64,
+          "y": 36,
+          "width": 112,
+          "height": 88,
+          "cornerRadius": 20,
+          "fills": [{ "type": "solid", "color": "#ffffff26" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 20,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "nested-glass",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "frame",
+          "name": "parent-glass",
+          "x": 16,
+          "y": 14,
+          "width": 208,
+          "height": 132,
+          "cornerRadius": 28,
+          "clipContent": true,
+          "fills": [{ "type": "solid", "color": "#ffffff26" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 30,
+              "dispersion": 50,
+              "frost": 35,
+              "splay": 0
+            }
+          ],
+          "children": [
+            {
+              "type": "rect",
+              "name": "child-glass",
+              "x": 48,
+              "y": 22,
+              "width": 112,
+              "height": 88,
+              "cornerRadius": 20,
+              "fills": [{ "type": "solid", "color": "#ffffff26" }],
+              "effects": [
+                {
+                  "type": "glass",
+                  "angle": -45,
+                  "intensity": 80,
+                  "refraction": 90,
+                  "depth": 20,
+                  "dispersion": 50,
+                  "frost": 0,
+                  "splay": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "nested-with-child",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "frame",
+          "name": "parent-glass",
+          "x": 16,
+          "y": 14,
+          "width": 208,
+          "height": 132,
+          "cornerRadius": 28,
+          "clipContent": true,
+          "fills": [{ "type": "solid", "color": "#ffffff26" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 30,
+              "dispersion": 50,
+              "frost": 35,
+              "splay": 0
+            }
+          ],
+          "children": [
+            {
+              "type": "rect",
+              "x": 20,
+              "y": 46,
+              "width": 168,
+              "height": 40,
+              "cornerRadius": 12,
+              "fills": [{ "type": "solid", "color": "#e63946" }]
+            },
+            {
+              "type": "text",
+              "x": 38,
+              "y": 50,
+              "width": 132,
+              "height": 34,
+              "characters": "INSIDE",
+              "fontFamily": "Inter",
+              "fontSize": 26,
+              "fontWeight": 800,
+              "textAutoResize": "width",
+              "fills": [{ "type": "solid", "color": "#ffffff" }]
+            },
+            {
+              "type": "rect",
+              "name": "child-glass",
+              "x": 58,
+              "y": 18,
+              "width": 120,
+              "height": 96,
+              "cornerRadius": 20,
+              "fills": [{ "type": "solid", "color": "#00e5ff26" }],
+              "effects": [
+                {
+                  "type": "glass",
+                  "angle": -45,
+                  "intensity": 80,
+                  "refraction": 90,
+                  "depth": 22,
+                  "dispersion": 50,
+                  "frost": 0,
+                  "splay": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "between-sibling",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "frame",
+          "name": "lower-card",
+          "x": 16,
+          "y": 18,
+          "width": 134,
+          "height": 124,
+          "cornerRadius": 24,
+          "clipContent": true,
+          "fills": [{ "type": "solid", "color": "#ffffff26" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 26,
+              "dispersion": 50,
+              "frost": 35,
+              "splay": 0
+            }
+          ],
+          "children": [
+            {
+              "type": "text",
+              "x": 18,
+              "y": 24,
+              "width": 110,
+              "height": 34,
+              "characters": "CARD",
+              "fontFamily": "Inter",
+              "fontSize": 28,
+              "fontWeight": 800,
+              "textAutoResize": "width",
+              "fills": [{ "type": "solid", "color": "#111111" }]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "middle-bar",
+          "x": 40,
+          "y": 82,
+          "width": 160,
+          "height": 34,
+          "cornerRadius": 8,
+          "fills": [{ "type": "solid", "color": "#e6007a" }]
+        },
+        {
+          "type": "text",
+          "name": "middle-text",
+          "x": 76,
+          "y": 85,
+          "width": 100,
+          "height": 30,
+          "characters": "MID",
+          "fontFamily": "Inter",
+          "fontSize": 24,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#ffffff" }]
+        },
+        {
+          "type": "rect",
+          "name": "upper",
+          "x": 86,
+          "y": 18,
+          "width": 138,
+          "height": 124,
+          "cornerRadius": 24,
+          "fills": [{ "type": "solid", "color": "#ffffff26" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 24,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lower-fill-stroke",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "lower",
+          "x": 20,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [{ "type": "solid", "color": "#e6394673" }],
+          "strokes": [{ "type": "solid", "color": "#00c853" }],
+          "strokeWeight": 8,
+          "strokeAlign": "inside",
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 26,
+              "dispersion": 50,
+              "frost": 35,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper",
+          "x": 90,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 24,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "diff-params",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "lower",
+          "x": 20,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 90,
+              "refraction": 100,
+              "depth": 40,
+              "dispersion": 100,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper",
+          "x": 90,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": 135,
+              "intensity": 90,
+              "refraction": 40,
+              "depth": 18,
+              "dispersion": 0,
+              "frost": 24,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "three-stacked",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "bottom",
+          "x": 16,
+          "y": 14,
+          "width": 116,
+          "height": 106,
+          "cornerRadius": 20,
+          "fills": [{ "type": "solid", "color": "#ff3b3040" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 24,
+              "dispersion": 50,
+              "frost": 36,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "middle",
+          "x": 62,
+          "y": 28,
+          "width": 116,
+          "height": 106,
+          "cornerRadius": 20,
+          "fills": [{ "type": "solid", "color": "#34c75940" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 24,
+              "dispersion": 50,
+              "frost": 14,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "top",
+          "x": 108,
+          "y": 42,
+          "width": 116,
+          "height": 106,
+          "cornerRadius": 20,
+          "fills": [{ "type": "solid", "color": "#007aff33" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 24,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "over-bg-blur",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "lower-blur",
+          "x": 20,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [{ "type": "solid", "color": "#ffffff40" }],
+          "effects": [
+            {
+              "type": "background-blur",
+              "radius": 28
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper-glass",
+          "x": 90,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 26,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "opacity-half",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "lower",
+          "x": 20,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [{ "type": "solid", "color": "#ff7a454d" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 28,
+              "dispersion": 50,
+              "frost": 35,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper",
+          "x": 90,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "opacity": 0.5,
+          "fills": [{ "type": "solid", "color": "#ffffff40" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 28,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "blend-multiply",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "lower",
+          "x": 20,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [{ "type": "solid", "color": "#ffd16666" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 28,
+              "dispersion": 50,
+              "frost": 35,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper",
+          "x": 90,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "blendMode": "multiply",
+          "fills": [{ "type": "solid", "color": "#3d7bf059" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 28,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "adjacent-frost",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "left-glass",
+          "x": 20,
+          "y": 20,
+          "width": 100,
+          "height": 120,
+          "cornerRadius": 16,
+          "fills": [],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 100,
+              "refraction": 100,
+              "depth": 30,
+              "dispersion": 50,
+              "frost": 40,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "right-glass",
+          "x": 120,
+          "y": 20,
+          "width": 100,
+          "height": 120,
+          "cornerRadius": 16,
+          "fills": [],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 80,
+              "depth": 24,
+              "dispersion": 50,
+              "frost": 28,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bg-blur-over-glass",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "rect",
+          "name": "lower-glass",
+          "x": 20,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [{ "type": "solid", "color": "#ffffff26" }],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 100,
+              "refraction": 100,
+              "depth": 32,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper-blur",
+          "x": 90,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [{ "type": "solid", "color": "#ffffff33" }],
+          "effects": [
+            {
+              "type": "background-blur",
+              "radius": 16
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lower-faded-group",
+      "layers": [
+        {
+          "type": "text",
+          "x": 14,
+          "y": 50,
+          "width": 220,
+          "height": 64,
+          "characters": "AaBb01",
+          "fontFamily": "Inter",
+          "fontSize": 48,
+          "fontWeight": 800,
+          "textAutoResize": "width",
+          "fills": [{ "type": "solid", "color": "#111111" }]
+        },
+        {
+          "type": "frame",
+          "name": "faded-parent",
+          "x": 20,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "opacity": 0.8,
+          "clipContent": false,
+          "fills": [],
+          "children": [
+            {
+              "type": "rect",
+              "name": "lower",
+              "x": 0,
+              "y": 0,
+              "width": 130,
+              "height": 120,
+              "cornerRadius": 24,
+              "fills": [{ "type": "solid", "color": "#e639464d" }],
+              "effects": [
+                {
+                  "type": "glass",
+                  "angle": -45,
+                  "intensity": 80,
+                  "refraction": 90,
+                  "depth": 26,
+                  "dispersion": 50,
+                  "frost": 35,
+                  "splay": 0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "name": "upper",
+          "x": 90,
+          "y": 20,
+          "width": 130,
+          "height": 120,
+          "cornerRadius": 24,
+          "fills": [],
+          "effects": [
+            {
+              "type": "glass",
+              "angle": -45,
+              "intensity": 80,
+              "refraction": 90,
+              "depth": 26,
+              "dispersion": 50,
+              "frost": 0,
+              "splay": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
