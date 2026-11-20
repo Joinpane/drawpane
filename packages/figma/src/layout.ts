@@ -132,7 +132,19 @@ export function childLayout(node: Figma.Node, parent: Figma.Node | undefined): P
   let h = pick(SIZING, node.layoutSizingHorizontal);
   let v = pick(SIZING, node.layoutSizingVertical);
   if (!h || !v) {
-    // Older files: a frame's own sizing modes, and a child's grow and stretch in its parent.
+    // Older files (and .fig records): a child's fill in its parent wins over its own hug.
+    if (node.layoutPositioning !== "ABSOLUTE") {
+      const autoWidthText =
+        node.type === "TEXT" && node.style?.textAutoResize === "WIDTH_AND_HEIGHT";
+      // A grid's item grows across and stretches down its cells, as in a row.
+      if (parentMode === "HORIZONTAL" || parentMode === "GRID") {
+        if (node.layoutGrow === 1 && !autoWidthText) h ??= "fill";
+        if (node.layoutAlign === "STRETCH") v ??= "fill";
+      } else if (parentMode === "VERTICAL") {
+        if (node.layoutGrow === 1) v ??= "fill";
+        if (node.layoutAlign === "STRETCH" && !autoWidthText) h ??= "fill";
+      }
+    }
     const own = node.layoutMode && node.layoutMode !== "NONE" ? node.layoutMode : null;
     const primaryHug = own && node.primaryAxisSizingMode === "AUTO";
     const counterHug = own && node.counterAxisSizingMode === "AUTO";
@@ -142,14 +154,6 @@ export function childLayout(node: Figma.Node, parent: Figma.Node | undefined): P
     } else if (own === "VERTICAL") {
       v ??= primaryHug ? "hug" : undefined;
       h ??= counterHug ? "hug" : undefined;
-    }
-    // A grid's item grows across and stretches down its cells, as in a row.
-    if (parentMode === "HORIZONTAL" || parentMode === "GRID") {
-      if (node.layoutGrow === 1) h ??= "fill";
-      if (node.layoutAlign === "STRETCH") v ??= "fill";
-    } else if (parentMode === "VERTICAL") {
-      if (node.layoutGrow === 1) v ??= "fill";
-      if (node.layoutAlign === "STRETCH") h ??= "fill";
     }
   }
   if (h && h !== "fixed") props.sizingH = h;
