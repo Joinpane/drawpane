@@ -9,7 +9,7 @@
 
 export const MAGIC = 0x4c445044; // "DPDL", little-endian
 export const MAJOR = 1;
-export const MINOR = 0;
+export const MINOR = 1;
 /** A message with this base replaces everything; it starts with a reset. */
 export const ANY_REVISION = 0xffffffff;
 /** The page: the root top-level records hang from. */
@@ -25,7 +25,11 @@ export const COMMAND = {
   transform: 7,
 } as const;
 
-export const FLAG = { hidden: 1, isolate: 2, group: 4 } as const;
+/**
+ * Record flags. `provisional`: sent ahead of its real drawing (text not shaped yet while a page
+ * opens), drawn as its coarse ops at every scale and never exact; sent again whole soon after.
+ */
+export const FLAG = { hidden: 1, isolate: 2, group: 4, provisional: 8 } as const;
 
 export const PATH = { path: 1, rect: 2, ellipse: 3, glyphs: 4, outside: 5 } as const;
 export const OP = { fill: 1, stroke: 2, clip: 3, unclip: 4, children: 5, read: 6 } as const;

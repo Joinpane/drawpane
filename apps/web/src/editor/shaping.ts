@@ -26,7 +26,20 @@ export const fontBytes: FontBytesLoader = async (face) => {
   return response.ok ? response.arrayBuffer() : null;
 };
 
-export const shaper = new Shaper(fontBytes);
+/**
+ * How long a face may load before its text goes without it (`Shaper`'s 3 s), unless the debug
+ * setting `drawpane:face-deadline-ms` says otherwise (tests that hold a face back).
+ */
+function faceDeadline(): { loadDeadlineMs: number } | Record<string, never> {
+  try {
+    const ms = Number(globalThis.localStorage?.getItem("drawpane:face-deadline-ms"));
+    return ms > 0 ? { loadDeadlineMs: ms } : {};
+  } catch {
+    return {};
+  }
+}
+
+export const shaper = new Shaper(fontBytes, faceDeadline());
 
 let boxAdded = false;
 /**

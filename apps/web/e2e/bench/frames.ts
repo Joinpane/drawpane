@@ -139,7 +139,7 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
         const trace = (traced?.trace ?? [])
           .map(
             (e) =>
-              `${e.k === "frame" ? "f" : e.k === "present" ? "p" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
+              `${e.k === "frame" ? "f" : e.k === "present" ? "p" : e.k === "text" ? "t" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
           )
           .join(" ");
         if (traced) traced.trace = null;
@@ -268,7 +268,7 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
       const trace = (traced?.trace ?? [])
         .map(
           (e) =>
-            `${e.k === "frame" ? "f" : e.k === "present" ? "p" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
+            `${e.k === "frame" ? "f" : e.k === "present" ? "p" : e.k === "text" ? "t" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
         )
         .join(" ");
       if (traced) traced.trace = null;
@@ -404,7 +404,10 @@ export async function settles(
           await frame();
         }
         const st = v?.stamps;
-        if (v ? !(st?.drawn && st.shown) : !w.drawpaneFrames.exact) {
+        if (v) v.stamps = null;
+        // A gesture counts only with every stamp: one missing is a timeout, never a sample left
+        // out of one column and not the others.
+        if (v ? !(st?.drawn && st.shown && st.gpu) : !w.drawpaneFrames.exact) {
           timeouts++;
           continue;
         }
@@ -412,7 +415,6 @@ export async function settles(
         if (st?.gpu) gpu.push(st.gpu.at - input);
         if (st?.shown) shown.push(st.shown.at - input);
         else shown.push(performance.now() - input);
-        if (v) v.stamps = null;
       }
       const spread = (xs: number[]) => {
         const s = [...xs].sort((a, b) => a - b);
@@ -443,4 +445,179 @@ export async function settles(
 export function settlesRow(r: Settles): string {
   const s = (x: Spread) => `p50 ${x.p50 ?? "-"} / p95 ${x.p95 ?? "-"} / max ${x.max ?? "-"}`;
   return `settle, ${r.kind.padEnd(5)} ${r.gestures} gestures, ${r.timeouts} timed out · drawn ${s(r.drawn)} · gpu done ${s(r.gpu)} · shown ${s(r.shown)} ms · ${r.stamp.renderer} on ${r.stamp.pageId}, revision ${r.stamp.revision}`;
+}
+
+/** Opening a page: when it was first usefully on screen, and when exact (drawn, GPU, shown). */
+export interface Opening {
+  /** Two animation frames after the page was shown: the old proxy, kept for comparison. */
+  twoFrames: number;
+  /**
+   * The first frame on screen that looks like the page (`USEFUL` in `opening`): when it was
+   * shown, its number, and how much of it matched. Null when none did, or the canvas renderer
+   * drew the page (its frames aren't sampled).
+   */
+  useful: { shown: number; n: number; foreground: number; all: number } | null;
+  /** Frames sampled before the exact one, and the best match among them. */
+  sampled: number;
+  /** The first exact frame: submitted, finished by the GPU, shown (read back here). */
+  exact: { drawn: number | null; gpu: number | null; shown: number | null };
+  /** The editor's own exact flag (either renderer), for pages the canvas renderer draws. */
+  exactAny: number;
+  timedOut: boolean;
+  stamp: { renderer: "engine" | "canvas"; pageId: string; revision: number | null };
+  /** `performance.now()` in the page when the page was shown: other clocks are from it. */
+  t0: number;
+}
+
+/**
+ * Shows `pageId`, whole, and times it (decision 0040's targets: a useful first image within 1 s,
+ * exact within 3 s). Every frame the engine puts on screen is sampled as it lands (its canvas
+ * scaled to blocks of 16 device pixels); once the page is exact, the first sample that looks
+ * like the exact frame is the useful one: at least 90% of the blocks where the exact frame
+ * isn't background, and of all blocks, within 40 levels (of 255) of it in every channel. Coarse
+ * tiles and text as bars pass; the loading checkerboard, a blank frame or one of the page before
+ * don't. At most 60 s.
+ */
+export async function opening(page: Page, pageId: string): Promise<Opening> {
+  return page.evaluate(async (pageId) => {
+    type Stamp = { n: number; at: number };
+    type View = {
+      canvas: HTMLCanvasElement;
+      stamps: { drawn?: Stamp; gpu?: Stamp; shown?: Stamp } | null;
+      shown: Stamp;
+      last: { pageId: string; supported: boolean };
+      engine: { revision: number };
+    };
+    const w = window as unknown as {
+      drawpane: { setPage(id: string): void; zoomToFit(): void };
+      drawpaneFrames: { exact: boolean };
+      drawpaneEngineView?: View;
+    };
+    const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+    const v = w.drawpaneEngineView;
+    const BLOCK = 16;
+    const small = document.createElement("canvas");
+    const sctx = small.getContext("2d", { willReadFrequently: true });
+    const sample = (): Uint8ClampedArray | null => {
+      if (!v || !sctx || v.canvas.width === 0) return null;
+      small.width = Math.ceil(v.canvas.width / BLOCK);
+      small.height = Math.ceil(v.canvas.height / BLOCK);
+      sctx.imageSmoothingEnabled = true;
+      sctx.imageSmoothingQuality = "high";
+      sctx.clearRect(0, 0, small.width, small.height);
+      sctx.drawImage(v.canvas, 0, 0, small.width, small.height);
+      return sctx.getImageData(0, 0, small.width, small.height).data;
+    };
+    const samples: Array<{ n: number; at: number; px: Uint8ClampedArray }> = [];
+    const shownBefore = v?.shown.n ?? 0;
+    if (v) v.stamps = {};
+    const t0 = performance.now();
+    w.drawpane.setPage(pageId);
+    w.drawpane.zoomToFit();
+    await frame();
+    await frame();
+    const twoFrames = performance.now() - t0;
+    let exactAny: number | null = null;
+    let lastSampled = shownBefore;
+    const take = () => {
+      if (!v || v.last.pageId !== pageId || v.shown.n === lastSampled || v.shown.n <= shownBefore)
+        return;
+      lastSampled = v.shown.n;
+      const px = sample();
+      if (px) samples.push({ n: v.shown.n, at: v.shown.at, px });
+    };
+    take();
+    for (;;) {
+      if (exactAny === null && w.drawpaneFrames.exact) exactAny = performance.now() - t0;
+      const st = v?.stamps;
+      const engineDone = !!(st?.drawn && st.shown && st.gpu);
+      if ((v?.last.supported ? engineDone : exactAny !== null) || performance.now() - t0 > 60_000)
+        break;
+      await frame();
+      take();
+    }
+    take();
+    const timedOut = performance.now() - t0 > 60_000;
+    const st = v?.stamps;
+    const rel = (s?: Stamp) => (s ? Math.round(s.at - t0) : null);
+    // The exact frame as shown, against every earlier sample.
+    const exactPx = v?.last.supported ? sample() : null;
+    let useful: Opening["useful"] = null;
+    if (exactPx) {
+      const counts = new Map<number, number>();
+      for (let i = 0; i < exactPx.length; i += 4) {
+        const key =
+          ((exactPx[i] as number) << 16) |
+          ((exactPx[i + 1] as number) << 8) |
+          (exactPx[i + 2] as number);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      let bg = 0;
+      let most = 0;
+      for (const [key, c] of counts)
+        if (c > most) {
+          most = c;
+          bg = key;
+        }
+      const bgc = [(bg >> 16) & 255, (bg >> 8) & 255, bg & 255];
+      const near = (
+        a: Uint8ClampedArray,
+        i: number,
+        b: ArrayLike<number>,
+        j: number,
+        tol: number,
+      ) =>
+        Math.abs((a[i] as number) - (b[j] as number)) <= tol &&
+        Math.abs((a[i + 1] as number) - (b[j + 1] as number)) <= tol &&
+        Math.abs((a[i + 2] as number) - (b[j + 2] as number)) <= tol;
+      for (const s of samples) {
+        if (s.px.length !== exactPx.length || (st?.shown && s.n > st.shown.n)) continue;
+        let fg = 0;
+        let fgOk = 0;
+        let ok = 0;
+        for (let i = 0; i < exactPx.length; i += 4) {
+          const match = near(s.px, i, exactPx, i, 40);
+          if (match) ok++;
+          if (!near(exactPx, i, bgc, 0, 24)) {
+            fg++;
+            if (match) fgOk++;
+          }
+        }
+        const foreground = fg ? fgOk / fg : 1;
+        const all = ok / (exactPx.length / 4);
+        if (foreground >= 0.9 && all >= 0.9) {
+          useful = {
+            shown: Math.round(s.at - t0),
+            n: s.n,
+            foreground: Math.round(foreground * 1000) / 1000,
+            all: Math.round(all * 1000) / 1000,
+          };
+          break;
+        }
+      }
+    }
+    if (v) v.stamps = null;
+    return {
+      twoFrames: Math.round(twoFrames),
+      useful,
+      sampled: samples.length,
+      exact: { drawn: rel(st?.drawn), gpu: rel(st?.gpu), shown: rel(st?.shown) },
+      exactAny: Math.round(exactAny ?? performance.now() - t0),
+      timedOut,
+      stamp: {
+        renderer: v?.last.supported && v.last.pageId === pageId ? "engine" : "canvas",
+        pageId,
+        revision: v ? v.engine.revision : null,
+      },
+      t0,
+    } satisfies Opening;
+  }, pageId);
+}
+
+/** One line of opening results for the console. */
+export function openingRow(o: Opening): string {
+  const u = o.useful
+    ? `useful image shown at ${o.useful.shown} ms (frame ${o.useful.n}, ${Math.round(o.useful.foreground * 100)}% of the foreground)`
+    : "no useful image sampled";
+  return `open        ${u} · exact drawn ${o.exact.drawn ?? "-"} / gpu done ${o.exact.gpu ?? "-"} / shown ${o.exact.shown ?? "-"} ms (editor's flag ${o.exactAny} ms) · ${o.sampled} frames sampled · two frames ${o.twoFrames} ms · ${o.stamp.renderer} on ${o.stamp.pageId}, revision ${o.stamp.revision}${o.timedOut ? " · TIMED OUT" : ""}`;
 }

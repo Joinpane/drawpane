@@ -309,58 +309,70 @@ fn limits_are_enforced() {
 #[test]
 fn tiles_reproduce_the_whole_frame() {
     for case in 0..cases(20) {
-        let mut r = Rng(seed().wrapping_add(u64::from(case) * 77) | 1);
-        let model = Model::new(&mut r, 24, case % 2 == 0);
-        let mut e = engine();
-        // Tiles narrower than the frame, so a band is several tiles.
-        e.store.limits.export_tile = 48;
-        e.apply(&model.fresh(1)).expect("fresh");
-        let cam = Camera {
-            zoom: 1.0,
-            x: 0.0,
-            y: 0.0,
-            dpr: 1.0,
-        };
-        let (whole, _) = e.render_cpu(W_PX, H_PX, cam, [1.0; 4], false).expect("whole");
-        let whole = whole.to_vec();
-        let mut banded = Vec::new();
-        let mut y = 0;
-        while y < H_PX {
-            let rows = 32.min(H_PX - y);
-            banded.extend_from_slice(e.render_band(W_PX, H_PX, cam, [1.0; 4], y, rows).expect("band"));
-            y += rows;
-        }
-        let differing = whole
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(banded.as_chunks::<4>().0.iter())
-            .filter(|(a, b)| a != b)
-            .count();
-        let worst = whole
-            .iter()
-            .zip(&banded)
-            .map(|(a, b)| a.abs_diff(*b))
-            .max()
-            .unwrap_or(0);
-        let at: Vec<(u32, u32)> = whole
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(banded.as_chunks::<4>().0.iter())
-            .enumerate()
-            .filter(|(_, (a, b))| a != b)
-            .map(|(i, _)| (i as u32 % W_PX, i as u32 / W_PX))
-            .take(8)
-            .collect();
-        if differing > 0 {
-            eprintln!("case {case}: readers {:?}, differing at {at:?}", e.store.readers());
-        }
-        assert!(
-            differing == 0,
-            "case {case}: {differing} pixels differ between bands and the whole frame (worst {worst})"
-        );
+        bands_match(seed(), case);
     }
+}
+
+#[test]
+fn bands_reproduce_the_whole_frame_where_a_run_of_glyphs_crosses_them() {
+    // CI's random seed that found a run's image, cut to a band, a level off the whole frame's
+    // (vello_cpu rounds an image's pixels by its size): the CPU draws a run's masks one by one.
+    bands_match(1_795_184_124_632_858_455, 27);
+}
+
+/// Case `case` of seed `seed`: a random page drawn whole and in bands, bitwise the same.
+fn bands_match(seed: u64, case: u32) {
+    let mut r = Rng(seed.wrapping_add(u64::from(case) * 77) | 1);
+    let model = Model::new(&mut r, 24, case.is_multiple_of(2));
+    let mut e = engine();
+    // Tiles narrower than the frame, so a band is several tiles.
+    e.store.limits.export_tile = 48;
+    e.apply(&model.fresh(1)).expect("fresh");
+    let cam = Camera {
+        zoom: 1.0,
+        x: 0.0,
+        y: 0.0,
+        dpr: 1.0,
+    };
+    let (whole, _) = e.render_cpu(W_PX, H_PX, cam, [1.0; 4], false).expect("whole");
+    let whole = whole.to_vec();
+    let mut banded = Vec::new();
+    let mut y = 0;
+    while y < H_PX {
+        let rows = 32.min(H_PX - y);
+        banded.extend_from_slice(e.render_band(W_PX, H_PX, cam, [1.0; 4], y, rows).expect("band"));
+        y += rows;
+    }
+    let differing = whole
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(banded.as_chunks::<4>().0.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    let worst = whole
+        .iter()
+        .zip(&banded)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    let at: Vec<(u32, u32)> = whole
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(banded.as_chunks::<4>().0.iter())
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(i, _)| (i as u32 % W_PX, i as u32 / W_PX))
+        .take(8)
+        .collect();
+    if differing > 0 {
+        eprintln!("case {case}: readers {:?}, differing at {at:?}", e.store.readers());
+    }
+    assert!(
+        differing == 0,
+        "case {case}: {differing} pixels differ between bands and the whole frame (worst {worst})"
+    );
 }
 
 #[test]

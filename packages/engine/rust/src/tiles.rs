@@ -102,6 +102,17 @@ impl Level {
         ])
     }
 
+    /// The ladder level just at or above `scale`: the smallest scale of the form 2^(k/2) not
+    /// below it, phase 0. A page just opened starts at the one at or above a quarter of its
+    /// scale, so it's never more than 4× coarser and always stands in (`stands_in`).
+    pub fn ladder_at_least(scale: f64) -> Level {
+        let k = (2.0 * scale.log2()).ceil().clamp(-60.0, 60.0);
+        Level {
+            scale: (k / 2.0).exp2(),
+            phase: (0.0, 0.0),
+        }
+    }
+
     /// The coarse level a zoom draws where nothing covers the view: the largest scale of the
     /// form 2^(k/2) at or below `scale`, phase 0 (decision 0040: scales step by √2).
     pub fn ladder(scale: f64) -> Level {
@@ -126,10 +137,21 @@ pub struct TileEntry {
     pub slot: u32,
     /// Drawn with no level of detail (no bars for small text, no specks skipped).
     pub exact: bool,
+    /// Drawn at full detail (no level of detail): nothing to draw again until it's stale, even
+    /// when it isn't exact (a provisional record in it, display list 1.1: what the list holds
+    /// now, drawn as well as it can be).
+    pub full: bool,
     /// Something it shows changed since it was drawn: a stand-in until drawn again.
     pub stale: bool,
     /// The frame it was last shown or drawn in.
     pub used: u64,
+}
+
+impl TileEntry {
+    /// Nothing to draw it again for: not stale, and exact or drawn at full detail.
+    pub fn current(&self) -> bool {
+        !self.stale && (self.exact || self.full)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -240,6 +262,8 @@ pub struct TileCache {
     /// The frame level and view centre (grid pixels) of the last plan: eviction keeps what's near.
     focus: Option<(u32, f64, f64)>,
     drag: DragTiles,
+    /// The next plan is a page's first frame (set by the backend): its stand-in is coarser.
+    pub opening: bool,
     /// Tiles an ended drag's selection was over, still stale: they show it where it was, so
     /// they're drawn again at once.
     ghosts: HashSet<TileKey>,
@@ -315,6 +339,7 @@ impl TileCache {
             halo: 0,
             focus: None,
             drag: DragTiles::default(),
+            opening: false,
             ghosts: HashSet::new(),
             stats: TileStats::default(),
         }
@@ -462,7 +487,7 @@ impl TileCache {
         let shown: HashSet<(i32, i32)> = plan.visible.iter().copied().collect();
         let tiles = &self.tiles;
         self.drag.touched.retain(|&(i, j)| {
-            let stale = tiles.get(&TileKey { level, i, j }).is_some_and(|e| e.stale || !e.exact);
+            let stale = tiles.get(&TileKey { level, i, j }).is_some_and(|e| !e.current());
             let cell = Rect::new(
                 f64::from(i) * t,
                 f64::from(j) * t,
@@ -476,11 +501,7 @@ impl TileCache {
     /// Whether a visible tile is one the drag composites: touched by the selection, and its own
     /// tile not up to date.
     fn dragged(&self, level: u32, i: i32, j: i32) -> bool {
-        self.drag.touched.contains(&(i, j))
-            && !self
-                .tiles
-                .get(&TileKey { level, i, j })
-                .is_some_and(|e| !e.stale && e.exact)
+        self.drag.touched.contains(&(i, j)) && !self.tiles.get(&TileKey { level, i, j }).is_some_and(|e| e.current())
     }
 
     /// The tiles the drag composites this frame: visible ones it touched whose own tile isn't up
@@ -795,14 +816,16 @@ impl TileCache {
             .map(|(k, _)| *k)
     }
 
-    /// Records a tile drawn into `slot`.
-    pub fn drawn(&mut self, key: TileKey, slot: u32, exact: bool) {
+    /// Records a tile drawn into `slot`: `exact`, nothing stood in for any record in it; `full`,
+    /// drawn without level of detail.
+    pub fn drawn(&mut self, key: TileKey, slot: u32, exact: bool, full: bool) {
         self.free.retain(|s| *s != slot);
         self.tiles.insert(
             key,
             TileEntry {
                 slot,
                 exact,
+                full,
                 stale: false,
                 used: self.frame,
             },
@@ -952,7 +975,14 @@ impl TileCache {
         });
         let grid_inv = level.grid().inverse();
         let frame_grid = Rect::new(gx0 as f64, gy0 as f64, (gx0 + w) as f64, (gy0 + h) as f64);
-        let ladder = zooming.then(|| self.level_id(Level::ladder(level.scale), true));
+        // A page just shown starts on a ladder level up to four times coarser: a few tiles, most
+        // of the page specks at that scale, so its first frame comes soon (see `opening`).
+        let ladder_level = if self.opening {
+            Level::ladder_at_least(level.scale / 4.0)
+        } else {
+            Level::ladder(level.scale)
+        };
+        let ladder = zooming.then(|| self.level_id(ladder_level, true));
         let other_levels: Vec<u32> = self
             .levels
             .iter()
@@ -972,7 +1002,7 @@ impl TileCache {
         for &(i, j) in &visible {
             let key = TileKey { level: id, i, j };
             let held = self.tiles.get(&key).copied();
-            if held.is_some_and(|e| !e.stale && e.exact) {
+            if held.is_some_and(|e| e.current()) {
                 continue;
             }
             let shown = Rect::new(
@@ -1141,7 +1171,7 @@ impl TileCache {
             for (i, j) in ring {
                 let key = TileKey { level: id, i, j };
                 match self.tiles.get(&key).copied() {
-                    Some(e) if !e.stale && e.exact => self.pin_spare(&key, &mut room),
+                    Some(e) if e.current() => self.pin_spare(&key, &mut room),
                     Some(_) => {
                         self.pin_spare(&key, &mut room);
                         plan.jobs.push(frame_job(key, false, false));
@@ -1203,7 +1233,7 @@ impl TileCache {
     /// What's left of a plan's work: tiles the frame shows that aren't up to date (stale,
     /// missing, or drawn with level of detail), and jobs round it not drawn yet.
     pub fn left(&self, plan: &Plan) -> (u32, u32) {
-        let done = |key: &TileKey| self.tiles.get(key).is_some_and(|e| !e.stale && e.exact);
+        let done = |key: &TileKey| self.tiles.get(key).is_some_and(|e| e.current());
         let pending = plan
             .visible
             .iter()
@@ -1222,7 +1252,7 @@ impl TileCache {
             .filter(|j| {
                 self.tiles
                     .get(&j.key)
-                    .is_none_or(|e| e.stale || (!j.detail && !e.exact))
+                    .is_none_or(|e| e.stale || (!j.detail && !e.current()))
             })
             .count();
         (pending as u32, queued as u32)
@@ -1258,6 +1288,10 @@ impl TileCache {
             };
             if e.stale || !e.exact {
                 out.exact = false;
+            }
+            // Pending: more frames will draw it (not a provisional record's tile, drawn as well
+            // as the list allows until the list changes).
+            if !e.current() {
                 out.pending += 1;
             }
             // The tile's grid pixels, in the frame.
@@ -1389,7 +1423,7 @@ mod tests {
     fn draw_all(c: &mut TileCache, plan: &Plan) {
         for j in &plan.jobs {
             let s = c.slot_for(j.key).expect("slot");
-            c.drawn(j.key, s, !j.detail);
+            c.drawn(j.key, s, !j.detail, !j.detail);
         }
     }
 
@@ -1616,7 +1650,7 @@ mod tests {
                     extra -= 1;
                 }
                 let s = c.slot_for(j.key).expect("the plan counted a slot for it");
-                c.drawn(j.key, s, true);
+                c.drawn(j.key, s, true, true);
             }
             if c.compose(&b, None).exact {
                 return;

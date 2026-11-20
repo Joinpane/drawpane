@@ -15,7 +15,10 @@ pub const FLAG_HIDDEN: u32 = 1;
 pub const FLAG_ISOLATE: u32 = 2;
 /// No paint of its own: a group, whose children are drawn in its parent's space.
 pub const FLAG_GROUP: u32 = 4;
-const KNOWN_FLAGS: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP;
+/// Sent ahead of its real drawing (text not shaped yet, while a page opens): drawn as its coarse
+/// ops at every scale, and never exact. Its record is sent again whole soon after.
+pub const FLAG_PROVISIONAL: u32 = 8;
+const KNOWN_FLAGS: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP | FLAG_PROVISIONAL;
 
 /// Bits of `Record::unsupported` (`UNSUPPORTED` in wire.ts) the engine sets itself, from what it
 /// decodes, so anything it would refuse while drawing refuses its page before any drawing, on
@@ -339,6 +342,9 @@ impl Record {
     }
     pub fn group(&self) -> bool {
         self.flags & FLAG_GROUP != 0
+    }
+    pub fn provisional(&self) -> bool {
+        self.flags & FLAG_PROVISIONAL != 0
     }
     /// The images its paints draw (by handle), for invalidating what shows them when one changes.
     pub fn images(&self) -> impl Iterator<Item = u32> + '_ {

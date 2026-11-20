@@ -47,6 +47,17 @@ export interface TextMeasurer {
    * face (decision 0037). Missing: nothing is known to be missing.
    */
   missing?(family: string, size: number, weight: number, italic: boolean): boolean;
+  /**
+   * The face text in `run` waits for while its file loads (a key to ask `faceStatus` about),
+   * or null when it's at hand or will never come: text shaped null while its face loads draws
+   * provisional (the render engine's display list 1.1) rather than not at all. Missing: no face
+   * is ever loading.
+   */
+  loading?(run: ShapingRun): string | null;
+  /** Where a face `loading` named is now. */
+  faceStatus?(key: string): "loading" | "ready" | "unavailable";
+  /** Bumped when only faces arrived (or turned out unavailable): `generation` counts these too. */
+  readonly faceGeneration?: number;
 }
 
 /**

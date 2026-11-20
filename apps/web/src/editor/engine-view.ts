@@ -18,7 +18,6 @@ import {
   type TextMeasurer,
 } from "@drawpane/editor";
 import {
-  type AheadStats,
   type Camera,
   ErrorCode,
   type FrameStats,
@@ -142,11 +141,39 @@ export interface EngineDraw {
    * again next frame: each draws more of the tiles still missing (decision 0040, phase 2).
    */
   readonly exact: boolean;
-  /** Tiles round the view are still to draw ahead of a pan: an idle frame may draw them. */
+  /**
+   * More to do between frames: tiles round the view to draw ahead of a pan, or text still to
+   * send whole (`EngineView.ahead`).
+   */
   readonly ahead: boolean;
+  /**
+   * Nothing more for frames or the time between them to do: every tile shown is as drawn as
+   * the page's list allows. A frame that isn't exact then waits for something to change (text
+   * provisional while its faces load: their arrival redraws it).
+   */
+  readonly settled: boolean;
 }
 
-const NOT_DRAWN: EngineDraw = { drawn: false, ready: false, exact: false, ahead: false };
+const NOT_DRAWN: EngineDraw = {
+  drawn: false,
+  ready: false,
+  exact: false,
+  ahead: false,
+  settled: false,
+};
+
+/** What drawing between frames did (`EngineView.ahead`). */
+export interface EngineAhead {
+  /** It drew a tile or sent text: another slice may do more. */
+  readonly progressed: boolean;
+  /** Tiles the last frame shows still to draw (some, after text was sent). */
+  readonly tiles: number;
+  /** Tiles round the view still to draw. */
+  readonly queued: number;
+  /** Text still to send whole, and of it, what's in view. */
+  readonly text: number;
+  readonly textVisible: number;
+}
 
 /**
  * Milliseconds a frame may spend drawing tiles beyond those nothing else can stand in for
@@ -161,9 +188,12 @@ export const REST_BUDGET_MS = 12;
  * (`EngineView.ahead`): the time a page has between animation frames goes to the exact frame
  * too, not only each frame's budget. A frame's length at 60 Hz: the browser renders between
  * slices (on the T4 bench, ~8 ms each time), so fewer, longer slices settle sooner, and none
- * holds input back for more than a frame.
+ * holds input back for more than a frame. Text sent whole after a page opens goes in slices of
+ * the same length.
  */
 export const IDLE_SLICE_MS = 16;
+/** A moving frame's budget that fits no tile: only what nothing stands in for is drawn. */
+const NO_OPTIONAL_MS = 1e-6;
 
 /** Frames in a row the canvas can't take before the engine gives up for the session. */
 const UNPRESENTED = 3;
@@ -205,19 +235,26 @@ export class EngineView {
   /** What drawing between frames did, summed (`ahead`), for the bench and the debug handle. */
   idle = { slices: 0, tiles: 0, ms: 0 };
   /**
-   * Set to an object by the bench: when the latest exact frame was drawn (submitted), when the
-   * GPU finished it (no read-back involved), and when it was shown (a read-back painted; with a
-   * WebGPU canvas, when it was drawn). Frame numbers tell them apart.
+   * Set to an object by the bench: when the first exact frame since was drawn (submitted), when
+   * the GPU finished it (no read-back involved), and when an exact frame was first shown (a
+   * read-back painted; with a WebGPU canvas, the first animation frame after the GPU finished
+   * it, the earliest a compositor could show it). Frame numbers tell them apart.
    */
   stamps: {
     drawn?: { n: number; at: number };
     gpu?: { n: number; at: number };
     shown?: { n: number; at: number };
   } | null = null;
+  /**
+   * The frame last put on screen, exact or not, and when: painted from its read-back, or (a
+   * WebGPU canvas) the first animation frame after the GPU finished it. The bench samples the
+   * canvas as it changes.
+   */
+  shown = { n: 0, at: 0 };
   /** Set to a list by the bench: each frame and slice between frames, as it happens. */
   trace: Array<{
     t: number;
-    k: "frame" | "idle" | "present";
+    k: "frame" | "idle" | "present" | "text";
     ms: number;
     tiles: number;
     pending: number;
@@ -230,6 +267,9 @@ export class EngineView {
   }> | null = null;
   /** The last frame's numbers, for the bench and the debug handle. */
   last = {
+    /** The page drawn and the frame's number (benches tell frames of a page apart by them). */
+    pageId: "",
+    n: 0,
     ms: 0,
     patchMs: 0,
     records: 0,
@@ -416,12 +456,29 @@ export class EngineView {
     for (const ref of this.#pending) if (!used.has(ref)) this.#pending.delete(ref);
   }
 
+  /** The last fresh list (a page shown): building it and applying it, in ms (benches). */
+  opened: { pageId: string; buildMs: number; applyMs: number; records: number } | null = null;
+
   /** Applies the builder's next message, if any; false (and off for the session) if it can't. */
-  #patch(pageId: string): boolean {
+  #patch(pageId: string, textMs?: number): boolean {
+    const t0 = performance.now();
+    // A page shown afresh: its text sent provisional (coarse bars), encoded whole over the next
+    // frames and the time between them, so the first frame doesn't wait for every line to be
+    // shaped.
     let message =
-      this.#builder.pageId === pageId ? this.#builder.update() : this.#builder.build(pageId);
+      this.#builder.pageId === pageId
+        ? this.#builder.update(textMs)
+        : this.#builder.build(pageId, undefined, { deferText: true });
     if (!message) return true;
+    const t1 = performance.now();
     let r = this.#engine.apply(message);
+    if (this.#builder.stats.fresh)
+      this.opened = {
+        pageId,
+        buildMs: t1 - t0,
+        applyMs: performance.now() - t1,
+        records: this.#builder.stats.records,
+      };
     this.#builder.acknowledge(r.ok, this.#engine.revision);
     if (!r.ok && r.code === ErrorCode.Revision) {
       // Out of step (an earlier message was refused or lost): start the page afresh.
@@ -491,15 +548,43 @@ export class EngineView {
   }
 
   /**
-   * Between frames at rest: draws tiles the next frame will want, for the frame last drawn, for
-   * at most `budgetMs` (at least one tile), compositing and showing nothing (decision 0040,
-   * phase 2). Answers what's left (`pending`: tiles the frame shows; `queued`: tiles round it)
-   * and whether it drew any, or null when there's nothing to draw ahead for (the engine isn't
+   * Between frames at rest, for at most `budgetMs` (decision 0040, phase 2): sends text of
+   * `pageId` still to be encoded whole that's in view (tiles drawn before it would be drawn
+   * again), else draws tiles the next frame will want (those the last frame shows that aren't
+   * up to date, nearest the centre first, then those round it), else sends the rest of the text.
+   * Composites and shows nothing. Null when there's nothing to do it for (the engine isn't
    * drawing, or failed: the next frame finds out).
    */
-  ahead(background: string, budgetMs: number): AheadStats | null {
-    if (this.#dead || !this.#presenting) return null;
+  ahead(pageId: string, background: string, budgetMs: number): EngineAhead | null {
+    if (this.#dead || !this.#presenting || this.#presenting.pageId !== pageId) return null;
+    const b = this.#builder;
     try {
+      const text = (): EngineAhead | null => {
+        const t = performance.now();
+        const before = b.pending;
+        if (!this.#patch(pageId, budgetMs)) return null;
+        this.trace?.push({
+          t: performance.now(),
+          k: "text",
+          ms: performance.now() - t,
+          tiles: 0,
+          pending: before - b.pending,
+          encode: 0,
+          render: 0,
+          misses: 0,
+          records: b.stats.records,
+          masked: 0,
+          outlined: 0,
+        });
+        return {
+          progressed: true,
+          tiles: 1,
+          queued: 0,
+          text: b.pending,
+          textVisible: b.pageId === pageId ? b.pendingVisible : 0,
+        };
+      };
+      if (b.pageId === pageId && b.pendingVisible > 0) return text();
       const r = this.#engine.renderGpuAhead(colour(background), budgetMs);
       if (!r.ok) {
         // A layer the engine refuses: the next frame draws this page on the canvas.
@@ -524,7 +609,14 @@ export class EngineView {
         masked: r.value.glyphsMasked,
         outlined: r.value.glyphsOutlined,
       });
-      return r.value;
+      if (r.value.drawn === 0 && b.pageId === pageId && b.pending > 0) return text();
+      return {
+        progressed: r.value.drawn > 0,
+        tiles: r.value.pending,
+        queued: r.value.queued,
+        text: b.pending,
+        textVisible: 0,
+      };
     } catch (err) {
       this.#fail({ message: String(err), code: null });
       return null;
@@ -550,6 +642,14 @@ export class EngineView {
   ): EngineDraw {
     const t0 = performance.now();
     this.#builder.setEditorState(state);
+    // What's in view, in page units: text still to send whole goes there first.
+    const z = camera.zoom > 0 ? camera.zoom : 1;
+    this.#builder.setView({
+      x0: -camera.x / z,
+      y0: -camera.y / z,
+      x1: (width / dpr - camera.x) / z,
+      y1: (height / dpr - camera.y) / z,
+    });
     if (!this.#patch(pageId)) return NOT_DRAWN;
     const t1 = performance.now();
     if (!this.#builder.supported) {
@@ -562,7 +662,18 @@ export class EngineView {
       this.canvas.height = height;
     }
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr };
-    const frame = this.#engine.renderGpu(width, height, cam, colour(background), !exact, budgetMs);
+    // While text in view is still to be sent whole, a frame draws only what nothing stands in
+    // for (as while moving): a tile drawn now would be stale again when the text arrives, and the
+    // time between frames sends the text first.
+    const textFirst = this.#builder.pendingVisible > 0;
+    const frame = this.#engine.renderGpu(
+      width,
+      height,
+      cam,
+      colour(background),
+      !exact || textFirst,
+      textFirst ? NO_OPTIONAL_MS : budgetMs,
+    );
     if (!frame.ok) {
       // A layer the builder didn't flag but the engine refuses: this page draws on the canvas.
       if (frame.code === ErrorCode.Unsupported) {
@@ -584,22 +695,35 @@ export class EngineView {
       return NOT_DRAWN;
     }
     this.#unpresented = 0;
+    // Exact only when the list holds what the page shows: text in view still to be sent again
+    // (fonts arrived) leaves the frame a stand-in, whatever the engine drew.
+    const shownExact = f.exact && this.#builder.pendingVisible === 0;
     const n = ++this.#frame;
     const stamps = this.stamps;
-    if (stamps && f.exact) {
-      const at = performance.now();
-      stamps.drawn = { n, at };
-      if (!this.#readback) stamps.shown = { n, at };
+    // Presented to a WebGPU canvas, a frame is on screen at the compositor's first frame after
+    // the GPU finished it, which nothing here can see: the first animation frame after then is
+    // the earliest it could be shown, and what's stamped. A read-back frame is shown when its
+    // pixels are painted (`#readNext`).
+    const watch = stamps && f.exact && !stamps.drawn;
+    if (watch) stamps.drawn = { n, at: performance.now() };
+    if (watch || !this.#readback)
       void this.#engine.gpuFinished().then(() => {
-        if (this.stamps === stamps && stamps.drawn?.n === n)
-          stamps.gpu = { n, at: performance.now() };
+        const gpu = performance.now();
+        if (watch && this.stamps === stamps && stamps.drawn?.n === n) stamps.gpu = { n, at: gpu };
+        if (this.#readback) return;
+        requestAnimationFrame(() => {
+          const at = performance.now();
+          if (n > this.shown.n) this.shown = { n, at };
+          if (watch && this.stamps === stamps && !stamps.shown) stamps.shown = { n, at };
+        });
       });
-    }
     if (this.#readback) {
-      this.#want = { n, width, height, exact: f.exact, epoch: this.#epoch };
+      this.#want = { n, width, height, exact: shownExact, epoch: this.#epoch };
       this.#readNext();
     }
     this.last = {
+      pageId,
+      n,
       ms: performance.now() - t0,
       patchMs: t1 - t0,
       records: f.records,
@@ -607,7 +731,7 @@ export class EngineView {
       glyphsMasked: f.glyphsMasked,
       glyphsOutlined: f.glyphsOutlined,
       supported: true,
-      exact: f.exact,
+      exact: shownExact,
       plan: f.plan,
       tiles: f.tiles,
       breakdown: {
@@ -625,7 +749,7 @@ export class EngineView {
       tiles: f.tiles.drawn,
       pending: f.tiles.pending,
       encode: f.ms.encode,
-      render: f.ms.render,
+      render: t1 - t0,
       misses: f.maskMisses,
       records: f.records,
       masked: f.glyphsMasked,
@@ -635,8 +759,9 @@ export class EngineView {
     return {
       drawn: true,
       ready: this.#readback === null,
-      exact: f.exact,
-      ahead: f.tiles.queued > 0,
+      exact: shownExact,
+      ahead: f.tiles.queued > 0 || this.#builder.pending > 0,
+      settled: f.tiles.pending === 0 && f.tiles.queued === 0 && this.#builder.pending === 0,
     };
   }
 
@@ -702,7 +827,8 @@ export class EngineView {
         breakdown: { ...this.last.breakdown, readback: performance.now() - t },
       };
       // Exact only if it's still the newest frame drawn.
-      if (this.stamps && want.exact && want.n === this.#frame)
+      this.shown = { n: want.n, at: performance.now() };
+      if (this.stamps && !this.stamps.shown && want.exact && want.n === this.#frame)
         this.stamps.shown = { n: want.n, at: performance.now() };
       this.onPresented(want.exact && want.n === this.#frame);
       this.#readNext();

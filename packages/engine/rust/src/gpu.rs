@@ -5,8 +5,10 @@
 //!   a buffer (`copy_texture_to_buffer`), never through the canvas: a WebGPU canvas copied into a
 //!   2D canvas can come back empty on headless drivers.
 //! - Images are textures, one per level, uploaded once. Glyph masks are rasterised by vello_cpu
-//!   (`masks.rs`, the same coverage as the CPU backend) and packed into one atlas texture, whose
-//!   space comes back a shelf at a time (`atlas.rs`).
+//!   (`masks.rs`, the same coverage as the CPU backend) and kept on the CPU; each tile lays its
+//!   runs' masks into one image a run and uploads them into the atlas texture, packed in rows
+//!   from its top left, a write a row (the next tile packs from the top left again: its uploads
+//!   run after the tiles before have drawn).
 //! - Everything the engine allocates on the GPU (images, the atlas, the frame and its depth
 //!   buffer, read-back buffers) is counted against `Limits::gpu_bytes`, and at most two
 //!   read-backs are in flight.
@@ -17,7 +19,6 @@
 //!   `ErrorCode::Gpu` and `ErrorCode::DeviceLost` on the next call, so the editor falls back.
 //! - Backdrop readers are phase 3 here (`read` refuses), as everywhere outside the tests.
 
-use crate::atlas::{Placed, Shelves};
 use crate::engine::{DragFrame, TiledOptions};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Open, impl_draw};
@@ -44,7 +45,7 @@ impl_draw!(Scene);
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const ATLAS_SIDE: u32 = 2048;
-/// The glyph atlas's bytes: the masks a GPU keeps by default.
+/// The atlas's bytes: what a GPU keeps of glyph masks by default (on the CPU).
 pub const ATLAS_BYTES: usize = (ATLAS_SIDE * ATLAS_SIDE * 4) as usize;
 const ATLAS_ID: TextureId = TextureId(1 << 48);
 const CHECKER_ID: TextureId = TextureId((1 << 48) + 1);
@@ -75,12 +76,31 @@ struct Main {
     height: u32,
 }
 
-/// The glyph atlas: one texture, and its shelves.
+/// The run atlas: one texture, holding the run images of the tile being drawn, packed in rows.
 struct Atlas {
     texture: wgpu::Texture,
-    shelves: Shelves,
-    /// Masks placed and not uploaded yet: x, y, width, height, pixels (`flush_masks`).
+    /// Where the next image goes: x and y, and the current row's height.
+    at: (u32, u32, u32),
+    /// Images placed and not uploaded yet: x, y, width, height, pixels (`flush_masks`).
     pending: Vec<(u32, u32, u32, u32, Vec<u8>)>,
+}
+
+impl Atlas {
+    /// Room for a `w` × `h` image in this tile's rows, if there's any left.
+    fn place(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        let (mut x, mut y, mut row) = self.at;
+        if w > ATLAS_SIDE || h > ATLAS_SIDE {
+            return None;
+        }
+        if x + w > ATLAS_SIDE {
+            (x, y, row) = (0, y + row, 0);
+        }
+        if y + h > ATLAS_SIDE {
+            return None;
+        }
+        self.at = (x + w, y, row.max(h));
+        Some((x, y))
+    }
 }
 
 /// Read-backs in flight at once, at most.
@@ -192,13 +212,16 @@ pub struct Gpu {
     last_scale: Option<f64>,
     /// The engine's generation and background the frame shown was made at, and whether it's exact.
     shown: Option<(u64, [u32; 4], bool)>,
+    /// Milliseconds a tile has lately taken to draw (a running average).
+    tile_ms: f64,
     blit: Option<wgpu::RenderPipeline>,
     images: HashMap<u32, Vec<(TextureId, wgpu::Texture, u32, u32)>>,
     image_bytes: usize,
     atlas: Atlas,
-    pub masks: MaskCache<RectU16>,
+    pub masks: MaskCache<Arc<vello_cpu::Pixmap>>,
     mask_side: u32,
-    cpu_resources: vello_cpu::Resources,
+    /// Rasterises glyph masks (on the CPU, as the CPU backend does: the same coverage).
+    raster: masks::Rasterizer,
     pub health: Arc<Health>,
     pub adapter: String,
     pub fallback_adapter: bool,
@@ -259,61 +282,6 @@ pub enum Target {
 }
 
 impl Gpu {
-    /// A coverage mask for `key` (a glyph's or a run's), made if it isn't held and fits within
-    /// `side` device pixels a side.
-    fn mask_with(
-        &mut self,
-        key: MaskKey,
-        path: &BezPath,
-        scale: (f64, f64),
-        phase: (f64, f64),
-        side: u32,
-    ) -> Option<GlyphMask> {
-        let source = |r: RectU16| ImageSource::external_texture(ATLAS_ID, TextureRegion::Rect(r), true);
-        let frame = self.masks.frame();
-        if let Some(e) = self.masks.get(&key) {
-            let (rect, origin, size) = (e.value, e.origin, e.size);
-            self.atlas.shelves.touch(u32::from(rect.y0), frame);
-            return Some((source(rect), origin, size));
-        }
-        // Room first (in the budget, then the atlas), so a mask that can't be kept isn't
-        // rasterised: that glyph is drawn as its outline.
-        let (w, h) = masks::mask_size(path, scale.0, scale.1, phase, side)?;
-        if !self.masks.fits(masks::bytes((w, h))) {
-            self.masks.stats.outlines += 1;
-            return None;
-        }
-        let (x, y) = match self.atlas.shelves.place(u32::from(w), u32::from(h), frame) {
-            Some(Placed::At { x, y }) => (x, y),
-            Some(Placed::Reused { x, y, shelf_y, shelf_h }) => {
-                let (y0, y1) = (shelf_y, shelf_y + shelf_h);
-                self.masks
-                    .evict_where(|r: &RectU16| u32::from(r.y0) >= y0 && u32::from(r.y0) < y1);
-                (x, y)
-            }
-            None => {
-                self.masks.stats.outlines += 1;
-                return None;
-            }
-        };
-        let (mask, origin) = masks::rasterise(&mut self.cpu_resources, path, scale.0, scale.1, phase, side)?;
-        if (mask.width(), mask.height()) != (w, h) {
-            return None;
-        }
-        // Uploaded with the tile's other new masks, a write per shelf (`flush_masks`).
-        self.atlas
-            .pending
-            .push((x, y, u32::from(w), u32::from(h), mask.data_as_u8_slice().to_vec()));
-        let rect = RectU16 {
-            x0: x as u16,
-            y0: y as u16,
-            x1: (x + u32::from(w)) as u16,
-            y1: (y + u32::from(h)) as u16,
-        };
-        let e = self.masks.insert(key, rect, origin, (w, h));
-        Some((source(e.value), e.origin, e.size))
-    }
-
     /// A WebGPU device and, given a canvas, a surface on it. In compatibility mode the caller
     /// has made `navigator.gpu.requestAdapter` ask for a compatibility adapter; the device is
     /// requested with the adapter's own limits either way, so a compatibility adapter takes it.
@@ -496,17 +464,18 @@ impl Gpu {
             last: None,
             last_scale: None,
             shown: None,
+            tile_ms: 0.0,
             blit,
             images: HashMap::new(),
             image_bytes: 0,
             atlas: Atlas {
                 texture: atlas_tex,
-                shelves: Shelves::new(ATLAS_SIDE),
+                at: (0, 0, 0),
                 pending: Vec::new(),
             },
             masks: MaskCache::new(mask_bytes),
             mask_side,
-            cpu_resources: vello_cpu::Resources::new(),
+            raster: masks::Rasterizer::default(),
             health,
             submits: 0,
             bytes: (ATLAS_SIDE * ATLAS_SIDE * 4 + 16 * 16 * 4) as usize,
@@ -810,11 +779,16 @@ impl Gpu {
         let view = frame.view;
         let scale = view.as_coeffs()[0];
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
+        // A page just shown (opened, switched to, its list made afresh): nothing to stand on.
+        // Under a budget its first frame is coarse tiles (a ladder level, level of detail on),
+        // quick to draw; the exact tiles follow a few a frame (decision 0040, phase 2: open time).
+        let opening = self.last.is_none() && self.tiles.is_empty() && options.budget_ms > 0.0;
         let last = self.last;
         let bg_bits = background.map(f32::to_bits);
+        self.tiles.opening = opening;
         let mut plan = self
             .tiles
-            .plan(view, (w, h), zooming, last, options.prefetch)
+            .plan(view, (w, h), zooming || opening, last, options.prefetch)
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
         let mut stats = DrawStats {
@@ -838,9 +812,22 @@ impl Gpu {
         // Drawn straight into the frame after it's laid: what no slot could be kept for.
         let mut late: Vec<crate::tiles::Job> = Vec::new();
         for job in &plan.jobs {
-            // Past the budget, what something stands in for waits for a later frame; what
-            // nothing stands in for is drawn regardless (the plan puts it first).
-            if !job.must && drew_any && options.budget_ms > 0.0 && now() - t0 >= options.budget_ms {
+            // Within the budget. Past it, what something stands in for waits for a later frame;
+            // what nothing stands in for is drawn regardless (the plan puts it first). At rest a
+            // frame always draws one tile, so it makes progress. While the camera moves a tile is
+            // drawn if one, at what tiles have lately cost, fits what's left; the frame's first
+            // may take up to three budgets, so a pan keeps up with ordinary tiles while a dense
+            // one (tens of ms) never makes a long moving frame.
+            let elapsed = now() - t0;
+            let over = options.budget_ms > 0.0
+                && if options.moving {
+                    let fits = elapsed + self.tile_ms <= options.budget_ms;
+                    let first = !drew_any && elapsed + self.tile_ms.max(1.0) <= options.budget_ms * 3.0;
+                    !(fits || first)
+                } else {
+                    drew_any && elapsed >= options.budget_ms
+                };
+            if !job.must && over {
                 stats.queued += 1;
                 continue;
             }
@@ -863,8 +850,11 @@ impl Gpu {
             };
             let exact = self.draw_job(store, job, background, target, &plan, dst, &mut stats, &mut verbs)?;
             drew_any = true;
+            // What a tile costs lately (a running average), for moving frames' budget.
+            let took = now() - t0 - elapsed;
+            self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
             match target {
-                TileTarget::Slot(s) => self.tiles.drawn(job.key, s, exact),
+                TileTarget::Slot(s) => self.tiles.drawn(job.key, s, exact, !job.detail),
                 TileTarget::Scratch | TileTarget::ScratchOnly => direct_exact &= exact,
             }
         }
@@ -970,7 +960,7 @@ impl Gpu {
                 &mut stats,
                 &mut verbs,
             )?;
-            self.tiles.drawn(job.key, slot, exact);
+            self.tiles.drawn(job.key, slot, exact, !job.detail);
         }
         let (pending, queued) = self.tiles.left(&plan);
         stats.pending = pending;
@@ -1134,9 +1124,11 @@ impl Gpu {
         verbs: &mut usize,
     ) -> Result<bool> {
         let t0 = now();
-        // Each tile is its own render and submission: masks and atlas shelves the tiles before
-        // it drew from may go now (their draws run before any upload made after them).
+        // Each tile is its own render and submission: masks the tiles before it drew from may go
+        // now, and its run images pack from the atlas's top left again (the draws before run
+        // before any upload made after them).
         self.masks.begin_frame();
+        self.atlas.at = (0, 0, 0);
         self.scene.reset_and_resize(TILE as u16, TILE as u16);
         let tile = Frame {
             width: TILE as u16,
@@ -1153,7 +1145,8 @@ impl Gpu {
         let limits = store.limits;
         let s = exec::draw_split(store, self, &tile, &limits, verbs, split)?;
         stats.add(&s);
-        let exact = !detail || s.exact();
+        // Exact only if nothing stood in: no level of detail, no provisional record.
+        let exact = s.exact();
         let t1 = now();
         // Every tile is drawn into the scratch tile, a target of its own size (Vello's work per
         // render follows its target's size, so a page as the target would cost a page's worth
@@ -1339,7 +1332,7 @@ impl Gpu {
                             self.tiles.release(key, slot);
                             return Err(e);
                         }
-                        self.tiles.drawn(key, slot, true);
+                        self.tiles.drawn(key, slot, true, true);
                         slot
                     }
                 };
@@ -2025,8 +2018,32 @@ impl Backend for Gpu {
     }
 
     fn glyph_mask(&mut self, key: MaskKey, path: &BezPath, scale: (f64, f64), phase: (f64, f64)) -> Option<GlyphMask> {
-        let side = self.mask_side;
-        self.mask_with(key, path, scale, phase, side)
+        masks::coverage(
+            &mut self.masks,
+            &mut self.raster,
+            key,
+            path,
+            scale,
+            phase,
+            self.mask_side,
+        )
+    }
+
+    fn whole_runs(&self) -> bool {
+        false
+    }
+
+    fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource> {
+        let (x, y) = self.atlas.place(u32::from(w), u32::from(h))?;
+        // Uploaded with the tile's other run images, a write per row (`flush_masks`).
+        self.atlas.pending.push((x, y, u32::from(w), u32::from(h), pixels));
+        let rect = RectU16 {
+            x0: x as u16,
+            y0: y as u16,
+            x1: (x + u32::from(w)) as u16,
+            y1: (y + u32::from(h)) as u16,
+        };
+        Some(ImageSource::external_texture(ATLAS_ID, TextureRegion::Rect(rect), true))
     }
 
     fn read(&mut self, kernel: u32, _paints: IRect, _reads: IRect, _open: &[Open]) -> Result<()> {

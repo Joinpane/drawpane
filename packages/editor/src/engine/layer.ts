@@ -69,14 +69,26 @@ export interface LayerContext {
   readonly whole: string | null;
   /** Layers hidden while dragged into place. */
   readonly hidden: ReadonlySet<string>;
+  /**
+   * Text isn't shaped: it's sent as its coarse bars, flagged provisional, and encoded whole
+   * later (a page opening shows its first frame sooner; decision 0040, phase 2).
+   */
+  readonly deferText?: boolean;
 }
 
 export interface EncodedLayer {
   readonly record: WireRecord;
   /** Image refs it paints (so it's encoded again when one arrives). */
   readonly images: readonly string[];
-  /** Text it couldn't outline yet (a face still loading): encoded again when shaping can. */
+  /** Text it couldn't outline (no face will come): encoded again when shaping can. */
   readonly textPending: boolean;
+  /** Sent provisional (`LayerContext.deferText`): to be encoded whole. */
+  readonly deferred: boolean;
+  /**
+   * Faces its text waits for while their files load (`TextMeasurer.loading`): it's sent
+   * provisional, its coarse bars, and encoded again when they arrive.
+   */
+  readonly waiting: readonly string[];
 }
 
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
@@ -126,6 +138,12 @@ class Builder {
   readonly images: string[] = [];
   unsupported = 0;
   textPending = false;
+  /** Sent ahead of its real drawing: deferred, or waiting for faces. */
+  provisional = false;
+  /** Sent ahead of its real drawing because text was deferred (`LayerContext.deferText`). */
+  deferred = false;
+  /** Faces its text waits for (`TextMeasurer.loading`). */
+  readonly waiting = new Set<string>();
   path(entry: PathEntry): number {
     this.paths.push(entry);
     return this.paths.length - 1;
@@ -547,21 +565,48 @@ function textRuns(
   const spanAt = (i: number) =>
     spans.find((s) => s.start <= i && i < s.end) ?? spans[spans.length - 1];
   let missing = false;
+  // A text layer composites as one shape, as Figma draws it (`text-overlap` in the parity
+  // suites): where its glyphs overlap, across lines too, they're covered once. Glyphs in a row
+  // with the same paints and scale go in one run, which the engine covers once (one fill of its
+  // outlines, or one image of its masks); a change of paints or size starts the next, so paint
+  // order between them stays as the text reads.
+  let open: { key: string; scale: number; glyphs: number[]; paints: readonly Paint[] } | null =
+    null;
+  const flush = () => {
+    if (open && open.glyphs.length > 0)
+      runs.push({
+        entry: b.path({ kind: "glyphs", scale: open.scale, glyphs: open.glyphs }),
+        paints: open.paints,
+      });
+    open = null;
+  };
+  const add = (scale: number, glyphs: number[], paints: readonly Paint[]) => {
+    if (glyphs.length === 0) return;
+    const key = `${scale}|${JSON.stringify(paints)}`;
+    if (open?.key !== key) {
+      flush();
+      open = { key, scale, glyphs: [], paints };
+    }
+    for (const v of glyphs) open.glyphs.push(v);
+  };
   for (const line of layout.lines) {
     const x0 = lineOffset(line, width, node.props);
     const baseline = drawnBaseline(line, dy);
     const marker = line.marker;
     if (marker) {
       const span = spanAt(line.start);
-      const shaped = span ? shape(marker.text, runFor(span.props, ctx.measurer)) : null;
-      if (!shaped || shaped.outlines === false) missing = true;
-      else {
-        const glyphs = shapedGlyphs(shaped, marker.text, 0, x0 + marker.x, baseline, ctx);
-        if (glyphs.length > 0)
-          runs.push({
-            entry: b.path({ kind: "glyphs", scale: shaped.scale, glyphs }),
-            paints: paintsOf(marker.fills),
-          });
+      const run = span ? runFor(span.props, ctx.measurer) : null;
+      const shaped = run ? shape(marker.text, run) : null;
+      if (!shaped || shaped.outlines === false) {
+        const face = run && !shaped ? (ctx.measurer.loading?.(run) ?? null) : null;
+        if (face) b.waiting.add(face);
+        else missing = true;
+      } else {
+        add(
+          shaped.scale,
+          shapedGlyphs(shaped, marker.text, 0, x0 + marker.x, baseline, ctx),
+          paintsOf(marker.fills),
+        );
       }
     }
     for (const frag of line.fragments) {
@@ -571,13 +616,15 @@ function textRuns(
       const shaped = run ? shape(frag.text, run) : null;
       const x = x0 + frag.x;
       if (!shaped || shaped.outlines === false) {
-        missing = true;
+        // A face still loading: provisional until it arrives. One that won't: not drawn here.
+        const face = run && !shaped ? (ctx.measurer.loading?.(run) ?? null) : null;
+        if (face) b.waiting.add(face);
+        else missing = true;
         continue;
       }
       const glyphs = shapedGlyphs(shaped, frag.text, frag.letterSpacing, x, baseline, ctx);
       const paints = paintsOf(frag.fills);
-      if (glyphs.length > 0)
-        runs.push({ entry: b.path({ kind: "glyphs", scale: shaped.scale, glyphs }), paints });
+      add(shaped.scale, glyphs, paints);
       if (frag.decoration !== "none") {
         const bar = decorationBar(frag.decoration, baseline, frag.fontSize);
         bars.push({
@@ -595,10 +642,11 @@ function textRuns(
       }
     }
   }
+  flush();
   if (missing) {
     b.unsupported |= UNSUPPORTED.textWithoutOutlines;
     b.textPending = true;
-  }
+  } else if (b.waiting.size > 0) b.provisional = true;
   return { runs, bars };
 }
 
@@ -610,7 +658,12 @@ function text(
   height: number,
   ctx: LayerContext,
 ): void {
-  const runs = textRuns(b, node, width, ctx);
+  // Deferred: its coarse bars only, for now (below), never its glyphs.
+  const runs = ctx.deferText ? { runs: [], bars: [] } : textRuns(b, node, width, ctx);
+  if (ctx.deferText) {
+    b.provisional = true;
+    b.deferred = true;
+  }
   if (!runs) {
     b.unsupported |= UNSUPPORTED.textWithoutOutlines;
     return;
@@ -752,7 +805,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   const size = node.type === "text" ? largestFontSize(node) : 0;
   return {
     record: {
-      flags,
+      flags: flags | (b.provisional ? FLAG.provisional : 0),
       opacity,
       transform: localTransform(node),
       width: w,
@@ -766,5 +819,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     },
     images: b.images,
     textPending: b.textPending,
+    deferred: b.deferred,
+    waiting: [...b.waiting],
   };
 }

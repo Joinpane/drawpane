@@ -1,9 +1,10 @@
 //! Regressions in the engine's tiles (decision 0040, phase 2), each one a frame that went wrong
 //! before its fix: holes in zoom frames under tight slot budgets, a reader inside a reader left
 //! stale, a mitered stroke culled from a tile; prefetch pinning the slots a missing tile was
-//! promised, a reader chain rechecking every change on every pass, an atlas refusing a mask its
-//! free rows would hold; a drag's history growing with its travel, a drag of a huge selection
-//! leaving the view blank, a split kept after its board began to fade.
+//! promised, a reader chain rechecking every change on every pass; a drag's history growing with
+//! its travel, a drag of a huge selection leaving the view blank, a split kept after its board
+//! began to fade, a selection left in the last frame; a page opened at a fractional device pixel
+//! ratio showing nothing, provisional text exported or reported exact.
 
 mod common;
 
@@ -245,7 +246,7 @@ fn prefetch_cannot_pin_the_slots_promised_to_a_missing_visible_tile() {
     for (i, j) in warm {
         let key = TileKey { level, i, j };
         let slot = cache.slot_for(key).unwrap();
-        cache.drawn(key, slot, true);
+        cache.drawn(key, slot, true, true);
     }
 
     // Seven visible tiles and nine neighbors are still held. A prior stand-in covered the view.
@@ -264,7 +265,7 @@ fn prefetch_cannot_pin_the_slots_promised_to_a_missing_visible_tile() {
             .unwrap();
         let slot = cache.slot_for(job.key);
         if let Some(slot) = slot {
-            cache.drawn(job.key, slot, true);
+            cache.drawn(job.key, slot, true, true);
             break;
         }
     }
@@ -319,18 +320,6 @@ fn a_reader_chain_against_preorder_checks_each_change_once() {
         "{} checks for {NESTED} readers and {} changes",
         engine.store.dirty_checks(),
         dirty.len()
-    );
-}
-
-#[test]
-fn atlas_eviction_can_combine_the_last_shelf_and_free_tail() {
-    use drawpane_engine::atlas::{Placed, Shelves};
-    let mut atlas = Shelves::new(64);
-    assert!(matches!(atlas.place(63, 50, 1), Some(Placed::At { y: 0, .. })));
-    // The preceding submission alone used this shelf. The whole texture is now reusable.
-    assert!(
-        atlas.place(30, 60, 2).is_some(),
-        "eviction ignored the unused rows below the last shelf"
     );
 }
 
@@ -784,4 +773,274 @@ fn a_drag_erases_its_selection_from_the_last_frame_with_no_tile_kept_there() {
         // In, out of the view, and back beside where it was.
         x = if revision == 1 { 200.0 } else { 40.0 };
     }
+}
+
+/// A 512-unit square, filled red.
+fn square() -> Rec {
+    solid(0.0, 512.0, 512.0, 1.0)
+}
+
+/// An engine given `record` alone, in a list of version 1.1 (provisional records are 1.1).
+fn provisional_engine(record: &Rec) -> Engine {
+    let mut msg = W::new(ANY, 1);
+    msg.b[6..8].copy_from_slice(&1u16.to_le_bytes());
+    msg.reset();
+    msg.set(1, 0, record);
+    let mut engine = Engine::new(Limits::default());
+    engine.apply(&msg.finish()).unwrap();
+    engine
+}
+
+#[test]
+fn opening_at_non_ladder_scale_draws_content() {
+    let mut engine = provisional_engine(&square());
+    engine.use_cpu_tiles(48, 32);
+    let camera = Camera {
+        dpr: 1.25,
+        ..camera(1.0, 0.0, 0.0)
+    };
+    let (pixels, stats) = engine
+        .render_cpu_tiled(
+            64,
+            64,
+            camera,
+            [0.0; 4],
+            TiledOptions {
+                max_jobs: 1,
+                ..TiledOptions::default()
+            },
+        )
+        .unwrap();
+    assert!(!stats.exact, "opening should use a stand-in");
+    assert!(stats.tiles_drawn > 0, "opening did no tile work");
+    assert_eq!(&pixels[(32 * 64 + 32) * 4..][..4], &[255, 0, 0, 255]);
+}
+
+#[test]
+fn provisional_text_is_refused_before_png_and_band() {
+    let mut provisional = square();
+    provisional.flags = 8;
+    provisional.coarse = std::mem::take(&mut provisional.ops);
+    let mut engine = provisional_engine(&provisional);
+    let camera = camera(1.0, 0.0, 0.0);
+    let admission = engine.admit_export(64, 64, camera);
+    let band = engine.render_band(64, 64, camera, [0.0; 4], 0, 4);
+    assert!(
+        admission.is_err() && band.is_err(),
+        "provisional content was accepted: admission {admission:?}, band first pixel {:?}",
+        band.ok().map(|pixels| &pixels[..4])
+    );
+}
+
+#[test]
+fn a_visible_provisional_record_without_bars_is_not_exact() {
+    let mut provisional = square();
+    provisional.flags = 8;
+    provisional.ops.clear();
+    provisional.paths.clear();
+    let mut engine = provisional_engine(&provisional);
+    engine.use_cpu_tiles(48, 32);
+    let (_, stats) = engine
+        .render_cpu_tiled(64, 64, camera(1.0, 0.0, 0.0), [0.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(
+        !stats.exact,
+        "an accepted visible provisional record was described as exact"
+    );
+}
+
+#[test]
+fn a_provisional_tile_waits_for_the_text_and_is_not_drawn_again_meanwhile() {
+    // Text still loading: its record is provisional. Its tiles are drawn once at full detail;
+    // until the list changes there's nothing more to draw (no frame or slice between frames
+    // draws them again), though no frame is exact. When the text arrives they're drawn again
+    // and the frame is exact.
+    let mut provisional = square();
+    provisional.flags = 8;
+    provisional.coarse = provisional.ops.clone();
+    let mut engine = provisional_engine(&provisional);
+    engine.use_cpu_tiles(48, 64);
+    let c = camera(1.0, 0.0, 0.0);
+    let options = TiledOptions {
+        prefetch: false,
+        ..TiledOptions::default()
+    };
+    // The page opens coarse, then its own tiles are drawn: a few frames, bounded.
+    let mut frames = 0;
+    loop {
+        let (_, f) = engine.render_cpu_tiled(96, 96, c, [0.0; 4], options).unwrap();
+        assert!(!f.exact, "{f:?}");
+        frames += 1;
+        if f.pending == 0 {
+            break;
+        }
+        assert!(frames < 4, "never settled: {f:?}");
+    }
+    let (_, again) = engine.render_cpu_tiled(96, 96, c, [0.0; 4], options).unwrap();
+    assert!(!again.exact, "{again:?}");
+    assert_eq!((again.tiles_drawn, again.pending), (0, 0), "{again:?}");
+    // Between frames: only tiles round the view (ahead of a pan), none of the frame's again.
+    let ahead = engine.render_cpu_ahead([0.0; 4], usize::MAX).unwrap();
+    assert_eq!(ahead.pending, 0, "{ahead:?}");
+    let (_, still) = engine.render_cpu_tiled(96, 96, c, [0.0; 4], options).unwrap();
+    assert_eq!(
+        (still.tiles_drawn, still.pending, still.exact),
+        (0, 0, false),
+        "{still:?}"
+    );
+
+    let mut patch = W::new(1, 2);
+    patch.b[6..8].copy_from_slice(&1u16.to_le_bytes());
+    patch.set(1, 0, &square());
+    engine.apply(&patch.finish()).unwrap();
+    let (_, settled) = engine.render_cpu_tiled(96, 96, c, [0.0; 4], options).unwrap();
+    assert!(settled.exact && settled.tiles_drawn > 0, "{settled:?}");
+}
+
+#[test]
+fn no_frame_is_exact_while_provisional_text_outside_it_may_paint_into_it() {
+    // A provisional record's box is off the view's left edge; its text, once it arrives, paints
+    // 24 units from the same origin, into the view. The frame before can't know that, so it
+    // isn't exact; the frame after, with the text, is.
+    let transform = [1.0, 0.0, 0.0, 1.0, -18.0, 0.0];
+    let mut provisional = Rec::new(transform, [16.0, 16.0]);
+    provisional.flags = 8;
+    let mut engine = provisional_engine(&provisional);
+    engine.use_cpu_tiles(64, 16);
+    let c = camera(1.0, 0.0, 0.0);
+    let options = TiledOptions {
+        prefetch: false,
+        ..TiledOptions::default()
+    };
+    let at = (8 * 64 + 3) * 4;
+    let (before, stats) = engine.render_cpu_tiled(64, 64, c, [0.0; 4], options).unwrap();
+    let before = before[at..at + 4].to_vec();
+    assert!(!stats.exact, "exact before the text arrived: {stats:?}");
+
+    let mut text = Rec::new(transform, [16.0, 16.0]);
+    text.paths.push(Entry::Rect {
+        w: 24.0,
+        h: 16.0,
+        radii: [0.0; 4],
+    });
+    text.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 0.0, 0.0, 1.0]),
+    });
+    let mut patch = W::new(1, 2);
+    patch.b[6..8].copy_from_slice(&1u16.to_le_bytes());
+    patch.set(1, 0, &text);
+    engine.apply(&patch.finish()).unwrap();
+    let (after, ready) = engine.render_cpu_tiled(64, 64, c, [0.0; 4], options).unwrap();
+    assert!(ready.exact, "{ready:?}");
+    assert_eq!(&after[at..at + 4], &[255, 0, 0, 255]);
+    assert_ne!(before, after[at..at + 4]);
+}
+
+#[test]
+fn hidden_provisional_text_leaves_frames_exact() {
+    // Only shown records count: text in a hidden layer never paints until it's shown, and
+    // showing it is a change of its own.
+    let mut provisional = square();
+    provisional.flags = 8 | 1;
+    let mut engine = provisional_engine(&provisional);
+    engine.use_cpu_tiles(64, 16);
+    let (_, stats) = engine
+        .render_cpu_tiled(64, 64, camera(1.0, 0.0, 0.0), [0.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats.exact, "{stats:?}");
+}
+
+#[test]
+fn a_curved_stroke_zoomed_out_draws_what_it_does_at_its_device_size() {
+    // Zoomed out, a stroke is drawn on the device (vello's own tolerance is finer there the
+    // further out). The same stroke, made that small and drawn at 100%, is the reference: within
+    // anti-aliasing, dashes included.
+    let draw = |k: f32, zoom: f64, dashes: Vec<f32>| {
+        let mut r = Rec::new(
+            [1.0, 0.0, 0.0, 1.0, f64::from(40.0 * k), f64::from(30.0 * k)],
+            [300.0 * k, 180.0 * k],
+        );
+        r.paths.push(Entry::Ellipse {
+            w: 300.0 * k,
+            h: 180.0 * k,
+        });
+        r.ops.push(Op::Stroke {
+            path: 0,
+            width: 12.0 * k,
+            join: 1,
+            cap: 1,
+            dashes: dashes.iter().map(|d| d * k).collect(),
+            offset: 0.0,
+            paint: Paint::Solid([0.8, 0.1, 0.3, 1.0]),
+        });
+        let mut msg = W::new(ANY, 1);
+        msg.reset();
+        msg.set(1, 0, &r);
+        let mut e = Engine::new(Limits::default());
+        e.apply(&msg.finish()).unwrap();
+        e.render_cpu(120, 90, camera(zoom, 3.3, 2.7), [1.0; 4], false)
+            .unwrap()
+            .0
+            .to_vec()
+    };
+    for dashes in [vec![], vec![40.0, 25.0]] {
+        let zoomed = draw(1.0, 0.25, dashes.clone());
+        let small = draw(0.25, 1.0, dashes.clone());
+        let worst = zoomed
+            .iter()
+            .zip(&small)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        let off = zoomed.iter().zip(&small).filter(|(a, b)| a.abs_diff(**b) > 8).count();
+        assert!(zoomed.iter().any(|v| *v != 255), "drew nothing");
+        // The ellipse's curves are made at its own size, so the two outlines differ in their last
+        // fraction of a pixel at a few dozen pixels along the edge (as they did before this drew
+        // on the device: the same numbers either way).
+        assert!(
+            worst <= 64 && off <= 240,
+            "dashes {dashes:?}: worst {worst}, {off} channels off"
+        );
+    }
+}
+
+#[test]
+fn a_see_through_run_covers_its_overlaps_once() {
+    // One glyph, a disjoint one, then the first again in the same place, at half alpha. Figma
+    // covers a text layer's overlaps once, as one shape (`text-overlap` in the parity suites):
+    // the GPU laid the run's masks into one image and did; the CPU laid them one over another
+    // (alpha 192 where 128 is right), and its exports with it.
+    let square = vec![
+        (0, vec![0.0, 0.0]),
+        (1, vec![16.0, 0.0]),
+        (1, vec![16.0, 16.0]),
+        (1, vec![0.0, 16.0]),
+        (4, vec![]),
+    ];
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 8.0, 8.0], [64.0, 48.0]);
+    r.paths.push(Entry::Glyphs {
+        scale: 1.0,
+        glyphs: vec![(1, 0.0, 24.0), (1, 32.0, 24.0), (1, 0.0, 24.0)],
+    });
+    r.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 0.0, 0.0, 0.5]),
+    });
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.glyph(1, &square);
+    list.set(1, 0, &r);
+    let mut e = Engine::new(Limits::default());
+    e.apply(&list.finish()).unwrap();
+    let c = camera(1.0, 0.0, 0.0);
+    let whole = e.render_cpu(96, 64, c, [0.0; 4], false).unwrap().0.to_vec();
+    let at = (24 * 96 + 16) * 4;
+    assert!(whole[at + 3].abs_diff(128) <= 1, "alpha {}", whole[at + 3]);
+    // The run's image is the whole run's, so bands draw what the whole frame does, bit for bit.
+    let mut banded = e.render_band(96, 64, c, [0.0; 4], 0, 20).unwrap().to_vec();
+    banded.extend_from_slice(e.render_band(96, 64, c, [0.0; 4], 20, 44).unwrap());
+    assert!(banded == whole, "bands differ from the whole frame");
 }

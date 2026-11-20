@@ -414,6 +414,20 @@ impl Engine {
 
     /// Refuses a page holding a shown record the engine doesn't draw, wherever it is: the caller
     /// draws the whole page another way.
+    /// Refuses an export while any shown record is provisional (display list 1.1, flag 8: its
+    /// text still loading, drawn as placeholder bars): an export is exact or isn't made, so it
+    /// waits for the list that has the text. Wherever the record is, in the crop or not: the list
+    /// isn't the document yet.
+    pub fn check_settled(&self) -> Result<()> {
+        match self.store.provisional_shown() {
+            Some(id) => Err(EngineError::new(
+                ErrorCode::State,
+                format!("record {id} is provisional (its text is still loading): an export waits for it"),
+            )),
+            None => Ok(()),
+        }
+    }
+
     pub fn check_supported(&self) -> Result<()> {
         match self.store.refusal() {
             Some((id, bits)) => Err(EngineError::unsupported(format!(
@@ -444,6 +458,7 @@ impl Engine {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
+        self.check_settled()?;
         let budget = self.store.limits.memory_bytes;
         if budget == 0 {
             return Ok(());
@@ -580,7 +595,7 @@ impl Engine {
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-        gpu.render(
+        let mut stats = gpu.render(
             &self.store,
             &frame,
             background,
@@ -588,7 +603,13 @@ impl Engine {
             halo,
             options,
             drag.as_ref(),
-        )
+        )?;
+        // No frame is exact while text is still to come: it may paint past its box.
+        if stats.exact && self.store.provisional_shown().is_some() {
+            stats.exact = false;
+            stats.standin = true;
+        }
+        Ok(stats)
     }
 
     /// Device pixels the readers on the page may read past where they paint, summed through
@@ -736,7 +757,11 @@ impl Engine {
         let mut tiles = self.cpu_tiles.take().expect("made above");
         let result = self.cpu_tiled_frame(&mut tiles, width, height, view, halo, background, options);
         self.cpu_tiles = Some(tiles);
-        let stats = result?;
+        let mut stats = result?;
+        // No frame is exact while text is still to come: it may paint past its box.
+        if self.store.provisional_shown().is_some() {
+            stats.exact = false;
+        }
         Ok((self.cpu_tiles.as_ref().map_or(&[][..], |t| t.frame.as_slice()), stats))
     }
 
@@ -783,7 +808,7 @@ impl Engine {
                     let from = ((y + h) * side + h) * 4;
                     out.extend_from_slice(&target[from..from + t * 4]);
                 }
-                tiles.cache.drawn(job.key, slot, !job.detail || fs.draw.exact());
+                tiles.cache.drawn(job.key, slot, fs.draw.exact(), !job.detail);
             }
             let (pending, _) = tiles.cache.left(&plan);
             stats.pending = pending;
@@ -809,10 +834,13 @@ impl Engine {
         tiles.cache.begin(background, halo);
         let scale = view.as_coeffs()[0];
         let zooming = options.moving && tiles.last_scale.is_some_and(|s| s != scale);
+        // A page just shown: under a budget, coarse tiles first (see `Gpu::render`).
+        let opening = tiles.last.is_none() && tiles.cache.is_empty() && options.max_jobs != usize::MAX;
         let last = tiles.last;
+        tiles.cache.opening = opening;
         let mut plan = tiles
             .cache
-            .plan(view, (width, height), zooming, last, options.prefetch)
+            .plan(view, (width, height), zooming || opening, last, options.prefetch)
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
         let mut stats = TiledStats {
             direct: plan.direct,
@@ -876,13 +904,14 @@ impl Engine {
             };
             stats.draw.add(&fs.draw);
             stats.tiles_drawn += 1;
-            let exact = !job.detail || fs.draw.exact();
+            // Exact only if nothing stood in: no level of detail, no provisional record.
+            let exact = fs.draw.exact();
             let s = slot as usize;
             if tiles.slots.len() <= s {
                 tiles.slots.resize_with(s + 1, Vec::new);
             }
             take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
-            tiles.cache.drawn(job.key, slot, exact);
+            tiles.cache.drawn(job.key, slot, exact, !job.detail);
         }
         let mut comp_exact = true;
         if !plan.direct {
@@ -961,7 +990,7 @@ impl Engine {
             let fs = self.cpu_draw_tile(job.view, tile, halo, job.detail, background)?;
             stats.draw.add(&fs.draw);
             stats.tiles_drawn += 1;
-            exact_direct &= !job.detail || fs.draw.exact();
+            exact_direct &= fs.draw.exact();
             take(self.cpu.target.data_as_u8_slice(), &mut scratch);
             let fx = i64::from(job.key.i) * i64::from(tile) + plan.origin.0;
             let fy = i64::from(job.key.j) * i64::from(tile) + plan.origin.1;
@@ -1004,7 +1033,7 @@ impl Engine {
                                     tiles.slots.resize_with(s + 1, Vec::new);
                                 }
                                 take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
-                                tiles.cache.drawn(key, slot, true);
+                                tiles.cache.drawn(key, slot, true, true);
                                 Some(slot)
                             }
                             None => None,
@@ -1066,6 +1095,7 @@ impl Engine {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
+        self.check_settled()?;
         let most = self.band_rows(width);
         if rows == 0 || rows > most || y0.checked_add(rows).is_none_or(|end| end > height) {
             return Err(EngineError::new(

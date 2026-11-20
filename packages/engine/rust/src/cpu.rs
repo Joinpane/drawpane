@@ -51,6 +51,8 @@ pub struct Cpu {
     pub origin: (i32, i32),
     scene: RenderContext,
     resources: Resources,
+    /// Rasterises glyph masks.
+    raster: masks::Rasterizer,
     images: HashMap<u32, Vec<Arc<Pixmap>>>,
     image_bytes: usize,
     pub masks: MaskCache<Arc<Pixmap>>,
@@ -62,40 +64,13 @@ pub struct Cpu {
 }
 
 impl Cpu {
-    /// A coverage mask for `key` (a glyph's or a run's), made if it isn't held and fits within
-    /// `side` device pixels a side.
-    fn mask_with(
-        &mut self,
-        key: MaskKey,
-        path: &BezPath,
-        scale: (f64, f64),
-        phase: (f64, f64),
-        side: u32,
-    ) -> Option<GlyphMask> {
-        if let Some(e) = self.masks.get(&key) {
-            return Some((ImageSource::Pixmap(e.value.clone()), e.origin, e.size));
-        }
-        // Full: drawn as its outline, without rasterising a mask that can't be kept.
-        if !self
-            .masks
-            .fits(masks::bytes(masks::mask_size(path, scale.0, scale.1, phase, side)?))
-        {
-            self.masks.stats.outlines += 1;
-            return None;
-        }
-        let (mask, origin) = masks::rasterise(&mut self.resources, path, scale.0, scale.1, phase, side)?;
-        let size = (mask.width(), mask.height());
-        let mask = Arc::new(mask);
-        let e = self.masks.insert(key, mask, origin, size);
-        Some((ImageSource::Pixmap(e.value.clone()), e.origin, e.size))
-    }
-
     pub fn new(mask_bytes: usize, mask_side: u32) -> Self {
         Self {
             target: Pixmap::new(1, 1),
             origin: (0, 0),
             scene: RenderContext::new(1, 1),
             resources: Resources::new(),
+            raster: masks::Rasterizer::default(),
             images: HashMap::new(),
             image_bytes: 0,
             masks: MaskCache::new(mask_bytes),
@@ -196,8 +171,27 @@ impl Backend for Cpu {
     }
 
     fn glyph_mask(&mut self, key: MaskKey, path: &BezPath, scale: (f64, f64), phase: (f64, f64)) -> Option<GlyphMask> {
-        let side = self.mask_side;
-        self.mask_with(key, path, scale, phase, side)
+        masks::coverage(
+            &mut self.masks,
+            &mut self.raster,
+            key,
+            path,
+            scale,
+            phase,
+            self.mask_side,
+        )
+    }
+
+    fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource> {
+        Some(ImageSource::Pixmap(Arc::new(pixmap(
+            u32::from(w),
+            u32::from(h),
+            pixels,
+        ))))
+    }
+
+    fn whole_runs(&self) -> bool {
+        true
     }
 
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()> {

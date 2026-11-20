@@ -339,5 +339,10 @@
     "glass-full": 1.21,
     "background-blur": 1.31,
     "glass-plain": 1.36
+  },
+  "text-overlap": {
+    "lines": 1.15,
+    "tracking": 1.06,
+    "lines-spaced": 2.79
   }
 }

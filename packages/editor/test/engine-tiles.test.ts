@@ -6,8 +6,8 @@
  */
 import { type EngineModule, RenderEngine } from "@drawpane/engine";
 import { built, loadNodeEngine } from "@drawpane/engine/node";
-import { glyphKey, ROOT_ID } from "@drawpane/model";
-import { beforeAll, describe, expect, it } from "vitest";
+import { glyphKey, keyBetween, type Op, ROOT_ID } from "@drawpane/model";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { Doc } from "../src/doc";
 import { DisplayListBuilder, type DisplayListOptions } from "../src/engine/display-list";
 import { Scene } from "../src/scene";
@@ -213,6 +213,115 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's tiles", () =>
     }
   });
 
+  describe("text whose face is", () => {
+    /** Two texts: one in a face that's loading (until `arrive`), one in a face at hand. */
+    function faces() {
+      const doc = page();
+      for (const [id, family, y] of [
+        ["late", "Late", 4],
+        ["stable", "Stable", 44],
+      ] as const)
+        doc.apply([
+          {
+            op: "create",
+            id,
+            type: "text",
+            parent: "p",
+            key: id === "late" ? "a0" : "a1",
+            props: {
+              x: 8,
+              y,
+              width: 70,
+              height: 30,
+              characters: "A",
+              fontSize: 20,
+              fontFamily: family,
+            },
+          },
+        ]);
+      let status: "loading" | "ready" | "unavailable" = "loading";
+      let faceGeneration = 0;
+      const shaped = {
+        glyphs: [{ path: null, d: "M0 0H500V800H0Z", x: 0, y: 0, cluster: 0 }],
+        width: 16,
+        scale: 0.02,
+      };
+      const m: TextMeasurer = {
+        ...measurer,
+        missing: () => false,
+        get generation() {
+          return faceGeneration;
+        },
+        get faceGeneration() {
+          return faceGeneration;
+        },
+        shape: (_text, run) => (run.family === "Late" && status !== "ready" ? null : shaped),
+        loading: (run) => (run.family === "Late" && status === "loading" ? "face:Late" : null),
+        faceStatus: () => status,
+      };
+      const settle = (to: "ready" | "unavailable") => {
+        status = to;
+        faceGeneration++;
+      };
+      return { doc, m, settle };
+    }
+
+    it("loading draws provisional, never on the canvas renderer, and only it is sent again when it arrives", () => {
+      const { doc, m, settle } = faces();
+      const scene = new Scene(doc);
+      const builder = new DisplayListBuilder(scene, m);
+      const e = new RenderEngine(mod);
+      try {
+        expect(e.apply(builder.build("p")).ok).toBe(true);
+        // Waiting for its face: provisional (bars), the page still the engine's.
+        expect(builder.supported).toBe(true);
+        expect(builder.waiting).toBe(1);
+        const r = e.renderCpuTiled(W, H, camera, BG, TILES);
+        if (!r.ok) throw new Error(r.message);
+        expect(r.value.stats.exact).toBe(false);
+        // Nothing changes until the face arrives.
+        expect(builder.update()).toBeNull();
+        settle("ready");
+        const patch = builder.update();
+        expect(patch).not.toBeNull();
+        // Only the text that waited, not the one in a face at hand.
+        expect(builder.stats.records).toBe(1);
+        if (patch) expect(e.apply(patch).ok).toBe(true);
+        expect(builder.waiting).toBe(0);
+        expect(same(tiled(e), fresh(mod, scene, m))).toBe(true);
+      } finally {
+        e.dispose();
+      }
+    });
+
+    it("never coming falls back to the canvas renderer, typed", () => {
+      const { doc, m, settle } = faces();
+      settle("unavailable");
+      const builder = new DisplayListBuilder(new Scene(doc), m);
+      builder.build("p");
+      expect(builder.supported).toBe(false);
+      expect(builder.waiting).toBe(0);
+    });
+
+    it("at hand is left alone when other faces arrive", () => {
+      const { doc, m, settle } = faces();
+      const scene = new Scene(doc);
+      const builder = new DisplayListBuilder(scene, m);
+      const e = new RenderEngine(mod);
+      try {
+        expect(e.apply(builder.build("p")).ok).toBe(true);
+        settle("ready");
+        const patch = builder.update();
+        if (patch) expect(e.apply(patch).ok).toBe(true);
+        // A face nobody waits for arriving sends nothing.
+        settle("ready");
+        expect(builder.update()).toBeNull();
+      } finally {
+        e.dispose();
+      }
+    });
+  });
+
   it("show nothing of the last page after a page switch, even while moving", () => {
     const doc = page();
     doc.apply([
@@ -245,14 +354,22 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's tiles", () =>
     const e = new RenderEngine(mod);
     try {
       expect(e.apply(builder.build("p")).ok).toBe(true);
-      tiled(e);
+      const old = tiled(e);
       expect(e.apply(builder.build("q")).ok).toBe(true);
-      // Moving, no budget: what nothing stands in for is drawn anyway, and the last page's frame
-      // doesn't stand in.
+      // Moving, no budget: the last page's frame doesn't stand in. The first frame of a page
+      // just shown is coarse tiles of it (a stand-in), then frames at rest draw it exactly.
       const r = e.renderCpuTiled(W, H, camera, BG, { ...TILES, moving: true, maxJobs: 0 });
       if (!r.ok) throw new Error(r.message);
-      expect(r.value.stats.exact).toBe(true);
-      expect(same(r.value.pixels, fresh(mod, scene, measurer, "q"))).toBe(true);
+      expect(r.value.stats.exact).toBe(false);
+      expect(same(r.value.pixels, old)).toBe(false);
+      let exact: Uint8Array | null = null;
+      for (let i = 0; i < 40 && !exact; i++) {
+        const f = e.renderCpuTiled(W, H, camera, BG, { ...TILES, maxJobs: 1 });
+        if (!f.ok) throw new Error(f.message);
+        if (f.value.stats.exact) exact = f.value.pixels;
+      }
+      if (!exact) throw new Error("never exact at rest");
+      expect(same(exact, fresh(mod, scene, measurer, "q"))).toBe(true);
     } finally {
       e.dispose();
     }
@@ -335,4 +452,163 @@ describe.skipIf(!built("worker") && !process.env.CI)("the builder's drags", () =
         e.dispose();
       }
     });
+});
+
+describe.skipIf(!built("worker") && !process.env.CI)("a page opening", () => {
+  let mod: EngineModule;
+  beforeAll(async () => {
+    mod = await loadNodeEngine("worker");
+  });
+
+  it("sends its text provisional first, then whole, ending as a full build draws it", () => {
+    const doc = page();
+    const shaping: TextMeasurer = { ...measurer, missing: () => false };
+    for (let i = 0; i < 6; i++)
+      doc.apply([
+        {
+          op: "create",
+          id: `t${i}`,
+          type: "text",
+          parent: "p",
+          key: `a${i}`,
+          props: {
+            x: 4 + (i % 3) * 30,
+            y: 4 + Math.floor(i / 3) * 36,
+            width: 28,
+            height: 30,
+            characters: "Hi",
+            fontSize: 20,
+          },
+        },
+      ]);
+    const scene = new Scene(doc);
+    const builder = new DisplayListBuilder(scene, shaping);
+    const e = new RenderEngine(mod);
+    try {
+      expect(e.apply(builder.build("p", undefined, { deferText: true })).ok).toBe(true);
+      expect(builder.pending).toBe(6);
+      // Coarse bars only, for now: a stand-in.
+      const first = e.renderCpuTiled(W, H, camera, BG, TILES);
+      if (!first.ok) throw new Error(first.message);
+      expect(first.value.stats.exact).toBe(false);
+      for (let i = 0; i < 20 && builder.pending > 0; i++) {
+        const patch = builder.update();
+        if (patch) expect(e.apply(patch).ok).toBe(true);
+      }
+      expect(builder.pending).toBe(0);
+      expect(same(tiled(e), fresh(mod, scene, shaping))).toBe(true);
+    } finally {
+      e.dispose();
+    }
+  });
+});
+
+describe("text sent whole after a page opens", () => {
+  /** A page of `n` text layers in a grid of 20 columns, 50 units apart. */
+  function grid(n: number): Doc {
+    const doc = page();
+    const ops: Op[] = [];
+    let key: string | null = null;
+    for (let i = 0; i < n; i++) {
+      key = keyBetween(key, null);
+      ops.push({
+        op: "create",
+        id: `t${i}`,
+        type: "text",
+        parent: "p",
+        key,
+        props: {
+          x: (i % 20) * 50,
+          y: Math.floor(i / 20) * 50,
+          width: 40,
+          height: 40,
+          characters: "Hi",
+          fontSize: 20,
+        },
+      });
+    }
+    doc.apply(ops);
+    return doc;
+  }
+
+  it("finds what's in view once a layer however often the view moves, never in a getter", () => {
+    // A fit, then a pan a frame while the text is still to come: each view used to sort the
+    // whole queue again (every layer's bounds) before the text's budget started.
+    const n = 400;
+    const scene = new Scene(grid(n));
+    const builder = new DisplayListBuilder(scene, { ...measurer, missing: () => false });
+    builder.build("p", undefined, { deferText: true });
+    const bounds = vi.spyOn(scene, "bounds");
+    for (let i = 0; i < 50; i++) {
+      builder.setView({ x0: i * 5, y0: 0, x1: i * 5 + 200, y1: 200 });
+      const asked = bounds.mock.calls.length;
+      void builder.pendingVisible;
+      expect(bounds.mock.calls.length).toBe(asked);
+      builder.update(0);
+    }
+    expect(bounds.mock.calls.length).toBeLessThanOrEqual(n);
+  });
+
+  it("sends what's in view first", () => {
+    const n = 400;
+    const builder = new DisplayListBuilder(new Scene(grid(n)), {
+      ...measurer,
+      missing: () => false,
+    });
+    builder.build("p", undefined, { deferText: true });
+    // The last row's last four layers.
+    builder.setView({ x0: 800, y0: 950, x1: 1000, y1: 1000 });
+    for (let i = 0; i < n && builder.pendingVisible > 0; i++) builder.update(0);
+    expect(builder.pendingVisible).toBe(0);
+    expect(n - builder.pending).toBe(4);
+    for (let i = 0; i < 2 * n && builder.pending > 0; i++) builder.update(0);
+    expect(builder.pending).toBe(0);
+  });
+});
+
+describe.skipIf(!built("worker") && !process.env.CI)("a see-through text layer", () => {
+  let mod: EngineModule;
+  beforeAll(async () => {
+    mod = await loadNodeEngine("worker");
+  });
+
+  it("covers where its lines overlap once, as one shape", () => {
+    // Two lines set tighter than their glyphs (16 tall, 8 apart), at half alpha: Figma covers
+    // the overlap once (`text-overlap` in the parity suites). Each line was a run of its own,
+    // filled in turn, so the overlap was covered twice (alpha 192, not 128).
+    const doc = page();
+    doc.apply([
+      {
+        op: "create",
+        id: "text",
+        type: "text",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 10,
+          y: 10,
+          width: 40,
+          height: 40,
+          characters: "A\nA",
+          fontSize: 20,
+          lineHeight: { unit: "px", value: 8 },
+          fills: [{ type: "solid", color: "#ff000080" }],
+        },
+      },
+    ]);
+    const shaping: TextMeasurer = { ...measurer, missing: () => false };
+    const scene = new Scene(doc);
+    const e = new RenderEngine(mod);
+    try {
+      expect(e.apply(new DisplayListBuilder(scene, shaping).build("p")).ok).toBe(true);
+      const r = e.renderCpu(W, H, camera, [0, 0, 0, 0], false);
+      if (!r.ok) throw new Error(r.message);
+      const px = r.value.pixels;
+      let most = 0;
+      for (let i = 3; i < px.length; i += 4) most = Math.max(most, px[i] ?? 0);
+      expect(Math.abs(most - 128)).toBeLessThanOrEqual(1);
+    } finally {
+      e.dispose();
+    }
+  });
 });

@@ -1,0 +1,98 @@
+{
+  "suite": "text-overlap",
+  "about": "See-through text whose glyphs overlap: lines set tighter than their glyphs (letters apart, so only the lines overlap, and letters close), and letter spacing tighter than the letters. Whether a text layer's overlaps are covered once, as one shape, or once per glyph or line.",
+  "cell": {
+    "width": 280,
+    "height": 140,
+    "gap": 40,
+    "columns": 2
+  },
+  "background": "#ffffff",
+  "cells": [
+    {
+      "id": "lines",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 40,
+          "fontWeight": 800,
+          "characters": "Hollow\nHollow",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#d0202080"
+            }
+          ],
+          "textAutoResize": "width",
+          "lineHeight": {
+            "unit": "px",
+            "value": 16
+          }
+        }
+      ]
+    },
+    {
+      "id": "tracking",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 40,
+          "fontWeight": 800,
+          "characters": "WAVE",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#d0202080"
+            }
+          ],
+          "textAutoResize": "width",
+          "letterSpacing": {
+            "unit": "px",
+            "value": -14
+          }
+        }
+      ]
+    },
+    {
+      "id": "lines-spaced",
+      "layers": [
+        {
+          "type": "text",
+          "x": 20,
+          "y": 20,
+          "width": 240,
+          "height": 100,
+          "fontFamily": "Inter",
+          "fontSize": 40,
+          "fontWeight": 800,
+          "characters": "HOLLOW\nHOLLOW",
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#d0202080"
+            }
+          ],
+          "textAutoResize": "width",
+          "lineHeight": {
+            "unit": "px",
+            "value": 16
+          },
+          "letterSpacing": {
+            "unit": "px",
+            "value": 8
+          }
+        }
+      ]
+    }
+  ]
+}

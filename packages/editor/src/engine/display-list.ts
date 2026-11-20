@@ -76,6 +76,9 @@ function glyphPath(d: string): PathData {
   return svgPathData(s);
 }
 
+/** Milliseconds an update spends encoding deferred text whole (see `build`'s `deferText`). */
+const DEFER_MS = 10;
+
 export class DisplayListBuilder {
   readonly #scene: Scene;
   readonly #measurer: TextMeasurer;
@@ -103,6 +106,34 @@ export class DisplayListBuilder {
   readonly #imagesBy = new Map<string, readonly string[]>();
   readonly #texts = new Set<string>();
   readonly #pendingText = new Set<string>();
+  /**
+   * Text to encode whole a few at a time: sent provisional when a page opened (`build`'s
+   * `deferText`), or waiting for faces that have since arrived. `#queue` is the order they were
+   * queued in, sent from `#at` on once what's in view is sent.
+   *
+   * What's in view is found by a scan of the queue from `#scanAt`, a slice at a time within the
+   * text's budget (`update`), started again when the view moves: never a sort of the whole queue
+   * on a camera change. Found, it's in `#shown` (to send first) and `#visible`.
+   */
+  readonly #deferred = new Set<string>();
+  #queue: string[] = [];
+  #at = 0;
+  #scanAt = 0;
+  #shown: string[] = [];
+  /** Of `#deferred`, what the scan found in view and isn't sent yet. */
+  readonly #visible = new Set<string>();
+  /** Page bounds of queued text, found once (`Scene.bounds`) and dropped when the page changes. */
+  readonly #bounds = new Map<
+    string,
+    { x: number; y: number; width: number; height: number } | null
+  >();
+  /** The page rectangle in view (`setView`), for ordering the queue. */
+  #view: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** Faces each layer's text waits for, and the layers each face is waited for by. */
+  readonly #waits = new Map<string, readonly string[]>();
+  readonly #waitingOn = new Map<string, Set<string>>();
+  /** The measurer's face generation (`TextMeasurer.faceGeneration`) text was last encoded at. */
+  #faceGeneration = 0;
   readonly #extra = new Set<string>();
   #glyphs = new Map<string, number>();
   /** Each glyph handle's path data, while it's defined. */
@@ -185,7 +216,7 @@ export class DisplayListBuilder {
     for (const id of this.#imagesOf.get(ref) ?? []) this.#extra.add(id);
   }
 
-  #context(): LayerContext {
+  #context(deferText = false): LayerContext {
     const glyph = (d: string) => {
       let g = this.#glyphs.get(d);
       if (g === undefined) {
@@ -212,6 +243,7 @@ export class DisplayListBuilder {
       },
       whole: this.#whole,
       hidden: this.#hidden,
+      deferText,
     };
   }
 
@@ -222,10 +254,103 @@ export class DisplayListBuilder {
     if (node.type === "text") this.#texts.add(node.id);
     if (e.textPending) this.#pendingText.add(node.id);
     else this.#pendingText.delete(node.id);
+    if (e.deferred) this.#defer(node.id);
+    else {
+      this.#deferred.delete(node.id);
+      this.#visible.delete(node.id);
+    }
+    this.#wait(node.id, e.waiting);
     this.#useImages(node.id, e.images);
     if (e.record.unsupported) this.unsupported.set(node.id, e.record.unsupported);
     else this.unsupported.delete(node.id);
     return e.record;
+  }
+
+  /** Queues a layer's text to be encoded whole (`update`, a few milliseconds at a time). */
+  #defer(id: string): void {
+    if (this.#deferred.has(id)) return;
+    this.#deferred.add(id);
+    this.#queue.push(id);
+  }
+
+  /** Notes the faces a layer's text waits for now, forgetting those it waited for before. */
+  #wait(id: string, faces: readonly string[]): void {
+    for (const face of this.#waits.get(id) ?? []) {
+      const ids = this.#waitingOn.get(face);
+      ids?.delete(id);
+      if (ids?.size === 0) this.#waitingOn.delete(face);
+    }
+    if (faces.length === 0) {
+      this.#waits.delete(id);
+      return;
+    }
+    this.#waits.set(id, faces);
+    for (const face of faces) {
+      const ids = this.#waitingOn.get(face) ?? new Set<string>();
+      this.#waitingOn.set(face, ids);
+      ids.add(id);
+    }
+  }
+
+  /** Starts the scan for what's in view again: the view moved, or the page changed. */
+  #rescan(): void {
+    this.#scanAt = this.#at;
+    this.#shown = [];
+    this.#visible.clear();
+  }
+
+  /** Whether the scan has been through the whole queue for the current view. */
+  get #scanned(): boolean {
+    return this.#scanAt >= this.#queue.length;
+  }
+
+  /**
+   * Scans more of the queue for text in view, until `until` (`performance.now()`): what it finds
+   * goes in `#shown`. Answers whether it's been through the whole queue.
+   */
+  #scan(until: number): boolean {
+    const view = this.#view;
+    if (!view) {
+      this.#scanAt = this.#queue.length;
+      return true;
+    }
+    let n = 0;
+    while (this.#scanAt < this.#queue.length) {
+      if ((++n & 63) === 0 && performance.now() >= until) return false;
+      const id = this.#queue[this.#scanAt++] as string;
+      if (!this.#deferred.has(id) || this.#visible.has(id)) continue;
+      let b = this.#bounds.get(id);
+      if (b === undefined) {
+        b = this.#scene.bounds(id);
+        this.#bounds.set(id, b);
+      }
+      if (
+        b !== null &&
+        b.x < view.x1 &&
+        b.x + b.width > view.x0 &&
+        b.y < view.y1 &&
+        b.y + b.height > view.y0
+      ) {
+        this.#shown.push(id);
+        this.#visible.add(id);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * The page rectangle in view: text still to be encoded whole is encoded there first. A view
+   * that moved reorders what's left.
+   */
+  setView(view: { x0: number; y0: number; x1: number; y1: number } | null): void {
+    const v = this.#view;
+    if (
+      v === view ||
+      (v && view && v.x0 === view.x0 && v.y0 === view.y0 && v.x1 === view.x1 && v.y1 === view.y1)
+    )
+      return;
+    this.#view = view;
+    if (this.#deferred.size > 0) this.#rescan();
   }
 
   /** Notes the images a layer's record paints now, forgetting those it painted before. */
@@ -329,12 +454,17 @@ export class DisplayListBuilder {
    * written as it's walked: each record goes into the message as it's encoded, after the glyphs
    * it brings, so the page is never held as records too.
    */
-  build(pageId: string, roots?: readonly string[]): Uint8Array {
+  build(
+    pageId: string,
+    roots?: readonly string[],
+    options: { readonly deferText?: boolean } = {},
+  ): Uint8Array {
     const t0 = performance.now();
     const doc = this.#scene.doc;
     this.#page = pageId;
     this.#version = doc.version;
     this.#generation = this.#measurer.generation ?? 0;
+    this.#faceGeneration = this.#measurer.faceGeneration ?? 0;
     this.#glyphTable = glyphTable(doc).version;
     this.#stale = false;
     this.#handles.clear();
@@ -344,6 +474,13 @@ export class DisplayListBuilder {
     this.#imagesBy.clear();
     this.#texts.clear();
     this.#pendingText.clear();
+    this.#deferred.clear();
+    this.#queue = [];
+    this.#at = 0;
+    this.#rescan();
+    this.#bounds.clear();
+    this.#waits.clear();
+    this.#waitingOn.clear();
     this.#extra.clear();
     this.unsupported.clear();
     this.#glyphs = new Map();
@@ -355,7 +492,7 @@ export class DisplayListBuilder {
     this.#shaped = new WeakMap();
     this.#newGlyphs = [];
     this.#nextGlyph = 1;
-    const ctx = this.#context();
+    const ctx = this.#context(options.deferText ?? false);
     const revision = this.#revision + 1;
     // Sized for the last fresh list (a page reopened, a reset), so the buffer rarely grows.
     const w = new ListWriter(
@@ -437,6 +574,9 @@ export class DisplayListBuilder {
       this.#nodes.delete(at);
       this.#texts.delete(at);
       this.#pendingText.delete(at);
+      this.#deferred.delete(at);
+      this.#visible.delete(at);
+      this.#wait(at, []);
       this.unsupported.delete(at);
       this.#useGlyphs(at, null);
       this.#useImages(at, []);
@@ -446,8 +586,29 @@ export class DisplayListBuilder {
     }
   }
 
-  /** A patch since the last message, or null when nothing on the page changed. */
-  update(): Uint8Array | null {
+  /** Text sent provisional and not yet encoded whole: updates go on sending it while any is left. */
+  get pending(): number {
+    return this.#deferred.size;
+  }
+
+  /**
+   * Of `pending`, what's in view (as of the last `setView`): sent before anything else. While
+   * the scan for it isn't through the queue, at least 1 (it may be). Finds nothing itself.
+   */
+  get pendingVisible(): number {
+    return this.#visible.size + (this.#deferred.size > 0 && !this.#scanned ? 1 : 0);
+  }
+
+  /** Layers whose text waits for faces still loading (sent provisional meanwhile). */
+  get waiting(): number {
+    return this.#waits.size;
+  }
+
+  /**
+   * A patch since the last message, or null when nothing on the page changed. Text still to be
+   * encoded whole (`pending`) is, for at most `textMs` (at least one record), what's in view first.
+   */
+  update(textMs = DEFER_MS): Uint8Array | null {
     const page = this.#page;
     if (!page) return null;
     const t0 = performance.now();
@@ -467,10 +628,24 @@ export class DisplayListBuilder {
     const forced = new Set<string>(this.#extra);
     this.#extra.clear();
     const generation = this.#measurer.generation ?? 0;
+    const faces = this.#measurer.faceGeneration ?? 0;
     if (generation !== this.#generation) {
-      // Fonts or faces arrived: every text's layout may have moved.
-      for (const id of this.#texts) forced.add(id);
+      if (generation - faces === this.#generation - this.#faceGeneration) {
+        // Only faces arrived (or turned out unavailable): what waited for them is encoded again,
+        // a few at a time, what's in view first; nothing else's layout depended on them.
+        for (const [face, ids] of this.#waitingOn)
+          if ((this.#measurer.faceStatus?.(face) ?? "ready") !== "loading")
+            for (const id of ids) this.#defer(id);
+        for (const id of this.#pendingText) forced.add(id);
+      } else {
+        // Fonts, aliases or the catalog changed: every text's layout may have moved. Encoded
+        // again a few at a time, what's in view first (`pendingVisible`: a frame isn't exact
+        // until what's in view is), never all in one long frame.
+        for (const id of this.#texts) this.#defer(id);
+        for (const id of this.#pendingText) forced.add(id);
+      }
       this.#generation = generation;
+      this.#faceGeneration = faces;
     } else for (const id of this.#pendingText) forced.add(id);
     // A glyph set changed (a file's saved outlines): text drawn from them may draw differently.
     const table = glyphTable(doc).version;
@@ -480,7 +655,12 @@ export class DisplayListBuilder {
     }
     for (const id of forced) touched.add(id);
     this.#version = doc.version;
-    if (touched.size === 0 && parents.size === 0) return null;
+    if (touched.size === 0 && parents.size === 0 && this.#deferred.size === 0) return null;
+    // The page changed: where queued text is may have too.
+    if (changes.length > 0 && this.#deferred.size > 0) {
+      this.#bounds.clear();
+      this.#rescan();
+    }
 
     const sets = new Set<string>();
     const moves = new Set<string>();
@@ -534,6 +714,38 @@ export class DisplayListBuilder {
       if (before && before.parent !== node.parent) this.#kids.get(before.parent)?.delete(id);
       records.push([this.#handleOf(id), this.#parentHandle(node), this.#encode(node, ctx)]);
       this.#kid(node.parent, id);
+    }
+    // Text sent provisional: encoded whole, a few milliseconds' worth (finding what's in view
+    // included), what's in view first, at least one record or a slice of the scan.
+    if (this.#deferred.size > 0) {
+      const until = performance.now() + textMs;
+      let sent = 0;
+      const send = (id: string) => {
+        if (!this.#deferred.has(id)) return;
+        this.#deferred.delete(id);
+        this.#visible.delete(id);
+        const node = doc.get(id);
+        if (!node || !this.#handles.has(id) || this.#pageOf(id) !== page) return;
+        records.push([this.#handleOf(id), this.#parentHandle(node), this.#encode(node, ctx)]);
+        sent++;
+      };
+      const more = () => sent === 0 || performance.now() < until;
+      for (;;) {
+        while (this.#shown.length > 0 && more()) send(this.#shown.pop() as string);
+        // Out of time, or nothing more can be in view.
+        if (this.#shown.length > 0 || !more() || this.#scanned) break;
+        // Spent scanning without finding any: the next slice goes on from there.
+        if (!this.#scan(until) && this.#shown.length === 0) break;
+      }
+      // Then the rest, in the order it was queued, once nothing more can be in view.
+      if (this.#scanned && this.#shown.length === 0)
+        while (this.#at < this.#queue.length && more()) send(this.#queue[this.#at++] as string);
+      if (this.#at >= this.#queue.length && this.#shown.length === 0) {
+        this.#queue = [];
+        this.#at = 0;
+        this.#scanAt = 0;
+        this.#bounds.clear();
+      }
     }
     const revision = this.#revision + 1;
     const w = new ListWriter(this.#revision, revision);

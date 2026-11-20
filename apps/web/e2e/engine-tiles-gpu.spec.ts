@@ -9,7 +9,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { ListWriter, ROOT } from "@drawpane/engine/wire";
+import { ListWriter, PathData, ROOT } from "@drawpane/engine/wire";
 import { expect, type Page, test } from "@playwright/test";
 
 test.use({
@@ -222,4 +222,136 @@ test("a drag erases its selection where only the last frame showed it", async ({
   );
   expect(movedIn?.pixel).toEqual(red);
   expect(movedOut?.pixel).toEqual([0, 0, 0, 0]);
+});
+
+test("a page opened at a fractional device pixel ratio shows the coarse frame it draws", async ({
+  page,
+}) => {
+  // The opening frame draws a coarser level first: at 1.25 it must still be one the composite
+  // lays (at most 4× coarser), never a frame of background only.
+  const [frame] = await sample(page, solid(512), [
+    { size: [64, 64], pixel: [32, 32], camera: [1, 0, 0, 1.25], moving: false, budget: 12 },
+  ]);
+  expect(frame?.exact).toBe(false);
+  expect(frame?.drawn).toBeGreaterThan(0);
+  expect(frame?.pixel).toEqual(red);
+});
+
+test("a see-through glyph run covers its overlaps once, on the GPU, the CPU and in a PNG", async ({
+  page,
+}) => {
+  // One glyph, a disjoint one, then the first again in the same place, at half alpha: covered
+  // once, as Figma covers a text layer's overlaps (alpha 128). The CPU and its PNG export laid
+  // the masks one over another (192) while the GPU laid them into one image.
+  const list = (glyphs: number[], opacity: number) => {
+    const writer = new ListWriter(0xffffffff, 1);
+    writer.reset();
+    writer.glyph(1, new PathData().moveTo(0, 0).lineTo(16, 0).lineTo(16, 16).lineTo(0, 16).close());
+    writer.set(1, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, 8, 8],
+      opacity: 1,
+      width: 64,
+      height: 48,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "glyphs", scale: 1, glyphs }],
+      ops: [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [1, 0, 0, opacity] },
+        },
+      ],
+      coarse: [],
+    });
+    return [...writer.finish()];
+  };
+  const cases = [
+    list([1, 0, 24, 1, 32, 24, 1, 0, 24], 0.5),
+    list([1, 0, 24, 1, 32, 24, 1, 0, 24], 1),
+    list([1, 0, 24, 1, 32, 24], 0.5),
+  ];
+  await page.route(`${origin}/**`, async (route) => {
+    const name = new URL(route.request().url()).pathname.slice(1);
+    if (name === "engine.js" || name === "engine_bg.wasm") {
+      await route.fulfill({
+        body: await readFile(root + name),
+        contentType: name.endsWith(".js") ? "text/javascript" : "application/wasm",
+      });
+    } else {
+      await route.fulfill({ body: "<!doctype html>", contentType: "text/html" });
+    }
+  });
+  await page.goto(origin);
+  const results = await page.evaluate(async (cases) => {
+    const name = "/engine.js";
+    const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+    await glue.default({ module_or_path: "/engine_bg.wasm" });
+    const out = [];
+    const bg = new Float32Array(4);
+    for (const [i, bytes] of cases.entries()) {
+      const device = await glue.createGpu(null, 0);
+      if (!device.ok) throw new Error(device.message);
+      const e = new glue.Engine(0, 0);
+      try {
+        const check = (r: { ok: boolean; message: string; free(): void }) => {
+          try {
+            if (!r.ok) throw new Error(r.message);
+          } finally {
+            r.free();
+          }
+        };
+        if (!e.attachGpu || !e.renderGpu || !e.gpuPixels) throw new Error("no GPU entry points");
+        check(e.apply(new Uint8Array(bytes)));
+        check(e.attachGpu(device));
+        check(e.renderBand(96, 64, 1, 0, 0, 1, bg, 0, 64));
+        const cpu = e.pixels();
+        const frame = e.renderGpu(96, 64, 1, 0, 0, 1, bg, false, 0);
+        const exact = frame.exact;
+        check(frame);
+        const gpu = await e.gpuPixels();
+        if (!(gpu instanceof Uint8Array)) throw new Error(gpu.message);
+        const at = (24 * 96 + 16) * 4;
+        let worstAlpha = 0;
+        for (let k = 3; k < cpu.length; k += 4)
+          worstAlpha = Math.max(worstAlpha, Math.abs((cpu[k] ?? 0) - (gpu[k] ?? 0)));
+        let png: number[] | null = null;
+        if (i === 0) {
+          check(e.pngBegin(96, 64, 1, 0, 0, 1));
+          check(e.pngBand(1, 0, 0, 1, bg, 64));
+          const img = await createImageBitmap(
+            new Blob([new Uint8Array(e.pngTake()), new Uint8Array(e.pngEnd())], {
+              type: "image/png",
+            }),
+          );
+          const ctx = new OffscreenCanvas(96, 64).getContext("2d");
+          if (!ctx) throw new Error("no 2D context");
+          ctx.drawImage(img, 0, 0);
+          png = Array.from(ctx.getImageData(16, 24, 1, 1).data);
+          img.close();
+        }
+        out.push({
+          exact,
+          worstAlpha,
+          cpu: [...cpu.slice(at, at + 4)],
+          gpu: [...gpu.slice(at, at + 4)],
+          png,
+        });
+      } finally {
+        e.free();
+        device.free();
+      }
+    }
+    return out;
+  }, cases);
+  expect(results.every((r) => r.exact)).toBe(true);
+  for (const r of results) expect(r.worstAlpha, JSON.stringify(r)).toBeLessThanOrEqual(2);
+  const [overlap] = results;
+  expect(Math.abs((overlap?.gpu[3] ?? 0) - 128)).toBeLessThanOrEqual(1);
+  expect(Math.abs((overlap?.cpu[3] ?? 0) - 128)).toBeLessThanOrEqual(1);
+  // A PNG is straight (unpremultiplied) red at the run's alpha.
+  expect(Math.abs((overlap?.png?.[3] ?? 0) - 128)).toBeLessThanOrEqual(1);
 });
