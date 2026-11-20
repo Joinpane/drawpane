@@ -445,7 +445,13 @@ for (const build of ["browser", "webgl"] as const) {
         coarseBelow: 0,
         reach: 0,
         unsupported: 0,
-        paths: [{ kind: "rect", w: 512, h: 512, radii: [0, 0, 0, 0], smoothing: 0 }],
+        paths: [
+          { kind: "rect", w: 512, h: 512, radii: [0, 0, 0, 0], smoothing: 0 },
+          {
+            kind: "path",
+            path: new PathData().moveTo(4, 0).lineTo(5, 0).lineTo(5, 512).lineTo(4, 512).close(),
+          },
+        ],
         ops: [
           {
             op: "fill",
@@ -453,6 +459,7 @@ for (const build of ["browser", "webgl"] as const) {
             evenOdd: false,
             paint: { kind: "solid", color: [0.1, 0.4, 0.9, 1] },
           },
+          { op: "fill", path: 1, evenOdd: false, paint: { kind: "solid", color: [1, 0, 0, 1] } },
         ],
         coarse: [],
       });
@@ -511,6 +518,8 @@ for (const build of ["browser", "webgl"] as const) {
         await glue.default({ module_or_path: "/engine_bg.wasm" });
         if (glue.gpuBackend() !== expectedBackend) throw new Error("wrong GPU backend");
         const bg = new Float32Array([1, 1, 1, 1]);
+        const width = 513;
+        const height = 511;
 
         // 1. Tight gpu_bytes budget must refuse oversized reader scratch with Limit (code 4).
         const tightDev = await glue.createGpu(null, 0);
@@ -540,22 +549,25 @@ for (const build of ["browser", "webgl"] as const) {
         try {
           e.apply(new Uint8Array(withGlass)).free();
           e.attachGpu?.(dev).free();
-          const moving = e.renderGpu?.(512, 512, 1, 0, 0, 1, bg, true, 0);
+          const moving = e.renderGpu?.(width, height, 1, 0, 0, 1, bg, true, 0);
           if (!moving) throw new Error("no renderGpu");
           const movingInfo = { ok: moving.ok, exact: moving.exact, reads: moving.reads };
           moving.free();
           const movingPx = await e.gpuPixels?.();
           if (!(movingPx instanceof Uint8Array)) throw new Error("moving gpuPixels failed");
-          const cAt = (180 * 512 + 200) * 4;
+          const cAt = (180 * width + 200) * 4;
+          const accentAt = (180 * width + 4) * 4;
           const movingCentre = [...movingPx.subarray(cAt, cAt + 4)];
 
-          const settled = e.renderGpu?.(512, 512, 1, 0, 0, 1, bg, false, 0);
+          const settled = e.renderGpu?.(width, height, 1, 0, 0, 1, bg, false, 0);
           if (!settled) throw new Error("no renderGpu");
           const settledInfo = { ok: settled.ok, exact: settled.exact, reads: settled.reads };
           settled.free();
+          const settledPx = await e.gpuPixels?.();
+          if (!(settledPx instanceof Uint8Array)) throw new Error("settled gpuPixels failed");
 
           e.apply(new Uint8Array(withoutGlass)).free();
-          const plain = e.renderGpu?.(512, 512, 1, 0, 0, 1, bg, false, 0);
+          const plain = e.renderGpu?.(width, height, 1, 0, 0, 1, bg, false, 0);
           if (!plain) throw new Error("no renderGpu");
           const plainInfo = { ok: plain.ok, exact: plain.exact, reads: plain.reads };
           plain.free();
@@ -568,6 +580,9 @@ for (const build of ["browser", "webgl"] as const) {
             tightCode,
             movingInfo,
             movingCentre,
+            movingPixelCount: movingPx.length / 4,
+            movingAccent: movingPx[accentAt] ?? 0,
+            settledAccent: settledPx[accentAt] ?? 0,
             settledInfo,
             plainInfo,
             plainCentre,
@@ -586,7 +601,11 @@ for (const build of ["browser", "webgl"] as const) {
 
     expect(res.tightOk).toBe(false);
     expect(res.tightCode).toBe(4);
-    expect(res.movingInfo.ok).toBe(true);
+    expect(res.movingInfo).toMatchObject({ ok: true, exact: false });
+    expect(res.movingPixelCount).toBe(513 * 511);
+    expect(res.movingAccent).toBeGreaterThan(26);
+    expect(res.movingAccent).toBeLessThan(255);
+    expect(res.settledAccent).toBe(255);
     expect(res.movingInfo.reads).toBeGreaterThan(0);
     expect(res.movingCentre[3]).toBe(255);
     expect(res.settledInfo).toEqual({ ok: true, exact: true, reads: expect.any(Number) });

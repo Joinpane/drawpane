@@ -487,14 +487,23 @@ describe.skipIf(!built("worker") && !process.env.CI)("the display-list builder",
         op: "set",
         id: frame,
         prop: "effects",
-        value: [{ type: "background-blur", radius: 8 }],
+        value: [
+          {
+            type: "layer-blur",
+            radius: 8,
+            blurType: "progressive",
+            startRadius: 0,
+            startOffset: { x: 0, y: 0 },
+            endOffset: { x: 1, y: 1 },
+          },
+        ],
       },
     ]);
     const builder = new DisplayListBuilder(new Scene(doc), measurer);
     const engine = new RenderEngine(mod);
     expect(engine.apply(builder.build("p1")).ok).toBe(true);
     expect(builder.supported).toBe(false);
-    expect(unsupportedNames(builder.unsupported.get(frame) ?? 0)).toEqual(["backgroundBlur"]);
+    expect(unsupportedNames(builder.unsupported.get(frame) ?? 0)).toEqual(["layerBlur"]);
     const r = engine.renderCpu(W, H, camera, BG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe(5);

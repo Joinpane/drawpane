@@ -488,8 +488,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // when a content frame is drawn, and only to one whose frame is on screen: an overlay-only
       // redraw never hides the engine's frame, and a read-back frame shows once it lands.
       let drewEngine = false;
+      const gestureMoving = s.gesture && s.editingText === null;
       if (contentDirty && s.pageId !== null && engine && engineMoved && !whole) {
-        if (engineCamera === s.camera && engineShowing && !changed) {
+        if (!gestureMoving && engineCamera === s.camera && engineShowing && !changed) {
           // The camera came to rest where the last frame was drawn: that frame stays on screen
           // while the time between frames draws the rest, and the exact frame follows (a frame
           // now would only show the same stand-ins again).
@@ -501,11 +502,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         engineMoved = false;
       }
       if (!drewEngine && contentDirty && s.pageId !== null && engine) {
-        // The engine keeps the page as tiles (decision 0040, phase 2). A camera that moved since
-        // its last frame is moving: tiles not drawn yet show stand-ins. One that didn't rests:
-        // each frame draws more of the missing tiles under a budget until the frame is exact,
-        // never one long frame (a test's whole redraw has no budget).
-        const moving = !whole && !exact && engineCamera !== s.camera;
+        // Camera motion and pointer gestures have the same moving-frame budget. Once they stop,
+        // idle slices fill the remaining exact tiles (decision 0040).
+        const moving = !whole && !exact && (gestureMoving || engineCamera !== s.camera);
         const background = (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor;
         changed = false;
         const r = engine.draw(
@@ -743,7 +742,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         s.camera !== last.camera ||
         s.pageId !== last.pageId ||
         s.viewport !== last.viewport ||
-        s.editingText !== last.editingText
+        s.editingText !== last.editingText ||
+        (last.gesture && !s.gesture && engineMoved)
       ) {
         contentDirty = true;
         // What's drawn ahead is for the frame before: the next one decides again.

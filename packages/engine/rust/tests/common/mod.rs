@@ -200,6 +200,19 @@ pub enum Op {
         box_radii: [f32; 4],
         box_smoothing: [f32; 4],
     },
+    BackgroundBlur {
+        paths: Vec<u32>,
+        even_odd: bool,
+        radius: f32,
+    },
+    ProgressiveBlur {
+        paths: Vec<u32>,
+        even_odd: bool,
+        start_radius: f32,
+        end_radius: f32,
+        start: [f32; 2],
+        end: [f32; 2],
+    },
     DropShadow {
         paths: Vec<u32>,
         even_odd: bool,
@@ -412,6 +425,40 @@ impl Rec {
                     for s in box_smoothing {
                         w.f32(*s);
                     }
+                }
+                Op::BackgroundBlur {
+                    paths,
+                    even_odd,
+                    radius,
+                } => {
+                    w.u32(10);
+                    w.u32(paths.len() as u32);
+                    for p in paths {
+                        w.u32(*p);
+                    }
+                    w.u32(u32::from(*even_odd));
+                    w.f32(*radius);
+                }
+                Op::ProgressiveBlur {
+                    paths,
+                    even_odd,
+                    start_radius,
+                    end_radius,
+                    start,
+                    end,
+                } => {
+                    w.u32(11);
+                    w.u32(paths.len() as u32);
+                    for p in paths {
+                        w.u32(*p);
+                    }
+                    w.u32(u32::from(*even_odd));
+                    w.f32(*start_radius);
+                    w.f32(*end_radius);
+                    w.f32(start[0]);
+                    w.f32(start[1]);
+                    w.f32(end[0]);
+                    w.f32(end[1]);
                 }
                 Op::DropShadow {
                     paths,

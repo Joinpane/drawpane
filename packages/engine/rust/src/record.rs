@@ -55,8 +55,6 @@ pub const MASK_LUMINANCE: u32 = 5;
 /// decodes, so anything it would refuse while drawing refuses its page before any drawing, on
 /// screen or not, in an export's crop or not, whatever the builder flagged.
 pub mod derived {
-    pub const BACKGROUND_BLUR: u32 = 1 << 2;
-    pub const PROGRESSIVE_BLUR: u32 = 1 << 10;
     pub const BACKDROP_READER: u32 = 1 << 13;
 }
 
@@ -565,10 +563,16 @@ impl Record {
         self.ops.iter().fold(None, |acc, op| match op {
             Op::Read { halo, .. } => Some(acc.unwrap_or(0.0f32).max(*halo)),
             Op::Glass(g) => Some(acc.unwrap_or(0.0f32).max(crate::glass::local_halo(g))),
-            Op::BackgroundBlur(b) => Some(acc.unwrap_or(0.0f32).max((b.radius * 1.5).ceil() + 2.0)),
+            Op::BackgroundBlur(b) => Some(
+                acc.unwrap_or(0.0f32)
+                    .max(crate::blur::blur_reach(crate::blur::sigma_from_radius(b.radius))),
+            ),
             Op::ProgressiveBlur(b) => {
                 let r = b.start_radius.max(b.end_radius);
-                Some(acc.unwrap_or(0.0f32).max((r * 1.5).ceil() + 2.0))
+                Some(
+                    acc.unwrap_or(0.0f32)
+                        .max(crate::blur::blur_reach(crate::blur::sigma_from_radius(r))),
+                )
             }
             _ => acc,
         })
@@ -1188,7 +1192,6 @@ fn ops(
                 }
                 let even_odd = r.u32()? == 1;
                 let radius = r.f32_nonneg()?;
-                *derived |= derived::BACKGROUND_BLUR;
                 Op::BackgroundBlur(Box::new(BackgroundBlurOp {
                     paths: bpaths,
                     even_odd,
@@ -1215,7 +1218,6 @@ fn ops(
                 let end_radius = r.f32_nonneg()?;
                 let start = [r.f32()?, r.f32()?];
                 let end = [r.f32()?, r.f32()?];
-                *derived |= derived::PROGRESSIVE_BLUR;
                 Op::ProgressiveBlur(Box::new(ProgressiveBlurOp {
                     paths: bpaths,
                     even_odd,

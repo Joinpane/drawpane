@@ -27,6 +27,7 @@ pub mod mask;
 pub mod masks;
 pub mod noise;
 pub mod png;
+pub mod progressive_blur;
 pub mod record;
 pub mod shadow;
 pub mod store;
@@ -429,6 +430,9 @@ impl Engine {
         background: Vec<f32>,
         detail: bool,
     ) -> Outcome {
+        if self.core.limits().memory_bytes > 0 {
+            self.pixels = Vec::new();
+        }
         let bg = rgba(&background);
         match self
             .core
@@ -538,6 +542,9 @@ impl Engine {
         y0: u32,
         rows: u32,
     ) -> Outcome {
+        if self.core.limits().memory_bytes > 0 {
+            self.pixels = Vec::new();
+        }
         let bg = rgba(&background);
         match self
             .core
@@ -564,6 +571,9 @@ impl Engine {
     pub fn png_begin(&mut self, width: u32, height: u32, zoom: f64, x: f64, y: f64, dpr: f64) -> Outcome {
         if let Some(o) = self.exporting() {
             return o;
+        }
+        if self.core.limits().memory_bytes > 0 {
+            self.pixels = Vec::new();
         }
         if let Err(e) = self.core.admit_export(width, height, Camera { zoom, x, y, dpr }) {
             return Outcome::err(e);

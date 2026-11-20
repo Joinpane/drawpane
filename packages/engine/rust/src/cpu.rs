@@ -6,6 +6,7 @@
 //! one tile. The scene is always the whole frame's size, so geometry lands on the same
 //! coordinates whichever tile is drawn, and tiles are bit-identical to a whole frame.
 
+use crate::blur;
 use crate::blur::{BlurSpec, EdgeMode, try_blur_cpu, validate_sigma};
 use crate::error::{EngineError, Result};
 use crate::exec::resolve_inradius;
@@ -14,7 +15,8 @@ use crate::glass;
 use crate::images::{self, Level};
 use crate::kernels;
 use crate::masks::{self, MaskCache, MaskKey};
-use crate::record::GlassOp;
+use crate::progressive_blur;
+use crate::record::{BackgroundBlurOp, GlassOp, ProgressiveBlurOp};
 use crate::shadow::{
     CanonicalShadow, ShadowMaskCache, compute_mask_rect, compute_mask_rect_bounds, reduced_dirty_rect,
     scaled_shadow_sigma, shadow_raster_shift, upsample_shadow_mask_cpu,
@@ -112,6 +114,17 @@ pub(crate) fn scene_work_bytes((width, height): (usize, usize)) -> usize {
     scene_estimate_bytes(width as u32, height as u32).saturating_add(width.saturating_mul(128))
 }
 
+pub(crate) fn blur_buffer_bytes((width, height): (u32, u32)) -> usize {
+    let size = (width as usize, height as usize);
+    let rgba = size.0 * size.1 * 4;
+    rgba + rgba.max(scene_work_bytes(size))
+}
+
+pub(crate) fn reader_copy_bytes((width, height): (u32, u32), clip_scene: Option<(usize, usize)>) -> usize {
+    let rgba = width as usize * height as usize * 4;
+    rgba + clip_scene.map_or(0, |size| rgba + scene_work_bytes(size))
+}
+
 fn active_clip(open: &Open) -> bool {
     matches!(
         open,
@@ -152,6 +165,7 @@ pub struct Cpu {
     backdrop_live: bool,
     write_main: bool,
     write_backdrop: bool,
+    backdrop_gen: u64,
     /// The device pixel the target's top left is.
     pub origin: (i32, i32),
     /// Whole frame size in device pixels (for restoring root scene dimensions).
@@ -206,6 +220,7 @@ impl Cpu {
             backdrop_live: false,
             write_main: true,
             write_backdrop: false,
+            backdrop_gen: 0,
             origin: (0, 0),
             frame_size: (1, 1),
             scene: RenderContext::new(1, 1),
@@ -399,6 +414,7 @@ impl Cpu {
     /// frame bounds so geometry lands on identical floating-point coordinates in tiled exports and
     /// whole frames.
     fn flush_current(&mut self) {
+        self.backdrop_gen = self.backdrop_gen.wrapping_add(1);
         self.scene.flush();
         let so = self.scene_offset();
         let target_origin = self.main().0;
@@ -566,6 +582,45 @@ impl Cpu {
         };
         clip.render_with(&mut mask, &mut self.resources, settings);
         Some(mask)
+    }
+
+    fn reader_shape_mask(
+        &mut self,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        origin: (i32, i32),
+        (width, height): (u32, u32),
+    ) -> Pixmap {
+        let mut mask_ctx = RenderContext::new(width as u16, height as u16);
+        let shifted = Affine::translate((-f64::from(origin.0), -f64::from(origin.1))) * device;
+        mask_ctx.set_transform(shifted);
+        mask_ctx.set_paint(vello_common::color::palette::css::WHITE);
+        for (path, even_odd) in paths {
+            mask_ctx.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+            mask_ctx.fill_path(path);
+        }
+        mask_ctx.flush();
+        let mut mask = Pixmap::new(width as u16, height as u16);
+        let settings = RasterizerSettings {
+            render_mode: RenderMode::OptimizeQuality,
+            ..Default::default()
+        };
+        mask_ctx.render_with(&mut mask, &mut self.resources, settings);
+        mask
+    }
+
+    fn write_reader_result(&mut self, mut write: impl FnMut(&mut Pixmap)) {
+        if self.write_main {
+            write(self.main_mut().1);
+        }
+        if self.write_backdrop {
+            if let Some((_, dst)) = self.backdrop_mut() {
+                write(dst);
+            } else if !self.write_main && !self.offscreen_stack.is_empty() {
+                write(self.main_mut().1);
+            }
+        }
+        self.backdrop_gen = self.backdrop_gen.wrapping_add(1);
     }
 
     pub fn finish(&mut self) {
@@ -1635,16 +1690,7 @@ impl Backend for Cpu {
             }
         };
         let cm = clip_mask.as_ref().map(Pixmap::data_as_u8_slice);
-        if self.write_main {
-            apply(self.main_mut().1.data_as_u8_slice_mut(), &out, cm, origin, w, h);
-        }
-        if self.write_backdrop {
-            if let Some((_, dst)) = self.backdrop_mut() {
-                apply(dst.data_as_u8_slice_mut(), &out, cm, origin, w, h);
-            } else if !self.write_main && !self.offscreen_stack.is_empty() {
-                apply(self.main_mut().1.data_as_u8_slice_mut(), &out, cm, origin, w, h);
-            }
-        }
+        self.write_reader_result(|dst| apply(dst.data_as_u8_slice_mut(), &out, cm, origin, w, h));
         Ok(())
     }
 
@@ -1824,6 +1870,202 @@ impl Backend for Cpu {
                 );
             }
         }
+        Ok(())
+    }
+    fn background_blur(
+        &mut self,
+        op: &BackgroundBlurOp,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        _size: [f32; 2],
+        alpha: f32,
+        _coarse: bool,
+        open: &[Open],
+    ) -> Result<()> {
+        if open.iter().any(|o| matches!(o, Open::Layer)) {
+            return Err(EngineError::unsupported(
+                "a backdrop reader inside a layer that fades as one",
+            ));
+        }
+        self.flush_barrier(open);
+        let scale = device.determinant().abs().sqrt() as f32;
+        if !(scale > 0.0 && scale.is_finite()) {
+            return Ok(());
+        }
+        let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));
+        let (origin, backdrop) = self.readable_backdrop(false);
+        let source = (u32::from(backdrop.width()), u32::from(backdrop.height()));
+        let target_size = (source.0 as i32, source.1 as i32);
+        let shift = (-origin.0, -origin.1);
+        let Some(dirty) = progressive_blur::blur_dirty_rect(paths, device, frame_size, shift, target_size) else {
+            return Ok(());
+        };
+        let bw = (dirty.x1 - dirty.x0) as u32;
+        let bh = (dirty.y1 - dirty.y0) as u32;
+        if bw > u32::from(u16::MAX) || bh > u32::from(u16::MAX) {
+            return Err(EngineError::limit("background blur region exceeds target dimensions"));
+        }
+        let buf_bytes = bw as usize * bh as usize * 4;
+        let sigma = blur::sigma_from_radius(op.radius) * scale;
+        let size = (bw, bh);
+        if self.memory_budget > 0 {
+            self.blur.clear();
+            let clip_scene = open
+                .iter()
+                .any(reader_clip)
+                .then(|| (self.scene.width() as usize, self.scene.height() as usize));
+            let work = blur::cpu_work_bytes(source, size, sigma);
+            self.check_memory(
+                reader_copy_bytes(source, clip_scene) + blur_buffer_bytes(size) + work,
+                "background blur working set",
+            )?;
+        }
+
+        let frame_x0 = dirty.x0 + origin.0;
+        let frame_y0 = dirty.y0 + origin.1;
+        let mask_pix = self.reader_shape_mask(paths, device, (frame_x0, frame_y0), size);
+
+        let paints = IRect {
+            x0: frame_x0,
+            y0: frame_y0,
+            x1: frame_x0 + bw as i32,
+            y1: frame_y0 + bh as i32,
+        };
+        let clip_pix = self.rasterize_open_clips(paints, open);
+        let within = glass::clip_within_from_open(open);
+        let (clamp_bounds, edge) =
+            progressive_blur::blur_bounds_and_edge(within, frame_size, shift, target_size, sigma);
+        let spec = blur::BlurSpec {
+            sigma,
+            edge,
+            clamp_bounds,
+            dirty,
+        };
+        let backdrop_src = self.readable_backdrop(false).1.data_as_u8_slice().to_vec();
+        let mut blurred = vec![0u8; buf_bytes];
+        self.blur.try_blur(
+            self.backdrop_gen,
+            &backdrop_src,
+            source,
+            &mut blurred,
+            (bw, bh),
+            (dirty.x0, dirty.y0),
+            &spec,
+        )?;
+        let cm = clip_pix.as_ref().map(Pixmap::data_as_u8_slice);
+        let target_w = target_size.0;
+        self.write_reader_result(|dst| {
+            progressive_blur::composite_blurred_cpu(
+                dst.data_as_u8_slice_mut(),
+                target_w,
+                &blurred,
+                mask_pix.data_as_u8_slice(),
+                cm,
+                dirty,
+                alpha,
+            );
+        });
+        Ok(())
+    }
+
+    fn progressive_blur(
+        &mut self,
+        op: &ProgressiveBlurOp,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        size: [f32; 2],
+        alpha: f32,
+        coarse: bool,
+        open: &[Open],
+    ) -> Result<()> {
+        if open.iter().any(|o| matches!(o, Open::Layer)) {
+            return Err(EngineError::unsupported(
+                "a backdrop reader inside a layer that fades as one",
+            ));
+        }
+        let scale = device.determinant().abs().sqrt() as f32;
+        if !(scale > 0.0 && scale.is_finite()) {
+            return Ok(());
+        }
+        let Some(plan) = progressive_blur::ProgressivePlan::new(op, device, size, scale) else {
+            let uniform = BackgroundBlurOp {
+                paths: op.paths.clone(),
+                even_odd: op.even_odd,
+                radius: op.start_radius.max(op.end_radius),
+            };
+            return self.background_blur(&uniform, paths, device, size, alpha, coarse, open);
+        };
+        self.flush_barrier(open);
+        let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));
+        let (origin, backdrop) = self.readable_backdrop(false);
+        let source = (u32::from(backdrop.width()), u32::from(backdrop.height()));
+        let target_size = (source.0 as i32, source.1 as i32);
+        let shift = (-origin.0, -origin.1);
+        let Some(dirty) = progressive_blur::blur_dirty_rect(paths, device, frame_size, shift, target_size) else {
+            return Ok(());
+        };
+        let bw = (dirty.x1 - dirty.x0) as u32;
+        let bh = (dirty.y1 - dirty.y0) as u32;
+        if bw > u32::from(u16::MAX) || bh > u32::from(u16::MAX) {
+            return Err(EngineError::limit("progressive blur region exceeds target dimensions"));
+        }
+        let buf_bytes = bw as usize * bh as usize * 4;
+        let size = (bw, bh);
+        if self.memory_budget > 0 {
+            self.blur.clear();
+            let clip_scene = open
+                .iter()
+                .any(reader_clip)
+                .then(|| (self.scene.width() as usize, self.scene.height() as usize));
+            let work = progressive_blur::cpu_work_bytes(source, size, &plan.stops);
+            self.check_memory(
+                reader_copy_bytes(source, clip_scene) + blur_buffer_bytes(size) + work,
+                "progressive blur working set",
+            )?;
+        }
+
+        let frame_x0 = dirty.x0 + origin.0;
+        let frame_y0 = dirty.y0 + origin.1;
+        let mask_pix = self.reader_shape_mask(paths, device, (frame_x0, frame_y0), size);
+
+        let paints = IRect {
+            x0: frame_x0,
+            y0: frame_y0,
+            x1: frame_x0 + bw as i32,
+            y1: frame_y0 + bh as i32,
+        };
+        let clip_pix = self.rasterize_open_clips(paints, open);
+        let within = glass::clip_within_from_open(open);
+        let max_sigma = plan.start_sigma.max(plan.end_sigma);
+        let (clamp_bounds, edge) =
+            progressive_blur::blur_bounds_and_edge(within, frame_size, shift, target_size, max_sigma);
+        let backdrop_src = self.readable_backdrop(false).1.data_as_u8_slice().to_vec();
+        let mut blurred = vec![0u8; buf_bytes];
+        progressive_blur::eval_progressive_cpu(
+            &mut self.blur,
+            self.backdrop_gen,
+            &backdrop_src,
+            source,
+            clamp_bounds,
+            edge,
+            dirty,
+            origin,
+            &plan,
+            &mut blurred,
+        )?;
+        let cm = clip_pix.as_ref().map(Pixmap::data_as_u8_slice);
+        let target_w = target_size.0;
+        self.write_reader_result(|dst| {
+            progressive_blur::composite_blurred_cpu(
+                dst.data_as_u8_slice_mut(),
+                target_w,
+                &blurred,
+                mask_pix.data_as_u8_slice(),
+                cm,
+                dirty,
+                alpha,
+            );
+        });
         Ok(())
     }
 }

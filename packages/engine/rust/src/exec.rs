@@ -21,7 +21,10 @@ use crate::geometry;
 use crate::glass;
 use crate::limits::Limits;
 use crate::masks::{MaskKey, PHASES};
-use crate::record::{ComposeMode, GlassOp, GradientKind, Op, Paint, PathEntry, PostEffect, Record, Rgba, StrokeStyle};
+use crate::record::{
+    BackgroundBlurOp, ComposeMode, GlassOp, GradientKind, Op, Paint, PathEntry, PostEffect, ProgressiveBlurOp, Record,
+    Rgba, StrokeStyle,
+};
 use crate::store::Store;
 use std::collections::{HashMap, HashSet};
 use vello_common::color::{AlphaColor, Srgb};
@@ -315,6 +318,30 @@ pub trait Backend {
         alpha: f32,
         coarse: bool,
         read_parent: bool,
+        open: &[Open],
+    ) -> Result<()>;
+    /// Runs Gaussian background blur over the current non-glass backdrop (`open` is open in the scene).
+    #[allow(clippy::too_many_arguments)]
+    fn background_blur(
+        &mut self,
+        op: &BackgroundBlurOp,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        size: [f32; 2],
+        alpha: f32,
+        coarse: bool,
+        open: &[Open],
+    ) -> Result<()>;
+    /// Runs progressive background blur over the current non-glass backdrop (`open` is open in the scene).
+    #[allow(clippy::too_many_arguments)]
+    fn progressive_blur(
+        &mut self,
+        op: &ProgressiveBlurOp,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        size: [f32; 2],
+        alpha: f32,
+        coarse: bool,
         open: &[Open],
     ) -> Result<()>;
     /// Pushes an offscreen target covering `area` (device pixels), flushing the active
@@ -672,8 +699,23 @@ pub struct ExportMetrics {
     pub max_reader_work_bytes: usize,
 }
 
+pub(crate) fn background_reader_work_bytes(op: &Op, source: (u32, u32), dirty: (u32, u32), scale: f32) -> usize {
+    let sigma = |radius| crate::blur::sigma_from_radius(radius) * scale;
+    let scratch = match op {
+        Op::BackgroundBlur(b) => crate::blur::cpu_work_bytes(source, dirty, sigma(b.radius)),
+        Op::ProgressiveBlur(b) => {
+            let start = sigma(b.start_radius);
+            let end = sigma(b.end_radius);
+            let stops = crate::progressive_blur::choose_stops(start.min(end), start.max(end));
+            crate::progressive_blur::cpu_work_bytes(source, dirty, &stops)
+        }
+        _ => return 0,
+    };
+    crate::cpu::blur_buffer_bytes(dirty).saturating_add(scratch)
+}
+
 /// Estimates peak reader allocations for an export of `frame` under `memory_bytes` cap.
-pub fn export_plan_metrics(store: &Store, frame: &Frame, _tile: (usize, usize)) -> ExportMetrics {
+pub fn export_plan_metrics(store: &Store, frame: &Frame, tile: (usize, usize)) -> ExportMetrics {
     let Some(plan) = plan_readers(store, frame) else {
         return ExportMetrics::default();
     };
@@ -695,6 +737,7 @@ pub fn export_plan_metrics(store: &Store, frame: &Frame, _tile: (usize, usize)) 
         viewport: Rect,
         plan: &'a ReaderPlan,
         frame_size: (i32, i32),
+        tile: (u32, u32),
         split_side: u32,
         split_pixels: u64,
         chunk_side: u32,
@@ -799,7 +842,20 @@ pub fn export_plan_metrics(store: &Store, frame: &Frame, _tile: (usize, usize)) 
                         }
                     }
                 }
-                Op::Read { .. } | Op::BackgroundBlur(_) | Op::ProgressiveBlur(_) => {
+                Op::BackgroundBlur(_) | Op::ProgressiveBlur(_) => {
+                    st.reader_seq += 1;
+                    st.metrics.has_clipped_reader |= st.clip_depth > 0;
+                    let q = IRect::around(device.transform_rect_bbox(bounds).inflate(2.0, 2.0))
+                        .clamp(st.frame_size.0, st.frame_size.1);
+                    let dirty = (
+                        st.tile.0.min((q.x1 - q.x0).max(0) as u32),
+                        st.tile.1.min((q.y1 - q.y0).max(0) as u32),
+                    );
+                    let scale = device.determinant().abs().sqrt() as f32;
+                    let bytes = background_reader_work_bytes(op, st.tile, dirty, scale);
+                    st.metrics.max_reader_work_bytes = st.metrics.max_reader_work_bytes.max(bytes);
+                }
+                Op::Read { .. } => {
                     st.reader_seq += 1;
                     if st.clip_depth > 0 {
                         st.metrics.has_clipped_reader = true;
@@ -818,6 +874,7 @@ pub fn export_plan_metrics(store: &Store, frame: &Frame, _tile: (usize, usize)) 
         viewport: full_viewport,
         plan: &plan,
         frame_size,
+        tile: (tile.0 as u32, tile.1 as u32),
         split_side,
         split_pixels,
         chunk_side,
@@ -2649,13 +2706,41 @@ impl<B: Backend> Walk<'_, B> {
                         )?;
                         self.sync_targets(is_context)?;
                     }
-                    Op::BackgroundBlur(_) => {
-                        return Err(EngineError::unsupported("background blur (pending Gaussian blur PR)"));
+                    Op::BackgroundBlur(bb) => {
+                        self.stats.reads += 1;
+                        self.reader_seq += 1;
+                        self.sync_targets(is_context)?;
+                        let mut paths = Vec::with_capacity(bb.paths.len());
+                        for &pi in &bb.paths {
+                            let p = self.path(r, pi, device, 0.0)?;
+                            paths.push((p, bb.even_odd));
+                        }
+                        let blur_coarse = self.frame.detail && bb.radius > 0.0;
+                        if blur_coarse {
+                            self.stats.coarse += 1;
+                        }
+                        let open = self.reader_open();
+                        self.backend
+                            .background_blur(bb, &paths, device, r.size, inner, blur_coarse, &open)?;
+                        self.sync_targets(is_context)?;
                     }
-                    Op::ProgressiveBlur(_) => {
-                        return Err(EngineError::unsupported(
-                            "progressive background blur (pending Gaussian blur PR)",
-                        ));
+                    Op::ProgressiveBlur(pb) => {
+                        self.stats.reads += 1;
+                        self.reader_seq += 1;
+                        self.sync_targets(is_context)?;
+                        let mut paths = Vec::with_capacity(pb.paths.len());
+                        for &pi in &pb.paths {
+                            let p = self.path(r, pi, device, 0.0)?;
+                            paths.push((p, pb.even_odd));
+                        }
+                        let blur_coarse = self.frame.detail && pb.start_radius.max(pb.end_radius) > 0.0;
+                        if blur_coarse {
+                            self.stats.coarse += 1;
+                        }
+                        let open = self.reader_open();
+                        self.backend
+                            .progressive_blur(pb, &paths, device, r.size, inner, blur_coarse, &open)?;
+                        self.sync_targets(is_context)?;
                     }
                     Op::DropShadow {
                         paths,

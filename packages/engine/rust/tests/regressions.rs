@@ -1314,6 +1314,244 @@ fn wire_minor_version_gates_flags_and_reader_opcodes() {
     bad_flag_w.set(1, 0, &bad_flag);
     let mut e = Engine::new(Limits::default());
     assert_eq!(e.apply(&bad_flag_w.finish()).unwrap_err().code, ErrorCode::Malformed);
+
+    // BackgroundBlur (opcode 10) and ProgressiveBlur (opcode 11): rejected in 1.0..=1.2 (Version), accepted in 1.3.
+    let mut bb_rec = positioned_rect(0.0, 0.0, 32.0, 32.0, None);
+    bb_rec.ops.push(Op::BackgroundBlur {
+        paths: vec![0],
+        even_odd: false,
+        radius: 12.0,
+    });
+    let mut bb_w = W::new(ANY, 1);
+    bb_w.reset();
+    bb_w.set(1, 0, &bb_rec);
+    let bb_bytes = bb_w.finish();
+
+    let mut pb_rec = positioned_rect(0.0, 0.0, 32.0, 32.0, None);
+    pb_rec.ops.push(Op::ProgressiveBlur {
+        paths: vec![0],
+        even_odd: false,
+        start_radius: 0.0,
+        end_radius: 12.0,
+        start: [0.5, 0.0],
+        end: [0.5, 1.0],
+    });
+    let mut pb_w = W::new(ANY, 1);
+    pb_w.reset();
+    pb_w.set(1, 0, &pb_rec);
+    let pb_bytes = pb_w.finish();
+
+    for bytes in [&bb_bytes, &pb_bytes] {
+        for minor in [0u16, 1, 2] {
+            let mut e = Engine::new(Limits::default());
+            assert_eq!(e.apply(&set_minor(bytes, minor)).unwrap_err().code, ErrorCode::Version);
+        }
+        let mut e = Engine::new(Limits::default());
+        assert!(e.apply(&set_minor(bytes, 3)).is_ok());
+    }
+}
+
+fn bg_blur_rect(x: f64, y: f64, w: f32, h: f32, radii: [f32; 4], radius: f32) -> Rec {
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, x, y], [w, h]);
+    r.paths.push(Entry::Rect { w, h, radii });
+    r.ops.push(Op::BackgroundBlur {
+        paths: vec![0],
+        even_odd: false,
+        radius,
+    });
+    r.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 1.0, 1.0, 0.25]),
+    });
+    r
+}
+
+#[test]
+fn background_blur_over_glass_ignores_lower_glass_and_glass_over_blur_reads_it() {
+    let build_blur_over_glass = |with_lower_glass: bool| {
+        let mut e = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        striped_backdrop(&mut w);
+        let mut lower = if with_lower_glass {
+            glass_rect(8.0, 8.0, 48.0, 48.0, [8.0; 4], 90.0, 14.0)
+        } else {
+            let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 8.0, 8.0], [48.0, 48.0]);
+            r.paths.push(Entry::Rect {
+                w: 48.0,
+                h: 48.0,
+                radii: [8.0; 4],
+            });
+            r
+        };
+        lower.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.8, 0.2, 0.1, 0.3]),
+        });
+        w.set(10, 0, &lower);
+        w.set(11, 0, &bg_blur_rect(18.0, 18.0, 28.0, 28.0, [4.0; 4], 8.0));
+        e.apply(&w.finish()).unwrap();
+        pixels(&mut e)
+    };
+    let with_glass = build_blur_over_glass(true);
+    let without_glass = build_blur_over_glass(false);
+    for y in 20..44u32 {
+        for x in 20..44u32 {
+            let i = ((y * 64 + x) * 4) as usize;
+            let max_diff = with_glass[i..i + 4]
+                .iter()
+                .zip(&without_glass[i..i + 4])
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            assert!(max_diff <= 1, "background blur leaked lower glass at ({x}, {y})");
+        }
+    }
+
+    let build_glass_over_blur = |blur_radius: f32| {
+        let mut e = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        striped_backdrop(&mut w);
+        w.set(10, 0, &bg_blur_rect(6.0, 6.0, 52.0, 52.0, [6.0; 4], blur_radius));
+        w.set(11, 0, &glass_rect(18.0, 18.0, 28.0, 28.0, [6.0; 4], 40.0, 0.0));
+        e.apply(&w.finish()).unwrap();
+        pixels(&mut e)
+    };
+    let sharp = build_glass_over_blur(0.0);
+    let blurred = build_glass_over_blur(16.0);
+    let inner_diffs = (22..42u32)
+        .flat_map(|y| (22..42u32).map(move |x| ((y * 64 + x) * 4) as usize))
+        .filter(|&i| sharp[i..i + 4] != blurred[i..i + 4])
+        .count();
+    assert!(
+        inner_diffs > 100,
+        "upper glass must read the earlier background-blur result"
+    );
+}
+
+#[test]
+fn an_offscreen_blur_cannot_make_an_unrelated_export_fail() {
+    let make = |extra: u32| {
+        let mut e = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        w.set(
+            1,
+            0,
+            &positioned_rect(20.0, 10.0, 20.0, 60.0, Some([0.2, 0.4, 0.6, 1.0])),
+        );
+        let mut r2 = positioned_rect(25.0, 18.0, 50.0, 40.0, None);
+        r2.ops.push(Op::BackgroundBlur {
+            paths: vec![0],
+            even_odd: false,
+            radius: 24.0,
+        });
+        w.set(2, 0, &r2);
+        for id in 3..(3 + extra) {
+            let mut off = positioned_rect(1000.0 * f64::from(id), 20.0, 60.0, 40.0, None);
+            off.ops.push(Op::BackgroundBlur {
+                paths: vec![0],
+                even_odd: false,
+                radius: 24.0,
+            });
+            w.set(id, 0, &off);
+        }
+        e.apply(&w.finish()).unwrap();
+        e
+    };
+    let plain = make(0)
+        .render_band(128, 96, camera(), [1.0; 4], 0, 32)
+        .unwrap()
+        .to_vec();
+    let mut with_offscreen = make(12);
+    let actual = with_offscreen.render_band(128, 96, camera(), [1.0; 4], 0, 32).unwrap();
+    assert_eq!(actual, plain.as_slice());
+}
+
+#[test]
+fn background_and_progressive_blur_match_with_genuinely_split_tiles() {
+    let mut e = Engine::new(Limits {
+        export_tile: 189,
+        ..Limits::default()
+    });
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    for ix in 0..60u32 {
+        for iy in 0..42u32 {
+            if (ix + iy) % 2 == 0 {
+                w.set(
+                    1 + ix * 42 + iy,
+                    0,
+                    &positioned_rect(
+                        f64::from(ix * 10),
+                        f64::from(iy * 10),
+                        10.0,
+                        10.0,
+                        Some([0.05, 0.35, 0.8, 0.45]),
+                    ),
+                );
+            }
+        }
+    }
+    let mut outer = positioned_rect(43.4, 39.6, 506.0, 348.0, None);
+    outer.paths[0] = Entry::Rect {
+        w: 506.0,
+        h: 348.0,
+        radii: [30.0; 4],
+    };
+    outer.ops.extend([
+        Op::Clip {
+            path: 0,
+            even_odd: false,
+        },
+        Op::Children,
+        Op::Unclip,
+    ]);
+    w.set(3000, 0, &outer);
+    let mut b1 = positioned_rect(68.5, -12.75, 407.0, 330.0, None);
+    b1.ops.push(Op::BackgroundBlur {
+        paths: vec![0],
+        even_odd: false,
+        radius: 28.0,
+    });
+    w.set(3001, 3000, &b1);
+    let mut b2 = positioned_rect(72.0, 19.0, 415.0, 327.0, None);
+    b2.ops.push(Op::ProgressiveBlur {
+        paths: vec![0],
+        even_odd: false,
+        start_radius: 1.0,
+        end_radius: 24.0,
+        start: [0.1, 0.0],
+        end: [0.95, 1.0],
+    });
+    w.set(3002, 3000, &b2);
+    e.apply(&w.finish()).unwrap();
+
+    let (width, height) = (600, 420);
+    let full = e
+        .render_cpu(width, height, camera(), [1.0; 4], false)
+        .unwrap()
+        .0
+        .to_vec();
+    let mut bands = Vec::new();
+    for y in (0..height).step_by(71) {
+        bands.extend_from_slice(
+            e.render_band(width, height, camera(), [1.0; 4], y, 71.min(height - y))
+                .unwrap(),
+        );
+    }
+    let diff = full
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(bands.as_chunks::<4>().0.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    let worst = full.iter().zip(&bands).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert_eq!(diff, 0, "split blur tiles differed in {diff} px (max {worst})");
 }
 #[test]
 fn backdrop_edit_invalidates_the_blurred_output_of_a_glass_reader() {

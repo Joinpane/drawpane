@@ -25,6 +25,9 @@ export interface RawEffect {
   readonly type?: string;
   readonly radius?: number;
   readonly blurOpType?: string;
+  readonly startRadius?: number;
+  readonly startOffset?: Figma.Vector;
+  readonly endOffset?: Figma.Vector;
   readonly noiseType?: "MONOTONE" | "DUOTONE" | "MULTITONE";
   readonly noiseSize?: Figma.Vector;
   readonly density?: number;

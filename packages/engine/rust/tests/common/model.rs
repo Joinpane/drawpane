@@ -138,7 +138,24 @@ fn gen_rec(r: &mut Rng, readers: bool, effects: bool) -> Rec {
         }
     }
     if readers && r.chance(0.15) {
-        if r.chance(0.5) {
+        if effects && !text && r.chance(0.4) {
+            rec.ops.push(if r.chance(0.5) {
+                Op::BackgroundBlur {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: r.range(1.0, 14.0),
+                }
+            } else {
+                Op::ProgressiveBlur {
+                    paths: vec![0],
+                    even_odd: false,
+                    start_radius: r.range(0.0, 2.0),
+                    end_radius: r.range(2.0, 14.0),
+                    start: [0.0, 0.0],
+                    end: [1.0, 1.0],
+                }
+            });
+        } else if r.chance(0.5) {
             rec.ops.push(Op::Read {
                 kernel: 1,
                 halo: r.range(0.0, 3.0).round(),

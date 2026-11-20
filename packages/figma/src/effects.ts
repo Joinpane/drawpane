@@ -60,14 +60,27 @@ export function convertEffect(e: Figma.Effect, notes: Notes, variables?: Lookup)
         ...binds(e, variables, SHADOW_FIELDS),
       };
     case "LAYER_BLUR":
-    case "BACKGROUND_BLUR":
-      if (e.blurType === "PROGRESSIVE") notes.add("blur-progressive");
+    case "BACKGROUND_BLUR": {
+      const progressive = e.blurType === "PROGRESSIVE";
+      const hasOffsets = e.startOffset !== undefined && e.endOffset !== undefined;
+      if (progressive && (e.type === "LAYER_BLUR" || !hasOffsets)) {
+        notes.add("blur-progressive");
+      }
       return {
         type: e.type === "LAYER_BLUR" ? "layer-blur" : "background-blur",
         radius: round2(Math.max(0, e.radius ?? 0)),
+        ...(progressive && hasOffsets
+          ? {
+              blurType: "progressive" as const,
+              startRadius: round2(Math.max(0, e.startRadius ?? 0)),
+              startOffset: { x: e.startOffset.x, y: e.startOffset.y },
+              endOffset: { x: e.endOffset.x, y: e.endOffset.y },
+            }
+          : {}),
         ...visible,
         ...binds(e, variables, { radius: "radius" }),
       };
+    }
     case "NOISE":
       return {
         ...DEFAULT_NOISE,

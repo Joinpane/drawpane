@@ -383,4 +383,258 @@ describe.skipIf(!built())("Saved glyphs, images and revisions (review of PR 216)
       fresh.dispose();
     }
   });
+
+  it("pulls in transitive backdrop inputs for contextual exports across stacked background blurs", () => {
+    const doc = page();
+    doc.apply([
+      {
+        op: "create",
+        id: "bg",
+        type: "rect",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 160,
+          height: 100,
+          fills: [{ type: "solid", color: "#000000" }],
+        },
+      },
+      {
+        op: "create",
+        id: "stripe",
+        type: "rect",
+        parent: "p",
+        key: "a1",
+        props: {
+          x: 52,
+          y: 0,
+          width: 12,
+          height: 100,
+          fills: [{ type: "solid", color: "#ffffff" }],
+        },
+      },
+      {
+        op: "create",
+        id: "lowerBlur",
+        type: "rect",
+        parent: "p",
+        key: "a2",
+        props: {
+          x: 68,
+          y: 0,
+          width: 25,
+          height: 100,
+          fills: [{ type: "solid", color: "#00000001" }],
+          effects: [{ type: "background-blur", radius: 44 }],
+        },
+      },
+      {
+        op: "create",
+        id: "upperBlur",
+        type: "rect",
+        parent: "p",
+        key: "a3",
+        props: {
+          x: 80,
+          y: 0,
+          width: 60,
+          height: 100,
+          fills: [{ type: "solid", color: "#00000001" }],
+          effects: [{ type: "background-blur", radius: 6 }],
+        },
+      },
+    ]);
+    const scene = new Scene(doc);
+    const wholeEngine = new RenderEngine(module);
+    const cropEngine = new RenderEngine(module);
+    try {
+      expect(wholeEngine.apply(new DisplayListBuilder(scene, measurer).build("p")).ok).toBe(true);
+      expect(
+        cropEngine.apply(
+          new DisplayListBuilder(scene, measurer).buildLayers(["upperBlur"], { context: true }),
+        ).ok,
+      ).toBe(true);
+      const whole = wholeEngine.renderCpu(160, 100, camera, [0, 0, 0, 0], false);
+      const crop = cropEngine.renderCpu(160, 100, camera, [0, 0, 0, 0], false);
+      if (!whole.ok || !crop.ok) throw new Error("render failed");
+      const at = (px: Uint8Array) => {
+        const i = (50 * 160 + 81) * 4;
+        return [px[i], px[i + 1], px[i + 2], px[i + 3]];
+      };
+      const wPx = at(whole.value.pixels);
+      const cPx = at(crop.value.pixels);
+      expect(wPx[0]).toBeGreaterThan(10);
+      expect(cPx).toEqual(wPx);
+    } finally {
+      wholeEngine.dispose();
+      cropEngine.dispose();
+    }
+  });
+
+  it("falls back to uniform background blur when progressive fields are absent or degenerate", () => {
+    const doc = page();
+    doc.apply([
+      {
+        op: "create",
+        id: "stripe",
+        type: "rect",
+        parent: "p",
+        key: "a0",
+        props: { x: 0, y: 0, width: 32, height: 64, fills: [{ type: "solid", color: "#ffffff" }] },
+      },
+      {
+        op: "create",
+        id: "bg",
+        type: "rect",
+        parent: "p",
+        key: "a1",
+        props: { x: 32, y: 0, width: 32, height: 64, fills: [{ type: "solid", color: "#000000" }] },
+      },
+      {
+        op: "create",
+        id: "blurLayer",
+        type: "rect",
+        parent: "p",
+        key: "a2",
+        props: {
+          x: 0,
+          y: 0,
+          width: 64,
+          height: 64,
+          fills: [{ type: "solid", color: "#ffffff05" }],
+          effects: [{ type: "background-blur", radius: 16 }],
+        },
+      },
+    ]);
+    const renderWith = (effects: unknown[]) => {
+      doc.apply([{ op: "set", id: "blurLayer", prop: "effects", value: effects }]);
+      const eng = new RenderEngine(module);
+      try {
+        expect(eng.apply(new DisplayListBuilder(new Scene(doc), measurer).build("p")).ok).toBe(
+          true,
+        );
+        const r = eng.renderCpu(64, 64, camera, [0, 0, 0, 1], false);
+        if (!r.ok) throw new Error(r.message);
+        return r.value.pixels.slice();
+      } finally {
+        eng.dispose();
+      }
+    };
+    const uniform = renderWith([{ type: "background-blur", radius: 16 }]);
+    const missingOffsets = renderWith([
+      { type: "background-blur", radius: 16, blurType: "progressive" },
+    ]);
+    const equalRadii = renderWith([
+      {
+        type: "background-blur",
+        radius: 16,
+        blurType: "progressive",
+        startRadius: 16,
+        startOffset: { x: 0.5, y: 0 },
+        endOffset: { x: 0.5, y: 1 },
+      },
+    ]);
+    const progressive = renderWith([
+      {
+        type: "background-blur",
+        radius: 16,
+        blurType: "progressive",
+        startRadius: 0,
+        startOffset: { x: 0.5, y: 0 },
+        endOffset: { x: 0.5, y: 1 },
+      },
+    ]);
+    expect(Buffer.from(missingOffsets).equals(Buffer.from(uniform))).toBe(true);
+    expect(Buffer.from(equalRadii).equals(Buffer.from(uniform))).toBe(true);
+    expect(Buffer.from(progressive).equals(Buffer.from(uniform))).toBe(false);
+  });
+
+  it("clips neighboring frames when selecting export backdrop context", () => {
+    const doc = page();
+    doc.apply([
+      // Earlier sibling cell clipped at x=0..100, containing a child with an unsupported blend
+      // that overflows past x=100 into the neighboring cell if unclipped.
+      {
+        op: "create",
+        id: "neighbor",
+        type: "frame",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 100,
+          clipContent: true,
+          fills: [{ type: "solid", color: "#222222" }],
+        },
+      },
+      {
+        op: "create",
+        id: "overflowBlend",
+        type: "rect",
+        parent: "neighbor",
+        key: "a0",
+        props: {
+          x: 80,
+          y: 0,
+          width: 120,
+          height: 100,
+          blendMode: "color-dodge",
+          fills: [{ type: "solid", color: "#ff0000" }],
+        },
+      },
+      // Adjacent exported cell starting at x=120 with a background-blur whose reach reaches x=100.
+      {
+        op: "create",
+        id: "exported",
+        type: "frame",
+        parent: "p",
+        key: "a1",
+        props: {
+          x: 120,
+          y: 0,
+          width: 100,
+          height: 100,
+          clipContent: true,
+          fills: [{ type: "solid", color: "#ffffff" }],
+        },
+      },
+      {
+        op: "create",
+        id: "blurCard",
+        type: "rect",
+        parent: "exported",
+        key: "a0",
+        props: {
+          x: 10,
+          y: 10,
+          width: 80,
+          height: 80,
+          fills: [{ type: "solid", color: "#ffffff22" }],
+          effects: [{ type: "background-blur", radius: 12 }],
+        },
+      },
+    ]);
+    const scene = new Scene(doc);
+    const builder = new DisplayListBuilder(scene, measurer);
+    const list = builder.buildLayers(["exported"], { context: true });
+    expect(builder.unsupported.size).toBe(0);
+    const engine = new RenderEngine(module);
+    try {
+      expect(engine.apply(list).ok).toBe(true);
+      const res = engine.renderCpu(
+        100,
+        100,
+        { zoom: 1, x: -120, y: 0, dpr: 1 },
+        [0, 0, 0, 0],
+        false,
+      );
+      expect(res.ok).toBe(true);
+    } finally {
+      engine.dispose();
+    }
+  });
 });

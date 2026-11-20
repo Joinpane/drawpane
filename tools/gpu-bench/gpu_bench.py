@@ -428,6 +428,7 @@ def bench(job: dict, sources: list[dict]) -> dict:
                 raise RuntimeError(f"The kit {job['kit']} isn't on the volume.")
 
         browsers = job.get("browsers") or ["chromium"]
+        port_offset = 0
         for n, source in enumerate(sources):
             label = source["label"]
             run: dict = {"label": label, "git": source.get("git"), "browsers": {}, "modes": {}}
@@ -538,8 +539,14 @@ def bench(job: dict, sources: list[dict]) -> dict:
                         "PLAYWRIGHT_JSON_OUTPUT_NAME": str(at / "report.json"),
                         "E2E_PORT": "8849",
                         "TOUR_PORT": "8859",
+                        "PARITY_PORT": "8935",
+                        "E2E_INSPECTOR_PORT": "9379",
                         **job.get("env", {}),
                     }
+                    # Wrangler may still be closing a socket from the preceding Playwright run.
+                    for port in ("E2E_PORT", "TOUR_PORT", "PARITY_PORT", "E2E_INSPECTOR_PORT"):
+                        test_env[port] = str(int(test_env[port]) + port_offset)
+                    port_offset += 200
                     if verified_backends:
                         test_env["BENCH_VERIFIED_BACKENDS"] = ",".join(verified_backends)
                     if wrapper:

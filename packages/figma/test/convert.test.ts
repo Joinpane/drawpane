@@ -63,6 +63,50 @@ const file = (...children: Figma.Node[]): Figma.File => ({
 const byName = (nodes: readonly NodeRecord[], name: string) =>
   nodes.find((n) => getProp(n.props, "name") === name) as NodeRecord;
 
+it("imports progressive and legacy background blur from a REST document", () => {
+  const progressive = {
+    type: "BACKGROUND_BLUR",
+    radius: 24,
+    blurType: "PROGRESSIVE",
+    startRadius: 0,
+    startOffset: { x: 0.25, y: 1 },
+    endOffset: { x: 0.75, y: 0 },
+  } as const;
+  const layer = (id: string, name: string, effect: Figma.Effect) =>
+    node({
+      id,
+      name,
+      type: "RECTANGLE",
+      relativeTransform: at(0, 0),
+      absoluteBoundingBox: { x: 0, y: 0, width: 64, height: 64 },
+      effects: [effect],
+    });
+  const { nodes, notes } = convertFile(
+    file(
+      layer("1:1", "Progressive", progressive),
+      layer("1:2", "Uniform", { type: "BACKGROUND_BLUR", radius: 24 }),
+      layer("1:3", "Incomplete", { type: "BACKGROUND_BLUR", radius: 24, blurType: "PROGRESSIVE" }),
+    ),
+  );
+  validate(nodes);
+  expect(getProp(byName(nodes, "Progressive").props, "effects")).toEqual([
+    {
+      type: "background-blur",
+      radius: 24,
+      blurType: "progressive",
+      startRadius: 0,
+      startOffset: progressive.startOffset,
+      endOffset: progressive.endOffset,
+    },
+  ]);
+  for (const name of ["Uniform", "Incomplete"]) {
+    expect(getProp(byName(nodes, name).props, "effects")).toEqual([
+      { type: "background-blur", radius: 24 },
+    ]);
+  }
+  expect(notes.entries().some(([kind]) => kind === "blur-progressive")).toBe(true);
+});
+
 describe("a real Figma file", () => {
   const { nodes, notes } = convertFile(parity);
 
