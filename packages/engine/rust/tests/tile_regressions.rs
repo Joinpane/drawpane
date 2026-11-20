@@ -1,11 +1,10 @@
 //! Regressions in the engine's tiles (decision 0040, phase 2), each one a frame that went wrong
 //! before its fix: holes in zoom frames under tight slot budgets, a reader inside a reader left
 //! stale, a mitered stroke culled from a tile; prefetch pinning the slots a missing tile was
-//! promised, a reader chain rechecking every change on every pass, an atlas refusing a mask its
-//! free rows would hold; a drag's history growing with its travel, a drag of a huge selection
-//! leaving the view blank, a split kept after its board began to fade, a selection left in the
-//! last frame; a page opened at a fractional device pixel ratio showing nothing, provisional text
-//! exported or reported exact.
+//! promised, a reader chain rechecking every change on every pass; a drag's history growing with
+//! its travel, a drag of a huge selection leaving the view blank, a split kept after its board
+//! began to fade, a selection left in the last frame; a page opened at a fractional device pixel
+//! ratio showing nothing, provisional text exported or reported exact.
 
 mod common;
 
@@ -321,18 +320,6 @@ fn a_reader_chain_against_preorder_checks_each_change_once() {
         "{} checks for {NESTED} readers and {} changes",
         engine.store.dirty_checks(),
         dirty.len()
-    );
-}
-
-#[test]
-fn atlas_eviction_can_combine_the_last_shelf_and_free_tail() {
-    use drawpane_engine::atlas::{Placed, Shelves};
-    let mut atlas = Shelves::new(64);
-    assert!(matches!(atlas.place(63, 50, 1), Some(Placed::At { y: 0, .. })));
-    // The preceding submission alone used this shelf. The whole texture is now reusable.
-    assert!(
-        atlas.place(30, 60, 2).is_some(),
-        "eviction ignored the unused rows below the last shelf"
     );
 }
 
@@ -963,4 +950,58 @@ fn hidden_provisional_text_leaves_frames_exact() {
         .render_cpu_tiled(64, 64, camera(1.0, 0.0, 0.0), [0.0; 4], TiledOptions::default())
         .unwrap();
     assert!(stats.exact, "{stats:?}");
+}
+
+#[test]
+fn a_curved_stroke_zoomed_out_draws_what_it_does_at_its_device_size() {
+    // Zoomed out, a stroke is drawn on the device (vello's own tolerance is finer there the
+    // further out). The same stroke, made that small and drawn at 100%, is the reference: within
+    // anti-aliasing, dashes included.
+    let draw = |k: f32, zoom: f64, dashes: Vec<f32>| {
+        let mut r = Rec::new(
+            [1.0, 0.0, 0.0, 1.0, f64::from(40.0 * k), f64::from(30.0 * k)],
+            [300.0 * k, 180.0 * k],
+        );
+        r.paths.push(Entry::Ellipse {
+            w: 300.0 * k,
+            h: 180.0 * k,
+        });
+        r.ops.push(Op::Stroke {
+            path: 0,
+            width: 12.0 * k,
+            join: 1,
+            cap: 1,
+            dashes: dashes.iter().map(|d| d * k).collect(),
+            offset: 0.0,
+            paint: Paint::Solid([0.8, 0.1, 0.3, 1.0]),
+        });
+        let mut msg = W::new(ANY, 1);
+        msg.reset();
+        msg.set(1, 0, &r);
+        let mut e = Engine::new(Limits::default());
+        e.apply(&msg.finish()).unwrap();
+        e.render_cpu(120, 90, camera(zoom, 3.3, 2.7), [1.0; 4], false)
+            .unwrap()
+            .0
+            .to_vec()
+    };
+    for dashes in [vec![], vec![40.0, 25.0]] {
+        let zoomed = draw(1.0, 0.25, dashes.clone());
+        let small = draw(0.25, 1.0, dashes.clone());
+        let worst = zoomed
+            .iter()
+            .zip(&small)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        let off = zoomed.iter().zip(&small).filter(|(a, b)| a.abs_diff(**b) > 8).count();
+        assert!(zoomed.iter().any(|v| *v != 255), "drew nothing");
+        // The ellipse's curves are made at its own size, so the two outlines differ in their last
+        // fraction of a pixel at a few dozen pixels along the edge (as they did before this drew
+        // on the device: the same numbers either way).
+        assert!(
+            worst <= 64 && off <= 240,
+            "dashes {dashes:?}: worst {worst}, {off} channels off"
+        );
+    }
 }

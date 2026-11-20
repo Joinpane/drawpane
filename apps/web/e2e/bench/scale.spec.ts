@@ -30,11 +30,15 @@
  * shadows, which the engine draws only from phase 3: without them its largest page is one the
  * engine draws, for its open time).
  *
+ * With BENCH_PROFILE set to a folder, opening the largest page is also profiled (a
+ * `.cpuprofile` per size and renderer, which Chrome's performance panel opens).
+ *
  * Prints a table and attaches the numbers as JSON. Budgets aren't enforced
  * here: this VM draws without a GPU, so compare runs on one machine
  * (see the bench notes) and hold the targets on hardware like the PRD's.
  * Run with `pnpm --filter @drawpane/web bench -- scale`.
  */
+import { mkdirSync, writeFileSync } from "node:fs";
 import { generateKit } from "@drawpane/corpus";
 import { compactByInstance, type NodeRecord } from "@drawpane/model";
 import { type CDPSession, expect, type Page, test } from "@playwright/test";
@@ -314,7 +318,21 @@ test.describe("Scale", () => {
         const before = await heapMb(cdp);
         const resetMs = await load(page, chunks.length, COMPACT);
         const storedNow = await stored(page);
+        const profile = process.env.BENCH_PROFILE;
+        if (profile) {
+          await cdp.send("Profiler.enable");
+          await cdp.send("Profiler.setSamplingInterval", { interval: 200 });
+          await cdp.send("Profiler.start");
+        }
         const shown = await firstFrame(page, largestPage(kit.nodes));
+        if (profile) {
+          const { profile: taken } = await cdp.send("Profiler.stop");
+          mkdirSync(profile, { recursive: true });
+          writeFileSync(
+            `${profile}/open-${kit.stats.layers}-${renderer}.cpuprofile`,
+            JSON.stringify(taken),
+          );
+        }
         // Let fonts and the first full paint settle.
         await page.waitForTimeout(1500);
         const heap = (await heapMb(cdp)) - before;

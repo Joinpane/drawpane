@@ -90,7 +90,9 @@ macro_rules! impl_draw {
 pub(crate) use impl_draw;
 
 /// A glyph's mask: its source, its top left from the glyph's whole-pixel anchor, and its size.
-pub type GlyphMask = (ImageSource, (i32, i32), (u16, u16));
+/// A glyph's mask, kept on the CPU (premultiplied white: its alpha is the coverage), and its top
+/// left from the glyph's whole-pixel anchor.
+pub type GlyphMask = (std::sync::Arc<vello_cpu::Pixmap>, (i32, i32));
 
 /// An image level a backend holds, to paint from.
 pub struct ImageView {
@@ -150,9 +152,11 @@ pub trait Backend {
     fn image(&mut self, id: u32, px: f64) -> Option<ImageView>;
     /// The loading checkerboard, 16 × 16 device pixels, repeated.
     fn checker(&mut self) -> ImageSource;
-    /// A glyph's coverage mask, made if it isn't held and fits: its source, its top left from
-    /// the glyph's whole-pixel anchor, and its size.
+    /// A glyph's coverage mask, made if it isn't held and fits (`masks::coverage`).
     fn glyph_mask(&mut self, key: MaskKey, path: &BezPath, scale: (f64, f64), phase: (f64, f64)) -> Option<GlyphMask>;
+    /// A run's image for the frame being drawn (`w` × `h` premultiplied pixels, `masks::compose_run`),
+    /// to paint from; None when it can't be had (the GPU's atlas is full for this tile).
+    fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource>;
 
     /// Runs a backdrop reader over what's drawn so far (`open` is open in the scene).
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()>;
@@ -922,7 +926,27 @@ impl<B: Backend> Walk<'_, B> {
         if !self.set_paint(paint, device, alpha, self.region(r, i, style.reach()))? {
             return Ok(());
         }
-        let mut s = Stroke::new(f64::from(style.width))
+        // Zoomed out, vello strokes to a tolerance of a quarter of the path's own units, finer on
+        // the device the further out (a fortieth of a pixel at 10%), where most of a dense tile's
+        // time went offsetting curves. Under a uniform scale (with any rotation or flip), the
+        // stroke of the path placed on the device, as wide as it is there, is the same outline:
+        // stroked there, it's to the quarter pixel everything else is flattened to. A solid paint
+        // only (another's place follows the transform).
+        let [a, b, c, d, _, _] = device.as_coeffs();
+        let (sx, sy) = (a.hypot(b), c.hypot(d));
+        let uniform = sx > 0.0
+            && sx < 1.0
+            && (sx - sy).abs() <= 1e-9 * sx
+            && (a * c + b * d).abs() <= 1e-9 * sx * sy
+            && matches!(paint, Paint::Solid(_));
+        let (p, k, transform) = if uniform {
+            let mut q = p;
+            q.apply_affine(device);
+            (q, sx, Affine::IDENTITY)
+        } else {
+            (p, 1.0, device)
+        };
+        let mut s = Stroke::new(f64::from(style.width) * k)
             .with_join(match style.join {
                 1 => Join::Round,
                 2 => Join::Bevel,
@@ -935,10 +959,13 @@ impl<B: Backend> Walk<'_, B> {
             })
             .with_miter_limit(f64::from(style.miter.max(1.0)));
         if !style.dashes.is_empty() {
-            s = s.with_dashes(f64::from(style.dash_offset), style.dashes.iter().map(|d| f64::from(*d)));
+            s = s.with_dashes(
+                f64::from(style.dash_offset) * k,
+                style.dashes.iter().map(|d| f64::from(*d) * k),
+            );
         }
         let scene = self.backend.scene();
-        scene.set_transform(device);
+        scene.set_transform(transform);
         scene.set_stroke(s);
         scene.stroke_path(&p);
         Ok(())
@@ -973,13 +1000,17 @@ impl<B: Backend> Walk<'_, B> {
                 (Some(a), Some(b)) => !overlaps(a, b),
                 _ => true,
             });
-        // Masks are laid in device pixels, tinted: set once for the run, on its first mask.
-        let mut tinted = false;
-        for g in glyphs {
+        // The run's place on the device is the same for every glyph but its offset: whether masks
+        // can be used at all, and their scale, are the run's.
+        let [a, b, cc, d, _, _] = (device * Affine::new([s, 0.0, 0.0, -s, 0.0, 0.0])).as_coeffs();
+        let axis_aligned = b.abs() <= 1e-9 * (a.abs() + d.abs()) && cc.abs() <= 1e-9 * (a.abs() + d.abs());
+        let (sx, sy) = ((a as f32).to_bits(), (d as f32).to_bits());
+        // Masks placed, each at its device pixel, with the glyph it's of: laid into one image of
+        // the run and drawn once (`masks::compose_run`).
+        let mut placed: Vec<(std::sync::Arc<vello_cpu::Pixmap>, i32, i32)> = Vec::new();
+        let mut of: Vec<usize> = Vec::new();
+        for (n, g) in glyphs.iter().enumerate() {
             let Some(glyph) = self.store.glyphs.get(g.glyph) else {
-                if tinted {
-                    self.backend.scene().set_tint(None);
-                }
                 return Err(EngineError::unknown(format!("glyph {}", g.glyph)));
             };
             let Some(gb) = glyph.bounds else { continue };
@@ -987,8 +1018,7 @@ impl<B: Backend> Walk<'_, B> {
             if !overlaps(m.transform_rect_bbox(gb), self.viewport) {
                 continue;
             }
-            let [a, b, cc, d, e, f] = m.as_coeffs();
-            let axis_aligned = b.abs() <= 1e-9 * (a.abs() + d.abs()) && cc.abs() <= 1e-9 * (a.abs() + d.abs());
+            let [_, _, _, _, e, f] = m.as_coeffs();
             let small = gb.width() * a.abs() <= self.glyph_mask_side && gb.height() * d.abs() <= self.glyph_mask_side;
             if masks && axis_aligned && small && e.abs() < 1.0e7 && f.abs() < 1.0e7 {
                 let (mut ix, mut iy) = (e.floor(), f.floor());
@@ -1004,57 +1034,27 @@ impl<B: Backend> Walk<'_, B> {
                 }
                 let key = MaskKey {
                     serial: glyph.serial,
-                    sx: (a as f32).to_bits(),
-                    sy: (d as f32).to_bits(),
+                    sx,
+                    sy,
                     px: px as u8,
                     py: py as u8,
                 };
-                if let Some((source, origin, size)) =
+                if let Some((mask, origin)) =
                     self.backend
                         .glyph_mask(key, &glyph.path, (a, d), (px / PHASES, py / PHASES))
                 {
-                    let x = ix + f64::from(origin.0);
-                    let y = iy + f64::from(origin.1);
-                    let scene = self.backend.scene();
-                    scene.set_paint(
-                        Image {
-                            image: source,
-                            sampler: ImageSampler {
-                                x_extend: Extend::Pad,
-                                y_extend: Extend::Pad,
-                                quality: ImageQuality::Low,
-                                alpha: 1.0,
-                            },
-                        }
-                        .into(),
-                    );
-                    if !tinted {
-                        scene.set_transform(Affine::IDENTITY);
-                        scene.set_tint(Some(Tint {
-                            color: tint,
-                            mode: TintMode::AlphaMask,
-                        }));
-                        tinted = true;
-                    }
-                    scene.set_paint_transform(Affine::translate((x, y)));
-                    scene.fill_rect(&Rect::new(x, y, x + f64::from(size.0), y + f64::from(size.1)));
-                    self.stats.glyphs_masked += 1;
+                    placed.push((mask, ix as i32 + origin.0, iy as i32 + origin.1));
+                    of.push(n);
                     continue;
                 }
             }
-            if let Err(e) = self.spend(glyph.path.elements().len()) {
-                if tinted {
-                    self.backend.scene().set_tint(None);
-                }
-                return Err(e);
-            }
-            let mut p = glyph.path.clone();
-            p.apply_affine(Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]));
-            outlines.extend(p);
-            self.stats.glyphs_outlined += 1;
+            self.outline(g, s, &mut outlines)?;
         }
-        if tinted {
-            self.backend.scene().set_tint(None);
+        if !placed.is_empty() && !self.draw_run(&placed, tint) {
+            // No room for the run's image: its glyphs fill their outlines.
+            for &n in &of {
+                self.outline(&glyphs[n], s, &mut outlines)?;
+            }
         }
         if !outlines.is_empty() {
             let scene = self.backend.scene();
@@ -1065,6 +1065,70 @@ impl<B: Backend> Walk<'_, B> {
             scene.fill_path(&outlines);
         }
         Ok(())
+    }
+
+    /// Adds a glyph's outline, placed in its run, to `outlines`, charged to the frame's budget.
+    fn outline(&mut self, g: &crate::record::GlyphInstance, s: f64, outlines: &mut BezPath) -> Result<()> {
+        let Some(glyph) = self.store.glyphs.get(g.glyph) else {
+            return Err(EngineError::unknown(format!("glyph {}", g.glyph)));
+        };
+        self.spend(glyph.path.elements().len())?;
+        let mut p = glyph.path.clone();
+        p.apply_affine(Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]));
+        outlines.extend(p);
+        self.stats.glyphs_outlined += 1;
+        Ok(())
+    }
+
+    /// Draws a run's masks, laid into one image (cut to the viewport), tinted: answers false when
+    /// the backend has no room for the image (nothing drawn).
+    fn draw_run(&mut self, placed: &[(std::sync::Arc<vello_cpu::Pixmap>, i32, i32)], tint: AlphaColor<Srgb>) -> bool {
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for (m, x, y) in placed {
+            x0 = x0.min(*x);
+            y0 = y0.min(*y);
+            x1 = x1.max(x + i32::from(m.width()));
+            y1 = y1.max(y + i32::from(m.height()));
+        }
+        let v = self.viewport;
+        x0 = x0.max(v.x0.floor() as i32);
+        y0 = y0.max(v.y0.floor() as i32);
+        x1 = x1.min(v.x1.ceil() as i32);
+        y1 = y1.min(v.y1.ceil() as i32);
+        if x1 <= x0 || y1 <= y0 {
+            return true;
+        }
+        let (Ok(w), Ok(h)) = (u16::try_from(x1 - x0), u16::try_from(y1 - y0)) else {
+            return false;
+        };
+        let mut pixels = Vec::new();
+        crate::masks::compose_run(placed, (x0, y0, x1, y1), &mut pixels);
+        let Some(source) = self.backend.run_image(w, h, pixels) else {
+            return false;
+        };
+        let scene = self.backend.scene();
+        scene.set_paint(
+            Image {
+                image: source,
+                sampler: ImageSampler {
+                    x_extend: Extend::Pad,
+                    y_extend: Extend::Pad,
+                    quality: ImageQuality::Low,
+                    alpha: 1.0,
+                },
+            }
+            .into(),
+        );
+        scene.set_transform(Affine::IDENTITY);
+        scene.set_tint(Some(Tint {
+            color: tint,
+            mode: TintMode::AlphaMask,
+        }));
+        scene.set_paint_transform(Affine::translate((f64::from(x0), f64::from(y0))));
+        scene.fill_rect(&Rect::new(f64::from(x0), f64::from(y0), f64::from(x1), f64::from(y1)));
+        scene.set_tint(None);
+        self.stats.glyphs_masked += placed.len() as u32;
+        true
     }
 }
 

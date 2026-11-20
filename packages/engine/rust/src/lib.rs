@@ -6,7 +6,6 @@
 //! code and message. Nothing panics across it: inputs are validated (`wire.rs`, `record.rs`),
 //! sizes are limited (`limits.rs`), and the fuzz tests (`tests/fuzz.rs`) hold that.
 
-pub mod atlas;
 pub mod cpu;
 pub mod engine;
 pub mod error;
@@ -642,8 +641,8 @@ pub async fn create_gpu(canvas: JsValue, glyph_mask_bytes: u32) -> GpuInit {
     } else {
         gpu::Target::None
     };
-    // By default, what the glyph atlas holds: it's allocated whole either way, and a mask that
-    // doesn't fit is drawn as its outline, at many times the cost.
+    // By default, as many bytes of glyph masks (kept on the CPU) as the atlas holds: a mask that
+    // isn't kept is drawn as its outline, at many times the cost.
     let bytes = if glyph_mask_bytes > 0 {
         glyph_mask_bytes as usize
     } else {

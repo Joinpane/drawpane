@@ -9,7 +9,12 @@
 //!   gradients or images in text, stroked text, rotated text) fills the outline itself, which is
 //!   always kept, so nothing is ever drawn from a mask at the wrong size.
 //! - **Rasterising** is vello_cpu on both backends, so CPU and GPU text has the same coverage
-//!   by construction; the GPU backend uploads each mask into its atlas once.
+//!   by construction. Masks are kept on the CPU on both.
+//! - **Drawn a run at a time:** a run's masks are laid into one image of the run, each at its
+//!   device pixel, coverage combined as source-over (`compose_run`), and that image is drawn
+//!   once, tinted: one draw a run instead of one a glyph (a dense tile holds 85,000 glyphs in
+//!   15,000 runs). The GPU backend uploads each tile's run images into its atlas, a write per
+//!   row, before the tile renders.
 //! - **Budget and eviction:** masks are counted in bytes against `Limits::glyph_mask_bytes`.
 //!   At each frame's start, masks not used in the last frame are evicted, least recently used
 //!   first, until the cache is under budget. A mask that doesn't fit mid-frame isn't made: that
@@ -269,9 +274,104 @@ pub fn rasterise(
     Some((pixmap, (x0 as i32, y0 as i32)))
 }
 
+/// A glyph's mask from `cache`, rasterised and kept if it isn't held and the budget has room:
+/// the mask (premultiplied white, its alpha the coverage) and its top left from the glyph's
+/// whole-pixel anchor. None when it can't be kept (the glyph fills its outline instead).
+#[allow(clippy::too_many_arguments)]
+pub fn coverage(
+    cache: &mut MaskCache<std::sync::Arc<Pixmap>>,
+    raster: &mut Rasterizer,
+    key: MaskKey,
+    path: &BezPath,
+    scale: (f64, f64),
+    phase: (f64, f64),
+    side: u32,
+) -> Option<(std::sync::Arc<Pixmap>, (i32, i32))> {
+    if let Some(e) = cache.get(&key) {
+        return Some((e.value.clone(), e.origin));
+    }
+    // Full: drawn as its outline, without rasterising a mask that can't be kept.
+    if !cache.fits(bytes(mask_size(path, scale.0, scale.1, phase, side)?)) {
+        cache.stats.outlines += 1;
+        return None;
+    }
+    let (mask, origin) = rasterise(raster, path, scale.0, scale.1, phase, side)?;
+    let size = (mask.width(), mask.height());
+    let e = cache.insert(key, std::sync::Arc::new(mask), origin, size);
+    Some((e.value.clone(), e.origin))
+}
+
+/// `a × b / 255`, rounded: 8-bit coverage times coverage.
+fn mul255(a: u8, b: u8) -> u8 {
+    let t = u32::from(a) * u32::from(b) + 128;
+    ((t + (t >> 8)) >> 8) as u8
+}
+
+/// Lays a run's glyph masks, each with its top left at a device pixel, into one image of
+/// `area` (x0, y0, x1, y1, device pixels; what's outside is cut off): coverage combined as
+/// source-over (a + b - ab, what drawing them one over another gives), as premultiplied white.
+pub fn compose_run(masks: &[(std::sync::Arc<Pixmap>, i32, i32)], area: (i32, i32, i32, i32), out: &mut Vec<u8>) {
+    let (ax0, ay0, ax1, ay1) = area;
+    let w = (ax1 - ax0).max(0) as usize;
+    let h = (ay1 - ay0).max(0) as usize;
+    out.clear();
+    out.resize(w * h * 4, 0);
+    for (m, mx, my) in masks {
+        let (mw, mh) = (i32::from(m.width()), i32::from(m.height()));
+        let data = m.data_as_u8_slice();
+        let (x0, x1) = ((*mx).max(ax0), (mx + mw).min(ax1));
+        let (y0, y1) = ((*my).max(ay0), (my + mh).min(ay1));
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        for y in y0..y1 {
+            let src = ((y - my) * mw + (x0 - mx)) as usize * 4;
+            let dst = ((y - ay0) as usize * w + (x0 - ax0) as usize) * 4;
+            let n = (x1 - x0) as usize * 4;
+            let (from, to) = (&data[src..src + n], &mut out[dst..dst + n]);
+            for (s, d) in from.as_chunks::<4>().0.iter().zip(to.as_chunks_mut::<4>().0.iter_mut()) {
+                let a = s[3];
+                if a == 0 {
+                    continue;
+                }
+                let b = d[3];
+                let v = if b == 0 {
+                    a
+                } else {
+                    (u16::from(b) + u16::from(a) - u16::from(mul255(a, b))) as u8
+                };
+                *d = [v; 4];
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_combines_its_masks_as_source_over() {
+        let square = |w: u16, h: u16, a: u8| {
+            let mut p = Pixmap::new(w, h);
+            for px in p.data_as_u8_slice_mut().as_chunks_mut::<4>().0 {
+                *px = [a; 4];
+            }
+            std::sync::Arc::new(p)
+        };
+        let mut out = Vec::new();
+        // Two half-covered squares overlapping in one column, the second cut off at the right.
+        compose_run(
+            &[(square(2, 1, 128), 0, 0), (square(3, 1, 128), 1, 0)],
+            (0, 0, 3, 1),
+            &mut out,
+        );
+        assert_eq!(out, [128, 128, 128, 128, 192, 192, 192, 192, 128, 128, 128, 128]);
+        for (a, b) in [(0u8, 0u8), (255, 7), (128, 128), (255, 255), (1, 254)] {
+            let exact = f64::from(a) * f64::from(b) / 255.0;
+            assert!((f64::from(mul255(a, b)) - exact).abs() <= 0.5, "{a} {b}");
+        }
+    }
 
     #[test]
     fn a_kept_context_rasterises_the_same_masks_as_a_new_one() {
